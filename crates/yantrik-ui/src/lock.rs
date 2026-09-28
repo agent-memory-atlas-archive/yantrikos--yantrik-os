@@ -14,7 +14,6 @@
 //! guess without limit.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 /// The secret the lock asks for.
@@ -59,34 +58,32 @@ fn account_name() -> Option<String> {
     (out.status.success() && !name.is_empty()).then_some(name)
 }
 
-/// Whether `passwd -S` says the account has a usable password: `<name> P <date> …`. `NP` (none)
-/// and `L` (locked) are not.
-fn usable_password(status_line: &str) -> bool {
-    status_line.split_whitespace().nth(1) == Some("P")
+/// Whether `passwd -S` says, in so many words, that the account has no password: `NP` (none) or
+/// `L`/`LK` (locked). Only that answer earns the PIN. Anything else, including no answer at all,
+/// is a password (a same-uid process can make `passwd` fail to start, by exhausting the process
+/// limit, and a failure must not hand it the PIN it can write).
+fn says_no_password(status_line: &str) -> bool {
+    matches!(status_line.split_whitespace().nth(1), Some("NP" | "L" | "LK"))
 }
 
-/// Which secret unlocks this account's screen. Asked at every lock: an installer or a person may
-/// set the password while the desktop runs. Unknown means the PIN, never a lockout.
+/// Which secret unlocks this account's screen. Asked at every lock and every attempt: an
+/// installer or a person may set the password while the desktop runs.
 pub fn secret_for_this_account() -> Secret {
-    let status = std::process::Command::new("/usr/bin/passwd").arg("-S").output();
-    match status {
-        Ok(out) if out.status.success() && usable_password(&String::from_utf8_lossy(&out.stdout)) => Secret::Password,
-        Ok(out) if out.status.success() => {
+    match std::process::Command::new("/usr/bin/passwd").arg("-S").output() {
+        Ok(out) if out.status.success() && says_no_password(&String::from_utf8_lossy(&out.stdout)) => {
             tracing::warn!("This account has no usable password; the lock asks for the PIN (#414)");
             Secret::Pin
         }
-        _ => {
-            tracing::warn!("Cannot tell whether this account has a password; the lock asks for the PIN");
-            Secret::Pin
+        Ok(_) => Secret::Password,
+        Err(e) => {
+            tracing::warn!(error = %e, "Cannot ask passwd about this account; the lock asks for the password");
+            Secret::Password
         }
     }
 }
 
-/// Wrong answers in a row, across both lock screens.
-static FAILURES: AtomicU32 = AtomicU32::new(0);
-
-/// How long to hold the answer after the `failures`-th wrong one in a row: nothing for the first
-/// three typos, then 1, 2, 4 … seconds, at most 30.
+/// How long the next attempt waits after the `failures`-th wrong one in a row: nothing for the
+/// first three typos, then 1, 2, 4 … seconds, at most 30.
 pub fn delay_after(failures: u32) -> Duration {
     if failures < 3 {
         return Duration::ZERO;
@@ -94,25 +91,76 @@ pub fn delay_after(failures: u32) -> Duration {
     Duration::from_secs((1u64 << (failures - 3).min(5)).min(30))
 }
 
-/// Whether `input` unlocks the screen. Blocks — it runs `unix_chkpwd`, and a wrong answer is held
-/// back by `delay_after` — so it is called off the UI thread.
-pub fn check_unlock(secret: Secret, input: &str) -> bool {
-    let ok = match secret {
-        Secret::Password => {
-            !input.is_empty()
-                && account_name().is_some_and(|user| crate::wire::login::verify_password(&user, input))
+/// What an attempt to unlock came to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Verdict {
+    /// The secret was right.
+    Open,
+    /// It was wrong; the next attempt is refused unchecked for this long (zero: straight away).
+    Wrong(Duration),
+    /// Too soon after a wrong one: not checked at all.
+    Wait(Duration),
+}
+
+impl Verdict {
+    /// What the lock screen says, for anything but `Open`.
+    pub fn message(self, secret: Secret) -> String {
+        match self {
+            Verdict::Open => String::new(),
+            Verdict::Wrong(wait) if wait.is_zero() => secret.wrong().to_string(),
+            Verdict::Wrong(wait) => format!("{}. Try again in {} s", secret.wrong(), secs(wait)),
+            Verdict::Wait(wait) => format!("Too many tries. Try again in {} s", secs(wait)),
         }
-        Secret::Pin => check_pin(input),
-    };
-    if ok {
-        FAILURES.store(0, Ordering::SeqCst);
-    } else {
-        let failures = FAILURES.fetch_add(1, Ordering::SeqCst) + 1;
-        let delay = delay_after(failures);
-        tracing::info!(failures, delay_secs = delay.as_secs(), "Wrong unlock entry");
-        std::thread::sleep(delay);
     }
-    ok
+}
+
+fn secs(d: Duration) -> u64 {
+    d.as_secs() + u64::from(d.subsec_nanos() > 0)
+}
+
+/// Wrong answers in a row across both lock screens, and when the next may be checked.
+#[derive(Debug, Default)]
+pub struct Tries {
+    failures: u32,
+    not_before: Option<std::time::Instant>,
+}
+
+impl Tries {
+    /// One attempt at `now`. `check` runs only when an attempt is due, so a burst of guesses
+    /// costs the guesser the wait, not the machine a check each.
+    pub fn attempt(&mut self, now: std::time::Instant, check: impl FnOnce() -> bool) -> Verdict {
+        if let Some(due) = self.not_before {
+            if now < due {
+                return Verdict::Wait(due - now);
+            }
+        }
+        if check() {
+            *self = Tries::default();
+            return Verdict::Open;
+        }
+        self.failures += 1;
+        let wait = delay_after(self.failures);
+        self.not_before = (!wait.is_zero()).then(|| now + wait);
+        Verdict::Wrong(wait)
+    }
+}
+
+/// One ledger for both lock screens, and one check at a time: the shell's own screen takes an
+/// attempt on a thread per Enter, and parallel checks would make the slow-down a queue.
+static TRIES: std::sync::Mutex<Tries> = std::sync::Mutex::new(Tries { failures: 0, not_before: None });
+
+/// Whether `input` unlocks the screen. Runs `unix_chkpwd`, so it is called off the UI thread, and
+/// it never sleeps: an attempt that comes too soon is refused unchecked, with how long to wait.
+pub fn check_unlock(input: &str) -> Verdict {
+    let mut tries = TRIES.lock().unwrap_or_else(|e| e.into_inner());
+    let verdict = tries.attempt(std::time::Instant::now(), || match secret_for_this_account() {
+        Secret::Password => account_name().is_some_and(|user| crate::wire::login::verify_password(&user, input)),
+        Secret::Pin => check_pin(input),
+    });
+    if verdict != Verdict::Open {
+        tracing::info!(?verdict, failures = tries.failures, "Unlock refused");
+    }
+    verdict
 }
 
 /// Default idle lock timeout in seconds (5 minutes).
@@ -276,11 +324,39 @@ mod lock_tests {
     }
 
     #[test]
-    fn only_a_usable_password_is_asked_for() {
-        assert!(usable_password("yantrik P 2026-09-17 0 99999 7 -1"));
-        assert!(!usable_password("yantrik NP 2026-09-17 0 99999 7 -1"), "no password: the PIN");
-        assert!(!usable_password("yantrik L 2026-09-17 0 99999 7 -1"), "locked: the PIN");
-        assert!(!usable_password(""));
+    fn only_an_account_that_says_it_has_no_password_gets_the_pin() {
+        assert!(!says_no_password("yantrik P 2026-09-17 0 99999 7 -1"));
+        assert!(says_no_password("yantrik NP 2026-09-17 0 99999 7 -1"), "no password: the PIN");
+        assert!(says_no_password("yantrik L 2026-09-17 0 99999 7 -1"), "locked: the PIN");
+        assert!(!says_no_password(""), "no answer is not \"no password\": a failure must not earn the PIN");
+        assert!(!says_no_password("passwd: something went wrong"));
+    }
+
+    #[test]
+    fn a_guess_too_soon_is_not_checked_and_a_right_one_clears_the_count() {
+        use std::time::Instant;
+        let t0 = Instant::now();
+        let mut tries = Tries::default();
+        for _ in 0..2 {
+            assert_eq!(tries.attempt(t0, || false), Verdict::Wrong(Duration::ZERO));
+        }
+        assert_eq!(tries.attempt(t0, || false), Verdict::Wrong(Duration::from_secs(1)));
+        let mut checked = false;
+        let soon = tries.attempt(t0 + Duration::from_millis(500), || {
+            checked = true;
+            true
+        });
+        assert!(matches!(soon, Verdict::Wait(_)) && !checked, "inside the wait nothing is checked, not even a right one");
+        assert_eq!(tries.attempt(t0 + Duration::from_secs(1), || false), Verdict::Wrong(Duration::from_secs(2)));
+        assert_eq!(tries.attempt(t0 + Duration::from_secs(3), || true), Verdict::Open);
+        assert_eq!(tries.attempt(t0 + Duration::from_secs(3), || false), Verdict::Wrong(Duration::ZERO), "counting starts again");
+    }
+
+    #[test]
+    fn the_screen_says_how_long_to_wait() {
+        assert_eq!(Verdict::Wrong(Duration::ZERO).message(Secret::Password), "Wrong password");
+        assert_eq!(Verdict::Wrong(Duration::from_secs(4)).message(Secret::Pin), "Wrong PIN. Try again in 4 s");
+        assert_eq!(Verdict::Wait(Duration::from_millis(1500)).message(Secret::Password), "Too many tries. Try again in 2 s");
     }
 
     #[test]

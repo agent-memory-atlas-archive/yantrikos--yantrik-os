@@ -131,6 +131,12 @@ struct App {
 }
 
 fn main() {
+    // Not dumpable: another process of the same user cannot read this one's memory (the password
+    // being typed) or open its descriptors through /proc, and it leaves no core behind.
+    // SAFETY: prctl with PR_SET_DUMPABLE takes plain integers and touches no memory of ours.
+    unsafe {
+        libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
+    }
     let args: Vec<String> = std::env::args().collect();
     let greeting = args.iter().skip_while(|a| *a != "--greeting").nth(1).cloned().unwrap_or_default();
     let ask = Ask::from_args(&args);
@@ -232,7 +238,11 @@ impl App {
         let mut answer = String::new();
         match std::io::stdin().lock().read_line(&mut answer) {
             Ok(n) if n > 0 && answer.trim() == "ok" => self.unlock(),
-            Ok(n) if n > 0 => self.error = self.ask.wrong().into(),
+            // `no <what to say>`: the shell's words, which carry how long to wait.
+            Ok(n) if n > 0 => {
+                let said = answer.trim().strip_prefix("no").unwrap_or("").trim();
+                self.error = if said.is_empty() { self.ask.wrong().into() } else { said.into() };
+            }
             _ => self.error = "The desktop is not answering".into(),
         }
     }

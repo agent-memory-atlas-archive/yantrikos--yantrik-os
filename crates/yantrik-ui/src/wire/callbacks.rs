@@ -45,15 +45,15 @@ fn wire_lock(ui: &App, ctx: &AppContext) {
         let given = given.to_string();
         let secret = asked.get();
         let (ui_weak, bridge) = (ui_weak.clone(), unlock_bridge.clone());
-        // Off the UI thread: the check runs `unix_chkpwd`, and a wrong answer is held back.
+        // Off the UI thread: the check runs `unix_chkpwd`.
         std::thread::spawn(move || {
-            let ok = lock::check_unlock(secret, &given);
+            let verdict = lock::check_unlock(&given);
             let _ = slint::invoke_from_event_loop(move || {
                 let Some(ui) = ui_weak.upgrade() else { return };
-                if ok {
+                if verdict == lock::Verdict::Open {
                     unlocked(&ui, &bridge, &given);
                 } else {
-                    ui.set_lock_error(secret.wrong().into());
+                    ui.set_lock_error(verdict.message(secret).into());
                 }
             });
         });
@@ -122,7 +122,9 @@ fn offer_screen_secret_to_vault(bridge: &std::sync::Arc<crate::bridge::Companion
     let bridge = bridge.clone();
     let secret = secret.to_string();
     std::thread::spawn(move || {
-        match bridge.vault(Op::Adopt(secret), std::time::Duration::from_secs(20)) {
+        // Open, never Adopt: unlocking a screen must not wrap an unprotected vault under what was
+        // typed (on an account without a password, the PIN every mind can read).
+        match bridge.vault(Op::Open(secret), std::time::Duration::from_secs(20)) {
             Ok(reply) if matches!(reply.outcome, Some(Outcome::Unlocked)) => {
                 tracing::info!("The vault opened with the secret that unlocked the screen");
                 vault_unlock::dismiss();
