@@ -188,6 +188,9 @@ pub struct RpcServer {
     /// on a file nobody can find.
     #[cfg_attr(not(unix), allow(dead_code))]
     bound: bool,
+    /// The mind door socket this server bound (#411), removed on drop like the main one.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    door: Option<String>,
 }
 
 impl RpcServer {
@@ -197,6 +200,7 @@ impl RpcServer {
         Self {
             address: address.to_string(),
             bound: false,
+            door: None,
         }
     }
 
@@ -284,6 +288,20 @@ impl RpcServer {
         private_socket_file(path);
         tracing::info!(socket = %self.address, service = handler.service_id(), "RPC server listening (UDS)");
 
+        // And at the mind door (#411), when this machine has one: the same service, for callers
+        // the kernel says are the mind account and nobody else.
+        if let Some(door_path) = crate::mind_door::serving_dir()
+            .and_then(|door| crate::mind_door::door_for(path, &socket_dir(), &door))
+        {
+            match self.bind_door(&door_path) {
+                Ok(door_listener) => {
+                    let handler = handler.clone();
+                    tokio::spawn(serve_door(door_listener, handler));
+                }
+                Err(e) => tracing::warn!(door = %door_path.display(), error = %e, "the mind door could not be opened; minds cannot reach this service"),
+            }
+        }
+
         loop {
             let (stream, _) = listener.accept().await?;
             // Read at accept, not when somebody asks. The peer of these sockets is routinely a
@@ -300,6 +318,18 @@ impl RpcServer {
                 handle_connection(BufReader::new(reader), writer, &handler, peer).await;
             });
         }
+    }
+
+    #[cfg(unix)]
+    fn bind_door(&mut self, door_path: &std::path::Path) -> std::io::Result<tokio::net::UnixListener> {
+        use std::os::unix::fs::PermissionsExt;
+        crate::owner::claim(door_path)?;
+        let listener = tokio::net::UnixListener::bind(door_path)?;
+        self.door = Some(door_path.display().to_string());
+        // The minds' group writes it (the directory's setgid gave it the group); nobody else.
+        std::fs::set_permissions(door_path, std::fs::Permissions::from_mode(0o660))?;
+        tracing::info!(door = %door_path.display(), "RPC server listening at the mind door");
+        Ok(listener)
     }
 
     #[cfg(windows)]
@@ -407,6 +437,35 @@ impl Drop for RpcServer {
     fn drop(&mut self) {
         if self.bound {
             let _ = std::fs::remove_file(&self.address);
+        }
+        if let Some(door) = &self.door {
+            let _ = std::fs::remove_file(door);
+        }
+    }
+}
+
+/// Serve the mind door: every connection whose peer the kernel does not say is the mind account
+/// is closed unread. The directory already keeps everyone else out; this is what makes the uid,
+/// not the path, the fact a handler is told.
+#[cfg(unix)]
+async fn serve_door(listener: tokio::net::UnixListener, handler: Arc<dyn ServiceHandler>) {
+    loop {
+        let Ok((stream, _)) = listener.accept().await else { continue };
+        let peer = stream
+            .peer_cred()
+            .ok()
+            .map(|c| PeerCred { pid: c.pid().unwrap_or(0), uid: c.uid(), gid: c.gid() });
+        match peer {
+            Some(p) if crate::mind_door::is_mind(p.uid) => {
+                let handler = handler.clone();
+                tokio::spawn(async move {
+                    let (reader, writer) = stream.into_split();
+                    handle_connection(BufReader::new(reader), writer, &handler, peer).await;
+                });
+            }
+            other => {
+                tracing::warn!(uid = other.map(|p| p.uid), service = handler.service_id(), "refused a caller at the mind door that is not the mind account");
+            }
         }
     }
 }

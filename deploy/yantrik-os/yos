@@ -112,6 +112,11 @@ def socket_dirs():
     session's value, so it looks where logind puts it, `/run/user/<uid>`, in the first place —
     which the protocol allows a client and never a server.
     """
+    # A mind runs as its own account (#411) and reaches the desktop only at the mind door, which
+    # its unit names: it looks there and nowhere else, so it can never fall through to anything.
+    door = os.environ.get("YANTRIK_MIND_RUN", "").strip()
+    if door:
+        return [door]
     xdg = os.environ.get("XDG_RUNTIME_DIR", "").strip() or "/run/user/%d" % os.getuid()
     return [os.path.join(xdg, "yantrik"), "/run/yantrik", "/tmp/yantrik-%d" % os.getuid()]
 
@@ -295,6 +300,9 @@ def shell_peer_problem(sock, path):
     the sentence saying what is listening instead."""
     if os.path.basename(os.path.realpath(path)) != SHELL_SOCKET:
         return None
+    door = os.environ.get("YANTRIK_MIND_RUN", "").strip()
+    if door and os.path.dirname(os.path.realpath(path)) == os.path.realpath(door):
+        return door_peer_problem(sock, path, door)
     try:
         creds = sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
         pid = struct.unpack("3i", creds)[0]
@@ -308,6 +316,26 @@ def shell_peer_problem(sock, path):
     return ("the process answering as the shell at %s is %s (pid %d), not the desktop's own "
             "yantrik-ui, so nothing was sent to it. Something else has the shell's name; the "
             "shell will refuse to start beside it" % (path, exe, pid))
+
+
+def door_peer_problem(sock, path, door):
+    """At the mind door (#411) the shell runs as another account, so its /proc/<pid>/exe cannot be
+    read. What can be: only the door's owner can put a socket in it (2750, not writable by the
+    minds), so the shell is whoever listens there as that owner."""
+    try:
+        creds = sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+        peer_uid = struct.unpack("3i", creds)[1]
+        st = os.stat(door)
+    except (OSError, AttributeError, struct.error) as e:
+        return ("could not tell who is answering as the shell at %s (%s), so nothing was sent to "
+                "it" % (path, e))
+    if st.st_mode & 0o022 or st.st_uid == os.getuid():
+        return ("the mind door %s can be written by more than its owner, so whoever answers there "
+                "could be anyone; nothing was sent" % door)
+    if peer_uid != st.st_uid:
+        return ("the process answering as the shell at %s is not the desktop's (uid %d, the door "
+                "belongs to uid %d), so nothing was sent to it" % (path, peer_uid, st.st_uid))
+    return None
 
 
 def open_socket(path, timeout):

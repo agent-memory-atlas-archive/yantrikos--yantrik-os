@@ -1123,7 +1123,7 @@ fn who_is_calling(claimed: &str) -> approvals::Verified {
     // A different uid is worth saying out loud rather than quietly resolving. The socket
     // directory is 0700 today, so this should be unreachable for anyone but root — which makes
     // it exactly the thing to notice if it ever happens.
-    if caller.uid != own_uid() {
+    if caller.uid != own_uid() && !yantrik_ipc_transport::mind_door::is_mind(caller.uid) {
         tracing::warn!(
             pid = caller.pid,
             uid = caller.uid,
