@@ -1978,7 +1978,7 @@ cmd_selftest() {
   # A machine that was current until #401: every package the list named before it, and none of
   # the developer's baseline. It is told exactly those, and nothing it already has.
   local pre401; pre401="$root/dpkg-pre401"
-  printf '#!/bin/sh\ncase "$1" in iproute2|iputils-ping|grim|curl|python3|nano|htop|swaybg|xdg-desktop-portal-gtk) echo installed ;; esac\n' > "$pre401"
+  printf '#!/bin/sh\ncase "$1" in iproute2|iputils-ping|grim|curl|python3|nano|htop|swaybg|xdg-desktop-portal-gtk|flatpak) echo installed ;; esac\n' > "$pre401"
   chmod +x "$pre401"
   out="$(missing_packages "$pre401")"
   want="git bash-completion podman uidmap passt fuse-overlayfs"
