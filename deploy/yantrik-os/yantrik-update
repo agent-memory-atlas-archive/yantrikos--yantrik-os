@@ -1801,6 +1801,12 @@ reconcile_mind_units() {
     cmp -s "$f" "$dest" 2>/dev/null && continue
     install -m 0644 -o root -g root "$f" "$dest" && changed=1 && info "mind unit in place: $dest"
   done
+  # The browser chat is off (the unit's YM_WEBUI), so a pairing code it minted is only a secret
+  # every mind can read. Removed as the mind itself, in its own home.
+  if [ -e /var/lib/yantrik-mind/web-pairing.code ] && getent passwd yantrik-mind >/dev/null 2>&1; then
+    runuser -u yantrik-mind -- rm -f /var/lib/yantrik-mind/web-pairing.code \
+      && info "removed the Mind's browser pairing code; its browser chat is off"
+  fi
   if [ "$changed" = 1 ]; then
     systemctl daemon-reload >/dev/null 2>&1
     # A running mind keeps the sandbox it started with until it restarts.
@@ -1822,7 +1828,6 @@ MIND_FILES="
 .local/share/yantrik-mind/console.token:console.token
 .local/share/yantrik-mind/devices.json:devices.json
 .local/share/yantrik-mind/yantrik-memory.token:yantrik-memory.token
-.local/share/yantrik-mind/web-pairing.code:web-pairing.code
 .config/yantrik-mind.env:.config/yantrik-mind.env
 .config/yantrik-mind/mcp.json:.config/yantrik-mind/mcp.json
 "

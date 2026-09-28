@@ -33,6 +33,14 @@ Environment=YM_CODER_DIR=/var/lib/yantrik-mind/coder
 Environment=YM_STATE_DIR=/var/lib/yantrik-mind
 Environment=YM_MEMORY_SERVER=127.0.0.1:7440
 Environment=YM_WEB=off
+# The Mind's browser chat, off. Its pairing code lives in this account's home, and every mind runs
+# as this account: any of them could read it, pair a browser over loopback, and talk to the Mind as
+# its person. The launcher lets the unit's keys win, so a settings file cannot turn it back on.
+Environment=YM_WEBUI=off
+# Its control endpoint (127.0.0.1:8077: the `ym` command set, settings and plugins included, and a
+# chat API that speaks as the person), off for the same reason: its token lives in this account's
+# home. The desktop reaches the Mind through the harness; nothing on this OS needs the endpoint.
+Environment=YM_CTL=off
 Environment=YANTRIK_MIND_RUN=/run/yantrik-minds
 # No EnvironmentFile: systemd would read it as root, before dropping to the account, and follow a
 # link the mind put in its own home to any root-readable file. yantrik-mind-launch reads the
