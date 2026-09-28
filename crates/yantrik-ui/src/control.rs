@@ -1774,6 +1774,9 @@ pub fn publish(
     // how a mind hands work to another agent, or to a role from the catalog. The caller's agent
     // comes from its token. See `control_agents` and design/agents-workspace-2026-09-23.md,
     // decision 1, and design/desk-and-mind-2026-09-23.md, section 5.
+    // The chat in one read, for a client that is not the Lens: the Yantrik terminal. See
+    // `control_chat`.
+    let surface = crate::control_chat::actions(surface, ui);
     crate::control_agents::actions(surface, ui).serve();
 }
 

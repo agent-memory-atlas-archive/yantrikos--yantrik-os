@@ -60,6 +60,8 @@ mod control_agent_terminal;
 mod control_recipes;
 /// Agents on the shell's surface: new_agent / send_to_agent / stop_agent / read_agent / show_agent.
 mod control_agents;
+// The chat in one read, for the Yantrik terminal (`chat_view`).
+mod control_chat;
 mod jobs;
 mod cards;
 mod clipboard;

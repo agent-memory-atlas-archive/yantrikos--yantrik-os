@@ -22,6 +22,7 @@ members = [
     "crates/yantrikdb-server",
     "crates/yantrik",
     "crates/yantrik-ui",
+    "crates/yantrik-term",
     "crates/yantrik-ml",
     "crates/yantrik-os",
     "crates/yantrik-brain",
