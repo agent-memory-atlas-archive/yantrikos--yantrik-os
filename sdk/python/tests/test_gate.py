@@ -357,9 +357,11 @@ class Shell:
     def __init__(self):
         self.spent = []
         self.calls = []
+        self.callers = []
 
-    def __call__(self, grant, app, action, args):
+    def __call__(self, grant, app, action, args, caller=None):
         self.calls.append((grant, app, action, args))
+        self.callers.append(caller)
         if not grant.startswith("ok-"):
             raise GrantRefused("no approval request `%s`." % grant)
         if (app, action, args) != ("system-monitor", "kill_process", {"pid": 42}):
@@ -370,8 +372,14 @@ class Shell:
         self.spent.append(grant)
 
 
+def no_reach(token, what):
+    """The shell's answer to `reach_of` for a live token with no role: nothing to hold it to."""
+    return {"jsonrpc": "2.0", "id": 1, "result": {"accepted": True, "settled": True,
+                                                  "result": {"reach": None, "known": True}}}
+
+
 def sysmon(shell):
-    s = Surface("system-monitor", spend_grant=shell)
+    s = Surface("system-monitor", spend_grant=shell, ask_shell=no_reach)
     seen = {}
 
     @s.action("kill_process", grade="dangerous")
@@ -473,6 +481,9 @@ class TestGrants(support.MachineCase):
                                         {"pid": 42})])
         self.assertEqual(seen["token"], "tok-1", "the token beside args reaches the handler")
         self.assertIsNone(agent_token(), "and is gone once the dispatch is over")
+        # #182: the spend says which agent it is for — the token, trimmed as the dispatch reads
+        # it, and no pid for a call the kernel stamped none on.
+        self.assertEqual(shell.callers, [gate.CallingAgent("tok-1", None)])
 
     def test_a_token_inside_args_alone_is_removed_and_not_used(self):
         self.machine.set_mode("bypass")

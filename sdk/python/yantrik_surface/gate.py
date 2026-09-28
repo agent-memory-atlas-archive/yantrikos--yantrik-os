@@ -343,21 +343,44 @@ class GrantRefused(Exception):
     """The shell would not spend a grant; the message is the shell's own sentence."""
 
 
-def spend_through_shell(grant, app, action, args):
+class CallingAgent(NamedTuple):
+    """Who a call arrived as, for spending its grant (#182): the token that rode beside `args`,
+    and the pid the kernel stamped on the call (None when it named none)."""
+    token: str
+    pid: object = None
+
+
+def spend_params(grant, app, action, args, caller=None):
+    """The `app.act` that carries a spend to the shell — `spend_params` in the Rust gate:
+    `consume_approval` with the grant's exact triple, and the calling agent beside it (#182) — the
+    token where every agent token rides, beside `args`, and the pid the kernel stamped on the call
+    among the arguments, because the peer of this forwarded call is the app and the shell checks a
+    token against the process tree it was issued into."""
+    params = {
+        "action": "consume_approval",
+        "args": {"request_id": grant, "app": app, "action": action, "args_json": args},
+    }
+    if caller is not None:
+        params[AGENT_TOKEN] = caller.token
+        if caller.pid is not None:
+            params["args"]["caller_pid"] = caller.pid
+    return params
+
+
+def spend_through_shell(grant, app, action, args, caller=None):
     """Burn `grant` for exactly `app.action(args)` through the shell's `consume_approval`.
 
     Only through the shell: before the grant is written to `app-shell.sock`, the process
     listening on it must pass `must_be_the_shell`. The check of the grant is the shell's —
-    granted, unspent, unexpired, bound to this app, this action and these arguments — and a
-    refusal carries the shell's sentence. A shell that cannot be reached is a refusal too, worded
-    as the Rust client words it.
+    granted, unspent, unexpired, bound to this app, this action and these arguments, and to the
+    agent the call arrived as (#182) — and a refusal carries the shell's sentence. A shell that
+    cannot be reached is a refusal too, worded as the Rust client words it. `caller` is None for
+    a call that runs as no agent (the person's own), which is let through as before.
     """
     path = wire.default_socket_path(SHELL)
     try:
-        reply = wire.call_once(path, "app.act", {
-            "action": "consume_approval",
-            "args": {"request_id": grant, "app": app, "action": action, "args_json": args},
-        }, timeout=GRANT_ROUNDTRIP, peer_rule=must_be_the_shell)
+        reply = wire.call_once(path, "app.act", spend_params(grant, app, action, args, caller),
+                               timeout=GRANT_ROUNDTRIP, peer_rule=must_be_the_shell)
     except wire.PeerRefused as e:
         raise GrantRefused(str(e)) from e
     except ConnectionError as e:
@@ -393,19 +416,24 @@ class Authority:
         """The ceiling and the mode as the files say them now, and no grant yet."""
         return cls(configured_ceiling(settings), configured_mode(mode), False)
 
-    def spend(self, grant, app_id, action, graded, args, spender=None):
+    def spend(self, grant, app_id, action, graded, args, spender=None, caller=None):
         """Spend `grant` for exactly `app_id.action(args)`, graded `graded` — but only if the
         ceiling lets that grade be used at all. Returns the refusal, or None once spent.
 
         Any grant attached is spent once the ceiling passes, whether or not the mode would
         have asked: a replayed, swapped or invented grant ends the call here, in the shell's
-        words, rather than being ignored.
+        words, rather than being ignored. `caller` is the agent the call arrived as (#182), or
+        None for the person's own call; a spender is given it only when there is one.
         """
         _, refusal = within_ceiling(self.ceiling, app_id, action, graded)
         if refusal is not None:
             return refusal
+        spend = spender or spend_through_shell
         try:
-            (spender or spend_through_shell)(grant, app_id, action, args)
+            if caller is None:
+                spend(grant, app_id, action, args)
+            else:
+                spend(grant, app_id, action, args, caller)
         except GrantRefused as why:
             return ("GRANT: `%s` does not authorise %s.%s — %s Nothing was run; a grant covers "
                     "one action, once, with the arguments the person was shown."

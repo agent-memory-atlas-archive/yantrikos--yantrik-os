@@ -23,6 +23,7 @@ stays silent for a second — keeps its name; only a socket nobody listens on, a
 file is replaced (`owner::claim` in the transport).
 """
 
+import contextlib
 import errno
 import json
 import math
@@ -35,6 +36,8 @@ import sys
 import threading
 import traceback
 from collections import namedtuple
+
+from . import mind_door
 
 # JSON-RPC error codes, the transport's own constants.
 RPC_PARSE_ERROR = -32700
@@ -356,6 +359,11 @@ class Server:
         self._server = None
         self._thread = None
         self._inode = None
+        # The mind door (#411), when this machine has one: the same surface, for callers the
+        # kernel says are the mind account and nobody else. None when there is no door.
+        self.door = None
+        self._door_server = None
+        self._door_inode = None
 
     def start(self):
         directory = os.path.dirname(self.path)
@@ -387,7 +395,43 @@ class Server:
             daemon=True,
         )
         self._thread.start()
+        self._open_door()
         return self
+
+    def _open_door(self):
+        """Listen at the mind door as well, when the machine has one set up exactly as the
+        updater makes it (`mind_door.serving_dir`) and this surface's socket is one that gets a
+        door. A door that cannot be opened is said and skipped: the person's socket still works,
+        and minds cannot reach this surface — as `bind_door` failing does in the transport."""
+        door = mind_door.serving_dir()
+        path = mind_door.door_for(self.path, socket_dir(), door) if door else None
+        if path is None:
+            return
+        try:
+            claim(path)
+            server = _UnixServer(path, _DoorConnection)
+        except OSError as e:
+            print("[yantrik] the mind door could not be opened at %s (%s); minds cannot reach "
+                  "this surface" % (path, e), file=sys.stderr)
+            return
+        server.handler = self.handler
+        server.slots = threading.BoundedSemaphore(mind_door.DOOR_CONNECTIONS)
+        try:
+            # The minds' group writes it (the directory's setgid gave it the group); nobody else.
+            os.chmod(path, 0o660)
+        except OSError as e:
+            server.server_close()
+            with contextlib.suppress(OSError):
+                os.unlink(path)
+            print("[yantrik] the mind door at %s could not be made the minds' (%s); minds cannot "
+                  "reach this surface" % (path, e), file=sys.stderr)
+            return
+        self.door = path
+        self._door_server = server
+        self._door_inode = _inode(path)
+        threading.Thread(target=server.serve_forever, daemon=True,
+                         name="%s-door" % getattr(self.handler, "service_id", "app")).start()
+        print("[yantrik] also answering minds at %s" % path, file=sys.stderr)
 
     def _link(self, link):
         target = os.path.basename(self.path)
@@ -427,6 +471,15 @@ class Server:
                 pass
         self._inode = None
         self._unlink_links()
+        if self._door_server is not None:
+            self._door_server.shutdown()
+            self._door_server.server_close()
+            self._door_server = None
+            if self._door_inode is not None and _inode(self.door) == self._door_inode:
+                with contextlib.suppress(OSError):
+                    os.unlink(self.door)
+            self._door_inode = None
+            self.door = None
 
     def _unlink_links(self):
         target = os.path.basename(self.path)
@@ -524,8 +577,10 @@ class _Connection(socketserver.StreamRequestHandler):
     """One caller. Reads lines until the caller goes away."""
 
     def handle(self):
+        self.serve(peer_cred(self.connection))
+
+    def serve(self, peer):
         handler = getattr(self.server, "handler", None)
-        peer = peer_cred(self.connection)
         for raw in self.rfile:
             line = raw.decode("utf-8", errors="replace").strip()
             if not line:
@@ -536,6 +591,30 @@ class _Connection(socketserver.StreamRequestHandler):
                 self.wfile.flush()
             except OSError:
                 return
+
+
+class _DoorConnection(_Connection):
+    """One caller at the mind door. Served only when the kernel says it is the mind account;
+    anyone else is closed unread. The directory already keeps everyone else out; this is what
+    makes the uid, not the path, the fact the surface is told. At most `DOOR_CONNECTIONS` at once:
+    one more is closed, where the transport waits to accept it — either way a mind holding
+    connections open uses up its own share and nothing of the person's."""
+
+    def handle(self):
+        peer = peer_cred(self.connection)
+        if peer is None or not mind_door.is_mind(peer.uid):
+            print("[yantrik] refused a caller at the mind door that is not the mind account "
+                  "(uid %s)" % (peer.uid if peer else "unknown"), file=sys.stderr)
+            return
+        slots = self.server.slots
+        if not slots.acquire(blocking=False):
+            print("[yantrik] the mind door already holds %d connections; one more was closed"
+                  % mind_door.DOOR_CONNECTIONS, file=sys.stderr)
+            return
+        try:
+            self.serve(peer)
+        finally:
+            slots.release()
 
 
 def encode(reply):
