@@ -41,6 +41,43 @@ const EXIT_UNSUPPORTED: i32 = 3;
 /// The longest pause between starts of a lock client that keeps ending without unlocking.
 const MOST_PAUSE_SECS: u64 = 5;
 
+/// Lock clients left by a shell that is gone: this user's `yantrik-lock` processes. A client
+/// answers only the shell that started it, so one whose shell ended (an update restarting the
+/// shell, a crash) can never unlock again while it holds the session locked.
+fn orphaned_clients() -> Vec<u32> {
+    use std::os::unix::fs::MetadataExt;
+    let me = unsafe { libc::getuid() };
+    let Ok(procs) = std::fs::read_dir("/proc") else { return Vec::new() };
+    procs
+        .flatten()
+        .filter_map(|e| {
+            let pid: u32 = e.file_name().to_str()?.parse().ok()?;
+            let owner = std::fs::metadata(e.path()).ok()?.uid();
+            let comm = std::fs::read_to_string(e.path().join("comm")).ok()?;
+            (owner == me && comm.trim() == "yantrik-lock").then_some(pid)
+        })
+        .collect()
+}
+
+/// At startup: a lock client from an earlier shell means the desktop was locked when that shell
+/// ended, and nothing can answer it now. It is replaced, not left: the old client is ended and
+/// this shell locks again at once, so the desktop stays locked and can be unlocked. Without this,
+/// an update applied while the screen was locked left the person locked out.
+pub fn take_over_orphans(ui: &App) {
+    let orphans = orphaned_clients();
+    if orphans.is_empty() {
+        return;
+    }
+    for pid in &orphans {
+        // SAFETY: a plain signal to a process of our own user.
+        unsafe {
+            libc::kill(*pid as libc::pid_t, libc::SIGTERM);
+        }
+    }
+    tracing::warn!(?orphans, "A lock client from an earlier shell was holding the desktop; locking again from this one");
+    ui.invoke_lock_screen();
+}
+
 /// What to answer a line from the lock client, and the secret when the answer unlocks: `ok`, or
 /// `no <what the lock screen should say>`.
 pub fn answer(
