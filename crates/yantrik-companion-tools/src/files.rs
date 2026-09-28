@@ -436,14 +436,29 @@ mod write_rule_tests {
 
     #[test]
     fn write_file_does_not_write_where_programs_read_their_startup() {
+        // Names that do not exist yet, so a regression writes a stray file rather than the
+        // developer's own ~/.gitconfig (these tests run in WSL on the person's machine). The rule
+        // for the real names (.gitconfig, .vimrc, .tmux.conf) is tested in a temp home in
+        // yantrik-ipc-contracts' home_paths.
         let home = std::path::PathBuf::from(std::env::var("HOME").expect("HOME"));
-        let before = std::fs::read(home.join(".vimrc")).ok();
-        for path in ["~/.vimrc", "~/.gitconfig", "~/.local/bin/yantrik-test", "~/bin/yantrik-test"] {
+        let id = std::process::id();
+        let targets = [
+            format!("~/.yantrik-rule-test-{id}.rc"),
+            format!("~/.yantrik-rule-test-{id}/config"),
+            format!("~/.local/bin/yantrik-rule-test-{id}"),
+            format!("~/bin/yantrik-rule-test-{id}"),
+        ];
+        for path in &targets {
             let said = run(&WriteFileTool, serde_json::json!({ "path": path, "content": "!echo pwned" }));
             assert!(said.contains("hidden folders or dotfiles"), "{path}: {said}");
+            let said = run(
+                &crate::network::DownloadFileTool,
+                serde_json::json!({ "url": "https://example.invalid/x", "path": path }),
+            );
+            assert!(said.contains("hidden folders or dotfiles"), "download to {path}: {said}");
+            let on_disk = home.join(path.trim_start_matches("~/"));
+            assert!(!on_disk.exists(), "{path} was not written");
         }
-        assert_eq!(std::fs::read(home.join(".vimrc")).ok(), before, "~/.vimrc is untouched");
-        assert!(!home.join("bin/yantrik-test").exists());
     }
 
     #[test]
@@ -461,6 +476,15 @@ mod write_rule_tests {
         let home = std::path::PathBuf::from(std::env::var("HOME").expect("HOME"));
         let base = home.join(format!("yantrik-move-rule-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
+        // Removed however the test ends: validate_path only works inside the real home, so the
+        // tree has to be there, and a panic must not leave it behind.
+        struct Gone(std::path::PathBuf);
+        impl Drop for Gone {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _gone = Gone(base.clone());
         std::fs::create_dir_all(base.join("photos/2026")).unwrap();
         std::fs::write(base.join("photos/2026/a.png"), "x").unwrap();
         std::fs::create_dir_all(base.join("project/.git")).unwrap();
