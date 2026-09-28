@@ -647,6 +647,15 @@ fi
     let _ = chroot_cmd(mount_dir, &["passwd", "-l", "root"]);
     let _ = run_cmd("sed", &["-i", "/^PermitRootLogin/d", &format!("{mount_dir}/etc/ssh/sshd_config.d/yantrik.conf")]);
 
+    // The OS's own code is root's on an installed machine (#397): the shell, the updater and every
+    // binary used to belong to the desktop's user, so anything running as them could replace the
+    // OS. The updater moves the copied tree over and puts its narrow sudo rule in place; the
+    // desktop's user keeps logs/, data/ and config.yaml. Refused or missing, the machine's first
+    // update does the same.
+    if let Err(e) = chroot_cmd(mount_dir, &["/opt/yantrik/bin/yantrik-update", "migrate-ownership"]) {
+        tracing::warn!(error = %e, "Could not make /opt/yantrik root's at install; the first update will");
+    }
+
     // Passwordless sudo (needed for labwc/system operations)
     let sudoers_file = format!("{mount_dir}/etc/sudoers.d/{username}");
     let _ = sudo_write(&sudoers_file, &format!("{username} ALL=(ALL) NOPASSWD:ALL\n"));
