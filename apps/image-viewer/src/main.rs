@@ -406,6 +406,7 @@ fn publish_control(app: &ImageViewerApp, state: State) {
     let open_ui = ui_for.clone();
     let open_state = state.clone();
     let show_ui = ui_for.clone();
+    let show_state = state.clone();
     let next_ui = ui_for.clone();
     let next_state = state.clone();
     let prev_ui = ui_for.clone();
@@ -449,31 +450,31 @@ fn publish_control(app: &ImageViewerApp, state: State) {
         .action(Action::new("show", "Bring the window forward"), move |_| {
             let ui = show_ui()?;
             ui.window().set_minimized(false);
-            Ok(serde_json::json!({ "showing": ui.get_file_name().to_string() }))
+            let g = show_state.borrow();
+            Ok(agent_rule::answer(g.current().map(|p| p.as_path()), ui.get_file_name().to_string(), None))
         })
         .action(Action::new("next", "The next picture in the folder"), move |_| {
             let ui = next_ui()?;
             if next_state.borrow().is_empty() {
                 return Err("no pictures are open".into());
             }
+            // Stepping through a folder an agent may not see names its pictures one by one.
+            agent_rule::may_step(next_state.borrow().current().map(|p| p.as_path()))?;
             next_state.borrow_mut().next();
             show_current(&ui, &next_state);
-            Ok(serde_json::json!({
-                "showing": ui.get_file_name().to_string(),
-                "position": next_state.borrow().index() + 1,
-            }))
+            let g = next_state.borrow();
+            Ok(agent_rule::answer(g.current().map(|p| p.as_path()), ui.get_file_name().to_string(), Some(g.index() + 1)))
         })
         .action(Action::new("previous", "The previous picture in the folder"), move |_| {
             let ui = prev_ui()?;
             if prev_state.borrow().is_empty() {
                 return Err("no pictures are open".into());
             }
+            agent_rule::may_step(prev_state.borrow().current().map(|p| p.as_path()))?;
             prev_state.borrow_mut().prev();
             show_current(&ui, &prev_state);
-            Ok(serde_json::json!({
-                "showing": ui.get_file_name().to_string(),
-                "position": prev_state.borrow().index() + 1,
-            }))
+            let g = prev_state.borrow();
+            Ok(agent_rule::answer(g.current().map(|p| p.as_path()), ui.get_file_name().to_string(), Some(g.index() + 1)))
         })
         .action(
             Action::new("rotate", "Turn the picture on screen")

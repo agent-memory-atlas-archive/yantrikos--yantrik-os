@@ -53,6 +53,48 @@ pub fn may_open_entry(label: &str, name: &str) -> Result<(), String> {
     entry_verdict(label, name, &home())
 }
 
+/// Refuse a mind making `name` in the folder Files is showing - a new folder, a new file, or a
+/// rename's new name - where it would be a protected place. Each step of "make a folder x in
+/// ~/.local/share, save a .desktop into it, rename x to applications" was allowed on its own.
+pub fn may_make(label: &str, name: &str) -> Result<(), String> {
+    if !a_mind_is_calling() {
+        return Ok(());
+    }
+    make_verdict(label, name, &home())
+}
+
+/// Refuse a mind acting on these entries of the folder on screen - renaming, trashing,
+/// selecting, copying or cutting them - unless each is one it may open: `files_rename .ssh keys`
+/// would otherwise take the keys out from under their protection.
+pub fn may_touch(label: &str, names: &[String]) -> Result<(), String> {
+    if !a_mind_is_calling() {
+        return Ok(());
+    }
+    let home = home();
+    names.iter().try_for_each(|name| entry_verdict(label, name, &home))
+}
+
+/// Refuse a mind pasting the person's clipboard into the folder on screen unless every source
+/// may be read and everything it would create may be made (control_files_paste.rs).
+pub fn may_paste(label: &str) -> Result<(), String> {
+    if !a_mind_is_calling() {
+        return Ok(());
+    }
+    match crate::wire::files::clipboard_now() {
+        Some((sources, _cut)) => crate::control_files_paste::paste_verdict(&sources, label, &home()),
+        None => Ok(()),
+    }
+}
+
+/// [`may_make`] with `home` given.
+pub fn make_verdict(label: &str, name: &str, home: &Path) -> Result<(), String> {
+    here_verdict(label, home)?;
+    if name.contains('/') || name == ".." || name == "." {
+        return Err(format!("`{name}` is not a name for something in this folder"));
+    }
+    home_paths::may_create(&into(label, name), home)
+}
+
 /// Trash lists what was deleted from anywhere, under the names it had, so it is no folder a
 /// mind looks into; `describe shell` hides it too.
 pub fn may_show_trash() -> Result<(), String> {
@@ -63,6 +105,11 @@ pub fn may_show_trash() -> Result<(), String> {
 }
 
 /// Whether what Files shows is hidden from this caller, and why.
+///
+/// Runs on the UI thread, inside `describe shell`: a describe answers from the live view-model
+/// and cannot be handed off the thread the way an action's `answer_later` can. The cost is
+/// `requester_now` (a short /proc walk when nothing cheaper decides) and, for a mind, a `stat`
+/// of the folder on screen, which was just listed and so is in the kernel's cache.
 pub fn hidden_here(label: &str) -> Option<&'static str> {
     (a_mind_is_calling() && here_verdict(label, &home()).is_err()).then_some(HIDDEN)
 }

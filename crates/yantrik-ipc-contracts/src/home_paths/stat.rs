@@ -18,7 +18,7 @@ use super::{expand, is_protected};
 
 /// The answer for `asked`, with `~` meaning `home`: `exists` true (with `kind`, `size`,
 /// `modified`), false with reason `not_found`, or "unknown" with reason `outside`, `protected`,
-/// `not_allowed`, `broken_link` or `not_a_path`.
+/// `not_allowed`, `broken_link`, `hard_link` or `not_a_path`.
 pub fn stat(asked: &str, home: &Path) -> Value {
     let Some(path) = expand(asked.trim(), home) else {
         return unknown(asked, "not_a_path");
@@ -75,6 +75,10 @@ pub fn stat(asked: &str, home: &Path) -> Value {
 /// What is at `real`, which `path` resolved to inside the home.
 fn describe(path: &Path, real: &Path) -> Value {
     match std::fs::metadata(real) {
+        // A file with a second name is the same bytes as whatever that name is, and the other
+        // name may be anywhere on the filesystem, ~/.ssh or /etc included: no link to follow
+        // says where. A hard link to /etc/shadow looks like any file in the home.
+        Ok(meta) if meta.is_file() && links(&meta) > 1 => unknown(&path.to_string_lossy(), "hard_link"),
         Ok(meta) => {
             let kind = if meta.is_dir() {
                 "directory"
@@ -99,6 +103,16 @@ fn describe(path: &Path, real: &Path) -> Value {
         Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => not_found(path),
         Err(_) => unknown(&path.to_string_lossy(), "not_allowed"),
     }
+}
+
+#[cfg(unix)]
+fn links(meta: &std::fs::Metadata) -> u64 {
+    std::os::unix::fs::MetadataExt::nlink(meta)
+}
+
+#[cfg(not(unix))]
+fn links(_meta: &std::fs::Metadata) -> u64 {
+    1
 }
 
 fn not_found(path: &Path) -> Value {

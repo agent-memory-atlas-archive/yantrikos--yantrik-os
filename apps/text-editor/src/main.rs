@@ -964,6 +964,23 @@ fn refuse(ui: &TextEditorApp, message: impl Into<String>) -> String {
     message
 }
 
+/// Refuse an agent anything that reads or changes the active tab's text when that tab is one the
+/// person opened from a place an agent may not read (#443). Hiding `content` in `describe` was
+/// not enough: `find` counts matches, `save_as` copies the text somewhere readable, and
+/// `append` then `save` writes it back.
+fn refuse_if_hidden(ui: &TextEditorApp, s: &State) -> Result<(), String> {
+    let path = s.borrow().docs[s.borrow().active].path.clone();
+    // The refusal does not name the file: the notice it leaves is in `describe` too.
+    match agent_rule::hidden_from_caller(path.as_deref()) {
+        Some(_) => Err(refuse(
+            ui,
+            "The tab in front holds a file an agent is not shown, and its text is left alone; \
+             `select_tab` another or `new` one.",
+        )),
+        None => Ok(()),
+    }
+}
+
 /// One action, with the one sentence a reader who cannot see the screen needs.
 ///
 /// The guard is the point: a description that is only the action's name, or too short to say
@@ -1064,9 +1081,10 @@ fn document_now(ui: &TextEditorApp, s: &State) -> serde_json::Value {
     let b = s.borrow();
     let d = &b.docs[b.active];
     let disk = d.path.as_deref().and_then(|p| document::read(p).ok());
+    let hidden = agent_rule::hidden_from_caller(d.path.as_deref()).is_some();
     serde_json::json!({
-        "title": d.title(),
-        "path": d.path.as_ref().map(|p| p.display().to_string()),
+        "title": if hidden { HIDDEN_TAB.to_string() } else { d.title() },
+        "path": if hidden { serde_json::json!(HIDDEN_TAB) } else { serde_json::json!(d.path.as_ref().map(|p| p.display().to_string())) },
         "tab": b.active,
         "tabs": b.docs.len(),
         "lines": d.text.bytes().filter(|c| *c == b'\n').count() + 1,
@@ -1091,10 +1109,11 @@ fn document_now(ui: &TextEditorApp, s: &State) -> serde_json::Value {
 fn view(ui: &TextEditorApp, s: &State) -> View {
     let b = s.borrow();
     let d = &b.docs[b.active];
+    let hidden = agent_rule::hidden_from_caller(d.path.as_deref()).is_some();
     let lines = d.text.bytes().filter(|c| *c == b'\n').count() + 1;
     let mut summary = format!(
         "Text Editor — {}{}, {} line{}, {}",
-        d.title(),
+        if hidden { HIDDEN_TAB.to_string() } else { d.title() },
         if d.path.is_none() { " (no file yet)" } else { "" },
         lines,
         if lines == 1 { "" } else { "s" },
@@ -1103,8 +1122,7 @@ fn view(ui: &TextEditorApp, s: &State) -> View {
     if b.docs.len() > 1 {
         summary.push_str(&format!(" · tab {} of {}", b.active + 1, b.docs.len()));
     }
-    let hidden = agent_rule::hidden_from_caller(d.path.as_deref());
-    if hidden.is_some() {
+    if hidden {
         summary.push_str(" · its text is not shown to an agent");
     }
     let unsaved = b.docs.iter().filter(|d| d.dirty()).count();
@@ -1130,26 +1148,23 @@ fn view(ui: &TextEditorApp, s: &State) -> View {
         summary.push_str(&format!(" · {view_status}"));
     }
     View::new(summary)
-        .with("path", serde_json::json!(d.path))
-        .with("title", d.title())
+        .with("path", shown_path(d))
+        .with("title", if hidden { HIDDEN_TAB.to_string() } else { d.title() })
         .with("modified", d.dirty())
         .with("lines", lines as i64)
         .with("characters", d.text.chars().count() as i64)
-        .with(
-            "content",
-            match &hidden {
-                Some(_) => String::new(),
-                None => d.text.chars().take(4000).collect::<String>(),
-            },
-        )
-        .with("content_hidden", serde_json::json!(hidden))
+        .with("content", if hidden { String::new() } else { d.text.chars().take(4000).collect::<String>() })
+        .with("content_hidden", hidden.then_some("the tab holds a file an agent is not shown"))
         .with("bytes", d.text.len())
         .with("language", document::language(d.path.as_deref()))
         .with(
             "tabs",
             b.docs
                 .iter()
-                .map(|d| serde_json::json!({"name": d.title(), "path": d.path, "modified": d.dirty()}))
+                .map(|d| match agent_rule::hidden_from_caller(d.path.as_deref()) {
+                    Some(_) => serde_json::json!({"name": HIDDEN_TAB, "path": HIDDEN_TAB, "modified": d.dirty()}),
+                    None => serde_json::json!({"name": d.title(), "path": d.path, "modified": d.dirty()}),
+                })
                 .collect::<Vec<_>>(),
         )
         .with("active_tab", b.active)
@@ -1160,9 +1175,21 @@ fn view(ui: &TextEditorApp, s: &State) -> View {
         .with("recovery", ui.get_recovery_status().to_string())
         .with("cursor_line", ui.get_cursor_line())
         .with("cursor_column", ui.get_cursor_column())
-        .with("find_query", ui.get_query().to_string())
-        .with("find_count", ui.get_match_count())
-        .with("replacement", ui.get_replacement().to_string())
+        // A match count over a hidden tab answers "does it contain X?" one query at a time.
+        .with("find_query", if hidden { String::new() } else { ui.get_query().to_string() })
+        .with("find_count", if hidden { 0 } else { ui.get_match_count() })
+        .with("replacement", if hidden { String::new() } else { ui.get_replacement().to_string() })
+}
+
+/// How a tab an agent is not shown is named to it, in place of its file's name and path.
+const HIDDEN_TAB: &str = "(hidden)";
+
+/// The tab's path as this caller may see it.
+fn shown_path(d: &Document) -> serde_json::Value {
+    match agent_rule::hidden_from_caller(d.path.as_deref()) {
+        Some(_) => serde_json::json!(HIDDEN_TAB),
+        None => serde_json::json!(d.path),
+    }
 }
 
 /// One published action: what it says it does, and the code that does it.
@@ -1365,6 +1392,9 @@ fn surface(ui: &TextEditorApp, s: &State) -> Vec<(Action, Handler)> {
             if ui.get_dialog() != 0 && ui.get_dialog() != 2 && ui.get_dialog() != 3 {
                 no_dialog(ui, "save_as")?;
             }
+            // The text written is the active tab's: saving a tab the person opened from
+            // ~/.ssh into ~/Documents would put it where `describe` reads it back.
+            refuse_if_hidden(ui, s)?;
             let path = needed(ui, args, "save_as", "path", "An absolute path to write to.")?;
             let full = expanded(path.trim());
             agent_rule::may_write(&full).map_err(|e| refuse(ui, e))?;
@@ -1489,6 +1519,7 @@ fn surface(ui: &TextEditorApp, s: &State) -> Vec<(Action, Handler)> {
              match-case box is ticked; an empty query clears the matches.",
         )),
         |ui, s, args| {
+            refuse_if_hidden(ui, s)?;
             no_dialog(ui, "find")?;
             let query = needed(ui, args, "find", "text", "The text to look for.")?;
             ui.set_query(query.clone().into());
@@ -1532,6 +1563,7 @@ fn surface(ui: &TextEditorApp, s: &State) -> Vec<(Action, Handler)> {
             "What each match becomes. An empty string is allowed and deletes the match instead.",
         )),
         |ui, s, args| {
+            refuse_if_hidden(ui, s)?;
             let with = args
                 .get("text")
                 .and_then(|v| v.as_str())
@@ -1580,6 +1612,7 @@ fn surface(ui: &TextEditorApp, s: &State) -> Vec<(Action, Handler)> {
              characters. An empty string empties the tab.",
         )),
         |ui, s, args| {
+            refuse_if_hidden(ui, s)?;
             no_dialog(ui, "set_content")?;
             let text = args
                 .get("text")
@@ -1615,6 +1648,7 @@ fn surface(ui: &TextEditorApp, s: &State) -> Vec<(Action, Handler)> {
              whole tab has to stay within 1 MiB and 20,000 lines.",
         )),
         |ui, s, args| {
+            refuse_if_hidden(ui, s)?;
             no_dialog(ui, "append")?;
             let add = args
                 .get("text")
@@ -1694,6 +1728,7 @@ fn surface(ui: &TextEditorApp, s: &State) -> Vec<(Action, Handler)> {
 
 /// Step the active tab's history, and refuse rather than report a move that did not happen.
 fn step_history(ui: &TextEditorApp, s: &State, id: &str) -> Result<serde_json::Value, String> {
+    refuse_if_hidden(ui, s)?;
     no_dialog(ui, id)?;
     let before = s.borrow().docs[s.borrow().active].text.clone();
     action(ui, s, id);
@@ -1712,6 +1747,7 @@ fn step_match(
     s: &State,
     id: &str,
 ) -> Result<serde_json::Value, String> {
+    refuse_if_hidden(ui, s)?;
     no_dialog(ui, id)?;
     if ui.get_match_count() == 0 {
         return Err(refuse(
@@ -1738,6 +1774,7 @@ fn replace_matches(
     s: &State,
     id: &str,
 ) -> Result<serde_json::Value, String> {
+    refuse_if_hidden(ui, s)?;
     no_dialog(ui, id)?;
     let intended = if id == "replace-all" { ui.get_match_count() } else { 1.min(ui.get_match_count()) };
     if intended == 0 {

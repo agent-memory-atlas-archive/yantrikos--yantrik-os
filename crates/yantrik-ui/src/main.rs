@@ -52,6 +52,8 @@ mod control_update;
 mod control_files;
 /// Where a mind may take the Files screen, and what it may do with the folder there (#443).
 mod control_files_mind;
+/// Whether a mind may paste the Files clipboard into the folder on screen (#443).
+mod control_files_paste;
 /// Agents' commands on the shell's surface: agent_run / agent_job / agent_input / agent_kill.
 mod control_agent_terminal;
 /// A recipe on the shell's surface: answer_recipe / pause_recipe / resume_recipe / cancel_recipe.

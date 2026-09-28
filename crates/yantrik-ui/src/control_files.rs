@@ -67,6 +67,17 @@ fn has_entry(ui: &App, name: &str) -> bool {
         .any(|e| e.name == name)
 }
 
+/// The names of the entries selected in the current listing.
+fn selected_names(ui: &App) -> Vec<String> {
+    use slint::Model;
+    let entries = ui.get_file_browser_entries();
+    (0..entries.row_count())
+        .filter_map(|i| entries.row_data(i))
+        .filter(|e| e.selected)
+        .map(|e| e.name.to_string())
+        .collect()
+}
+
 /// Add the file-browser actions to the shell's control surface.
 pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
     let for_go = ui.as_weak();
@@ -164,6 +175,7 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                     return Err("`name` is empty".into());
                 }
                 ensure_files_screen(&ui);
+                mind::may_make(&ui.get_file_browser_path(), &name)?;
                 ui.invoke_file_create_folder(name.clone().into());
                 Ok(serde_json::json!({ "requested_folder": name, "now": where_now(&ui) }))
             },
@@ -188,6 +200,7 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                     return Err("`name` is empty".into());
                 }
                 ensure_files_screen(&ui);
+                mind::may_make(&ui.get_file_browser_path(), &name)?;
                 ui.invoke_file_create_file(name.clone().into());
                 Ok(serde_json::json!({ "requested_file": name, "now": where_now(&ui) }))
             },
@@ -205,6 +218,7 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                 if !has_entry(&ui, &name) {
                     return Err(format!("nothing called `{name}` in {}", ui.get_file_browser_path()));
                 }
+                mind::may_touch(&ui.get_file_browser_path(), std::slice::from_ref(&name))?;
                 ui.invoke_file_delete(name.clone().into());
                 Ok(serde_json::json!({ "requested_trash": name, "now": where_now(&ui) }))
             },
@@ -227,6 +241,8 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
             let index = (0..entries.row_count())
                 .find(|i| entries.row_data(*i).is_some_and(|e| e.name == name))
                 .ok_or("Entry not found")?;
+            // A selection is what copy, cut and trash act on next.
+            mind::may_touch(&ui.get_file_browser_path(), &[name.to_string()])?;
             ui.invoke_file_multi_select_clicked(
                 index as i32,
                 args["extend"].as_bool().unwrap_or(false),
@@ -295,6 +311,10 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
             if !has_entry(&ui, name) {
                 return Err("Entry not found".into());
             }
+            // What is renamed, and what it becomes: `.ssh` renamed away, or an innocent folder
+            // renamed to `applications` under ~/.local/share.
+            mind::may_touch(&ui.get_file_browser_path(), &[name.to_string()])?;
+            mind::may_make(&ui.get_file_browser_path(), new)?;
             ui.invoke_file_rename(name.into(), new.into());
             Ok(where_now(&ui))
         },
@@ -308,8 +328,14 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                 let ui = up(&weak)?;
                 // Every one of these acts on the folder on screen, wherever the person left it.
                 mind::here(&ui.get_file_browser_path())?;
-                if $name == "files_toggle_trash" {
-                    mind::may_show_trash()?;
+                match $name {
+                    "files_toggle_trash" => mind::may_show_trash()?,
+                    // The selection may be the person's, made on anything in the folder.
+                    "files_copy" | "files_cut" | "files_trash_selected" => {
+                        mind::may_touch(&ui.get_file_browser_path(), &selected_names(&ui))?
+                    }
+                    "files_paste" => mind::may_paste(&ui.get_file_browser_path())?,
+                    _ => {}
                 }
                 if $needs_ready {
                     ready(&ui)?;

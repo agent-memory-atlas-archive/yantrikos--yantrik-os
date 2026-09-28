@@ -394,7 +394,7 @@ pub const BLOCKED_SEGMENTS: &[&str] = &[
     "memory.db", ".bashrc", ".profile", ".bash_history",
     ".bash_profile", ".bash_login", ".bash_logout", ".zshrc", ".zshenv", ".zprofile", ".zlogin",
     ".pam_environment", ".config/autostart", ".config/environment.d", ".config/systemd",
-    ".local/share/applications",
+    ".local/share/applications", ".config/mimeapps.list",
     "/etc/shadow", "/etc/passwd",
     // The work directory, where other programs (whisper, ffmpeg, edge-tts) write while following
     // links. Its runtime spelling is outside every root anyway; its home fallback is under $HOME,

@@ -48,6 +48,19 @@ pub fn may_write_file(asked: &str, home: &Path) -> Result<(), String> {
     }
 }
 
+/// Whether an agent may have something made or moved to `asked`: a new folder, a new file, a
+/// rename's new name, a pasted copy. Only where `stat` answers true or false - in the home,
+/// outside its protected places, links followed and the part not there yet included - so a
+/// folder named `applications` made in ~/.local/share, or renamed to that, is refused. Whether
+/// a name is already taken is the operation's own business.
+pub fn may_create(asked: &str, home: &Path) -> Result<(), String> {
+    let answer = stat(asked, home);
+    match &answer["exists"] {
+        Value::Bool(_) => Ok(()),
+        _ => Err(refusal(asked, &answer)),
+    }
+}
+
 /// A new file needs its folder already there: nothing an agent writes creates folders on the way.
 fn folder_is_there(asked: &str, home: &Path) -> Result<(), String> {
     let Some(parent) = expand(asked.trim(), home).and_then(|p| p.parent().map(Path::to_path_buf)) else {

@@ -35,6 +35,28 @@ pub fn hidden_from_caller(path: Option<&Path>) -> Option<String> {
     home_paths::may_read_file(&path.to_string_lossy(), &home()).err()
 }
 
+/// Refuse an agent stepping to the next or previous picture of a folder it may not see: each
+/// step would name one more picture in it.
+pub fn may_step(current: Option<&Path>) -> Result<(), String> {
+    match hidden_from_caller(current) {
+        Some(_) => Err("the picture on screen is one an agent is not shown; `open` one in the person's home first".to_string()),
+        None => Ok(()),
+    }
+}
+
+/// What `show`, `next` and `previous` answer: the picture on screen by name and place, unless it
+/// is one this caller is not shown - checked after the move too, since the folder's next
+/// picture may be a link or a second name for a file elsewhere.
+pub fn answer(current: Option<&Path>, name: String, position: Option<usize>) -> serde_json::Value {
+    if hidden_from_caller(current).is_some() {
+        return serde_json::json!({ "showing": "(hidden)", "hidden": "the picture is one an agent is not shown" });
+    }
+    match position {
+        Some(position) => serde_json::json!({ "showing": name, "position": position }),
+        None => serde_json::json!({ "showing": name }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -56,5 +78,33 @@ mod tests {
     fn the_person_opens_pictures_anywhere() {
         assert!(may_open(Path::new("/etc/hostname")).is_ok());
         assert_eq!(hidden_from_caller(Some(Path::new("/etc/hostname"))), None);
+    }
+}
+
+#[cfg(test)]
+mod step_tests {
+    use super::*;
+    use yantrik_app_runtime::control::AgentTokenScope;
+    use yantrik_image_core::Gallery;
+
+    #[test]
+    fn next_in_a_folder_an_agent_may_not_see_names_nothing() {
+        // The person opened a picture in the temp directory, outside the home.
+        let dir = std::env::temp_dir().join(format!("yantrik-viewer-step-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["a.png", "b.png", "secret-plans.png"] {
+            std::fs::write(dir.join(name), "x").unwrap();
+        }
+        let mut g = Gallery::open(&dir.join("a.png"));
+        assert!(may_step(g.current().map(|p| p.as_path())).is_ok(), "the person steps anywhere");
+
+        let _agent = AgentTokenScope::enter(Some("tok-viewer-step".into()));
+        assert!(may_step(g.current().map(|p| p.as_path())).is_err());
+        g.next();
+        let said = answer(g.current().map(|p| p.as_path()), "b.png".into(), Some(2));
+        assert_eq!(said["showing"], "(hidden)", "{said}");
+        assert!(said.get("position").is_none(), "{said}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -890,7 +890,12 @@ fn an_agent_names_only_files_in_the_home(ui: &TextEditorApp, s: &State, publishe
     assert!(!shown["content"].as_str().unwrap_or_default().is_empty(), "the person sees the text: {shown}");
     assert!(shown["content_hidden"].is_null(), "{shown}");
 
-    let _agent = AgentTokenScope::enter(Some("tok-editor-test".into()));
+    let text_before = s.borrow().docs[s.borrow().active].text.clone();
+    ui.set_query("omega".into());
+    search(ui, s, false);
+    assert!(ui.get_match_count() > 0, "the person's find matches");
+
+    let agent = AgentTokenScope::enter(Some("tok-editor-test".into()));
     let refused = |name: &str, args: serde_json::Value, why: &str| {
         let err = act_on(published, name, args.clone()).expect_err(&format!("{name} {args}"));
         assert!(err.ends_with(why), "{name} {args}: {err}");
@@ -898,16 +903,55 @@ fn an_agent_names_only_files_in_the_home(ui: &TextEditorApp, s: &State, publishe
     refused("open", serde_json::json!({ "path": "~/.ssh/id_ed25519" }), " is protected");
     refused("open", serde_json::json!({ "path": "/etc/hostname" }), " is outside");
     refused("open", serde_json::json!({ "path": tab.display().to_string() }), " is outside");
+    refused("save", serde_json::json!({}), " is outside");
+
+    // The tab in front is the person's, from outside the home: nothing reads or changes its
+    // text for an agent. `save_as` would copy it somewhere an agent may read; `find` would
+    // answer "does it contain X?" by its count.
+    let hidden = "its text is left alone; `select_tab` another or `new` one.";
+    refused("save_as", serde_json::json!({ "path": "~/Documents/copied-out.txt" }), hidden);
+    for (name, args) in [
+        ("find", serde_json::json!({ "text": "omega" })),
+        ("find-next", serde_json::json!({})),
+        ("find-prev", serde_json::json!({})),
+        ("replace_text", serde_json::json!({ "text": "x" })),
+        ("replace", serde_json::json!({})),
+        ("replace-all", serde_json::json!({})),
+        ("set_content", serde_json::json!({ "text": "x" })),
+        ("append", serde_json::json!({ "text": "x" })),
+        ("undo", serde_json::json!({})),
+        ("redo", serde_json::json!({})),
+    ] {
+        refused(name, args, hidden);
+    }
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    assert!(!home.join("Documents/copied-out.txt").exists(), "nothing was copied out");
+    assert_eq!(s.borrow().docs[s.borrow().active].text, text_before, "the tab is untouched");
+    assert_eq!(s.borrow().docs[s.borrow().active].path.as_ref(), Some(&tab), "the tab stays where it was");
+
+    // Nor is it read back through `describe`: not its text, its name, its path or a match count.
+    let seen = view(ui, s);
+    assert_eq!(seen.state["content"], "", "{}", seen.state);
+    assert!(seen.state["content_hidden"].is_string(), "{}", seen.state);
+    assert_eq!(seen.state["find_count"], 0, "{}", seen.state);
+    assert_eq!(seen.state["find_query"], "", "{}", seen.state);
+    assert!(seen.summary.contains("not shown to an agent"), "{}", seen.summary);
+    let listed = seen.state.to_string();
+    assert!(!listed.contains("surface.txt") && !listed.contains(&dir.display().to_string()), "{listed}");
+    assert!(seen.state["tabs"].as_array().unwrap().iter().any(|t| t["path"] == "(hidden)"), "{listed}");
+
+    // In a tab of its own, the write rule alone decides.
+    act_on(published, "new", serde_json::json!({ "text": "echo pwned\n" })).expect("a new tab");
     refused("save_as", serde_json::json!({ "path": "~/.bashrc", "overwrite": true }), " is protected");
     refused("save_as", serde_json::json!({ "path": "~/.config/autostart/x.desktop" }), " is protected");
     refused("save_as", serde_json::json!({ "path": dir.join("agent.txt").display().to_string() }), " is outside");
-    refused("save", serde_json::json!({}), " is outside");
     assert!(!dir.join("agent.txt").exists(), "nothing was written");
-    assert_eq!(s.borrow().docs[s.borrow().active].path.as_ref(), Some(&tab), "the tab stays where it was");
-
-    // The tab the person opened from outside the home is not read back to an agent.
-    let seen = view(ui, s);
-    assert_eq!(seen.state["content"], "", "{}", seen.state);
-    assert!(seen.state["content_hidden"].as_str().unwrap_or_default().ends_with(" is outside"));
-    assert!(seen.summary.contains("not shown to an agent"), "{}", seen.summary);
+    drop(agent);
+    act_on(published, "set_content", serde_json::json!({ "text": "" })).expect("empty the scratch tab");
+    act_on(published, "close", serde_json::json!({})).expect("close the scratch tab");
+    if ui.get_dialog() == 3 {
+        act_on(published, "discard", serde_json::json!({})).expect("discard the scratch tab");
+    }
+    ui.set_query("".into());
+    search(ui, s, false);
 }

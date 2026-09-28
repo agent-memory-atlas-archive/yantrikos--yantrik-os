@@ -2,6 +2,8 @@
 
 use super::{Tool, ToolContext, ToolRegistry, PermissionLevel, validate_path};
 
+mod members;
+
 pub fn register(reg: &mut ToolRegistry) {
     reg.register(Box::new(ArchiveCreateTool));
     reg.register(Box::new(ArchiveExtractTool));
@@ -148,6 +150,12 @@ impl Tool for ArchiveExtractTool {
             Ok(p) => p,
             Err(e) => return format!("Error (destination): {e}"),
         };
+
+        // Every member, before tar writes any of them: no links, and no name that lands
+        // somewhere a single write would be refused (members.rs).
+        if let Err(e) = members::check(&archive_expanded, &dest_expanded, validate_path) {
+            return format!("Error: {e}");
+        }
 
         // Create destination directory
         if !std::path::Path::new(&dest_expanded).exists() {

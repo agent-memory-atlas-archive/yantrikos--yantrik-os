@@ -162,3 +162,31 @@ fn a_hidden_folder_is_described_as_hidden_and_names_nothing() {
     assert_eq!(hidden["view"], "list", "what says nothing about the folder stays");
     assert_eq!(hidden["places"][0]["path"], "~");
 }
+
+#[test]
+fn a_mind_does_not_name_anything_into_a_protected_place() {
+    // files_go ~/.local/share, new_folder x, save a .desktop into x, files_rename x applications:
+    // the rename makes it the menu's desktop entries.
+    let (_d, home) = home("make");
+    std::fs::create_dir_all(home.join(".local/share/x")).unwrap();
+    std::fs::create_dir_all(home.join(".config")).unwrap();
+    let share = home.join(".local/share");
+    let share = share.to_str().unwrap();
+    assert!(make_verdict(share, "fonts", &home).is_ok());
+    refused_because(make_verdict(share, "applications", &home), " is protected", "applications");
+    let config = home.join(".config");
+    let config = config.to_str().unwrap();
+    for name in ["autostart", "systemd", "mimeapps.list", "labwc"] {
+        refused_because(make_verdict(config, name, &home), " is protected", name);
+    }
+    refused_because(make_verdict(home.to_str().unwrap(), ".bashrc", &home), " is protected", ".bashrc");
+    assert!(make_verdict(home.to_str().unwrap(), "a/b", &home).is_err(), "a name, not a path");
+}
+
+#[test]
+fn renaming_the_keys_folder_away_is_refused() {
+    // `files_rename .ssh keys` checks the entry it renames, not only the name it gets.
+    let (_d, home) = home("rename");
+    refused_because(entry_verdict(home.to_str().unwrap(), ".ssh", &home), " is protected", ".ssh");
+    assert!(make_verdict(home.to_str().unwrap(), "keys", &home).is_ok(), "the new name alone is harmless");
+}

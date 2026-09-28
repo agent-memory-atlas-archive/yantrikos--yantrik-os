@@ -267,3 +267,58 @@ fn protected_names_match_whole_components_only() {
     assert!(!is_protected(Path::new("/home/ann/.config/labwc-themes/a")));
     assert!(!is_protected(Path::new("/home/ann/.local/share/applications-old")));
 }
+
+#[test]
+fn a_file_with_a_second_name_is_not_known_to_be_anything() {
+    // The other name may be anywhere; a hard link to a key looks like any file in the home.
+    let (_d, home) = home();
+    std::fs::hard_link(home.join("notes/today.txt"), home.join("twin.txt")).unwrap();
+    for asked in ["~/twin.txt", "~/notes/today.txt"] {
+        assert_eq!(exists_and_reason(asked, &home), (json!("unknown"), json!("hard_link")), "{asked}");
+        assert!(may_read_file(asked, &home).unwrap_err().ends_with(" is hard_link"), "{asked}");
+        assert!(may_write_file(asked, &home).unwrap_err().ends_with(" is hard_link"), "{asked}");
+    }
+    std::fs::remove_file(home.join("twin.txt")).unwrap();
+    assert_eq!(stat("~/notes/today.txt", &home)["exists"], true, "one name again, an ordinary file");
+}
+
+#[test]
+fn which_program_opens_what_is_protected() {
+    let (_d, home) = home();
+    std::fs::create_dir_all(home.join(".config")).unwrap();
+    std::fs::write(home.join(".config/mimeapps.list"), "[Default Applications]\n").unwrap();
+    assert_eq!(exists_and_reason("~/.config/mimeapps.list", &home), (json!("unknown"), json!("protected")));
+    assert!(may_write_file("~/.config/mimeapps.list", &home).unwrap_err().ends_with(" is protected"));
+}
+
+#[test]
+fn desktop_entries_under_a_moved_data_home_are_protected() {
+    let xdg = Path::new("/srv/ann-data");
+    assert!(is_protected_with(Path::new("/srv/ann-data/applications/term.desktop"), Some(xdg)));
+    assert!(is_protected_with(Path::new("/srv/ann-data/applications"), Some(xdg)));
+    assert!(!is_protected_with(Path::new("/srv/ann-data/applications-old/a"), Some(xdg)));
+    assert!(!is_protected_with(Path::new("/srv/ann-data/fonts/a.ttf"), Some(xdg)));
+    assert!(!is_protected_with(Path::new("/srv/ann-data/applications/a"), None));
+}
+
+#[test]
+fn nothing_is_made_where_it_would_become_a_protected_place() {
+    // files_go ~/.local/share, new_folder x, save a .desktop into it, rename x to applications:
+    // each step looked harmless, and the last one made a desktop entry the person's menu runs.
+    let (_d, home) = home();
+    std::fs::create_dir_all(home.join(".local/share/x")).unwrap();
+    std::fs::create_dir_all(home.join(".config")).unwrap();
+    assert!(may_create("~/.local/share/x", &home).is_ok(), "an ordinary name there is fine");
+    assert!(may_create("~/notes/new-folder", &home).is_ok());
+    for asked in [
+        "~/.local/share/applications",
+        "~/.config/autostart",
+        "~/.config/systemd",
+        "~/.config/mimeapps.list",
+        "~/.ssh",
+    ] {
+        assert!(may_create(asked, &home).unwrap_err().ends_with(" is protected"), "{asked}");
+    }
+    symlink("/etc", home.join("escape")).unwrap();
+    assert!(may_create("~/escape/new", &home).unwrap_err().ends_with(" is outside"));
+}

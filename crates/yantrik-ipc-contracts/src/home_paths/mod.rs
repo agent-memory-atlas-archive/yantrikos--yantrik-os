@@ -22,13 +22,15 @@ mod verdict;
 mod tests;
 
 pub use stat::stat;
-pub use verdict::{may_read_file, may_write_file};
+pub use verdict::{may_create, may_read_file, may_write_file};
 
 /// Places in the home no agent reads or writes: keys, the shell's own configuration and memory,
 /// and every file a shell or the session runs as the person without asking - the login and
-/// startup scripts, autostart entries, user service units, the environment files, and desktop
-/// entries (which run their `Exec=` when clicked). Written relative to the home, one or more
-/// whole path components each.
+/// startup scripts, autostart entries, user service units, the environment files, desktop
+/// entries (which run their `Exec=` when clicked), and `mimeapps.list`, which decides which of
+/// them opens a file. Written relative to the home, one or more whole path components each.
+/// Desktop entries under `$XDG_DATA_HOME`, when it is set elsewhere, are protected too; see
+/// [`is_protected`].
 ///
 /// The file tools in `yantrik-companion-core` add places outside the home to this (their
 /// BLOCKED_SEGMENTS); this is the part every side shares.
@@ -53,16 +55,33 @@ pub const PROTECTED: &[&str] = &[
     ".config/environment.d",
     ".config/systemd",
     ".local/share/applications",
+    ".config/mimeapps.list",
 ];
 
 /// Whether `path` passes through a protected place, compared a whole component at a time:
 /// `.ssh` is protected, `.ssh-notes` is not, and `.config/labwc` only as those two in a row.
+///
+/// Desktop entries are read from `$XDG_DATA_HOME/applications` as well, and a session that sets
+/// XDG_DATA_HOME somewhere other than ~/.local/share would otherwise leave the real folder open;
+/// a const list cannot name a path from the environment, so it is asked here.
 pub fn is_protected(path: &Path) -> bool {
+    let xdg = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).filter(|p| p.is_absolute());
+    is_protected_with(path, xdg.as_deref())
+}
+
+/// [`is_protected`] with the XDG data home given, or none.
+pub fn is_protected_with(path: &Path, xdg_data_home: Option<&Path>) -> bool {
     let parts: Vec<&std::ffi::OsStr> = path.iter().collect();
-    PROTECTED.iter().any(|place| {
+    let listed = PROTECTED.iter().any(|place| {
         let want: Vec<&std::ffi::OsStr> = Path::new(place).iter().collect();
         !want.is_empty() && parts.windows(want.len()).any(|w| w == want.as_slice())
-    })
+    });
+    listed
+        || xdg_data_home.is_some_and(|xdg| {
+            // As written and as resolved, since the path may be either.
+            let apps = xdg.join("applications");
+            path.starts_with(&apps) || apps.canonicalize().is_ok_and(|real| path.starts_with(real))
+        })
 }
 
 /// `asked` as an absolute path: `~` and `~/...` are the home. Relative paths, other users'
