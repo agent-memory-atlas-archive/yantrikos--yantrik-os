@@ -470,6 +470,18 @@ pub struct Host {
     /// Where each turn is kept as a run (#25), when the shell gave the host somewhere to keep
     /// them: see [`Host::with_runs`].
     runs: Option<Arc<RunStore>>,
+    /// Whether a mind is handed a memory credential with its turns (#447), when the shell said
+    /// how to decide: see [`Host::with_memory`].
+    memory: Option<MemoryPolicy>,
+}
+
+/// How the host decides who carries a memory credential, and how it digests one. The decision
+/// is the shell's (the person's grants); the host only asks, turn by turn.
+#[derive(Clone)]
+struct MemoryPolicy {
+    /// `(harness id, uid it attached with)` -> whether that mind holds any memory grant.
+    granted: Arc<dyn Fn(&str, Option<u32>) -> bool + Send + Sync>,
+    hash: Arc<dyn Fn(&str) -> String + Send + Sync>,
 }
 
 impl Host {
@@ -491,7 +503,20 @@ impl Host {
             })),
             liveness: Arc::new(pid_alive),
             runs: None,
+            memory: None,
         }
+    }
+
+    /// The same host, handing each turn of a mind that holds a memory grant its agent's memory
+    /// credential (#447): `granted` is asked with the harness id and the uid it attached with,
+    /// `hash` digests the credential as the memory server will. Without this, no turn carries one.
+    pub fn with_memory(
+        mut self,
+        granted: impl Fn(&str, Option<u32>) -> bool + Send + Sync + 'static,
+        hash: impl Fn(&str) -> String + Send + Sync + 'static,
+    ) -> Host {
+        self.memory = Some(MemoryPolicy { granted: Arc::new(granted), hash: Arc::new(hash) });
+        self
     }
 
     /// The same host, keeping every turn a harness takes as a run in `store` (#25): its state and
@@ -803,9 +828,16 @@ impl Host {
             }
             harness.agents.insert(conversation.clone(), Agent::new(mint_token()?));
         }
+        let carries_memory = self.memory.as_ref().is_some_and(|p| (p.granted)(harness_id, harness.uid));
         let live = harness.agents.get_mut(&conversation).expect("present or just made");
         live.turns += 1;
         let agent_token = live.token.clone();
+        // A mind with any memory grant gets its credential with every turn, the same one while
+        // the agent lives; one with none gets nothing, and the memory server would refuse it.
+        let memory_credential = match (&self.memory, carries_memory) {
+            (Some(policy), true) => ensure_memory_credential(live, |s| (policy.hash)(s))?,
+            _ => String::new(),
+        };
 
         let turn_id = st.next_turn;
         st.next_turn += 1;
@@ -817,6 +849,7 @@ impl Host {
                 context: turn.context,
                 conversation,
                 agent_token,
+                memory_credential,
             },
             tx,
         });
@@ -907,15 +940,7 @@ impl Host {
         let mut state = self.lock();
         self.reap(&mut state);
         let live = state.attached.get_mut(agent.harness())?.agents.get_mut(agent.conversation())?;
-        if let Some(existing) = &live.memory {
-            return Some(Ok(existing.secret.clone()));
-        }
-        Some(random_hex(MEMORY_CREDENTIAL_BYTES).map(|hex| {
-            let secret = format!("{MEMORY_CREDENTIAL_PREFIX}{hex}");
-            let digest = hash(&secret).to_ascii_lowercase();
-            live.memory = Some(MemoryCredential { secret: secret.clone(), digest });
-            secret
-        }))
+        Some(ensure_memory_credential(live, hash))
     }
 
     /// Which live agent holds this memory credential, under which attach, and the process and
@@ -1656,6 +1681,17 @@ const TOKEN_HEX_LEN: usize = 32;
 
 fn mint_token() -> Result<String, String> {
     random_hex(TOKEN_HEX_LEN / 2)
+}
+
+/// This agent's memory credential, minted if it has none yet. Digested once, at mint.
+fn ensure_memory_credential(live: &mut Agent, hash: impl Fn(&str) -> String) -> Result<String, String> {
+    if let Some(existing) = &live.memory {
+        return Ok(existing.secret.clone());
+    }
+    let secret = format!("{MEMORY_CREDENTIAL_PREFIX}{}", random_hex(MEMORY_CREDENTIAL_BYTES)?);
+    let digest = hash(&secret).to_ascii_lowercase();
+    live.memory = Some(MemoryCredential { secret: secret.clone(), digest });
+    Ok(secret)
 }
 
 /// A memory credential (#447): `mem-` and 256 random bits as hex. Longer than an agent token and
@@ -2634,6 +2670,53 @@ mod tests {
         let credential = host.memory_credential(&agent, |s| format!("{:0>64}", s.len())).unwrap().unwrap();
         let held = host.memory_credential_holder(&credential).unwrap();
         assert_eq!((held.pid, held.uid), (None, None));
+    }
+
+    #[test]
+    fn a_turn_carries_the_memory_credential_only_to_a_mind_the_person_granted() {
+        let hash = |s: &str| format!("{:0>64}", s.len().to_string() + &s[4..10]);
+        let host = host_with_nothing()
+            .with_liveness(|pid| pid == 4242)
+            .with_memory(|harness, _uid| harness == "hermes", hash);
+        let hermes = host
+            .handle_from(protocol::ATTACH, &json!({ "id": "hermes", "name": "Hermes" }), Some(4242), Some(1000))
+            .unwrap()["session"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let pi = host
+            .handle_from(protocol::ATTACH, &json!({ "id": "pi", "name": "Pi" }), Some(4242), Some(1000))
+            .unwrap()["session"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let _h1 = host.send_to(&AgentId::new("hermes", AgentId::MAIN), Turn::new("one")).unwrap();
+        let first = poll(&host, &hermes);
+        let credential = first["memory_credential"].as_str().expect("granted, so carried").to_string();
+        assert!(credential.starts_with("mem-") && credential.len() == 68, "{credential}");
+        assert_ne!(first["memory_credential"], first["agent_token"], "its own secret, not the token");
+        host.handle_from(protocol::COMPLETE, &json!({ "session": hermes, "turn_id": first["turn_id"] }), Some(4242), Some(1000))
+            .unwrap();
+        let _h2 = host.send_to(&AgentId::new("hermes", AgentId::MAIN), Turn::new("two")).unwrap();
+        assert_eq!(poll(&host, &hermes)["memory_credential"], credential.as_str(), "the same while it lives");
+        let held = host.memory_credential_holder(&credential).unwrap();
+        assert_eq!(held.agent, AgentId::new("hermes", AgentId::MAIN));
+
+        let _p = host.send_to(&AgentId::new("pi", AgentId::MAIN), Turn::new("three")).unwrap();
+        let turn = poll(&host, &pi);
+        assert!(turn.get("memory_credential").is_none(), "no grant, no credential: {turn}");
+
+        // A host the shell gave no policy hands none to anyone.
+        let bare = host_with_nothing().with_liveness(|pid| pid == 4242);
+        let s = bare
+            .handle_from(protocol::ATTACH, &json!({ "id": "hermes", "name": "Hermes" }), Some(4242), Some(1000))
+            .unwrap()["session"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let _b = bare.send_to(&AgentId::new("hermes", AgentId::MAIN), Turn::new("four")).unwrap();
+        assert!(poll(&bare, &s).get("memory_credential").is_none());
     }
 
     /// Agents catalog: the shell asks whether a mind can give a role a conversation of its own, and

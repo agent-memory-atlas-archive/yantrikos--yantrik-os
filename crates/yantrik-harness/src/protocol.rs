@@ -24,7 +24,8 @@
 //! ```text
 //! attach  {id, name, conversations?}    → {session}
 //! loop:
-//!   poll  {session}                     → {turn_id, text, context, conversation, agent_token} | {}
+//!   poll  {session}                     → {turn_id, text, context, conversation, agent_token,
+//!                                          memory_credential?} | {}
 //!                                         (+ cancelled: [turn_id], ended: [conversation])
 //!   …if no turn_id: wait POLL_INTERVAL_MS and poll again
 //!   chunk {session, turn_id, delta}     → {}          … as many as you like
@@ -211,6 +212,12 @@ pub struct Assignment {
     /// the model and never written to a log.
     #[serde(default)]
     pub agent_token: String,
+    /// The agent's credential for the person's memory (#447): `mem-` and 256 random bits, the same
+    /// for every turn while the agent lives, present only when the person has granted this mind
+    /// some use of their memory. What the harness presents to the memory server, which asks the
+    /// desktop what it may do; like the token, never shown to the model and never logged.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub memory_credential: String,
 }
 
 #[cfg(test)]

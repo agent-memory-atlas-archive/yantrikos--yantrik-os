@@ -128,6 +128,18 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         Some(store) => host.with_runs(store),
         None => host,
     };
+    // A mind the person has granted some use of their memory carries its credential with every
+    // turn (#447); one with none carries nothing. Judged as `memory_validate` judges it: the
+    // person's grants, with the first-party defaults only for the account that attached as the
+    // mind account. A grants file that cannot be trusted hands nobody anything.
+    let host = host.with_memory(
+        |harness, uid| {
+            crate::memory_grants::load().is_some_and(|store| {
+                store.grants_for(harness, uid.is_some_and(yantrik_ipc_transport::mind_door::is_mind)).any()
+            })
+        },
+        yantrik_ipc_transport::reach::token_digest,
+    );
     let _ = HOST.set(host.clone());
 
     // The agent terminal's side of agents (design/agents-workspace-2026-09-23.md, decision 3):
