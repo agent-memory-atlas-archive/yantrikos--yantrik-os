@@ -100,8 +100,8 @@ pub use args::{
     with_defaults,
 };
 pub use call::{
-    finish_later, next_action_id, refusal, service_id_for, ActCall, NO_SUCH_METHOD, REFUSED,
-    UNANSWERED,
+    finish_later, needs_standing, next_action_id, refusal, service_id_for, ActCall, NO_SUCH_METHOD,
+    REFUSED, STANDING_NOT_NEEDED, UNANSWERED,
 };
 pub use context::{
     agent_token, answer_later, caller, off_the_reactor, AgentTokenScope, Caller, CallerScope, Later,

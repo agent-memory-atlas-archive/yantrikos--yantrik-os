@@ -200,6 +200,32 @@ struct Agent {
     notes: VecDeque<String>,
     /// Notes pushed out by newer ones since the last turn took them, so that turn can say so.
     notes_dropped: usize,
+    /// Its credential for the person's memory (#447), minted when the desktop first hands one
+    /// out and gone with the agent: a mind that detaches, or whose grants are revoked, holds
+    /// nothing the memory server will honour.
+    memory: Option<MemoryCredential>,
+}
+
+/// A memory credential as the host keeps it: the secret the agent is handed, and its digest,
+/// computed once at mint. The memory server asks by digest, so a lookup compares digests
+/// rather than hashing every live credential under the host's lock on every question.
+struct MemoryCredential {
+    secret: String,
+    digest: String,
+}
+
+/// Who holds a memory credential (#447), as the memory server's question is answered from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryHolder {
+    pub agent: AgentId,
+    /// The attach it was minted under (`s<n>`): a harness that restarts attaches again, so this
+    /// tells two lives of the same mind apart in an audit.
+    pub session: String,
+    /// The process that attached, and the account it ran as, both as the kernel said at accept
+    /// (`SO_PEERCRED`). Read then and kept, never looked up again later: by the time a question
+    /// arrives the pid may be another process's, and `/proc` would name that one's account.
+    pub pid: Option<u32>,
+    pub uid: Option<u32>,
 }
 
 impl Agent {
@@ -211,6 +237,7 @@ impl Agent {
             last: None,
             notes: VecDeque::new(),
             notes_dropped: 0,
+            memory: None,
         }
     }
 
@@ -248,6 +275,10 @@ struct Attached {
     /// The process that attached, as the kernel reported it. `None` when the transport could not
     /// say (the TCP dev path) or the caller did not pass it.
     pid: Option<u32>,
+    /// The account that process ran as, from the same `SO_PEERCRED` read, recorded at attach
+    /// for the same reason: what decides whether it is the person's own mind account (#447) is
+    /// the kernel's word when it attached, not a later look at a pid that may have been reused.
+    uid: Option<u32>,
     /// Turns handed out and not yet closed by the harness.
     in_flight: HashMap<u64, Flight>,
     /// Turns waiting to be collected, oldest first.
@@ -863,6 +894,79 @@ impl Host {
         state.attached.values().any(|harness| harness.agents.values().any(|agent| hash(&agent.token) == digest))
     }
 
+    /// This agent's credential for the person's memory (#447), minted the first time it is asked
+    /// for, with its digest computed then by `hash` (the caller's, as [`Host::knows_token_digest`]
+    /// takes one, so this crate needs no hash of its own). Distinct from its agent token: the
+    /// token lets it act on the desktop, this lets the memory server ask the desktop what it may
+    /// remember, and either can be withdrawn alone. `None` when no such agent is alive.
+    pub fn memory_credential(
+        &self,
+        agent: &AgentId,
+        hash: impl Fn(&str) -> String,
+    ) -> Option<Result<String, String>> {
+        let mut state = self.lock();
+        self.reap(&mut state);
+        let live = state.attached.get_mut(agent.harness())?.agents.get_mut(agent.conversation())?;
+        if let Some(existing) = &live.memory {
+            return Some(Ok(existing.secret.clone()));
+        }
+        Some(random_hex(MEMORY_CREDENTIAL_BYTES).map(|hex| {
+            let secret = format!("{MEMORY_CREDENTIAL_PREFIX}{hex}");
+            let digest = hash(&secret).to_ascii_lowercase();
+            live.memory = Some(MemoryCredential { secret: secret.clone(), digest });
+            secret
+        }))
+    }
+
+    /// Which live agent holds this memory credential, under which attach, and the process and
+    /// account that attached it. What the shell answers the memory server from, before anything
+    /// is recalled or kept.
+    pub fn memory_credential_holder(&self, credential: &str) -> Option<MemoryHolder> {
+        let credential = credential.trim();
+        if !well_formed_memory_credential(credential) {
+            return None;
+        }
+        self.memory_holder_where(|held| same_secret(&held.secret, credential))
+    }
+
+    /// The same, asked by the credential's digest: what the memory server sends, so the
+    /// credential itself never crosses the shell's socket. Compared with the digest kept at mint.
+    pub fn memory_credential_holder_by_digest(&self, digest: &str) -> Option<MemoryHolder> {
+        if digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        let digest = digest.to_ascii_lowercase();
+        self.memory_holder_where(|held| same_secret(&held.digest, &digest))
+    }
+
+    fn memory_holder_where(&self, matches: impl Fn(&MemoryCredential) -> bool) -> Option<MemoryHolder> {
+        let mut state = self.lock();
+        self.reap(&mut state);
+        for (harness_id, harness) in &state.attached {
+            for (conversation, agent) in &harness.agents {
+                if agent.memory.as_ref().is_some_and(&matches) {
+                    return Some(MemoryHolder {
+                        agent: AgentId::new(harness_id, conversation),
+                        session: harness.session.clone(),
+                        pid: harness.pid,
+                        uid: harness.uid,
+                    });
+                }
+            }
+        }
+        None
+    }
+
+    /// Withdraw a mind's memory credentials: every agent of `harness_id` loses the one it holds,
+    /// and the next it is handed is a new one. What a revoked grant does (#447). Answers the
+    /// digests of what was withdrawn, which is all `memory.revoked` needs to tell the memory
+    /// server: the secrets themselves never leave the host.
+    pub fn revoke_memory_credentials(&self, harness_id: &str) -> Vec<String> {
+        let mut state = self.lock();
+        let Some(harness) = state.attached.get_mut(harness_id) else { return Vec::new() };
+        harness.agents.values_mut().filter_map(|agent| agent.memory.take()).map(|held| held.digest).collect()
+    }
+
     /// Whether an attached harness holds a conversation per agent — `None` when nothing by that id
     /// is attached. A role from the agent catalog is only ever started as a conversation of its
     /// own: a harness that holds one has only the person's own conversation to offer.
@@ -1011,21 +1115,25 @@ impl Host {
 
     /// Answer one protocol call. The shell wires this to the `harness` socket.
     pub fn handle(&self, method: &str, params: &serde_json::Value) -> Result<serde_json::Value, String> {
-        self.handle_from(method, params, None)
+        self.handle_from(method, params, None, None)
     }
 
-    /// The same, told which process is on the other end of the socket, as the kernel says it.
+    /// The same, told which process is on the other end of the socket and which account it runs
+    /// as, as the kernel says them.
     ///
-    /// Only `attach` uses it: the pid of the harness process is recorded then, so that a caller
-    /// later presenting one of its agents' tokens can be checked against it.
+    /// Only `attach` uses them: the pid of the harness process is recorded then, so that a caller
+    /// later presenting one of its agents' tokens can be checked against it, and the uid beside
+    /// it, so that whether it is the person's own mind account is decided from what the kernel
+    /// said at accept (#447).
     pub fn handle_from(
         &self,
         method: &str,
         params: &serde_json::Value,
         peer_pid: Option<u32>,
+        peer_uid: Option<u32>,
     ) -> Result<serde_json::Value, String> {
         match method {
-            protocol::ATTACH => self.attach(params, peer_pid),
+            protocol::ATTACH => self.attach(params, peer_pid, peer_uid),
             protocol::POLL => self.poll(params),
             protocol::CHUNK => self.chunk(params),
             protocol::EVENT => self.event(params),
@@ -1042,7 +1150,12 @@ impl Host {
         }
     }
 
-    fn attach(&self, params: &serde_json::Value, pid: Option<u32>) -> Result<serde_json::Value, String> {
+    fn attach(
+        &self,
+        params: &serde_json::Value,
+        pid: Option<u32>,
+        uid: Option<u32>,
+    ) -> Result<serde_json::Value, String> {
         let announced: Attach = serde_json::from_value(params.clone())
             .map_err(|e| format!("`attach` needs at least an `id` and a `name`: {e}"))?;
         if announced.id.trim().is_empty() {
@@ -1101,6 +1214,7 @@ impl Host {
                 session: session.clone(),
                 last_seen: Instant::now(),
                 pid,
+                uid,
                 in_flight: HashMap::new(),
                 queued: VecDeque::new(),
                 agents: HashMap::new(),
@@ -1542,6 +1656,17 @@ const TOKEN_HEX_LEN: usize = 32;
 
 fn mint_token() -> Result<String, String> {
     random_hex(TOKEN_HEX_LEN / 2)
+}
+
+/// A memory credential (#447): `mem-` and 256 random bits as hex. Longer than an agent token and
+/// told apart by its prefix, so neither is ever taken for the other.
+const MEMORY_CREDENTIAL_PREFIX: &str = "mem-";
+const MEMORY_CREDENTIAL_BYTES: usize = 32;
+
+fn well_formed_memory_credential(credential: &str) -> bool {
+    credential.strip_prefix(MEMORY_CREDENTIAL_PREFIX).is_some_and(|hex| {
+        hex.len() == MEMORY_CREDENTIAL_BYTES * 2 && hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    })
 }
 
 /// A token this host could have minted: [`TOKEN_HEX_LEN`] lowercase hex digits.
@@ -2397,7 +2522,7 @@ mod tests {
         // presence, and the registry asks the kernel about real ones (#67).
         let host = host_with_nothing().with_liveness(|pid| pid == 4242);
         let session = host
-            .handle_from(protocol::ATTACH, &json!({ "id": "pi", "name": "Pi", "conversations": true }), Some(4242))
+            .handle_from(protocol::ATTACH, &json!({ "id": "pi", "name": "Pi", "conversations": true }), Some(4242), None)
             .unwrap()["session"]
             .as_str()
             .unwrap()
@@ -2426,6 +2551,89 @@ mod tests {
         // A stopped agent's token names nothing.
         host.stop_agent(&first);
         assert_eq!(host.agent_for_token(&token_one), None);
+    }
+
+    #[test]
+    fn a_memory_credential_names_its_agent_until_it_is_withdrawn() {
+        let host = host_with_nothing().with_liveness(|pid| pid == 4242);
+        let session = host
+            .handle_from(
+                protocol::ATTACH,
+                &json!({ "id": "pi", "name": "Pi", "conversations": true }),
+                Some(4242),
+                Some(1000),
+            )
+            .unwrap()["session"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let first = host.start_agent("pi").unwrap();
+        let second = host.start_agent("pi").unwrap();
+        // A stand-in hash that is 64 hex long, counting how often it runs.
+        let hashed = std::sync::atomic::AtomicUsize::new(0);
+        let hash = |s: &str| {
+            hashed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            format!("{:0>64}", s.len().to_string() + &s[4..10])
+        };
+        let holder = |agent: &AgentId| MemoryHolder {
+            agent: agent.clone(),
+            session: session.clone(),
+            pid: Some(4242),
+            uid: Some(1000),
+        };
+
+        let one = host.memory_credential(&first, hash).unwrap().unwrap();
+        assert!(one.starts_with("mem-") && one.len() == 4 + 64, "256 bits, marked: {one}");
+        assert_eq!(host.memory_credential(&first, hash).unwrap().unwrap(), one, "the same one while it lives");
+        let two = host.memory_credential(&second, hash).unwrap().unwrap();
+        assert_ne!(one, two, "each agent its own");
+        assert_eq!(hashed.load(std::sync::atomic::Ordering::Relaxed), 2, "hashed once each, at mint");
+        // The pid and the account are the kernel's at attach, carried to whoever asks.
+        assert_eq!(host.memory_credential_holder(&one), Some(holder(&first)));
+        assert_eq!(host.memory_credential_holder(&two), Some(holder(&second)));
+
+        // Asked by digest, as the memory server does: compared with what was kept at mint, and
+        // nothing is hashed to answer.
+        assert_eq!(host.memory_credential_holder_by_digest(&hash(&one)), Some(holder(&first)));
+        assert_eq!(host.memory_credential_holder_by_digest(&hash(&one).to_ascii_uppercase()), Some(holder(&first)));
+        let before = hashed.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(host.memory_credential_holder_by_digest(&"0".repeat(64)), None);
+        assert_eq!(host.memory_credential_holder_by_digest("not-a-digest"), None);
+        assert_eq!(hashed.load(std::sync::atomic::Ordering::Relaxed), before);
+
+        // Not a prefix, not an agent token, not a guess.
+        assert_eq!(host.memory_credential_holder(&one[..60]), None);
+        assert_eq!(host.memory_credential_holder(&format!("mem-{}", "0".repeat(64))), None);
+        assert_eq!(host.memory_credential_holder(""), None);
+
+        // Withdrawn: what comes back is the digests, never the credentials; the old one names
+        // nothing, and the next is new.
+        let mut withdrawn = host.revoke_memory_credentials("pi");
+        withdrawn.sort();
+        let mut expected = vec![hash(&one), hash(&two)];
+        expected.sort();
+        assert_eq!(withdrawn, expected);
+        assert!(!withdrawn.contains(&one) && !withdrawn.contains(&two));
+        assert_eq!(host.memory_credential_holder(&one), None);
+        assert_eq!(host.memory_credential_holder_by_digest(&hash(&one)), None);
+        assert_ne!(host.memory_credential(&first, hash).unwrap().unwrap(), one);
+
+        // A stopped agent's credential names nothing, and nothing is minted for it.
+        let three = host.memory_credential(&second, hash).unwrap().unwrap();
+        host.stop_agent(&second);
+        assert_eq!(host.memory_credential_holder(&three), None);
+        assert!(host.memory_credential(&second, hash).is_none());
+    }
+
+    #[test]
+    fn a_harness_attached_without_peer_credentials_holds_its_memory_credential_as_nobody_in_particular() {
+        // The TCP dev path: no pid, no account. Nothing about the holder is made up to fill it.
+        let host = host_with_nothing();
+        host.handle(protocol::ATTACH, &json!({ "id": "pi", "name": "Pi", "conversations": true })).unwrap();
+        let agent = host.start_agent("pi").unwrap();
+        let credential = host.memory_credential(&agent, |s| format!("{:0>64}", s.len())).unwrap().unwrap();
+        let held = host.memory_credential_holder(&credential).unwrap();
+        assert_eq!((held.pid, held.uid), (None, None));
     }
 
     /// Agents catalog: the shell asks whether a mind can give a role a conversation of its own, and
@@ -2471,7 +2679,7 @@ mod tests {
             .arg("60")
             .spawn()
             .expect("the test machine can start a sleeper");
-        host.handle_from(protocol::ATTACH, &json!({ "id": "pi", "name": "Pi" }), Some(child.id()))
+        host.handle_from(protocol::ATTACH, &json!({ "id": "pi", "name": "Pi" }), Some(child.id()), None)
             .unwrap();
         assert!(host.list().iter().any(|e| e.id == "pi"), "listed while its process lives");
 
@@ -2492,7 +2700,7 @@ mod tests {
         let host = host_with_nothing();
         // Its own pid, as the kernel reports for a harness started by hand from a terminal while
         // its unit file sits installed and stopped. Presence asks the process, never the unit.
-        host.handle_from(protocol::ATTACH, &json!({ "id": "pi", "name": "Pi" }), Some(std::process::id()))
+        host.handle_from(protocol::ATTACH, &json!({ "id": "pi", "name": "Pi" }), Some(std::process::id()), None)
             .unwrap();
         assert!(host.list().iter().any(|e| e.id == "pi"));
         host.set_active("pi").unwrap();

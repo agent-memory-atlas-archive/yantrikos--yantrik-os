@@ -753,7 +753,7 @@ mod tests {
         use yantrik_harness::{protocol, Host, Turn};
         let host = Host::new(vec![]);
         let attach = json!({ "id": "pi", "name": "Pi", "conversations": true });
-        let session = host.handle_from(protocol::ATTACH, &attach, me).unwrap()["session"].as_str().unwrap().to_string();
+        let session = host.handle_from(protocol::ATTACH, &attach, me, None).unwrap()["session"].as_str().unwrap().to_string();
         let agent = host.start_agent("pi").unwrap();
         let turn = |text: &str| {
             let _answer = host.send_to(&agent, Turn::new(text)).unwrap();
