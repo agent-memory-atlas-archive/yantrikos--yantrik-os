@@ -1,6 +1,6 @@
-use super::check::{ensure_private_as, prepare};
+use super::check::{self, ensure_private_as, prepare};
 use super::*;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 fn mode(p: &Path) -> u32 {
@@ -119,20 +119,42 @@ fn never_falls_back_to_tmp() {
 }
 
 #[test]
-fn refuses_a_base_other_accounts_can_write() {
-    for loose_mode in [0o777, 0o770] {
-        let root = tempfile::tempdir().unwrap();
-        let run = root.path().join("run");
-        std::fs::create_dir(&run).unwrap();
-        std::fs::set_permissions(&run, std::fs::Permissions::from_mode(loose_mode)).unwrap();
-        let home = root.path().join("home");
-        std::fs::create_dir(&home).unwrap();
-        let got = scratch_dir_from(Some(run.clone()), Some(home.clone())).unwrap();
-        assert_eq!(got, canon(&home).join(".cache/yantrik/tmp"), "{loose_mode:o}");
-        // Judged before anything was made in it.
-        assert!(!run.join(SCRATCH_NAME).exists());
-        assert!(scratch_dir_from(Some(run), None).is_err());
-    }
+fn refuses_a_base_every_account_can_write() {
+    let root = tempfile::tempdir().unwrap();
+    let run = root.path().join("run");
+    std::fs::create_dir(&run).unwrap();
+    std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let home = root.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    let got = scratch_dir_from(Some(run.clone()), Some(home.clone())).unwrap();
+    assert_eq!(got, canon(&home).join(".cache/yantrik/tmp"));
+    // Judged before anything was made in it.
+    assert!(!run.join(SCRATCH_NAME).exists());
+    assert!(scratch_dir_from(Some(run), None).is_err());
+}
+
+#[test]
+fn group_writable_is_fine_when_the_group_is_ours() {
+    // A umask-002 system with user-private groups: ~/.cache is 0775 and the group is just us.
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    std::fs::create_dir_all(home.join(".cache")).unwrap();
+    std::fs::set_permissions(home.join(".cache"), std::fs::Permissions::from_mode(0o775)).unwrap();
+    let got = scratch_dir_from(None, Some(home.clone())).unwrap();
+    assert_eq!(got, canon(&home).join(".cache/yantrik/tmp"));
+}
+
+#[test]
+fn group_writable_is_refused_when_the_group_is_someone_elses() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("shared");
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o770)).unwrap();
+    let meta = std::fs::metadata(&dir).unwrap();
+    // Not root in a test run, so the other group is simulated by judging as a different one.
+    let err = check::trusted_as(&dir, &meta, current_uid(), meta.gid().wrapping_add(1)).unwrap_err();
+    assert!(err.to_string().contains("which is not ours"), "{err}");
+    assert!(check::trusted_as(&dir, &meta, current_uid(), meta.gid()).is_ok());
 }
 
 #[test]
@@ -142,7 +164,7 @@ fn refuses_a_loose_directory_on_the_way_down() {
     std::fs::create_dir_all(home.join(".cache")).unwrap();
     std::fs::set_permissions(home.join(".cache"), std::fs::Permissions::from_mode(0o777)).unwrap();
     let err = scratch_dir_from(None, Some(home)).unwrap_err();
-    assert!(err.to_string().contains("writable by other accounts"), "{err}");
+    assert!(err.to_string().contains("writable by every account"), "{err}");
 }
 
 #[test]
@@ -217,6 +239,57 @@ fn will_not_empty_a_file_that_has_another_name() {
     std::fs::hard_link(&precious, &planted).unwrap();
     assert!(create_private_file(&planted).is_err());
     assert_eq!(std::fs::read_to_string(&precious).unwrap(), "ssh-ed25519 AAAA");
+}
+
+// ── Reading files back ───────────────────────────────────────────────────────────────────────
+
+#[test]
+fn reads_a_file_of_ours() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("yantrik-scrollback.txt");
+    create_private_file(&path).unwrap().write_all(b"error: it broke").unwrap();
+    let mut text = String::new();
+    open_private_file(&path).unwrap().read_to_string(&mut text).unwrap();
+    assert_eq!(text, "error: it broke");
+}
+
+#[test]
+fn will_not_read_through_a_link_at_the_name() {
+    // The attack: an archive extracted into scratch leaves the terminal's dump name pointing at a
+    // key, and "read the terminal" hands the key to the model.
+    let root = tempfile::tempdir().unwrap();
+    let key = root.path().join("id_ed25519");
+    std::fs::write(&key, "-----BEGIN OPENSSH PRIVATE KEY-----").unwrap();
+    let planted = root.path().join("yantrik-scrollback.txt");
+    std::os::unix::fs::symlink(&key, &planted).unwrap();
+    assert!(open_private_file(&planted).is_err());
+}
+
+#[test]
+fn will_not_read_a_fifo_or_a_directory() {
+    let root = tempfile::tempdir().unwrap();
+    let fifo = root.path().join("task.out");
+    let c = std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(fifo.as_os_str())).unwrap();
+    // SAFETY: a valid NUL-terminated path; mkfifo touches nothing else.
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    assert!(open_private_file(&fifo).is_err());
+    assert!(open_private_file(root.path()).is_err());
+}
+
+// ── Fresh directories ────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn a_fresh_dir_is_new_private_and_gone_when_dropped() {
+    let a = fresh_scratch_dir("test-fresh").unwrap();
+    let b = fresh_scratch_dir("test-fresh").unwrap();
+    assert_ne!(a.path(), b.path());
+    assert_eq!(mode(a.path()), 0o700);
+    assert!(std::fs::read_dir(a.path()).unwrap().next().is_none(), "nothing can be waiting inside");
+    std::fs::write(a.file("out.txt").unwrap(), "x").unwrap();
+    assert!(a.file("../escape").is_err());
+    let path = a.path().to_path_buf();
+    drop(a);
+    assert!(!path.exists());
 }
 
 #[test]

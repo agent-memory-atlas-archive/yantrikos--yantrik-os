@@ -2,7 +2,7 @@
 //!
 //! Uses LLM to generate DOT source, renders via `dot` command to PNG.
 
-use super::{Tool, ToolContext, ToolRegistry, PermissionLevel, scratch_target, write_scratch};
+use super::{Tool, ToolContext, ToolRegistry, PermissionLevel, write_scratch};
 
 /// Register canvas tools.
 pub fn register(reg: &mut ToolRegistry, ollama_base: &str, model: &str) {
@@ -37,16 +37,10 @@ Rules:
         "stream": false
     });
 
-    let payload_path = write_scratch("yantrik-canvas-payload.json", payload.to_string().as_bytes())?;
-
     let url = format!("{}/api/chat", ollama_base);
 
-    let output = std::process::Command::new("curl")
-        .args(["-fsSL", "--max-time", "60", "-H", "Content-Type: application/json", "-d", &format!("@{payload_path}"), &url])
-        .output()
+    let output = crate::pipe::post_json(&url, 60, payload.to_string().into_bytes())
         .map_err(|e| format!("curl failed: {e}"))?;
-
-    let _ = std::fs::remove_file(&payload_path);
 
     if !output.status.success() {
         return Err(format!("LLM request failed: {}", String::from_utf8_lossy(&output.stderr)));
@@ -81,22 +75,18 @@ fn render_dot(dot_source: &str) -> Result<String, String> {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    // dot writes the PNG itself, so its name is cleared first; the source we write ourselves.
-    let out_path = scratch_target(&format!("yantrik-diagram-{ts}.png"))?;
-    let dot_path = write_scratch(&format!("yantrik-diagram-{ts}.dot"), dot_source.as_bytes())?;
-
-    let output = std::process::Command::new("dot")
-        .args(["-Tpng", "-Gdpi=150", "-o", &out_path, &dot_path])
-        .output()
+    // dot reads the source on stdin and writes the PNG to stdout, so it opens no file of ours; we
+    // write the PNG, the one file the caller needs, ourselves.
+    let mut dot = std::process::Command::new("dot");
+    dot.args(["-Tpng", "-Gdpi=150"]);
+    let output = crate::pipe::run_with_stdin(dot, dot_source.as_bytes().to_vec())
         .map_err(|e| format!("graphviz not available: {e}"))?;
-
-    let _ = std::fs::remove_file(&dot_path);
 
     if !output.status.success() {
         return Err(format!("dot rendering failed: {}", String::from_utf8_lossy(&output.stderr)));
     }
 
-    Ok(out_path)
+    write_scratch(&format!("yantrik-diagram-{ts}.png"), &output.stdout)
 }
 
 // ── generate_diagram ──
@@ -219,21 +209,12 @@ impl Tool for EditDiagramTool {
             "stream": false
         });
 
-        let payload_path = match write_scratch("yantrik-canvas-edit-payload.json", payload.to_string().as_bytes()) {
-            Ok(p) => p,
-            Err(e) => return format!("Failed to write payload: {e}"),
-        };
-
         let url = format!("{}/api/chat", self.ollama_base);
 
-        let output = match std::process::Command::new("curl")
-            .args(["-fsSL", "--max-time", "60", "-H", "Content-Type: application/json", "-d", &format!("@{payload_path}"), &url])
-            .output() {
+        let output = match crate::pipe::post_json(&url, 60, payload.to_string().into_bytes()) {
             Ok(o) => o,
-            Err(e) => { let _ = std::fs::remove_file(&payload_path); return format!("curl failed: {e}"); }
+            Err(e) => return format!("curl failed: {e}"),
         };
-
-        let _ = std::fs::remove_file(&payload_path);
 
         if !output.status.success() {
             return format!("LLM request failed: {}", String::from_utf8_lossy(&output.stderr));

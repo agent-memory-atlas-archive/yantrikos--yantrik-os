@@ -24,7 +24,7 @@ use std::sync::Mutex;
 
 use check::{current_uid, ensure_private_as, prepare, still_private};
 
-pub use check::create_private_file;
+pub use check::{create_private_file, open_private_file};
 
 /// The scratch directory's name under `$XDG_RUNTIME_DIR`.
 ///
@@ -74,29 +74,60 @@ pub fn create_scratch(name: &str) -> io::Result<File> {
     create_private_file(&scratch_file(name)?)
 }
 
+/// Open the named scratch file for reading, refusing a link, a FIFO, or a file that is not ours.
+/// See [`open_private_file`]: a fixed name we read back is as plantable as one we write.
+pub fn read_scratch(name: &str) -> io::Result<File> {
+    open_private_file(&scratch_file(name)?)
+}
+
+/// A new, empty, private directory inside scratch for one call's files, removed (with everything
+/// in it) when dropped.
+///
+/// For files another program must write — whisper's transcript, curl's download, ffmpeg's
+/// output — where we cannot pass `O_NOFOLLOW` to its `open`. The name is random and made with a
+/// plain `mkdir`, which fails if anything is already there, so nothing can be waiting inside it:
+/// no clearing a fixed name and hoping nothing is put back before the program opens it.
+pub fn fresh_scratch_dir(prefix: &str) -> io::Result<FreshDir> {
+    use rand::Rng;
+    let scratch = scratch_dir()?;
+    let prefix = plain_name(prefix)?;
+    let tag: u64 = rand::thread_rng().gen();
+    let dir = scratch.join(format!("{prefix}-{tag:016x}"));
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(&dir)?;
+    Ok(FreshDir(dir))
+}
+
+/// See [`fresh_scratch_dir`].
+#[derive(Debug)]
+pub struct FreshDir(PathBuf);
+
+impl FreshDir {
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+
+    /// A file inside, as the string a command line takes. The name must be a plain file name.
+    pub fn file(&self, name: &str) -> io::Result<String> {
+        into_string(self.0.join(plain_name(name)?))
+    }
+}
+
+impl Drop for FreshDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// Write `contents` to the named scratch file through [`create_scratch`], and return its path as
-/// the string a command line takes (curl's `-d @file`, dot's input).
+/// the string a caller hands on (to the model, to a player).
 pub fn write_scratch(name: &str, contents: &[u8]) -> io::Result<String> {
     use std::io::Write;
     let path = scratch_file_string(name)?;
     create_scratch(name)?.write_all(contents)?;
     Ok(path)
-}
-
-/// A scratch path for an external program (grim, dot, ffmpeg, piper) to write, with whatever was
-/// already at that name removed first.
-///
-/// We cannot pass `O_NOFOLLOW` to another program's `open`, so the name is cleared instead: a
-/// link left there — by an earlier run, or by the model through the file tools — is unlinked, not
-/// followed, and the program creates a fresh file of its own.
-pub fn scratch_target(name: &str) -> io::Result<String> {
-    let path = scratch_file(name)?;
-    match std::fs::remove_file(&path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e),
-    }
-    into_string(path)
 }
 
 /// A private (0700) directory inside [`scratch_dir`], made if missing — for a run that needs a

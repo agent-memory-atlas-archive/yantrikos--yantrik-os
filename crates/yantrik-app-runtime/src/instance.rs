@@ -45,6 +45,21 @@ fn runtime_dir() -> PathBuf {
     p
 }
 
+/// Whether `dir` is a real directory owned by us that no one else can write: what `socket_dir`
+/// makes of every candidate it accepts.
+#[cfg(unix)]
+fn private_to_us(dir: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    // SAFETY: geteuid cannot fail and touches no memory.
+    let me = unsafe { libc::geteuid() };
+    fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir() && m.uid() == me && m.mode() & 0o022 == 0)
+}
+
+#[cfg(not(unix))]
+fn private_to_us(_dir: &std::path::Path) -> bool {
+    true
+}
+
 fn pid_alive(pid: u32) -> bool {
     // On Linux a live process has a /proc entry — but so does a ZOMBIE, and the shell that
     // launched us may not have reaped our predecessor yet. A zombie holds no window and no
@@ -66,7 +81,15 @@ fn pid_alive(pid: u32) -> bool {
 ///
 /// Returns `None` when another live instance holds it — the caller should exit quietly.
 pub fn claim(app_name: &str) -> Option<InstanceGuard> {
-    let path = runtime_dir().join(format!("{app_name}.pid"));
+    let dir = runtime_dir();
+    if !private_to_us(&dir) {
+        // `socket_dir` hands back its last candidate unchecked when it could prepare none, and a
+        // directory that may be someone else's is no place to keep a file whose contents decide
+        // whether we run. Running unguarded risks a second window; trusting it risks worse.
+        tracing::warn!(app = app_name, dir = %dir.display(), "Pid directory is not private to us; running unguarded");
+        return Some(InstanceGuard { path: PathBuf::new() });
+    }
+    let path = dir.join(format!("{app_name}.pid"));
 
     if let Ok(existing) = fs::read_to_string(&path) {
         if let Ok(pid) = existing.trim().parse::<u32>() {

@@ -2028,31 +2028,12 @@ impl Tool for BrowserSeeTool {
             "stream": false
         });
 
-        // curl reads the body from this file, so it must be one nobody else can swap or read.
-        let payload_path = match crate::write_scratch("yantrik-see-payload.json", payload.to_string().as_bytes()) {
-            Ok(p) => p,
-            Err(e) => return format!("Error writing payload: {e}"),
-        };
-
+        // The body goes to curl on its stdin: no file for anyone to swap or read.
         let url = format!("{}/api/chat", self.ollama_base);
-        let output = match std::process::Command::new("curl")
-            .args([
-                "-fsSL",
-                "--max-time", "120",
-                "-H", "Content-Type: application/json",
-                "-d", &format!("@{payload_path}"),
-                &url,
-            ])
-            .output()
-        {
+        let output = match crate::pipe::post_json(&url, 120, payload.to_string().into_bytes()) {
             Ok(o) => o,
-            Err(e) => {
-                let _ = std::fs::remove_file(&payload_path);
-                return format!("Vision request failed: {e}");
-            }
+            Err(e) => return format!("Vision request failed: {e}"),
         };
-
-        let _ = std::fs::remove_file(&payload_path);
 
         if !output.status.success() {
             return format!("Vision model error: {}", String::from_utf8_lossy(&output.stderr));

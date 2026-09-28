@@ -597,19 +597,20 @@ fn process_voice(acc: &VoiceAccumulator) -> Result<String, String> {
     // These files used to sit in the shared temp dir under the client's id, taken as it came: a
     // `/` or `..` in it walked the names anywhere, and any account could leave a transcript at
     // the `.txt` name for us to read back as what the person said. Now the id is held to a plain
-    // token, and the files live in our private scratch dir — the opus we write ourselves without
-    // following a link at the name, and the names ffmpeg and whisper write are cleared first.
+    // token, and the files live in a directory made new for this message inside our private
+    // scratch dir (random name, plain mkdir, removed when `work` drops) — ffmpeg and whisper write
+    // into it, and a directory that did not exist a moment ago has nothing planted in it.
     let stem = voice_stem(&acc.id)?;
     use yantrik_ml::private_dir as scratch;
     let scratch_err = |e: std::io::Error| format!("no private scratch directory: {e}");
-    let scratch_dir = scratch::scratch_dir().map_err(scratch_err)?;
-    let opus_path = scratch::scratch_file_string(&format!("{stem}.opus")).map_err(scratch_err)?;
-    let wav_path = scratch::scratch_target(&format!("{stem}.wav")).map_err(scratch_err)?;
-    let txt_path = scratch::scratch_target(&format!("{stem}.txt")).map_err(scratch_err)?;
+    let work = scratch::fresh_scratch_dir("voice").map_err(scratch_err)?;
+    let opus_path = work.file(&format!("{stem}.opus")).map_err(scratch_err)?;
+    let wav_path = work.file(&format!("{stem}.wav")).map_err(scratch_err)?;
+    let txt_path = work.file(&format!("{stem}.txt")).map_err(scratch_err)?;
 
     // Write raw opus data
     {
-        let mut f = scratch::create_scratch(&format!("{stem}.opus"))
+        let mut f = scratch::create_private_file(std::path::Path::new(&opus_path))
             .map_err(|e| format!("create temp: {e}"))?;
         for chunk in &acc.chunks {
             f.write_all(chunk).map_err(|e| format!("write chunk: {e}"))?;
@@ -649,7 +650,7 @@ fn process_voice(acc: &VoiceAccumulator) -> Result<String, String> {
             "--output_format", "txt",
         ])
         .arg("--output_dir")
-        .arg(&scratch_dir)
+        .arg(work.path())
         .output();
 
     // Clean up WAV
@@ -657,9 +658,13 @@ fn process_voice(acc: &VoiceAccumulator) -> Result<String, String> {
 
     match whisper_result {
         Ok(output) if output.status.success() => {
-            // Whisper writes a .txt file named after the input into --output_dir
-            let text = std::fs::read_to_string(&txt_path)
-                .unwrap_or_else(|_| String::from_utf8_lossy(&output.stdout).to_string());
+            // Whisper writes a .txt file named after the input into --output_dir. Read back only
+            // if it is a plain file of ours, never through a link: it becomes "what the person said".
+            let from_file = scratch::open_private_file(std::path::Path::new(&txt_path)).and_then(|mut f| {
+                let mut text = String::new();
+                std::io::Read::read_to_string(&mut f, &mut text).map(|_| text)
+            });
+            let text = from_file.unwrap_or_else(|_| String::from_utf8_lossy(&output.stdout).to_string());
             let _ = std::fs::remove_file(&txt_path);
             let text = text.trim().to_string();
             if text.is_empty() {

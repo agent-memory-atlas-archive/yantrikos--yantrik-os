@@ -316,10 +316,12 @@ fn handle_voice_message(
     let _ = yantrik_companion::telegram::send_typing(config);
 
     // 1. Download the voice file
-    // Private scratch: the person's voice, and a message id is no secret, so a name in /tmp could
-    // be read, or planted as a link for the download to write through.
-    let ogg_path = match scratch_path(&format!("tg_voice_{}.ogg", update.message_id)) {
-        Ok(p) => p,
+    // A fresh private directory for this message's audio, removed when the handler returns. The
+    // files are the person's voice, and curl and ffmpeg write them, not us; a name in /tmp (and a
+    // message id is no secret) could be read, or planted as a link for them to write through.
+    // A directory made new for this call has nothing in it for anyone to have planted.
+    let (_work, ogg_path, reply_ogg) = match voice_workdir() {
+        Ok(w) => w,
         Err(e) => {
             tracing::warn!(error = %e, "No private directory for the voice file");
             let _ = yantrik_companion::telegram::send_message(
@@ -493,13 +495,8 @@ fn handle_voice_message(
     let _ = yantrik_companion::telegram::send_recording_voice(config);
 
     let (rate, pitch) = tts_params_for_bond(bridge);
-    let reply = scratch_path(&format!("tg_reply_{}.ogg", update.message_id)).and_then(|reply_ogg| {
-        yantrik_companion::audio_convert::text_to_ogg(&response, &reply_ogg, rate, pitch)?;
-        Ok(reply_ogg)
-    });
-
-    match reply {
-        Ok(reply_ogg) => {
+    match yantrik_companion::audio_convert::text_to_ogg(&response, &reply_ogg, rate, pitch) {
+        Ok(()) => {
             if let Err(e) = yantrik_companion::telegram::send_voice(config, &reply_ogg) {
                 tracing::warn!(error = %e, "Failed to send voice reply");
             } else {
@@ -533,11 +530,14 @@ fn handle_voice_message(
     });
 }
 
-/// A voice file's place in our private scratch dir, as the `&str` the telegram and audio helpers
-/// take. curl and ffmpeg write these, not us, so whatever was at the name (a link left there
-/// through the file tools, say) is removed first rather than followed.
-fn scratch_path(name: &str) -> Result<String, String> {
-    yantrik_ml::private_dir::scratch_target(name).map_err(|e| e.to_string())
+/// A fresh private directory for one voice message, with the paths (as the `&str` the telegram
+/// and audio helpers take) of the incoming voice and the spoken reply inside it. The directory
+/// and both files go when the first element is dropped.
+fn voice_workdir() -> Result<(yantrik_ml::private_dir::FreshDir, String, String), String> {
+    let work = yantrik_ml::private_dir::fresh_scratch_dir("tg-voice").map_err(|e| e.to_string())?;
+    let voice = work.file("voice.ogg").map_err(|e| e.to_string())?;
+    let reply = work.file("reply.ogg").map_err(|e| e.to_string())?;
+    Ok((work, voice, reply))
 }
 
 /// Lazily load Whisper STT engine (loaded once on first voice message).

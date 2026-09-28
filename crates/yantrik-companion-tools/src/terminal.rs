@@ -20,13 +20,21 @@ pub fn register(reg: &mut ToolRegistry) {
 /// so change both together. It used to
 /// be a fixed name in `/tmp`, where anyone could have left a "fresh" dump for us to read as the
 /// person's terminal — and then act on the errors it claimed.
+///
+/// Read through `read_scratch`, not a plain open: the file tools can leave anything at this name
+/// (extracting an archive is enough), and `yantrik-scrollback.txt -> ~/.ssh/id_ed25519` would
+/// otherwise hand the key to the model as "the terminal". The age is taken from the descriptor
+/// that is read, so it is this file's age and not whatever the name pointed at a moment before.
 pub(crate) fn read_scrollback(max_age_secs: u64) -> Option<String> {
-    let path = yantrik_ml::private_dir::scratch_file("yantrik-scrollback.txt").ok()?;
-    let modified = std::fs::metadata(&path).ok()?.modified().ok()?;
+    use std::io::Read;
+    let mut file = yantrik_ml::private_dir::read_scratch("yantrik-scrollback.txt").ok()?;
+    let modified = file.metadata().ok()?.modified().ok()?;
     if modified.elapsed().unwrap_or_default().as_secs() >= max_age_secs {
         return None;
     }
-    std::fs::read_to_string(&path).ok()
+    let mut text = String::new();
+    file.read_to_string(&mut text).ok()?;
+    Some(text)
 }
 
 pub struct ReadTerminalBufferTool;

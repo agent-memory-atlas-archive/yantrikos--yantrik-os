@@ -273,9 +273,13 @@ impl TaskManager {
     }
 
     /// Read the last N lines from a task's output file.
+    ///
+    /// Opened through `read_scratch`, not a plain open: the names are predictable and the file
+    /// tools can write into scratch, so `yantrik-task-t0001.out` could be a link to a key that
+    /// "the task's output" would then hand to the model.
     pub fn read_output(task_id: &str, tail_lines: usize) -> String {
-        match Self::output_path(task_id) {
-            Ok(path) => Self::read_output_from_path(&path, tail_lines),
+        match yantrik_ml::private_dir::read_scratch(&Self::output_name(task_id)) {
+            Ok(file) => Self::read_output_tail(file, tail_lines),
             Err(_) => String::new(),
         }
     }
@@ -300,12 +304,7 @@ impl TaskManager {
         format!("yantrik-task-{task_id}.out")
     }
 
-    fn read_output_from_path(path: &str, tail_lines: usize) -> String {
-        let file = match std::fs::File::open(path) {
-            Ok(f) => f,
-            Err(_) => return String::new(),
-        };
-
+    fn read_output_tail(file: std::fs::File, tail_lines: usize) -> String {
         // Read last N lines by seeking backwards
         let metadata = match file.metadata() {
             Ok(m) => m,
