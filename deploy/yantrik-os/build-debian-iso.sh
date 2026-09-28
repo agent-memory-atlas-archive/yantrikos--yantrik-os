@@ -669,14 +669,20 @@ else
     tar --zstd -xf "$MIND_TARBALL" -C "$MIND_UNPACK" --strip-components=1 \
         || fail "could not unpack $MIND_TARBALL"
 
+    # Only a mind that carries an agent token (yantrik-mind bae1353 and later) may ship. Once
+    # its account is moved (yantrik-update migrate-minds), every act from it must name a live
+    # token (#423's MIND rule); an older mind has none, so each of its acts is refused, on a
+    # machine that looks fine until it is asked to do something. The bundle says so in its
+    # manifest: its ancestry cannot be checked from here.
+    [ -f "$MIND_UNPACK/BUILD" ] \
+        || fail "mind bundle carries no BUILD manifest — cannot tell which mind it is or whether it carries an agent token"
+    grep -qx 'agent_token=1' "$MIND_UNPACK/BUILD" \
+        || fail "mind bundle $(sed -n 's/^commit=//p' "$MIND_UNPACK/BUILD") does not declare agent_token=1 — a mind older than yantrik-mind bae1353 has every act refused by the MIND rule"
+
     sudo mkdir -p "$ROOTFS/opt/yantrik-mind/bin" "$ROOTFS/etc/systemd/user"
     sudo cp -a "$MIND_UNPACK/bin/." "$ROOTFS/opt/yantrik-mind/bin/"
     sudo chmod 755 "$ROOTFS/opt/yantrik-mind/bin/"*
-    if [ -f "$MIND_UNPACK/BUILD" ]; then
-        sudo cp "$MIND_UNPACK/BUILD" "$ROOTFS/opt/yantrik-mind/BUILD"
-    else
-        warn "mind bundle carries no BUILD manifest — the image will not be able to say which mind it carries"
-    fi
+    sudo cp "$MIND_UNPACK/BUILD" "$ROOTFS/opt/yantrik-mind/BUILD"
     sudo cp "$MIND_UNPACK/systemd/user/"*.service "$ROOTFS/etc/systemd/user/"
     # Owned by root: `cp -a` keeps the build user's uid, which on the installed machine is the
     # person's own uid — leaving the mind's binaries writable by every process they run.
