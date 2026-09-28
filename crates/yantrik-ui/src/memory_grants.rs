@@ -10,8 +10,10 @@
 //! The list lives in ~/.config/yantrik, where the desktop's own tools refuse every agent's write
 //! (#443). That is not a wall around the file. A mind that runs as the person, as the third-party
 //! harnesses (pi, hermes, openclaw, deepseek) still do, can open it and write it like any other
-//! file of the person's. Their units mount the directory read-only as a second line, and Hermes,
-//! started by its own gateway, does not even have that. So until third-party minds run under
+//! file of the person's. (A read-only mount in their units was tried and withdrawn: in a user
+//! unit it takes PrivateUsers with it, under which ssh refuses the root-owned configuration it
+//! reads, so a coding agent could no longer push over ssh; and a process running as the person
+//! can ask the user manager to run something outside its unit anyway.) So until third-party minds run under
 //! accounts of their own, per-mind grants among the person's own processes are advisory: they
 //! hold against a mind that plays by the desktop's rules, not against one that edits the file.
 //!
