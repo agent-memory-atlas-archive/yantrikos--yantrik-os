@@ -17,6 +17,8 @@ protocol and prints what came back.
                                         desktop's own sockets that are not surfaces
     yos describe shell                  what the desktop is showing
     yos describe notes                  what an app is showing
+    yos screen                          the whole screen in one reading: each window, what it
+                                        shows and what it can be asked to do, with ids
     yos check notes                     does a surface keep the protocol (docs/surface-protocol.md)
     yos check ./my-app.sock --json      the same, for a socket you are writing, as JSON
     yos check --all                     every surface that answers on this machine
@@ -964,7 +966,7 @@ def cmd_describe(argv):
 # small, high-value fields first, the large lists last, the rest in the wire's alphabetical order
 # between them. Keys and values are untouched; only the order they are printed in changes. A key
 # that is not present is simply not printed, so this is safe for every app, not only the shell.
-STATE_FIRST = ("summary", "screen", "locked", "clock", "windows", "companion_online")
+STATE_FIRST = ("summary", "screen", "locked", "clock", "in_front", "windows", "companion_online")
 STATE_LAST = ("agents", "catalog", "services")
 
 
@@ -2442,6 +2444,255 @@ def cmd_check(argv):
         raise SystemExit(1)
 
 
+# ── The screen, as one reading (#257, step 1) ──
+#
+# A mind asking "what is on the screen" had to know which of four readers to use for each
+# window — describe for ours, the accessibility service for a foreign one, the page scan for the
+# browser — and call them one by one. Or it asked for a screenshot, which is thousands of vision
+# tokens to learn that a window says "Ready". This is one call over the readers that exist, in
+# that order, and it builds nothing new underneath them.
+#
+# Every id it prints works where it says: an app's actions with `yos act <app> <action>`, a
+# page's numbers with `yos web click <n>`, an accessibility element's `a11y:` id with the
+# accessibility service's `a11y.act`. It reaches only what the caller could already reach. A
+# mind at the mind door has no accessibility socket, so a foreign window is reported to it as
+# unreadable from here, not quietly left out: each source publishes its own blindness.
+
+SCENE_ACTIONS = 10      # actions named per app, then "+N more"
+SCENE_ELEMENTS = 25     # accessibility elements per foreign window
+SCENE_WEB_LINES = 25    # lines of the page scan
+SCENE_WAIT = 5          # seconds any one reader is given
+
+
+def _quietly(fn, *args, **kwargs):
+    """(value, None), or (None, why) — a scene is a listing, and one unreadable window must not
+    take the rest of the screen with it."""
+    try:
+        return fn(*args, **kwargs), None
+    except Unreachable as e:
+        return None, plain(e)
+    except SystemExit:
+        return None, "it did not answer"
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        return None, str(e) or type(e).__name__
+
+
+def scene_actions(actions, limit=SCENE_ACTIONS):
+    """An app's actions as call shapes — `refresh()`, `set_location(city)` — required arguments
+    only, which is enough to notice an action exists; `yos describe` has the rest."""
+    shapes = []
+    for a in actions:
+        params = a.get("parameters") or {}
+        required = set(params.get("required") or [])
+        names = [n for n in (params.get("properties") or {}) if n in required]
+        shapes.append("%s(%s)" % (a.get("name", "?"), ", ".join(names)))
+    more = len(shapes) - limit
+    return ", ".join(shapes[:limit]) + (", +%d more" % more if more > 0 else "")
+
+
+def scene_app(name, indent="    "):
+    """Our own app, from its describe: its summary and what it can be asked to do."""
+    view, why = _quietly(request, name, "app.describe", timeout=SCENE_WAIT, waited=True)
+    if view is None:
+        return ["%snot readable: %s" % (indent, why)]
+    lines = ["%s%s" % (indent, (view.get("summary") or "(no summary)").strip())]
+    if view.get("actions"):
+        lines.append("%sact: %s" % (indent, scene_actions(view["actions"])))
+    return lines
+
+
+def scene_element(element):
+    """One accessibility element: its id, role, name and what it can be asked to do."""
+    name = " ".join((element.get("name") or element.get("text") or "").split())
+    if len(name) > 80:
+        name = name[:77] + "..."
+    parts = ["a11y:%s" % element.get("id", "?")]
+    if element.get("role"):
+        parts.append(element["role"])
+    if name:
+        parts.append(json.dumps(name, ensure_ascii=False))
+    if element.get("actions"):
+        parts.append("[%s]" % ", ".join(element["actions"]))
+    return " ".join(parts)
+
+
+def scene_elements(elements, limit=SCENE_ELEMENTS, indent="    "):
+    """A foreign window's elements, capped, without the label twin some toolkits publish under
+    every button: Slint puts the button, then its text again as a separate node with the same
+    name and nothing to do. The second says nothing the first did not."""
+    kept, last_actionable = [], None
+    for e in elements:
+        name = e.get("name") or e.get("text") or ""
+        if not e.get("actions") and last_actionable is not None and name == last_actionable:
+            last_actionable = None
+            continue
+        last_actionable = name if e.get("actions") else None
+        kept.append(e)
+    lines = [indent + scene_element(e) for e in kept[:limit]]
+    if len(kept) > limit:
+        lines.append("%s(+%d more elements)" % (indent, len(kept) - limit))
+    return lines
+
+
+class Accessibility:
+    """The accessibility service as a scene reads it: whether this caller can reach it at all,
+    and the foreign windows it knows."""
+
+    def __init__(self):
+        self.windows, self.blind = [], None
+        if not socket_candidates("a11y"):
+            self.blind = ("the accessibility service is not reachable from here, so a window that "
+                          "is not one of ours cannot be read by this caller")
+            return
+        status, why = _quietly(request, "a11y", "a11y.status", timeout=SCENE_WAIT)
+        if status is None or not status.get("available"):
+            self.blind = "there is no accessibility bus in this session (%s)" % (
+                why or (status or {}).get("note") or "it says it is unavailable")
+            return
+        listing, why = _quietly(request, "a11y", "a11y.windows", timeout=SCENE_WAIT)
+        if listing is None:
+            self.blind = "the accessibility service did not list its windows: %s" % why
+            return
+        self.windows = [w for w in listing.get("windows") or [] if isinstance(w, dict)]
+
+    def window_for(self, title):
+        for w in self.windows:
+            if w.get("title") == title:
+                return w
+        return None
+
+    def read(self, title, indent="    "):
+        """The elements of the foreign window called `title`, or why they cannot be had."""
+        if self.blind:
+            return ["%snot readable: %s" % (indent, self.blind)]
+        window = self.window_for(title)
+        if window is None:
+            return ["%sno accessibility tree: the app publishes none (a terminal, a game, a canvas "
+                    "or an X11 app without a bridge). Nothing in this reading can see inside it."
+                    % indent]
+        described, why = _quietly(request, "a11y", "a11y.describe", {"window": window["id"]},
+                                  timeout=20)
+        if described is None:
+            return ["%snot readable: %s" % (indent, why)]
+        elements = described.get("elements") or []
+        if not elements:
+            return ["%sits accessibility tree names nothing a person would mention" % indent]
+        return scene_elements(elements, indent=indent)
+
+
+def scene_web(indent="    "):
+    """The browser's page: its title and address, and what can be done on it, numbered."""
+    import urllib.error
+    import urllib.request
+    try:
+        tabs = json.load(urllib.request.urlopen(CDP + "/json/list", timeout=2))
+    except (urllib.error.URLError, OSError, ValueError):
+        return ["%snot readable: this browser was not started by the desktop, so its pages "
+                "cannot be read (close it and open it with open_app name=browser)" % indent]
+    pages = [t for t in tabs if t.get("type") == "page"]
+    if not pages:
+        return ["%sno page open" % indent]
+    lines = ["%s%s — %s" % (indent, pages[0].get("title", "")[:80], pages[0].get("url", "")[:90])]
+    if len(pages) > 1:
+        lines.append("%s(%d tabs; `yos web tabs` lists them)" % (indent, len(pages)))
+    scan, why = _quietly(_eval, _scan_js())
+    if scan is None:
+        return lines + ["%sthe page did not answer: %s" % (indent, why)]
+    rows = [r for r in str(scan).splitlines() if r.strip()]
+    lines.extend(indent + r for r in rows[:SCENE_WEB_LINES])
+    if len(rows) > SCENE_WEB_LINES:
+        lines.append("%s(+%d more lines; `yos web` for all of them, `yos web click <n>` to act)"
+                     % (indent, len(rows) - SCENE_WEB_LINES))
+    return lines
+
+
+def scene_surface(app):
+    """The surface a window's app answers on, when it is one of ours with a socket here."""
+    for path in socket_candidates(app):
+        name = os.path.basename(path)[:-len(".sock")]
+        if name.startswith("app-"):
+            return name
+    return None
+
+
+def _plural(n, word):
+    return "%d %s%s" % (n, word, "" if n == 1 else "s")
+
+
+def scene(desktop, accessibility=None):
+    """The whole screen as lines of text, from `describe shell`."""
+    state = desktop.get("state") or {}
+    if state.get("locked"):
+        return ["The screen is locked. Nothing on it can be read until the person unlocks it."]
+    windows = [w for w in state.get("windows") or [] if isinstance(w, dict)]
+    in_front = state.get("in_front")
+    clock = state.get("clock") if isinstance(state.get("clock"), dict) else {}
+    head = ("Screen at %s %s. " % (clock.get("weekday", ""), clock["time"])).replace("  ", " ")         if clock.get("time") else "Screen. "
+    if in_front == "shell":
+        head += "In front: the desktop itself (its %s screen)." % (state.get("screen") or "desktop")
+    elif in_front:
+        head += "In front: %s." % in_front
+    else:
+        head += "Which window is in front is not knowable right now."
+    lines = [head]
+
+    waiting = state.get("pending_approvals") or []
+    questions = state.get("pending_questions") or []
+    if waiting or questions:
+        lines.append("Waiting on the person: %s." % " and ".join(filter(None, [
+            _plural(len(waiting), "approval card") if waiting else "",
+            _plural(len(questions), "question") if questions else ""])))
+
+    view = state.get("mind_view") if isinstance(state.get("mind_view"), dict) else {}
+    surfaces = {w.get("app"): scene_surface(w.get("app") or "") for w in windows}
+    if accessibility is None and any(
+            not surfaces.get(w.get("app")) and w.get("app") not in ("mind-view", "browser")
+            for w in windows):
+        accessibility = Accessibility()
+
+    lines += ["", "On the person's desktop, %s:" % _plural(len(windows), "window")]
+    if not windows:
+        lines.append("  (none — the desktop itself is all there is)")
+    for w in windows:
+        app, title = w.get("app") or "?", w.get("title") or "?"
+        mark = "  (in front)" if in_front and in_front == title else ""
+        if app == "mind-view":
+            inside = ", ".join(view.get("apps") or []) or "nothing yet"
+            lines.append("- Mind View%s — the minds' own display, holding: %s" % (mark, inside))
+        elif app == "browser":
+            lines.append("- [browser] %s%s" % (title, mark))
+            lines.extend(scene_web())
+        elif surfaces.get(app):
+            lines.append("- [%s] %s%s" % (app, title, mark))
+            lines.extend(scene_app(surfaces[app]))
+        else:
+            lines.append("- %s — %s, not one of ours%s" % (title, app, mark))
+            lines.extend(accessibility.read(title))
+
+    apps = [a for a in view.get("apps") or [] if isinstance(a, str)]
+    if apps:
+        lines += ["", "In Mind View, %s:" % _plural(len(apps), "app")]
+        for app in apps:
+            surface = scene_surface(app)
+            lines.append("- [%s]" % app)
+            lines.extend(scene_app(surface) if surface
+                         else ["    not readable: it has no surface this caller can reach"])
+    elif view.get("unavailable"):
+        lines += ["", "Mind View is not available: %s" % view["unavailable"]]
+
+    lines += ["", "To act: yos act <app> <action> on an [app]; yos web click <n> on a page's "
+                  "numbers; a11y.act on the a11y service with an a11y: id."]
+    return lines
+
+
+def cmd_screen(argv):
+    """`yos screen`: what is on the screen, as one reading."""
+    desktop, why = _quietly(request, "shell", "app.describe", timeout=10)
+    if desktop is None:
+        die("the desktop did not answer, so there is no screen to read: %s" % why)
+    print("\n".join(scene(desktop)))
+
+
 COMMANDS = {
     "ls": cmd_ls,
     "describe": cmd_describe,
@@ -2451,6 +2702,7 @@ COMMANDS = {
     "journal": cmd_journal,
     "notify": cmd_notify,
     "web": cmd_web,
+    "screen": cmd_screen,
 }
 
 

@@ -995,6 +995,84 @@ def main():
                 with contextlib.suppress(OSError):
                     os.unlink(wrapped_sock)
 
+            print("yos screen: the whole screen in one reading, with what it cannot read named")
+            saved_reply = shell.reply
+            scene_sock = sockets / "app-wrapped.sock"
+            a11y_sock = sockets / "a11y.sock"
+            extra = []
+            desktop = {
+                "clock": {"weekday": "Monday", "time": "16:52"},
+                "in_front": "Wrapped",
+                "windows": [{"app": "wrapped", "title": "Wrapped"},
+                            {"app": "foot", "title": "Yantrik Terminal"},
+                            {"app": "gedit", "title": "notes.txt - gedit"},
+                            {"app": "mind-view", "title": "Mind View"}],
+                "mind_view": {"running": True, "apps": ["wrapped"]},
+                "pending_approvals": [{"id": "a1"}],
+            }
+            try:
+                wrapped = FakeService(scene_sock, lambda _s, asked: {
+                    "app": "wrapped", "summary": "Wrapped — 3 parcels", "state": {},
+                    "actions": [{"name": "open", "parameters": {
+                        "type": "object", "required": ["path"],
+                        "properties": {"path": {"type": "string"}, "mode": {"type": "string"}}}},
+                        {"name": "save"}]})
+                wrapped.start()
+                extra.append(wrapped)
+                shell.reply = lambda _s, asked: {"app": "shell", "summary": "Yantrik",
+                                                 "state": desktop, "actions": []}
+                out, err, code = run(lambda: yos.cmd_screen([]))
+                check("it answers in one reading", code is None and err == "", (out, err))
+                check("with the time and the window in front",
+                      out.startswith("Screen at Monday 16:52. In front: Wrapped."), out)
+                check("what is waiting on the person", "1 approval card" in out, out)
+                check("our app by its summary, marked in front, and its actions by call shape",
+                      "- [wrapped] Wrapped  (in front)" in out and "Wrapped — 3 parcels" in out
+                      and "act: open(path), save()" in out, out)
+                check("a foreign window with no accessibility service here is named unreadable, "
+                      "not left out",
+                      "Yantrik Terminal — foot, not one of ours" in out
+                      and "accessibility service is not reachable from here" in out, out)
+                check("Mind View's apps are read too",
+                      "In Mind View, 1 app:" in out and out.count("Wrapped — 3 parcels") == 2, out)
+
+                accessible = FakeService(a11y_sock, lambda _s, asked: {
+                    "a11y.status": {"available": True},
+                    "a11y.windows": {"windows": [{"id": "w1", "title": "notes.txt - gedit",
+                                                  "app": "gedit"}]},
+                    "a11y.describe": {"elements": [
+                        {"id": "w2", "role": "push button", "name": "Save", "actions": ["click"]},
+                        {"id": "w3", "role": "label", "name": "Save"},
+                        {"id": "w4", "role": "text", "name": "", "text": "buy  milk\n"}]},
+                }.get(asked["method"]))
+                accessible.start()
+                extra.append(accessible)
+                out, err, code = run(lambda: yos.cmd_screen([]))
+                check("a foreign window with a tree is listed by element, with a11y: ids",
+                      'a11y:w2 push button "Save" [click]' in out
+                      and 'a11y:w4 text "buy milk"' in out, out)
+                check("without the label twin a toolkit puts under a button", "a11y:w3" not in out, out)
+                check("and one with no tree says it publishes none",
+                      "no accessibility tree" in out, out)
+
+                desktop_locked = {"locked": True, "screen": "lock"}
+                shell.reply = lambda _s, asked: {"app": "shell", "summary": "Yantrik — locked",
+                                                 "state": desktop_locked, "actions": []}
+                out, err, code = run(lambda: yos.cmd_screen([]))
+                check("a locked screen is one sentence, and reads nothing behind it",
+                      code is None and out.strip().startswith("The screen is locked")
+                      and "Wrapped" not in out, out)
+                desktop["in_front"] = None
+                shell.reply = lambda _s, asked: {"app": "shell", "summary": "Yantrik",
+                                                 "state": desktop, "actions": []}
+                out, err, code = run(lambda: yos.cmd_screen([]))
+                check("an unknowable front window is said to be unknowable",
+                      "not knowable" in out and "(in front)" not in out, out)
+            finally:
+                shell.reply = saved_reply
+                for svc in extra:
+                    svc.close()
+
             print("yos ls, with a desktop that lists what it can open")
             listing = [
                 {"name": "howdy", "opens": "app", "describe_as": "howdy", "running": True,

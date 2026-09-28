@@ -102,9 +102,32 @@ fn get_tabs() -> Result<Vec<CdpTab>, String> {
         .collect())
 }
 
+/// The one Origin a browser launched here lets open its DevTools socket, and the one this client
+/// presents: its own debugging address. `--remote-allow-origins=*` let any web page's script open
+/// that socket once it learned a target id, and drive the browser it was running in.
+fn devtools_origin(port: u16) -> String {
+    format!("http://{CDP_HOST}:{port}")
+}
+
+/// The port in a DevTools websocket address, `ws://127.0.0.1:9223/devtools/page/…`.
+fn port_of(ws_url: &str) -> Option<u16> {
+    let rest = ws_url.strip_prefix("ws://")?;
+    let authority = rest.split('/').next()?;
+    authority.rsplit_once(':')?.1.parse().ok()
+}
+
 /// Connect to a tab's WebSocket and return a client.
 fn connect_tab(ws_url: &str) -> Result<WebSocket<MaybeTlsStream<TcpStream>>, String> {
-    let (socket, _response) = tungstenite::connect(ws_url)
+    use tungstenite::client::IntoClientRequest;
+    let mut request = ws_url
+        .into_client_request()
+        .map_err(|e| format!("WS connect failed: {e}"))?;
+    let origin = devtools_origin(port_of(ws_url).unwrap_or(CDP_PORT));
+    request.headers_mut().insert(
+        "Origin",
+        origin.parse().map_err(|e| format!("WS connect failed: {e}"))?,
+    );
+    let (socket, _response) = tungstenite::connect(request)
         .map_err(|e| format!("WS connect failed: {e}"))?;
     Ok(socket)
 }
@@ -489,6 +512,7 @@ fn ensure_headless_browser() -> Result<(), String> {
             "--ozone-platform=wayland",
             "--remote-debugging-address=127.0.0.1",
             "--remote-debugging-port=9222",
+            "--remote-allow-origins=http://127.0.0.1:9222",
             "--no-first-run",
             "--no-default-browser-check",
             "--disable-gpu",
@@ -608,9 +632,9 @@ impl Tool for LaunchBrowserTool {
             "--ozone-platform=wayland".into(),
             "--remote-debugging-address=127.0.0.1".into(),
             format!("--remote-debugging-port={port}"),
-            // Chrome 2026 refuses a DevTools websocket whose Origin it does not know, which is
-            // every connection we make. Without this every CDP call fails the handshake with 403.
-            "--remote-allow-origins=*".into(),
+            // Chrome 2026 refuses a DevTools websocket whose Origin it does not know. Only ours:
+            // `connect_tab` presents exactly this one, and a web page's script cannot.
+            format!("--remote-allow-origins={}", devtools_origin(port)),
             format!("--user-data-dir={}", profile.display()),
             "--no-first-run".into(),
             "--no-default-browser-check".into(),
@@ -2296,6 +2320,16 @@ impl Tool for BrowserTypeXYTool {
 #[cfg(test)]
 mod identity_tests {
     use super::*;
+
+    #[test]
+    fn the_devtools_origin_is_the_browsers_own_address_and_nothing_wider() {
+        assert_eq!(port_of("ws://127.0.0.1:9230/devtools/page/AB12"), Some(9230));
+        assert_eq!(port_of("ws://127.0.0.1/devtools/page/AB12"), None);
+        assert_eq!(devtools_origin(port_for("default")), "http://127.0.0.1:9222");
+        let port = port_for("research");
+        assert_eq!(devtools_origin(port), format!("http://127.0.0.1:{port}"));
+        assert!(!devtools_origin(port).contains('*'));
+    }
 
     #[test]
     fn an_identity_cannot_wander_out_of_its_directory() {

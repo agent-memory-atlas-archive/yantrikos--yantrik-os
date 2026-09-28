@@ -484,6 +484,24 @@ TOOLS = [
         "timeout": ACT_TIMEOUT,
     },
     {
+        "name": "os_screen",
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+        # One reading of everything on screen, as text (#257). A mind asked "what's on my screen"
+        # otherwise described each app in turn, or asked for a screenshot: thousands of vision
+        # tokens to learn that a window says "Ready". On VM 520 this is about 1 KB for three
+        # windows and Mind View. It reaches only what os_describe could; a window it cannot read
+        # is named as unreadable, never left out.
+        "description": "What is on the screen right now, in one reading: which window is in "
+                       "front, each window with what it shows and what it can be asked to do "
+                       "(our apps by their summary and actions, other apps by their "
+                       "accessibility elements, the browser by its numbered links and fields), "
+                       "the apps open in Mind View, and anything waiting on the person. Use it "
+                       "before a screenshot. Act on what it lists with os_act.",
+        "inputSchema": {"type": "object", "properties": {}},
+        "argv": lambda a: ["screen"],
+        "timeout": 40,
+    },
+    {
         "name": "os_perception",
         "annotations": {"readOnlyHint": True, "openWorldHint": False},
         "description": "What the OS has noticed lately — files saved, apps opened, windows "
@@ -1239,7 +1257,7 @@ def ambiguous(pair):
 # is session lifetime. There is deliberately NO tool to clear the taint — a caller that can
 # untaint itself is not constrained, and the only way back is a new session, which is a
 # person's decision rather than an agent's.
-PRIVATE_READS = {"os_describe", "os_perception", "web_listen",
+PRIVATE_READS = {"os_describe", "os_screen", "os_perception", "web_listen",
                  # Another agent's session: what it read, its commands' output.
                  "read_agent"}
 OUTBOUND = {"web_type", "web_go"}

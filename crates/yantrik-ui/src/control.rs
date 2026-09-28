@@ -687,6 +687,10 @@ pub fn publish(
                 // it reads everything else off, rather than knowing which file to trust.
                 .with("version", yantrik_version::version())
                 .with("windows", serde_json::Value::Array(open))
+                // Which of them the person is looking at: "shell" for the desktop itself, a title
+                // from `windows`, or null when the compositor could not say. The list's order is
+                // not that answer — the registry's launches come first.
+                .with("in_front", crate::windows::in_front())
                 .with("failed_launches", serde_json::Value::Array(failed))
                 // Where the apps a mind opens are drawn (#239): whether minds open them in Mind
                 // View, whether it is up and on which display, what is in it, and why not if it

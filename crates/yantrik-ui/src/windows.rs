@@ -768,6 +768,17 @@ pub fn shell_in_front() -> Option<bool> {
     }
 }
 
+/// What the person is looking at, as of the last reading: `Some("shell")` for the desktop or one
+/// of its screens, `Some(title)` for an app window (the title exactly as `windows` lists it), and
+/// `None` when the compositor could not say. For `describe shell`, so a reader of the screen can
+/// tell which of the open windows is the one in front instead of guessing from the list's order.
+pub fn in_front() -> Option<String> {
+    match shell_in_front()? {
+        true => Some("shell".to_string()),
+        false => compositor_snapshot().1,
+    }
+}
+
 /// [`shell_in_front`]'s last reading: 0 not knowable, 1 the shell, 2 an app window.
 static SHELL_FRONT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
