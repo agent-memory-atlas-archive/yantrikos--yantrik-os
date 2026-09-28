@@ -89,6 +89,7 @@ fn wire_lock(ui: &App, ctx: &AppContext) {
 /// The screen is open: back to the desktop, and the same secret offered to the vault. One path
 /// for the shell's own lock screen and the compositor's session lock (#313).
 fn unlocked(ui: &App, bridge: &std::sync::Arc<crate::bridge::CompanionBridge>, secret: &str) {
+    crate::session_lock::released();
     ui.set_current_screen(1);
     ui.set_lock_error("".into());
     tracing::info!("Screen unlocked");

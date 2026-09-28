@@ -25,6 +25,17 @@ use crate::App;
 /// One lock client at a time, however many ways the desktop was asked to lock.
 static RUNNING: AtomicBool = AtomicBool::new(false);
 
+/// Whether the desktop is still meant to be locked. A client that keeps failing to start is
+/// started again only while it is: once the person is back in (through the shell's own screen,
+/// when no client could take the lock), a client that finally connects must not lock the desktop
+/// they are using.
+static WANTED: AtomicBool = AtomicBool::new(false);
+
+/// The person is back in; stop starting lock clients.
+pub fn released() {
+    WANTED.store(false, Ordering::SeqCst);
+}
+
 /// The compositor has no session lock.
 const EXIT_UNSUPPORTED: i32 = 3;
 /// The longest pause between starts of a lock client that keeps ending without unlocking.
@@ -59,6 +70,7 @@ pub fn engage(
     secret: crate::lock::Secret,
     on_unlock: impl Fn(&App, &str) + Send + Clone + 'static,
 ) {
+    WANTED.store(true, Ordering::SeqCst);
     if RUNNING.swap(true, Ordering::SeqCst) {
         return;
     }
@@ -90,8 +102,14 @@ pub fn engage(
                     // The compositor may be holding the session locked with nobody to unlock it.
                     // Giving up would leave the person locked out of their own machine, so another
                     // is started, however many times it takes.
-                    tracing::warn!(%why, starts, "The session-lock client ended without unlocking; starting it again");
+                    if starts <= 3 || starts % 60 == 0 {
+                        tracing::warn!(%why, starts, "The session-lock client ended without unlocking; starting it again");
+                    }
                     std::thread::sleep(std::time::Duration::from_secs((starts.max(1) as u64).min(MOST_PAUSE_SECS)));
+                    if !WANTED.load(Ordering::SeqCst) {
+                        tracing::info!("The desktop was unlocked meanwhile; no lock client is needed");
+                        break;
+                    }
                 }
             }
         }
@@ -136,14 +154,21 @@ fn run_once(bin: &std::path::Path, greeting: &str, secret: crate::lock::Secret) 
         }
     };
     let mut unlocked_with = None;
+    // The channel failed while the client may still be running (and waiting for an answer that
+    // will not come): it is ended, and another started, rather than waited on for ever.
+    let mut lost = false;
     for line in BufReader::new(ours).lines() {
-        let Ok(line) = line else { break };
+        let Ok(line) = line else {
+            lost = true;
+            break;
+        };
         if line == "locked" {
             tracing::info!("The compositor locked the session");
             continue;
         }
         if let Some((reply, pin)) = answer(&line, secret, crate::lock::check_unlock) {
             if writeln!(to, "{reply}").and_then(|_| to.flush()).is_err() {
+                lost = true;
                 break;
             }
             if pin.is_some() {
@@ -153,6 +178,9 @@ fn run_once(bin: &std::path::Path, greeting: &str, secret: crate::lock::Secret) 
     }
     // Ours closed before waiting: a client still reading sees the end, not a shell that hangs.
     drop(to);
+    if lost {
+        let _ = child.kill();
+    }
     match child.wait().map(|s| s.code()) {
         Ok(Some(0)) if unlocked_with.is_some() => Outcome::Unlocked(unlocked_with.unwrap_or_default()),
         Ok(Some(EXIT_UNSUPPORTED)) => Outcome::Unsupported,
