@@ -264,6 +264,7 @@ cp "$PROJECT_ROOT/config/shell/bashrc" "$ROOT/share/shell/bashrc"
 # `yantrik-update reconcile` — never run from /opt/yantrik, which its user can write.
 mkdir -p "$ROOT/share/root-helpers"
 install -m 0755 "$SCRIPT_DIR/yantrik-pkg" "$ROOT/share/root-helpers/yantrik-pkg"
+install -m 0755 "$SCRIPT_DIR/yantrik-mind-log" "$ROOT/share/root-helpers/yantrik-mind-log"
 # The system units minds run under, as their own account (#411): installed root's, hash-checked,
 # into /etc/systemd/system by `yantrik-update`; enabled by `yantrik-update migrate-minds`.
 mkdir -p "$ROOT/share/systemd"

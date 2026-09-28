@@ -562,11 +562,15 @@ elevate() {
 
 # The rule itself. `%sudo` is the desktop's user on every install. Paths only root can change:
 # a NOPASSWD rule on a file its user can write would be root for that user.
+#
+# The Mind's journal goes through a root helper that takes no arguments (`""` allows none):
+# sudo matches a command's arguments as one string joined by spaces, so a rule on journalctl
+# with its options written out would also allow every other way of splitting that string.
 sudo_rule_text() {
   printf '%s\n' \
     "# Yantrik OS (#397): what the desktop's account may run as root without a password." \
     "# Everything else asks for the password. Written by yantrik-update; do not edit." \
-    "%sudo ALL=(root) NOPASSWD: $BIN_DIR/yantrik-update, /usr/lib/yantrik/yantrik-pkg, /usr/bin/timedatectl set-timezone *, /usr/bin/systemctl restart yantrik-mind.service"
+    "%sudo ALL=(root) NOPASSWD: $BIN_DIR/yantrik-update, /usr/lib/yantrik/yantrik-pkg, /usr/bin/timedatectl set-timezone *, /usr/bin/systemctl restart yantrik-mind.service, /usr/lib/yantrik/yantrik-mind-log \"\""
 }
 
 # Hand the tree to root, keep what is the desktop's, and put the narrow rule in place. Root
@@ -2059,7 +2063,7 @@ cmd_migrate_minds() {
   if [ -x /opt/yantrik-mind/bin/yantrik-mind ] && [ -f /etc/systemd/system/yantrik-mind.service ]; then
     systemctl enable --now yantrik-mind.service >/dev/null 2>&1 \
       && info "Yantrik Mind runs as yantrik-mind now" \
-      || warn "the mind's unit did not start; see: journalctl -u yantrik-mind"
+      || warn "the mind's unit did not start; see: sudo -n /usr/lib/yantrik/yantrik-mind-log"
   else
     info "Yantrik Mind is not installed here; its memory (if any) waits in $dst"
   fi
