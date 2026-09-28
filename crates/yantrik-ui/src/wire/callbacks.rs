@@ -51,7 +51,7 @@ fn wire_lock(ui: &App, ctx: &AppContext) {
             let _ = slint::invoke_from_event_loop(move || {
                 let Some(ui) = ui_weak.upgrade() else { return };
                 if verdict == lock::Verdict::Open {
-                    unlocked(&ui, &bridge, &given);
+                    unlocked(&ui, &bridge, &given, secret);
                 } else {
                     ui.set_lock_error(verdict.message(secret).into());
                 }
@@ -79,8 +79,8 @@ fn wire_lock(ui: &App, ctx: &AppContext) {
             // And at the compositor (#313): the shell's screen alone left every app window
             // above it, visible and usable. The session lock shows only the lock.
             let bridge = lock_bridge.clone();
-            crate::session_lock::engage(ui.as_weak(), ui.get_greeting_text().to_string(), secret, move |ui, given| {
-                unlocked(ui, &bridge, given)
+            crate::session_lock::engage(ui.as_weak(), ui.get_greeting_text().to_string(), secret, move |ui, given, kind| {
+                unlocked(ui, &bridge, given, kind)
             });
         }
     });
@@ -88,7 +88,12 @@ fn wire_lock(ui: &App, ctx: &AppContext) {
 
 /// The screen is open: back to the desktop, and the same secret offered to the vault. One path
 /// for the shell's own lock screen and the compositor's session lock (#313).
-fn unlocked(ui: &App, bridge: &std::sync::Arc<crate::bridge::CompanionBridge>, secret: &str) {
+fn unlocked(
+    ui: &App,
+    bridge: &std::sync::Arc<crate::bridge::CompanionBridge>,
+    secret: &str,
+    kind: lock::Secret,
+) {
     crate::session_lock::released();
     ui.set_current_screen(1);
     ui.set_lock_error("".into());
@@ -100,7 +105,16 @@ fn unlocked(ui: &App, bridge: &std::sync::Arc<crate::bridge::CompanionBridge>, s
     // account without a password, or a vault wrapped under an older password) a wrong guess costs
     // one Argon2id derivation and is silent: the person was unlocking a screen, and telling them
     // they failed at something they were not attempting is worse than telling them nothing.
-    offer_screen_secret_to_vault(bridge, secret);
+    if kind == lock::Secret::Password {
+        // A verified login password: what the login screen does with one, the vault protected
+        // under it the first time and opened every time after. Since the desktop starts locked at
+        // boot (#415), this is where that happens on a machine that logs in by itself.
+        crate::vault_unlock::note_session_password_seen();
+        let (bridge, password) = (bridge.clone(), secret.to_string());
+        std::thread::spawn(move || crate::wire::login::adopt_session_password(&bridge, &password));
+    } else {
+        offer_screen_secret_to_vault(bridge, secret);
+    }
 }
 
 /// Try the secret that just unlocked the screen on the vault, without making anybody wait.

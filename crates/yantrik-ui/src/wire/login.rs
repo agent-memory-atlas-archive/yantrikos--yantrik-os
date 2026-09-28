@@ -105,7 +105,7 @@ pub fn wire(ui: &App, ctx: &AppContext) {
 /// Every branch logs at most a state. The password is borrowed for the call and is not put in a
 /// span, a field, or a message; `secret_never_reaches_a_message` in `vault_unlock` covers the
 /// strings this function can reach.
-fn adopt_session_password(bridge: &Arc<crate::bridge::CompanionBridge>, password: &str) {
+pub(crate) fn adopt_session_password(bridge: &Arc<crate::bridge::CompanionBridge>, password: &str) {
     use crate::vault_unlock::{Op, Outcome};
 
     // Generous, because Argon2id is deliberately slow and the worker may be mid-thought. The

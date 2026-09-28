@@ -78,6 +78,29 @@ pub fn take_over_orphans(ui: &App) {
     ui.invoke_lock_screen();
 }
 
+/// At startup: an installed machine whose account has a password starts locked (#415).
+///
+/// The session logs in by itself at boot (agetty --autologin), so a desktop that started open made
+/// every lock a screen saver: restart the machine, or kill the shell, and it was open. It starts
+/// behind the same session lock as every other lock, asking for the account's password, and the
+/// vault opens with that password when it is given. Not on the live image (its password is
+/// published) and not on an account with no password (there is nothing to ask for); and not when
+/// a start screen is named (the GUI installer's login screen, a developer's override).
+pub fn lock_at_start(ui: &App) {
+    if std::env::var_os("YANTRIK_START_SCREEN").is_some() || crate::lock::live_session() {
+        return;
+    }
+    if !crate::lock::account_has_password() {
+        tracing::warn!("This account has no password; the desktop starts open. Set one to lock it at boot");
+        return;
+    }
+    if crate::control::locked_screen(ui.get_current_screen()) {
+        return;
+    }
+    tracing::info!("Starting locked: the account's password opens the desktop");
+    ui.invoke_lock_screen();
+}
+
 /// What to answer a line from the lock client, and the secret when the answer unlocks: `ok`, or
 /// `no <what the lock screen should say>`.
 pub fn answer(
@@ -105,7 +128,7 @@ pub fn engage(
     ui: slint::Weak<App>,
     greeting: String,
     secret: crate::lock::Secret,
-    on_unlock: impl Fn(&App, &str) + Send + Clone + 'static,
+    on_unlock: impl Fn(&App, &str, crate::lock::Secret) + Send + Clone + 'static,
 ) {
     WANTED.store(true, Ordering::SeqCst);
     if RUNNING.swap(true, Ordering::SeqCst) {
@@ -134,7 +157,7 @@ fn hold(
     greeting: &str,
     secret: crate::lock::Secret,
     ui: &slint::Weak<App>,
-    on_unlock: &(impl Fn(&App, &str) + Send + Clone + 'static),
+    on_unlock: &(impl Fn(&App, &str, crate::lock::Secret) + Send + Clone + 'static),
 ) {
     let mut starts: u32 = 0;
     loop {
@@ -147,7 +170,7 @@ fn hold(
                 let (ui, on_unlock) = (ui.clone(), on_unlock.clone());
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = ui.upgrade() {
-                        on_unlock(&ui, &pin);
+                        on_unlock(&ui, &pin, secret);
                     }
                 });
                 return;

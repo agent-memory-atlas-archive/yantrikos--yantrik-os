@@ -66,6 +66,29 @@ fn says_no_password(status_line: &str) -> bool {
     matches!(status_line.split_whitespace().nth(1), Some("NP" | "L" | "LK"))
 }
 
+/// Whether `passwd -S` says, in so many words, that the account has a usable password (`P`).
+fn says_password(status_line: &str) -> bool {
+    matches!(status_line.split_whitespace().nth(1), Some("P" | "PS"))
+}
+
+/// Whether this account positively has a password. Stricter than [`secret_for_this_account`]:
+/// what the desktop starts behind at boot is decided by this, and a desktop that starts locked
+/// behind a password the account does not have is a machine nobody can use. Unknown is `false`.
+pub fn account_has_password() -> bool {
+    std::process::Command::new("/usr/bin/passwd")
+        .arg("-S")
+        .output()
+        .map(|out| out.status.success() && says_password(&String::from_utf8_lossy(&out.stdout)))
+        .unwrap_or(false)
+}
+
+/// Whether this is the live image rather than an installed machine: its password is published,
+/// so a lock at boot would keep nobody out and everybody guessing.
+pub fn live_session() -> bool {
+    std::path::Path::new("/run/live").exists()
+        || std::fs::read_to_string("/proc/cmdline").is_ok_and(|c| c.split_whitespace().any(|w| w == "boot=live"))
+}
+
 /// Which secret unlocks this account's screen. Asked at every lock and every attempt: an
 /// installer or a person may set the password while the desktop runs.
 pub fn secret_for_this_account() -> Secret {
@@ -321,6 +344,14 @@ mod lock_tests {
                 "{ui} fixes the prompt in markup; it must show the secret the shell checks"
             );
         }
+    }
+
+    #[test]
+    fn the_desktop_starts_locked_only_behind_a_password_the_account_has() {
+        assert!(says_password("yantrik P 2026-09-28 0 99999 7 -1"));
+        assert!(!says_password("yantrik NP 2026-09-28 0 99999 7 -1"), "no password: nothing to start behind");
+        assert!(!says_password("yantrik L 2026-09-28 0 99999 7 -1"));
+        assert!(!says_password(""), "unknown is not a password: starting locked behind it would lock everyone out");
     }
 
     #[test]

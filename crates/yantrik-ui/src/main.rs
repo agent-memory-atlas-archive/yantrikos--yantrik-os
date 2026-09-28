@@ -245,6 +245,8 @@ fn main() {
 
     // A desktop that was locked when the last shell ended stays locked, by this shell (#415).
     session_lock::take_over_orphans(&ui);
+    // And a desktop that was just booted starts locked behind the account's password (#415).
+    session_lock::lock_at_start(&ui);
 
     // Give the shell's shortcut scope the keyboard.
     //
