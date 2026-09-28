@@ -430,6 +430,20 @@ class Unreachable(Exception):
 STARTING_WAIT = 15.0
 
 
+def apps_with_windows(desktop):
+    """The apps the desktop has a window open for, from `describe shell`'s state: the person's own
+    (`windows`) and the ones a mind opened in Mind View (`mind_view.apps`). The second list is the
+    only place those appear — `windows` names Mind View itself, not what runs inside it — and it
+    is written the moment the app is spawned, 6.5 s before Blender answers (VM 520, 28 Sep 2026).
+    """
+    apps = {w.get("app") for w in desktop.get("windows") or [] if isinstance(w, dict)}
+    view = desktop.get("mind_view")
+    if isinstance(view, dict):
+        apps.update(a for a in view.get("apps") or [] if isinstance(a, str))
+    apps.discard(None)
+    return apps
+
+
 def still_starting(name, surface):
     """Whether an app with no live socket is one the desktop has open, and so still starting — and
     if it is, wait for its surface to answer.
@@ -446,8 +460,7 @@ def still_starting(name, surface):
     except Unreachable:
         return False
     names = {surface["id"], surface["entry"]} | set(surface["aliases"])
-    windows = (view.get("state") or {}).get("windows") or []
-    if not any(isinstance(w, dict) and w.get("app") in names for w in windows):
+    if not names & apps_with_windows(view.get("state") or {}):
         return False
     deadline = time.time() + STARTING_WAIT
     while time.time() < deadline:
@@ -859,12 +872,12 @@ def cmd_ls(argv):
     print("    and `describe <name>` means the window whenever it is open.")
 
     shell = os.path.join(SOCKET_DIRS[0], "app-shell.sock")
-    openable, windows, from_disk = [], [], False
+    openable, windows, from_disk = [], set(), False
     if _answers(shell):
         try:
             desktop = call("shell", "app.describe", timeout=5).get("state") or {}
             openable = desktop.get("apps") or []
-            windows = [w.get("app") for w in desktop.get("windows") or [] if isinstance(w, dict)]
+            windows = apps_with_windows(desktop)
         except SystemExit:
             openable = []
     if not openable:

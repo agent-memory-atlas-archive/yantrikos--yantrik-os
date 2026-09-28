@@ -943,10 +943,12 @@ def main():
             wrapped_sock = sockets / "app-wrapped.sock"
             late = []
 
-            def shell_listing(windows):
+            def shell_listing(windows, in_mind_view=()):
                 return lambda _s, asked: (
                     {"app": "shell", "summary": "Yantrik", "actions": [],
-                     "state": {"windows": windows}}
+                     "state": {"windows": windows,
+                               "mind_view": {"running": bool(in_mind_view),
+                                             "apps": list(in_mind_view)}}}
                     if asked["method"] == "app.describe" else {"accepted": True, "settled": True})
 
             def bind_late():
@@ -965,6 +967,18 @@ def main():
                       code is None and "Wrapped — ready" in out, (out, err))
                 for svc in late:
                     svc.close()
+                # What a mind's open looks like: `windows` names only Mind View, and the app is in
+                # `mind_view.apps` from the moment it is spawned.
+                late.clear()
+                shell.reply = shell_listing([{"app": "mind-view", "title": "Mind View"}],
+                                            in_mind_view=["wrapped"])
+                threading.Timer(0.4, bind_late).start()
+                out, err, code = run(lambda: yos.cmd_describe(["wrapped"]))
+                check("an app a mind opened in Mind View is waited for the same way",
+                      code is None and "Wrapped — ready" in out, (out, err))
+                for svc in late:
+                    svc.close()
+                shell.reply = shell_listing([{"app": "wrapped", "title": "Wrapped"}])
                 # A socket file with nobody behind it, as a killed app leaves.
                 stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
                 stale.bind(str(wrapped_sock))
