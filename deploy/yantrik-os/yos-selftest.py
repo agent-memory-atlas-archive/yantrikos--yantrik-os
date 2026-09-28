@@ -935,6 +935,52 @@ def main():
                   code == 1 and "is closed" in err and "quiet: nothing to see here" in err
                   and "open_app name=quiet" in err and "no socket for" in err, err)
 
+            print("an app the desktop has open but that has not answered yet is starting, not "
+                  "closed")
+            # Blender binds its socket 8.7 s after open_app (VM 520, 28 Sep 2026). A mind that
+            # described it in between was told "closed. Open it first", and gave up on the task.
+            saved_wait, saved_reply = yos.STARTING_WAIT, shell.reply
+            wrapped_sock = sockets / "app-wrapped.sock"
+            late = []
+
+            def shell_listing(windows):
+                return lambda _s, asked: (
+                    {"app": "shell", "summary": "Yantrik", "actions": [],
+                     "state": {"windows": windows}}
+                    if asked["method"] == "app.describe" else {"accepted": True, "settled": True})
+
+            def bind_late():
+                svc = FakeService(wrapped_sock, lambda _s, asked: (
+                    {"app": "wrapped", "summary": "Wrapped — ready", "state": {}, "actions": []}
+                    if asked["method"] == "app.describe" else {}))
+                svc.start()
+                late.append(svc)
+
+            try:
+                yos.STARTING_WAIT = 1.5
+                shell.reply = shell_listing([{"app": "wrapped", "title": "Wrapped"}])
+                threading.Timer(0.4, bind_late).start()
+                out, err, code = run(lambda: yos.cmd_describe(["wrapped"]))
+                check("describe waits for it and answers once its surface is up",
+                      code is None and "Wrapped — ready" in out, (out, err))
+                for svc in late:
+                    svc.close()
+                # A socket file with nobody behind it, as a killed app leaves.
+                stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                stale.bind(str(wrapped_sock))
+                stale.close()
+                out, err, code = run(lambda: yos.cmd_describe(["wrapped"]))
+                check("one that never answers is called starting, and not sent to open it again",
+                      code == 1 and "still starting" in err and "open_app" not in err, err)
+                shell.reply = shell_listing([])
+                out, err, code = run(lambda: yos.cmd_describe(["wrapped"]))
+                check("with no window on the desktop it is closed, as before",
+                      code == 1 and "is closed" in err and "open_app name=wrapped" in err, err)
+            finally:
+                yos.STARTING_WAIT, shell.reply = saved_wait, saved_reply
+                with contextlib.suppress(OSError):
+                    os.unlink(wrapped_sock)
+
             print("yos ls, with a desktop that lists what it can open")
             listing = [
                 {"name": "howdy", "opens": "app", "describe_as": "howdy", "running": True,
