@@ -357,7 +357,7 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                 super::pins::publish(&ui, &catalogue.get());
 
                 // Update window list for switcher (with contextual subtitles)
-                let win_items = window_items(ui.get_current_screen(), &wins);
+                let win_items = window_items(ui.get_current_screen(), &wins, windows::shell_in_front());
                 if let Some(model) = crate::models::changed(ui.get_window_list(), win_items) {
         ui.set_window_list(model);
     }
@@ -522,7 +522,7 @@ fn handle_keybind(ui: &App, action: &str) {
             if ui.get_current_screen() == 1 {
                 // Refresh window list immediately before showing
                 let wins = windows::list_windows();
-                let items = window_items(ui.get_current_screen(), &wins);
+                let items = window_items(ui.get_current_screen(), &wins, windows::shell_in_front());
                 ui.set_window_list(ModelRc::new(VecModel::from(items)));
                 ui.set_window_switcher_open(!ui.get_window_switcher_open());
             }
@@ -535,24 +535,33 @@ fn handle_keybind(ui: &App, action: &str) {
 
 /// Format a byte count as a human-readable string (KB / MB / GB).
 /// The taskbar's entries: the screen the shell is on, when it is one a person reads as a window
-/// (`control::screen_entry` — Files, Settings, Agents …), and then every window. The screen goes
-/// first because it is the shell's, and the shell is the window everything else opened over.
-fn window_items(screen: i32, wins: &[windows::WindowEntry]) -> Vec<WindowItem> {
-    let shell = crate::control::screen_entry(screen).map(|(name, title)| WindowItem {
-        title: title.into(),
-        app_id: format!("{}{name}", crate::control::SCREEN_ENTRY_PREFIX).into(),
-        icon_char: windows::icon_for_app(name).into(),
-        subtitle: "".into(),
-    });
-    shell
-        .into_iter()
-        .chain(wins.iter().map(|w| WindowItem {
+/// (`control::screen_entry` — Files, Settings, Agents …), among every window.
+///
+/// The taskbar lights its first entry as the active one, so the screen goes first only when the
+/// shell is what the person is looking at (`shell_front`, from the compositor), or when that cannot
+/// be known. With an app window in front of it — Weather over Files — the app stays first and the
+/// screen comes second, behind it, where it is.
+fn window_items(screen: i32, wins: &[windows::WindowEntry], shell_front: Option<bool>) -> Vec<WindowItem> {
+    let mut items: Vec<WindowItem> = wins
+        .iter()
+        .map(|w| WindowItem {
             title: w.title.clone().into(),
             app_id: w.app_id.clone().into(),
             icon_char: w.icon_char.clone().into(),
             subtitle: w.subtitle.clone().into(),
-        }))
-        .collect()
+        })
+        .collect();
+    if let Some((name, title)) = crate::control::screen_entry(screen) {
+        let entry = WindowItem {
+            title: title.into(),
+            app_id: format!("{}{name}", crate::control::SCREEN_ENTRY_PREFIX).into(),
+            icon_char: windows::icon_for_app(name).into(),
+            subtitle: "".into(),
+        };
+        let at = if shell_front == Some(false) && !items.is_empty() { 1 } else { 0 };
+        items.insert(at, entry);
+    }
+    items
 }
 
 fn format_bytes(bytes: u64) -> String {
@@ -817,13 +826,20 @@ mod tests {
     /// first, and the desktop adds nothing.
     #[test]
     fn the_screen_the_shell_is_on_is_a_taskbar_entry() {
-        let items = window_items(8, &[weather()]);
-        let titles: Vec<String> = items.iter().map(|w| w.title.to_string()).collect();
-        assert_eq!(titles, ["Files", "Weather"]);
+        let titles = |items: &[WindowItem]| items.iter().map(|w| w.title.to_string()).collect::<Vec<_>>();
+        // The shell in front: its screen is the active entry, first.
+        let items = window_items(8, &[weather()], Some(true));
+        assert_eq!(titles(&items), ["Files", "Weather"]);
         assert_eq!(items[0].app_id.as_str(), "shell:files");
         assert_eq!(items[1].app_id.as_str(), "weather");
+        // Weather in front of Files: Weather stays first, and Files is behind it.
+        assert_eq!(titles(&window_items(8, &[weather()], Some(false))), ["Weather", "Files"]);
+        // Not knowable: first, as before.
+        assert_eq!(titles(&window_items(8, &[weather()], None)), ["Files", "Weather"]);
+        // Nothing else open: the screen is the only entry, whatever is said to be in front.
+        assert_eq!(titles(&window_items(8, &[], Some(false))), ["Files"]);
 
-        let on_desktop = window_items(1, &[weather()]);
+        let on_desktop = window_items(1, &[weather()], Some(true));
         assert_eq!(on_desktop.len(), 1);
         assert_eq!(on_desktop[0].title.as_str(), "Weather");
     }

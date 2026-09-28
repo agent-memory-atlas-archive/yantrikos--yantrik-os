@@ -65,7 +65,19 @@ static COMPOSITOR: Mutex<Option<(Instant, Vec<WindowEntry>, Option<String>)>> = 
 pub fn refresh_compositor_windows() -> usize {
     let found = wlrctl_windows();
     let count = found.len();
-    let front = front_now();
+    let activation = activation_now();
+    SHELL_FRONT.store(
+        match activation {
+            Activation::Shell => 1,
+            Activation::Window(_) => 2,
+            Activation::Unknown => 0,
+        },
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    let front = match activation {
+        Activation::Window(title) => Some(title),
+        _ => None,
+    };
     if let Ok(mut cache) = COMPOSITOR.lock() {
         let front = front.or_else(|| cache.as_ref().and_then(|(_, _, f)| f.clone()));
         *cache = Some((Instant::now(), found, front));
@@ -688,32 +700,76 @@ fn wlrctl_windows() -> Vec<WindowEntry> {
 /// and off the UI thread by the approval cards when they need the answer for THIS moment rather
 /// than the cached one.
 pub(crate) fn front_now() -> Option<String> {
-    let output = std::process::Command::new("wlrctl")
-        .args(["toplevel", "list", "state:activated"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+    match activation_now() {
+        Activation::Window(title) => Some(title),
+        _ => None,
     }
-    activated_title(&String::from_utf8_lossy(&output.stdout))
 }
 
-/// The title of the single activated toplevel in a `wlrctl toplevel list state:activated`
-/// answer, or `None` if the answer is not exactly one window outside the shell. Parsed with
-/// [`toplevel_entry`], the same reader the full list uses, so the title is spelled the way the
-/// list spells it — which is what lets the merge match it.
-fn activated_title(text: &str) -> Option<String> {
+/// What the compositor says is in front: one app window, the shell itself, or not knowable.
+#[derive(Clone, Debug, PartialEq)]
+enum Activation {
+    Window(String),
+    Shell,
+    Unknown,
+}
+
+fn activation_now() -> Activation {
+    let Ok(output) = std::process::Command::new("wlrctl").args(["toplevel", "list", "state:activated"]).output()
+    else {
+        return Activation::Unknown;
+    };
+    if !output.status.success() {
+        return Activation::Unknown;
+    }
+    activation(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// A `wlrctl toplevel list state:activated` answer, read: exactly one line naming a window, or the
+/// shell, or anything else — which is not knowable. Parsed with [`toplevel_entry`], the same reader
+/// the full list uses, so the title is spelled the way the list spells it — which is what lets the
+/// merge match it.
+fn activation(text: &str) -> Activation {
     let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
     if lines.len() != 1 {
-        return None;
+        return Activation::Unknown;
     }
     let title = toplevel_entry(lines[0]).title;
-    if title.is_empty() || title == SHELL_WINDOW_TITLE {
-        // The person is looking at the desktop. No app window is in front.
-        return None;
+    if title == SHELL_WINDOW_TITLE {
+        // The person is looking at the desktop, or one of its screens. No app window is in front.
+        return Activation::Shell;
     }
-    Some(title)
+    if title.is_empty() {
+        return Activation::Unknown;
+    }
+    Activation::Window(title)
 }
+
+/// The title of the single activated toplevel, or `None` if the answer is not exactly one window
+/// outside the shell.
+#[cfg(test)]
+fn activated_title(text: &str) -> Option<String> {
+    match activation(text) {
+        Activation::Window(title) => Some(title),
+        _ => None,
+    }
+}
+
+/// Whether the shell's own window was in front at the last reading: `Some(true)` for the desktop
+/// or one of its screens, `Some(false)` for an app window, `None` when the compositor could not say.
+///
+/// The taskbar lights its first entry as the active one, and a screen of the shell (Files …) is
+/// only first when the shell is what the person is looking at (#467).
+pub fn shell_in_front() -> Option<bool> {
+    match SHELL_FRONT.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => Some(true),
+        2 => Some(false),
+        _ => None,
+    }
+}
+
+/// [`shell_in_front`]'s last reading: 0 not knowable, 1 the shell, 2 an app window.
+static SHELL_FRONT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
 /// One `wlrctl toplevel list` line, as `(title, app_id)` — the shell's id, see [`toplevel_entry`].
 fn split_toplevel_line(line: &str) -> (String, String) {
@@ -1063,6 +1119,11 @@ mod tests {
         assert_eq!(activated_title(""), None);
         assert_eq!(activated_title(": Editor\n: Terminal\n"), None);
         assert_eq!(activated_title(": Yantrik OS"), None);
+        // And the shell in front is told apart from not knowing (#467's taskbar order).
+        assert_eq!(activation(": Yantrik OS"), Activation::Shell);
+        assert_eq!(activation(": Terminal"), Activation::Window("Terminal".into()));
+        assert_eq!(activation(""), Activation::Unknown);
+        assert_eq!(activation(": Editor\n: Terminal\n"), Activation::Unknown);
     }
 
     /// A program's app_id is its binary's name, give or take a distribution's suffix.
