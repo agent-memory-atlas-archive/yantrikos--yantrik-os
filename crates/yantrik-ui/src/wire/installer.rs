@@ -562,8 +562,8 @@ fn install_to_target(
     let _ = run_cmd("rm", &["-f", &marker]);
 
     // The session's log directory, the person's and written by them alone. It was 0777, which
-    // since minds have an account of their own (#411) let the mind plant a name the session
-    // appends to — a symlink to ~/.bashrc, say (yantrik-update's reconcile_private_dirs).
+    // let any other account plant a name the session appends to — a symlink to ~/.bashrc, say
+    // (yantrik-update's reconcile_private_dirs repairs machines installed that way).
     let logs = format!("{mount_dir}/opt/yantrik/logs");
     let owner = if state.username.is_empty() { "yantrik" } else { &state.username };
     let _ = run_cmd("install", &["-d", "-m", "0755", &logs]);

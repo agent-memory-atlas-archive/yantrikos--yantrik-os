@@ -589,8 +589,15 @@ cmd_migrate_ownership() {
   for f in "$BUILD_FILE" "$PREFIX/.version" "$CONF"; do
     [ -e "$f" ] && chown root:root "$f" && chmod 0644 "$f"
   done
+  # The directories first, then what other accounts left in them goes, and only then is the rest
+  # adopted: `chown -R` changes a link itself, so a link planted while logs/ was 0777 would
+  # become the owner's and pass for one of their own files from then on.
   for d in "$LOG_DIR" "$PREFIX/data"; do
     mkdir -p "$d"
+    chown -h "$owner" "$d"
+  done
+  reconcile_private_dirs
+  for d in "$LOG_DIR" "$PREFIX/data"; do
     chown -R "$owner" "$d"
   done
   # config.yaml stays the user's until it is split (#397 step c): Settings, OAuth refresh and
@@ -1027,12 +1034,20 @@ shell_session() {
 
 start_shell() {
   local runtime="$1" owner="${2:-}"
-  mkdir -p "$PREFIX/logs" 2>/dev/null || true
   # Started for the session's owner, never as root: under sudo this process is root, and a shell
   # started from it would be root's (#374).
   local as=()
   if [ "$(id -u)" = 0 ] && [ -n "$owner" ] && [ "$owner" != 0 ]; then
     as=(runuser -u "$(id -nu "$owner")" --)
+  fi
+  # logs/ made, if missing, as the owner's: made root's, the session could no longer write its
+  # log. Root may make it (its parent is root's); it is handed over as it is made.
+  if [ ! -d "$PREFIX/logs" ]; then
+    if [ "${#as[@]}" -gt 0 ]; then
+      install -d -o "$owner" -m 0755 "$PREFIX/logs" 2>/dev/null || true
+    else
+      mkdir -p "$PREFIX/logs" 2>/dev/null || true
+    fi
   fi
 
   if [ "${#SHELL_ENV[@]}" -gt 0 ]; then
@@ -1784,12 +1799,14 @@ d /run/yantrik-minds 2750 $owner yantrik-minds -"
   systemd-tmpfiles --create "$conf" >/dev/null 2>&1 || warn "could not make /run/yantrik-minds now; it is made at the next boot"
 }
 
-# logs/ and data/ are the desktop's alone. The installer made logs/ 0777, so once minds had an
-# account of their own (#411) the mind could plant a name there: the session rotates
-# yantrik-os.log and appends to that name, so a symlink to ~/.bashrc put there first would have
-# the shell's output (which carries text the mind chose) written into the person's startup file.
-# Write for the owner only, then anything in it someone else owns is removed; both as the owner,
-# because root never works inside a directory another account controls.
+# logs/ and data/ are the desktop's alone. The installer made logs/ 0777, so any other account on
+# the machine could plant a name there: the session rotates yantrik-os.log and appends to that
+# name, and a symlink to ~/.bashrc put there first would have the shell's output (which carries
+# text a mind chose) written into the person's startup file. The mind's own unit cannot reach it
+# (ProtectSystem=strict); every other account and anything unsandboxed could.
+# Write for the owner only, then what other accounts own in it goes: files and links removed,
+# directories (which the owner cannot empty) renamed aside. All as the owner, because root never
+# works inside a directory another account controls.
 reconcile_private_dirs() {
   [ "$(id -u)" = 0 ] || return 0
   tree_is_roots || return 0
@@ -1805,12 +1822,17 @@ reconcile_private_dirs() {
     if [ -n "$(find "$d" -maxdepth 0 -perm /022 2>/dev/null)" ]; then
       runuser -u "$owner" -- chmod go-w "$d" && info "$d is written by $owner alone now"
     fi
-    # Files and links only: a directory someone else made here cannot be emptied as the owner,
-    # so it is named for a person to look at rather than removed as root.
     runuser -u "$owner" -- find "$d" -mindepth 1 -maxdepth 1 ! -user "$owner" ! -type d \
       -exec rm -f -- {} + 2>/dev/null || true
-    left="$(find "$d" -mindepth 1 -maxdepth 1 ! -user "$owner" 2>/dev/null | head -5)"
-    [ -z "$left" ] || warn "not $owner's, in $d: $(printf '%s ' $left)"
+    # A directory under a name the session writes (yantrik-os.log) would stop the desktop
+    # starting. Renaming within the owner's directory needs no write on the one moved.
+    runuser -u "$owner" -- find "$d" -mindepth 1 -maxdepth 1 ! -user "$owner" -type d \
+      -exec sh -c 'for p; do mv -T -- "$p" "${p%/*}/.foreign-$(stat -c %i -- "$p")"; done' sh {} + \
+      2>/dev/null || true
+    # Names another account chose, so nothing in them reaches a terminal but printable text.
+    left="$(find "$d" -mindepth 1 -maxdepth 1 ! -user "$owner" -printf '%f\n' 2>/dev/null \
+      | head -5 | LC_ALL=C tr -c '[:print:]\n' '?' | tr '\n' ' ')"
+    [ -z "$left" ] || warn "not $owner's, in $d (moved aside, look before deleting): $left"
   done
 }
 

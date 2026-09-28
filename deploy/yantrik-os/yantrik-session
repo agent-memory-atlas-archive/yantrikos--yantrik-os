@@ -116,7 +116,17 @@ fi
 # written eight hours earlier and not noticing that it had.
 LOG_DIR=/opt/yantrik/logs
 mkdir -p "$LOG_DIR" 2>/dev/null || true
+# Only into a directory this account owns and alone can write. Anyone else able to write it could
+# put a link where the log goes (a link to ~/.bashrc, say) and have the shell's output appended to
+# it; yantrik-update repairs such a directory, and until it has, the log goes to the person's own.
+if [ ! -O "$LOG_DIR" ] || [ -n "$(find "$LOG_DIR" -maxdepth 0 -perm /022 2>/dev/null)" ]; then
+    LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/yantrik"
+    mkdir -p "$LOG_DIR"
+fi
+LOG="$LOG_DIR/yantrik-os.log"
+[ -L "$LOG" ] && rm -f -- "$LOG"
 # Rotate on start rather than growing without bound; one previous boot is enough to compare.
-[ -f "$LOG_DIR/yantrik-os.log" ] && mv -f "$LOG_DIR/yantrik-os.log" "$LOG_DIR/yantrik-os.log.1" 2>/dev/null
+# -T: onto the name itself, never into a directory a link there points at.
+[ -f "$LOG" ] && mv -fT -- "$LOG" "$LOG.1" 2>/dev/null
 
-exec labwc -s '/opt/yantrik/bin/yantrik-shell /opt/yantrik/config.yaml'   >>"$LOG_DIR/yantrik-os.log" 2>&1
+exec labwc -s '/opt/yantrik/bin/yantrik-shell /opt/yantrik/config.yaml'   >>"$LOG" 2>&1
