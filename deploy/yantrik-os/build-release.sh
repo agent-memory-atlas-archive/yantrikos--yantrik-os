@@ -142,6 +142,9 @@ mapfile -t BINS < <(
     -printf '%f\n' | sort | grep -vxF "$(printf '%s\n' $SHELVED_BINS)"
 )
 [ "${#BINS[@]}" -gt 0 ] || fail "no binaries found in $TARGET_DIR"
+# Mind View's title library (#239): preloaded into its nested labwc only, installed beside the
+# shell. Not a binary, so the list above leaves it out.
+[ -f "$TARGET_DIR/libyantrik_mind_view_title.so" ] || fail "no libyantrik_mind_view_title.so in $TARGET_DIR - Mind View would be titled labwc - WL-1"
 for b in $SHELVED_BINS; do
   if [ -f "$TARGET_DIR/$b" ]; then echo "   (shelved, not shipped: $b)"; fi
 done
@@ -155,6 +158,7 @@ mkdir -p "$ROOT/bin" "$ROOT/config" "$ROOT/models"
 
 say "Staging"
 for b in "${BINS[@]}"; do cp "$TARGET_DIR/$b" "$ROOT/bin/$b"; done
+cp "$TARGET_DIR/libyantrik_mind_view_title.so" "$ROOT/bin/libyantrik_mind_view_title.so"
 
 # The agent surface is not compiled, so binary discovery cannot find it. Without these the
 # machine boots a desktop that no agent can see or drive — the exact failure the old ISO had.
