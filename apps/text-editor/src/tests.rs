@@ -425,6 +425,7 @@ fn real_editor_keyboard_tabs_search_save_close_and_recovery() {
     let published = surface(&ui, &s);
     every_action_says_what_it_does(&published);
     the_editor_answers_with_what_it_wrote(&ui, &s, &published, &dir);
+    an_agent_names_only_files_in_the_home(&ui, &s, &published, &dir);
     a_missing_required_argument_is_refused_by_name(&ui, &s, &published);
     append_adds_to_the_end_and_takes_nothing_away(&s, &published);
     a_document_too_big_to_draw_is_windowed_read_only_and_kept_whole(
@@ -871,4 +872,42 @@ fn a_document_too_big_to_draw_is_windowed_read_only_and_kept_whole(
         summary.contains("Showing the first"),
         "and says what the window withholds: {summary:?}"
     );
+}
+
+/// An agent names only files in the person's home, outside its protected places (#443).
+///
+/// `open ~/.ssh/id_ed25519` then `describe` read a key back, and `save_as ~/.bashrc` with
+/// `overwrite` ran code as the person at their next login. The fixtures live in the temp
+/// directory, outside the home, which is exactly what an agent is refused and the person is not.
+fn an_agent_names_only_files_in_the_home(ui: &TextEditorApp, s: &State, published: &[(Action, Handler)], dir: &Path) {
+    use yantrik_app_runtime::control::AgentTokenScope;
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    if dir.starts_with(&home) {
+        return; // A temp directory inside the home would be allowed, and prove nothing here.
+    }
+    let tab = s.borrow().docs[s.borrow().active].path.clone().expect("the tab saved above");
+    let shown = view(ui, s).state;
+    assert!(!shown["content"].as_str().unwrap_or_default().is_empty(), "the person sees the text: {shown}");
+    assert!(shown["content_hidden"].is_null(), "{shown}");
+
+    let _agent = AgentTokenScope::enter(Some("tok-editor-test".into()));
+    let refused = |name: &str, args: serde_json::Value, why: &str| {
+        let err = act_on(published, name, args.clone()).expect_err(&format!("{name} {args}"));
+        assert!(err.ends_with(why), "{name} {args}: {err}");
+    };
+    refused("open", serde_json::json!({ "path": "~/.ssh/id_ed25519" }), " is protected");
+    refused("open", serde_json::json!({ "path": "/etc/hostname" }), " is outside");
+    refused("open", serde_json::json!({ "path": tab.display().to_string() }), " is outside");
+    refused("save_as", serde_json::json!({ "path": "~/.bashrc", "overwrite": true }), " is protected");
+    refused("save_as", serde_json::json!({ "path": "~/.config/autostart/x.desktop" }), " is protected");
+    refused("save_as", serde_json::json!({ "path": dir.join("agent.txt").display().to_string() }), " is outside");
+    refused("save", serde_json::json!({}), " is outside");
+    assert!(!dir.join("agent.txt").exists(), "nothing was written");
+    assert_eq!(s.borrow().docs[s.borrow().active].path.as_ref(), Some(&tab), "the tab stays where it was");
+
+    // The tab the person opened from outside the home is not read back to an agent.
+    let seen = view(ui, s);
+    assert_eq!(seen.state["content"], "", "{}", seen.state);
+    assert!(seen.state["content_hidden"].as_str().unwrap_or_default().ends_with(" is outside"));
+    assert!(seen.summary.contains("not shown to an agent"), "{}", seen.summary);
 }

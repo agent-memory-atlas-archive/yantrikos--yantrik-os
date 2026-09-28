@@ -545,6 +545,14 @@ pub fn publish(
             } else {
                 serde_json::Value::Null
             };
+            // A mind is not shown a folder it could not have opened: the person may have left
+            // Files in /etc or ~/.ssh, and the listing, the recent row and even the folder's
+            // name are what the file tools would never give it (#443). The places, the view and
+            // whether something is loading say nothing about the folder, and stay.
+            let files = match (screen == 8).then(|| crate::control_files_mind::hidden_here(&ui.get_file_browser_path())).flatten() {
+                Some(hidden) => crate::control_files_mind::hide_folder(files, hidden),
+                None => files,
+            };
 
             // The wizard, when the wizard is up. This is the screen an agent is most likely to
             // meet first and, until it published anything, the only one it could not read.
@@ -570,7 +578,7 @@ pub fn publish(
                 // On the file screen the directory IS the answer to "where am I".
                 format!(
                     "Yantrik — files at {}, {} items, {} windows open",
-                    ui.get_file_browser_path(),
+                    files["path"].as_str().unwrap_or("a folder hidden from a mind"),
                     files["total"].as_u64().unwrap_or(0),
                     open.len()
                 )

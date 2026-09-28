@@ -382,10 +382,19 @@ pub fn expand_home(path: &str) -> String {
     path.to_string()
 }
 
-/// Paths the AI must never touch.
+/// Paths the AI must never touch, matched anywhere in the path as text.
+///
+/// The first part is every place in `yantrik_ipc_contracts::home_paths::PROTECTED`, written out
+/// again because a const cannot be built from another's entries; a test holds the two together.
+/// `validate_path` also asks the shared list itself, a whole component at a time, after links
+/// are followed. What follows is this list's own: places outside the home, and the work
+/// directory.
 pub const BLOCKED_SEGMENTS: &[&str] = &[
     ".ssh", ".gnupg", ".config/labwc", ".config/yantrik",
     "memory.db", ".bashrc", ".profile", ".bash_history",
+    ".bash_profile", ".bash_login", ".bash_logout", ".zshrc", ".zshenv", ".zprofile", ".zlogin",
+    ".pam_environment", ".config/autostart", ".config/environment.d", ".config/systemd",
+    ".local/share/applications",
     "/etc/shadow", "/etc/passwd",
     // The work directory, where other programs (whisper, ffmpeg, edge-tts) write while following
     // links. Its runtime spelling is outside every root anyway; its home fallback is under $HOME,
@@ -417,6 +426,9 @@ pub fn validate_path(path: &str) -> Result<String, String> {
     }
 
     let roots = allowed_roots();
+    if roots.is_empty() {
+        return Err(NO_HOME.to_string());
+    }
     if !under_any(&expanded, &roots) {
         return Err("Path must be under your home directory".to_string());
     }
@@ -430,18 +442,31 @@ pub fn validate_path(path: &str) -> Result<String, String> {
 /// parent let a link two levels up (~/l -> /etc, asked as ~/l/X/y.txt) go unchecked whenever X
 /// did not exist, and a write would then create X under /etc (#443). A link on the way that leads
 /// nowhere is refused, since whatever is written through it lands where it points.
+///
+/// The part below the deepest that resolves does not exist yet, and is checked too, joined to
+/// where the rest really is: through a link `~/x/c -> ~/.config`, `~/x/c/labwc/autostart`
+/// resolves only as far as ~/.config, which is allowed, and a write would then create
+/// ~/.config/labwc/autostart. Neither half names a protected place; the two together do.
 fn resolves_within(path: &std::path::Path, roots: &[std::path::PathBuf]) -> Result<(), String> {
+    if roots.is_empty() {
+        return Err(NO_HOME.to_string());
+    }
     let mut probe = path.to_path_buf();
     loop {
         match probe.canonicalize() {
             Ok(resolved) => {
-                let resolved_str = resolved.to_string_lossy().to_string();
+                let tail = path.strip_prefix(&probe).unwrap_or(std::path::Path::new(""));
+                let whole = resolved.join(tail);
+                let resolved_str = whole.to_string_lossy().to_string();
                 for blocked in BLOCKED_SEGMENTS {
                     if resolved_str.contains(blocked) {
                         return Err(format!("Access denied: path resolves to protected location ({blocked})"));
                     }
                 }
-                if !under_any(&resolved_str, roots) {
+                if yantrik_ipc_contracts::home_paths::is_protected(&whole) {
+                    return Err("Access denied: path resolves to a protected location".to_string());
+                }
+                if !under_any(&resolved.to_string_lossy(), roots) {
                     return Err("Access denied: path resolves outside your home directory".to_string());
                 }
                 return Ok(());
@@ -458,6 +483,10 @@ fn resolves_within(path: &std::path::Path, roots: &[std::path::PathBuf]) -> Resu
         }
     }
 }
+
+/// The refusal when there is no root at all: "must be under your home directory" sent the model
+/// looking for a mistake in a path that had none, when the account running it has no usable HOME.
+const NO_HOME: &str = "Access denied: there is no home directory to work in";
 
 /// Where the file tools may reach: the home directory, and the private scratch directory the
 /// tools write their own outputs to (a diagram, a screenshot) so the model can open them again.
@@ -835,6 +864,41 @@ mod path_root_tests {
             assert!(at(nowhere).is_err(), "{nowhere} goes through a link that leads nowhere");
         }
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_protected_name_split_across_a_link_is_refused() {
+        use super::resolves_within;
+        let root = std::env::temp_dir().join(format!("yantrik-resolves-split-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".config")).unwrap();
+        std::fs::create_dir_all(root.join(".ssh")).unwrap();
+        std::fs::create_dir_all(root.join("x")).unwrap();
+        let root = root.canonicalize().unwrap();
+        std::os::unix::fs::symlink(root.join(".config"), root.join("x/c")).unwrap();
+        std::os::unix::fs::symlink(root.join(".ssh"), root.join("keys")).unwrap();
+        let roots = [root.clone()];
+        let at = |p: &str| resolves_within(&root.join(p), &roots);
+
+        for refused in ["x/c/labwc/autostart", "x/c/yantrik/config.yaml", "x/c/autostart/a.desktop", "keys/authorized_keys", "keys/new/deeper"] {
+            let err = at(refused).unwrap_err();
+            assert!(err.contains("protected location"), "{refused}: {err}");
+        }
+        assert!(at("x/c/gtk-3.0/settings.ini").is_ok(), "an ordinary folder under the link");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn with_no_root_at_all_the_refusal_says_there_is_no_home() {
+        let err = super::resolves_within(std::path::Path::new("/home/ann/notes.txt"), &[]).unwrap_err();
+        assert!(err.ends_with("there is no home directory to work in"), "{err}");
+    }
+
+    #[test]
+    fn every_place_every_side_protects_is_blocked_here_too() {
+        for place in yantrik_ipc_contracts::home_paths::PROTECTED {
+            assert!(super::BLOCKED_SEGMENTS.contains(place), "BLOCKED_SEGMENTS is missing {place}");
+        }
     }
 
     #[test]

@@ -1,4 +1,5 @@
 //! Native, bounded text workbench. All document I/O runs on one worker.
+mod agent_rule;
 mod document;
 use document::{Document, MAX_TABS};
 use slint::{ComponentHandle, ModelRc, VecModel};
@@ -1102,6 +1103,10 @@ fn view(ui: &TextEditorApp, s: &State) -> View {
     if b.docs.len() > 1 {
         summary.push_str(&format!(" · tab {} of {}", b.active + 1, b.docs.len()));
     }
+    let hidden = agent_rule::hidden_from_caller(d.path.as_deref());
+    if hidden.is_some() {
+        summary.push_str(" · its text is not shown to an agent");
+    }
     let unsaved = b.docs.iter().filter(|d| d.dirty()).count();
     if unsaved > 1 {
         summary.push_str(&format!(" ({unsaved} tabs unsaved)"));
@@ -1130,7 +1135,14 @@ fn view(ui: &TextEditorApp, s: &State) -> View {
         .with("modified", d.dirty())
         .with("lines", lines as i64)
         .with("characters", d.text.chars().count() as i64)
-        .with("content", d.text.chars().take(4000).collect::<String>())
+        .with(
+            "content",
+            match &hidden {
+                Some(_) => String::new(),
+                None => d.text.chars().take(4000).collect::<String>(),
+            },
+        )
+        .with("content_hidden", serde_json::json!(hidden))
         .with("bytes", d.text.len())
         .with("language", document::language(d.path.as_deref()))
         .with(
@@ -1247,6 +1259,7 @@ fn surface(ui: &TextEditorApp, s: &State) -> Vec<(Action, Handler)> {
             no_dialog(ui, "open")?;
             let path = needed(ui, args, "open", "path", "An absolute path to a text file.")?;
             let full = expanded(path.trim());
+            agent_rule::may_read(&full).map_err(|e| refuse(ui, e))?;
             let before = s.borrow().docs[s.borrow().active].path.clone();
             open(ui, s, full.clone());
             settle(ui, s);
@@ -1288,6 +1301,11 @@ fn surface(ui: &TextEditorApp, s: &State) -> Vec<(Action, Handler)> {
                 ));
             }
             let path = s.borrow().docs[s.borrow().active].path.clone();
+            // The tab may be one the person opened from anywhere; an agent writing it back is a
+            // write to that place, and `append` then `save` to ~/.bashrc runs code as the person.
+            if let Some(p) = path.as_deref() {
+                agent_rule::may_write(p).map_err(|e| refuse(ui, e))?;
+            }
             action(ui, s, if answering { "save-close" } else { "save" });
             settle(ui, s);
             // Read back through the tab that holds that path — a save that closed its tab has
@@ -1349,6 +1367,7 @@ fn surface(ui: &TextEditorApp, s: &State) -> Vec<(Action, Handler)> {
             }
             let path = needed(ui, args, "save_as", "path", "An absolute path to write to.")?;
             let full = expanded(path.trim());
+            agent_rule::may_write(&full).map_err(|e| refuse(ui, e))?;
             let overwrite = args.get("overwrite").and_then(|v| v.as_bool()).unwrap_or(false);
             save(ui, s, Some(full.clone()), overwrite);
             settle(ui, s);

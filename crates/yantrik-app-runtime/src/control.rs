@@ -303,6 +303,19 @@ thread_local! {
 // learns this exists.
 pub use yantrik_surface::{agent_token, answer_later, caller, AgentTokenScope, Caller, CallerScope};
 
+/// Whether the call being dispatched on this thread is an agent's rather than the person's: the
+/// mind's own account by the kernel's word, or any caller that presented an agent token, believed
+/// or not - one that presented a token is not the person. An app that holds a rule for agents
+/// only (which files they may name, #443) asks this inside the handler, where both are in scope.
+///
+/// It cannot see an agent that runs as the person and presents no token, nor tell whether the
+/// caller descends from an attached mind: that takes the shell's /proc walk
+/// (`mind_view::requester_now`). A `describe` carries no token, so there only the mind account
+/// is seen.
+pub fn agent_is_calling() -> bool {
+    agent_token().is_some() || caller().is_some_and(|c| yantrik_ipc_transport::mind_door::is_mind(c.uid))
+}
+
 /// The grade THIS app publishes for one of its own actions.
 ///
 /// Reads the registry installed by [`App::serve`], so it answers only on the thread that owns
@@ -1352,6 +1365,18 @@ mod tests {
             assert_eq!(LADDER[Mode::named(mode).allows()], top, "{mode}");
         }
         assert_eq!(LADDER[Mode::named("yolo").allows()], "standard", "an unknown mode reads as ask");
+    }
+
+    #[test]
+    fn a_call_with_a_token_is_an_agent_and_the_persons_own_is_not() {
+        let me = unsafe { libc::getuid() };
+        let _person = CallerScope::enter(Some(Caller { pid: 4242, uid: me, gid: me }));
+        assert!(!agent_is_calling(), "the person's own account, no token");
+        {
+            let _agent = AgentTokenScope::enter(Some("tok-anything".into()));
+            assert!(agent_is_calling(), "a token, believed or not, is not the person");
+        }
+        assert!(!agent_is_calling(), "and the token goes with its call");
     }
 
     #[test]

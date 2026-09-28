@@ -21,6 +21,8 @@ use yantrik_image_core::{dimensions_from_size, read_info, Gallery, ImageInfo};
 
 slint::include_modules!();
 
+mod agent_rule;
+
 /// Fill the agent rail from the picture on screen.
 ///
 /// Name and dimensions, both of which the app read off the file. No suggestion: what would be
@@ -361,6 +363,11 @@ fn publish_control(app: &ImageViewerApp, state: State) {
     let describe = move || {
         let Ok(ui) = describe_ui() else { return View::new("Images — closed") };
         let g = describe_state.borrow();
+        if let Some(why) = agent_rule::hidden_from_caller(g.current().map(|p| p.as_path())) {
+            // A picture the person opened where an agent may not look: neither it nor the names
+            // of the pictures beside it are read back.
+            return View::new("Images — showing a picture an agent is not shown").with("hidden", why);
+        }
         let name = ui.get_file_name().to_string();
         let summary = if name.is_empty() {
             "Images — nothing open".to_string()
@@ -419,6 +426,7 @@ fn publish_control(app: &ImageViewerApp, state: State) {
                     return Err("`path` is empty".into());
                 }
                 let path = expanded(&raw);
+                agent_rule::may_open(&path)?;
                 // Checked here so the answer names the file rather than leaving a blank window
                 // and a caller believing the picture is on screen.
                 if !path.is_file() {

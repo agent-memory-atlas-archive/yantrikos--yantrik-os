@@ -13,6 +13,7 @@
 use slint::ComponentHandle;
 use yantrik_app_runtime::control::{Action, App as ControlSurface, Param};
 
+use crate::control_files_mind as mind;
 use crate::App;
 
 /// The Files screen id.
@@ -31,6 +32,16 @@ fn ensure_files_screen(ui: &App) {
 /// landed without a second round trip; the full listing is one `describe shell` away.
 fn where_now(ui: &App) -> serde_json::Value {
     use slint::Model;
+    if let Some(hidden) = mind::hidden_here(&ui.get_file_browser_path()) {
+        // As `describe shell` hides it: a mind that went somewhere allowed is answered before
+        // the new listing arrives, while the screen still shows where the person left it.
+        return serde_json::json!({
+            "path": serde_json::Value::Null,
+            "hidden": hidden,
+            "loading": ui.get_file_browser_loading(),
+            "operation_busy": ui.get_file_operation_busy(),
+        });
+    }
     let entries = ui.get_file_browser_entries();
     serde_json::json!({
         "path": ui.get_file_browser_path().to_string(),
@@ -41,34 +52,6 @@ fn where_now(ui: &App) -> serde_json::Value {
         "notice": ui.get_file_notice().to_string(),
         "view": if ui.get_file_grid_view() { "grid" } else { "list" },
     })
-}
-
-/// Where a mind may take the Files screen: a directory in the person's home, and not one of its
-/// protected places (#443). `files_go` took any absolute path, so a mind could open /etc, another
-/// account's home or ~/.ssh and read the listing back through `describe shell` - names, sizes and
-/// times the file tools themselves would never give it. The same rules as `files_stat`
-/// (file_stat.rs), links followed to where they really lead. The person, clicking or typing
-/// `yos` in their own terminal, goes wherever they can see.
-fn mind_may_open(path: &str) -> Result<(), String> {
-    if crate::mind_view::requester_now() == crate::mind_view::Requester::Person {
-        return Ok(());
-    }
-    let home = std::env::var("HOME").unwrap_or_default();
-    open_verdict(path, std::path::Path::new(&home))
-}
-
-/// Whether a mind may open `path` in Files, with `home` as the person's home.
-fn open_verdict(path: &str, home: &std::path::Path) -> Result<(), String> {
-    let answer = crate::file_stat::stat(path, home);
-    match (&answer["exists"], answer["kind"].as_str()) {
-        (serde_json::Value::Bool(true), Some("directory")) => Ok(()),
-        (serde_json::Value::Bool(true), _) => Err(format!("{path} is not a folder")),
-        (serde_json::Value::Bool(false), _) => Err(format!("there is no folder at {path}")),
-        _ => Err(format!(
-            "a mind's Files stays in the person's home, outside its protected places; {path} is {}",
-            answer["reason"].as_str().unwrap_or("not one it may open")
-        )),
-    }
 }
 
 /// Whether the current listing has an entry by this name, so an action can refuse a name that is
@@ -106,7 +89,7 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                 if path.is_empty() {
                     return Err("`path` is empty".into());
                 }
-                mind_may_open(&path)?;
+                mind::may_open(&path)?;
                 ensure_files_screen(&ui);
                 ui.invoke_file_navigate_to_path(path.clone().into());
                 Ok(serde_json::json!({ "requested_path": path, "now": where_now(&ui) }))
@@ -119,11 +102,14 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                 let ui = up(&for_enter)?;
                 let name = args["name"].as_str().unwrap_or_default().to_string();
                 ensure_files_screen(&ui);
+                // Checked first, and never naming the folder, so a refusal is no way to learn
+                // what a folder the mind may not see holds.
+                mind::here(&ui.get_file_browser_path())?;
                 if !has_entry(&ui, &name) {
                     return Err(format!("nothing called `{name}` in {}", ui.get_file_browser_path()));
                 }
-                let into = std::path::Path::new(ui.get_file_browser_path().as_str()).join(&name);
-                mind_may_open(&into.to_string_lossy())?;
+                // The folder the callback will load, computed the way it computes it.
+                mind::may_open(&mind::into(&ui.get_file_browser_path(), &name))?;
                 ui.invoke_file_navigate_dir(name.clone().into());
                 Ok(serde_json::json!({ "requested_directory": name, "now": where_now(&ui) }))
             },
@@ -139,6 +125,7 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                 let ui = up(&for_open)?;
                 let name = args["name"].as_str().unwrap_or_default().to_string();
                 ensure_files_screen(&ui);
+                mind::here(&ui.get_file_browser_path())?;
                 if !has_entry(&ui, &name) {
                     return Err(format!("nothing called `{name}` in {}", ui.get_file_browser_path()));
                 }
@@ -147,6 +134,9 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                 // same `classify` on the callback side; asking it here too is the cheap way to
                 // keep the answer and the launch on one rule (#233).
                 let app = crate::mime_dispatch::app_name(&crate::mime_dispatch::classify(&name));
+                // The entry too, links followed: opening puts its contents in a window the mind
+                // can read back, and a link in the home may lead anywhere.
+                mind::may_open_entry(&ui.get_file_browser_path(), &name)?;
                 ui.invoke_file_open(name.clone().into());
                 Ok(serde_json::json!({ "opened": name, "app": app, "screen": crate::control::screen_name(ui.get_current_screen()) }))
             },
@@ -156,10 +146,9 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
             move |_| {
                 let ui = up(&for_up)?;
                 ensure_files_screen(&ui);
-                // From the home, up is /home and every account's name in it.
-                if let Some(parent) = std::path::Path::new(ui.get_file_browser_path().as_str()).parent() {
-                    mind_may_open(&parent.to_string_lossy())?;
-                }
+                // From the home, up is /home and every account's name in it. The folder checked is
+                // the one the callback loads: the label may be `~`, whose `Path::parent` is "".
+                mind::may_open(&mind::up_from(&ui.get_file_browser_path()))?;
                 ui.invoke_file_go_up();
                 Ok(serde_json::json!({ "now": where_now(&ui) }))
             },
@@ -169,6 +158,7 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                 .arg(Param::text("name").describe("The new folder's name")),
             move |args| {
                 let ui = up(&for_folder)?;
+                mind::here(&ui.get_file_browser_path())?;
                 let name = args["name"].as_str().unwrap_or_default().to_string();
                 if name.is_empty() {
                     return Err("`name` is empty".into());
@@ -192,6 +182,7 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
             .arg(Param::text("name").describe("The new file's name")),
             move |args| {
                 let ui = up(&for_file)?;
+                mind::here(&ui.get_file_browser_path())?;
                 let name = args["name"].as_str().unwrap_or_default().to_string();
                 if name.is_empty() {
                     return Err("`name` is empty".into());
@@ -210,6 +201,7 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                 let ui = up(&for_delete)?;
                 let name = args["name"].as_str().unwrap_or_default().to_string();
                 ensure_files_screen(&ui);
+                mind::here(&ui.get_file_browser_path())?;
                 if !has_entry(&ui, &name) {
                     return Err(format!("nothing called `{name}` in {}", ui.get_file_browser_path()));
                 }
@@ -228,6 +220,7 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
         move |args| {
             use slint::Model;
             let ui = up(&weak)?;
+            mind::here(&ui.get_file_browser_path())?;
             ready(&ui)?;
             let name = args["name"].as_str().ok_or("name required")?;
             let entries = ui.get_file_browser_entries();
@@ -244,13 +237,13 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
     );
     // Whether a path is there, answered by the desktop, which runs as the person and can see
     // their home: a mind with an account of its own cannot tell "not there" from "hidden from me"
-    // (file_stat.rs). A read: it does not move the Files screen.
+    // (yantrik_ipc_contracts::home_paths). A read: it does not move the Files screen.
     let surface = surface.action(
         Action::new(
             "files_stat",
             "Whether a path in the person's home exists: `exists` true, false, or \"unknown\" with \
-             a `reason` (not_found, not_allowed, outside, not_a_path); kind, size and modified \
-             (unix seconds) when it does. `~` is the person's home",
+             a `reason` (not_found, not_allowed, outside, protected, broken_link, not_a_path); \
+             kind, size and modified (unix seconds) when it does. `~` is the person's home",
         )
         .risk("safe")
         .arg(Param::text("path").describe("An absolute path or ~/…, e.g. ~/notes/today.txt")),
@@ -259,7 +252,7 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
             let home = std::env::var("HOME").unwrap_or_default();
             // Off the UI thread: a path under a hung network mount in the home would otherwise
             // freeze the person's whole desktop in the syscall.
-            let work = move || Ok(crate::file_stat::stat(&asked, std::path::Path::new(&home)));
+            let work = move || Ok(yantrik_ipc_contracts::home_paths::stat(&asked, std::path::Path::new(&home)));
             yantrik_app_runtime::control::answer_later(work)
                 .map(|()| serde_json::json!({ "answering": "off the UI thread" }))
                 .or_else(|work| work())
@@ -294,6 +287,7 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
         .arg(Param::text("new_name")),
         move |args| {
             let ui = up(&weak)?;
+            mind::here(&ui.get_file_browser_path())?;
             ready(&ui)?;
             let name = args["name"].as_str().ok_or("name required")?;
             let new = args["new_name"].as_str().ok_or("new_name required")?;
@@ -312,6 +306,11 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
             let spec = if $deferred { spec.defers() } else { spec };
             let $surface = $surface.action(spec, move |_| {
                 let ui = up(&weak)?;
+                // Every one of these acts on the folder on screen, wherever the person left it.
+                mind::here(&ui.get_file_browser_path())?;
+                if $name == "files_toggle_trash" {
+                    mind::may_show_trash()?;
+                }
                 if $needs_ready {
                     ready(&ui)?;
                 }
@@ -405,37 +404,4 @@ fn ready(ui: &App) -> Result<(), String> {
         return Err("A file operation is running".into());
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::open_verdict;
-
-    #[test]
-    fn a_mind_opens_folders_in_the_home_and_nowhere_else() {
-        let home = std::env::temp_dir().join(format!("yantrik-files-home-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&home);
-        std::fs::create_dir_all(home.join("Documents")).unwrap();
-        std::fs::create_dir_all(home.join(".ssh")).unwrap();
-        std::fs::write(home.join("notes.txt"), "x").unwrap();
-        let home = home.canonicalize().unwrap();
-        std::os::unix::fs::symlink("/etc", home.join("escape")).unwrap();
-        let open = |p: &str| open_verdict(p, &home);
-
-        assert!(open("~").is_ok());
-        assert!(open("~/Documents").is_ok());
-        assert!(open(home.join("Documents").to_str().unwrap()).is_ok(), "absolute too");
-        for (refused, why) in [
-            ("/etc", "outside"),
-            ("/home", "outside"),
-            ("~/escape", "outside"),
-            ("~/.ssh", "protected"),
-            ("~/notes.txt", "not a folder"),
-            ("~/Nowhere", "no folder"),
-        ] {
-            let err = open(refused).unwrap_err();
-            assert!(err.contains(why), "{refused}: {err}");
-        }
-        let _ = std::fs::remove_dir_all(&home);
-    }
 }
