@@ -424,13 +424,63 @@ class Unreachable(Exception):
     """
 
 
-def request(name, method, params=None, timeout=40):
+# How long a describe or an act waits for an app the desktop has open but whose surface has not
+# answered yet. Blender binds its socket 8.7 s after open_app on VM 520 (28 Sep 2026). yos-mcp gives
+# a whole os_describe 20 s, so this stays under it.
+STARTING_WAIT = 15.0
+
+
+def apps_with_windows(desktop):
+    """The apps the desktop has a window open for, from `describe shell`'s state: the person's own
+    (`windows`) and the ones a mind opened in Mind View (`mind_view.apps`). The second list is the
+    only place those appear — `windows` names Mind View itself, not what runs inside it — and it
+    is written the moment the app is spawned, 6.5 s before Blender answers (VM 520, 28 Sep 2026).
+    """
+    apps = {w.get("app") for w in desktop.get("windows") or [] if isinstance(w, dict)}
+    view = desktop.get("mind_view")
+    if isinstance(view, dict):
+        apps.update(a for a in view.get("apps") or [] if isinstance(a, str))
+    apps.discard(None)
+    return apps
+
+
+def still_starting(name, surface):
+    """Whether an app with no live socket is one the desktop has open, and so still starting — and
+    if it is, wait for its surface to answer.
+
+    True once a socket for `name` answers. False when the desktop lists no window for the app: it is
+    closed, and the caller says so. Raises `Unreachable` when the window is there and the surface
+    has still not answered after STARTING_WAIT. That is not "closed": a mind told "closed. Open it
+    first" about a Blender that was mid-launch believed it and gave up on the whole task.
+    """
+    if surface is None or surface["id"] in ("shell", "yantrik"):
+        return False
+    try:
+        view = request("shell", "app.describe", timeout=5)
+    except Unreachable:
+        return False
+    names = {surface["id"], surface["entry"]} | set(surface["aliases"])
+    if not names & apps_with_windows(view.get("state") or {}):
+        return False
+    deadline = time.time() + STARTING_WAIT
+    while time.time() < deadline:
+        if is_up(name):
+            return True
+        time.sleep(0.25)
+    raise Unreachable(
+        "%s is open but still starting: its window is on the desktop and it has not answered for "
+        "%d s. Nothing needs opening again — describe %s again in a few seconds."
+        % (name, STARTING_WAIT, surface["id"]))
+
+
+def request(name, method, params=None, timeout=40, waited=False):
     """One JSON-RPC round trip. One line in, one line out.
 
     Tries every socket the name could mean, in order, skipping any that no longer has a
     process behind it. A socket file outlives the process that made it, so a connection
     refused is "that window is gone", not an error worth stopping on — the next candidate,
-    usually the always-on service, answers.
+    usually the always-on service, answers. Unless the desktop still has its window open: then
+    the app is starting, and the answer waits for it (`still_starting`).
 
     Raises `Unreachable` rather than exiting, so both kinds of caller can be written.
     """
@@ -438,6 +488,8 @@ def request(name, method, params=None, timeout=40):
     if not candidates:
         surface = declared_surface(name)
         if surface:
+            if not waited and still_starting(name, surface):
+                return request(name, method, params, timeout, waited=True)
             raise Unreachable(
                 "%s is closed%s. Open it first: act shell open_app name=%s — then describe %s. "
                 "(no socket for %r yet)"
@@ -492,6 +544,8 @@ def request(name, method, params=None, timeout=40):
     # stale" is the mechanism, and the reader wanted to know what to do next.
     surface = declared_surface(name)
     if surface:
+        if not waited and still_starting(name, surface):
+            return request(name, method, params, timeout, waited=True)
         raise Unreachable(
             "%s is closed%s. Open it first: act shell open_app name=%s — then describe %s."
             % (name, (" (%s: %s)" % (surface["id"], surface["purpose"])) if surface["purpose"] else "",
@@ -818,10 +872,12 @@ def cmd_ls(argv):
     print("    and `describe <name>` means the window whenever it is open.")
 
     shell = os.path.join(SOCKET_DIRS[0], "app-shell.sock")
-    openable, from_disk = [], False
+    openable, windows, from_disk = [], set(), False
     if _answers(shell):
         try:
-            openable = (call("shell", "app.describe", timeout=5).get("state") or {}).get("apps") or []
+            desktop = call("shell", "app.describe", timeout=5).get("state") or {}
+            openable = desktop.get("apps") or []
+            windows = apps_with_windows(desktop)
         except SystemExit:
             openable = []
     if not openable:
@@ -832,6 +888,16 @@ def cmd_ls(argv):
                      "aliases": s["aliases"]} for s in declared_surfaces()]
     running = {name for name, _ in apps}
     closed = [a for a in openable if a.get("opens") == "app" and a.get("describe_as") not in running]
+    # An app whose window the desktop has open and whose surface has not answered yet is starting,
+    # not closed. Listed as closed, a mind that had just opened Blender read "(closed)" here, opened
+    # it again, and gave up on the task; describing it now waits for it (`still_starting`).
+    starting = [a for a in closed if a["name"] in windows or a.get("describe_as") in windows]
+    closed = [a for a in closed if a not in starting]
+    if starting:
+        print("Starting (the window is open, the app has not answered yet; describe it in a few "
+              "seconds, and do not open it again):")
+        for a in starting:
+            print("    %-18s (starting)  %s" % (a.get("describe_as") or a["name"], a.get("for", "")))
     if closed:
         # One line each, with what the app is for. This was a comma-separated row of names, and
         # a row of names is how three different models, asked for a "document", each wrote a
