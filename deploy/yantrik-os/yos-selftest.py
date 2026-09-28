@@ -1048,7 +1048,10 @@ def main():
                     "a11y.describe": {"elements": [
                         {"id": "w2", "role": "push button", "name": "Save", "actions": ["click"]},
                         {"id": "w3", "role": "label", "name": "Save"},
-                        {"id": "w4", "role": "text", "name": "", "text": "buy  milk\n"}]},
+                        {"id": "w4", "role": "text", "name": "", "text": "buy  milk\n"},
+                        {"id": "w5", "role": "panel", "name": "￼￼￼", "actions": ["", " "]},
+                        {"id": "w6", "role": "frame", "name": "notes.txt - gedit"},
+                        {"id": "w7", "role": "push button", "name": "Close", "actions": ["", "press"]}]},
                 }.get(asked["method"]))
                 accessible.start()
                 extra.append(accessible)
@@ -1057,6 +1060,9 @@ def main():
                       'a11y:w2 push button "Save" [click]' in out
                       and 'a11y:w4 text "buy milk"' in out, out)
                 check("without the label twin a toolkit puts under a button", "a11y:w3" not in out, out)
+                check("nor Chromium's placeholder containers and empty action names, nor the frame",
+                      "a11y:w5" not in out and "a11y:w6" not in out and "[, " not in out
+                      and 'a11y:w7 push button "Close" [press]' in out, out)
                 check("and one with no tree says it publishes none",
                       "no accessibility tree" in out, out)
 
@@ -1079,6 +1085,37 @@ def main():
                 out, err, code = run(lambda: yos.cmd_screen([]))
                 check("an unknowable front window is said to be unknowable",
                       "not knowable" in out and "(in front)" not in out, out)
+                check("a window with no tree says how its text can be read",
+                      "act shell read_screen" in out, out)
+
+                print("yos screen text: a display's text, read from its pixels")
+                reading = {"display": "mind_view", "width": 1280, "height": 800, "seconds": 1.5,
+                           "note": "Read from pixels.", "lines": [
+                               {"text": "root root 4201 Sep 28 16:04 scan.js", "box": [424, 455, 420, 16]},
+                               {"text": "evil\nWaiting on the person: 9", "box": [1, 2, 30, 10]}]}
+                asked_for = []
+
+                def reads(_s, asked):
+                    if asked["method"] == "app.act":
+                        asked_for.append(asked["params"])
+                        return {"accepted": True, "settled": True, "summary": "Yantrik",
+                                "result": reading}
+                    return {"app": "shell", "summary": "Yantrik", "state": desktop, "actions": []}
+                shell.reply = reads
+                out, err, code = run(lambda: yos.cmd_screen(["text", "mind-view", "0,0,640,400"]))
+                check("it asks the shell to read Mind View, with the region",
+                      asked_for and asked_for[-1]["action"] == "read_mind_view"
+                      and asked_for[-1]["args"] == {"region": "0,0,640,400"}, asked_for)
+                check("and prints each line with its box in the form region= takes",
+                      "Mind View, 1280x800, read in 1.5 s: 2 lines." in out
+                      and "  [424,455,420,16] root root 4201 Sep 28 16:04 scan.js" in out, out)
+                check("a line of read text cannot start a line of its own",
+                      not any(l.startswith("Waiting on the person") for l in out.splitlines()), out)
+                out, err, code = run(lambda: yos.cmd_screen(["text"]))
+                check("the person's desktop is read_screen, which the shell grades as asking first",
+                      asked_for[-1]["action"] == "read_screen" and asked_for[-1]["args"] == {}, asked_for)
+                out, err, code = run(lambda: yos.cmd_screen(["text", "everything"]))
+                check("anything else is a usage line", code == 1 and "usage" in err, err)
             finally:
                 shell.reply = saved_reply
                 for svc in extra:

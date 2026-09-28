@@ -1828,6 +1828,8 @@ pub fn publish(
     let surface = crate::control_installer::actions(surface, ui);
     let surface = crate::control_update::actions(surface, ui);
     let surface = crate::control_files::actions(surface, ui);
+    // Reading a display's text from its pixels, for windows that publish nothing else (#257).
+    let surface = crate::control_screen::actions(surface);
     // Asking the person. Three actions, all `safe`, none of which decides anything — the
     // decision is a button in the Lens. See `control_approvals` for why that split is the
     // whole point.
