@@ -497,7 +497,11 @@ TOOLS = [
                        "(our apps by their summary and actions, other apps by their "
                        "accessibility elements, the browser by its numbered links and fields), "
                        "the apps open in Mind View, and anything waiting on the person. Use it "
-                       "before a screenshot. Act on what it lists with os_act.",
+                       "before a screenshot. Act on what it lists with os_act. A window it says "
+                       "has no tree can be read from its pixels as text, each line with its box: "
+                       "os_act shell read_mind_view for Mind View, os_act shell read_screen for "
+                       "the person's desktop (that one asks them first). Pass args {\"region\": "
+                       "\"x,y,w,h\"} to read one part.",
         "inputSchema": {"type": "object", "properties": {}},
         "argv": lambda a: ["screen"],
         # Its readers run one after another, each bounded: 10 s per foreign window, the page scan's
@@ -1265,6 +1269,10 @@ PRIVATE_READS = {"os_describe", "os_screen", "os_perception", "web_listen",
                  # Another agent's session: what it read, its commands' output.
                  "read_agent"}
 OUTBOUND = {"web_type", "web_go"}
+# Reads a mind makes through os_act, because they are the shell's actions: a display's text, read
+# from its pixels (#257). Private the way os_screen is — everything on the display is in them.
+SCREEN_READS = {("shell", "read_screen"), ("app-shell", "read_screen"),
+                ("shell", "read_mind_view"), ("app-shell", "read_mind_view")}
 
 _SAW_PRIVATE = []          # what tainted this session, in order, for the refusal message
 TAINT_OFF = os.environ.get("YOS_MCP_NO_TAINT") == "1"
@@ -2357,6 +2365,10 @@ def run_tool(tool, args, present=None):
     if tool["name"] in PRIVATE_READS and p.returncode == 0:
         # Recorded after the call, not before: a read that failed saw nothing.
         _SAW_PRIVATE.append(tool["name"])
+    if (tool["name"] == "os_act" and p.returncode == 0
+            and (str(app or "").lower(), str(args.get("action") or "")) in SCREEN_READS):
+        # A read that goes by os_act: the text on a display, whatever the person has open on it.
+        _SAW_PRIVATE.append("shell.%s" % args.get("action"))
 
     if not out:
         return prefix(note, "(the command succeeded and printed nothing)"

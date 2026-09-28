@@ -624,6 +624,14 @@ fn is_mind_view_app(app_id: &str) -> bool {
     with_state(|s| s.apps.iter().any(|(_, id)| id == app_id))
 }
 
+/// The Wayland display Mind View draws on, while it is running.
+pub fn display_now() -> Option<String> {
+    with_state(|s| {
+        let n = s.nested.as_mut()?;
+        matches!(n.child.try_wait(), Ok(None)).then(|| n.seat.wayland.clone())
+    })
+}
+
 /// What `describe shell` says about Mind View.
 pub fn for_describe() -> serde_json::Value {
     let on = crate::wire::settings::minds_open_in_mind_view();

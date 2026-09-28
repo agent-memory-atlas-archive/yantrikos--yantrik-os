@@ -50,6 +50,7 @@ mod control_installer;
 mod installer_rules;
 mod control_update;
 mod control_files;
+mod control_screen;
 /// Where a mind may take the Files screen, and what it may do with the folder there (#443).
 mod control_files_mind;
 /// Whether a mind may paste the Files clipboard into the folder on screen (#443).

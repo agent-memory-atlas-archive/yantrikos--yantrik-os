@@ -181,6 +181,9 @@ revision: c0ffee
 # grades them in control_agent_terminal.rs).
 SHELL_ACTIONS = """  act: open_app(name)  [standard, settles later]
        Launch an app, or focus it if it is already running.
+  act: read_mind_view(region?)  [safe, settles on return]
+       Read the text on Mind View from its pixels.
+         region?: string - x,y,w,h
   act: send_message(text)  [standard, settles later]
        Ask the desktop something, as if typed into the Lens.
   act: agent_run(command, cwd?, wait?)  [sensitive, settles later]
@@ -1177,6 +1180,18 @@ with tempfile.TemporaryDirectory() as d:
     check("bypass does not switch off the taint rule",
           not is_error and text.startswith("REFUSED") and "already read private state" in text, text)
     check("and nothing reached the browser", not read(state).get("web"), read(state))
+
+    # 15d. A display's text, read through os_act, is a private read like os_screen: the next
+    # thing typed into a page is refused (#257).
+    module, state = case(tmp, "taint-screen-read", mode="auto", machine_ceiling="dangerous",
+                         ceiling=None)
+    text, is_error = module.run_tool(module.BY_NAME["web_type"], {"ref": 1, "text": "hello"})
+    check("before reading a display, typing into a page is not refused by the taint",
+          not text.startswith("REFUSED"), text)
+    act(module, "shell", "read_mind_view", {})
+    text, is_error = module.run_tool(module.BY_NAME["web_type"], {"ref": 1, "text": "what I read"})
+    check("after os_act shell read_mind_view it is, naming the read",
+          text.startswith("REFUSED") and "shell.read_mind_view" in text, text)
 
     # 16. A desktop that will not say what mode it is in: fall back to `ask`, and say so.
     module, state = case(tmp, "nomode", no_mode=True, answer="pending")

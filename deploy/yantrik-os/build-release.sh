@@ -278,6 +278,25 @@ cp "$PROJECT_ROOT/config/systemd/"*.service "$ROOT/share/systemd/"
 mkdir -p "$ROOT/share/labwc-mind"
 cp "$PROJECT_ROOT/config/labwc-mind/rc.xml" "$ROOT/share/labwc-mind/rc.xml"
 cp "$PROJECT_ROOT/config/labwc-mind/empty.png" "$ROOT/share/labwc-mind/empty.png"
+
+# The models yantrik-ocr reads a display's text with (#257), in share/ocr where it looks. Fetched
+# once into a cache and pinned by hash: a model is code the shell runs on the person's screen, and
+# one that changed under the same name must stop the build, not ship.
+OCR_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/yantrik-release/ocr"
+mkdir -p "$OCR_CACHE" "$ROOT/share/ocr"
+for pinned in   "text-detection.rten f15cfb56bd02c4bf478a20343986504a1f01e1665c2b3a0ad66340f054b1b5ca"   "text-recognition.rten e484866d4cce403175bd8d00b128feb08ab42e208de30e42cd9889d8f1735a6e"; do
+  read -r model want <<< "$pinned"
+  if ! printf '%s  %s
+' "$want" "$OCR_CACHE/$model" | sha256sum -c --quiet >/dev/null 2>&1; then
+    curl -fsSL --retry 3 -o "$OCR_CACHE/$model.part" "https://ocrs-models.s3-accelerate.amazonaws.com/$model"       || fail "could not fetch the OCR model $model"
+    printf '%s  %s
+' "$want" "$OCR_CACHE/$model.part" | sha256sum -c --quiet >/dev/null 2>&1       || fail "the OCR model $model does not match its pinned sha256; not shipping it"
+    mv "$OCR_CACHE/$model.part" "$OCR_CACHE/$model"
+  fi
+  cp "$OCR_CACHE/$model" "$ROOT/share/ocr/$model"
+done
+[ -f "$ROOT/bin/yantrik-ocr" ] || fail "no yantrik-ocr in the build — a window with no tree could not be read"
+echo "   + share/ocr (the text reader's models)"
 # Barlow is embedded in each app binary, which the compositor cannot read a font out of, so the
 # same files also ship loose for fontconfig.
 cp "$PROJECT_ROOT/crates/yantrik-design-tokens/slint/fonts/"*.ttf "$ROOT/share/fonts/"

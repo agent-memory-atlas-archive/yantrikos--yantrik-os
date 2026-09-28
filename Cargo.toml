@@ -23,6 +23,8 @@ members = [
     "crates/yantrik",
     "crates/yantrik-ui",
     "crates/yantrik-term",
+    # Text on a screen capture, for windows with no accessibility tree (#257).
+    "crates/yantrik-ocr",
     "crates/yantrik-ml",
     "crates/yantrik-os",
     "crates/yantrik-brain",
