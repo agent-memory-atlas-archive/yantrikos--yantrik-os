@@ -203,6 +203,8 @@ export component InstallerScreen inherits Rectangle {
     // False until the disk scan has answered, so "no disks" is not said while still looking.
     in property <bool> disks-scanned: false;
     in-out property <string> selected-disk;
+    // LUKS2 on the root with the password as its passphrase (#400 step b). On unless unticked.
+    in-out property <bool> encrypt: true;
 
     // ── Review ──
     // Detected from the network when the installer starts, "UTC" when that fails; editable.
@@ -217,7 +219,7 @@ export component InstallerScreen inherits Rectangle {
     callback install-to-disk(/* username */ string, /* password */ string,
                              /* full_name */ string, /* hostname */ string,
                              /* keyboard */ string, /* timezone */ string,
-                             /* target_disk */ string);
+                             /* target_disk */ string, /* encrypt */ bool);
     callback reboot();
 
     // ── The rules (installer_rules.rs); each check answers "" when the value is fine ──
@@ -681,29 +683,59 @@ export component InstallerScreen inherits Rectangle {
                         }
                     }
 
-                    // Encryption is the next step of #400. Shown, and plainly not yet on, so
-                    // nobody installs believing their disk is encrypted.
-                    HorizontalLayout {
-                        spacing: Theme.sp-3;
-                        opacity: 0.45;
-                        VerticalLayout {
-                            alignment: center;
-                            Rectangle {
-                                width: 16px; height: 16px;
-                                border-radius: 4px;
-                                border-width: 1.5px;
-                                border-color: Theme.border-strong;
+                    // On by default (#400 step b): the root is LUKS2 with the password as its
+                    // passphrase, asked for at every start. Off, a stolen disk is readable.
+                    encrypt-row := Rectangle {
+                        height: encrypt-layout.preferred-height;
+                        encrypt-layout := HorizontalLayout {
+                            spacing: Theme.sp-3;
+                            VerticalLayout {
+                                alignment: start;
+                                padding-top: 2px;
+                                Rectangle {
+                                    width: 16px; height: 16px;
+                                    border-radius: 4px;
+                                    border-width: 1.5px;
+                                    border-color: root.encrypt ? Theme.cyan : Theme.border-strong;
+                                    background: root.encrypt ? Theme.cyan.transparentize(80%) : transparent;
+                                    if root.encrypt : Icon {
+                                        commands: Icons.check;
+                                        size: 12px;
+                                        tint: Theme.cyan;
+                                    }
+                                }
+                            }
+                            VerticalLayout {
+                                alignment: start;
+                                padding-top: 2px;
+                                Icon {
+                                    commands: Icons.lock;
+                                    size: 14px;
+                                    tint: root.encrypt ? Theme.cyan : Theme.text-dim;
+                                }
+                            }
+                            VerticalLayout {
+                                horizontal-stretch: 1;
+                                spacing: 2px;
+                                Text {
+                                    text: "Encrypt with my password";
+                                    color: Theme.text-primary;
+                                    font-size: Theme.fs-body;
+                                    font-weight: 500;
+                                }
+                                Text {
+                                    text: root.encrypt
+                                        ? "Asked for each time the computer starts. Without it, nobody can read the disk."
+                                        : "Anyone who takes the disk out can read everything on it.";
+                                    color: root.encrypt ? Theme.text-dim : Theme.amber;
+                                    font-size: Theme.fs-caption;
+                                    wrap: word-wrap;
+                                }
                             }
                         }
-                        VerticalLayout {
-                            alignment: center;
-                            Icon { commands: Icons.lock; size: 14px; tint: Theme.text-dim; }
-                        }
-                        Text {
-                            text: "Encrypt with my password (coming next)";
-                            color: Theme.text-dim;
-                            font-size: Theme.fs-body;
-                            vertical-alignment: center;
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.encrypt = !root.encrypt; }
                         }
                     }
 
@@ -747,6 +779,10 @@ export component InstallerScreen inherits Rectangle {
                             SummaryRow { label: "Name"; value: root.full-name != "" ? root.full-name : "—"; }
                             SummaryRow { label: "Username"; value: root.username; }
                             SummaryRow { label: "Computer name"; value: root.hostname; }
+                            SummaryRow {
+                                label: "Encryption";
+                                value: root.encrypt ? "On — your password unlocks the disk at start" : "Off";
+                            }
                             HorizontalLayout {
                                 spacing: Theme.sp-3;
                                 Text {
@@ -861,7 +897,7 @@ export component InstallerScreen inherits Rectangle {
                                     root.username, root.password,
                                     root.full-name, root.hostname,
                                     root.keyboard, root.timezone,
-                                    root.selected-disk);
+                                    root.selected-disk, root.encrypt);
                                 root.step = 4;
                             }
                         }

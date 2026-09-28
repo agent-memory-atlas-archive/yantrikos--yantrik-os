@@ -57,6 +57,7 @@ pub mod cross_app;
 pub mod universal_actions;
 pub mod command_palette;
 pub mod installer;
+pub mod installer_disk;
 pub mod installer_locale;
 pub mod login;
 pub mod services;

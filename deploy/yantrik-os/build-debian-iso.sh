@@ -291,6 +291,13 @@ apt-get install -y -qq \
     dosfstools e2fsprogs grub-efi-amd64-bin grub-pc-bin \
     libpam-modules initramfs-tools || true
 
+# ── Disk encryption (#400 step b) ──
+# The installer encrypts the root by default: cryptsetup makes and opens it, cryptsetup-initramfs
+# puts the unlock into the installed initramfs, and console-setup the keymap beside it, so a
+# passphrase typed on a German keyboard is read as German. Copied onto the disk with the rest of
+# the live system. No `|| true`: without them an encrypted install cannot boot.
+apt-get install -y -qq     cryptsetup     cryptsetup-initramfs     console-setup
+
 # ── Calamares installer ──
 apt-get install -y -qq \
     2>/dev/null || {

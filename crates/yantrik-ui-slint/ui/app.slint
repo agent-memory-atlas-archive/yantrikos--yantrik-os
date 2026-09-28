@@ -1077,7 +1077,9 @@ export component App inherits Window {
     callback onboard-install-to-disk(/* username */ string, /* password */ string,
                                      /* full_name */ string, /* hostname */ string,
                                      /* keyboard */ string, /* timezone */ string,
-                                     /* target_disk */ string);
+                                     /* target_disk */ string, /* encrypt */ bool);
+    // The installer's "Encrypt with my password" (#400 step b), on by default.
+    in-out property <bool> onboard-encrypt: true;
     callback onboard-install-reboot();
 
     // AI onboarding setup (V59)
@@ -1317,13 +1319,14 @@ export component App inherits Window {
             disks: root.onboard-disks;
             disks-scanned: root.onboard-disks-scanned;
             selected-disk <=> root.onboard-selected-disk;
+            encrypt <=> root.onboard-encrypt;
             timezone <=> root.onboard-timezone;
             installing <=> root.onboard-installing;
             install-progress <=> root.onboard-install-progress;
             install-status <=> root.onboard-install-status;
             install-error <=> root.onboard-install-error;
-            install-to-disk(username, password, full-name, hostname, keyboard, timezone, disk) => {
-                root.onboard-install-to-disk(username, password, full-name, hostname, keyboard, timezone, disk);
+            install-to-disk(username, password, full-name, hostname, keyboard, timezone, disk, encrypt) => {
+                root.onboard-install-to-disk(username, password, full-name, hostname, keyboard, timezone, disk, encrypt);
             }
             reboot => { root.onboard-install-reboot(); }
             derive-username(name) => { return root.installer-derive-username(name); }

@@ -78,6 +78,7 @@ mod mime_dispatch;
 mod lens;
 /// The Lens's conversation put back from the saved session when it opens empty (#246).
 mod lens_history;
+mod disk_lock;
 mod lock;
 mod markdown;
 /// What the mind may do without being asked: plan / ask / auto / bypass. See its module doc.

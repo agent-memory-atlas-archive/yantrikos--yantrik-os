@@ -10,6 +10,7 @@ use crate::app_context::AppContext;
 use crate::control_installer::step;
 use crate::installer_rules;
 use crate::wire::ai_onboarding::auth_type_for;
+use crate::wire::installer_disk;
 use crate::wire::installer_locale;
 use crate::wire::settings::{provider_preset, ProviderStore, ProviderStoreEntry};
 use crate::{App, InstallerDisk, KeyboardChoice};
@@ -38,7 +39,7 @@ pub fn wire(ui: &App, _ctx: &AppContext) {
 
     // Handle install-to-disk callback from the installer screens and the control surface
     let ui_weak = ui.as_weak();
-    ui.on_onboard_install_to_disk(move |username, password, full_name, hostname, keyboard, timezone, target_disk| {
+    ui.on_onboard_install_to_disk(move |username, password, full_name, hostname, keyboard, timezone, target_disk, encrypt| {
         let username = username.to_string();
         let password = password.to_string();
         let full_name = full_name.to_string();
@@ -55,6 +56,7 @@ pub fn wire(ui: &App, _ctx: &AppContext) {
                 hostname = %hostname,
                 keyboard = %keyboard,
                 timezone = %timezone,
+                encrypt,
                 "Installer thread started"
             );
 
@@ -95,6 +97,7 @@ pub fn wire(ui: &App, _ctx: &AppContext) {
                 keyboard,
                 timezone,
                 target_disk: target_disk.clone(),
+                encrypt,
                 partition_scheme: "auto".into(),
                 ai_provider,
                 ai_base_url,
@@ -245,6 +248,8 @@ pub struct InstallerState {
     /// IANA zone from the Review screen, e.g. "Europe/Berlin". Empty means UTC.
     pub timezone: String,
     pub target_disk: String,      // e.g. "sda"
+    /// LUKS2 on the root with the password as its passphrase (#400 step b).
+    pub encrypt: bool,
     pub partition_scheme: String,  // "auto" or "manual"
     pub ai_provider: String,
     /// The endpoint the wizard saved for the provider. Empty means nobody chose
@@ -284,60 +289,18 @@ pub fn run_install(state: &InstallerState, progress: ProgressFn) -> Result<(), S
     let is_efi = std::path::Path::new("/sys/firmware/efi").exists();
     tracing::info!(efi = is_efi, "Installer: boot mode detected");
 
-    // ── Step 1: Partition disk ────────────────────────────────────
-    progress(2, "Partitioning disk...");
-    run_cmd("parted", &["-s", &disk, "mklabel", "gpt"])?;
-
-    let (efi_part, root_part) = if is_efi {
-        // GPT + EFI: partition 1 = EFI (512M), partition 2 = root
-        run_cmd("parted", &["-s", &disk, "mkpart", "EFI", "fat32", "1MiB", "513MiB"])?;
-        run_cmd("parted", &["-s", &disk, "set", "1", "esp", "on"])?;
-        run_cmd("parted", &["-s", &disk, "mkpart", "root", "ext4", "513MiB", "100%"])?;
-        partition_names(&disk, 1, 2)
-    } else {
-        // GPT + BIOS: partition 1 = BIOS boot (1M), partition 2 = root (no EFI)
-        run_cmd("parted", &["-s", &disk, "mkpart", "biosboot", "", "1MiB", "2MiB"])?;
-        run_cmd("parted", &["-s", &disk, "set", "1", "bios_grub", "on"])?;
-        run_cmd("parted", &["-s", &disk, "mkpart", "root", "ext4", "2MiB", "100%"])?;
-        // No EFI partition in BIOS mode
-        (String::new(), partition_name(&disk, 2))
-    };
-    progress(8, "Disk partitioned");
-
-    // Wait for partition devices to appear
-    let _ = run_cmd("partprobe", &[&disk]);
-    std::thread::sleep(std::time::Duration::from_secs(2));
-
-    if !std::path::Path::new(&root_part).exists() {
-        let _ = run_cmd("udevadm", &["settle", "--timeout=5"]);
-        std::thread::sleep(std::time::Duration::from_secs(1));
-    }
-
-    // ── Step 2: Format filesystems ──────────────────────────────
-    if is_efi && !efi_part.is_empty() {
-        progress(10, "Formatting EFI partition (FAT32)...");
-        run_cmd("mkfs.fat", &["-F32", &efi_part])?;
-    }
-
-    progress(12, "Formatting root partition (ext4)...");
-    run_cmd("mkfs.ext4", &["-q", "-L", "YANTRIK", &root_part])?;
-    progress(15, "Filesystems formatted");
-
-    // ── Step 3: Mount target ────────────────────────────────────
+    // ── Steps 1-3: partition, encrypt if asked, format, mount (installer_disk.rs) ──
+    let layout = installer_disk::prepare(&disk, is_efi, state.encrypt, &state.password, &*progress)?;
     let mount_dir = "/mnt/yantrik-install";
     progress(16, "Mounting target filesystem...");
-    run_cmd("mkdir", &["-p", mount_dir])?;
-    run_cmd("mount", &[&root_part, mount_dir])?;
-
-    if is_efi && !efi_part.is_empty() {
-        let efi_mount = format!("{mount_dir}/boot/efi");
-        run_cmd("mkdir", &["-p", &efi_mount])?;
-        run_cmd("mount", &[&efi_part, &efi_mount])?;
+    if let Err(e) = installer_disk::mount(&layout, mount_dir) {
+        installer_disk::release(&layout, mount_dir);
+        return Err(e);
     }
     progress(18, "Target mounted");
 
     // From here, ensure we clean up on failure
-    let result = install_to_target(state, &disk, &efi_part, is_efi, mount_dir, &progress);
+    let result = install_to_target(state, &disk, &layout, is_efi, mount_dir, &progress);
 
     // ── Cleanup: unmount everything (lazy to avoid "device busy") ──
     // Kill any processes still using the mount
@@ -348,11 +311,8 @@ pub fn run_install(state: &InstallerState, progress: ProgressFn) -> Result<(), S
     let _ = run_cmd("umount", &["-Rl", &format!("{mount_dir}/sys")]);
     let _ = run_cmd("umount", &["-Rl", &format!("{mount_dir}/proc")]);
     let _ = run_cmd("umount", &["-Rl", &format!("{mount_dir}/dev")]);
-    let _ = run_cmd("umount", &["-l", &format!("{mount_dir}/boot/efi")]);
-    let _ = run_cmd("umount", &["-l", mount_dir]);
-
-    // Sync to flush writes
-    let _ = run_cmd("sync", &[]);
+    // /boot/efi, /boot and the root, then the encrypted root closed.
+    installer_disk::release(&layout, mount_dir);
 
     result
 }
@@ -361,7 +321,7 @@ pub fn run_install(state: &InstallerState, progress: ProgressFn) -> Result<(), S
 fn install_to_target(
     state: &InstallerState,
     disk: &str,
-    efi_part: &str,
+    layout: &installer_disk::Layout,
     is_efi: bool,
     mount_dir: &str,
     progress: &ProgressFn,
@@ -372,11 +332,8 @@ fn install_to_target(
 
     // ── Step 5: Generate fstab ──────────────────────────────────
     progress(58, "Configuring filesystem table...");
-    let mut fstab = format!("LABEL=YANTRIK  /           ext4  defaults,noatime  0  1\n");
-    if is_efi && !efi_part.is_empty() {
-        fstab.push_str(&format!("{efi_part}     /boot/efi   vfat  defaults          0  2\n"));
-    }
-    sudo_write(&format!("{mount_dir}/etc/fstab"), &fstab)?;
+    // fstab, and for an encrypted root its crypttab and the initramfs settings that ask for it.
+    installer_disk::write_system_files(layout, mount_dir)?;
 
     // ── Step 6: Set hostname ────────────────────────────────────
     progress(60, "Setting hostname...");
@@ -541,7 +498,7 @@ fn install_to_target(
     // Configure GRUB defaults
     let _ = sudo_write(
         &format!("{mount_dir}/etc/default/grub"),
-        "GRUB_DEFAULT=0\nGRUB_TIMEOUT=3\nGRUB_DISTRIBUTOR=\"Yantrik OS\"\nGRUB_CMDLINE_LINUX_DEFAULT=\"quiet splash\"\nGRUB_CMDLINE_LINUX=\"console=tty1 console=ttyS0,115200\"\nGRUB_TERMINAL=\"console serial\"\nGRUB_SERIAL_COMMAND=\"serial --speed=115200\"\n",
+        "GRUB_DEFAULT=0\nGRUB_TIMEOUT=3\nGRUB_DISTRIBUTOR=\"Yantrik OS\"\nGRUB_CMDLINE_LINUX_DEFAULT=\"quiet splash\"\nGRUB_CMDLINE_LINUX=\"console=ttyS0,115200 console=tty1\"\nGRUB_TERMINAL=\"console serial\"\nGRUB_SERIAL_COMMAND=\"serial --speed=115200\"\n",
     );
 
     progress(85, "Updating GRUB configuration...");
@@ -565,9 +522,16 @@ fn install_to_target(
     let _ = run_cmd("mkdir", &["-p", &format!("{mount_dir}/opt/yantrik/logs")]);
     let _ = run_cmd("chmod", &["777", &format!("{mount_dir}/opt/yantrik/logs")]);
 
-    // Regenerate initramfs without live-boot hooks
+    // Regenerate initramfs without live-boot hooks, and with the unlock when the root is
+    // encrypted. There a failure is the install's failure, and so is an image that came out
+    // without the unlock: the machine would stop at boot with nothing asking for the passphrase.
     progress(93, "Rebuilding initramfs...");
-    let _ = chroot_cmd(mount_dir, &["update-initramfs", "-u"]);
+    if layout.encrypted() {
+        chroot_cmd(mount_dir, &["update-initramfs", "-u", "-k", "all"])?;
+        installer_disk::verify_initramfs(mount_dir)?;
+    } else {
+        let _ = chroot_cmd(mount_dir, &["update-initramfs", "-u"]);
+    }
 
     progress(100, "Installation complete!");
     Ok(())
@@ -1034,18 +998,6 @@ fn auto_detect_disk() -> Result<String, String> {
 }
 
 /// Get a single partition device name by number.
-fn partition_name(disk: &str, num: u8) -> String {
-    if disk.contains("nvme") || disk.contains("mmcblk") {
-        format!("{disk}p{num}")
-    } else {
-        format!("{disk}{num}")
-    }
-}
-
-/// Get two partition device names.
-fn partition_names(disk: &str, n1: u8, n2: u8) -> (String, String) {
-    (partition_name(disk, n1), partition_name(disk, n2))
-}
 
 /// Write a file via sudo tee (since direct fs::write lacks root perms).
 pub(super) fn sudo_write(path: &str, content: &str) -> Result<(), String> {
