@@ -411,6 +411,46 @@ fn parse_seat(text: &str) -> Option<Seat> {
     Some(Seat { wayland, x11 })
 }
 
+/// Mind View's window, as the person's compositor names it: labwc's app id, and the title the
+/// title library gives it (crates/yantrik-mind-view-title).
+const WINDOW_MATCH: [&str; 2] = ["app_id:labwc", "title:Mind View"];
+
+/// Minimise Mind View's window the moment it first appears (#427).
+///
+/// A window that maps is focused and raised by the person's compositor like any other, so the
+/// first app a mind opened put Mind View over whatever the person was doing and took their
+/// keyboard: over the launcher they had just opened, in the case that found it. That is the
+/// interruption Mind View exists to end. It starts out of the way; the person opens it from its
+/// taskbar entry when they want to watch, and focus returns to what they had in front. Off the UI
+/// thread: it waits for the window, and wlrctl is a process.
+fn step_aside_when_shown() {
+    std::thread::spawn(|| {
+        let deadline = Instant::now() + START_BUDGET;
+        while Instant::now() < deadline {
+            let shown = Command::new("wlrctl")
+                .args(["toplevel", "find"])
+                .args(WINDOW_MATCH)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success());
+            if shown {
+                let minimised = Command::new("wlrctl")
+                    .args(["toplevel", "minimize"])
+                    .args(WINDOW_MATCH)
+                    .status()
+                    .is_ok_and(|s| s.success());
+                if !minimised {
+                    tracing::warn!("Mind View appeared but could not be set aside; it may be over the person's work");
+                }
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        tracing::debug!("Mind View's window did not appear in time to be set aside");
+    });
+}
+
 fn start() -> Result<Nested, String> {
     if std::env::var_os("WAYLAND_DISPLAY").is_none() {
         return Err("the shell is not running under a Wayland compositor, so there is nothing \
@@ -463,6 +503,7 @@ fn start() -> Result<Nested, String> {
         if let Some(seat) = std::fs::read_to_string(&seat_file).ok().as_deref().and_then(parse_seat)
         {
             if socket_path(&seat.wayland).exists() {
+                step_aside_when_shown();
                 return Ok(Nested { child, seat });
             }
         }
