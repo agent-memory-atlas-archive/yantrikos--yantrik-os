@@ -6,7 +6,8 @@
 //! followed by a member `k/authorized_keys` writes through the link; a hard link member names
 //! any file the person owns and makes it the archive's to overwrite. So every member is listed
 //! first: any link or special file refuses the whole archive, and every name, put where it will
-//! land, must pass the same `validate_path` a single write would.
+//! land, must pass the same `validate_write_path` a single write would - which refuses a
+//! member under any hidden folder of the home, a repository's .git/config included.
 
 use std::path::{Component, Path};
 

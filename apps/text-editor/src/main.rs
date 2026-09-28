@@ -1087,9 +1087,10 @@ fn document_now(ui: &TextEditorApp, s: &State) -> serde_json::Value {
         "path": if hidden { serde_json::json!(HIDDEN_TAB) } else { serde_json::json!(d.path.as_ref().map(|p| p.display().to_string())) },
         "tab": b.active,
         "tabs": b.docs.len(),
-        "lines": d.text.bytes().filter(|c| *c == b'\n').count() + 1,
-        "characters": d.text.chars().count(),
-        "bytes": d.text.len(),
+        // How long a hidden file is, is something about it too.
+        "lines": (!hidden).then(|| d.text.bytes().filter(|c| *c == b'\n').count() + 1),
+        "characters": (!hidden).then(|| d.text.chars().count()),
+        "bytes": (!hidden).then(|| d.text.len()),
         "modified": d.dirty(),
         "on_disk": disk.is_some(),
         "matches_disk": disk.as_deref() == Some(d.text.as_str()),
@@ -1097,7 +1098,7 @@ fn document_now(ui: &TextEditorApp, s: &State) -> serde_json::Value {
         "notice": ui.get_notice().to_string(),
         // Empty unless the window is too big to draw whole and the person sees only its first
         // lines (#328); the counts above are the full document's either way.
-        "view_status": ui.get_view_status().to_string(),
+        "view_status": if hidden { String::new() } else { ui.get_view_status().to_string() },
     })
 }
 
@@ -1111,14 +1112,18 @@ fn view(ui: &TextEditorApp, s: &State) -> View {
     let d = &b.docs[b.active];
     let hidden = agent_rule::hidden_from_caller(d.path.as_deref()).is_some();
     let lines = d.text.bytes().filter(|c| *c == b'\n').count() + 1;
-    let mut summary = format!(
-        "Text Editor — {}{}, {} line{}, {}",
-        if hidden { HIDDEN_TAB.to_string() } else { d.title() },
-        if d.path.is_none() { " (no file yet)" } else { "" },
-        lines,
-        if lines == 1 { "" } else { "s" },
-        if d.dirty() { "unsaved" } else { "saved" }
-    );
+    let mut summary = if hidden {
+        format!("Text Editor — {HIDDEN_TAB}, {}", if d.dirty() { "unsaved" } else { "saved" })
+    } else {
+        format!(
+            "Text Editor — {}{}, {} line{}, {}",
+            d.title(),
+            if d.path.is_none() { " (no file yet)" } else { "" },
+            lines,
+            if lines == 1 { "" } else { "s" },
+            if d.dirty() { "unsaved" } else { "saved" }
+        )
+    };
     if b.docs.len() > 1 {
         summary.push_str(&format!(" · tab {} of {}", b.active + 1, b.docs.len()));
     }
@@ -1143,7 +1148,8 @@ fn view(ui: &TextEditorApp, s: &State) -> View {
     if !notice.is_empty() {
         summary.push_str(&format!(" · {notice}"));
     }
-    let view_status = ui.get_view_status().to_string();
+    // "Showing the first N lines" is the file's length too.
+    let view_status = if hidden { String::new() } else { ui.get_view_status().to_string() };
     if !view_status.is_empty() {
         summary.push_str(&format!(" · {view_status}"));
     }
@@ -1151,11 +1157,11 @@ fn view(ui: &TextEditorApp, s: &State) -> View {
         .with("path", shown_path(d))
         .with("title", if hidden { HIDDEN_TAB.to_string() } else { d.title() })
         .with("modified", d.dirty())
-        .with("lines", lines as i64)
-        .with("characters", d.text.chars().count() as i64)
+        .with("lines", (!hidden).then_some(lines as i64))
+        .with("characters", (!hidden).then(|| d.text.chars().count() as i64))
         .with("content", if hidden { String::new() } else { d.text.chars().take(4000).collect::<String>() })
         .with("content_hidden", hidden.then_some("the tab holds a file an agent is not shown"))
-        .with("bytes", d.text.len())
+        .with("bytes", (!hidden).then_some(d.text.len()))
         .with("language", document::language(d.path.as_deref()))
         .with(
             "tabs",

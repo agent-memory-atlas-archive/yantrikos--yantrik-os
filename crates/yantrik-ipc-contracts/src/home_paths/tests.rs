@@ -294,11 +294,29 @@ fn which_program_opens_what_is_protected() {
 #[test]
 fn desktop_entries_under_a_moved_data_home_are_protected() {
     let xdg = Path::new("/srv/ann-data");
-    assert!(is_protected_with(Path::new("/srv/ann-data/applications/term.desktop"), Some(xdg)));
-    assert!(is_protected_with(Path::new("/srv/ann-data/applications"), Some(xdg)));
-    assert!(!is_protected_with(Path::new("/srv/ann-data/applications-old/a"), Some(xdg)));
-    assert!(!is_protected_with(Path::new("/srv/ann-data/fonts/a.ttf"), Some(xdg)));
-    assert!(!is_protected_with(Path::new("/srv/ann-data/applications/a"), None));
+    assert!(is_protected_with(Path::new("/srv/ann-data/applications/term.desktop"), Some(xdg), None));
+    assert!(is_protected_with(Path::new("/srv/ann-data/applications"), Some(xdg), None));
+    assert!(!is_protected_with(Path::new("/srv/ann-data/applications-old/a"), Some(xdg), None));
+    assert!(!is_protected_with(Path::new("/srv/ann-data/fonts/a.ttf"), Some(xdg), None));
+    assert!(!is_protected_with(Path::new("/srv/ann-data/applications/a"), None, None));
+}
+
+#[test]
+fn startup_places_under_a_moved_config_home_are_protected() {
+    let xdg = Path::new("/srv/ann-config");
+    for place in ["autostart/run.desktop", "systemd/user/a.service", "environment.d/x.conf", "labwc/rc.xml", "yantrik/config.yaml", "mimeapps.list"] {
+        assert!(is_protected_with(&xdg.join(place), None, Some(xdg)), "{place}");
+    }
+    assert!(!is_protected_with(Path::new("/srv/ann-config/gtk-3.0/settings.ini"), None, Some(xdg)));
+}
+
+#[test]
+fn protected_names_are_matched_whatever_their_case() {
+    // A case-folding filesystem makes `.SSH` the folder `.ssh`.
+    assert!(is_protected(Path::new("/home/ann/.SSH/id_ed25519")));
+    assert!(is_protected(Path::new("/home/ann/.Config/Autostart/x.desktop")));
+    assert!(is_protected(Path::new("/home/ann/Memory.DB")));
+    assert!(!is_protected(Path::new("/home/ann/.SSH-notes")));
 }
 
 #[test]
@@ -308,8 +326,8 @@ fn nothing_is_made_where_it_would_become_a_protected_place() {
     let (_d, home) = home();
     std::fs::create_dir_all(home.join(".local/share/x")).unwrap();
     std::fs::create_dir_all(home.join(".config")).unwrap();
-    assert!(may_create("~/.local/share/x", &home).is_ok(), "an ordinary name there is fine");
     assert!(may_create("~/notes/new-folder", &home).is_ok());
+    assert!(may_create("~/.local/share/x", &home).unwrap_err().ends_with(" is hidden_place"), "a hidden folder");
     for asked in [
         "~/.local/share/applications",
         "~/.config/autostart",

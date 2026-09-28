@@ -8,7 +8,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use super::{expand, stat};
+use super::{expand, stat, where_programs_look, HIDDEN_RULE};
 
 /// Whether an agent may have the file at `asked` read: in the home, outside its protected
 /// places, there, and a file. `Err` says which of those it is not.
@@ -27,11 +27,15 @@ pub fn may_read_file(asked: &str, home: &Path) -> Result<(), String> {
 ///
 /// A file already at the path may be replaced - an agent asked to save over the draft it made is
 /// the ordinary case - because what could run as the person when replaced is on the protected
-/// list and refused before this is reached. The last part of the path must not be a link: the
-/// write would land wherever the link points, and a link an agent could place is exactly how
-/// "a file in the home" becomes somewhere else.
+/// list or in a hidden place (writes.rs), both refused before this is reached. The last part of
+/// the path must not be a link: the write would land wherever the link points, and a link an
+/// agent could place is exactly how "a file in the home" becomes somewhere else.
 pub fn may_write_file(asked: &str, home: &Path) -> Result<(), String> {
     let answer = stat(asked, home);
+    if !answer["exists"].is_boolean() {
+        return Err(refusal(asked, &answer));
+    }
+    not_hidden(asked, home)?;
     let is_link = || {
         expand(asked.trim(), home)
             .and_then(|p| p.symlink_metadata().ok())
@@ -52,12 +56,21 @@ pub fn may_write_file(asked: &str, home: &Path) -> Result<(), String> {
 /// rename's new name, a pasted copy. Only where `stat` answers true or false - in the home,
 /// outside its protected places, links followed and the part not there yet included - so a
 /// folder named `applications` made in ~/.local/share, or renamed to that, is refused. Whether
-/// a name is already taken is the operation's own business.
+/// a name is already taken is the operation's own business. Nowhere hidden, either (writes.rs):
+/// a folder `.config` made in the home is where programs will look.
 pub fn may_create(asked: &str, home: &Path) -> Result<(), String> {
     let answer = stat(asked, home);
     match &answer["exists"] {
-        Value::Bool(_) => Ok(()),
+        Value::Bool(_) => not_hidden(asked, home),
         _ => Err(refusal(asked, &answer)),
+    }
+}
+
+/// Refuse a write into a place programs read their settings or startup from.
+fn not_hidden(asked: &str, home: &Path) -> Result<(), String> {
+    match expand(asked.trim(), home) {
+        Some(path) if where_programs_look(&path, home) => Err(format!("{HIDDEN_RULE}; {asked} is hidden_place")),
+        _ => Ok(()),
     }
 }
 

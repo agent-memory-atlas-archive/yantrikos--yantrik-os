@@ -935,7 +935,11 @@ fn an_agent_names_only_files_in_the_home(ui: &TextEditorApp, s: &State, publishe
     assert!(seen.state["content_hidden"].is_string(), "{}", seen.state);
     assert_eq!(seen.state["find_count"], 0, "{}", seen.state);
     assert_eq!(seen.state["find_query"], "", "{}", seen.state);
+    for size in ["lines", "characters", "bytes"] {
+        assert!(seen.state[size].is_null(), "{size}: {}", seen.state);
+    }
     assert!(seen.summary.contains("not shown to an agent"), "{}", seen.summary);
+    assert!(!seen.summary.contains(" line"), "no length in the summary either: {}", seen.summary);
     let listed = seen.state.to_string();
     assert!(!listed.contains("surface.txt") && !listed.contains(&dir.display().to_string()), "{listed}");
     assert!(seen.state["tabs"].as_array().unwrap().iter().any(|t| t["path"] == "(hidden)"), "{listed}");
@@ -944,6 +948,10 @@ fn an_agent_names_only_files_in_the_home(ui: &TextEditorApp, s: &State, publishe
     act_on(published, "new", serde_json::json!({ "text": "echo pwned\n" })).expect("a new tab");
     refused("save_as", serde_json::json!({ "path": "~/.bashrc", "overwrite": true }), " is protected");
     refused("save_as", serde_json::json!({ "path": "~/.config/autostart/x.desktop" }), " is protected");
+    // Nor anywhere else programs read their settings and startup: the list can never be whole.
+    for hidden_place in ["~/.gitconfig", "~/.local/bin/x", "~/bin/x", "~/.tmux.conf"] {
+        refused("save_as", serde_json::json!({ "path": hidden_place }), " is hidden_place");
+    }
     refused("save_as", serde_json::json!({ "path": dir.join("agent.txt").display().to_string() }), " is outside");
     assert!(!dir.join("agent.txt").exists(), "nothing was written");
     drop(agent);

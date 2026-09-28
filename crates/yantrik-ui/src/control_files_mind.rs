@@ -80,10 +80,49 @@ pub fn may_paste(label: &str) -> Result<(), String> {
     if !a_mind_is_calling() {
         return Ok(());
     }
-    match crate::wire::files::clipboard_now() {
-        Some((sources, _cut)) => crate::control_files_paste::paste_verdict(&sources, label, &home()),
+    paste_now_verdict(crate::wire::files::clipboard_now(), label, &home())
+}
+
+/// [`may_paste`] with the clipboard as read and `home` given. A clipboard that could not be read
+/// refuses: "nothing to check" is not what an unreadable one means.
+pub fn paste_now_verdict(
+    clipboard: Result<Option<(Vec<std::path::PathBuf>, bool)>, String>,
+    label: &str,
+    home: &Path,
+) -> Result<(), String> {
+    match clipboard? {
+        Some((sources, _cut)) => crate::control_files_paste::paste_verdict(&sources, label, home),
         None => Ok(()),
     }
+}
+
+/// Refuse a mind renaming the entry `name` to `new`: the entry must be one it may open, the new
+/// name one it may make, and - for a folder - everything below it must be able to land under
+/// the new name. `cfg` holding `autostart/evil.desktop`, renamed `.config`, would otherwise
+/// create ~/.config/autostart with only the top name checked.
+pub fn may_rename(label: &str, name: &str, new: &str) -> Result<(), String> {
+    if !a_mind_is_calling() {
+        return Ok(());
+    }
+    rename_verdict(label, name, new, &home())
+}
+
+/// [`may_rename`] with `home` given.
+pub fn rename_verdict(label: &str, name: &str, new: &str, home: &Path) -> Result<(), String> {
+    entry_verdict(label, name, home)?;
+    make_verdict(label, new, home)?;
+    let folder = home_paths::expand(label, home).ok_or_else(|| format!("{label} is not a folder"))?;
+    let real = folder.canonicalize().map_err(|e| format!("the folder on screen cannot be read: {e}"))?;
+    home_paths::may_land(&folder.join(name), &real.join(new), home)
+}
+
+/// Undoing a trash puts things back where they were deleted from, which may be anywhere the
+/// person deleted from; which items it restores is decided by the last trash, not by the caller.
+pub fn may_undo_trash() -> Result<(), String> {
+    if a_mind_is_calling() {
+        return Err("undoing a trash restores the person's files wherever they were; a mind does not".to_string());
+    }
+    Ok(())
 }
 
 /// [`may_make`] with `home` given.

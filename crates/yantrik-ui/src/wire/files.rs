@@ -720,12 +720,17 @@ thread_local! {
 
 /// What a paste would copy or move right now: the Files clipboard's paths, and whether they are
 /// cut. The person's clipboard, not the caller's: a mind pasting has to be checked against what
-/// the person put there, which may be anything they could select (#443). `None` when nothing is
-/// on it, or the browser is mid-callback and cannot be read.
-pub fn clipboard_now() -> Option<(Vec<PathBuf>, bool)> {
-    let browser = BROWSER.with(|b| b.borrow().upgrade())?;
-    let browser = browser.try_borrow().ok()?;
-    browser.clipboard.as_ref().map(|c| (c.paths.clone(), c.cut))
+/// the person put there, which may be anything they could select (#443). `Ok(None)` when
+/// nothing is on it; `Err` when it cannot be read - no browser, or one mid-callback - which a
+/// check must refuse on rather than read as "nothing to paste".
+pub fn clipboard_now() -> Result<Option<(Vec<PathBuf>, bool)>, String> {
+    let browser = BROWSER
+        .with(|b| b.borrow().upgrade())
+        .ok_or_else(|| "the Files clipboard cannot be read: Files is not running".to_string())?;
+    let browser = browser
+        .try_borrow()
+        .map_err(|_| "the Files clipboard cannot be read right now; try again".to_string())?;
+    Ok(browser.clipboard.as_ref().map(|c| (c.paths.clone(), c.cut)))
 }
 
 pub fn wire(ui: &App, ctx: &AppContext) {

@@ -437,6 +437,38 @@ pub fn validate_path(path: &str) -> Result<String, String> {
     Ok(expanded)
 }
 
+/// [`validate_path`] for a tool that writes: also nowhere hidden in the home, where programs read
+/// their settings and startup (`home_paths::where_programs_look`). The protected list can never
+/// name all of those - ~/.gitconfig, ~/.vimrc, ~/.local/bin - so a write goes into none of the
+/// home's dot folders and dotfiles, nor ~/bin, wherever a link would take it. Reading keeps
+/// `validate_path` alone.
+///
+/// The tools' own scratch directory is exempt, where its home fallback (~/.cache/yantrik/tmp)
+/// would otherwise be refused: the model writes a diagram or a screenshot there to open it
+/// again. Only when the path is inside it both as written and where it resolves, so a link left
+/// in the scratch directory does not carry a write out of it.
+pub fn validate_write_path(path: &str) -> Result<String, String> {
+    let expanded = validate_path(path)?;
+    let at = std::path::Path::new(&expanded);
+    if in_scratch(at) {
+        return Ok(expanded);
+    }
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from).filter(|h| h.is_absolute());
+    if home.is_some_and(|home| yantrik_ipc_contracts::home_paths::where_programs_look(at, &home)) {
+        return Err(format!("Access denied: {}", yantrik_ipc_contracts::home_paths::HIDDEN_RULE));
+    }
+    Ok(expanded)
+}
+
+/// Whether `path` is inside the tools' scratch directory, as written and as resolved.
+fn in_scratch(path: &std::path::Path) -> bool {
+    let Ok(scratch) = yantrik_ml::private_dir::scratch_dir() else { return false };
+    let roots = with_canonical(vec![scratch]);
+    let resolved = yantrik_ipc_contracts::home_paths::resolve(path);
+    under_any(&path.to_string_lossy(), &roots)
+        && resolved.is_some_and(|real| under_any(&real.to_string_lossy(), &roots))
+}
+
 /// Where `path` really goes, links followed, must be inside `roots` and outside the protected
 /// places. The deepest part of the path that resolves decides: looking only at the path and its
 /// parent let a link two levels up (~/l -> /etc, asked as ~/l/X/y.txt) go unchecked whenever X
@@ -892,6 +924,20 @@ mod path_root_tests {
     fn with_no_root_at_all_the_refusal_says_there_is_no_home() {
         let err = super::resolves_within(std::path::Path::new("/home/ann/notes.txt"), &[]).unwrap_err();
         assert!(err.ends_with("there is no home directory to work in"), "{err}");
+    }
+
+    #[test]
+    fn a_write_goes_nowhere_hidden_in_the_home_but_a_read_may() {
+        for hidden in ["~/.vimrc", "~/.gitconfig", "~/.config/nvim/init.lua", "~/.local/bin/x", "~/bin/x", "~/.cargo/config.toml"] {
+            let err = super::validate_write_path(hidden).unwrap_err();
+            assert!(err.contains("hidden folders or dotfiles"), "{hidden}: {err}");
+        }
+        assert!(super::validate_path("~/.gitconfig").is_ok(), "reading a dotfile that is not protected");
+        assert!(super::validate_write_path("~/yantrik-write-rule-test.txt").is_ok());
+        if let Ok(scratch) = yantrik_ml::private_dir::scratch_dir() {
+            let own = scratch.join("diagram.svg");
+            assert!(super::validate_write_path(own.to_str().unwrap()).is_ok(), "the tools' own scratch");
+        }
     }
 
     #[test]

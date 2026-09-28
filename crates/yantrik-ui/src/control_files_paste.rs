@@ -3,16 +3,13 @@
 //! The clipboard is the person's: whatever they last copied or cut, from anywhere they could
 //! see. A mind pasting it would copy ~/.ssh into ~/Documents, where every rule lets it read, or
 //! move a folder named `applications` into ~/.local/share, where the session runs what is in it.
-//! So every source must be something a mind may read, and every path the paste would create,
-//! the whole copied tree put where it lands, must be one a mind may create. A file inside the
-//! tree with a second name is refused too: a copy of it is a copy of whatever that name is.
+//! So every source must be something a mind may read, the top of what lands must be something
+//! it may create, and the whole tree below, put where it lands, must pass
+//! `home_paths::may_land`: nothing protected, nothing hidden, no file with a second name.
 
 use std::path::{Path, PathBuf};
 
 use yantrik_ipc_contracts::home_paths;
-
-/// A tree larger than this is not checked entry by entry on the person's UI thread.
-const MAX_CHECKED: usize = 20_000;
 
 const RULE: &str = "a mind pastes only what is in the person's home, outside its protected places";
 
@@ -22,7 +19,6 @@ pub fn paste_verdict(sources: &[PathBuf], dest_label: &str, home: &Path) -> Resu
     crate::control_files_mind::here_verdict(dest_label, home)?;
     let dest = home_paths::expand(dest_label, home).ok_or_else(|| format!("{dest_label} is not a folder"))?;
     let real_dest = dest.canonicalize().map_err(|e| format!("the folder on screen cannot be read: {e}"))?;
-    let mut budget = MAX_CHECKED;
     for src in sources {
         let shown = src.to_string_lossy();
         let answer = home_paths::stat(&shown, home);
@@ -33,39 +29,9 @@ pub fn paste_verdict(sources: &[PathBuf], dest_label: &str, home: &Path) -> Resu
             return Err(format!("{shown} has no name to paste under"));
         };
         home_paths::may_create(&dest.join(name).to_string_lossy(), home)?;
-        walk(src, &real_dest.join(name), &mut budget)?;
+        home_paths::may_land(src, &real_dest.join(name), home)?;
     }
     Ok(())
-}
-
-/// Everything below `src`, links not followed (Files copies a link as a link), checked where it
-/// would land below `landing`.
-fn walk(src: &Path, landing: &Path, budget: &mut usize) -> Result<(), String> {
-    let mut stack = vec![(src.to_path_buf(), landing.to_path_buf())];
-    while let Some((from, to)) = stack.pop() {
-        let meta = std::fs::symlink_metadata(&from).map_err(|e| format!("{} cannot be read: {e}", from.display()))?;
-        if meta.is_file() && links(&meta) > 1 {
-            return Err(format!("{RULE}; {} is hard_link", from.display()));
-        }
-        if !meta.is_dir() {
-            continue;
-        }
-        let entries = std::fs::read_dir(&from).map_err(|e| format!("{} cannot be looked through: {e}", from.display()))?;
-        for entry in entries {
-            let entry = entry.map_err(|e| format!("{} cannot be looked through: {e}", from.display()))?;
-            *budget = budget.checked_sub(1).ok_or_else(|| format!("more than {MAX_CHECKED} entries to paste; too many to check"))?;
-            let (child, lands) = (entry.path(), to.join(entry.file_name()));
-            if home_paths::is_protected(&child) || home_paths::is_protected(&lands) {
-                return Err(format!("{RULE}; {} is protected", lands.display()));
-            }
-            stack.push((child, lands));
-        }
-    }
-    Ok(())
-}
-
-fn links(meta: &std::fs::Metadata) -> u64 {
-    std::os::unix::fs::MetadataExt::nlink(meta)
 }
 
 #[cfg(test)]
@@ -115,7 +81,7 @@ mod tests {
     }
 
     #[test]
-    fn a_tree_that_would_land_as_a_protected_place_is_refused() {
+    fn a_tree_that_would_land_as_a_protected_or_hidden_place_is_refused() {
         // A folder named `applications`, pasted into ~/.local/share, is the menu's desktop entries.
         let (_d, home) = home("lands");
         std::fs::create_dir_all(home.join(".local/share")).unwrap();
@@ -123,10 +89,11 @@ mod tests {
         std::fs::write(home.join("applications/term.desktop"), "[Desktop Entry]").unwrap();
         let share = home.join(".local/share");
         refused_because(paste_verdict(&[home.join("applications")], share.to_str().unwrap(), &home), " is protected");
-        // And a protected place deep inside what is copied.
+        // And a hidden folder deep inside what is copied: programs read their startup there.
         std::fs::create_dir_all(home.join("backup/.config/autostart")).unwrap();
         std::fs::write(home.join("backup/.config/autostart/run.desktop"), "x").unwrap();
-        refused_because(paste_verdict(&[home.join("backup")], home.to_str().unwrap(), &home), " is protected");
+        let label = home.join("Documents");
+        refused_because(paste_verdict(&[home.join("backup")], label.to_str().unwrap(), &home), " is hidden_place");
     }
 
     #[test]

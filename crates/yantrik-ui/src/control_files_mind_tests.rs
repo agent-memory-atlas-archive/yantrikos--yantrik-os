@@ -172,7 +172,8 @@ fn a_mind_does_not_name_anything_into_a_protected_place() {
     std::fs::create_dir_all(home.join(".config")).unwrap();
     let share = home.join(".local/share");
     let share = share.to_str().unwrap();
-    assert!(make_verdict(share, "fonts", &home).is_ok());
+    refused_because(make_verdict(share, "fonts", &home), " is hidden_place", "fonts under .local");
+    assert!(make_verdict(home.join("Documents").to_str().unwrap(), "fonts", &home).is_ok());
     refused_because(make_verdict(share, "applications", &home), " is protected", "applications");
     let config = home.join(".config");
     let config = config.to_str().unwrap();
@@ -189,4 +190,56 @@ fn renaming_the_keys_folder_away_is_refused() {
     let (_d, home) = home("rename");
     refused_because(entry_verdict(home.to_str().unwrap(), ".ssh", &home), " is protected", ".ssh");
     assert!(make_verdict(home.to_str().unwrap(), "keys", &home).is_ok(), "the new name alone is harmless");
+    refused_because(rename_verdict(home.to_str().unwrap(), ".ssh", "keys", &home), " is protected", ".ssh -> keys");
+}
+
+#[test]
+fn a_folder_renamed_so_that_what_is_below_becomes_a_startup_place_is_refused() {
+    // `cfg` holding autostart/evil.desktop, renamed: to `.config` it is hidden; to a name whose
+    // tree lands as a protected place it is caught below the top.
+    let (_d, home) = home("rename-tree");
+    std::fs::create_dir_all(home.join("cfg/autostart")).unwrap();
+    std::fs::write(home.join("cfg/autostart/evil.desktop"), "[Desktop Entry]").unwrap();
+    let label = home.to_str().unwrap();
+    refused_because(rename_verdict(label, "cfg", ".config", &home), " is hidden_place", "cfg -> .config");
+    std::fs::create_dir_all(home.join("stuff/.config")).unwrap();
+    std::fs::rename(home.join("cfg"), home.join("stuff/cfg")).unwrap();
+    // Under a folder that is itself hidden only below the home: the walk sees what lands.
+    assert!(home_paths::may_land(&home.join("stuff/cfg"), &home.join("stuff/.config"), &home).is_err());
+    std::fs::create_dir_all(home.join("photos/2026")).unwrap();
+    assert!(rename_verdict(label, "photos", "pictures", &home).is_ok(), "an ordinary rename");
+}
+
+#[test]
+fn an_unreadable_clipboard_refuses_a_paste_rather_than_passing_it() {
+    let (_d, home) = home("clipboard");
+    let label = home.to_str().unwrap();
+    let err = paste_now_verdict(Err("the Files clipboard cannot be read right now".into()), label, &home).unwrap_err();
+    assert!(err.contains("cannot be read"), "{err}");
+    assert!(paste_now_verdict(Ok(None), label, &home).is_ok(), "an empty clipboard pastes nothing");
+    // And the shell's own reader, with no Files browser wired in this process, says it cannot.
+    assert!(crate::wire::files::clipboard_now().is_err());
+}
+
+/// Run `check` as a call from an agent that presented a token: `requester_now` says a mind.
+fn as_a_mind<T>(check: impl FnOnce() -> T) -> T {
+    use yantrik_app_runtime::control::{AgentTokenScope, Caller, CallerScope};
+    let _held = crate::control_agent_terminal::RESOLVER_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+    let me = unsafe { libc::getuid() };
+    let _caller = CallerScope::enter(Some(Caller { pid: 4242, uid: me, gid: me }));
+    let _token = AgentTokenScope::enter(Some("tok-files-mind-test".into()));
+    assert_ne!(requester_now(), Requester::Person, "the scopes make this a mind's call");
+    check()
+}
+
+#[test]
+fn a_mind_does_not_undo_a_trash_or_open_the_trash() {
+    assert!(may_undo_trash().is_ok(), "the person undoes");
+    assert!(may_show_trash().is_ok());
+    as_a_mind(|| {
+        assert!(may_undo_trash().unwrap_err().contains("a mind does not"));
+        assert!(may_show_trash().is_err());
+        // With no browser to read, a mind's paste is refused, not waved through.
+        assert!(may_paste("~").is_err());
+    });
 }

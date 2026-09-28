@@ -311,10 +311,10 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
             if !has_entry(&ui, name) {
                 return Err("Entry not found".into());
             }
-            // What is renamed, and what it becomes: `.ssh` renamed away, or an innocent folder
-            // renamed to `applications` under ~/.local/share.
-            mind::may_touch(&ui.get_file_browser_path(), &[name.to_string()])?;
-            mind::may_make(&ui.get_file_browser_path(), new)?;
+            // What is renamed, what it becomes, and what lands under the new name: `.ssh`
+            // renamed away, a folder renamed `applications` under ~/.local/share, or `cfg`
+            // holding autostart/ renamed `.config`.
+            mind::may_rename(&ui.get_file_browser_path(), name, new)?;
             ui.invoke_file_rename(name.into(), new.into());
             Ok(where_now(&ui))
         },
@@ -330,6 +330,7 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                 mind::here(&ui.get_file_browser_path())?;
                 match $name {
                     "files_toggle_trash" => mind::may_show_trash()?,
+                    "files_undo_trash" => mind::may_undo_trash()?,
                     // The selection may be the person's, made on anything in the folder.
                     "files_copy" | "files_cut" | "files_trash_selected" => {
                         mind::may_touch(&ui.get_file_browser_path(), &selected_names(&ui))?
