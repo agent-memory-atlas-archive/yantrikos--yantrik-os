@@ -34,6 +34,7 @@ mod timers;
 pub mod toast;
 mod voice_mode;
 pub mod apt;
+pub mod flatpak;
 pub mod package_manager;
 pub mod skill_store;
 pub mod device_dashboard;
