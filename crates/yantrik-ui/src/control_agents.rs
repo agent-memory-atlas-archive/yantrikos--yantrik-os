@@ -234,6 +234,12 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
     // registry, in-process, as it spends grants in-process; and nothing an earlier run published
     // is held any more — those tokens are gone.
     yantrik_ipc_transport::reach::read_reach_with(reaches::lookup);
+    // And whether a token is a live agent's, for a mind account's call (#411).
+    // In the shell the token is also checked against the caller's descent from the harness that
+    // holds it, as grants are, so a live token alone is not standing.
+    yantrik_ipc_transport::reach::read_standing_with(|token, pid| {
+        crate::control_agent_terminal::agent_for(token, pid).is_ok()
+    });
     reaches::reset();
     surface
         .action(new, |args| new_agent(host()?, &caller()?, &text(args, "mind"), &text(args, "task")))
