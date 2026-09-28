@@ -588,7 +588,7 @@ cmd_migrate_ownership() {
   # config.yaml stays the user's until it is split (#397 step c): Settings, OAuth refresh and
   # onboarding write it as the user.
   [ -e "$PREFIX/config.yaml" ] && chown "$owner" "$PREFIX/config.yaml"
-  install_sudo_rule
+  install_sudo_rule && remove_blanket_sudo
 }
 
 install_sudo_rule() {
@@ -602,6 +602,29 @@ install_sudo_rule() {
   fi
   install -m 0440 -o root -g root "$tmp" "$SUDO_RULE" && rm -f "$tmp"
   info "sudo rule in place: $SUDO_RULE"
+}
+
+# The blanket rule the OS itself wrote — `<user> ALL=(ALL) NOPASSWD: ALL`, by the image
+# (/etc/sudoers.d/yantrik) and the installer (/etc/sudoers.d/<user>) — taken away once the
+# narrow rule is in place (#397). With it, anything running as the desktop's account was root
+# without asking; the narrow rule is everything the desktop needs. Only a file whose one
+# non-comment line is exactly that rule is removed: a file a person wrote themselves is theirs.
+remove_blanket_sudo() {
+  [ "$(id -u)" = 0 ] || return 0
+  [ -f "$SUDO_RULE" ] || return 0
+  if command -v visudo >/dev/null 2>&1 && ! visudo -cf "$SUDO_RULE" >/dev/null 2>&1; then
+    return 0
+  fi
+  local owner f body
+  owner="$(desktop_owner)"
+  for f in /etc/sudoers.d/yantrik ${owner:+"/etc/sudoers.d/$owner"}; do
+    [ -f "$f" ] || continue
+    body="$(grep -v '^[[:space:]]*#' "$f" | grep -v '^[[:space:]]*$')"
+    [ "$(printf '%s\n' "$body" | wc -l)" = 1 ] || continue
+    if printf '%s\n' "$body" | grep -qxE '[a-z_][a-z0-9_-]* ALL=\(ALL(:ALL)?\) ?NOPASSWD: ?ALL'; then
+      rm -f "$f" && info "removed the blanket sudo rule $f; the desktop keeps only $SUDO_RULE"
+    fi
+  done
 }
 
 # Run by this updater's own `apply` and `reconcile`, first thing: a machine whose tree is still
@@ -1413,6 +1436,7 @@ reconcile_polkit() {
 cmd_reconcile() {
   migrate_if_needed
   elevate
+  remove_blanket_sudo
   say "Reconciling the base system against what the image ships"
   info "required: $REQUIRED_PACKAGES"
   reconcile_packages
