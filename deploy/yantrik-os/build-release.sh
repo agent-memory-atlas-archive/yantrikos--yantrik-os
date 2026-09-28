@@ -239,6 +239,10 @@ cp "$PROJECT_ROOT/config/labwc/"*.png "$ROOT/share/labwc/" 2>/dev/null \
 cp "$PROJECT_ROOT/config/labwc/autostart" "$ROOT/share/labwc/autostart"
 # Mind View's own compositor (#239): the nested labwc a mind's apps are drawn in. yantrik-ui runs
 # it with -C on this directory; without it, a mind's apps open on the person's desktop as before.
+# polkit rules the desktop needs (#397): installed into /etc/polkit-1/rules.d by the image and by
+# `yantrik-update reconcile` on machines already installed.
+mkdir -p "$ROOT/share/polkit"
+cp "$PROJECT_ROOT/config/polkit/"*.rules "$ROOT/share/polkit/"
 mkdir -p "$ROOT/share/labwc-mind"
 cp "$PROJECT_ROOT/config/labwc-mind/rc.xml" "$ROOT/share/labwc-mind/rc.xml"
 cp "$PROJECT_ROOT/config/labwc-mind/empty.png" "$ROOT/share/labwc-mind/empty.png"

@@ -19,9 +19,7 @@ pub fn wire(ui: &App, ctx: &AppContext) {
             }
             "suspend" => {
                 tracing::info!("Suspending via power menu");
-                let _ = std::process::Command::new("sudo")
-                    .args(["zzz"])
-                    .spawn();
+                power("suspend");
             }
             "restart" => {
                 // Auto-save workspace before restart
@@ -31,9 +29,7 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                 );
                 std::thread::sleep(std::time::Duration::from_secs(2));
                 tracing::info!("Restarting via power menu");
-                let _ = std::process::Command::new("sudo")
-                    .args(["reboot"])
-                    .spawn();
+                power("reboot");
             }
             "shutdown" => {
                 // Auto-save workspace before shutdown
@@ -43,13 +39,28 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                 );
                 std::thread::sleep(std::time::Duration::from_secs(2));
                 tracing::info!("Shutting down via power menu");
-                let _ = std::process::Command::new("sudo")
-                    .args(["poweroff"])
-                    .spawn();
+                power("poweroff");
             }
             _ => {
                 tracing::warn!(action = action.as_str(), "Unknown power action");
             }
         }
+    });
+}
+
+/// Suspend, restart or power off through logind, which lets the person at this machine's active
+/// session do so without sudo. These used to be `sudo zzz` (an Alpine command that does not exist
+/// on the Debian this OS ships, so Suspend did nothing), `sudo reboot` and `sudo poweroff`, which
+/// needed the account to have passwordless sudo for everything (#397). Said in the log when it
+/// fails, rather than dropped.
+fn power(verb: &'static str) {
+    std::thread::spawn(move || match std::process::Command::new("systemctl").arg(verb).output() {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => tracing::warn!(
+            verb,
+            error = %String::from_utf8_lossy(&out.stderr).trim(),
+            "systemctl refused the power action"
+        ),
+        Err(e) => tracing::warn!(verb, error = %e, "could not run systemctl"),
     });
 }

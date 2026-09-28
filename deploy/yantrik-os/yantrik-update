@@ -580,6 +580,7 @@ from it. Change it with: yantrik-update set-channel nightly" ;;
     # machine can still be missing — a 520 has every current Yantrik file and no `ip` —
     # so a run that found no new build is exactly the moment to look (#210).
     reconcile_packages || true
+    reconcile_polkit || true
     return 0
   fi
 
@@ -1271,10 +1272,31 @@ reconcile_packages() {
   return 1
 }
 
+# The polkit rules the bundle ships (share/polkit/*.rules), put where polkit reads them. The power
+# menu calls systemctl without sudo and needs the one that lets the desktop's user suspend,
+# restart and power off from any of their sessions (#397). Copied only when different, so an
+# unchanged rule costs nothing.
+reconcile_polkit() {
+  local dir="$PREFIX/share/polkit" rules="/etc/polkit-1/rules.d" f dest
+  [ -d "$dir" ] || return 0
+  [ -d "$rules" ] || { info "no $rules on this machine; polkit rules not installed"; return 0; }
+  for f in "$dir"/*.rules; do
+    [ -f "$f" ] || continue
+    dest="$rules/$(basename "$f")"
+    if cmp -s "$f" "$dest" 2>/dev/null; then continue; fi
+    if sudo -n install -m 0644 -o root -g root "$f" "$dest" 2>/dev/null; then
+      info "polkit rule in place: $dest"
+    else
+      warn "could not install $dest (no sudo here); the power menu may ask for an administrator"
+    fi
+  done
+}
+
 cmd_reconcile() {
   say "Reconciling the base system against what the image ships"
   info "required: $REQUIRED_PACKAGES"
   reconcile_packages
+  reconcile_polkit
 }
 
 # ── selftest ────────────────────────────────────────────────────────────────────────────
