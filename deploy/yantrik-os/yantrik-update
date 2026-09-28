@@ -715,6 +715,7 @@ from it. Change it with: yantrik-update set-channel nightly" ;;
     # so a run that found no new build is exactly the moment to look (#210).
     reconcile_packages || true
     reconcile_polkit || true
+    reconcile_helpers || true
     return 0
   fi
 
@@ -1433,6 +1434,26 @@ reconcile_polkit() {
   done
 }
 
+# The root helpers the bundle ships (share/root-helpers), installed root-owned into /usr/lib/yantrik
+# (#397): the Package Manager's yantrik-pkg is the only way the desktop's account runs apt without
+# a password. Never run from /opt/yantrik, which its user can write: a helper sudo trusts has to
+# live where only root can change it. Copied only when different.
+reconcile_helpers() {
+  local dir="$PREFIX/share/root-helpers" dest_dir="/usr/lib/yantrik" f dest
+  [ -d "$dir" ] || return 0
+  sudo -n install -d -m 0755 -o root -g root "$dest_dir" 2>/dev/null     || { warn "could not create $dest_dir (no sudo here); the Package Manager cannot install yet"; return 0; }
+  for f in "$dir"/*; do
+    [ -f "$f" ] || continue
+    dest="$dest_dir/$(basename "$f")"
+    if cmp -s "$f" "$dest" 2>/dev/null; then continue; fi
+    if sudo -n install -m 0755 -o root -g root "$f" "$dest" 2>/dev/null; then
+      info "root helper in place: $dest"
+    else
+      warn "could not install $dest (no sudo here)"
+    fi
+  done
+}
+
 cmd_reconcile() {
   migrate_if_needed
   elevate
@@ -1441,6 +1462,7 @@ cmd_reconcile() {
   info "required: $REQUIRED_PACKAGES"
   reconcile_packages
   reconcile_polkit
+  reconcile_helpers
 }
 
 # ── selftest ────────────────────────────────────────────────────────────────────────────

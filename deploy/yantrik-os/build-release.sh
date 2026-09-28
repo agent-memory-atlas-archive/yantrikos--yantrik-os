@@ -243,6 +243,10 @@ cp "$PROJECT_ROOT/config/labwc/autostart" "$ROOT/share/labwc/autostart"
 # `yantrik-update reconcile` on machines already installed.
 mkdir -p "$ROOT/share/polkit"
 cp "$PROJECT_ROOT/config/polkit/"*.rules "$ROOT/share/polkit/"
+# Root helpers (#397): installed root-owned into /usr/lib/yantrik by the image and by
+# `yantrik-update reconcile` — never run from /opt/yantrik, which its user can write.
+mkdir -p "$ROOT/share/root-helpers"
+install -m 0755 "$SCRIPT_DIR/yantrik-pkg" "$ROOT/share/root-helpers/yantrik-pkg"
 mkdir -p "$ROOT/share/labwc-mind"
 cp "$PROJECT_ROOT/config/labwc-mind/rc.xml" "$ROOT/share/labwc-mind/rc.xml"
 cp "$PROJECT_ROOT/config/labwc-mind/empty.png" "$ROOT/share/labwc-mind/empty.png"

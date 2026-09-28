@@ -405,6 +405,14 @@ sudo getcap "$ROOTFS/opt/yantrik/bin/perception-service" | grep -q cap_sys_admin
 sudo mkdir -p "$ROOTFS/opt/yantrik/share"
 sudo cp -a "$UNPACK/share/." "$ROOTFS/opt/yantrik/share/"
 sudo chown -R root:root "$ROOTFS/opt/yantrik/share"
+# The root helpers (#397), root-owned outside /opt/yantrik: the Package Manager's yantrik-pkg is
+# the only way the desktop's account runs apt without a password.
+if [ -d "$UNPACK/share/root-helpers" ]; then
+    sudo install -d -m 0755 -o root -g root "$ROOTFS/usr/lib/yantrik"
+    for helper in "$UNPACK/share/root-helpers/"*; do
+        sudo install -m 0755 -o root -g root "$helper" "$ROOTFS/usr/lib/yantrik/$(basename "$helper")"
+    done
+fi
 for required in share/labwc/rc.xml share/labwc/autostart bin/yantrik-session bin/yantrik-shell \
                 share/icons/hicolor/scalable/apps/yantrik.svg; do
     [ -e "$ROOTFS/opt/yantrik/$required" ] || fail "$required missing from the image — the desktop session would not be the shipped one"
