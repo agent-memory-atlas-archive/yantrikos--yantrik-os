@@ -716,6 +716,7 @@ from it. Change it with: yantrik-update set-channel nightly" ;;
     reconcile_packages || true
     reconcile_polkit || true
     reconcile_helpers || true
+    reconcile_sysctl || true
     return 0
   fi
 
@@ -1454,6 +1455,29 @@ reconcile_helpers() {
   done
 }
 
+# Kernel settings the bundle ships (share/sysctl) into /etc/sysctl.d, applied now as well as at
+# boot (#414): Yama ptrace_scope 1, so nothing a mind starts can attach to the shell and read the
+# vault's key or the unlock password out of it. Copied only when different; applied every time,
+# because a value set by hand since would otherwise stand until the next boot.
+reconcile_sysctl() {
+  local dir="$PREFIX/share/sysctl" dest_dir="/etc/sysctl.d" f dest
+  [ -d "$dir" ] || return 0
+  [ -d "$dest_dir" ] || { info "no $dest_dir on this machine; kernel settings not installed"; return 0; }
+  for f in "$dir"/*.conf; do
+    [ -f "$f" ] || continue
+    dest="$dest_dir/$(basename "$f")"
+    if ! cmp -s "$f" "$dest" 2>/dev/null; then
+      if sudo -n install -m 0644 -o root -g root "$f" "$dest" 2>/dev/null; then
+        info "kernel settings in place: $dest"
+      else
+        warn "could not install $dest (no sudo here)"
+        continue
+      fi
+    fi
+    sudo -n sysctl -q -p "$dest" >/dev/null 2>&1 || warn "could not apply $dest now; it applies at the next boot"
+  done
+}
+
 cmd_reconcile() {
   migrate_if_needed
   elevate
@@ -1463,6 +1487,7 @@ cmd_reconcile() {
   reconcile_packages
   reconcile_polkit
   reconcile_helpers
+  reconcile_sysctl
 }
 
 # ── selftest ────────────────────────────────────────────────────────────────────────────

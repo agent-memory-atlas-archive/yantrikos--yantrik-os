@@ -413,6 +413,11 @@ if [ -d "$UNPACK/share/root-helpers" ]; then
         sudo install -m 0755 -o root -g root "$helper" "$ROOTFS/usr/lib/yantrik/$(basename "$helper")"
     done
 fi
+# Kernel settings (#414): Yama ptrace_scope 1, so nothing a mind starts can attach to the shell.
+[ -d "$UNPACK/share/sysctl" ] || fail "release tarball carries no share/sysctl — the image would let any process attach to the shell"
+for conf in "$UNPACK/share/sysctl/"*.conf; do
+    sudo install -m 0644 -o root -g root "$conf" "$ROOTFS/etc/sysctl.d/$(basename "$conf")"
+done
 for required in share/labwc/rc.xml share/labwc/autostart bin/yantrik-session bin/yantrik-shell \
                 share/icons/hicolor/scalable/apps/yantrik.svg; do
     [ -e "$ROOTFS/opt/yantrik/$required" ] || fail "$required missing from the image — the desktop session would not be the shipped one"
