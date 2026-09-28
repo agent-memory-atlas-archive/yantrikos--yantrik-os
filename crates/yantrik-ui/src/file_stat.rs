@@ -6,9 +6,11 @@
 //! two it is, and it has to say it in a way that keeps them apart: `exists` is true, false or
 //! "unknown", and a `reason` says why whenever it is not true.
 //!
-//! Only the person's home is answered for. Anything outside it (the system, another account's
-//! files, a link that leads out) is `unknown` with the reason `outside`, which says nothing about
-//! whether it is there.
+//! Only the person's home is answered for, and never its protected places (keys, the shell's own
+//! configuration and memory: the file tools' BLOCKED_SEGMENTS). Anything else is `unknown`, with a
+//! reason that says nothing about whether it is there. That includes what a link inside the home
+//! leads to: where a path goes is decided by the deepest part of it that resolves, so a link to
+//! /etc cannot be used to ask, a directory at a time, what /etc holds.
 
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
@@ -23,24 +25,51 @@ pub fn stat(asked: &str, home: &Path) -> Value {
     if !home.is_absolute() || home == Path::new("/") || !path.starts_with(home) {
         return unknown(asked, "outside");
     }
-    // Where it really is, links followed, must still be inside the home; for a path that does not
-    // exist, where its parent really is.
-    let real_home = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
-    match path.canonicalize() {
-        Ok(real) if !real.starts_with(&real_home) => return unknown(asked, "outside"),
-        Ok(_) => {}
-        Err(e) if e.kind() == ErrorKind::PermissionDenied => return unknown(asked, "not_allowed"),
-        Err(_) => {
-            if let Some(parent) = path.parent() {
-                if let Ok(real_parent) = parent.canonicalize() {
-                    if !real_parent.starts_with(&real_home) {
-                        return unknown(asked, "outside");
-                    }
+    let Ok(real_home) = home.canonicalize() else {
+        return unknown(asked, "outside");
+    };
+    if real_home == Path::new("/") {
+        return unknown(asked, "outside");
+    }
+    if protected(&path) {
+        return unknown(asked, "protected");
+    }
+
+    // Up from the path to the deepest part of it that resolves. That part decides where the path
+    // goes; whatever is below it does not exist, unless it is a link that exists and leads
+    // nowhere, which is not known to be anything.
+    let mut probe = path.clone();
+    loop {
+        match probe.canonicalize() {
+            Ok(real) => {
+                if !real.starts_with(&real_home) {
+                    return unknown(asked, "outside");
+                }
+                if protected(&real) {
+                    return unknown(asked, "protected");
+                }
+                if probe == path {
+                    return describe(&path, &real);
+                }
+                return not_found(&path);
+            }
+            Err(e) if e.kind() == ErrorKind::PermissionDenied => return unknown(asked, "not_allowed"),
+            Err(_) => {
+                if let Ok(meta) = probe.symlink_metadata() {
+                    return unknown(asked, if meta.file_type().is_symlink() { "broken_link" } else { "not_allowed" });
                 }
             }
         }
+        match probe.parent() {
+            Some(parent) if parent.starts_with(home) || parent == home => probe = parent.to_path_buf(),
+            _ => return unknown(asked, "outside"),
+        }
     }
-    match std::fs::metadata(&path) {
+}
+
+/// What is at `real`, which `path` resolved to inside the home.
+fn describe(path: &Path, real: &Path) -> Value {
+    match std::fs::metadata(real) {
         Ok(meta) => {
             let kind = if meta.is_dir() {
                 "directory"
@@ -62,40 +91,50 @@ pub fn stat(asked: &str, home: &Path) -> Value {
                 "modified": modified,
             })
         }
-        Err(e) if e.kind() == ErrorKind::NotFound => json!({
-            "path": path.to_string_lossy(),
-            "exists": false,
-            "reason": "not_found",
-        }),
-        Err(e) if e.kind() == ErrorKind::PermissionDenied => unknown(asked, "not_allowed"),
-        // A file where a directory was expected on the way (ENOTDIR) is also a path that is not
-        // there; anything else is not known.
-        Err(e) if e.raw_os_error() == Some(20) => json!({
-            "path": path.to_string_lossy(),
-            "exists": false,
-            "reason": "not_found",
-        }),
-        Err(_) => unknown(asked, "not_allowed"),
+        Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => not_found(path),
+        Err(_) => unknown(&path.to_string_lossy(), "not_allowed"),
     }
+}
+
+fn not_found(path: &Path) -> Value {
+    json!({ "path": path.to_string_lossy(), "exists": false, "reason": "not_found" })
 }
 
 fn unknown(asked: &str, reason: &str) -> Value {
     json!({ "path": asked, "exists": "unknown", "reason": reason })
 }
 
-/// `asked` as an absolute path: `~` and `~/…` are the home. Relative paths, other users' `~name`
-/// and any `..` are not paths this answers for.
+/// Whether `path` passes through a place the file tools never reach (BLOCKED_SEGMENTS), compared
+/// a whole component at a time: `.ssh` is protected, `.ssh-notes` is not.
+fn protected(path: &Path) -> bool {
+    let parts: Vec<&std::ffi::OsStr> = path.iter().collect();
+    yantrik_companion::tools::BLOCKED_SEGMENTS.iter().any(|blocked| {
+        let want: Vec<&std::ffi::OsStr> = Path::new(blocked.trim_start_matches('/')).iter().collect();
+        !want.is_empty() && parts.windows(want.len()).any(|w| w == want.as_slice())
+    })
+}
+
+/// `asked` as an absolute path: `~` and `~/…` are the home. Relative paths, other users' `~name`,
+/// any `..` and a NUL are not paths this answers for. Rebuilt from its components, so a trailing
+/// slash or a doubled one does not change what is asked about.
 fn expand(asked: &str, home: &Path) -> Option<PathBuf> {
+    if asked.contains('\0') {
+        return None;
+    }
     let path = if asked == "~" {
         home.to_path_buf()
     } else if let Some(rest) = asked.strip_prefix("~/") {
+        if rest.starts_with('/') {
+            return None;
+        }
         home.join(rest)
     } else {
         PathBuf::from(asked)
     };
-    let absolute = path.is_absolute();
-    let climbs = path.components().any(|c| matches!(c, Component::ParentDir));
-    (absolute && !climbs).then_some(path)
+    if !path.is_absolute() || path.components().any(|c| matches!(c, Component::ParentDir)) {
+        return None;
+    }
+    Some(path.components().collect())
 }
 
 #[cfg(test)]
@@ -133,6 +172,7 @@ mod tests {
         assert_eq!(v["size"], 9);
         assert!(v["modified"].as_u64().is_some());
         assert_eq!(stat("~/notes", &home)["kind"], "directory");
+        assert_eq!(stat("~/notes/", &home)["kind"], "directory", "a trailing slash");
         assert_eq!(stat(home.join("notes").to_str().unwrap(), &home)["exists"], true, "absolute too");
     }
 
@@ -144,31 +184,76 @@ mod tests {
         assert_eq!(v["reason"], "not_found");
         assert_eq!(stat("~/nowhere/at/all.txt", &home)["exists"], false);
         assert_eq!(stat("~/notes/today.txt/inside", &home)["reason"], "not_found", "ENOTDIR");
+        assert_eq!(stat("~/notes/today.txt/", &home)["exists"], true, "a trailing slash on a file");
     }
 
     #[test]
     fn outside_the_home_is_never_true_or_false() {
         let (_d, home) = home();
-        for asked in ["/etc/passwd", "/", "/nonexistent/file"] {
+        for asked in ["/etc/passwd", "/", "/nonexistent/file", "~//etc/passwd"] {
             let v = stat(asked, &home);
             assert_eq!(v["exists"], "unknown", "{asked}");
-            assert_eq!(v["reason"], "outside", "{asked}");
         }
     }
 
     #[test]
-    fn a_link_out_of_the_home_is_outside() {
+    fn a_link_out_of_the_home_answers_nothing_about_where_it_leads() {
         let (_d, home) = home();
         std::os::unix::fs::symlink("/etc", home.join("escape")).unwrap();
-        assert_eq!(stat("~/escape/passwd", &home)["reason"], "outside");
-        assert_eq!(stat("~/escape/not-there", &home)["reason"], "outside");
+        // Whether /etc/ssh is there or /etc/no-such-dir is not, the answer is the same.
+        for asked in [
+            "~/escape/passwd",
+            "~/escape/not-there",
+            "~/escape/ssh/anything",
+            "~/escape/no-such-dir/anything",
+            "~/escape/no-such-dir/deeper/still",
+        ] {
+            let v = stat(asked, &home);
+            assert_eq!((v["exists"].clone(), v["reason"].clone()), (json!("unknown"), json!("outside")), "{asked}");
+        }
+    }
+
+    #[test]
+    fn a_dangling_link_is_not_known_to_be_anything() {
+        let (_d, home) = home();
+        std::os::unix::fs::symlink("/etc/yantrik-no-such-file", home.join("dangling")).unwrap();
+        for asked in ["~/dangling", "~/dangling/below"] {
+            let v = stat(asked, &home);
+            assert_eq!(v["exists"], "unknown", "{asked}");
+            assert_eq!(v["reason"], "broken_link", "{asked}");
+        }
+    }
+
+    #[test]
+    fn protected_places_are_not_answered_for() {
+        let (_d, home) = home();
+        std::fs::create_dir(home.join(".ssh")).unwrap();
+        std::fs::write(home.join(".ssh/id_ed25519"), "key").unwrap();
+        std::fs::create_dir_all(home.join(".config/yantrik")).unwrap();
+        for asked in ["~/.ssh", "~/.ssh/id_ed25519", "~/.ssh/not-there", "~/.config/yantrik/memory.db", "~/.bash_history"] {
+            let v = stat(asked, &home);
+            assert_eq!((v["exists"].clone(), v["reason"].clone()), (json!("unknown"), json!("protected")), "{asked}");
+        }
+        // Whole components only.
+        std::fs::create_dir(home.join(".ssh-notes")).unwrap();
+        assert_eq!(stat("~/.ssh-notes", &home)["exists"], true);
+        // Nor through a link that leads into one.
+        std::os::unix::fs::symlink(home.join(".ssh"), home.join("keys")).unwrap();
+        assert_eq!(stat("~/keys/id_ed25519", &home)["reason"], "protected");
     }
 
     #[test]
     fn what_is_not_a_path_is_said_to_be_not_a_path() {
         let (_d, home) = home();
-        for asked in ["", "notes/today.txt", "~bob/x", "~/notes/../../etc"] {
+        for asked in ["", "notes/today.txt", "~bob/x", "~/notes/../../etc", "~/no\0te"] {
             assert_eq!(stat(asked, &home)["reason"], "not_a_path", "{asked:?}");
+        }
+    }
+
+    #[test]
+    fn a_home_that_is_the_root_answers_for_nothing() {
+        for home in ["/", "", "relative"] {
+            assert_eq!(stat("/etc/passwd", Path::new(home))["reason"], "outside", "{home:?}");
         }
     }
 
@@ -186,8 +271,9 @@ mod tests {
         std::fs::write(locked.join("inside.txt"), "x").unwrap();
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
         let v = stat("~/locked/inside.txt", &home);
+        let w = stat("~/locked/never-there.txt", &home);
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert_eq!(v["exists"], "unknown");
-        assert_eq!(v["reason"], "not_allowed");
+        assert_eq!((v["exists"].clone(), v["reason"].clone()), (json!("unknown"), json!("not_allowed")));
+        assert_eq!(w["exists"], "unknown", "what is not there is not known either, behind a door");
     }
 }

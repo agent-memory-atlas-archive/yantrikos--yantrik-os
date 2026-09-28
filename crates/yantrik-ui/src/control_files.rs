@@ -220,11 +220,14 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
         .risk("safe")
         .arg(Param::text("path").describe("An absolute path or ~/…, e.g. ~/notes/today.txt")),
         |args| {
+            let asked = args["path"].as_str().unwrap_or_default().to_string();
             let home = std::env::var("HOME").unwrap_or_default();
-            Ok(crate::file_stat::stat(
-                args["path"].as_str().unwrap_or_default(),
-                std::path::Path::new(&home),
-            ))
+            // Off the UI thread: a path under a hung network mount in the home would otherwise
+            // freeze the person's whole desktop in the syscall.
+            let work = move || Ok(crate::file_stat::stat(&asked, std::path::Path::new(&home)));
+            yantrik_app_runtime::control::answer_later(work)
+                .map(|()| serde_json::json!({ "answering": "off the UI thread" }))
+                .or_else(|work| work())
         },
     );
     // The grid/list switch in the toolbar, for a caller. Grid is the folder tiles with their
