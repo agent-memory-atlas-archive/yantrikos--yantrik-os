@@ -251,16 +251,25 @@ cp "$PROJECT_ROOT/config/polkit/"*.rules "$ROOT/share/polkit/"
 # attach to the shell. Installed into /etc/sysctl.d by the image and by `yantrik-update reconcile`.
 mkdir -p "$ROOT/share/sysctl"
 cp "$PROJECT_ROOT/config/sysctl/"*.conf "$ROOT/share/sysctl/"
+# Where a short container image name resolves (#401): Docker Hub, as with docker, so the Container
+# Manager's Pull of "nginx" works on podman. Installed into /etc/containers/registries.conf.d by
+# the image and by `yantrik-update reconcile`.
+mkdir -p "$ROOT/share/containers"
+cp "$PROJECT_ROOT/config/containers/"*.conf "$ROOT/share/containers/"
+# The interactive shell's defaults (#401): completion, a git-aware prompt, mise. Sourced from the
+# ~/.bashrc the image's /etc/skel gives each new account, as that account; never installed as root.
+mkdir -p "$ROOT/share/shell"
+cp "$PROJECT_ROOT/config/shell/bashrc" "$ROOT/share/shell/bashrc"
 # Root helpers (#397): installed root-owned into /usr/lib/yantrik by the image and by
 # `yantrik-update reconcile` — never run from /opt/yantrik, which its user can write.
 mkdir -p "$ROOT/share/root-helpers"
 install -m 0755 "$SCRIPT_DIR/yantrik-pkg" "$ROOT/share/root-helpers/yantrik-pkg"
 # What the updater installs as root, by content: every file under share/ it copies into /usr/lib,
-# /etc/polkit-1 or /etc/sysctl.d, with its sha256. It rides in bin/, which the updater installs
-# with plain cp as root, so it is root's on the machine whoever could write share/; the updater
-# installs nothing as root whose hash is not in it (#419).
-(cd "$ROOT/share" && sha256sum root-helpers/* polkit/* sysctl/*) > "$ROOT/bin/yantrik-root-files.sha256"
-[ "$(wc -l < "$ROOT/bin/yantrik-root-files.sha256")" -ge 3 ] || fail "the root-files list is short: $(cat "$ROOT/bin/yantrik-root-files.sha256")"
+# /etc/polkit-1, /etc/sysctl.d or /etc/containers, with its sha256. It rides in bin/, which the
+# updater installs with plain cp as root, so it is root's on the machine whoever could write
+# share/; the updater installs nothing as root whose hash is not in it (#419).
+(cd "$ROOT/share" && sha256sum root-helpers/* polkit/* sysctl/* containers/*) > "$ROOT/bin/yantrik-root-files.sha256"
+[ "$(wc -l < "$ROOT/bin/yantrik-root-files.sha256")" -ge 4 ] || fail "the root-files list is short: $(cat "$ROOT/bin/yantrik-root-files.sha256")"
 mkdir -p "$ROOT/share/labwc-mind"
 cp "$PROJECT_ROOT/config/labwc-mind/rc.xml" "$ROOT/share/labwc-mind/rc.xml"
 cp "$PROJECT_ROOT/config/labwc-mind/empty.png" "$ROOT/share/labwc-mind/empty.png"

@@ -137,6 +137,15 @@ packages:
   # and a process view beside the System Monitor app. The image shipped neither (#210).
   - nano
   - htop
+  # A developer's baseline (#401): git, completion in the terminal, and rootless podman for the
+  # Container Manager app, with what rootless needs beside it (uidmap, passt, fuse-overlayfs).
+  # yantrik-update reconciles the same list on every machine.
+  - git
+  - bash-completion
+  - podman
+  - uidmap
+  - passt
+  - fuse-overlayfs
 
 write_files:
   - path: /etc/yantrik/install.env
