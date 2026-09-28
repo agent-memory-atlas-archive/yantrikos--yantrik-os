@@ -235,8 +235,10 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
     // is held any more — those tokens are gone.
     yantrik_ipc_transport::reach::read_reach_with(reaches::lookup);
     // And whether a token is a live agent's, for a mind account's call (#411).
-    yantrik_ipc_transport::reach::read_standing_with(|token| {
-        crate::wire::harness::host().is_some_and(|h| h.agent_for_token(token).is_some())
+    // In the shell the token is also checked against the caller's descent from the harness that
+    // holds it, as grants are, so a live token alone is not standing.
+    yantrik_ipc_transport::reach::read_standing_with(|token, pid| {
+        crate::control_agent_terminal::agent_for(token, pid).is_ok()
     });
     reaches::reset();
     surface

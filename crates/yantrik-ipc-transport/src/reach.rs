@@ -138,22 +138,22 @@ pub fn read_reach_with(read: impl Fn(&str) -> Option<Reach> + Send + Sync + 'sta
     let _ = READER.set(Box::new(read));
 }
 
-type StandingReader = dyn Fn(&str) -> bool + Send + Sync;
+type StandingReader = dyn Fn(&str, Option<u32>) -> bool + Send + Sync;
 
 static STANDING: OnceLock<Box<StandingReader>> = OnceLock::new();
 
 /// Install how this process tells whether a token belongs to a live agent. The shell calls it
 /// once, with its harness host; every other process asks the shell.
-pub fn read_standing_with(read: impl Fn(&str) -> bool + Send + Sync + 'static) {
+pub fn read_standing_with(read: impl Fn(&str, Option<u32>) -> bool + Send + Sync + 'static) {
     let _ = STANDING.set(Box::new(read));
 }
 
 /// Whether `token` belongs to an agent attached to the shell right now (#411). A call from the
 /// mind account acts only as such an agent: a made-up token, or one whose agent is gone, gives it
 /// no standing. Asked of the shell, as reach is, and an unanswerable question is an error.
-pub fn standing_of(token: &str) -> Result<bool, String> {
+pub fn standing_of(token: &str, pid: Option<u32>) -> Result<bool, String> {
     if let Some(read) = STANDING.get() {
-        return Ok(read(token));
+        return Ok(read(token, pid));
     }
     ask_the_shell_standing(token)
 }

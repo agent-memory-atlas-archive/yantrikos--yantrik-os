@@ -16,6 +16,9 @@ Wants=network-online.target
 Conflicts=yantrik-memory.service
 # Not in the installer's live session.
 ConditionKernelCommandLine=!yantrik.install=true
+# A start that keeps failing (the memory not moved yet) stops being retried after five in a minute.
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -31,7 +34,9 @@ Environment=YM_STATE_DIR=/var/lib/yantrik-mind
 Environment=YM_MEMORY_SERVER=127.0.0.1:7440
 Environment=YM_WEB=off
 Environment=YANTRIK_MIND_RUN=/run/yantrik-minds
-EnvironmentFile=-/var/lib/yantrik-mind/.config/yantrik-mind.env
+# No EnvironmentFile: systemd would read it as root, before dropping to the account, and follow a
+# link the mind put in its own home to any root-readable file. The mind reads its settings itself
+# (YM_ENV_PATH), as itself.
 # Never on an empty memory while the old one is still in a person's home: that would be a mind
 # that silently forgot everything. Run as root (+), the only one that can look there.
 ExecStartPre=+/bin/sh -c 'for d in /home/*/.local/share/yantrik-mind/mind.db; do if [ -e "$$d" ] && [ ! -e /var/lib/yantrik-mind/mind.db ]; then echo "Yantrik Mind: its memory is still at $$d. Run: sudo yantrik-update migrate-minds" >&2; exit 1; fi; done; exit 0'
@@ -60,6 +65,11 @@ RestrictRealtime=yes
 LockPersonality=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 UMask=0077
+# The person's processes, and their command lines, are not the mind's to see.
+ProtectProc=invisible
+ProcSubset=pid
+PrivateIPC=yes
+SystemCallArchitectures=native
 
 [Install]
 WantedBy=multi-user.target

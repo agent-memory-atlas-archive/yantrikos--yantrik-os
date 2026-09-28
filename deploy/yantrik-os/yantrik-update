@@ -1676,93 +1676,226 @@ reconcile_mind_units() {
     dest="/etc/systemd/system/$(basename "$f")"
     if ! root_file_ok "systemd/$(basename "$f")" "$f"; then
       warn "refusing $f: not root's alone, or not what this build ships"
-      drop_unshipped "systemd/$(basename "$f")" "$dest"
+      [ -e "$dest" ] && drop_unshipped "systemd/$(basename "$f")" "$dest" && changed=1
       continue
     fi
     cmp -s "$f" "$dest" 2>/dev/null && continue
     install -m 0644 -o root -g root "$f" "$dest" && changed=1 && info "mind unit in place: $dest"
   done
-  [ "$changed" = 1 ] && systemctl daemon-reload >/dev/null 2>&1
+  if [ "$changed" = 1 ]; then
+    systemctl daemon-reload >/dev/null 2>&1
+    # A running mind keeps the sandbox it started with until it restarts.
+    systemctl try-restart yantrik-mind.service >/dev/null 2>&1 || true
+  fi
   return 0
 }
 
-# Table counts of a mind's memory, read-only: `integrity <result>` then `<table> <rows>` lines.
-mind_db_counts() {
-  python3 - "$1" <<'PY'
+# What migrate-minds moves: paths under the person's home, and where each goes under the mind's.
+# Only these names; nothing is ever moved by a pattern.
+MIND_FILES="
+.local/share/yantrik-mind/mind.db:mind.db
+.local/share/yantrik-mind/mind.db-wal:mind.db-wal
+.local/share/yantrik-mind/mind.db-shm:mind.db-shm
+.local/share/yantrik-mind/mind.db.decisions.jsonl:mind.db.decisions.jsonl
+.local/share/yantrik-mind/mind.db.read_receipts.jsonl:mind.db.read_receipts.jsonl
+.local/share/yantrik-mind/egress.key:egress.key
+.local/share/yantrik-mind/egress_receipts.jsonl:egress_receipts.jsonl
+.local/share/yantrik-mind/console.token:console.token
+.local/share/yantrik-mind/devices.json:devices.json
+.local/share/yantrik-mind/yantrik-memory.token:yantrik-memory.token
+.config/yantrik-mind.env:.config/yantrik-mind.env
+.config/yantrik-mind/mcp.json:.config/yantrik-mind/mcp.json
+"
+
+# Run as the person: count the memory's tables (read-only), then stream every listed file that
+# exists as `<source> <size>\n<bytes>` records. Every path is opened from the home directory one
+# component at a time, never following a link, and a file is taken only when it is a plain
+# file of this account with one link: a mind that ran as the person could have left anything in
+# that home. Exit 2, with the reason on stderr, on anything else.
+PY_READ_AS_PERSON='
+import os, sys, stat, sqlite3
+home, pairs = sys.argv[1], [l.split(":", 1) for l in sys.argv[2].split() if l]
+uid, out = os.getuid(), sys.stdout.buffer
+def opened(rel):
+    fd = os.open(home, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        parts = rel.split("/")
+        for part in parts[:-1]:
+            nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd); fd = nxt
+        return os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+    finally:
+        os.close(fd)
+def plain(f, rel):
+    st = os.fstat(f)
+    if not stat.S_ISREG(st.st_mode) or st.st_uid != uid or st.st_nlink != 1:
+        sys.stderr.write("refused %s: not a plain file of this account with one link\n" % rel); sys.exit(2)
+    return st.st_size
+if sys.argv[3] == "count":
+    try:
+        f = opened(pairs[0][0])
+    except FileNotFoundError:
+        sys.exit(0)
+    except OSError as e:
+        sys.stderr.write("refused %s: %s\n" % (pairs[0][0], e)); sys.exit(2)
+    plain(f, pairs[0][0])
+    os.close(f)
+    # By path, as this account: SQLite finds the WAL and SHM beside the file by name, and this
+    # reads nothing the person could not read anyway.
+    c = sqlite3.connect("file:%s?mode=ro" % os.path.join(home, pairs[0][0]), uri=True)
+    print("integrity", c.execute("pragma integrity_check").fetchone()[0])
+    for (t,) in c.execute("select name from sqlite_master where type=\"table\" order by name"):
+        print(t, c.execute("select count(*) from \"%s\"" % t.replace("\"", "\"\"")).fetchone()[0])
+    sys.exit(0)
+for src, _ in pairs:
+    try:
+        f = opened(src)
+    except FileNotFoundError:
+        continue
+    except OSError as e:
+        sys.stderr.write("refused %s: %s\n" % (src, e)); sys.exit(2)
+    size = plain(f, src)
+    out.write(("%s %d\n" % (src, size)).encode())
+    left = size
+    while left:
+        chunk = os.read(f, min(left, 1 << 20))
+        if not chunk:
+            sys.stderr.write("%s shrank while it was read\n" % src); sys.exit(2)
+        out.write(chunk); left -= len(chunk)
+    os.close(f)
+'
+
+# Run as root: read those records into a staging directory only root can write. A record whose
+# name is not one of the listed sources is refused; each file is created new (O_EXCL, no link).
+PY_STAGE_AS_ROOT='
+import os, sys
+stage, pairs = sys.argv[1], dict(l.split(":", 1) for l in sys.argv[2].split() if l)
+inp = sys.stdin.buffer
+while True:
+    head = inp.readline()
+    if not head:
+        break
+    src, size = head.decode().rstrip("\n").rsplit(" ", 1)
+    if src not in pairs:
+        sys.stderr.write("refused a record for %r\n" % src); sys.exit(2)
+    name = pairs[src].replace("/", "__")
+    fd = os.open(os.path.join(stage, name), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o640)
+    left = int(size)
+    while left:
+        chunk = inp.read(min(left, 1 << 20))
+        if not chunk:
+            sys.stderr.write("the stream ended inside %s\n" % src); sys.exit(2)
+        os.write(fd, chunk); left -= len(chunk)
+    os.close(fd)
+'
+
+# Run as the mind account: place the staged files into its own home, never over an existing one,
+# never through a link, and check each against its staged copy byte for byte.
+PY_PLACE_AS_MIND='
+import os, sys, filecmp
+stage, dst, pairs = sys.argv[1], sys.argv[2], [l.split(":", 1) for l in sys.argv[3].split() if l]
+os.umask(0o077)
+for _, rel in pairs:
+    staged = os.path.join(stage, rel.replace("/", "__"))
+    if not os.path.exists(staged):
+        continue
+    target = os.path.join(dst, rel)
+    os.makedirs(os.path.dirname(target), mode=0o700, exist_ok=True)
+    if os.path.lexists(target):
+        if rel in ("mind.db", "mind.db-wal", "mind.db-shm"):
+            sys.stderr.write("%s is already there; nothing was placed\n" % target); sys.exit(2)
+        continue
+    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with open(staged, "rb") as src:
+        while True:
+            chunk = src.read(1 << 20)
+            if not chunk:
+                break
+            os.write(fd, chunk)
+    os.close(fd)
+    if not filecmp.cmp(staged, target, shallow=False):
+        sys.stderr.write("%s differs from what was staged\n" % target); sys.exit(2)
+'
+
+# Run as the person, last: remove what was moved, walking from the home without following links.
+PY_REMOVE_AS_PERSON='
+import os, sys
+home, pairs = sys.argv[1], [l.split(":", 1) for l in sys.argv[2].split() if l]
+for src, _ in pairs:
+    parts = src.split("/")
+    try:
+        fd = os.open(home, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        for part in parts[:-1]:
+            nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd); fd = nxt
+        os.unlink(parts[-1], dir_fd=fd)
+        os.close(fd)
+    except FileNotFoundError:
+        pass
+'
+
+# Table counts of a staged memory, as root, on files nobody else can write.
+staged_counts() {
+  python3 -c '
 import sqlite3, sys
 c = sqlite3.connect("file:%s?mode=ro" % sys.argv[1], uri=True)
 print("integrity", c.execute("pragma integrity_check").fetchone()[0])
-for (t,) in c.execute("select name from sqlite_master where type='table' order by name"):
-    print(t, c.execute('select count(*) from "%s"' % t.replace('"', '""')).fetchone()[0])
-PY
-}
-
-# A file root may move out of the person's home: a regular file (not a link), the person's, and
-# really under their home. Minds ran as the person until now, so anything in that home may have
-# been put there to make root move, or chown, something else.
-movable() {
-  local f="$1" owner="$2" home="$3"
-  [ -e "$f" ] || return 1
-  [ -f "$f" ] && [ ! -L "$f" ] || { warn "refusing $f: not a plain file"; return 2; }
-  [ "$(stat -c %U "$f")" = "$owner" ] || { warn "refusing $f: not $owner's"; return 2; }
-  case "$(realpath -e "$f")" in "$home"/*) return 0 ;; esac
-  warn "refusing $f: it resolves outside $home"; return 2
+for (t,) in c.execute("select name from sqlite_master where type=\"table\" order by name"):
+    print(t, c.execute("select count(*) from \"%s\"" % t.replace("\"", "\"\"")).fetchone()[0])
+' "$1"
 }
 
 # Move the Yantrik Mind out of the person's account into its own (#411): its memory (the db with
 # its WAL and SHM, which hold the latest writes), the files beside it, its settings and its MCP
-# config; counted before and after, and put back if the counts differ. Then its user unit off
-# and its system unit on. Safe to run again: with nothing left in the person's home it only
-# makes sure the system unit is the one running.
+# config. Root never works on a path someone else controls: the person's files are read as the
+# person, staged where only root writes, counted there, and placed by the mind account into its
+# own home; only then are the sources removed, as the person. Then the person's unit off and the
+# mind's system unit on. Safe to run again.
 cmd_migrate_minds() {
   migrate_if_needed
   elevate "$@"
   reconcile_minds
   reconcile_mind_units
   getent passwd yantrik-mind >/dev/null 2>&1 || fail "there is no mind account; nothing was moved"
-  local owner home src dst f before after rc
+  local owner home dst stage pairs before after
   owner="$(desktop_owner)"
   case "$owner" in ''|root|*[!a-z0-9_-]*) fail "cannot tell whose desktop this is; nothing was moved" ;; esac
   home="$(getent passwd "$owner" | cut -d: -f6)"
-  [ -d "$home" ] && [ ! -L "$home" ] || fail "no home for $owner; nothing was moved"
-  src="$home/.local/share/yantrik-mind"
+  [ -n "$home" ] && [ -d "$home" ] || fail "no home for $owner; nothing was moved"
   dst=/var/lib/yantrik-mind
+  [ -d "$dst" ] && [ ! -L "$dst" ] || fail "$dst is not the mind's home directory; nothing was moved"
+  pairs="$(printf '%s\n' "$MIND_FILES" | sed '/^$/d')"
   say "Moving Yantrik Mind from $owner's account into its own"
   systemctl --user -M "$owner@" stop yantrik-mind.service >/dev/null 2>&1 || true
   systemctl stop yantrik-mind.service >/dev/null 2>&1 || true
-  install -d -o yantrik-mind -g yantrik-minds -m 0750 "$dst" "$dst/.config" "$dst/.config/yantrik-mind" "$dst/coder"
 
-  if [ -e "$src/mind.db" ]; then
-    [ -L "$src" ] && fail "refusing $src: it is a link; nothing was moved"
-    [ -e "$dst/mind.db" ] && fail "a memory is already at $dst/mind.db and another at $src/mind.db; nothing was moved. Say which is the mind's."
-    movable "$src/mind.db" "$owner" "$home" || fail "the memory at $src/mind.db cannot be moved safely; nothing was moved"
-    before="$(mind_db_counts "$src/mind.db")" || fail "could not read the memory at $src/mind.db; nothing was moved"
-    case "$before" in "integrity ok"*) ;; *) fail "the memory at $src/mind.db fails its integrity check; nothing was moved" ;; esac
-    local moved=""
-    for f in mind.db mind.db-wal mind.db-shm mind.db.decisions.jsonl mind.db.read_receipts.jsonl \
-             egress.key egress_receipts.jsonl console.token devices.json yantrik-memory.token; do
-      movable "$src/$f" "$owner" "$home"; rc=$?
-      [ "$rc" = 1 ] && continue
-      [ "$rc" = 0 ] || { for m in $moved; do mv -f "$dst/$m" "$src/$m"; done; fail "stopped at $src/$f; everything moved so far was put back"; }
-      mv "$src/$f" "$dst/$f" || { for m in $moved; do mv -f "$dst/$m" "$src/$m"; done; fail "could not move $src/$f; everything moved so far was put back"; }
-      moved="$moved $f"
-    done
-    after="$(mind_db_counts "$dst/mind.db")"
-    if [ "$before" != "$after" ]; then
-      for m in $moved; do mv -f "$dst/$m" "$src/$m"; done
-      fail "the memory's counts changed in the move; it was put back where it was. Before: $(printf '%s' "$before" | tr '\n' ' ') After: $(printf '%s' "$after" | tr '\n' ' ')"
-    fi
-    info "memory moved and counted: $(printf '%s\n' "$after" | sed -n 2,999p | wc -l) tables, identical before and after"
+  before="$(runuser -u "$owner" -- python3 -c "$PY_READ_AS_PERSON" "$home" "$pairs" count)" \
+    || fail "could not read the mind's memory in $owner's home; nothing was moved"
+  if [ -n "$before" ]; then
+    case "$before" in "integrity ok"*) ;; *) fail "the memory in $owner's home fails its integrity check; nothing was moved" ;; esac
+    runuser -u yantrik-mind -- test -e "$dst/mind.db" \
+      && fail "a memory is already at $dst/mind.db and another in $owner's home; nothing was moved. Say which is the mind's."
   fi
-  if movable "$home/.config/yantrik-mind.env" "$owner" "$home"; then
-    [ -e "$dst/.config/yantrik-mind.env" ] || mv "$home/.config/yantrik-mind.env" "$dst/.config/yantrik-mind.env"
+
+  stage="$(mktemp -d /var/lib/.yantrik-mind-move.XXXXXX)" || fail "no staging directory; nothing was moved"
+  # shellcheck disable=SC2064  # the path is fixed now, on purpose
+  trap "rm -rf '$stage'" EXIT
+  chmod 0700 "$stage"
+  runuser -u "$owner" -- python3 -c "$PY_READ_AS_PERSON" "$home" "$pairs" stream \
+    | python3 -c "$PY_STAGE_AS_ROOT" "$stage" "$pairs" \
+    || fail "could not stage the mind's files; nothing was moved"
+  if [ -e "$stage/mind.db" ]; then
+    after="$(staged_counts "$stage/mind.db")" || fail "could not read the staged memory; nothing was moved"
+    [ "$before" = "$after" ] || fail "the memory's counts changed while it was read; nothing was moved. Before: $(printf '%s' "$before" | tr '\n' ' ') After: $(printf '%s' "$after" | tr '\n' ' ')"
   fi
-  if movable "$home/.config/yantrik-mind/mcp.json" "$owner" "$home"; then
-    [ -e "$dst/.config/yantrik-mind/mcp.json" ] || mv "$home/.config/yantrik-mind/mcp.json" "$dst/.config/yantrik-mind/mcp.json"
-  fi
-  chown -R yantrik-mind:yantrik-minds "$dst"
-  chmod 0750 "$dst"
-  [ -e "$dst/.config/yantrik-mind.env" ] && chmod 0600 "$dst/.config/yantrik-mind.env"
+  # The mind account places its own files: open the staging directory to its group, read-only.
+  chgrp -R yantrik-minds "$stage" && chmod 0750 "$stage" && chmod 0640 "$stage"/* 2>/dev/null
+  runuser -u yantrik-mind -- python3 -c "$PY_PLACE_AS_MIND" "$stage" "$dst" "$pairs" \
+    || fail "the mind account could not place its files; the originals are untouched in $owner's home"
+  runuser -u yantrik-mind -- sh -c 'umask 077; mkdir -p "$1/coder"' sh "$dst"
+  runuser -u "$owner" -- python3 -c "$PY_REMOVE_AS_PERSON" "$home" "$pairs" \
+    || warn "the mind's files are in $dst, but some copies in $owner's home could not be removed"
+  [ -n "$after" ] && info "memory moved and counted: $(printf '%s\n' "$after" | sed -n '2,$p' | wc -l) tables, identical before and after"
 
   # The person's unit off, for the person and for everyone the global enable reached; the mind's
   # own on, if the mind is installed.

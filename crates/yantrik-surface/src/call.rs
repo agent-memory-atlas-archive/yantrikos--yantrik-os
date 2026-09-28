@@ -112,7 +112,8 @@ impl ActCall {
                     .into(),
             ));
         }
-        match reach::standing_of(token) {
+        let pid = u32::try_from(caller.pid).ok().filter(|p| *p > 0);
+        match reach::standing_of(token, pid) {
             Ok(true) => Ok(()),
             Ok(false) => Err(refusal(
                 "MIND: this agent token is not one the shell has given a live agent. Nothing was run.".into(),
