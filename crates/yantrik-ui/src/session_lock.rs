@@ -31,6 +31,11 @@ static RUNNING: AtomicBool = AtomicBool::new(false);
 /// they are using.
 static WANTED: AtomicBool = AtomicBool::new(false);
 
+/// Whether a lock client has held the session since this shell started. After that, a client the
+/// compositor refuses ("already locked": the one before it had not gone yet) is started again,
+/// not taken as a compositor without the protocol.
+static LOCKED_ONCE: AtomicBool = AtomicBool::new(false);
+
 /// The person is back in; stop starting lock clients.
 pub fn released() {
     WANTED.store(false, Ordering::SeqCst);
@@ -68,10 +73,20 @@ pub fn take_over_orphans(ui: &App) {
     if orphans.is_empty() {
         return;
     }
-    for pid in &orphans {
-        // SAFETY: a plain signal to a process of our own user.
-        unsafe {
-            libc::kill(*pid as libc::pid_t, libc::SIGTERM);
+    // Ended, and gone, before this shell asks for the lock: the compositor refuses a new lock
+    // while the old client still holds it, and a refused client looks like no protocol at all.
+    for (signal, wait) in [(libc::SIGTERM, 2000u64), (libc::SIGKILL, 1000)] {
+        for pid in orphans.iter().filter(|p| std::path::Path::new(&format!("/proc/{p}")).exists()) {
+            // SAFETY: a plain signal to a process of our own user.
+            unsafe {
+                libc::kill(*pid as libc::pid_t, signal);
+            }
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(wait);
+        while orphans.iter().any(|p| std::path::Path::new(&format!("/proc/{p}")).exists())
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
     }
     tracing::warn!(?orphans, "A lock client from an earlier shell was holding the desktop; locking again from this one");
@@ -87,14 +102,20 @@ pub fn take_over_orphans(ui: &App) {
 /// published) and not on an account with no password (there is nothing to ask for); and not when
 /// a start screen is named (the GUI installer's login screen, a developer's override).
 pub fn lock_at_start(ui: &App) {
-    if std::env::var_os("YANTRIK_START_SCREEN").is_some() || crate::lock::live_session() {
+    // A developer's start screen, in a debug build only. In a shipped one the file that names it
+    // (~/.config/labwc/environment) is the user's, so a mind could write "start on the desktop".
+    if cfg!(debug_assertions) && std::env::var_os("YANTRIK_START_SCREEN").is_some() {
         return;
     }
-    if !crate::lock::account_has_password() {
+    if crate::lock::live_session() {
+        return;
+    }
+    if crate::lock::account_says_no_password() {
         tracing::warn!("This account has no password; the desktop starts open. Set one to lock it at boot");
         return;
     }
-    if crate::control::locked_screen(ui.get_current_screen()) {
+    // Already locked by the takeover of an earlier shell's lock.
+    if ui.get_current_screen() == 3 {
         return;
     }
     tracing::info!("Starting locked: the account's password opens the desktop");
@@ -107,10 +128,10 @@ pub fn answer(
     line: &str,
     asking: crate::lock::Secret,
     check: impl Fn(&str) -> crate::lock::Verdict,
-) -> Option<(String, Option<String>)> {
+) -> Option<(String, Option<(String, crate::lock::Secret)>)> {
     let secret = line.strip_prefix("secret ")?;
     match check(secret) {
-        crate::lock::Verdict::Open => Some(("ok".into(), Some(secret.to_string()))),
+        crate::lock::Verdict::Open(checked) => Some(("ok".into(), Some((secret.to_string(), checked)))),
         refused => Some((format!("no {}", refused.message(asking)), None)),
     }
 }
@@ -163,17 +184,25 @@ fn hold(
     loop {
         starts += 1;
         match run_once(bin, greeting, secret) {
-            Outcome::Unlocked(pin) => {
+            Outcome::Unlocked(pin, checked) => {
                 // Released here as well as by the unlock itself: that runs later, on the UI thread,
                 // and the caller must not read "still wanted" in between.
                 released();
                 let (ui, on_unlock) = (ui.clone(), on_unlock.clone());
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = ui.upgrade() {
-                        on_unlock(&ui, &pin, secret);
+                        on_unlock(&ui, &pin, checked);
                     }
                 });
                 return;
+            }
+            Outcome::Unsupported if LOCKED_ONCE.load(Ordering::SeqCst) => {
+                // This compositor does have the protocol; it refused because a lock was still
+                // held. Another client, as for any other ending.
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                if !WANTED.load(Ordering::SeqCst) {
+                    return;
+                }
             }
             Outcome::Unsupported => {
                 // The shell's own screen is the lock; its unlock releases it.
@@ -199,7 +228,7 @@ fn hold(
 }
 
 enum Outcome {
-    Unlocked(String),
+    Unlocked(String, crate::lock::Secret),
     Unsupported,
     Died(String),
 }
@@ -244,6 +273,7 @@ fn run_once(bin: &std::path::Path, greeting: &str, secret: crate::lock::Secret) 
             break;
         };
         if line == "locked" {
+            LOCKED_ONCE.store(true, Ordering::SeqCst);
             tracing::info!("The compositor locked the session");
             continue;
         }
@@ -263,7 +293,10 @@ fn run_once(bin: &std::path::Path, greeting: &str, secret: crate::lock::Secret) 
         let _ = child.kill();
     }
     match child.wait().map(|s| s.code()) {
-        Ok(Some(0)) if unlocked_with.is_some() => Outcome::Unlocked(unlocked_with.unwrap_or_default()),
+        Ok(Some(0)) if unlocked_with.is_some() => match unlocked_with {
+            Some((pin, checked)) => Outcome::Unlocked(pin, checked),
+            None => Outcome::Died("unlocked without a secret".into()),
+        },
         Ok(Some(EXIT_UNSUPPORTED)) => Outcome::Unsupported,
         Ok(code) => Outcome::Died(format!("exited {code:?}")),
         Err(e) => Outcome::Died(e.to_string()),
@@ -278,11 +311,11 @@ mod tests {
     fn a_secret_line_is_answered_by_the_shells_own_check_and_nothing_else_is() {
         use crate::lock::{Secret, Verdict};
         use std::time::Duration;
-        let check = |p: &str| if p == " correct horse " { Verdict::Open } else { Verdict::Wrong(Duration::ZERO) };
+        let check = |p: &str| if p == " correct horse " { Verdict::Open(Secret::Password) } else { Verdict::Wrong(Duration::ZERO) };
         let ask = Secret::Password;
         assert_eq!(
             answer("secret  correct horse ", ask, check),
-            Some(("ok".to_string(), Some(" correct horse ".to_string()))),
+            Some(("ok".to_string(), Some((" correct horse ".to_string(), Secret::Password)))),
             "the secret exactly as typed, spaces and all"
         );
         assert_eq!(answer("secret 0000", ask, check), Some(("no Wrong password".to_string(), None)));

@@ -66,20 +66,16 @@ fn says_no_password(status_line: &str) -> bool {
     matches!(status_line.split_whitespace().nth(1), Some("NP" | "L" | "LK"))
 }
 
-/// Whether `passwd -S` says, in so many words, that the account has a usable password (`P`).
-fn says_password(status_line: &str) -> bool {
-    matches!(status_line.split_whitespace().nth(1), Some("P" | "PS"))
-}
-
-/// Whether this account positively has a password. Stricter than [`secret_for_this_account`]:
-/// what the desktop starts behind at boot is decided by this, and a desktop that starts locked
-/// behind a password the account does not have is a machine nobody can use. Unknown is `false`.
-pub fn account_has_password() -> bool {
+/// Whether `passwd -S` says, in so many words, that this account has no password. Only that
+/// answer lets the desktop start open. Not knowing starts it locked: a same-uid process can make
+/// `passwd` fail to start (the process limit), and that must not open the desktop. Locked is not
+/// a lockout either way: every attempt decides the secret again, so an account that really has
+/// no password gets the PIN as soon as `passwd` answers.
+pub fn account_says_no_password() -> bool {
     std::process::Command::new("/usr/bin/passwd")
         .arg("-S")
         .output()
-        .map(|out| out.status.success() && says_password(&String::from_utf8_lossy(&out.stdout)))
-        .unwrap_or(false)
+        .is_ok_and(|out| out.status.success() && says_no_password(&String::from_utf8_lossy(&out.stdout)))
 }
 
 /// Whether this is the live image rather than an installed machine: its password is published,
@@ -117,8 +113,9 @@ pub fn delay_after(failures: u32) -> Duration {
 /// What an attempt to unlock came to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Verdict {
-    /// The secret was right.
-    Open,
+    /// The secret was right, and which secret it was: the one actually checked, not the one the
+    /// screen was showing a prompt for, since the account can change between the two.
+    Open(Secret),
     /// It was wrong; the next attempt is refused unchecked for this long (zero: straight away).
     Wrong(Duration),
     /// Too soon after a wrong one: not checked at all.
@@ -129,7 +126,7 @@ impl Verdict {
     /// What the lock screen says, for anything but `Open`.
     pub fn message(self, secret: Secret) -> String {
         match self {
-            Verdict::Open => String::new(),
+            Verdict::Open(_) => String::new(),
             Verdict::Wrong(wait) if wait.is_zero() => secret.wrong().to_string(),
             Verdict::Wrong(wait) => format!("{}. Try again in {} s", secret.wrong(), secs(wait)),
             Verdict::Wait(wait) => format!("Too many tries. Try again in {} s", secs(wait)),
@@ -151,15 +148,15 @@ pub struct Tries {
 impl Tries {
     /// One attempt at `now`. `check` runs only when an attempt is due, so a burst of guesses
     /// costs the guesser the wait, not the machine a check each.
-    pub fn attempt(&mut self, now: std::time::Instant, check: impl FnOnce() -> bool) -> Verdict {
+    pub fn attempt(&mut self, now: std::time::Instant, check: impl FnOnce() -> Option<Secret>) -> Verdict {
         if let Some(due) = self.not_before {
             if now < due {
                 return Verdict::Wait(due - now);
             }
         }
-        if check() {
+        if let Some(checked) = check() {
             *self = Tries::default();
-            return Verdict::Open;
+            return Verdict::Open(checked);
         }
         self.failures += 1;
         let wait = delay_after(self.failures);
@@ -177,10 +174,12 @@ static TRIES: std::sync::Mutex<Tries> = std::sync::Mutex::new(Tries { failures: 
 pub fn check_unlock(input: &str) -> Verdict {
     let mut tries = TRIES.lock().unwrap_or_else(|e| e.into_inner());
     let verdict = tries.attempt(std::time::Instant::now(), || match secret_for_this_account() {
-        Secret::Password => account_name().is_some_and(|user| crate::wire::login::verify_password(&user, input)),
-        Secret::Pin => check_pin(input),
+        Secret::Password => account_name()
+            .is_some_and(|user| crate::wire::login::verify_password(&user, input))
+            .then_some(Secret::Password),
+        Secret::Pin => check_pin(input).then_some(Secret::Pin),
     });
-    if verdict != Verdict::Open {
+    if !matches!(verdict, Verdict::Open(_)) {
         tracing::info!(?verdict, failures = tries.failures, "Unlock refused");
     }
     verdict
@@ -347,14 +346,6 @@ mod lock_tests {
     }
 
     #[test]
-    fn the_desktop_starts_locked_only_behind_a_password_the_account_has() {
-        assert!(says_password("yantrik P 2026-09-28 0 99999 7 -1"));
-        assert!(!says_password("yantrik NP 2026-09-28 0 99999 7 -1"), "no password: nothing to start behind");
-        assert!(!says_password("yantrik L 2026-09-28 0 99999 7 -1"));
-        assert!(!says_password(""), "unknown is not a password: starting locked behind it would lock everyone out");
-    }
-
-    #[test]
     fn only_an_account_that_says_it_has_no_password_gets_the_pin() {
         assert!(!says_no_password("yantrik P 2026-09-17 0 99999 7 -1"));
         assert!(says_no_password("yantrik NP 2026-09-17 0 99999 7 -1"), "no password: the PIN");
@@ -369,18 +360,18 @@ mod lock_tests {
         let t0 = Instant::now();
         let mut tries = Tries::default();
         for _ in 0..2 {
-            assert_eq!(tries.attempt(t0, || false), Verdict::Wrong(Duration::ZERO));
+            assert_eq!(tries.attempt(t0, || None), Verdict::Wrong(Duration::ZERO));
         }
-        assert_eq!(tries.attempt(t0, || false), Verdict::Wrong(Duration::from_secs(1)));
+        assert_eq!(tries.attempt(t0, || None), Verdict::Wrong(Duration::from_secs(1)));
         let mut checked = false;
         let soon = tries.attempt(t0 + Duration::from_millis(500), || {
             checked = true;
-            true
+            Some(Secret::Password)
         });
         assert!(matches!(soon, Verdict::Wait(_)) && !checked, "inside the wait nothing is checked, not even a right one");
-        assert_eq!(tries.attempt(t0 + Duration::from_secs(1), || false), Verdict::Wrong(Duration::from_secs(2)));
-        assert_eq!(tries.attempt(t0 + Duration::from_secs(3), || true), Verdict::Open);
-        assert_eq!(tries.attempt(t0 + Duration::from_secs(3), || false), Verdict::Wrong(Duration::ZERO), "counting starts again");
+        assert_eq!(tries.attempt(t0 + Duration::from_secs(1), || None), Verdict::Wrong(Duration::from_secs(2)));
+        assert_eq!(tries.attempt(t0 + Duration::from_secs(3), || Some(Secret::Password)), Verdict::Open(Secret::Password));
+        assert_eq!(tries.attempt(t0 + Duration::from_secs(3), || None), Verdict::Wrong(Duration::ZERO), "counting starts again");
     }
 
     #[test]

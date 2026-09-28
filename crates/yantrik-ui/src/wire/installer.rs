@@ -614,10 +614,13 @@ fi
     let labwc_dir = format!("{dst_home}/.config/labwc");
     let _ = run_cmd("mkdir", &["-p", &labwc_dir]);
 
-    // YANTRIK_START_SCREEN=32 boots to the graphical login screen
+    // No YANTRIK_START_SCREEN: the shell starts an installed machine behind the session lock,
+    // asking for this password (#415). It used to name the login screen (32) here, which is drawn
+    // in the shell's own window, so an app window could sit over it; and this file is the
+    // user's, so anything running as them could name another start screen.
     sudo_write(
         &format!("{labwc_dir}/environment"),
-        "WLR_RENDERER=pixman\nWLR_RENDERER_ALLOW_SOFTWARE=1\nXDG_SESSION_TYPE=wayland\nQT_QPA_PLATFORM=wayland\nMOZ_ENABLE_WAYLAND=1\nSLINT_BACKEND=winit\nLIBGL_ALWAYS_SOFTWARE=1\nYANTRIK_START_SCREEN=32\n",
+        "WLR_RENDERER=pixman\nWLR_RENDERER_ALLOW_SOFTWARE=1\nXDG_SESSION_TYPE=wayland\nQT_QPA_PLATFORM=wayland\nMOZ_ENABLE_WAYLAND=1\nSLINT_BACKEND=winit\nLIBGL_ALWAYS_SOFTWARE=1\n",
     )?;
 
     // No autostart or rc.xml here. `yantrik-session` installs the shipped ones from

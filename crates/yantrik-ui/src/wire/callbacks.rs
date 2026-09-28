@@ -50,8 +50,8 @@ fn wire_lock(ui: &App, ctx: &AppContext) {
             let verdict = lock::check_unlock(&given);
             let _ = slint::invoke_from_event_loop(move || {
                 let Some(ui) = ui_weak.upgrade() else { return };
-                if verdict == lock::Verdict::Open {
-                    unlocked(&ui, &bridge, &given, secret);
+                if let lock::Verdict::Open(checked) = verdict {
+                    unlocked(&ui, &bridge, &given, checked);
                 } else {
                     ui.set_lock_error(verdict.message(secret).into());
                 }
