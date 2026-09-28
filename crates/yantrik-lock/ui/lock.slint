@@ -1,6 +1,7 @@
 // The lock screen, drawn by yantrik-lock on the compositor's session-lock surfaces (#313).
 // The same content as the shell's own lock screen; only the compositor shows it now, and nothing
-// else on the desktop is shown or reachable until the shell says the PIN is right.
+// else on the desktop is shown or reachable until the shell says the secret is right: the login
+// password, or the PIN on an account without one (#414).
 import { Theme } from "theme.slint";
 
 export component LockView inherits Window {
@@ -9,6 +10,7 @@ export component LockView inherits Window {
     in property <string> greeting;
     in property <int> digits: 0;
     in property <string> error;
+    in property <string> prompt;
 
     default-font-family: Theme.font-ui;
     background: Theme.bg-deep;
@@ -38,7 +40,7 @@ export component LockView inherits Window {
             horizontal-alignment: center;
         }
         Text {
-            text: "Enter PIN to unlock";
+            text: root.prompt;
             font-size: 13px;
             color: Theme.text-dim;
             horizontal-alignment: center;
@@ -56,7 +58,7 @@ export component LockView inherits Window {
                     padding-left: 22px;
                     spacing: 10px;
                     alignment: start;
-                    for i in root.digits: VerticalLayout {
+                    for i in min(root.digits, 20): VerticalLayout {
                         alignment: center;
                         Rectangle {
                             width: 10px;

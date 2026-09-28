@@ -7,11 +7,12 @@
 //! compositor instead (`ext-session-lock-v1`, the protocol swaylock uses): while it holds it, the
 //! compositor shows only these surfaces and sends input only to them.
 //!
-//! It does not know the PIN. The shell does (`lock::check_pin`), and this asks it, one line at a
-//! time over stdin/stdout:
+//! It does not know the secret. The shell does (`lock::check_unlock`: the login password, or the
+//! PIN on an account without one, #414, named by `--ask password|pin`), and this asks it, one
+//! line at a time over stdin/stdout:
 //!
 //!   → `locked`           the compositor has locked the session
-//!   → `pin <digits>`     the person pressed Enter
+//!   → `secret <text>`    the person pressed Enter
 //!   ← `ok` | `no`        the shell's answer; on `ok` this unlocks and exits 0
 //!
 //! Exit 3: this compositor has no session lock, so the shell keeps its own screen (and says so).
@@ -58,8 +59,47 @@ slint::include_modules!();
 const EXIT_UNSUPPORTED: i32 = 3;
 /// Anything else that stopped it before it could lock.
 const EXIT_FAILED: i32 = 4;
-/// A PIN this long is not a PIN; stop taking keys rather than grow without bound.
-const MOST_DIGITS: usize = 32;
+/// Longer than any password a person types; stop taking keys rather than grow without bound.
+const MOST_CHARS: usize = 256;
+
+/// What to ask for, from `--ask`: the login password unless the shell says the PIN.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Ask {
+    Password,
+    Pin,
+}
+
+impl Ask {
+    fn from_args(args: &[String]) -> Ask {
+        match args.iter().skip_while(|a| *a != "--ask").nth(1).map(String::as_str) {
+            Some("pin") => Ask::Pin,
+            _ => Ask::Password,
+        }
+    }
+
+    fn prompt(self) -> &'static str {
+        match self {
+            Ask::Password => "Enter your password to unlock",
+            Ask::Pin => "Enter PIN to unlock",
+        }
+    }
+
+    fn wrong(self) -> &'static str {
+        match self {
+            Ask::Password => "Wrong password",
+            Ask::Pin => "Wrong PIN",
+        }
+    }
+
+    /// Whether a typed character belongs in the entry: digits for a PIN, anything printable for a
+    /// password.
+    fn takes(self, c: char) -> bool {
+        match self {
+            Ask::Pin => c.is_ascii_digit(),
+            Ask::Password => !c.is_control(),
+        }
+    }
+}
 
 struct Headless(Rc<MinimalSoftwareWindow>);
 
@@ -83,19 +123,29 @@ struct App {
     keyboard: Option<wl_keyboard::WlKeyboard>,
     window: Rc<MinimalSoftwareWindow>,
     view: LockView,
-    pin: String,
+    ask: Ask,
+    entry: String,
     error: String,
     locked: bool,
     exit: Option<i32>,
 }
 
 fn main() {
-    let greeting = std::env::args().skip_while(|a| a != "--greeting").nth(1).unwrap_or_default();
+    // Not dumpable: another process of the same user cannot read this one's memory (the password
+    // being typed) or open its descriptors through /proc, and it leaves no core behind.
+    // SAFETY: prctl with PR_SET_DUMPABLE takes plain integers and touches no memory of ours.
+    unsafe {
+        libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
+    }
+    let args: Vec<String> = std::env::args().collect();
+    let greeting = args.iter().skip_while(|a| *a != "--greeting").nth(1).cloned().unwrap_or_default();
+    let ask = Ask::from_args(&args);
 
     let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
     slint::platform::set_platform(Box::new(Headless(window.clone()))).expect("one platform");
     let view = LockView::new().expect("the lock view");
     view.set_greeting(greeting.into());
+    view.set_prompt(ask.prompt().into());
     view.show().ok();
 
     let Ok(conn) = Connection::connect_to_env() else {
@@ -122,7 +172,8 @@ fn main() {
         keyboard: None,
         window,
         view,
-        pin: String::new(),
+        ask,
+        entry: String::new(),
         error: String::new(),
         locked: false,
         exit: None,
@@ -172,18 +223,26 @@ impl App {
     }
 
     fn ask_shell(&mut self) {
-        let pin = std::mem::take(&mut self.pin);
-        if pin.is_empty() {
+        let entry = std::mem::take(&mut self.entry);
+        if entry.is_empty() {
             return;
         }
-        if !self.tell(&format!("pin {pin}")) {
+        // The answer can take a moment (the password check, and a slow-down after wrong ones):
+        // say so before waiting for it, with the field already empty.
+        self.error = "Checking…".into();
+        self.draw();
+        if !self.tell(&format!("secret {entry}")) {
             self.error = "The desktop is not answering".into();
             return;
         }
         let mut answer = String::new();
         match std::io::stdin().lock().read_line(&mut answer) {
             Ok(n) if n > 0 && answer.trim() == "ok" => self.unlock(),
-            Ok(n) if n > 0 => self.error = "Wrong PIN".into(),
+            // `no <what to say>`: the shell's words, which carry how long to wait.
+            Ok(n) if n > 0 => {
+                let said = answer.trim().strip_prefix("no").unwrap_or("").trim();
+                self.error = if said.is_empty() { self.ask.wrong().into() } else { said.into() };
+            }
             _ => self.error = "The desktop is not answering".into(),
         }
     }
@@ -200,7 +259,7 @@ impl App {
         let now = chrono::Local::now();
         self.view.set_time(now.format("%H:%M").to_string().into());
         self.view.set_date(now.format("%A, %B %-d").to_string().into());
-        self.view.set_digits(self.pin.chars().count() as i32);
+        self.view.set_digits(self.entry.chars().count() as i32);
         self.view.set_error(self.error.clone().into());
 
         let qh = self.qh.clone();
@@ -235,14 +294,14 @@ impl App {
         match event.keysym {
             Keysym::Return | Keysym::KP_Enter => self.ask_shell(),
             Keysym::BackSpace => {
-                self.pin.pop();
+                self.entry.pop();
             }
-            Keysym::Escape => self.pin.clear(),
+            Keysym::Escape => self.entry.clear(),
             _ => {
                 if let Some(text) = &event.utf8 {
-                    for c in text.chars().filter(|c| c.is_ascii_digit()) {
-                        if self.pin.len() < MOST_DIGITS {
-                            self.pin.push(c);
+                    for c in text.chars().filter(|c| self.ask.takes(*c)) {
+                        if self.entry.chars().count() < MOST_CHARS {
+                            self.entry.push(c);
                         }
                     }
                     if !text.is_empty() {
