@@ -34,7 +34,7 @@ import threading
 import types
 import typing
 
-from . import gate, wire
+from . import gate, reach, wire
 
 PROTOCOL = 1
 SETTLES = ("on return", "later")
@@ -527,7 +527,7 @@ class Surface:
     act_timeout = ACT_TIMEOUT
 
     def __init__(self, app_id, summary=None, *, aliases=(), settings_path=None, mode_path=None,
-                 spend_grant=None, socket_path=None):
+                 spend_grant=None, socket_path=None, ask_shell=None):
         if not isinstance(app_id, str) or not app_id or any(
                 c.isspace() or c in "/\0" for c in app_id):
             raise ValueError("an app id is one word of text with no slash, like `hello` or "
@@ -544,6 +544,8 @@ class Surface:
         self._settings_path = settings_path
         self._mode_path = mode_path
         self._spend_grant = spend_grant
+        # Stands in for the shell's `reach_of` in tests: (token, what) -> the reply object.
+        self._ask_shell = ask_shell
         self._socket_path = socket_path
         self._lock = threading.RLock()
         self._ids = itertools.count(1)
@@ -622,6 +624,13 @@ class Surface:
     def _unknown(self, name):
         return "unknown action `%s`; this app offers: %s" % (
             name, ", ".join(a.name for a in self.actions))
+
+    def _within_reach(self, held, spec, args):
+        """The calling agent's reach held to this act, on the grade this surface publishes for it
+        now: the refusal, or None. `held` None — no token, or no reach for it — holds nothing."""
+        if held is None:
+            return None
+        return reach.within(held, self.app_id, spec.name, self._grade(spec), args)
 
     # ── the app's side, which an app may override ────────────────────────────
 
@@ -721,6 +730,13 @@ class Surface:
             args = dict(args)
         # Lifted off before anything reads `args` — the grant below is bound to them.
         token = gate.agent_token_of(params, args)
+        # A caller the kernel says is the mind account acts only as a live agent (#411), before
+        # anything else is decided about its call.
+        reach.require_standing(self.app_id, name, token, peer, self._ask_shell)
+        # The calling agent's reach, read here, where IO belongs, and held to below before any
+        # grant is spent and again before the handler runs. No token, or a token with no reach,
+        # is not held; a shell that cannot say refuses the call.
+        held = reach.read_reach(token, self._ask_shell)
         # A string, or no guard: what the transport reads with `as_str` (a client MUST send one).
         expect = params.get("expect_revision")
         expect = expect if isinstance(expect, str) else None
@@ -731,14 +747,22 @@ class Surface:
         spec = self._find(name)
         if grant:
             # Spent only once everything that could still refuse the call without asking anybody
-            # has passed — the action exists, its arguments are right, and the ceiling allows its
-            # grade (#154) — or a person's Allow is used up on an act that never runs. Spent
-            # against the arguments as sent: what the card showed, not what the handler will read.
+            # has passed — the action exists, the agent's reach covers it, its arguments are
+            # right, and the ceiling allows its grade (#154) — or a person's Allow is used up on
+            # an act that never runs. Spent against the arguments as sent: what the card showed,
+            # not what the handler will read. And for the agent the call arrived as (#182): a
+            # grant one agent asked for is not another's to spend.
             if spec is None:
                 raise wire.RpcError(wire.RPC_INVALID_PARAMS, self._unknown(name))
-            refusal = check_arguments(spec, args)
+            refusal = (self._within_reach(held, spec, args) or check_arguments(spec, args))
             if refusal is not None:
                 raise wire.RpcError(wire.RPC_INVALID_PARAMS, refusal)
+            # Not forwarded as the calling agent (#182) — yet. The shell believes a forwarded
+            # `caller_pid` only from one of the desktop's own binaries (`spending_agent`), so from
+            # a Python app the token would be checked against the app's own pid, "not believed",
+            # and every agent's grant would fail to spend. Spent as no agent, as it always was,
+            # until the shell can tell a surface it launched from anything else on the socket
+            # (#466). `gate.spend_params` already carries the agent for when it can.
             refusal = authority.spend(grant, self.app_id, name, self._grade(spec), args,
                                       self._spend_grant)
             if refusal is not None:
@@ -746,6 +770,12 @@ class Surface:
 
         def turn():
             with _Scope(peer, token):
+                # The reach, on the grade this surface publishes now — the one the dispatch
+                # decides on. An action this surface does not have is answered as that, below.
+                found = self._find(name)
+                refusal = self._within_reach(held, found, args) if found is not None else None
+                if refusal is not None:
+                    raise Refusal(refusal)
                 return self._dispatch(name, args, expect, authority)
 
         timeout = (spec.timeout if spec is not None and spec.timeout else self.act_timeout)
