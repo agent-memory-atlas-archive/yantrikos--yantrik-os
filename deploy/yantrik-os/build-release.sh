@@ -243,6 +243,10 @@ cp "$PROJECT_ROOT/config/labwc/autostart" "$ROOT/share/labwc/autostart"
 # `yantrik-update reconcile` on machines already installed.
 mkdir -p "$ROOT/share/polkit"
 cp "$PROJECT_ROOT/config/polkit/"*.rules "$ROOT/share/polkit/"
+# Kernel settings the desktop relies on (#414): Yama ptrace_scope 1, so nothing a mind starts can
+# attach to the shell. Installed into /etc/sysctl.d by the image and by `yantrik-update reconcile`.
+mkdir -p "$ROOT/share/sysctl"
+cp "$PROJECT_ROOT/config/sysctl/"*.conf "$ROOT/share/sysctl/"
 # Root helpers (#397): installed root-owned into /usr/lib/yantrik by the image and by
 # `yantrik-update reconcile` — never run from /opt/yantrik, which its user can write.
 mkdir -p "$ROOT/share/root-helpers"
