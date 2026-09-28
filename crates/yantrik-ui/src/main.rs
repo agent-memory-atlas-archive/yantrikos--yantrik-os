@@ -85,6 +85,7 @@ mod mind_mode;
 mod mind_panel;
 /// A desktop of the mind's own, inside one window: where the apps a mind opens are drawn (#239).
 mod mind_view;
+mod session_lock;
 mod notifications;
 mod onboarding;
 mod icons;

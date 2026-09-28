@@ -334,7 +334,9 @@ echo "yantrik:yantrik" | chpasswd
 # this filesystem, so every installed machine accepted that login from the network.
 passwd -l root
 
-# Passwordless sudo for yantrik
+# Passwordless sudo for yantrik — on the LIVE image only: the installer runs from this session and
+# needs root without a terminal. An installed machine does not keep it: the installer's
+# `yantrik-update migrate-ownership` puts the narrow rule in place and removes this file (#397).
 echo "yantrik ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/yantrik
 chmod 440 /etc/sudoers.d/yantrik
 

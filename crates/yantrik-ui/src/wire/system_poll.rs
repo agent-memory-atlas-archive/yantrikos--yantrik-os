@@ -299,10 +299,8 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                 && snap.idle_seconds >= lock_timeout
                 && ui.get_current_screen() == 1
             {
-                ui.set_current_screen(3);
-                ui.set_lock_error("".into());
-                ui.set_lock_date_text(app_context::current_date_text().into());
-                ui.set_lock_greeting(ui.get_greeting_text());
+                // The one lock path: the shell's screen and the compositor's session lock (#313).
+                ui.invoke_lock_screen();
                 tracing::info!(idle_secs = snap.idle_seconds, "Auto-locked due to idle");
             }
         }
@@ -459,10 +457,8 @@ fn handle_keybind(ui: &App, action: &str) {
             }
         }
         "lock-screen" => {
-            ui.set_current_screen(3);
-            ui.set_lock_error("".into());
-            ui.set_lock_date_text(app_context::current_date_text().into());
-            ui.set_lock_greeting(ui.get_greeting_text());
+            // The one lock path: the shell's screen and the compositor's session lock (#313).
+            ui.invoke_lock_screen();
             tracing::info!("Screen locked via hotkey");
         }
         "open-terminal" => {

@@ -13,8 +13,8 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         let Some(ui) = ui_weak.upgrade() else { return };
         match action.as_str() {
             "lock" => {
-                ui.set_current_screen(3);
-                ui.set_lock_error("".into());
+                // The one lock path: the shell's screen and the compositor's session lock (#313).
+                ui.invoke_lock_screen();
                 tracing::info!("Screen locked via power menu");
             }
             "suspend" => {

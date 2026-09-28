@@ -36,6 +36,8 @@ members = [
     "services/perception-journal",
     "services/a11y-service",
     "crates/yantrik-app-runtime",
+    # The lock screen as a Wayland session lock (#313).
+    "crates/yantrik-lock",
     # The folder watch and the move decisions shared by yDoc and the Text Editor, so a file
     # moved in Files does not strand the editor holding it open (#75, #86).
     "crates/yantrik-file-follow",

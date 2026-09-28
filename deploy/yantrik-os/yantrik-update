@@ -60,6 +60,9 @@ CONF="$PREFIX/update.conf"
 SESSION_UNIT="${YANTRIK_SESSION_UNIT:-yantrik-session.service}"
 LOG_DIR="$PREFIX/logs"
 LOG_FILE="$LOG_DIR/yantrik-os.log"
+# What the desktop's account may run as root without a password (#397): this updater, the
+# Package Manager's helper and setting the timezone. Nothing else.
+SUDO_RULE="${YANTRIK_SUDO_RULE:-/etc/sudoers.d/yantrik-os}"
 
 # Read a KEY from the installed BUILD marker, or empty if absent.
 #
@@ -513,7 +516,134 @@ cmd_check() {
 #   give_back_to_owner     when this IS root, hand what it made back to whoever owns $PREFIX.
 prefix_owner() { stat -c %U "$PREFIX" 2>/dev/null || id -un; }
 
+# ── Root-owned (#397) ───────────────────────────────────────────────────────────────────
+#
+# The tree above belonged to the desktop's user, and everything the OS runs was in it: the
+# shell, this updater, every binary. So anything running as that user — a mind with a terminal
+# included — could replace the OS's own code without asking anyone. It is root's now. The user
+# keeps logs/ and data/, and config.yaml for now; this updater runs as root, through a sudo rule
+# for this one file, and so does its rollback.
+
+# Is the tree root's yet? bin/ is the tell: it is what was replaced first and matters most.
+tree_is_roots() { [ "$(stat -c %u "$BIN_DIR" 2>/dev/null)" = 0 ]; }
+
+# Who the desktop belongs to, for the parts that stay theirs: whoever owns logs/ (the session
+# writes it at every login), else the prefix, else the user a sudo came from.
+desktop_owner() {
+  local o
+  o="$(stat -c %U "$LOG_DIR" 2>/dev/null)"
+  [ -n "$o" ] && [ "$o" != root ] || o="$(stat -c %U "$PREFIX" 2>/dev/null)"
+  [ -n "$o" ] && [ "$o" != root ] || o="${SUDO_USER:-}"
+  printf '%s' "$o"
+}
+
+# A command that writes the tree, run as the user once the tree is root's: run this same,
+# root-owned file again through its own sudo rule. The shell, the About screen and a mind over
+# `yos` all call it as the user, and none of them has to know.
+elevate() {
+  [ "$(id -u)" = 0 ] && return 0
+  tree_is_roots || return 0
+  local self="$BIN_DIR/yantrik-update"
+  [ "$(stat -c %u "$self" 2>/dev/null)" = 0 ] \
+    || fail "$self is not root's while the rest of $BIN_DIR is; refusing to run it as root. Reinstall with: sudo $self apply --force"
+  if ! sudo -n -l "$self" >/dev/null 2>&1; then
+    fail "the updater runs as root on this machine, and this account may not run it without a password. Run: sudo yantrik-update $CMD${*:+ $*}"
+  fi
+  exec sudo -n "$self" "$CMD" "$@"
+}
+
+# The rule itself. `%sudo` is the desktop's user on every install. Paths only root can change:
+# a NOPASSWD rule on a file its user can write would be root for that user.
+sudo_rule_text() {
+  printf '%s\n' \
+    "# Yantrik OS (#397): what the desktop's account may run as root without a password." \
+    "# Everything else asks for the password. Written by yantrik-update; do not edit." \
+    "%sudo ALL=(root) NOPASSWD: $BIN_DIR/yantrik-update, /usr/lib/yantrik/yantrik-pkg, /usr/bin/timedatectl set-timezone *"
+}
+
+# Hand the tree to root, keep what is the desktop's, and put the narrow rule in place. Root
+# only; run once, at the start of this updater's own `apply` or `reconcile`, before anything is
+# installed, so a rollback of the same run already runs as root. Never as the last step of an
+# apply an older updater is driving: its rollback would run as the user into a root tree.
+cmd_migrate_ownership() {
+  [ "$(id -u)" = 0 ] || fail "migrate-ownership runs as root"
+  local owner d
+  owner="$(desktop_owner)"
+  [ -n "$owner" ] || fail "cannot tell whose desktop this is (no owner on $LOG_DIR or $PREFIX); nothing changed"
+  say "Making $PREFIX root's; $owner keeps logs/ and data/"
+  chown root:root "$PREFIX" && chmod 0755 "$PREFIX"
+  for d in "$BIN_DIR" "$SHARE_DIR" "$UPDATES_DIR" "$BACKUP_DIR" "$PREFIX/models" "$PREFIX/skills" \
+           "$PREFIX/i18n" "$PREFIX/ui-deployments"; do
+    [ -e "$d" ] || continue
+    chown -R root:root "$d"
+    chmod -R go-w "$d"
+  done
+  for f in "$BUILD_FILE" "$PREFIX/.version" "$CONF"; do
+    [ -e "$f" ] && chown root:root "$f" && chmod 0644 "$f"
+  done
+  for d in "$LOG_DIR" "$PREFIX/data"; do
+    mkdir -p "$d"
+    chown -R "$owner" "$d"
+  done
+  # config.yaml stays the user's until it is split (#397 step c): Settings, OAuth refresh and
+  # onboarding write it as the user.
+  [ -e "$PREFIX/config.yaml" ] && chown "$owner" "$PREFIX/config.yaml"
+  install_sudo_rule && remove_blanket_sudo
+}
+
+install_sudo_rule() {
+  local tmp
+  tmp="$(mktemp)"
+  sudo_rule_text > "$tmp"
+  if command -v visudo >/dev/null 2>&1 && ! visudo -cf "$tmp" >/dev/null 2>&1; then
+    rm -f "$tmp"
+    warn "the sudo rule did not pass visudo; not installed"
+    return 1
+  fi
+  install -m 0440 -o root -g root "$tmp" "$SUDO_RULE" && rm -f "$tmp"
+  info "sudo rule in place: $SUDO_RULE"
+}
+
+# The blanket rule the OS itself wrote — `<user> ALL=(ALL) NOPASSWD: ALL`, by the image
+# (/etc/sudoers.d/yantrik) and the installer (/etc/sudoers.d/<user>) — taken away once the
+# narrow rule is in place (#397). With it, anything running as the desktop's account was root
+# without asking; the narrow rule is everything the desktop needs. Only a file whose one
+# non-comment line is exactly that rule is removed: a file a person wrote themselves is theirs.
+remove_blanket_sudo() {
+  [ "$(id -u)" = 0 ] || return 0
+  [ -f "$SUDO_RULE" ] || return 0
+  if command -v visudo >/dev/null 2>&1 && ! visudo -cf "$SUDO_RULE" >/dev/null 2>&1; then
+    return 0
+  fi
+  local owner f body
+  owner="$(desktop_owner)"
+  for f in /etc/sudoers.d/yantrik ${owner:+"/etc/sudoers.d/$owner"}; do
+    [ -f "$f" ] || continue
+    body="$(grep -v '^[[:space:]]*#' "$f" | grep -v '^[[:space:]]*$')"
+    [ "$(printf '%s\n' "$body" | wc -l)" = 1 ] || continue
+    if printf '%s\n' "$body" | grep -qxE '[a-z_][a-z0-9_-]* ALL=\(ALL(:ALL)?\) ?NOPASSWD: ?ALL'; then
+      rm -f "$f" && info "removed the blanket sudo rule $f; the desktop keeps only $SUDO_RULE"
+    fi
+  done
+}
+
+# Run by this updater's own `apply` and `reconcile`, first thing: a machine whose tree is still
+# the user's is moved over while the old blanket rule still lets it be, then the command goes on
+# as root.
+migrate_if_needed() {
+  tree_is_roots && [ -f "$SUDO_RULE" ] && return 0
+  [ "$PREFIX" = /opt/yantrik ] || return 0   # a scratch prefix (the selftest) is never migrated
+  if [ "$(id -u)" = 0 ]; then
+    cmd_migrate_ownership || warn "could not make $PREFIX root's; carrying on as before"
+  elif sudo -n true 2>/dev/null; then
+    sudo -n "$BIN_DIR/yantrik-update" migrate-ownership \
+      || warn "could not make $PREFIX root's; carrying on as before"
+  fi
+}
+
 ensure_writable_tree() {
+  [ "$(id -u)" = 0 ] && return 0
+  tree_is_roots && fail "$PREFIX is root's and this is running as $(id -un); run: sudo yantrik-update $CMD"
   local d bad=""
   for d in "$PREFIX" "$BIN_DIR" "$SHARE_DIR" "$UPDATES_DIR" "$BACKUP_DIR"; do
     [ -e "$d" ] || continue
@@ -533,6 +663,8 @@ ensure_writable_tree() {
 
 give_back_to_owner() {
   [ "$(id -u)" = 0 ] || return 0
+  # Once the tree is root's, what this made stays root's (#397).
+  tree_is_roots && return 0
   local owner; owner="$(prefix_owner)"
   [ -n "$owner" ] && [ "$owner" != root ] || return 0
   chown -R "$owner" "$UPDATES_DIR" "$BACKUP_DIR" "$BIN_DIR" "$SHARE_DIR" "$BUILD_FILE" \
@@ -540,6 +672,8 @@ give_back_to_owner() {
 }
 
 cmd_apply() {
+  migrate_if_needed
+  elevate "$@"
   trap give_back_to_owner EXIT
   need python3; need curl; need sha256sum; need tar
   parse_channel "$@"
@@ -1081,6 +1215,7 @@ restore_backup() {
 
 # ── rollback ────────────────────────────────────────────────────────────────────────────
 cmd_rollback() {
+  elevate "$@"
   local backup
   backup="$(cat "$UPDATES_DIR/last-backup" 2>/dev/null)"
   [ -n "$backup" ] && [ -d "$backup" ] || {
@@ -1103,6 +1238,11 @@ cmd_status() {
   if [ -f "$CONF" ]; then
     [ -w "$CONF" ] && can_write="yes"
   elif [ -w "$(dirname "$CONF")" ]; then
+    can_write="yes"
+  fi
+  # On a root-owned tree, set-channel runs as root through the updater's own rule (#397): the
+  # file is settable from this account although this account cannot write it.
+  if [ "$can_write" = no ] && tree_is_roots && sudo -n -l "$BIN_DIR/yantrik-update" >/dev/null 2>&1; then
     can_write="yes"
   fi
 
@@ -1174,6 +1314,7 @@ conf_body() {
 }
 
 cmd_set_channel() {
+  elevate "$@"
   local new="${1:-}"
   case "$new" in
     nightly|beta|stable) ;;
@@ -1314,6 +1455,9 @@ reconcile_helpers() {
 }
 
 cmd_reconcile() {
+  migrate_if_needed
+  elevate
+  remove_blanket_sudo
   say "Reconciling the base system against what the image ships"
   info "required: $REQUIRED_PACKAGES"
   reconcile_packages
@@ -1550,6 +1694,7 @@ case "$CMD" in
   # person at a terminal types the hyphen.
   set-channel|set_channel) cmd_set_channel "$@" ;;
   reconcile) cmd_reconcile ;;
+  migrate-ownership) cmd_migrate_ownership ;;
   selftest) cmd_selftest ;;
   # Printed from a function rather than `sed -n '20,30p' "$0"`, which quietly printed whatever
   # happened to be on those lines after anyone edited the header.

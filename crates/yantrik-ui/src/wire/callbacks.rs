@@ -36,25 +36,13 @@ pub fn wire(ui: &App, ctx: &AppContext) {
 fn wire_lock(ui: &App, ctx: &AppContext) {
     let ui_weak = ui.as_weak();
     let bridge = ctx.bridge.clone();
+    let unlock_bridge = bridge.clone();
     ui.on_try_unlock(move |pin| {
         let pin = pin.to_string();
         if lock::check_pin(&pin) {
             if let Some(ui) = ui_weak.upgrade() {
-                ui.set_current_screen(1);
-                ui.set_lock_error("".into());
-                tracing::info!("Screen unlocked");
+                unlocked(&ui, &unlock_bridge, &pin);
             }
-            // The screen is open; now see whether the same keystrokes also open the vault.
-            //
-            // Usually they will not: the screen PIN and the vault passphrase are different
-            // secrets, and on most machines the PIN is still the default. It is offered anyway
-            // because on a machine where the person has made them the same — which is the
-            // obvious thing to do once the desktop has asked for a vault passphrase — coming
-            // back to an unlocked screen with a still-locked vault is a second prompt for a
-            // secret they just typed. A wrong guess here costs one Argon2id derivation and is
-            // silent: the person was unlocking a screen, and telling them they failed at
-            // something they were not attempting is worse than telling them nothing.
-            offer_screen_secret_to_vault(&bridge, &pin);
         } else {
             if let Some(ui) = ui_weak.upgrade() {
                 ui.set_lock_error("Wrong PIN".into());
@@ -64,6 +52,7 @@ fn wire_lock(ui: &App, ctx: &AppContext) {
     });
 
     let ui_weak_lock = ui.as_weak();
+    let lock_bridge = bridge.clone();
     ui.on_lock_screen(move || {
         // Before the screen goes dark, not after: the key is zeroed while this is still the
         // person's own action. A locked screen with the vault's key still in memory protects a
@@ -76,8 +65,32 @@ fn wire_lock(ui: &App, ctx: &AppContext) {
             ui.set_lock_date_text(app_context::current_date_text().into());
             ui.set_lock_greeting(ui.get_greeting_text());
             tracing::info!("Screen locked — the vault's key was zeroed with it");
+            // And at the compositor (#313): the shell's screen alone left every app window
+            // above it, visible and usable. The session lock shows only the lock.
+            let bridge = lock_bridge.clone();
+            crate::session_lock::engage(ui.as_weak(), ui.get_greeting_text().to_string(), move |ui, pin| {
+                unlocked(ui, &bridge, pin)
+            });
         }
     });
+}
+
+/// The screen is open: back to the desktop, and the same secret offered to the vault. One path
+/// for the shell's own PIN screen and the compositor's session lock (#313).
+fn unlocked(ui: &App, bridge: &std::sync::Arc<crate::bridge::CompanionBridge>, pin: &str) {
+    ui.set_current_screen(1);
+    ui.set_lock_error("".into());
+    tracing::info!("Screen unlocked");
+    // The screen is open; now see whether the same keystrokes also open the vault.
+    //
+    // Usually they will not: the screen PIN and the vault passphrase are different secrets, and on
+    // most machines the PIN is still the default. It is offered anyway because on a machine where
+    // the person has made them the same — the obvious thing to do once the desktop has asked for
+    // a vault passphrase — coming back to an unlocked screen with a still-locked vault is a second
+    // prompt for a secret they just typed. A wrong guess here costs one Argon2id derivation and is
+    // silent: the person was unlocking a screen, and telling them they failed at something they
+    // were not attempting is worse than telling them nothing.
+    offer_screen_secret_to_vault(bridge, pin);
 }
 
 /// Try the secret that just unlocked the screen on the vault, without making anybody wait.
