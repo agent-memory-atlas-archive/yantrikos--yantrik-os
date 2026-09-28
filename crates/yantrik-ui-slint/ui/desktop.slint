@@ -944,6 +944,7 @@ export component DesktopScreen inherits Rectangle {
         category-selected(id) => { root.grid-category-selected(id); }
         launch-app(app-id) => { root.grid-launch-app(app-id); }
         toggle-pin(app-id) => { root.grid-toggle-pin(app-id); }
+        power-action(action) => { root.power-action(action); }
         close => { root.app-grid-open = false; }
         search-changed(query) => { root.grid-search-apps(query); }
     }
