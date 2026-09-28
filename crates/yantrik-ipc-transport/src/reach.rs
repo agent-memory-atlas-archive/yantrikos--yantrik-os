@@ -138,6 +138,51 @@ pub fn read_reach_with(read: impl Fn(&str) -> Option<Reach> + Send + Sync + 'sta
     let _ = READER.set(Box::new(read));
 }
 
+type StandingReader = dyn Fn(&str, Option<u32>) -> bool + Send + Sync;
+
+static STANDING: OnceLock<Box<StandingReader>> = OnceLock::new();
+
+/// Install how this process tells whether a token belongs to a live agent. The shell calls it
+/// once, with its harness host; every other process asks the shell.
+pub fn read_standing_with(read: impl Fn(&str, Option<u32>) -> bool + Send + Sync + 'static) {
+    let _ = STANDING.set(Box::new(read));
+}
+
+/// Whether `token` belongs to an agent attached to the shell right now (#411). A call from the
+/// mind account acts only as such an agent: a made-up token, or one whose agent is gone, gives it
+/// no standing. Asked of the shell, as reach is, and an unanswerable question is an error.
+pub fn standing_of(token: &str, pid: Option<u32>) -> Result<bool, String> {
+    if let Some(read) = STANDING.get() {
+        return Ok(read(token, pid));
+    }
+    ask_the_shell_standing(token)
+}
+
+#[cfg(unix)]
+fn ask_the_shell_standing(token: &str) -> Result<bool, String> {
+    let reply = crate::SyncRpcClient::for_service("app-shell")
+        .with_timeout(REACH_ROUNDTRIP)
+        .expecting_peer(crate::owner::must_be_the_shell)
+        .call("app.act", serde_json::json!({ "action": "reach_of", "args": { "token_sha256": token_digest(token) } }))
+        .map_err(|e| format!("the shell did not say whether this agent token is live ({})", e.message))?;
+    known_in_reply(&reply)
+}
+
+#[cfg(not(unix))]
+fn ask_the_shell_standing(_token: &str) -> Result<bool, String> {
+    Err("there is no shell socket to ask on this platform".into())
+}
+
+/// Whether the shell's answer to `reach_of` says the token is live: `{"result": {"known": bool}}`.
+/// Any other shape is an error, never "yes".
+pub fn known_in_reply(reply: &Value) -> Result<bool, String> {
+    reply
+        .get("result")
+        .and_then(|r| r.get("known"))
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "the shell's answer about this agent token does not say whether it is live".into())
+}
+
 /// How long a door waits for the shell to say what a token may reach.
 const REACH_ROUNDTRIP: std::time::Duration = std::time::Duration::from_secs(2);
 

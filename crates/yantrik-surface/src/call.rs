@@ -96,6 +96,32 @@ impl ActCall {
         }
     }
 
+    /// A caller the kernel says is the mind account (#411) acts only as an agent the shell has
+    /// attached: with the token its harness was given, and a token the shell knows. Without one it
+    /// would act unheld by any reach, as nobody in particular. Everyone else is unaffected.
+    pub fn require_standing(&self, who: Option<Caller>) -> Result<(), ServiceError> {
+        let Some(caller) = who else { return Ok(()) };
+        if !yantrik_ipc_transport::mind_door::is_mind(caller.uid) {
+            return Ok(());
+        }
+        let token = self.agent_token.as_deref().map(str::trim).unwrap_or_default();
+        if token.is_empty() {
+            return Err(refusal(
+                "MIND: a mind acts on the desktop only as an attached agent, with the token its harness \
+                 was given; this call carried none. Nothing was run."
+                    .into(),
+            ));
+        }
+        let pid = u32::try_from(caller.pid).ok().filter(|p| *p > 0);
+        match reach::standing_of(token, pid) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(refusal(
+                "MIND: this agent token is not one the shell has given a live agent. Nothing was run.".into(),
+            )),
+            Err(why) => Err(refusal(format!("MIND: {why}, so no act from a mind runs until it can be. Nothing was run."))),
+        }
+    }
+
     /// Spend this call's grant, if it carries one, for exactly this action and these arguments
     /// as they were sent.
     ///
