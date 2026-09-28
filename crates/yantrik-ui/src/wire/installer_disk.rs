@@ -238,27 +238,11 @@ pub fn write_system_files(layout: &Layout, mount_dir: &str) -> Result<(), String
         return Ok(());
     };
     sudo_write(&format!("{mount_dir}/etc/crypttab"), &crypttab_text(&uuid_of(luks)?))?;
-    // Into the initramfs whatever the hook guesses about the root from inside a chroot.
-    sudo_write(
-        &format!("{mount_dir}/etc/cryptsetup-initramfs/conf-hook"),
-        "# Yantrik OS: the root is encrypted; the initramfs opens it.\nCRYPTSETUP=y\n",
-    )?;
-    // The keymap too, or a passphrase typed on a German keyboard is checked as if typed on a US one.
-    let conf = format!("{mount_dir}/etc/initramfs-tools/initramfs.conf");
-    let current = std::fs::read_to_string(&conf).unwrap_or_default();
-    sudo_write(&conf, &with_keymap(&current))?;
+    // Nothing else to write: cryptsetup-initramfs's own conf-hook turns on KEYMAP=y, so the
+    // keymap in /etc/default/keyboard goes into the initramfs beside the unlock. Rewriting the
+    // package's configuration files would only stop a later upgrade at a conffile prompt.
+    // verify_initramfs checks that it happened.
     Ok(())
-}
-
-/// initramfs.conf with `KEYMAP=y`, whatever it said before.
-pub fn with_keymap(conf: &str) -> String {
-    let mut out: Vec<String> = conf
-        .lines()
-        .filter(|l| !l.trim_start().starts_with("KEYMAP="))
-        .map(String::from)
-        .collect();
-    out.push("KEYMAP=y".into());
-    out.join("\n") + "\n"
 }
 
 /// Check that each initramfs on the installed /boot opens the root. Without it the machine
@@ -284,14 +268,26 @@ pub fn verify_initramfs(mount_dir: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// What an initramfs listing lacks to open an encrypted root, if anything.
+/// What an initramfs listing lacks to open an encrypted root, if anything: the unlock itself,
+/// the prompt, and the keymap. Without the keymap a passphrase typed on an AZERTY keyboard is read
+/// as QWERTY, and there is no other key to the disk.
 pub fn initramfs_missing(listing: &str) -> Option<&'static str> {
-    let has = |suffix: &str| listing.lines().any(|l| l.trim_end().ends_with(suffix));
+    let lines: Vec<&str> = listing.lines().map(str::trim_end).collect();
+    let has = |suffix: &str| lines.iter().any(|l| l.ends_with(suffix));
+    let has_keymap = lines
+        .iter()
+        .any(|l| l.contains("etc/console-setup/cached_") && l.ends_with(".kmap"));
     if !has("cryptroot/crypttab") {
         return Some("cryptroot/crypttab");
     }
     if !has("sbin/cryptsetup") {
         return Some("cryptsetup");
+    }
+    if !has("cryptsetup/askpass") {
+        return Some("the passphrase prompt (askpass)");
+    }
+    if !has_keymap || !has("bin/loadkeys") {
+        return Some("the keyboard's keymap");
     }
     None
 }
@@ -375,21 +371,21 @@ mod tests {
         assert!(!line.contains("discard"));
     }
 
-    #[test]
-    fn the_keymap_goes_into_the_initramfs_once() {
-        let conf = "MODULES=most\nKEYMAP=n\nCOMPRESS=zstd\n";
-        let out = with_keymap(conf);
-        assert_eq!(out.matches("KEYMAP=").count(), 1);
-        assert!(out.contains("KEYMAP=y\n"));
-        assert!(out.contains("MODULES=most") && out.contains("COMPRESS=zstd"));
-        assert_eq!(with_keymap(""), "KEYMAP=y\n");
-    }
+    /// What lsinitramfs listed for the installed disk on VM 540 (trixie), trimmed.
+    const INSTALLED: &str = "cryptroot\ncryptroot/crypttab\netc/console-setup\n\
+        etc/console-setup/cached_UTF-8_del.kmap\nscripts/local-top/cryptroot\n\
+        usr/bin/loadkeys\nusr/bin/setupcon\nusr/lib/cryptsetup/askpass\nusr/sbin/cryptsetup\n";
 
     #[test]
     fn an_initramfs_that_cannot_open_the_root_is_caught() {
-        let good = "conf/conf.d\ncryptroot/crypttab\nusr/sbin/cryptsetup\nscripts/local-top/cryptroot\n";
-        assert_eq!(initramfs_missing(good), None);
-        assert_eq!(initramfs_missing("usr/sbin/cryptsetup\n"), Some("cryptroot/crypttab"));
-        assert_eq!(initramfs_missing("cryptroot/crypttab\n"), Some("cryptsetup"));
+        assert_eq!(initramfs_missing(INSTALLED), None);
+        let without = |gone: &str| {
+            INSTALLED.lines().filter(|l| !l.contains(gone)).collect::<Vec<_>>().join("\n")
+        };
+        assert_eq!(initramfs_missing(&without("crypttab")), Some("cryptroot/crypttab"));
+        assert_eq!(initramfs_missing(&without("sbin/cryptsetup")), Some("cryptsetup"));
+        assert_eq!(initramfs_missing(&without("askpass")), Some("the passphrase prompt (askpass)"));
+        assert_eq!(initramfs_missing(&without(".kmap")), Some("the keyboard's keymap"));
+        assert_eq!(initramfs_missing(&without("loadkeys")), Some("the keyboard's keymap"));
     }
 }

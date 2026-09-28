@@ -402,6 +402,11 @@ fn install_to_target(
     // labwc environment (create_user). A failure costs the console its layout, not the install.
     progress(69, "Configuring the keyboard...");
     if let Err(e) = installer_locale::configure_target_keyboard(mount_dir, installed_layout(state)) {
+        // On an encrypted disk the layout is how the passphrase is read at every start; a wrong
+        // one is a disk nobody can open, so it fails the install rather than warning.
+        if layout.encrypted() {
+            return Err(format!("could not set the keyboard the disk's passphrase is typed on: {e}"));
+        }
         tracing::warn!(error = %e, "Could not write the installed keyboard layout");
     }
 

@@ -118,12 +118,10 @@ pub fn lock_at_start(ui: &App) {
     if ui.get_current_screen() == 3 {
         return;
     }
-    // An encrypted root opened at this boot by a typed passphrase (#400 step b): a reboot
-    // cannot get past the disk, so the password is not asked for a second time.
-    if crate::disk_lock::root_unlocked_by_passphrase() {
-        tracing::info!("The disk asked for its passphrase at this boot; the desktop starts open");
-        return;
-    }
+    // An encrypted disk still starts locked (#400 step b): whatever opened the disk describes the
+    // boot, not this start, and the shell starts again whenever the session does (a crash, or
+    // Alt+SysRq+K at a locked screen); the vault is handed its key by this unlock; and the disk's
+    // passphrase does not follow a later change of the password.
     tracing::info!("Starting locked: the account's password opens the desktop");
     ui.invoke_lock_screen();
 }
