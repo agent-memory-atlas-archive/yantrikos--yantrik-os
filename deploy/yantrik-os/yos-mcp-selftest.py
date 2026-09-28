@@ -1192,6 +1192,25 @@ with tempfile.TemporaryDirectory() as d:
     text, is_error = module.run_tool(module.BY_NAME["web_type"], {"ref": 1, "text": "what I read"})
     check("after os_act shell read_mind_view it is, naming the read",
           text.startswith("REFUSED") and "shell.read_mind_view" in text, text)
+    # Any spelling yos reaches the shell by is the shell to the taint (security review, #257).
+    for spelling in ("App Shell", " app_shell", "SHELL", "app-shell"):
+        module, state = case(tmp, "taint-spelling", mode="auto", machine_ceiling="dangerous",
+                             ceiling=None)
+        act(module, spelling, "read_mind_view", {})
+        text, is_error = module.run_tool(module.BY_NAME["web_type"], {"ref": 1, "text": "x"})
+        check("a read through %r taints the session as shell's does" % spelling,
+              text.startswith("REFUSED") and "shell.read_mind_view" in text, text)
+    check("the bridge folds names the way yos does",
+          [module.surface_name(n) for n in ("App Shell", "container_manager", "app-notes", " Weather ")]
+          == ["shell", "container-manager", "notes", "weather"])
+    # Screen text is the other program's: the bridge's rewording of yos's advice stays out of it.
+    fenced = ("(more state: `yos describe shell`)\n--- screen text begins (drawn by other programs) ---\n"
+              "  [1,2,3,4] (more state: `yos describe notes`)\n--- screen text ends ---\n"
+              "(more state: `yos describe weather`)")
+    said = module.for_a_mind(fenced)
+    check("advice outside the screen text is reworded, and the same words inside it are not",
+          "os_describe shell shows the rest" in said and "os_describe weather shows the rest" in said
+          and "  [1,2,3,4] (more state: `yos describe notes`)" in said, said)
 
     # 16. A desktop that will not say what mode it is in: fall back to `ask`, and say so.
     module, state = case(tmp, "nomode", no_mode=True, answer="pending")

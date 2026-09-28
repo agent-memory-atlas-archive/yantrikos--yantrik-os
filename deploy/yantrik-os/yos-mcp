@@ -1271,8 +1271,7 @@ PRIVATE_READS = {"os_describe", "os_screen", "os_perception", "web_listen",
 OUTBOUND = {"web_type", "web_go"}
 # Reads a mind makes through os_act, because they are the shell's actions: a display's text, read
 # from its pixels (#257). Private the way os_screen is — everything on the display is in them.
-SCREEN_READS = {("shell", "read_screen"), ("app-shell", "read_screen"),
-                ("shell", "read_mind_view"), ("app-shell", "read_mind_view")}
+SCREEN_READS = {("shell", "read_screen"), ("shell", "read_mind_view")}
 
 _SAW_PRIVATE = []          # what tainted this session, in order, for the refusal message
 TAINT_OFF = os.environ.get("YOS_MCP_NO_TAINT") == "1"
@@ -1306,6 +1305,18 @@ def payload_in_url(url):
 HANDOFFS = {("shell", "new_agent"), ("shell", "send_to_agent"), ("shell", "hand_off"),
             # The Lens, as if typed: the mind answering there may be another one, its session clean.
             ("shell", "send_message")}
+
+
+def surface_name(app):
+    """The one spelling of an app every check here compares: how `yos` resolves a name, folded.
+
+    `yos` reaches the shell as `shell`, `Shell`, ` app_shell`, `App Shell` or `app-shell`: it
+    trims, ignores case, reads `_` and spaces as `-`, and tries `app-<name>` first. Every rule in
+    this bridge that names an app — the screen reads that taint, the hand-offs that ask — compared
+    the raw string, so `App Shell` reached the shell and met none of them (security review of
+    #257's reads, 28 Sep 2026)."""
+    name = re.sub(r"[\s_]+", "-", str(app or "").strip().lower())
+    return name[len("app-"):] if name.startswith("app-") else name
 
 
 def carries_private(app, action):
@@ -2173,8 +2184,26 @@ _CLI_STATE_HINT = re.compile(r"\(state omitted; `yos describe ([^`]+)`, or re-ru
 _CLI_MORE_STATE = re.compile(r"\(more state: `yos describe ([^`]+)`\)")
 
 
+SCREEN_TEXT_BEGINS = "--- screen text begins"
+SCREEN_TEXT_ENDS = "--- screen text ends ---"
+
+
 def for_a_mind(text):
-    """`text` with the command-line advice in it said the way a mind can act on."""
+    """`text` with the command-line advice in it said the way a mind can act on — outside any
+    screen text. What a display reads is whatever other programs drew, and a page that drew
+    "(more state: `yos describe x`)" must not come out in this bridge's own voice."""
+    if SCREEN_TEXT_BEGINS not in text:
+        return _for_a_mind(text)
+    out, rest = [], text
+    while SCREEN_TEXT_BEGINS in rest:
+        before, _, rest = rest.partition(SCREEN_TEXT_BEGINS)
+        inside, ends, rest = rest.partition(SCREEN_TEXT_ENDS)
+        out.append(_for_a_mind(before) + SCREEN_TEXT_BEGINS + inside + ends)
+    out.append(_for_a_mind(rest))
+    return "".join(out)
+
+
+def _for_a_mind(text):
     text = _CLI_STATE_HINT.sub(
         lambda m: "(The app's state is left out of this result; os_describe %s shows it. The action "
                   "is done: do not repeat it to see the state.)" % m.group(1),
@@ -2248,6 +2277,12 @@ def run_tool(tool, args, present=None):
         # punctuation cost a whole confirmed turn on the third live drive.
         args = dict(args)
         args["action"] = str(args["action"]).strip().split("(", 1)[0].strip()
+        # One spelling from here on, so every rule below sees the app yos will reach.
+        args["app"] = surface_name(args.get("app"))
+        if (args["app"], args["action"]) in SCREEN_READS:
+            # Before the call, not after it: a read whose answer arrives with a failure after it
+            # (a state line that did not print) has still put the screen in front of the mind.
+            _SAW_PRIVATE.append("shell.%s" % args["action"])
         # With an agent token, the Terminal's `run` is the agent's own terminal instead — graded,
         # asked about and recorded as `shell.agent_run`, which is what will actually run.
         routed = agent_route(args)
@@ -2365,10 +2400,11 @@ def run_tool(tool, args, present=None):
     if tool["name"] in PRIVATE_READS and p.returncode == 0:
         # Recorded after the call, not before: a read that failed saw nothing.
         _SAW_PRIVATE.append(tool["name"])
-    if (tool["name"] == "os_act" and p.returncode == 0
-            and (str(app or "").lower(), str(args.get("action") or "")) in SCREEN_READS):
-        # A read that goes by os_act: the text on a display, whatever the person has open on it.
-        _SAW_PRIVATE.append("shell.%s" % args.get("action"))
+    if (tool["name"] == "os_act" and p.returncode == 0 and surface_name(app) == "shell"
+            and args.get("action") == "hand_off" and (args.get("args") or {}).get("wait_seconds")):
+        # A hand-off that waited hands back what the role said — whatever it read on the way —
+        # by os_act as by the hand_off tool.
+        _SAW_PRIVATE.append("shell.hand_off")
 
     if not out:
         return prefix(note, "(the command succeeded and printed nothing)"

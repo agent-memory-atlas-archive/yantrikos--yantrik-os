@@ -12,8 +12,9 @@
 //! a crash in it must not take the desktop with it.
 //!
 //! ```text
-//! yantrik-ocr [--models DIR] <image.png|image.ppm>
+//! yantrik-ocr [--models DIR] [--max-lines N] <image.png|image.ppm>
 //! → {"width":1280,"height":800,"seconds":1.7,"lines":[{"text":"…","box":[x,y,w,h]}, …]}
+//!   (with "clipped": true when there were more than N lines)
 //! ```
 
 mod read;
@@ -40,9 +41,16 @@ fn run() -> Result<serde_json::Value, String> {
     let mut args = std::env::args().skip(1);
     let mut models = None;
     let mut image = None;
+    let mut max_lines = usize::MAX;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--models" => models = Some(PathBuf::from(args.next().ok_or("--models needs a directory")?)),
+            "--max-lines" => {
+                max_lines = args
+                    .next()
+                    .and_then(|n| n.parse().ok())
+                    .ok_or("--max-lines needs a number")?
+            }
             "-h" | "--help" => return Err("usage: yantrik-ocr [--models DIR] <image.png|image.ppm>".into()),
             _ if image.is_none() => image = Some(PathBuf::from(arg)),
             other => return Err(format!("one image at a time; `{other}` is a second")),
@@ -56,8 +64,11 @@ fn run() -> Result<serde_json::Value, String> {
         .into_rgb8();
     let (width, height) = rgb.dimensions();
     let reader = read::Reader::load(&models_dir(models))?;
-    let lines = reader.lines(rgb.as_raw(), width, height)?;
+    let mut lines = reader.lines(rgb.as_raw(), width, height)?;
+    let clipped = lines.len() > max_lines;
+    lines.truncate(max_lines);
     Ok(serde_json::json!({
+        "clipped": clipped,
         "width": width,
         "height": height,
         "seconds": (started.elapsed().as_secs_f64() * 10.0).round() / 10.0,

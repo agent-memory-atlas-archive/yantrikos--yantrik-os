@@ -294,6 +294,9 @@ for pinned in   "text-detection.rten f15cfb56bd02c4bf478a20343986504a1f01e1665c2
     mv "$OCR_CACHE/$model.part" "$OCR_CACHE/$model"
   fi
   cp "$OCR_CACHE/$model" "$ROOT/share/ocr/$model"
+  # The copy that ships is the one checked, not the cache it came from.
+  printf '%s  %s\n' "$want" "$ROOT/share/ocr/$model" | sha256sum -c --quiet >/dev/null 2>&1 \
+    || fail "the staged OCR model $model does not match its pinned sha256"
 done
 [ -f "$ROOT/bin/yantrik-ocr" ] || fail "no yantrik-ocr in the build — a window with no tree could not be read"
 echo "   + share/ocr (the text reader's models)"
