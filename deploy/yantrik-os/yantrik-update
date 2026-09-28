@@ -713,9 +713,11 @@ from it. Change it with: yantrik-update set-channel nightly" ;;
     # "Nothing to do" is about the binaries. The base system is the half an up-to-date
     # machine can still be missing — a 520 has every current Yantrik file and no `ip` —
     # so a run that found no new build is exactly the moment to look (#210).
+    seal_share || true
     reconcile_packages || true
     reconcile_polkit || true
     reconcile_helpers || true
+    reconcile_sysctl || true
     return 0
   fi
 
@@ -768,8 +770,10 @@ done by accident — to do it on purpose: yantrik-update apply --allow-downgrade
   say "Unpacking"
   local stage="$UPDATES_DIR/staging"
   rm -rf "$stage"; mkdir -p "$stage"
-  tar --use-compress-program='zstd -d' -xf "$dl" -C "$stage" 2>/dev/null \
-    || tar -xf "$dl" -C "$stage" \
+  # --no-same-owner: as root, tar keeps the archive's owners by default, and the builder's uid is
+  # the desktop's account on most machines (1000). Everything unpacked here is root's.
+  tar --no-same-owner --no-same-permissions --use-compress-program='zstd -d' -xf "$dl" -C "$stage" 2>/dev/null \
+    || tar --no-same-owner --no-same-permissions -xf "$dl" -C "$stage" \
     || fail "could not unpack the bundle (need zstd for .tar.zst)"
   # The bundle holds one top directory <NAME>/ with bin/ under it.
   local root; root="$(find "$stage" -maxdepth 1 -mindepth 1 -type d | head -1)"
@@ -812,16 +816,26 @@ safely. Old backups live in $BACKUP_DIR."
   local backup="$BACKUP_DIR/$ts"
   say "Backing up current build to $backup"
   mkdir -p "$backup"
-  cp -a "$BIN_DIR" "$backup/bin"
-  [ -d "$SHARE_DIR" ] && cp -a "$SHARE_DIR" "$backup/share"
-  [ -f "$BUILD_FILE" ] && cp -a "$BUILD_FILE" "$backup/BUILD"
+  cp -a --no-preserve=ownership "$BIN_DIR" "$backup/bin"
+  [ -d "$SHARE_DIR" ] && cp -a --no-preserve=ownership "$SHARE_DIR" "$backup/share"
+  [ -f "$BUILD_FILE" ] && cp -a --no-preserve=ownership "$BUILD_FILE" "$backup/BUILD"
+  [ "$(id -u)" = 0 ] && chmod -R go-w "$backup"
   echo "$backup" > "$UPDATES_DIR/last-backup"
 
   # ── Swap: install each new binary over the old, atomically per file ──
   say "Installing"
   local installed=0
+  # The updater itself only moves forward (#419): a bundle without the root-files list is from
+  # before content was checked, and its yantrik-update would install anything share/ held as
+  # root. Such a bundle's other binaries install; this updater and its list stay.
+  local keep_updater=0
+  [ -f "$root/bin/yantrik-root-files.sha256" ] || {
+    keep_updater=1
+    warn "this build predates the root-files list; keeping the current yantrik-update"
+  }
   while IFS= read -r f; do
     local base; base="$(basename "$f")"
+    if [ "$keep_updater" = 1 ] && is_updater_file "$base"; then continue; fi
     local tmp="$BIN_DIR/.$base.new"
     if cp "$f" "$tmp" 2>/dev/null \
        && [ "$(stat -c%s "$tmp" 2>/dev/null || echo 0)" = "$(stat -c%s "$f")" ] \
@@ -867,11 +881,12 @@ safely. Old backups live in $BACKUP_DIR."
   if [ -d "$root/share" ]; then
     mkdir -p "$SHARE_DIR"
     if command -v rsync >/dev/null 2>&1; then
-      rsync -a --delete "$root/share/" "$SHARE_DIR/" || fail "could not install share/"
+      rsync -a --checksum --no-owner --no-group --delete "$root/share/" "$SHARE_DIR/" || fail "could not install share/"
     else
       rm -rf "$SHARE_DIR" && mkdir -p "$SHARE_DIR"
-      cp -a "$root/share/." "$SHARE_DIR/" || fail "could not install share/"
+      cp -a --no-preserve=ownership "$root/share/." "$SHARE_DIR/" || fail "could not install share/"
     fi
+    seal_share
     info "installed $(find "$SHARE_DIR" -type f | wc -l) shared files"
 
     # ── The app icon ──
@@ -994,15 +1009,17 @@ start_shell() {
 
   if [ "${#SHELL_ENV[@]}" -gt 0 ]; then
     # The session's own environment, verbatim.
-    setsid "${as[@]}" env "${SHELL_ENV[@]}" \
-      "$BIN_DIR/yantrik-ui" "$PREFIX/config.yaml" >> "$LOG_FILE" 2>&1 &
+    # The log is opened by the shell's own user (sh -c below), never by root: logs/ is theirs,
+    # and a root `>>` would follow a symlink they put there to any file on the machine.
+    setsid "${as[@]}" sh -c 'exec "$@" >> "$0" 2>&1' "$LOG_FILE" env "${SHELL_ENV[@]}" \
+      "$BIN_DIR/yantrik-ui" "$PREFIX/config.yaml" &
   else
     # Nothing was running to copy from. SLINT_FULLSCREEN is named here on purpose: a shell
     # without it is a window, and a window is the one thing this is not.
-    setsid "${as[@]}" env \
+    setsid "${as[@]}" sh -c 'exec "$@" >> "$0" 2>&1' "$LOG_FILE" env \
       XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" \
       SLINT_BACKEND="${SLINT_BACKEND:-winit}" SLINT_FULLSCREEN="${SLINT_FULLSCREEN:-1}" \
-      "$BIN_DIR/yantrik-ui" "$PREFIX/config.yaml" >> "$LOG_FILE" 2>&1 &
+      "$BIN_DIR/yantrik-ui" "$PREFIX/config.yaml" &
   fi
 }
 
@@ -1171,7 +1188,13 @@ sudo systemctl restart $SESSION_UNIT"
   # into an afternoon, and the log is the only witness the new shell leaves behind.
   if [ -s "$LOG_FILE" ]; then
     warn "last lines from $LOG_FILE:"
-    tail -n 15 "$LOG_FILE" | sed 's/^/    /'
+    # Read as the log's owner: as root, tail would print whatever file a symlink there named.
+    local reader=()
+    if [ "$(id -u)" = 0 ]; then
+      local lo; lo="$(desktop_owner)"
+      [ -n "$lo" ] && [ "$lo" != root ] && reader=(runuser -u "$lo" --)
+    fi
+    "${reader[@]}" tail -n 15 "$LOG_FILE" 2>/dev/null | sed 's/^/    /'
   else
     warn "$LOG_FILE is empty — the new shell wrote nothing before it stopped"
   fi
@@ -1199,13 +1222,24 @@ no shell running. Start one with: $BIN_DIR/yantrik-ui $PREFIX/config.yaml"
 restore_backup() {
   local backup="$1"
   [ -d "$backup/bin" ] || { warn "backup $backup has no bin/ — cannot restore"; return 1; }
+  # Binaries go back only from a backup nobody but root could have written: `sudo yantrik-update
+  # rollback` needs no password, so a backup the desktop's account could edit (every backup taken
+  # before the tree was root's) would be a way to put its own yantrik-update into bin/ and have
+  # sudo run it. share/ is checked by content instead, where it matters (reconcile).
+  if tree_is_roots && [ -n "$(find "$backup" "$backup/bin" -maxdepth 0 \( ! -user root -o -perm /022 \) 2>/dev/null)$(find "$backup/bin" "$backup/BUILD" \( ! -user root -o \( ! -type l -perm /022 \) \) -print -quit 2>/dev/null)" ]; then
+    warn "backup $backup is not root's alone to write; refusing to restore binaries from it"
+    return 1
+  fi
   while IFS= read -r f; do
     local base; base="$(basename "$f")"
+    # Never back: an older updater would undo what this one checks (#419).
+    is_updater_file "$base" && continue
     cp "$f" "$BIN_DIR/.$base.rb" 2>/dev/null && chmod 755 "$BIN_DIR/.$base.rb" && mv -f "$BIN_DIR/.$base.rb" "$BIN_DIR/$base"
   done < <(find "$backup/bin" -maxdepth 1 -type f)
   if [ -d "$backup/share" ]; then
     rm -rf "$SHARE_DIR"
     cp -a "$backup/share" "$SHARE_DIR"
+    seal_share
   fi
   [ -f "$backup/BUILD" ] && cp -a "$backup/BUILD" "$BUILD_FILE"
   # A rollback moves the version backwards, so the one-line copy has to move with it.
@@ -1418,6 +1452,67 @@ reconcile_packages() {
 # menu calls systemctl without sudo and needs the one that lets the desktop's user suspend,
 # restart and power off from any of their sessions (#397). Copied only when different, so an
 # unchanged rule costs nothing.
+# share/ is root's and nobody else may write it, once the tree is root's (#397). It holds what
+# this updater installs as root (the polkit rules, the root helpers sudo trusts, the kernel
+# settings), so a share/ the desktop's account can write is root for anything running as it:
+# write share/root-helpers/yantrik-pkg, run `sudo yantrik-update reconcile`, and the helper sudo
+# allows is yours. Every apply left it that way (tar and rsync -a kept the archive's owners, the
+# builder's uid 1000). Run after every install and restore of share/, and before each reconcile.
+seal_share() {
+  tree_is_roots || return 0
+  [ "$(id -u)" = 0 ] || return 0
+  [ -d "$SHARE_DIR" ] || return 0
+  chown -R root:root "$SHARE_DIR" && chmod -R go-w "$SHARE_DIR"
+}
+
+# Whether a file this updater is about to install as root came from where only root can write:
+# root's, not writable by group or others, in a directory (and a share/ and prefix) the same.
+source_is_roots() {
+  local f="$1" d
+  d="$(dirname "$f")"
+  for p in "$f" "$d" "$SHARE_DIR" "$PREFIX"; do
+    [ "$(stat -c %u "$p" 2>/dev/null)" = 0 ] || return 1
+  done
+  [ -z "$(find "$f" "$d" "$SHARE_DIR" "$PREFIX" -maxdepth 0 ! -type l -perm /022 2>/dev/null)" ]
+}
+
+# The updater and the list it trusts, which roll forward only: neither a rollback nor an older
+# bundle puts back an updater from before content was checked (#419).
+is_updater_file() {
+  [ "$1" = yantrik-update ] || [ "$1" = yantrik-root-files.sha256 ]
+}
+
+# The hashes of everything this updater installs as root, shipped in bin/ (#419). Ownership says
+# who can write a file now, not who wrote it: share/ was the desktop account's after every update
+# until #419, and sealing it made whatever was there root's. So a file is installed as root only
+# when its content is what the build shipped.
+ROOT_FILES="$BIN_DIR/yantrik-root-files.sha256"
+
+# The shipped sha256 of share/<rel>, or nothing.
+shipped_hash() {
+  [ -f "$ROOT_FILES" ] || return 0
+  awk -v p="$1" '$2 == p || $2 == "*" p { print $1; exit }' "$ROOT_FILES"
+}
+
+# Whether $2 (a file under share/, named $1 relative to it) may be installed as root.
+root_file_ok() {
+  local want
+  want="$(shipped_hash "$1")"
+  [ -n "$want" ] && source_is_roots "$2" && [ "$(sha256sum "$2" | cut -d' ' -f1)" = "$want" ]
+}
+
+# An installed root file ($2, installed from share/<rel> $1) that is not what any build shipped
+# is removed: it was put there from a share/ the desktop could write (#419), and keeping it would
+# keep whatever it grants. Nothing is removed when there is no list to judge by.
+drop_unshipped() {
+  local want
+  [ -f "$ROOT_FILES" ] && [ -f "$2" ] || return 0
+  want="$(shipped_hash "$1")"
+  if [ "$(sha256sum "$2" | cut -d' ' -f1)" != "$want" ]; then
+    rm -f -- "$2" && warn "removed $2: it is not what this build ships"
+  fi
+}
+
 reconcile_polkit() {
   local dir="$PREFIX/share/polkit" rules="/etc/polkit-1/rules.d" f dest
   [ -d "$dir" ] || return 0
@@ -1425,6 +1520,11 @@ reconcile_polkit() {
   for f in "$dir"/*.rules; do
     [ -f "$f" ] || continue
     dest="$rules/$(basename "$f")"
+    if ! root_file_ok "polkit/$(basename "$f")" "$f"; then
+      warn "refusing $f: not root's alone, or not what this build ships"
+      drop_unshipped "polkit/$(basename "$f")" "$dest"
+      continue
+    fi
     if cmp -s "$f" "$dest" 2>/dev/null; then continue; fi
     if sudo -n install -m 0644 -o root -g root "$f" "$dest" 2>/dev/null; then
       info "polkit rule in place: $dest"
@@ -1445,6 +1545,11 @@ reconcile_helpers() {
   for f in "$dir"/*; do
     [ -f "$f" ] || continue
     dest="$dest_dir/$(basename "$f")"
+    if ! root_file_ok "root-helpers/$(basename "$f")" "$f"; then
+      warn "refusing $f: not root's alone, or not what this build ships"
+      drop_unshipped "root-helpers/$(basename "$f")" "$dest"
+      continue
+    fi
     if cmp -s "$f" "$dest" 2>/dev/null; then continue; fi
     if sudo -n install -m 0755 -o root -g root "$f" "$dest" 2>/dev/null; then
       info "root helper in place: $dest"
@@ -1452,17 +1557,89 @@ reconcile_helpers() {
       warn "could not install $dest (no sudo here)"
     fi
   done
+  # /usr/lib/yantrik is this updater's alone: anything in it the build does not list was put there
+  # from a share/ the desktop could write (before #419), and sudo may run it. It goes.
+  if [ -f "$ROOT_FILES" ] && [ "$(id -u)" = 0 ]; then
+    # Top-level files and links only: a directory here (adapters/, say) is someone else's layout,
+    # and a file a package owns is that package's.
+    for dest in "$dest_dir"/* "$dest_dir"/.[!.]*; do
+      [ -f "$dest" ] || [ -L "$dest" ] || continue
+      [ -n "$(shipped_hash "root-helpers/$(basename "$dest")")" ] && continue
+      command -v dpkg >/dev/null 2>&1 && dpkg -S "$dest" >/dev/null 2>&1 && continue
+      rm -f -- "$dest" && warn "removed $dest: no build and no package ships it"
+    done
+  fi
+}
+
+# Files in a root-read config directory ($1, matching $2) that neither a package owns nor the
+# build lists under share/<$3>/: before #419 the old reconcile installed whatever share/ held, and
+# share/ was the desktop's to write. Named, not removed: anything else there may be the
+# administrator's own, and only a person can tell.
+audit_unowned() {
+  local dir="$1" pattern="$2" rel="$3" f
+  [ -d "$dir" ] && [ -f "$ROOT_FILES" ] || return 0
+  command -v dpkg >/dev/null 2>&1 || return 0
+  for f in "$dir"/$pattern; do
+    [ -f "$f" ] || continue
+    [ -n "$(shipped_hash "$rel/$(basename "$f")")" ] && continue
+    dpkg -S "$f" >/dev/null 2>&1 && continue
+    warn "$f is not from any package or this build; if you did not put it there, remove it (it runs as root)"
+  done
+}
+
+# Kernel settings the bundle ships (share/sysctl) into /etc/sysctl.d, applied now as well as at
+# boot (#414): Yama ptrace_scope 1, so nothing a mind starts can attach to the shell and read the
+# vault's key or the unlock password out of it. Copied only when different; applied every time,
+# because a value set by hand since would otherwise stand until the next boot.
+#
+# A sysctl file is as good as root (kernel.core_pattern=|… runs a program as root), so it is taken
+# only from a tree root owns, and only when every line is one this updater knows: a comment, a
+# blank, or the ptrace scope. A line added to the bundle has to be added here, past a reader.
+sysctl_file_ok() {
+  ! grep -vqE '^[[:space:]]*(#.*)?$|^kernel\.yama\.ptrace_scope[[:space:]]*=[[:space:]]*[1-3][[:space:]]*$' "$1"
+}
+
+reconcile_sysctl() {
+  local dir="$PREFIX/share/sysctl" dest_dir="/etc/sysctl.d" f dest
+  [ -d "$dir" ] || return 0
+  [ -d "$dest_dir" ] || { info "no $dest_dir on this machine; kernel settings not installed"; return 0; }
+  if [ "$(stat -c %u "$dir" 2>/dev/null)" != 0 ]; then
+    warn "$dir is not root's; kernel settings not installed until the tree is (yantrik-update migrate-ownership)"
+    return 0
+  fi
+  for f in "$dir"/*.conf; do
+    [ -f "$f" ] || continue
+    if ! root_file_ok "sysctl/$(basename "$f")" "$f" || ! sysctl_file_ok "$f"; then
+      warn "refusing $f: not root's, or it sets something other than kernel.yama.ptrace_scope"
+      drop_unshipped "sysctl/$(basename "$f")" "$dest_dir/$(basename "$f")"
+      continue
+    fi
+    dest="$dest_dir/$(basename "$f")"
+    if ! cmp -s "$f" "$dest" 2>/dev/null; then
+      if sudo -n install -m 0644 -o root -g root "$f" "$dest" 2>/dev/null; then
+        info "kernel settings in place: $dest"
+      else
+        warn "could not install $dest (no sudo here)"
+        continue
+      fi
+    fi
+    sudo -n sysctl -q -p "$dest" >/dev/null 2>&1 || warn "could not apply $dest now; it applies at the next boot"
+  done
 }
 
 cmd_reconcile() {
   migrate_if_needed
   elevate
   remove_blanket_sudo
+  seal_share
   say "Reconciling the base system against what the image ships"
   info "required: $REQUIRED_PACKAGES"
   reconcile_packages
   reconcile_polkit
   reconcile_helpers
+  reconcile_sysctl
+  audit_unowned /etc/polkit-1/rules.d '*.rules' polkit
+  audit_unowned /etc/sysctl.d '*.conf' sysctl
 }
 
 # ── selftest ────────────────────────────────────────────────────────────────────────────
