@@ -1560,11 +1560,13 @@ reconcile_helpers() {
   # /usr/lib/yantrik is this updater's alone: anything in it the build does not list was put there
   # from a share/ the desktop could write (before #419), and sudo may run it. It goes.
   if [ -f "$ROOT_FILES" ] && [ "$(id -u)" = 0 ]; then
+    # Top-level files and links only: a directory here (adapters/, say) is someone else's layout,
+    # and a file a package owns is that package's.
     for dest in "$dest_dir"/* "$dest_dir"/.[!.]*; do
-      [ -e "$dest" ] || [ -L "$dest" ] || continue
-      if [ -z "$(shipped_hash "root-helpers/$(basename "$dest")")" ]; then
-        rm -rf -- "$dest" && warn "removed $dest: no build ships it"
-      fi
+      [ -f "$dest" ] || [ -L "$dest" ] || continue
+      [ -n "$(shipped_hash "root-helpers/$(basename "$dest")")" ] && continue
+      command -v dpkg >/dev/null 2>&1 && dpkg -S "$dest" >/dev/null 2>&1 && continue
+      rm -f -- "$dest" && warn "removed $dest: no build and no package ships it"
     done
   fi
 }
