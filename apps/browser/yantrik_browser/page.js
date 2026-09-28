@@ -475,6 +475,8 @@
     return { mutations, appeared: still.slice(0, 8) };
   }
 
-  globalThis.__yb = { snapshot, find, text, target, focus, submits, pick, scrollBy, watch, changes };
+  const where = () => ({ url: location.href, title: document.title });
+
+  globalThis.__yb = { snapshot, find, text, target, focus, submits, pick, scrollBy, watch, changes, where };
   return 'installed';
 })()

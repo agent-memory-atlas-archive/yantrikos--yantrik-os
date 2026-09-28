@@ -145,6 +145,13 @@ class Driver:
                 return {"open": False}
             pages = self.browser.pages()
             active = self.browser.active if self.browser.active in pages else (pages[0] if pages else None)
+            if active is not None and active.session:
+                # The target list's title arrives a moment after the page has it; ask the page.
+                try:
+                    here = self.browser.run(active, "where", timeout=3)
+                    active.url, active.title = here.get("url", active.url), here.get("title", active.title)
+                except (cdp.CdpError, cdp.BrowserClosed):
+                    pass
             return {
                 "open": True,
                 "tabs": [{"tab": short(t.id), "title": t.title[:100], "url": t.url[:200],
