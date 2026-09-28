@@ -144,9 +144,13 @@ pub fn wire(ui: &App, ctx: &AppContext) {
     // own (#447), dialled only when it is there. Loopback TCP is a fallback per harness that
     // is off until one needs it, so it is never offered here.
     .with_memory_url(|| {
+        use std::os::unix::fs::MetadataExt;
         let person = unsafe { libc::geteuid() };
         let socket = format!("/run/yantrik-mind/{person}/memory.sock");
-        std::path::Path::new(&socket).exists().then(|| format!("unix:{socket}"))
+        // Only a socket the mind account owns: one the person's own processes could have put
+        // there would collect every credential a harness presents to it.
+        let owner = std::fs::symlink_metadata(&socket).ok().map(|m| m.uid());
+        owner.is_some_and(yantrik_ipc_transport::mind_door::is_mind).then(|| format!("unix:{socket}"))
     });
     let _ = HOST.set(host.clone());
 

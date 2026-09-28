@@ -1328,6 +1328,17 @@ impl Host {
         // Except what the harness says it is still answering (#246): those turns are kept, under
         // the same ids and the same listeners, so a harness that only lost its connection
         // carries on as though it had not.
+        // Not across accounts. A live harness attached from one account is not replaced by a
+        // process of another: that would hand the newcomer the turns it listed as resumed and
+        // whoever asks this mind something next. A restart comes back from the same account.
+        if let Some(previous) = state.attached.get(&announced.id) {
+            if previous.uid.is_some() && previous.uid != uid {
+                return Err(format!(
+                    "`{}` is attached from another account; it can be replaced only from that one",
+                    announced.id
+                ));
+            }
+        }
         let mut kept: HashMap<u64, Flight> = HashMap::new();
         if let Some(mut previous) = state.attached.remove(&announced.id) {
             for turn in announced.resume.iter().filter_map(|r| r.turn_id) {
@@ -2858,6 +2869,22 @@ mod tests {
         let credential = host.memory_credential(&agent, |s| format!("{:0>64}", s.len())).unwrap().unwrap();
         let held = host.memory_credential_holder(&credential).unwrap();
         assert_eq!((held.pid, held.uid), (None, None));
+    }
+
+    #[test]
+    fn a_live_harness_is_not_replaced_from_another_account() {
+        let host = host_with_nothing().with_liveness(|pid| pid == 700 || pid == 701);
+        host.handle_from(protocol::ATTACH, &json!({ "id": "mind", "name": "Yantrik Mind" }), Some(700), Some(990))
+            .unwrap();
+        let refused = host
+            .handle_from(protocol::ATTACH, &json!({ "id": "mind", "name": "Yantrik Mind" }), Some(701), Some(1000))
+            .unwrap_err();
+        assert!(refused.contains("another account"), "{refused}");
+        assert_eq!(host.list().into_iter().find(|e| e.id == "mind").unwrap().pid, Some(700), "the original stands");
+        // A restart from the same account replaces it, as it always has.
+        host.handle_from(protocol::ATTACH, &json!({ "id": "mind", "name": "Yantrik Mind" }), Some(701), Some(990))
+            .unwrap();
+        assert_eq!(host.list().into_iter().find(|e| e.id == "mind").unwrap().pid, Some(701));
     }
 
     #[test]
