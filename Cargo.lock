@@ -10874,6 +10874,8 @@ dependencies = [
  "serde_json",
  "sysinfo",
  "tracing",
+ "wayland-client",
+ "wayland-protocols",
  "zbus",
 ]
 

@@ -292,12 +292,15 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                 ui.set_bar_disk_text(format!("{} / {}", format_bytes(used), format_bytes(snap.disk_total_bytes)).into());
             }
 
-            // Auto-lock on idle (only from desktop screen, 0 = disabled)
+            // Auto-lock when the person has left the seat (0 = never). Idle is the compositor's
+            // count of keyboard and mouse (#412), so an agent working does not hold it off.
+            // From any screen but boot, first run and the lock itself: it was the desktop only,
+            // so a machine left on Settings or Memory stayed open.
             let lock_timeout = ui.get_settings_auto_lock_secs() as u64;
             if lock_timeout > 0
                 && snap.user_idle
                 && snap.idle_seconds >= lock_timeout
-                && ui.get_current_screen() == 1
+                && may_auto_lock(ui.get_current_screen())
             {
                 // The one lock path: the shell's screen and the compositor's session lock (#313).
                 ui.invoke_lock_screen();
@@ -783,9 +786,25 @@ fn publish_network(ui: &App, r: &NetworkReadout) {
     }
 }
 
+/// Screens the auto-lock may lock from: all but boot (0), first run (2) and the lock (3). First
+/// run has no PIN to unlock with yet.
+fn may_auto_lock(screen: i32) -> bool {
+    !matches!(screen, 0 | 2 | 3)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_auto_lock_locks_from_any_screen_the_person_could_leave_open() {
+        for screen in [1, 6, 7, 8, 10, 17, 23] {
+            assert!(may_auto_lock(screen), "screen {screen} left open would stay unlocked");
+        }
+        for screen in [0, 2, 3] {
+            assert!(!may_auto_lock(screen), "screen {screen}");
+        }
+    }
 
     /// The live machine's answer, captured from `yos describe network`:
     /// online via ethernet at 192.168.4.44, ssid null, no wireless adapter.
