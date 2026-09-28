@@ -495,10 +495,11 @@ fn install_to_target(
         ),
     );
 
-    // Configure GRUB defaults
+    // Configure GRUB defaults. loglevel=3: `quiet` still prints the kernel's error-level lines,
+    // and on real hardware (and in a VM) those scroll over the disk's passphrase prompt.
     let _ = sudo_write(
         &format!("{mount_dir}/etc/default/grub"),
-        "GRUB_DEFAULT=0\nGRUB_TIMEOUT=3\nGRUB_DISTRIBUTOR=\"Yantrik OS\"\nGRUB_CMDLINE_LINUX_DEFAULT=\"quiet splash\"\nGRUB_CMDLINE_LINUX=\"console=ttyS0,115200 console=tty1\"\nGRUB_TERMINAL=\"console serial\"\nGRUB_SERIAL_COMMAND=\"serial --speed=115200\"\n",
+        "GRUB_DEFAULT=0\nGRUB_TIMEOUT=3\nGRUB_DISTRIBUTOR=\"Yantrik OS\"\nGRUB_CMDLINE_LINUX_DEFAULT=\"quiet splash loglevel=3\"\nGRUB_CMDLINE_LINUX=\"console=ttyS0,115200 console=tty1\"\nGRUB_TERMINAL=\"console serial\"\nGRUB_SERIAL_COMMAND=\"serial --speed=115200\"\n",
     );
 
     progress(85, "Updating GRUB configuration...");
