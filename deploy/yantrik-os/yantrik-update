@@ -1676,7 +1676,7 @@ reconcile_mind_units() {
     dest="/etc/systemd/system/$(basename "$f")"
     if ! root_file_ok "systemd/$(basename "$f")" "$f"; then
       warn "refusing $f: not root's alone, or not what this build ships"
-      [ -e "$dest" ] && drop_unshipped "systemd/$(basename "$f")" "$dest" && changed=1
+      [ -e "$dest" ] && drop_unshipped "systemd/$(basename "$f")" "$dest" && [ ! -e "$dest" ] && changed=1
       continue
     fi
     cmp -s "$f" "$dest" 2>/dev/null && continue
@@ -1771,6 +1771,7 @@ PY_STAGE_AS_ROOT='
 import os, sys
 stage, pairs = sys.argv[1], dict(l.split(":", 1) for l in sys.argv[2].split() if l)
 inp = sys.stdin.buffer
+budget = 4 << 30  # far above any mind memory; a stream past it is not one
 while True:
     head = inp.readline()
     if not head:
@@ -1781,6 +1782,9 @@ while True:
     name = pairs[src].replace("/", "__")
     fd = os.open(os.path.join(stage, name), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o640)
     left = int(size)
+    budget -= left
+    if left < 0 or budget < 0:
+        sys.stderr.write("refused %s: more than a mind\x27s memory could be\n" % src); sys.exit(2)
     while left:
         chunk = inp.read(min(left, 1 << 20))
         if not chunk:
@@ -1795,6 +1799,13 @@ PY_PLACE_AS_MIND='
 import os, sys, filecmp
 stage, dst, pairs = sys.argv[1], sys.argv[2], [l.split(":", 1) for l in sys.argv[3].split() if l]
 os.umask(0o077)
+# The memory is three files that are one thing: none placed if any is already there, or the mind
+# would start on a database without the writes its WAL holds.
+if os.path.exists(os.path.join(stage, "mind.db")):
+    for part in ("mind.db", "mind.db-wal", "mind.db-shm"):
+        if os.path.lexists(os.path.join(dst, part)):
+            sys.stderr.write("%s is already there; nothing was placed\n" % os.path.join(dst, part)); sys.exit(2)
+placed = []
 for _, rel in pairs:
     staged = os.path.join(stage, rel.replace("/", "__"))
     if not os.path.exists(staged):
@@ -1802,8 +1813,6 @@ for _, rel in pairs:
     target = os.path.join(dst, rel)
     os.makedirs(os.path.dirname(target), mode=0o700, exist_ok=True)
     if os.path.lexists(target):
-        if rel in ("mind.db", "mind.db-wal", "mind.db-shm"):
-            sys.stderr.write("%s is already there; nothing was placed\n" % target); sys.exit(2)
         continue
     fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     with open(staged, "rb") as src:
@@ -1815,13 +1824,18 @@ for _, rel in pairs:
     os.close(fd)
     if not filecmp.cmp(staged, target, shallow=False):
         sys.stderr.write("%s differs from what was staged\n" % target); sys.exit(2)
+    placed.append(rel)
+print(" ".join(placed))
 '
 
 # Run as the person, last: remove what was moved, walking from the home without following links.
 PY_REMOVE_AS_PERSON='
 import os, sys
 home, pairs = sys.argv[1], [l.split(":", 1) for l in sys.argv[2].split() if l]
-for src, _ in pairs:
+placed = set(sys.argv[3].split())
+for src, rel in pairs:
+    if rel not in placed:
+        continue
     parts = src.split("/")
     try:
         fd = os.open(home, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -1836,7 +1850,7 @@ for src, _ in pairs:
 
 # Table counts of a staged memory, as root, on files nobody else can write.
 staged_counts() {
-  python3 -c '
+  python3 -I -c '
 import sqlite3, sys
 c = sqlite3.connect("file:%s?mode=ro" % sys.argv[1], uri=True)
 print("integrity", c.execute("pragma integrity_check").fetchone()[0])
@@ -1857,7 +1871,7 @@ cmd_migrate_minds() {
   reconcile_minds
   reconcile_mind_units
   getent passwd yantrik-mind >/dev/null 2>&1 || fail "there is no mind account; nothing was moved"
-  local owner home dst stage pairs before after
+  local owner home dst stage pairs placed before="" after=""
   owner="$(desktop_owner)"
   case "$owner" in ''|root|*[!a-z0-9_-]*) fail "cannot tell whose desktop this is; nothing was moved" ;; esac
   home="$(getent passwd "$owner" | cut -d: -f6)"
@@ -1869,7 +1883,7 @@ cmd_migrate_minds() {
   systemctl --user -M "$owner@" stop yantrik-mind.service >/dev/null 2>&1 || true
   systemctl stop yantrik-mind.service >/dev/null 2>&1 || true
 
-  before="$(runuser -u "$owner" -- python3 -c "$PY_READ_AS_PERSON" "$home" "$pairs" count)" \
+  before="$(runuser -u "$owner" -- python3 -I -c "$PY_READ_AS_PERSON" "$home" "$pairs" count)" \
     || fail "could not read the mind's memory in $owner's home; nothing was moved"
   if [ -n "$before" ]; then
     case "$before" in "integrity ok"*) ;; *) fail "the memory in $owner's home fails its integrity check; nothing was moved" ;; esac
@@ -1881,19 +1895,19 @@ cmd_migrate_minds() {
   # shellcheck disable=SC2064  # the path is fixed now, on purpose
   trap "rm -rf '$stage'" EXIT
   chmod 0700 "$stage"
-  runuser -u "$owner" -- python3 -c "$PY_READ_AS_PERSON" "$home" "$pairs" stream \
-    | python3 -c "$PY_STAGE_AS_ROOT" "$stage" "$pairs" \
+  runuser -u "$owner" -- python3 -I -c "$PY_READ_AS_PERSON" "$home" "$pairs" stream \
+    | python3 -I -c "$PY_STAGE_AS_ROOT" "$stage" "$pairs" \
     || fail "could not stage the mind's files; nothing was moved"
   if [ -e "$stage/mind.db" ]; then
     after="$(staged_counts "$stage/mind.db")" || fail "could not read the staged memory; nothing was moved"
     [ "$before" = "$after" ] || fail "the memory's counts changed while it was read; nothing was moved. Before: $(printf '%s' "$before" | tr '\n' ' ') After: $(printf '%s' "$after" | tr '\n' ' ')"
   fi
   # The mind account places its own files: open the staging directory to its group, read-only.
-  chgrp -R yantrik-minds "$stage" && chmod 0750 "$stage" && chmod 0640 "$stage"/* 2>/dev/null
-  runuser -u yantrik-mind -- python3 -c "$PY_PLACE_AS_MIND" "$stage" "$dst" "$pairs" \
+  chgrp -R yantrik-minds "$stage" && chmod 0750 "$stage"
+  placed="$(runuser -u yantrik-mind -- python3 -I -c "$PY_PLACE_AS_MIND" "$stage" "$dst" "$pairs")" \
     || fail "the mind account could not place its files; the originals are untouched in $owner's home"
   runuser -u yantrik-mind -- sh -c 'umask 077; mkdir -p "$1/coder"' sh "$dst"
-  runuser -u "$owner" -- python3 -c "$PY_REMOVE_AS_PERSON" "$home" "$pairs" \
+  runuser -u "$owner" -- python3 -I -c "$PY_REMOVE_AS_PERSON" "$home" "$pairs" "$placed" \
     || warn "the mind's files are in $dst, but some copies in $owner's home could not be removed"
   [ -n "$after" ] && info "memory moved and counted: $(printf '%s\n' "$after" | sed -n '2,$p' | wc -l) tables, identical before and after"
 
