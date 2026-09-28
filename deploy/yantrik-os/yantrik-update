@@ -825,8 +825,17 @@ safely. Old backups live in $BACKUP_DIR."
   # ── Swap: install each new binary over the old, atomically per file ──
   say "Installing"
   local installed=0
+  # The updater itself only moves forward (#419): a bundle without the root-files list is from
+  # before content was checked, and its yantrik-update would install anything share/ held as
+  # root. Such a bundle's other binaries install; this updater and its list stay.
+  local keep_updater=0
+  [ -f "$root/bin/yantrik-root-files.sha256" ] || {
+    keep_updater=1
+    warn "this build predates the root-files list; keeping the current yantrik-update"
+  }
   while IFS= read -r f; do
     local base; base="$(basename "$f")"
+    if [ "$keep_updater" = 1 ] && is_updater_file "$base"; then continue; fi
     local tmp="$BIN_DIR/.$base.new"
     if cp "$f" "$tmp" 2>/dev/null \
        && [ "$(stat -c%s "$tmp" 2>/dev/null || echo 0)" = "$(stat -c%s "$f")" ] \
@@ -1223,6 +1232,8 @@ restore_backup() {
   fi
   while IFS= read -r f; do
     local base; base="$(basename "$f")"
+    # Never back: an older updater would undo what this one checks (#419).
+    is_updater_file "$base" && continue
     cp "$f" "$BIN_DIR/.$base.rb" 2>/dev/null && chmod 755 "$BIN_DIR/.$base.rb" && mv -f "$BIN_DIR/.$base.rb" "$BIN_DIR/$base"
   done < <(find "$backup/bin" -maxdepth 1 -type f)
   if [ -d "$backup/share" ]; then
@@ -1465,6 +1476,12 @@ source_is_roots() {
   [ -z "$(find "$f" "$d" "$SHARE_DIR" "$PREFIX" -maxdepth 0 ! -type l -perm /022 2>/dev/null)" ]
 }
 
+# The updater and the list it trusts, which roll forward only: neither a rollback nor an older
+# bundle puts back an updater from before content was checked (#419).
+is_updater_file() {
+  [ "$1" = yantrik-update ] || [ "$1" = yantrik-root-files.sha256 ]
+}
+
 # The hashes of everything this updater installs as root, shipped in bin/ (#419). Ownership says
 # who can write a file now, not who wrote it: share/ was the desktop account's after every update
 # until #419, and sealing it made whatever was there root's. So a file is installed as root only
@@ -1540,6 +1557,32 @@ reconcile_helpers() {
       warn "could not install $dest (no sudo here)"
     fi
   done
+  # /usr/lib/yantrik is this updater's alone: anything in it the build does not list was put there
+  # from a share/ the desktop could write (before #419), and sudo may run it. It goes.
+  if [ -f "$ROOT_FILES" ] && [ "$(id -u)" = 0 ]; then
+    for dest in "$dest_dir"/* "$dest_dir"/.[!.]*; do
+      [ -e "$dest" ] || [ -L "$dest" ] || continue
+      if [ -z "$(shipped_hash "root-helpers/$(basename "$dest")")" ]; then
+        rm -rf -- "$dest" && warn "removed $dest: no build ships it"
+      fi
+    done
+  fi
+}
+
+# Files in a root-read config directory ($1, matching $2) that neither a package owns nor the
+# build lists under share/<$3>/: before #419 the old reconcile installed whatever share/ held, and
+# share/ was the desktop's to write. Named, not removed: anything else there may be the
+# administrator's own, and only a person can tell.
+audit_unowned() {
+  local dir="$1" pattern="$2" rel="$3" f
+  [ -d "$dir" ] && [ -f "$ROOT_FILES" ] || return 0
+  command -v dpkg >/dev/null 2>&1 || return 0
+  for f in "$dir"/$pattern; do
+    [ -f "$f" ] || continue
+    [ -n "$(shipped_hash "$rel/$(basename "$f")")" ] && continue
+    dpkg -S "$f" >/dev/null 2>&1 && continue
+    warn "$f is not from any package or this build; if you did not put it there, remove it (it runs as root)"
+  done
 }
 
 # Kernel settings the bundle ships (share/sysctl) into /etc/sysctl.d, applied now as well as at
@@ -1566,6 +1609,7 @@ reconcile_sysctl() {
     [ -f "$f" ] || continue
     if ! root_file_ok "sysctl/$(basename "$f")" "$f" || ! sysctl_file_ok "$f"; then
       warn "refusing $f: not root's, or it sets something other than kernel.yama.ptrace_scope"
+      drop_unshipped "sysctl/$(basename "$f")" "$dest_dir/$(basename "$f")"
       continue
     fi
     dest="$dest_dir/$(basename "$f")"
@@ -1592,6 +1636,8 @@ cmd_reconcile() {
   reconcile_polkit
   reconcile_helpers
   reconcile_sysctl
+  audit_unowned /etc/polkit-1/rules.d '*.rules' polkit
+  audit_unowned /etc/sysctl.d '*.conf' sysctl
 }
 
 # ── selftest ────────────────────────────────────────────────────────────────────────────
