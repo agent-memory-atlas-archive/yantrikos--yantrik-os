@@ -269,6 +269,22 @@ apt-get install -y -qq     swaybg     xdg-utils     espeak-ng
 # on machines whose base system drifted from this list (#210).
 apt-get install -y -qq     nano     htop
 
+# ── A developer's baseline (#401) ──
+# git: the image used to install it only to build llama.cpp and then remove it, so a machine
+# could not clone anything. bash-completion: Debian's ~/.bashrc loads it when it is there.
+# podman, rootless, for the Container Manager app, which runs the podman CLI as the person
+# (apps/container-manager/src/runtime.rs) and found no runtime at all. What rootless needs
+# beside it: uidmap (newuidmap/newgidmap, to map a container's users onto the account's
+# subordinate ids), passt (pasta, podman 5's rootless network), fuse-overlayfs (layered storage
+# where the kernel's own overlay cannot be used, as on the live session, whose home is itself an
+# overlay). Named rather than left to Recommends, because yantrik-update installs the same list
+# on older machines with --no-install-recommends. No `|| true`: release-check asserts them.
+apt-get install -y -qq     git     bash-completion     podman uidmap passt fuse-overlayfs
+# Nothing talks to podman's API: the app runs the CLI. So no socket for it is left listening, for
+# root or for anyone, whatever the package's defaults are.
+systemctl disable podman.socket 2>/dev/null || true
+systemctl --global disable podman.socket 2>/dev/null || true
+
 # ── Utilities (installer essentials) ──
 apt-get install -y -qq \
     jq parted rsync openssh-server openssl \
@@ -320,6 +336,38 @@ done
 [ -z "$MISSING_PACKAGES" ]     || fail "installed by cloud-init but not in the ISO:$MISSING_PACKAGES"
 ok "Every package cloud-init installs is in the image ($(echo $CLOUD_INIT_PACKAGES | wc -w))"
 
+# ── mise, for language runtimes (#401) ──
+# `mise use node@lts` and the like: node, python, go, rust and the rest, per project, into the
+# person's own home. Debian 13 does not package mise, so this is upstream's release binary, pinned
+# and checked against the sha256 its release publishes (SHASUMS256.txt, and GitHub's own digest
+# of the asset) before it goes anywhere near the image. Pinned because an image must say what it
+# contains; moving it is a deliberate edit of both lines. Root's, in /usr/local/bin, so neither a
+# mind nor `mise self-update` running as the person can replace it. Image only: at 135 MB it
+# does not ride in the update bundle, and the updater fetches nothing from a URL like this one.
+MISE_VERSION="v2026.9.12"
+MISE_SHA256="e79ae57945034903aee8aa2ea66b4c7ca9cd4f4edd5a8a78a589cbae6d0f428a"
+MISE_ASSET="mise-${MISE_VERSION}-linux-x64"
+MISE_URL="https://github.com/jdx/mise/releases/download/${MISE_VERSION}/${MISE_ASSET}"
+# A copy in cache/ (see build-llama-variants.sh for the same arrangement) saves the download; it is
+# checked exactly as a fresh one is.
+MISE_BIN="$SCRIPT_DIR/cache/$MISE_ASSET"
+if [ ! -f "$MISE_BIN" ]; then
+    info "mise ${MISE_VERSION} (~135MB)..."
+    MISE_BIN="$WORK_DIR/$MISE_ASSET"
+    wget -q -O "$MISE_BIN" "$MISE_URL" || fail "could not download $MISE_URL"
+fi
+[ "$(sha256sum "$MISE_BIN" | cut -d' ' -f1)" = "$MISE_SHA256" ] \
+    || fail "$MISE_BIN does not match the pinned sha256 for mise ${MISE_VERSION}; not putting it in the image"
+sudo install -m 0755 -o root -g root "$MISE_BIN" "$ROOTFS/usr/local/bin/mise"
+# Captured, then matched: `mise --version | grep -q` under pipefail fails whenever grep stops
+# reading first.
+MISE_SAYS="$(sudo chroot "$ROOTFS" env HOME=/root /usr/local/bin/mise --version 2>/dev/null || true)"
+case "$MISE_SAYS" in
+    *"${MISE_VERSION#v}"*) ;;
+    *) fail "mise ${MISE_VERSION} does not run inside the image (it said: ${MISE_SAYS:-nothing})" ;;
+esac
+ok "mise ${MISE_VERSION} (sha256 checked) in /usr/local/bin"
+
 # ═══════════════════════════════════════════════════════════════
 # STEP 3: Create yantrik user + directory structure
 # ═══════════════════════════════════════════════════════════════
@@ -328,8 +376,35 @@ step "[3/10] Creating user and directories..."
 sudo chroot "$ROOTFS" /bin/bash <<'CHROOT_USER'
 set -e
 
+# The shell's defaults for every account made from this skeleton (#401): completion, a git-aware
+# prompt, mise. One line of ours at the end of Debian's own ~/.bashrc, sourcing a file that ships
+# with each update, so the defaults can move on without anyone's ~/.bashrc being rewritten, and
+# anything a person adds below the line wins. The file lands in step 4.
+if ! grep -q '/opt/yantrik/share/shell/bashrc' /etc/skel/.bashrc; then
+    cat >> /etc/skel/.bashrc <<'SKEL'
+
+# Yantrik OS: completion, a git-aware prompt and mise. Your own settings go below this.
+if [ -r /opt/yantrik/share/shell/bashrc ]; then
+    . /opt/yantrik/share/shell/bashrc
+fi
+SKEL
+fi
+
+# Subordinate ids for rootless podman (#401). useradd hands an account a range only when
+# /etc/subuid already exists, and usermod refuses to add one when it does not, so both files are
+# there first. The installers' useradd then gives each new account its own range from them.
+for f in /etc/subuid /etc/subgid; do
+    [ -e "$f" ] || install -m 0644 -o root -g root /dev/null "$f"
+done
+
 # Create yantrik user
 useradd -m -s /bin/bash -G sudo,video,audio,input yantrik
+# The first account on this filesystem, so 100000 is free whichever way useradd went. Checked
+# after, not assumed: a podman with no range pulls almost no image.
+grep -q '^yantrik:' /etc/subuid || usermod --add-subuids 100000-165535 yantrik
+grep -q '^yantrik:' /etc/subgid || usermod --add-subgids 100000-165535 yantrik
+grep -q '^yantrik:' /etc/subuid
+grep -q '^yantrik:' /etc/subgid
 echo "yantrik:yantrik" | chpasswd
 # Root is locked. It used to be root:root with SSH root login allowed, and the installer copies
 # this filesystem, so every installed machine accepted that login from the network.
@@ -421,6 +496,14 @@ for conf in "$UNPACK/share/sysctl/"*.conf; do
     sudo install -m 0644 -o root -g root "$conf" "$ROOTFS/etc/sysctl.d/$(basename "$conf")"
 done
 [ -f "$ROOTFS/etc/sysctl.d/60-yantrik-ptrace.conf" ] || fail "60-yantrik-ptrace.conf missing from the image's /etc/sysctl.d"
+# Where podman resolves a short image name (#401): Docker Hub, so the Container Manager's Pull of
+# "nginx" works as it would with docker.
+[ -d "$UNPACK/share/containers" ] || fail "release tarball carries no share/containers — the Container Manager could not pull a short image name"
+sudo install -d -m 0755 -o root -g root "$ROOTFS/etc/containers/registries.conf.d"
+for conf in "$UNPACK/share/containers/"*.conf; do
+    sudo install -m 0644 -o root -g root "$conf" "$ROOTFS/etc/containers/registries.conf.d/$(basename "$conf")"
+done
+[ -r "$UNPACK/share/shell/bashrc" ] || fail "release tarball carries no share/shell/bashrc — every new account's ~/.bashrc sources it"
 for required in share/labwc/rc.xml share/labwc/autostart bin/yantrik-session bin/yantrik-shell \
                 share/icons/hicolor/scalable/apps/yantrik.svg; do
     [ -e "$ROOTFS/opt/yantrik/$required" ] || fail "$required missing from the image — the desktop session would not be the shipped one"
@@ -1006,7 +1089,8 @@ if [ -d llama.cpp ]; then
     } || echo "llama-server build failed"
     cd /tmp && rm -rf llama.cpp
 fi
-apt-get remove -y -qq build-essential cmake git
+# git stays: the image ships it for the person (#401), and it was installed before this ran.
+apt-get remove -y -qq build-essential cmake
 apt-get autoremove -y -qq
 CHROOT_LLAMA
     fi

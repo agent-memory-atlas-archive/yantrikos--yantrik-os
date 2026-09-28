@@ -137,6 +137,15 @@ packages:
   # and a process view beside the System Monitor app. The image shipped neither (#210).
   - nano
   - htop
+  # A developer's baseline (#401): git, completion in the terminal, and rootless podman for the
+  # Container Manager app, with what rootless needs beside it (uidmap, passt, fuse-overlayfs).
+  # yantrik-update reconciles the same list on every machine.
+  - git
+  - bash-completion
+  - podman
+  - uidmap
+  - passt
+  - fuse-overlayfs
   # Flatpak, so the Package Manager can install apps from Flathub — VS Code, Spotify, Discord,
   # Steam — that Debian's archive does not carry (#399). Installed per-user by the desktop's own
   # account, so it needs no root and no sudo rule; the Flathub remote is added the first time

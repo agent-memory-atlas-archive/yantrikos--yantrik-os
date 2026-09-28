@@ -234,8 +234,46 @@ IMAGE_COMMANDS = {
     "nano": "EDITOR, exported by yantrik-session",
     "htop": "the process view beside the System Monitor app",
     "swaybg": "the wallpaper, and the label Mind View shows while it is empty",
+    "git": "the developer's baseline: the image once removed it after building llama.cpp (#401)",
+    "podman": "the runtime the Container Manager app runs, rootless, as the person (#401)",
+    "newuidmap": "rootless podman's user mapping (uidmap)",
+    "pasta": "rootless podman's network (passt)",
+    "fuse-overlayfs": "rootless podman's storage where the kernel's overlay cannot be used",
     "flatpak": "the Package Manager's Flathub apps, installed per-user (#399)",
 }
+
+
+def _subid_total(path, name, uid):
+    total = 0
+    try:
+        lines = pathlib.Path(path).read_text().splitlines()
+    except OSError:
+        return 0
+    for line in lines:
+        parts = line.strip().split(":")
+        if len(parts) >= 3 and parts[0] in (name, str(uid)) and parts[2].isdigit():
+            total += int(parts[2])
+    return total
+
+
+@check("this account can run rootless containers: subordinate ids and shell completion are in place")
+def _rootless_podman():
+    # #401: podman maps a container's users onto the account's ranges in /etc/subuid and
+    # /etc/subgid; with none, most pulls fail with "insufficient UIDs or GIDs". The image and the
+    # installers give each account one, and yantrik-update reconcile gives one to an account
+    # made before they did.
+    import pwd
+    uid = os.getuid()
+    name = pwd.getpwuid(uid).pw_name
+    short = ["%s has %d" % (p, n) for p, n in
+             (("/etc/subuid", _subid_total("/etc/subuid", name, uid)),
+              ("/etc/subgid", _subid_total("/etc/subgid", name, uid))) if n < 65536]
+    if short:
+        raise Failed("%s: fewer than 65536 subordinate ids (%s); yantrik-update reconcile adds a range"
+                     % (name, "; ".join(short)))
+    if not pathlib.Path("/usr/share/bash-completion/bash_completion").is_file():
+        raise Failed("bash-completion is not installed; yantrik-update reconcile installs it")
+    return "%s owns a full subuid and subgid range; bash-completion present" % name
 
 
 @check("every command the image ships is installed and answers on PATH")
