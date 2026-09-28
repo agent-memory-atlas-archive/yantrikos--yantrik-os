@@ -57,7 +57,10 @@ export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-yantrik:labwc:wlroots}"
 # installed there being invisible to the launcher is a bug nobody would think to look for.
 # /opt/yantrik/share is where this OS keeps its own .desktop entries and icons, so the
 # ordinary freedesktop scan finds the apps it ships without writing into /usr.
-export XDG_DATA_DIRS="${XDG_DATA_DIRS:-/usr/local/share:/usr/share}:/opt/yantrik/share:/var/lib/flatpak/exports/share:$HOME/.local/share/flatpak/exports/share"
+# The person's own Flatpak exports before the system's, as flatpak's own profile script orders
+# them: the Package Manager installs Flathub apps per-user (#399), and an app installed both ways
+# should open the copy this account chose.
+export XDG_DATA_DIRS="${XDG_DATA_DIRS:-/usr/local/share:/usr/share}:/opt/yantrik/share:$HOME/.local/share/flatpak/exports/share:/var/lib/flatpak/exports/share"
 export XDG_CONFIG_DIRS="${XDG_CONFIG_DIRS:-/etc/xdg}"
 
 # The OS's own binaries. `yos` is the agent surface and scripts call it by name; without this
