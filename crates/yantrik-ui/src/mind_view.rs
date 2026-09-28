@@ -607,6 +607,19 @@ pub fn app_pids() -> HashSet<u32> {
     with_state(|s| s.apps.iter().map(|(p, _)| *p).collect())
 }
 
+/// What is drawing in Mind View, as a person reads the apps' names, in the order they were opened.
+pub fn app_names() -> Vec<String> {
+    let ids: Vec<String> = with_state(|s| s.apps.iter().map(|(_, id)| id.clone()).collect());
+    let mut names: Vec<String> = Vec::new();
+    for id in ids {
+        let name = crate::windows::app_display_name(&id);
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
 fn is_mind_view_app(app_id: &str) -> bool {
     with_state(|s| s.apps.iter().any(|(_, id)| id == app_id))
 }

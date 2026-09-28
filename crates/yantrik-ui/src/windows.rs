@@ -830,6 +830,18 @@ pub fn icon_for_app(app_id: &str) -> &'static str {
 /// Terminal: extract CWD from "user@host:/path" pattern.
 /// Browser: extract site name from "Page Title - Site" pattern.
 /// Files: extract current directory.
+/// What the taskbar calls Mind View: its name, and the apps the minds have open in it. The apps a
+/// mind opens are drawn inside Mind View rather than on the person's desktop, so they have no
+/// taskbar entries of their own; with only "Mind View" on the strip, Images opened by the Mind
+/// looked to Pranab like an app missing from the taskbar (VM 520, 28 Sep 2026).
+pub(crate) fn mind_view_label(apps: &[String]) -> String {
+    if apps.is_empty() {
+        "Mind View".to_string()
+    } else {
+        format!("Mind View · {}", apps.join(", "))
+    }
+}
+
 fn derive_context(title: &str, app_id: &str) -> String {
     match app_id {
         "terminal" => {
@@ -855,7 +867,7 @@ fn derive_context(title: &str, app_id: &str) -> String {
                 .to_string()
         }
         // The compositor titles the window "labwc - WL-1", which says nothing to a person.
-        "mind-view" => "Mind View".to_string(),
+        "mind-view" => mind_view_label(&crate::mind_view::app_names()),
         "files" => {
             if title.contains('/') {
                 title.rsplit('/').next().unwrap_or("").to_string()
@@ -1087,6 +1099,17 @@ mod tests {
         );
         // The shell's own window is never in this list and is named by its title alone.
         assert_eq!(matchspecs(SHELL_WINDOW_TITLE, &open), ["title:Yantrik OS"]);
+    }
+
+    /// Mind View's entry says what is in it: the apps a mind opened are drawn inside it, and have
+    /// no entries of their own.
+    #[test]
+    fn mind_views_entry_names_what_is_open_in_it() {
+        assert_eq!(mind_view_label(&[]), "Mind View");
+        assert_eq!(
+            mind_view_label(&["Blender".to_string(), "Images".to_string()]),
+            "Mind View · Blender, Images"
+        );
     }
 
     /// The declared app_id is kept as the compositor spelled it, beside the lowercased one the
