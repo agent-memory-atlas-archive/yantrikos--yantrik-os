@@ -264,11 +264,15 @@ cp "$PROJECT_ROOT/config/shell/bashrc" "$ROOT/share/shell/bashrc"
 # `yantrik-update reconcile` — never run from /opt/yantrik, which its user can write.
 mkdir -p "$ROOT/share/root-helpers"
 install -m 0755 "$SCRIPT_DIR/yantrik-pkg" "$ROOT/share/root-helpers/yantrik-pkg"
+# The system units minds run under, as their own account (#411): installed root's, hash-checked,
+# into /etc/systemd/system by `yantrik-update`; enabled by `yantrik-update migrate-minds`.
+mkdir -p "$ROOT/share/systemd"
+cp "$PROJECT_ROOT/config/systemd/"*.service "$ROOT/share/systemd/"
 # What the updater installs as root, by content: every file under share/ it copies into /usr/lib,
-# /etc/polkit-1, /etc/sysctl.d or /etc/containers, with its sha256. It rides in bin/, which the
+# /etc/polkit-1, /etc/sysctl.d, /etc/containers or /etc/systemd/system, with its sha256. It rides in bin/, which the
 # updater installs with plain cp as root, so it is root's on the machine whoever could write
 # share/; the updater installs nothing as root whose hash is not in it (#419).
-(cd "$ROOT/share" && sha256sum root-helpers/* polkit/* sysctl/* containers/*) > "$ROOT/bin/yantrik-root-files.sha256"
+(cd "$ROOT/share" && sha256sum root-helpers/* polkit/* sysctl/* containers/* systemd/*) > "$ROOT/bin/yantrik-root-files.sha256"
 [ "$(wc -l < "$ROOT/bin/yantrik-root-files.sha256")" -ge 4 ] || fail "the root-files list is short: $(cat "$ROOT/bin/yantrik-root-files.sha256")"
 mkdir -p "$ROOT/share/labwc-mind"
 cp "$PROJECT_ROOT/config/labwc-mind/rc.xml" "$ROOT/share/labwc-mind/rc.xml"

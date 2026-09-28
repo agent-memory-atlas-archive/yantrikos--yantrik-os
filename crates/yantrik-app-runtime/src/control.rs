@@ -517,6 +517,8 @@ impl ControlRpc {
 
             "app.act" => {
                 let call = ActCall::parse(&params)?;
+                // A mind account's call acts only as a live agent (#411), before anything else.
+                call.require_standing(who)?;
                 // Agents catalog: the calling agent's reach (`yantrik_ipc_transport::reach`) —
                 // read here, where IO belongs, and held to below before any grant is spent and
                 // before the handler runs. No token, or a token with no reach, is not held.

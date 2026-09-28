@@ -854,6 +854,15 @@ impl Host {
         None
     }
 
+    /// Whether a live agent holds a token whose digest is `digest`, digests computed by `hash` (the
+    /// caller's, so this crate needs no hash of its own). What a door outside the shell asks,
+    /// by digest, before it believes a mind account's call is an agent's (#411).
+    pub fn knows_token_digest(&self, digest: &str, hash: impl Fn(&str) -> String) -> bool {
+        let mut state = self.lock();
+        self.reap(&mut state);
+        state.attached.values().any(|harness| harness.agents.values().any(|agent| hash(&agent.token) == digest))
+    }
+
     /// Whether an attached harness holds a conversation per agent — `None` when nothing by that id
     /// is attached. A role from the agent catalog is only ever started as a conversation of its
     /// own: a harness that holds one has only the person's own conversation to offer.
