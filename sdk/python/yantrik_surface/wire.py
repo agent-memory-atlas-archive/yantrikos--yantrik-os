@@ -521,7 +521,7 @@ def who_holds(path, patience=CLAIM_PING):
 
         def ask(method):
             try:
-                probe.sendall(('{"jsonrpc":"2.0","id":1,"method":"%s"}\n' % method).encode())
+                send_all(probe, ('{"jsonrpc":"2.0","id":1,"method":"%s"}\n' % method).encode())
                 return json.loads(reader.readline().decode("utf-8"))
             except (OSError, ValueError):
                 return None
@@ -595,21 +595,32 @@ class _Connection(socketserver.StreamRequestHandler):
                 return
             if max_line and len(raw) > max_line and not raw.endswith(b"\n"):
                 with contextlib.suppress(OSError):
-                    self.wfile.write(encode(_error(
+                    send_all(self.connection, encode(_error(
                         None, RPC_PARSE_ERROR, "Parse error: request too large — at most %d bytes "
                         "on one line here; this one was longer, so it was not read and the "
                         "connection is closed. Nothing was run." % max_line)))
-                    self.wfile.flush()
                 return
             line = raw.decode("utf-8", errors="replace").strip()
             if not line:
                 continue
             reply = answer(handler, line, peer)
             try:
-                self.wfile.write(encode(reply))
-                self.wfile.flush()
+                send_all(self.connection, encode(reply))
             except OSError:
                 return
+
+
+# Never a signal for writing to a socket whose other end has gone. A standalone Python ignores
+# SIGPIPE; an embedding host need not, and Blender does not — a reply written to a caller that had
+# already hung up killed Blender outright, render and unsaved scene with it (VM 520, 28 Sep 2026),
+# and any caller, a mind at the door included, could do that on purpose. With this flag the write
+# fails with EPIPE, which is an OSError like any other lost caller.
+_NO_SIGNAL = getattr(socket, "MSG_NOSIGNAL", 0)
+
+
+def send_all(sock, data):
+    """`sock.sendall(data)`, without SIGPIPE."""
+    sock.sendall(data, _NO_SIGNAL)
 
 
 # The longest request line a mind may send at the door, and how long a door connection may sit
@@ -785,7 +796,7 @@ def call_once(path, method, params, timeout=10.0, request_id=1, peer_rule=None):
         payload = json.dumps(
             {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params},
             ensure_ascii=False) + "\n"
-        client.sendall(payload.encode("utf-8"))
+        send_all(client, payload.encode("utf-8"))
         buf = b""
         while not buf.endswith(b"\n"):
             chunk = client.recv(65536)
