@@ -10772,6 +10772,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "yantrik-mind-view-title"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "yantrik-ml"
 version = "0.1.0"
 dependencies = [

@@ -33,6 +33,26 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+/// The environment that titles Mind View's window: the title library preloaded into its labwc,
+/// when it ships beside the shell. Without it the window keeps labwc's own title; nothing else
+/// changes.
+fn title_preload() -> Vec<(&'static str, String)> {
+    let lib = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join(TITLE_LIBRARY)))
+        .filter(|p| p.is_file());
+    match lib {
+        Some(lib) => vec![
+            ("LD_PRELOAD", lib.display().to_string()),
+            ("YANTRIK_MIND_VIEW_TITLE", "Mind View".to_string()),
+        ],
+        None => Vec::new(),
+    }
+}
+
+/// The title library's file name, beside the shell in bin/.
+const TITLE_LIBRARY: &str = "libyantrik_mind_view_title.so";
+
 /// How long the nested compositor gets to say which display it is serving.
 ///
 /// It is paid off the UI thread (the launch waits on a worker, see `wire::dock::spawn_launch`),
@@ -420,6 +440,9 @@ fn start() -> Result<Nested, String> {
         .arg(&script)
         // A window on the person's compositor, not a session of its own on the hardware.
         .env("WLR_BACKENDS", "wayland")
+        // Titled "Mind View" on the person's desktop, not labwc's own "labwc - WL-1": the
+        // title library answers labwc's wlr_wl_output_set_title (crates/yantrik-mind-view-title).
+        .envs(title_preload())
         // Its Xwayland sets DISPLAY for what it starts; the person's must not leak in.
         .env_remove("DISPLAY")
         .env_remove("SLINT_FULLSCREEN")
