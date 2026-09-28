@@ -859,10 +859,12 @@ def cmd_ls(argv):
     print("    and `describe <name>` means the window whenever it is open.")
 
     shell = os.path.join(SOCKET_DIRS[0], "app-shell.sock")
-    openable, from_disk = [], False
+    openable, windows, from_disk = [], [], False
     if _answers(shell):
         try:
-            openable = (call("shell", "app.describe", timeout=5).get("state") or {}).get("apps") or []
+            desktop = call("shell", "app.describe", timeout=5).get("state") or {}
+            openable = desktop.get("apps") or []
+            windows = [w.get("app") for w in desktop.get("windows") or [] if isinstance(w, dict)]
         except SystemExit:
             openable = []
     if not openable:
@@ -873,6 +875,16 @@ def cmd_ls(argv):
                      "aliases": s["aliases"]} for s in declared_surfaces()]
     running = {name for name, _ in apps}
     closed = [a for a in openable if a.get("opens") == "app" and a.get("describe_as") not in running]
+    # An app whose window the desktop has open and whose surface has not answered yet is starting,
+    # not closed. Listed as closed, a mind that had just opened Blender read "(closed)" here, opened
+    # it again, and gave up on the task; describing it now waits for it (`still_starting`).
+    starting = [a for a in closed if a["name"] in windows or a.get("describe_as") in windows]
+    closed = [a for a in closed if a not in starting]
+    if starting:
+        print("Starting (the window is open, the app has not answered yet; describe it in a few "
+              "seconds, and do not open it again):")
+        for a in starting:
+            print("    %-18s (starting)  %s" % (a.get("describe_as") or a["name"], a.get("for", "")))
     if closed:
         # One line each, with what the app is for. This was a comma-separated row of names, and
         # a row of names is how three different models, asked for a "document", each wrote a

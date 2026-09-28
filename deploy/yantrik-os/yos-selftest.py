@@ -1001,6 +1001,18 @@ def main():
                   "Can be opened with `act shell open_app name=<name>`" in out, out)
             check("and an open one is not listed as closed",
                   "howdy " in out and not re.search(r"^    howdy +\(closed\)", out, re.M), out)
+            listing_reply = shell.reply
+            shell.reply = lambda _s, asked: (
+                {"app": "shell", "summary": "Yantrik", "actions": [],
+                 "state": {"apps": listing,
+                           "windows": [{"app": "system-monitor", "title": "System Monitor"}]}}
+                if asked["method"] == "app.describe" else {"accepted": True, "settled": True})
+            out, err, code = run(lambda: yos.cmd_ls([]))
+            shell.reply = listing_reply
+            check("one whose window is open and that has not answered yet is starting, not closed",
+                  re.search(r"^    system-monitor +\(starting\)  CPU, memory", out, re.M)
+                  and not re.search(r"^    system-monitor +\(closed\)", out, re.M)
+                  and "do not open it again" in out, out)
 
             print("yos ls, with sockets that answer but are not surfaces (#190)")
             # The harness host, as it refuses anything but its own protocol; the store behind a
