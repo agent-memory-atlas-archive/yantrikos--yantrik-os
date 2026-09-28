@@ -656,10 +656,9 @@ fi
         tracing::warn!(error = %e, "Could not make /opt/yantrik root's at install; the first update will");
     }
 
-    // Passwordless sudo (needed for labwc/system operations)
-    let sudoers_file = format!("{mount_dir}/etc/sudoers.d/{username}");
-    let _ = sudo_write(&sudoers_file, &format!("{username} ALL=(ALL) NOPASSWD:ALL\n"));
-    let _ = run_cmd("chmod", &["0440", &sudoers_file]);
+    // No passwordless sudo for everything on an installed machine (#397): the migration above
+    // put the narrow rule in place (the updater, the Package Manager's helper, the timezone) and
+    // removed the blanket one the live image carries. The person's own password does the rest.
 
     // Autologin to start labwc + yantrik-ui automatically (no TTY shown to user).
     // Yantrik UI shows its own graphical login screen (screen 32) for authentication.
