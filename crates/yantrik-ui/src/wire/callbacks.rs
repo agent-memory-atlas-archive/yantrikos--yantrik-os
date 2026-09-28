@@ -68,6 +68,12 @@ fn wire_lock(ui: &App, ctx: &AppContext) {
         // process for as long as the machine stayed on.
         crate::vault_unlock::on_screen_lock();
         if let Some(ui) = ui_weak_lock.upgrade() {
+            // What this lock covers, unless it covers a lock already (a second lock asked for
+            // while locked keeps the first one's answer).
+            let covering = ui.get_current_screen();
+            if !crate::control::locked_screen(covering) {
+                SCREEN_BEFORE_LOCK.store(covering, std::sync::atomic::Ordering::SeqCst);
+            }
             ui.set_current_screen(3);
             ui.set_lock_error("".into());
             ui.set_lock_date_text(app_context::current_date_text().into());
@@ -88,6 +94,24 @@ fn wire_lock(ui: &App, ctx: &AppContext) {
 
 /// The screen is open: back to the desktop, and the same secret offered to the vault. One path
 /// for the shell's own lock screen and the compositor's session lock (#313).
+/// The screen that was showing when the desktop locked, to come back to on unlock.
+///
+/// Unlocking always went to the desktop, so the first boot after an install, which starts locked
+/// (#415) in front of the optional setup (#400), unlocked straight past the setup; and a lock
+/// taken over Settings or Files came back to the desktop instead. 0 when nothing is remembered.
+static SCREEN_BEFORE_LOCK: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+/// Where an unlock goes: the screen the lock covered. A lock taken during boot (the desktop
+/// starts locked, #415) goes where boot would have: the optional setup when it is waiting (the
+/// first boot after an install), else the desktop. A locked screen is never returned to.
+fn screen_after_unlock(before: i32, setup_waiting: bool) -> i32 {
+    match before {
+        0 if setup_waiting => 2,
+        0 | 3 | 32 => 1,
+        screen => screen,
+    }
+}
+
 fn unlocked(
     ui: &App,
     bridge: &std::sync::Arc<crate::bridge::CompanionBridge>,
@@ -95,7 +119,8 @@ fn unlocked(
     kind: lock::Secret,
 ) {
     crate::session_lock::released();
-    ui.set_current_screen(1);
+    let before = SCREEN_BEFORE_LOCK.swap(0, std::sync::atomic::Ordering::SeqCst);
+    ui.set_current_screen(screen_after_unlock(before, ui.get_onboarding_step() > 0));
     ui.set_lock_error("".into());
     tracing::info!("Screen unlocked");
     // The screen is open; now see whether the same keystrokes also open the vault.
@@ -462,4 +487,21 @@ fn wire_file_assistant(ui: &App, ctx: &AppContext) {
     let summarize = request.clone();
     ui.on_file_request_summarize(move || summarize(true));
     ui.on_file_request_ask_ai(move || request(false));
+}
+
+#[cfg(test)]
+mod unlock_screen_tests {
+    use super::screen_after_unlock;
+
+    #[test]
+    fn an_unlock_returns_to_what_the_lock_covered() {
+        assert_eq!(screen_after_unlock(0, true), 2, "locked at boot, with the first boot's setup waiting");
+        assert_eq!(screen_after_unlock(0, false), 1, "locked at boot, nothing waiting: the desktop");
+        assert_eq!(screen_after_unlock(2, false), 2, "locked over the setup itself");
+        assert_eq!(screen_after_unlock(7, false), 7, "Settings");
+        assert_eq!(screen_after_unlock(1, true), 1);
+        for nowhere in [3, 32] {
+            assert_eq!(screen_after_unlock(nowhere, true), 1, "screen {nowhere} is never returned to");
+        }
+    }
 }
