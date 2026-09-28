@@ -503,6 +503,15 @@ impl ServiceHandler for ControlRpc {
         peer: Option<PeerCred>,
     ) -> Result<serde_json::Value, ServiceError> {
         let who = peer.map(Caller::from);
+        // The agent the call arrived as, kept for the view read again after deferred work: that
+        // read is a describe of the app's state, and a state that tells an agent less than the
+        // person (the shell's, #475) has to know it is an agent reading, token and all.
+        let token = params
+            .get(AGENT_TOKEN)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_string);
         // Nothing left over from an earlier call on this thread can be taken for this one's.
         LATER_HANDED.with(|cell| cell.borrow_mut().take());
         let answer = self.dispatch(method, params, who);
@@ -510,8 +519,12 @@ impl ServiceHandler for ControlRpc {
         match (answer, later) {
             // The work runs here, off the UI thread, and the view beside its result is read
             // again on the UI thread once it has.
-            (Ok(envelope), Some(later)) if method == "app.act" => finish_later(envelope, later, || {
-                on_ui_thread(who, |reg| reg.snapshot()).ok()
+            (Ok(envelope), Some(later)) if method == "app.act" => finish_later(envelope, later, move || {
+                on_ui_thread(who, move |reg| {
+                    let _agent = AgentTokenScope::enter(token);
+                    reg.snapshot()
+                })
+                .ok()
             }),
             (answer, _) => answer,
         }

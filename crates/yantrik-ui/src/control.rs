@@ -345,6 +345,34 @@ fn clip(text: &str, max: usize) -> String {
 }
 
 /// The tool calls in one message, each with its arguments, as the trail carried them.
+/// Refuse a caller the desktop takes for an agent: what it asked for is the person's own.
+pub(crate) fn persons_only(action: &str) -> Result<(), String> {
+    if yantrik_app_runtime::control::agent_is_calling() {
+        return Err(format!(
+            "{action} is the person's, and an agent is calling. An agent reads its own session with read_agent."
+        ));
+    }
+    Ok(())
+}
+
+/// `value` with `fields` taken out of every object in it, at any depth: what is the person's in a
+/// part of `describe` an agent may otherwise read (the questions other agents put to them, the
+/// arguments of what ran unasked, the command lines of every agent's jobs).
+fn without_fields(value: serde_json::Value, fields: &[&str]) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.into_iter()
+                .filter(|(k, _)| !fields.contains(&k.as_str()))
+                .map(|(k, v)| (k, without_fields(v, fields)))
+                .collect(),
+        ),
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.into_iter().map(|v| without_fields(v, fields)).collect())
+        }
+        other => other,
+    }
+}
+
 fn calls_of(text: &str) -> Vec<serde_json::Value> {
     crate::trail::calls_in(text)
         .into_iter()
@@ -708,7 +736,10 @@ pub fn publish(
                 // "the machine is hung" — the two look identical from outside otherwise.
                 .with("pending_approvals", crate::control_approvals::pending_for_describe())
                 // And what an agent has asked the person (#25), waiting for an answer on its card.
-                .with("pending_questions", crate::wire::agents::questions_for_describe())
+                .with("pending_questions", {
+                    let q = crate::wire::agents::questions_for_describe();
+                    if agent_reading { without_fields(q, &["prompt", "options"]) } else { q }
+                })
                 // What went wrong on this machine, newest first: the local records a person
                 // or a mind can choose to send with `report_problem`. Reading them sends nothing.
                 .with("problems", crate::wire::problem_report::for_describe())
@@ -737,7 +768,10 @@ pub fn publish(
                 // And what it has already done unasked. A mode that stops the asking has to
                 // replace the cards with something, or `auto` is only a quieter way of not
                 // knowing. See `mind_mode`'s audit section.
-                .with("mind_audit_recent", crate::control_approvals::mind_audit_for_describe())
+                .with("mind_audit_recent", {
+                    let audit = crate::control_approvals::mind_audit_for_describe();
+                    if agent_reading { without_fields(audit, &["args", "verified"]) } else { audit }
+                })
                 // The mind panel at the right edge: where it is, whether it is open, the choice
                 // each place keeps, and how much it is showing. `set_mind_panel` changes it.
                 .with("mind_panel", crate::mind_panel::for_describe(&ui))
@@ -793,7 +827,10 @@ pub fn publish(
                 .with("harnesses", crate::wire::harness::catalogue_for_describe())
                 // Agents' commands running now, per agent: the job, its command, how long, and
                 // whether it seems to be waiting for input. See `control_agent_terminal`.
-                .with("agent_jobs", crate::control_agent_terminal::for_describe())
+                .with("agent_jobs", {
+                    let jobs = crate::control_agent_terminal::for_describe();
+                    if agent_reading { without_fields(jobs, &["command"]) } else { jobs }
+                })
                 .with("files", files)
                 .with("installer", installer)
                 .with("services", serde_json::Value::Array(services))
@@ -865,7 +902,8 @@ pub fn publish(
                     "lens",
                     serde_json::json!({
                         "open": ui.get_lens_open(),
-                        "text": ui.get_lens_input_text().to_string(),
+                        // What the person is typing, before they have sent it: theirs alone.
+                        "text": if agent_reading { String::new() } else { ui.get_lens_input_text().to_string() },
                         "chat": ui.get_lens_chat_mode(),
                     }),
                 )
@@ -1163,6 +1201,9 @@ pub fn publish(
             .risk("safe")
             .arg(Param::number("index").describe("The message's `index` from describe's `conversation`")),
             move |args| {
+                // The whole of any message, tool calls included: the person's chat, not a mind's
+                // to page through (the security review of #475).
+                persons_only("read_message")?;
                 let ui = read_ui()?;
                 let index = args["index"]
                     .as_u64()
@@ -1810,6 +1851,23 @@ mod screen_entry_tests {
             assert_eq!(entry, *name);
             assert!(title.chars().next().is_some_and(|c| c.is_ascii_uppercase()), "{title}");
         }
+    }
+}
+
+#[cfg(test)]
+mod persons_fields_tests {
+    use super::without_fields;
+    use serde_json::json;
+
+    /// What an agent reading `describe` loses, it loses at any depth, and nothing else goes with it.
+    #[test]
+    fn the_persons_fields_come_out_wherever_they_sit() {
+        let jobs = json!([{ "agent": "pi:main", "running": [{ "job": "j1", "command": "printf 'Lunch with Sam'", "elapsed_secs": 3 }] }]);
+        let told = without_fields(jobs, &["command"]);
+        assert_eq!(told, json!([{ "agent": "pi:main", "running": [{ "job": "j1", "elapsed_secs": 3 }] }]));
+        let audit = json!([{ "app": "email", "action": "send", "args": { "to": "mom" }, "verified": { "line": "yos act email send" }, "outcome": "ok" }]);
+        assert_eq!(without_fields(audit, &["args", "verified"]), json!([{ "app": "email", "action": "send", "outcome": "ok" }]));
+        assert_eq!(without_fields(json!("text"), &["args"]), json!("text"));
     }
 }
 
