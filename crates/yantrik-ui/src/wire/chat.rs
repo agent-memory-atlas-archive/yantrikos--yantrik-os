@@ -20,7 +20,17 @@ use crate::{apps, lens, streaming, App};
 /// desktop had already worked out it was in Bentonville. These are facts about the machine,
 /// never configuration for the mind — the same things the status bar shows.
 pub(crate) fn desktop_context(place: &super::settings::Place) -> String {
+    machine_context(place, std::env::var("HOME").ok().as_deref())
+}
+
+/// The context from its parts. `home` is the person's home directory, what `~` means in their
+/// words: a mind running as its own account (#411) has another home, and cannot see this one, so
+/// "save it in ~/notes" was read as its own directory and the file "not found" there.
+fn machine_context(place: &super::settings::Place, home: Option<&str>) -> String {
     let mut machine = serde_json::Map::new();
+    if let Some(home) = home.filter(|h| h.starts_with('/') && *h != "/") {
+        machine.insert("home".into(), home.into());
+    }
     if !place.city.trim().is_empty() {
         machine.insert(
             "place".into(),
@@ -613,16 +623,23 @@ mod tests {
             timezone: "America/Chicago".into(),
             source: "detected".into(),
         };
-        let v: serde_json::Value = serde_json::from_str(&super::desktop_context(&place)).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&super::machine_context(&place, Some("/home/ann"))).unwrap();
         assert_eq!(v["machine"]["place"]["city"], "Bentonville");
         assert_eq!(v["machine"]["timezone"], "America/Chicago");
+        assert_eq!(v["machine"]["home"], "/home/ann", "what ~ means in the person's words");
         // Coordinates and how the place was found stay on the machine.
         assert!(v["machine"].get("lat").is_none() && v["machine"]["place"].get("lat").is_none());
         assert!(v["machine"].get("source").is_none());
 
         let unknown: serde_json::Value =
-            serde_json::from_str(&super::desktop_context(&Default::default())).unwrap();
+            serde_json::from_str(&super::machine_context(&Default::default(), None)).unwrap();
         assert_eq!(unknown, serde_json::json!({ "machine": {} }));
+        for not_a_home in ["", "relative/dir", "/"] {
+            let v: serde_json::Value =
+                serde_json::from_str(&super::machine_context(&Default::default(), Some(not_a_home))).unwrap();
+            assert!(v["machine"].get("home").is_none(), "{not_a_home:?}");
+        }
     }
 
 }

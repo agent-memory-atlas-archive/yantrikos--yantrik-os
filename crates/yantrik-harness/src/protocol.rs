@@ -190,8 +190,9 @@ pub struct Assignment {
     pub turn_id: u64,
     pub text: String,
     /// What the desktop knows about where the turn came from, as a JSON object in a string:
-    /// `{"machine": {"place": {"city", "region", "country"}, "timezone"}}`, each part present only
-    /// when known. Facts about the machine, never configuration for the harness. Optional, and
+    /// `{"machine": {"place": {"city", "region", "country"}, "timezone", "home"}}`, each part
+    /// present only when known. `home` is the person's home directory, what `~` means in what they
+    /// say; a harness running as an account of its own has a different one and may not see it. Facts about the machine, never configuration for the harness. Optional, and
     /// safe to ignore.
     ///
     /// It may also carry `"notes": ["…"]`: what the desktop has to tell this agent since its last
