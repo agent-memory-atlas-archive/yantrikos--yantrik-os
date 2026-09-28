@@ -86,7 +86,7 @@ impl AppContext {
         ui.global::<ThemeMode>().set_dark(user_settings.dark_mode);
         ui.set_settings_dark_mode(user_settings.dark_mode);
         ui.set_settings_tool_permission(user_settings.tool_permission.clone().into());
-        ui.set_settings_auto_lock_secs(user_settings.auto_lock_secs);
+        ui.set_settings_auto_lock_secs(crate::wire::settings::auto_lock_choice(user_settings.auto_lock_secs));
         // The only place do-not-disturb comes back after a restart. Everything that suppresses a
         // toast reads `dnd_mode` off the window (see `wire::notifications::maybe_toast`), so this
         // one line is what makes "held until I say otherwise" mean anything across a reboot.

@@ -234,6 +234,8 @@ export component SettingsScreen inherits Rectangle {
 
     // Security
     in property <int> auto-lock-secs: 300;
+    // False when the compositor gives no idle signal: no lock can come, so none is promised (#412).
+    in property <bool> auto-lock-available: true;
     in-out property <bool> incognito-mode: false;
     in-out property <bool> dnd-mode: false;
     callback toggle-incognito-mode();
@@ -3005,7 +3007,7 @@ SettingRow{label:"Network manager";description:"Open the native app to inspect a
 
 SettingRow{label:"Incognito";description:"Pause new built-in companion memories for this session. Existing memories remain. Resets when the shell restarts.";value:root.incognito-mode?"On":"Off";activated=>{root.toggle-incognito-mode();}}
 SettingRow{label:"Do Not Disturb";description:"Mute shell notification interruptions. This preference stays after a restart.";value:root.dnd-mode?"On":"Off";activated=>{root.toggle-dnd-mode();}}
-SettingRow{label:"Shell idle screen";description:"Show the shell lock view after inactivity on the desktop. This does not lock other native windows.";value:root.auto-lock-secs==0?"Never":root.auto-lock-secs<60?"30 seconds":"\{root.auto-lock-secs/60} minutes";activated=>{root.cycle-auto-lock();}}
+SettingRow{label:"Lock when away";description:"Lock the screen after this long with no keyboard or mouse. An agent working does not count as you being here.";value:root.auto-lock-secs==0?"Never":!root.auto-lock-available?"Unavailable on this display":root.auto-lock-secs<60?"30 seconds":"\{root.auto-lock-secs/60} minutes";activated=>{root.cycle-auto-lock();}}
 SettingRow{label:"Permissions";description:"Review the shell's tool permissions and outstanding requests.";value:"Review";activated=>{root.navigate-to(28);}}
 
                         Rectangle{height:24px;}
