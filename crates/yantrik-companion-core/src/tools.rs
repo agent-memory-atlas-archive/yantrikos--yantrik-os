@@ -387,6 +387,10 @@ pub const BLOCKED_SEGMENTS: &[&str] = &[
     ".ssh", ".gnupg", ".config/labwc", ".config/yantrik",
     "memory.db", ".bashrc", ".profile", ".bash_history",
     "/etc/shadow", "/etc/passwd",
+    // The work directory, where other programs (whisper, ffmpeg, edge-tts) write while following
+    // links. Its runtime spelling is outside every root anyway; its home fallback is under $HOME,
+    // so both are named here, from the same constants `private_dir` makes them with.
+    yantrik_ml::private_dir::WORK_NAME, yantrik_ml::private_dir::WORK_HOME_REL,
 ];
 
 /// Validate a path is safe for the AI to access.
@@ -802,8 +806,22 @@ mod audit_tests {
 
 #[cfg(test)]
 mod path_root_tests {
-    use super::{under_any, with_canonical};
+    use super::{under_any, validate_path, with_canonical};
     use std::path::PathBuf;
+
+    #[test]
+    fn the_work_dir_is_out_of_reach_in_both_spellings() {
+        // Other programs write there while following links; the model must not be able to plant
+        // anything in it, even through the home fallback that sits under $HOME.
+        let work_in_home = format!("~/{}/voice-0123/voice.wav", yantrik_ml::private_dir::WORK_HOME_REL);
+        let err = validate_path(&work_in_home).unwrap_err();
+        assert!(err.contains("not allowed"), "{err}");
+        let work_in_runtime = format!("/run/user/1000/{}/voice-0123/voice.wav", yantrik_ml::private_dir::WORK_NAME);
+        assert!(validate_path(&work_in_runtime).is_err());
+        if let Ok(work) = yantrik_ml::private_dir::work_dir() {
+            assert!(validate_path(work.join("x.txt").to_str().unwrap()).is_err());
+        }
+    }
 
     #[test]
     fn a_root_admits_itself_and_what_is_inside_it_only() {

@@ -76,8 +76,10 @@ fn text_to_ogg_edge(text: &str, out_path: &str) -> Result<(), String> {
     let mp3_path = format!("{}.mp3", out_path);
     clear(&mp3_path)?;
 
+    // `--text=…` in one argument: the text is the model's reply, and as a separate argument one
+    // that starts with `-` is read by argparse as another option rather than as the text.
     let edge_output = std::process::Command::new("edge-tts")
-        .arg("--text").arg(text)
+        .arg(format!("--text={text}"))
         .arg("--voice").arg("en-US-GuyNeural")
         .arg("--rate").arg("+10%")
         .arg("--write-media").arg(&mp3_path)
@@ -119,6 +121,10 @@ fn text_to_ogg_espeak(text: &str, out_path: &str, rate: u32, pitch: u32) -> Resu
         .arg("--stdout")
         .arg("-s").arg(rate.to_string())
         .arg("-p").arg(pitch.to_string())
+        // `--` first: the text is the model's reply, and without it a reply beginning with `-`
+        // is parsed as espeak-ng options (`-w <file>` writes wherever it names). espeak-ng takes
+        // its options through getopt_long, which stops at `--` and reads the rest as text.
+        .arg("--")
         .arg(text)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

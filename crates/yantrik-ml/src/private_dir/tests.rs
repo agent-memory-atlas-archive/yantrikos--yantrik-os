@@ -134,27 +134,39 @@ fn refuses_a_base_every_account_can_write() {
 }
 
 #[test]
-fn group_writable_is_fine_when_the_group_is_ours() {
-    // A umask-002 system with user-private groups: ~/.cache is 0775 and the group is just us.
+fn a_group_writable_home_cache_follows_whether_our_group_is_private() {
+    // A umask-002 system: ~/.cache is 0775 in our primary group. That is ours alone only under
+    // the user-private-group convention (group named after us); a shared group like `users` is
+    // not. Which one this test machine is decides the expected answer.
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
     std::fs::create_dir_all(home.join(".cache")).unwrap();
     std::fs::set_permissions(home.join(".cache"), std::fs::Permissions::from_mode(0o775)).unwrap();
-    let got = scratch_dir_from(None, Some(home.clone())).unwrap();
-    assert_eq!(got, canon(&home).join(".cache/yantrik/tmp"));
+    let got = scratch_dir_from(None, Some(home.clone()));
+    if super::upg::private_group(current_uid()).is_some() {
+        assert_eq!(got.unwrap(), canon(&home).join(".cache/yantrik/tmp"));
+    } else {
+        assert!(got.is_err());
+    }
 }
 
 #[test]
-fn group_writable_is_refused_when_the_group_is_someone_elses() {
+fn group_writable_is_accepted_only_in_our_private_group() {
     let root = tempfile::tempdir().unwrap();
     let dir = root.path().join("shared");
     std::fs::create_dir(&dir).unwrap();
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o770)).unwrap();
     let meta = std::fs::metadata(&dir).unwrap();
-    // Not root in a test run, so the other group is simulated by judging as a different one.
-    let err = check::trusted_as(&dir, &meta, current_uid(), meta.gid().wrapping_add(1)).unwrap_err();
-    assert!(err.to_string().contains("which is not ours"), "{err}");
-    assert!(check::trusted_as(&dir, &meta, current_uid(), meta.gid()).is_ok());
+    // Not root in a test run, so the groups are simulated by what we pass as our private one.
+    assert!(check::trusted_as(&dir, &meta, current_uid(), Some(meta.gid())).is_ok());
+    for private in [None, Some(meta.gid().wrapping_add(1))] {
+        let err = check::trusted_as(&dir, &meta, current_uid(), private).unwrap_err();
+        assert!(err.to_string().contains("not a group of ours alone"), "{err}");
+    }
+    // Not group-writable: the group does not matter.
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o750)).unwrap();
+    let meta = std::fs::metadata(&dir).unwrap();
+    assert!(check::trusted_as(&dir, &meta, current_uid(), None).is_ok());
 }
 
 #[test]
@@ -276,13 +288,39 @@ fn will_not_read_a_fifo_or_a_directory() {
     assert!(open_private_file(root.path()).is_err());
 }
 
-// ── Fresh directories ────────────────────────────────────────────────────────────────────────
+#[test]
+fn will_not_read_a_file_that_has_another_name() {
+    // A hard link to the key is the key: reads refuse what writes refuse.
+    let root = tempfile::tempdir().unwrap();
+    let key = root.path().join("id_ed25519");
+    std::fs::write(&key, "-----BEGIN OPENSSH PRIVATE KEY-----").unwrap();
+    let planted = root.path().join("yantrik-task-t0001.out");
+    std::fs::hard_link(&key, &planted).unwrap();
+    assert!(open_private_file(&planted).is_err());
+}
+
+// ── Work directories ─────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn the_work_dir_is_its_own_directory_not_scratch() {
+    let root = tempfile::tempdir().unwrap();
+    let work = work_dir_from(Some(root.path().into()), None).unwrap();
+    assert_eq!(work, canon(root.path()).join(WORK_NAME));
+    assert_ne!(work, scratch_dir_from(Some(root.path().into()), None).unwrap());
+    assert_eq!(mode(&work), 0o700);
+    let home = root.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    let work = work_dir_from(None, Some(home.clone())).unwrap();
+    assert_eq!(work, canon(&home).join(WORK_HOME_REL));
+    assert_ne!(work, scratch_dir_from(None, Some(home)).unwrap());
+}
 
 #[test]
 fn a_fresh_dir_is_new_private_and_gone_when_dropped() {
-    let a = fresh_scratch_dir("test-fresh").unwrap();
-    let b = fresh_scratch_dir("test-fresh").unwrap();
+    let a = fresh_work_dir("test-fresh").unwrap();
+    let b = fresh_work_dir("test-fresh").unwrap();
     assert_ne!(a.path(), b.path());
+    assert_eq!(a.path().parent().unwrap(), work_dir().unwrap(), "made in the work dir, not scratch");
     assert_eq!(mode(a.path()), 0o700);
     assert!(std::fs::read_dir(a.path()).unwrap().next().is_none(), "nothing can be waiting inside");
     std::fs::write(a.file("out.txt").unwrap(), "x").unwrap();

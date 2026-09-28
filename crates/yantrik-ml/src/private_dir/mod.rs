@@ -14,6 +14,7 @@
 //! account. The checks themselves are in `check.rs`.
 
 mod check;
+mod upg;
 #[cfg(all(test, unix))]
 mod tests;
 
@@ -35,6 +36,17 @@ pub use check::{create_private_file, open_private_file};
 /// directory, a prompt-injected model could plant `notes.pid -> ~/.ssh/authorized_keys` there
 /// and have the next app launch truncate it.
 pub const SCRATCH_NAME: &str = "yantrik-scratch";
+
+/// The work directory's name under `$XDG_RUNTIME_DIR`, and its fallback under `$HOME`.
+///
+/// Separate from scratch because scratch is one of the file tools' roots and this must not be:
+/// other programs write here (whisper for seconds, edge-tts waiting on the network), following
+/// links as they go, so nothing the model can reach may be able to reach in. The home fallback
+/// sits under `$HOME`, which the tools can reach, so companion-core's `BLOCKED_SEGMENTS` names
+/// both spellings.
+pub const WORK_NAME: &str = "yantrik-work";
+/// See [`WORK_NAME`].
+pub const WORK_HOME_REL: &str = ".cache/yantrik/work";
 
 /// The directory for short-lived files: `$XDG_RUNTIME_DIR/yantrik-scratch`, else
 /// `$HOME/.cache/yantrik/tmp`. Canonical, so it compares cleanly against resolved paths.
@@ -80,19 +92,27 @@ pub fn read_scratch(name: &str) -> io::Result<File> {
     open_private_file(&scratch_file(name)?)
 }
 
-/// A new, empty, private directory inside scratch for one call's files, removed (with everything
-/// in it) when dropped.
+/// The directory the per-call [`fresh_work_dir`]s are made in: `$XDG_RUNTIME_DIR/yantrik-work`,
+/// else `$HOME/.cache/yantrik/work`. Private and checked like scratch, but out of the file tools'
+/// reach (see [`WORK_NAME`]).
+pub fn work_dir() -> io::Result<PathBuf> {
+    work_dir_from(env_path("XDG_RUNTIME_DIR"), env_path("HOME"))
+}
+
+/// A new, empty, private directory inside [`work_dir`] for one call's files, removed (with
+/// everything in it) when dropped.
 ///
 /// For files another program must write — whisper's transcript, curl's download, ffmpeg's
 /// output — where we cannot pass `O_NOFOLLOW` to its `open`. The name is random and made with a
-/// plain `mkdir`, which fails if anything is already there, so nothing can be waiting inside it:
-/// no clearing a fixed name and hoping nothing is put back before the program opens it.
-pub fn fresh_scratch_dir(prefix: &str) -> io::Result<FreshDir> {
+/// plain `mkdir`, which fails if anything is already there, so nothing can be waiting inside it;
+/// and it is not in scratch, so the model cannot list it and put something there while the
+/// program runs — whisper takes seconds, edge-tts waits on the network.
+pub fn fresh_work_dir(prefix: &str) -> io::Result<FreshDir> {
     use rand::Rng;
-    let scratch = scratch_dir()?;
+    let work = work_dir()?;
     let prefix = plain_name(prefix)?;
     let tag: u64 = rand::thread_rng().gen();
-    let dir = scratch.join(format!("{prefix}-{tag:016x}"));
+    let dir = work.join(format!("{prefix}-{tag:016x}"));
     let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
@@ -100,7 +120,7 @@ pub fn fresh_scratch_dir(prefix: &str) -> io::Result<FreshDir> {
     Ok(FreshDir(dir))
 }
 
-/// See [`fresh_scratch_dir`].
+/// See [`fresh_work_dir`].
 #[derive(Debug)]
 pub struct FreshDir(PathBuf);
 
@@ -147,20 +167,29 @@ pub fn state_dir(name: &str) -> io::Result<PathBuf> {
 // ── Resolution, with the environment passed in so tests need not mutate it ──────────────────
 
 fn scratch_dir_from(runtime: Option<PathBuf>, home: Option<PathBuf>) -> io::Result<PathBuf> {
+    resolve(runtime, home, SCRATCH_NAME, ".cache/yantrik/tmp")
+}
+
+fn work_dir_from(runtime: Option<PathBuf>, home: Option<PathBuf>) -> io::Result<PathBuf> {
+    resolve(runtime, home, WORK_NAME, WORK_HOME_REL)
+}
+
+/// `runtime/runtime_name` if the runtime dir exists and passes, else `home/home_rel`.
+fn resolve(runtime: Option<PathBuf>, home: Option<PathBuf>, runtime_name: &str, home_rel: &str) -> io::Result<PathBuf> {
     // The runtime dir itself is never created here: if it is set but missing (WSL without
     // systemd, a bare ssh session) the session has no runtime dir, and making one under /run is
     // neither possible for a user nor ours to do.
     if let Some(runtime) = runtime.filter(|r| r.is_dir()) {
-        match prepare(&runtime, Path::new(SCRATCH_NAME)) {
+        match prepare(&runtime, Path::new(runtime_name)) {
             Ok(dir) => return Ok(dir),
             Err(e) => tracing::warn!(
                 runtime = %runtime.display(), error = %e,
-                "runtime scratch dir refused; using the one under home"
+                "runtime {runtime_name} dir refused; using the one under home"
             ),
         }
     }
     let home = home.ok_or_else(|| no_place("neither XDG_RUNTIME_DIR nor HOME is usable"))?;
-    prepare(&home, Path::new(".cache/yantrik/tmp"))
+    prepare(&home, Path::new(home_rel))
 }
 
 fn state_dir_from(state_home: Option<PathBuf>, home: Option<PathBuf>, name: &str) -> io::Result<PathBuf> {

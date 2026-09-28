@@ -597,13 +597,14 @@ fn process_voice(acc: &VoiceAccumulator) -> Result<String, String> {
     // These files used to sit in the shared temp dir under the client's id, taken as it came: a
     // `/` or `..` in it walked the names anywhere, and any account could leave a transcript at
     // the `.txt` name for us to read back as what the person said. Now the id is held to a plain
-    // token, and the files live in a directory made new for this message inside our private
-    // scratch dir (random name, plain mkdir, removed when `work` drops) — ffmpeg and whisper write
-    // into it, and a directory that did not exist a moment ago has nothing planted in it.
+    // token, and the files live in a directory made new for this message in our private work dir
+    // (random name, plain mkdir, removed when `work` drops) — ffmpeg and whisper write into it, a
+    // directory that did not exist a moment ago has nothing planted in it, and the work dir is out
+    // of the file tools' reach for the seconds whisper runs.
     let stem = voice_stem(&acc.id)?;
     use yantrik_ml::private_dir as scratch;
     let scratch_err = |e: std::io::Error| format!("no private scratch directory: {e}");
-    let work = scratch::fresh_scratch_dir("voice").map_err(scratch_err)?;
+    let work = scratch::fresh_work_dir("voice").map_err(scratch_err)?;
     let opus_path = work.file(&format!("{stem}.opus")).map_err(scratch_err)?;
     let wav_path = work.file(&format!("{stem}.wav")).map_err(scratch_err)?;
     let txt_path = work.file(&format!("{stem}.txt")).map_err(scratch_err)?;

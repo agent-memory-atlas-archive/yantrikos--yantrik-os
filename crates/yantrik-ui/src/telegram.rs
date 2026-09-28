@@ -319,7 +319,8 @@ fn handle_voice_message(
     // A fresh private directory for this message's audio, removed when the handler returns. The
     // files are the person's voice, and curl and ffmpeg write them, not us; a name in /tmp (and a
     // message id is no secret) could be read, or planted as a link for them to write through.
-    // A directory made new for this call has nothing in it for anyone to have planted.
+    // A directory made new for this call, in the work dir the file tools cannot reach, has nothing
+    // in it for anyone to have planted, and nobody can add anything while edge-tts waits.
     let (_work, ogg_path, reply_ogg) = match voice_workdir() {
         Ok(w) => w,
         Err(e) => {
@@ -534,7 +535,7 @@ fn handle_voice_message(
 /// and audio helpers take) of the incoming voice and the spoken reply inside it. The directory
 /// and both files go when the first element is dropped.
 fn voice_workdir() -> Result<(yantrik_ml::private_dir::FreshDir, String, String), String> {
-    let work = yantrik_ml::private_dir::fresh_scratch_dir("tg-voice").map_err(|e| e.to_string())?;
+    let work = yantrik_ml::private_dir::fresh_work_dir("tg-voice").map_err(|e| e.to_string())?;
     let voice = work.file("voice.ogg").map_err(|e| e.to_string())?;
     let reply = work.file("reply.ogg").map_err(|e| e.to_string())?;
     Ok((work, voice, reply))

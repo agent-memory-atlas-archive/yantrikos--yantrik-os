@@ -73,16 +73,18 @@ pub(super) fn still_private(dir: &Path) -> bool {
 /// nobody else — anyone who can write to it can rename what is inside it.
 #[cfg(unix)]
 pub(super) fn trusted(p: &Path, meta: &std::fs::Metadata, uid: u32) -> io::Result<()> {
-    trusted_as(p, meta, uid, current_gid())
+    trusted_as(p, meta, uid, super::upg::private_group(uid))
 }
 
-/// [`trusted`], with our group passed in so a test can stand in for another one.
+/// [`trusted`], with our user-private group (if we have one) passed in so a test can stand in
+/// for one.
 ///
-/// Group-writable is allowed when the group is our own: on a umask-002 system with user-private
-/// groups, `~/.cache` and `~/.local/state` are 0775 and the group holds nobody but us. A
-/// group-writable directory of any other group is refused, and world-writable always is.
+/// Group-writable is allowed only in that group: on a umask-002 system with user-private groups,
+/// `~/.cache` and `~/.local/state` are 0775 and the group holds nobody but us. A group-writable
+/// directory of any other group is refused — including our own primary group when it is a shared
+/// one like `users` — and world-writable always is.
 #[cfg(unix)]
-pub(super) fn trusted_as(p: &Path, meta: &std::fs::Metadata, uid: u32, gid: u32) -> io::Result<()> {
+pub(super) fn trusted_as(p: &Path, meta: &std::fs::Metadata, uid: u32, private_gid: Option<u32>) -> io::Result<()> {
     use std::os::unix::fs::MetadataExt;
     let refuse = |why: String| io::Error::new(io::ErrorKind::PermissionDenied, format!("{}: {why}", p.display()));
     if meta.file_type().is_symlink() || !meta.is_dir() {
@@ -94,16 +96,10 @@ pub(super) fn trusted_as(p: &Path, meta: &std::fs::Metadata, uid: u32, gid: u32)
     if meta.mode() & 0o002 != 0 {
         return Err(refuse("is writable by every account".into()));
     }
-    if meta.mode() & 0o020 != 0 && meta.gid() != gid {
-        return Err(refuse(format!("is writable by group {}, which is not ours ({gid})", meta.gid())));
+    if meta.mode() & 0o020 != 0 && Some(meta.gid()) != private_gid {
+        return Err(refuse(format!("is writable by group {}, which is not a group of ours alone", meta.gid())));
     }
     Ok(())
-}
-
-#[cfg(unix)]
-fn current_gid() -> u32 {
-    // SAFETY: getegid cannot fail and touches no memory.
-    unsafe { libc::getegid() }
 }
 
 /// Windows dev builds: the profile's own directories are per user already.
@@ -204,7 +200,8 @@ pub fn create_private_file(path: &Path) -> io::Result<File> {
 /// name — extracting an archive is enough — so `yantrik-scrollback.txt -> ~/.ssh/id_ed25519` would
 /// have had the terminal tools hand the key to the model as "the terminal". `O_NOFOLLOW` refuses
 /// the link, `O_NONBLOCK` keeps a FIFO from hanging the read, and the open file itself must be a
-/// regular file owned by us. A caller that judges the file (its age, say) should ask the
+/// regular file owned by us with no other name — a hard link to the key is the same key, and
+/// reads should refuse what writes refuse. A caller that judges the file (its age, say) should ask the
 /// returned `File` for its metadata, so it judges the file it reads and not the name.
 #[cfg(unix)]
 pub fn open_private_file(path: &Path) -> io::Result<File> {
@@ -214,10 +211,10 @@ pub fn open_private_file(path: &Path) -> io::Result<File> {
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)?;
     let meta = file.metadata()?;
-    if !meta.is_file() || meta.uid() != current_uid() {
+    if !meta.is_file() || meta.nlink() != 1 || meta.uid() != current_uid() {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            format!("{}: not a plain file of ours; refusing to read it", path.display()),
+            format!("{}: not a plain file of ours with a single name; refusing to read it", path.display()),
         ));
     }
     Ok(file)
