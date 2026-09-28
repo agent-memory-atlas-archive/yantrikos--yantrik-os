@@ -141,7 +141,7 @@ fn adopt_session_password(bridge: &Arc<crate::bridge::CompanionBridge>, password
 
 /// Verify username/password against the system.
 /// Tries unix_chkpwd first (preferred, PAM-aware), falls back to shadow file.
-fn verify_password(username: &str, password: &str) -> bool {
+pub(crate) fn verify_password(username: &str, password: &str) -> bool {
     // Method 1: unix_chkpwd — the PAM helper binary
     // It reads the password from stdin and checks against /etc/shadow
     for chkpwd_path in &["/usr/sbin/unix_chkpwd", "/sbin/unix_chkpwd"] {

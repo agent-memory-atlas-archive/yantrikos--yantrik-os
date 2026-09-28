@@ -7,10 +7,10 @@
 //! session lock (`ext-session-lock-v1`): the compositor shows only its surfaces and sends input
 //! only to them.
 //!
-//! It does not know the PIN: it asks this process, one line at a time, and this answers with
-//! `lock::check_pin` — the same check the shell's own screen makes, in one place. On `ok` it
-//! unlocks the session and the shell runs its own unlock (back to the desktop, the vault offered
-//! the same secret). A compositor without the protocol (exit 3) leaves the shell's own screen as
+//! It does not know the secret: it asks this process, one line at a time, and this answers with
+//! `lock::check_unlock` — the same check the shell's own screen makes, in one place: the login
+//! password, or the PIN on an account without one (#414). On `ok` it unlocks the session and the
+//! shell runs its own unlock (back to the desktop, the vault offered the same secret). A compositor without the protocol (exit 3) leaves the shell's own screen as
 //! the lock, as before, and says so. A lock client that dies while the session is locked is
 //! started again, so the person can always get back in.
 
@@ -28,11 +28,11 @@ const EXIT_UNSUPPORTED: i32 = 3;
 /// A lock client that keeps dying is not restarted forever.
 const MOST_STARTS: u32 = 5;
 
-/// What to answer a line from the lock client, and the PIN when the answer unlocks.
+/// What to answer a line from the lock client, and the secret when the answer unlocks.
 pub fn answer(line: &str, check: impl Fn(&str) -> bool) -> Option<(&'static str, Option<String>)> {
-    let pin = line.strip_prefix("pin ")?;
-    if check(pin) {
-        Some(("ok", Some(pin.to_string())))
+    let secret = line.strip_prefix("secret ")?;
+    if check(secret) {
+        Some(("ok", Some(secret.to_string())))
     } else {
         Some(("no", None))
     }
@@ -46,8 +46,13 @@ fn lock_bin() -> std::path::PathBuf {
 }
 
 /// Take the session lock, if it is not held already. `on_unlock` runs on the UI thread with the
-/// PIN that unlocked it.
-pub fn engage(ui: slint::Weak<App>, greeting: String, on_unlock: impl Fn(&App, &str) + Send + Clone + 'static) {
+/// secret that unlocked it.
+pub fn engage(
+    ui: slint::Weak<App>,
+    greeting: String,
+    secret: crate::lock::Secret,
+    on_unlock: impl Fn(&App, &str) + Send + Clone + 'static,
+) {
     if RUNNING.swap(true, Ordering::SeqCst) {
         return;
     }
@@ -61,7 +66,7 @@ pub fn engage(ui: slint::Weak<App>, greeting: String, on_unlock: impl Fn(&App, &
         let mut starts = 0;
         loop {
             starts += 1;
-            match run_once(&bin, &greeting) {
+            match run_once(&bin, &greeting, secret) {
                 Outcome::Unlocked(pin) => {
                     let (ui, on_unlock) = (ui.clone(), on_unlock.clone());
                     let _ = slint::invoke_from_event_loop(move || {
@@ -96,9 +101,9 @@ enum Outcome {
     Died(String),
 }
 
-fn run_once(bin: &std::path::Path, greeting: &str) -> Outcome {
+fn run_once(bin: &std::path::Path, greeting: &str, secret: crate::lock::Secret) -> Outcome {
     let mut child = match Command::new(bin)
-        .args(["--greeting", greeting])
+        .args(["--greeting", greeting, "--ask", secret.arg()])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -118,7 +123,7 @@ fn run_once(bin: &std::path::Path, greeting: &str) -> Outcome {
             tracing::info!("The compositor locked the session");
             continue;
         }
-        if let Some((reply, pin)) = answer(&line, crate::lock::check_pin) {
+        if let Some((reply, pin)) = answer(&line, |given| crate::lock::check_unlock(secret, given)) {
             if writeln!(to, "{reply}").and_then(|_| to.flush()).is_err() {
                 break;
             }
@@ -140,11 +145,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_pin_line_is_answered_by_the_shells_own_check_and_nothing_else_is() {
-        let check = |p: &str| p == "4242";
-        assert_eq!(answer("pin 4242", check), Some(("ok", Some("4242".to_string()))));
-        assert_eq!(answer("pin 0000", check), Some(("no", None)));
-        assert_eq!(answer("pin ", check), Some(("no", None)), "an empty PIN is a wrong one");
+    fn a_secret_line_is_answered_by_the_shells_own_check_and_nothing_else_is() {
+        let check = |p: &str| p == "correct horse";
+        assert_eq!(answer("secret correct horse", check), Some(("ok", Some("correct horse".to_string()))));
+        assert_eq!(answer("secret 0000", check), Some(("no", None)));
+        assert_eq!(answer("secret ", check), Some(("no", None)), "an empty entry is a wrong one");
+        assert_eq!(answer("pin correct horse", check), None, "the old protocol is not a question");
         assert_eq!(answer("locked", check), None, "not a question");
         assert_eq!(answer("ok", check), None, "the client cannot answer itself");
     }

@@ -1,16 +1,119 @@
-//! Lock screen — screen PIN and idle lock management.
+//! Lock screen — what unlocks it, and idle lock management.
 //!
-//! The PIN here guards the shell's own canvas and nothing else. It is a comparison against
-//! `~/.yantrik/lock_pin`, which is a file on the same disk as everything it is guarding, so it
-//! keeps a passer-by out of an unattended desktop and stops at exactly that. It is not what
-//! protects the credential vault: that is a passphrase the vault's key is *wrapped* under, so
-//! there is nothing on disk to read and nothing to compare against. See `crate::vault_unlock`,
-//! which the same screen drives.
+//! The screen unlocks with the account's login password (#414). The PIN it used to take lived in
+//! `~/.yantrik/lock_pin`, a file anything running as this user — any mind with a shell — could
+//! read, or overwrite with a PIN of its own choosing. The password lives in /etc/shadow, which
+//! nothing running as this user can read or change, and it is checked the way the login screen
+//! checks it (`unix_chkpwd`). It is also the secret the vault's key is wrapped under, so coming
+//! back to the machine opens both with one entry.
 //!
-//! Creates a default PIN "0000" on first use. Idle lock triggers after a configurable timeout
-//! (default 5 minutes).
+//! Only an account with no usable password keeps the PIN: there, the password is nothing to
+//! check, and asking for it would make the lock a lockout.
+//!
+//! Wrong answers slow down (`delay_after`): the lock is the one place anybody at the keyboard may
+//! guess without limit.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
+
+/// The secret the lock asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Secret {
+    /// The account's login password — every account that has one.
+    Password,
+    /// `~/.yantrik/lock_pin` — only an account with no usable password.
+    Pin,
+}
+
+impl Secret {
+    /// What the lock screen says above its field.
+    pub fn prompt(self) -> &'static str {
+        match self {
+            Secret::Password => "Enter your password to unlock",
+            Secret::Pin => "Enter PIN to unlock",
+        }
+    }
+
+    /// What it says after a wrong entry.
+    pub fn wrong(self) -> &'static str {
+        match self {
+            Secret::Password => "Wrong password",
+            Secret::Pin => "Wrong PIN",
+        }
+    }
+
+    /// How the session-lock client is told which to ask for.
+    pub fn arg(self) -> &'static str {
+        match self {
+            Secret::Password => "password",
+            Secret::Pin => "pin",
+        }
+    }
+}
+
+/// The account this desktop runs as, from the system rather than the environment.
+fn account_name() -> Option<String> {
+    let out = std::process::Command::new("/usr/bin/id").arg("-un").output().ok()?;
+    let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (out.status.success() && !name.is_empty()).then_some(name)
+}
+
+/// Whether `passwd -S` says the account has a usable password: `<name> P <date> …`. `NP` (none)
+/// and `L` (locked) are not.
+fn usable_password(status_line: &str) -> bool {
+    status_line.split_whitespace().nth(1) == Some("P")
+}
+
+/// Which secret unlocks this account's screen. Asked at every lock: an installer or a person may
+/// set the password while the desktop runs. Unknown means the PIN, never a lockout.
+pub fn secret_for_this_account() -> Secret {
+    let status = std::process::Command::new("/usr/bin/passwd").arg("-S").output();
+    match status {
+        Ok(out) if out.status.success() && usable_password(&String::from_utf8_lossy(&out.stdout)) => Secret::Password,
+        Ok(out) if out.status.success() => {
+            tracing::warn!("This account has no usable password; the lock asks for the PIN (#414)");
+            Secret::Pin
+        }
+        _ => {
+            tracing::warn!("Cannot tell whether this account has a password; the lock asks for the PIN");
+            Secret::Pin
+        }
+    }
+}
+
+/// Wrong answers in a row, across both lock screens.
+static FAILURES: AtomicU32 = AtomicU32::new(0);
+
+/// How long to hold the answer after the `failures`-th wrong one in a row: nothing for the first
+/// three typos, then 1, 2, 4 … seconds, at most 30.
+pub fn delay_after(failures: u32) -> Duration {
+    if failures < 3 {
+        return Duration::ZERO;
+    }
+    Duration::from_secs((1u64 << (failures - 3).min(5)).min(30))
+}
+
+/// Whether `input` unlocks the screen. Blocks — it runs `unix_chkpwd`, and a wrong answer is held
+/// back by `delay_after` — so it is called off the UI thread.
+pub fn check_unlock(secret: Secret, input: &str) -> bool {
+    let ok = match secret {
+        Secret::Password => {
+            !input.is_empty()
+                && account_name().is_some_and(|user| crate::wire::login::verify_password(&user, input))
+        }
+        Secret::Pin => check_pin(input),
+    };
+    if ok {
+        FAILURES.store(0, Ordering::SeqCst);
+    } else {
+        let failures = FAILURES.fetch_add(1, Ordering::SeqCst) + 1;
+        let delay = delay_after(failures);
+        tracing::info!(failures, delay_secs = delay.as_secs(), "Wrong unlock entry");
+        std::thread::sleep(delay);
+    }
+    ok
+}
 
 /// Default idle lock timeout in seconds (5 minutes).
 pub const DEFAULT_IDLE_LOCK_SECS: u64 = 300;
@@ -151,28 +254,38 @@ mod lock_tests {
         assert!(!check_pin(""));
     }
 
-    /// The screen asks for the secret `check_pin` actually checks.
-    ///
-    /// It said "Enter password to unlock" while `check_pin` compared against
-    /// `~/.yantrik/lock_pin` and a wrong entry answered "Wrong PIN" (#215): a person who took
-    /// the label at its word typed the one secret that was not wanted. The vault passphrase
-    /// really is a password, and it is a different secret with a different prompt
-    /// (`vault_unlock`); this screen's own field checks the PIN. The label is markup, so the
-    /// markup is read — the way `bond_not_loaded_tests` in control.rs reads app.slint.
+    /// Both lock screens ask for the secret that is checked (#215): the label is not fixed in
+    /// markup, it is the `Secret` the shell decided on, and the wrong-entry message names the same
+    /// secret. A screen that said "PIN" while checking the password would send the person to the
+    /// one secret that is not wanted.
     #[test]
-    fn the_lock_screen_asks_for_the_pin_it_checks() {
-        let path =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../yantrik-ui-slint/ui/lock.slint");
-        let slint = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
-        assert!(
-            slint.contains("Enter PIN to unlock"),
-            "the lock screen must ask for the PIN `check_pin` checks, not for a password"
-        );
-        assert!(
-            !slint.contains("password to unlock"),
-            "the lock screen says password again: what it checks is ~/.yantrik/lock_pin, and a \
-             wrong entry answers \"Wrong PIN\""
-        );
+    fn the_lock_screens_ask_for_the_secret_that_is_checked() {
+        for secret in [Secret::Password, Secret::Pin] {
+            let word = if secret == Secret::Password { "password" } else { "PIN" };
+            assert!(secret.prompt().contains(word) && secret.wrong().contains(word), "{secret:?}");
+        }
+        for ui in ["../yantrik-ui-slint/ui/lock.slint", "../yantrik-lock/ui/lock.slint"] {
+            let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(ui);
+            let slint = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+            assert!(
+                !slint.contains("\"Enter PIN to unlock\"") && !slint.contains("\"Enter your password"),
+                "{ui} fixes the prompt in markup; it must show the secret the shell checks"
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_usable_password_is_asked_for() {
+        assert!(usable_password("yantrik P 2026-09-17 0 99999 7 -1"));
+        assert!(!usable_password("yantrik NP 2026-09-17 0 99999 7 -1"), "no password: the PIN");
+        assert!(!usable_password("yantrik L 2026-09-17 0 99999 7 -1"), "locked: the PIN");
+        assert!(!usable_password(""));
+    }
+
+    #[test]
+    fn wrong_entries_slow_down_after_three_and_never_past_half_a_minute() {
+        let secs: Vec<u64> = (1..=12).map(|n| delay_after(n).as_secs()).collect();
+        assert_eq!(secs, [0, 0, 1, 2, 4, 8, 16, 30, 30, 30, 30, 30]);
     }
 }

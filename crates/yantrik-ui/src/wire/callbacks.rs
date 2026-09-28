@@ -37,18 +37,26 @@ fn wire_lock(ui: &App, ctx: &AppContext) {
     let ui_weak = ui.as_weak();
     let bridge = ctx.bridge.clone();
     let unlock_bridge = bridge.clone();
-    ui.on_try_unlock(move |pin| {
-        let pin = pin.to_string();
-        if lock::check_pin(&pin) {
-            if let Some(ui) = ui_weak.upgrade() {
-                unlocked(&ui, &unlock_bridge, &pin);
-            }
-        } else {
-            if let Some(ui) = ui_weak.upgrade() {
-                ui.set_lock_error("Wrong PIN".into());
-            }
-            tracing::debug!("Unlock failed — wrong PIN");
-        }
+    // The secret this lock asks for, decided when it locked (#414): the login password, or the
+    // PIN on an account without one. Both closures run on the UI thread.
+    let asking = std::rc::Rc::new(std::cell::Cell::new(lock::Secret::Password));
+    let asked = asking.clone();
+    ui.on_try_unlock(move |given| {
+        let given = given.to_string();
+        let secret = asked.get();
+        let (ui_weak, bridge) = (ui_weak.clone(), unlock_bridge.clone());
+        // Off the UI thread: the check runs `unix_chkpwd`, and a wrong answer is held back.
+        std::thread::spawn(move || {
+            let ok = lock::check_unlock(secret, &given);
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(ui) = ui_weak.upgrade() else { return };
+                if ok {
+                    unlocked(&ui, &bridge, &given);
+                } else {
+                    ui.set_lock_error(secret.wrong().into());
+                }
+            });
+        });
     });
 
     let ui_weak_lock = ui.as_weak();
@@ -64,33 +72,34 @@ fn wire_lock(ui: &App, ctx: &AppContext) {
             ui.set_lock_error("".into());
             ui.set_lock_date_text(app_context::current_date_text().into());
             ui.set_lock_greeting(ui.get_greeting_text());
-            tracing::info!("Screen locked — the vault's key was zeroed with it");
+            let secret = lock::secret_for_this_account();
+            asking.set(secret);
+            ui.set_lock_prompt(secret.prompt().into());
+            tracing::info!(secret = secret.arg(), "Screen locked — the vault's key was zeroed with it");
             // And at the compositor (#313): the shell's screen alone left every app window
             // above it, visible and usable. The session lock shows only the lock.
             let bridge = lock_bridge.clone();
-            crate::session_lock::engage(ui.as_weak(), ui.get_greeting_text().to_string(), move |ui, pin| {
-                unlocked(ui, &bridge, pin)
+            crate::session_lock::engage(ui.as_weak(), ui.get_greeting_text().to_string(), secret, move |ui, given| {
+                unlocked(ui, &bridge, given)
             });
         }
     });
 }
 
 /// The screen is open: back to the desktop, and the same secret offered to the vault. One path
-/// for the shell's own PIN screen and the compositor's session lock (#313).
-fn unlocked(ui: &App, bridge: &std::sync::Arc<crate::bridge::CompanionBridge>, pin: &str) {
+/// for the shell's own lock screen and the compositor's session lock (#313).
+fn unlocked(ui: &App, bridge: &std::sync::Arc<crate::bridge::CompanionBridge>, secret: &str) {
     ui.set_current_screen(1);
     ui.set_lock_error("".into());
     tracing::info!("Screen unlocked");
     // The screen is open; now see whether the same keystrokes also open the vault.
     //
-    // Usually they will not: the screen PIN and the vault passphrase are different secrets, and on
-    // most machines the PIN is still the default. It is offered anyway because on a machine where
-    // the person has made them the same — the obvious thing to do once the desktop has asked for
-    // a vault passphrase — coming back to an unlocked screen with a still-locked vault is a second
-    // prompt for a secret they just typed. A wrong guess here costs one Argon2id derivation and is
-    // silent: the person was unlocking a screen, and telling them they failed at something they
-    // were not attempting is worse than telling them nothing.
-    offer_screen_secret_to_vault(bridge, pin);
+    // They usually will: the screen unlocks with the login password (#414), and the login
+    // screen wraps the vault's key under that same password. Where they differ (the PIN on an
+    // account without a password, or a vault wrapped under an older password) a wrong guess costs
+    // one Argon2id derivation and is silent: the person was unlocking a screen, and telling them
+    // they failed at something they were not attempting is worse than telling them nothing.
+    offer_screen_secret_to_vault(bridge, secret);
 }
 
 /// Try the secret that just unlocked the screen on the vault, without making anybody wait.

@@ -477,6 +477,8 @@ export component App inherits Window {
     in property <string> lock-error: "";
     in property <string> lock-date-text: "";
     in property <string> lock-greeting: "";
+    // What the lock asks for: the login password, or the PIN on an account without one (#414).
+    in property <string> lock-prompt: "Enter your password to unlock";
     callback try-unlock(string);
     callback lock-screen();
 
@@ -1301,6 +1303,7 @@ export component App inherits Window {
             date-text: root.lock-date-text;
             greeting-text: root.lock-greeting;
             error-text: root.lock-error;
+            prompt-text: root.lock-prompt;
             try-unlock(pin) => { root.try-unlock(pin); }
         }
 
