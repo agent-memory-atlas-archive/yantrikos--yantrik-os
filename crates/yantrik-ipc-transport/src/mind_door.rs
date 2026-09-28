@@ -48,10 +48,13 @@ pub fn mind_gid() -> Option<u32> {
 }
 
 /// Whether a caller with this uid is a mind. The one test every door and every "who is asking"
-/// uses.
+/// uses. Never root, never this process's own uid: an account table that named either as the mind
+/// account would make the person (or root) a mind, or a mind the person.
 #[cfg(unix)]
 pub fn is_mind(uid: u32) -> bool {
-    mind_uid() == Some(uid)
+    // SAFETY: getuid cannot fail.
+    let me = unsafe { libc::getuid() };
+    uid != 0 && uid != me && mind_uid() == Some(uid)
 }
 
 #[cfg(not(unix))]
@@ -110,12 +113,22 @@ pub fn serving_dir() -> Option<PathBuf> {
     None
 }
 
+/// Which services open a door: the harness (where a mind attaches) and the app surfaces, whose
+/// every change goes through the shell's graded `app.act`. Nothing else, by name, until it is
+/// judged safe for a mind to call. The companion runs tools as the person, a11y drives any window
+/// ungraded, perception streams the person's file activity: on a door each would hand a mind back
+/// the authority its own account exists to take away.
+pub fn opens_a_door(socket_name: &str) -> bool {
+    let Some(id) = socket_name.strip_suffix(".sock") else { return false };
+    id == "harness" || id.starts_with("app-")
+}
+
 /// Where the door socket for the service listening at `address` goes: the same file name in the
-/// door directory, for a service socket in this session's own socket directory. Anything bound
-/// elsewhere (a test's temp path, an explicit address) gets no door.
+/// door directory, for a door service's socket in this session's own socket directory. Anything
+/// else (another service, a test's temp path, an explicit address) gets no door.
 pub fn door_for(address: &Path, socket_dir: &Path, door: &Path) -> Option<PathBuf> {
     let name = address.file_name()?;
-    (address.parent()? == socket_dir).then(|| door.join(name))
+    (address.parent()? == socket_dir && opens_a_door(name.to_str()?)).then(|| door.join(name))
 }
 
 /// The address a client in a mind's process dials for a service: the door, when this process
@@ -151,5 +164,15 @@ mod tests {
             Some(PathBuf::from("/run/yantrik-minds/app-shell.sock"))
         );
         assert_eq!(door_for(Path::new("/tmp/test-x/app.sock"), run, door), None);
+    }
+
+    #[test]
+    fn only_the_harness_and_the_app_surfaces_open_a_door() {
+        for yes in ["harness.sock", "app-shell.sock", "app-notes.sock", "app-editor.sock"] {
+            assert!(opens_a_door(yes), "{yes}");
+        }
+        for no in ["companion.sock", "a11y.sock", "perception.sock", "notifications.sock", "email.sock", "harness", "vault.sock"] {
+            assert!(!opens_a_door(no), "{no} must not be on the mind door");
+        }
     }
 }

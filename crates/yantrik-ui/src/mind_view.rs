@@ -143,10 +143,11 @@ pub struct CallerFacts {
 /// - A process descended from an attached mind (Hermes, pi through `yos-mcp`).
 /// - Anything else — `yos` typed in the Terminal, labwc's Ctrl+Alt+T — is the person.
 pub fn classify(facts: &CallerFacts, own_pid: u32) -> Requester {
-    let Some(pid) = facts.pid else { return Requester::Person };
+    // First: the kernel's word on the account outranks everything, a missing pid included.
     if facts.mind_account {
         return Requester::Mind(facts.attached_mind.clone().unwrap_or_else(|| "a mind".to_string()));
     }
+    let Some(pid) = facts.pid else { return Requester::Person };
     match facts.agent {
         Some(true) => return Requester::Mind("an agent".to_string()),
         Some(false) => return Requester::Mind("an agent whose token was not believed".to_string()),

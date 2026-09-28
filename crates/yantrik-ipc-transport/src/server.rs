@@ -50,6 +50,15 @@ pub fn socket_dir() -> std::path::PathBuf {
         // and resolves it again gets a permission error on the directory it just made itself, and
         // falls through to candidates it can create even less. That is exactly how
         // perception-service died pointing at /tmp/yantrik-0.
+        // Ours, and not a link: a shared /tmp lets any account create /tmp/yantrik-<uid> first,
+        // and a directory someone else made is one they can empty or fill with their own sockets.
+        if let Ok(meta) = std::fs::symlink_metadata(dir) {
+            use std::os::unix::fs::MetadataExt;
+            if meta.file_type().is_symlink() || meta.uid() != uid {
+                tracing::warn!(dir = %dir.display(), "socket dir candidate is a link or someone else's; skipped");
+                continue;
+            }
+        }
         if !dir.is_dir() {
             if let Err(e) = std::fs::create_dir_all(dir) {
                 tracing::debug!(dir = %dir.display(), error = %e, "socket dir candidate: cannot create");
@@ -303,7 +312,16 @@ impl RpcServer {
         }
 
         loop {
-            let (stream, _) = listener.accept().await?;
+            // A failed accept is waited out, not returned: out of descriptors (EMFILE) is a
+            // moment, and ending this loop would end the service for the person.
+            let stream = match listener.accept().await {
+                Ok((stream, _)) => stream,
+                Err(e) => {
+                    tracing::warn!(error = %e, service = handler.service_id(), "accept failed; retrying");
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    continue;
+                }
+            };
             // Read at accept, not when somebody asks. The peer of these sockets is routinely a
             // short-lived process — `yos` runs one JSON-RPC call and exits — so by the time a
             // handler wants to know who called, the pid may already be gone or, worse, reused.
@@ -444,13 +462,28 @@ impl Drop for RpcServer {
     }
 }
 
+/// Mind connections one door serves at a time.
+#[cfg(unix)]
+const DOOR_CONNECTIONS: usize = 32;
+
 /// Serve the mind door: every connection whose peer the kernel does not say is the mind account
 /// is closed unread. The directory already keeps everyone else out; this is what makes the uid,
 /// not the path, the fact a handler is told.
 #[cfg(unix)]
 async fn serve_door(listener: tokio::net::UnixListener, handler: Arc<dyn ServiceHandler>) {
+    // A bounded number of mind connections at once: a mind that opens connections and holds them
+    // uses up its own share and nothing of the person's.
+    let slots = Arc::new(tokio::sync::Semaphore::new(DOOR_CONNECTIONS));
     loop {
-        let Ok((stream, _)) = listener.accept().await else { continue };
+        let Ok(slot) = slots.clone().acquire_owned().await else { return };
+        let stream = match listener.accept().await {
+            Ok((stream, _)) => stream,
+            Err(e) => {
+                tracing::warn!(error = %e, service = handler.service_id(), "accept at the mind door failed; retrying");
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                continue;
+            }
+        };
         let peer = stream
             .peer_cred()
             .ok()
@@ -459,6 +492,7 @@ async fn serve_door(listener: tokio::net::UnixListener, handler: Arc<dyn Service
             Some(p) if crate::mind_door::is_mind(p.uid) => {
                 let handler = handler.clone();
                 tokio::spawn(async move {
+                    let _slot = slot;
                     let (reader, writer) = stream.into_split();
                     handle_connection(BufReader::new(reader), writer, &handler, peer).await;
                 });

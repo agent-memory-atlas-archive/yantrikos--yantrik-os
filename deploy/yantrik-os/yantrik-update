@@ -588,8 +588,10 @@ cmd_migrate_ownership() {
   # config.yaml stays the user's until it is split (#397 step c): Settings, OAuth refresh and
   # onboarding write it as the user.
   [ -e "$PREFIX/config.yaml" ] && chown "$owner" "$PREFIX/config.yaml"
-  install_sudo_rule && remove_blanket_sudo
+  local rc=0
+  install_sudo_rule && remove_blanket_sudo || rc=$?
   reconcile_minds
+  return "$rc"
 }
 
 install_sudo_rule() {
