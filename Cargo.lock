@@ -10501,6 +10501,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "tracing",
+ "yantrik-ipc-contracts",
  "yantrik-ml",
  "yantrikdb",
 ]
