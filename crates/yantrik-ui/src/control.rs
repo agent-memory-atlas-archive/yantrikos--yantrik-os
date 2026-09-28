@@ -639,9 +639,17 @@ pub fn publish(
                 })
                 .collect();
 
+            // Whether the one reading this is an agent the desktop can tell apart from the person:
+            // the mind account, by the kernel's word (`describe` carries no token). The person's
+            // chat and what they asked each agent are theirs, not every mind's — a mind reading
+            // `describe` used to be handed the last six messages of the person's chat with another
+            // mind, and every agent's first prompt, commands and files (yantrik-mind-72's review).
+            // An agent reads its own session with `read_agent`.
+            let agent_reading = yantrik_app_runtime::control::agent_is_calling();
+
             // What was said. Roles and text, newest last, so a caller that asked a question can
-            // read the answer instead of photographing it.
-            let conversation: Vec<serde_json::Value> = {
+            // read the answer instead of photographing it. The person's, so not an agent's.
+            let conversation: Vec<serde_json::Value> = if agent_reading { Vec::new() } else {
                 use slint::Model;
                 let messages = ui.get_messages();
                 let total = messages.row_count();
@@ -680,6 +688,9 @@ pub fn publish(
             View::new(summary)
                 .with("screen", screen_name(screen))
                 .with("conversation", serde_json::Value::Array(conversation))
+                // True when the conversation above was withheld: the chat is the person's, and an
+                // agent reads its own session with `read_agent`.
+                .with("conversation_private", agent_reading)
                 .with("screen_id", screen)
                 // Which build is answering. The report this came from asked a machine three
                 // times what it was and got three answers, one of them months old; an agent
@@ -703,7 +714,10 @@ pub fn publish(
                 .with("problems", crate::wire::problem_report::for_describe())
                 // Every agent, one conversation with one mind: its state, what it has run and
                 // what it is waiting on, with the counts the Agents screen's tabs show.
-                .with("agents", crate::agents::for_describe())
+                .with(
+                    "agents",
+                    if agent_reading { crate::agents::for_describe_by_an_agent() } else { crate::agents::for_describe() },
+                )
                 // The agent catalog: the roles `hand_off` can start, what each may touch, and
                 // whether a mind it runs on is attached now. See `agents::catalog`.
                 .with("catalog", crate::agents::catalog::for_describe())
