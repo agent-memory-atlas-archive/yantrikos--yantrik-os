@@ -357,15 +357,7 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                 super::pins::publish(&ui, &catalogue.get());
 
                 // Update window list for switcher (with contextual subtitles)
-                let win_items: Vec<WindowItem> = wins
-                    .iter()
-                    .map(|w| WindowItem {
-                        title: w.title.clone().into(),
-                        app_id: w.app_id.clone().into(),
-                        icon_char: w.icon_char.clone().into(),
-                        subtitle: w.subtitle.clone().into(),
-                    })
-                    .collect();
+                let win_items = window_items(ui.get_current_screen(), &wins);
                 if let Some(model) = crate::models::changed(ui.get_window_list(), win_items) {
         ui.set_window_list(model);
     }
@@ -530,15 +522,7 @@ fn handle_keybind(ui: &App, action: &str) {
             if ui.get_current_screen() == 1 {
                 // Refresh window list immediately before showing
                 let wins = windows::list_windows();
-                let items: Vec<WindowItem> = wins
-                    .iter()
-                    .map(|w| WindowItem {
-                        title: w.title.clone().into(),
-                        app_id: w.app_id.clone().into(),
-                        icon_char: w.icon_char.clone().into(),
-                        subtitle: w.subtitle.clone().into(),
-                    })
-                    .collect();
+                let items = window_items(ui.get_current_screen(), &wins);
                 ui.set_window_list(ModelRc::new(VecModel::from(items)));
                 ui.set_window_switcher_open(!ui.get_window_switcher_open());
             }
@@ -550,6 +534,27 @@ fn handle_keybind(ui: &App, action: &str) {
 }
 
 /// Format a byte count as a human-readable string (KB / MB / GB).
+/// The taskbar's entries: the screen the shell is on, when it is one a person reads as a window
+/// (`control::screen_entry` — Files, Settings, Agents …), and then every window. The screen goes
+/// first because it is the shell's, and the shell is the window everything else opened over.
+fn window_items(screen: i32, wins: &[windows::WindowEntry]) -> Vec<WindowItem> {
+    let shell = crate::control::screen_entry(screen).map(|(name, title)| WindowItem {
+        title: title.into(),
+        app_id: format!("{}{name}", crate::control::SCREEN_ENTRY_PREFIX).into(),
+        icon_char: windows::icon_for_app(name).into(),
+        subtitle: "".into(),
+    });
+    shell
+        .into_iter()
+        .chain(wins.iter().map(|w| WindowItem {
+            title: w.title.clone().into(),
+            app_id: w.app_id.clone().into(),
+            icon_char: w.icon_char.clone().into(),
+            subtitle: w.subtitle.clone().into(),
+        }))
+        .collect()
+}
+
 fn format_bytes(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = 1024 * 1024;
@@ -797,6 +802,31 @@ fn may_auto_lock(screen: i32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn weather() -> windows::WindowEntry {
+        windows::WindowEntry {
+            title: "Weather".into(),
+            app_id: "weather".into(),
+            wayland_app_id: String::new(),
+            icon_char: windows::icon_for_app("weather").into(),
+            subtitle: String::new(),
+        }
+    }
+
+    /// Files is the shell's own screen, drawn as a window; it is on the taskbar while it is up,
+    /// first, and the desktop adds nothing.
+    #[test]
+    fn the_screen_the_shell_is_on_is_a_taskbar_entry() {
+        let items = window_items(8, &[weather()]);
+        let titles: Vec<String> = items.iter().map(|w| w.title.to_string()).collect();
+        assert_eq!(titles, ["Files", "Weather"]);
+        assert_eq!(items[0].app_id.as_str(), "shell:files");
+        assert_eq!(items[1].app_id.as_str(), "weather");
+
+        let on_desktop = window_items(1, &[weather()]);
+        assert_eq!(on_desktop.len(), 1);
+        assert_eq!(on_desktop[0].title.as_str(), "Weather");
+    }
 
     #[test]
     fn the_auto_lock_locks_from_any_screen_the_person_could_leave_open() {
