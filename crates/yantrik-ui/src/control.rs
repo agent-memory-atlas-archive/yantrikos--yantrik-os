@@ -1161,12 +1161,20 @@ pub fn publish(
             // fail in silence in four different ways before a single byte reaches a harness.
             //
             // Deferred, because the answer streams: this returns when the question has been
-            // asked, not when it has been answered. The answer arrives in `describe` under
-            // `conversation`, where a caller can watch `streaming` go false.
-            Action::new("send_message", "Ask the desktop something, as if typed into the Lens")
+            // asked, not when it has been answered. The answer arrives in the person's `describe`
+            // under `conversation`, where they can watch `streaming` go false.
+            //
+            // The person's, and no agent's (#476): the chat is theirs, and a mind that could put
+            // words in it could have the answering mind repeat it back. An agent talks to another
+            // agent with `new_agent` / `send_to_agent`. Said plainly, because a harness that
+            // reaches this with a token has to know why, not see a question go unanswered.
+            Action::new("send_message", "Ask the desktop something, as if typed into the Lens (the person's; an agent talks to another agent with new_agent or send_to_agent)")
                 .arg(Param::text("text").describe("What to say"))
                 .defers(),
             move |args| {
+                if yantrik_app_runtime::control::agent_is_calling() {
+                    return Err("send_message puts words in the person's chat, and an agent is calling: refused, nothing was sent. An agent talks to another agent with new_agent or send_to_agent.".into());
+                }
                 let ui = ask_ui()?;
                 let text = args["text"].as_str().unwrap_or_default().trim().to_string();
                 if text.is_empty() {
