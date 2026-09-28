@@ -117,6 +117,10 @@ fn open_runs() -> Option<Arc<yantrik_harness::run_store::RunStore>> {
 }
 
 pub fn wire(ui: &App, ctx: &AppContext) {
+    // The memory grants read once as the shell starts, so their baseline is set now rather than
+    // at the first question from the memory server, which may be hours away: until then a grant
+    // written behind the shell's back would have been taken as the person's (#448 review).
+    let _ = crate::memory_grants::load();
     let host = Host::new(vec![Arc::new(Companion { bridge: ctx.bridge.clone() })]);
     // Every turn a mind takes is kept as a run beside the agents' sessions (#25); without the
     // file the host still works, it just keeps no runs.
@@ -485,7 +489,8 @@ fn serve_socket(host: Host, ui: slint::Weak<App>) {
                 }
                 tracing::info!(address = %address, "Harness socket listening (attach to answer)");
                 let server = yantrik_ipc_transport::server::RpcServer::new(&address);
-                let served = runtime.block_on(server.serve(Arc::new(HarnessService { host: host.clone() })));
+                let service = HarnessService::new(host.clone());
+                let served = runtime.block_on(server.serve(Arc::new(service)));
                 match served {
                     // Taken between the look and the bind: say so and look again.
                     Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => continue,
@@ -523,6 +528,17 @@ fn held_notice(path: &std::path::Path) -> Option<String> {
 
 struct HarnessService {
     host: Host,
+    /// Whether the mind door was served when this socket was bound, decided then and kept. Asked
+    /// afresh on every attach it could be switched off by any of the person's processes, which
+    /// own the door directory: a chmod, an attach as `mind` that replaces the real Mind, and a
+    /// chmod back (#448 review).
+    door_served: bool,
+}
+
+impl HarnessService {
+    fn new(host: Host) -> HarnessService {
+        HarnessService { host, door_served: yantrik_ipc_transport::mind_door::serving_dir().is_some() }
+    }
 }
 
 impl yantrik_ipc_transport::server::ServiceHandler for HarnessService {
@@ -554,7 +570,7 @@ impl yantrik_ipc_transport::server::ServiceHandler for HarnessService {
             method,
             &params,
             uid,
-            yantrik_ipc_transport::mind_door::serving_dir().is_some(),
+            self.door_served,
             yantrik_ipc_transport::mind_door::is_mind,
         );
         let answer = match refused {
@@ -593,7 +609,7 @@ fn first_party_claim_refused(
         return None;
     }
     Some(format!(
-        "`{}` is the id of the person's own Yantrik Mind, which attaches from its own account; attach          under a different id",
+        "`{}` is the id of the person's own Yantrik Mind, which attaches from its own account; attach under a different id",
         crate::memory_grants::FIRST_PARTY_MIND
     ))
 }
@@ -683,7 +699,7 @@ mod tests {
     #[test]
     fn the_harness_socket_keeps_the_account_the_kernel_named_at_attach() {
         use yantrik_ipc_transport::server::ServiceHandler;
-        let service = HarnessService { host: Host::new(vec![]) };
+        let service = HarnessService { host: Host::new(vec![]), door_served: false };
         // A test process serves no door, so the first-party id goes through here, as it does on
         // an install the account migration has not reached.
         let params = serde_json::json!({ "id": "mind", "name": "Yantrik Mind", "conversations": true });
@@ -695,6 +711,22 @@ mod tests {
             service.host.memory_credential(&agent, yantrik_ipc_transport::reach::token_digest).unwrap().unwrap();
         let held = service.host.memory_credential_holder(&credential).unwrap();
         assert_eq!((held.pid, held.uid), (Some(std::process::id()), Some(me)));
+    }
+
+    /// Where the door was served when the socket was bound, a harness of the person's cannot
+    /// attach as the first-party Mind, and nothing it does to the door directory afterwards
+    /// changes that: the answer was decided at bind and kept.
+    #[test]
+    fn the_door_decided_at_bind_keeps_the_first_party_name_for_the_mind_account() {
+        use yantrik_ipc_transport::server::ServiceHandler;
+        let service = HarnessService { host: Host::new(vec![]), door_served: true };
+        let params = serde_json::json!({ "id": "mind", "name": "Yantrik Mind", "conversations": true });
+        let me = unsafe { libc::getuid() };
+        let peer = yantrik_ipc_transport::PeerCred { pid: std::process::id() as i32, uid: me, gid: me };
+        let refused = service.handle_from(protocol::ATTACH, params, Some(peer)).unwrap_err();
+        assert!(refused.message.contains("person's own Yantrik Mind"), "{}", refused.message);
+        assert!(!refused.message.contains("  "), "one sentence, no stray spaces: {}", refused.message);
+        assert!(service.host.list().iter().all(|e| e.id != "mind"), "nothing attached as mind");
     }
 
     /// pi's manifest, plus what — if anything — systemd says about its unit. The manifest
