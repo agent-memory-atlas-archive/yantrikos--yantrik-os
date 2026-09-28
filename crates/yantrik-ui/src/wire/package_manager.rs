@@ -453,6 +453,7 @@ fn run_pkg_action(
     let args_owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
     let (tx, rx) = mpsc::channel::<Result<String, String>>();
 
+    let pkg_name_for_error = pkg_name.clone();
     std::thread::spawn(move || {
         if args_owned.is_empty() {
             let _ = tx.send(Err("No command".to_string()));
@@ -469,8 +470,18 @@ fn run_pkg_action(
             Ok(output) => {
                 let stderr = String::from_utf8_lossy(&output.stderr).to_string();
                 let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                let msg = if stderr.contains("Permission denied") || stderr.contains("not permitted") {
-                    "Requires root privileges. Configure sudo/doas for the yantrik user.".to_string()
+                // The helper is the only way this account runs apt without a password (#397), and a
+                // machine that has not updated since may not have it, or its sudo rule, yet.
+                let msg = if stderr.contains("a password is required") {
+                    "This machine does not yet let the desktop manage packages without a password.                      Install the latest Yantrik update, which sets that up, then try again."
+                        .to_string()
+                } else if stderr.contains(crate::wire::apt::PKG_HELPER) && stderr.contains("not found") {
+                    "The package helper is not installed yet. Install the latest Yantrik update,                      which puts it in place, then try again."
+                        .to_string()
+                } else if stderr.contains("is not a package name from the repositories") {
+                    format!("`{}` is not a package this machine installs by name.", pkg_name_for_error)
+                } else if stderr.contains("Permission denied") || stderr.contains("not permitted") {
+                    "Requires root privileges, and this machine did not grant them.".to_string()
                 } else {
                     format!("{} {}", stdout.trim(), stderr.trim())
                 };
