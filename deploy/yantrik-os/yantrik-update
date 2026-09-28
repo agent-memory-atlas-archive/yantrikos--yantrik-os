@@ -1811,6 +1811,7 @@ MIND_FILES="
 .local/share/yantrik-mind/console.token:console.token
 .local/share/yantrik-mind/devices.json:devices.json
 .local/share/yantrik-mind/yantrik-memory.token:yantrik-memory.token
+.local/share/yantrik-mind/web-pairing.code:web-pairing.code
 .config/yantrik-mind.env:.config/yantrik-mind.env
 .config/yantrik-mind/mcp.json:.config/yantrik-mind/mcp.json
 "
