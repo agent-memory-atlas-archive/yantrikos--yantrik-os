@@ -234,6 +234,7 @@ IMAGE_COMMANDS = {
     "nano": "EDITOR, exported by yantrik-session",
     "htop": "the process view beside the System Monitor app",
     "swaybg": "the wallpaper, and the label Mind View shows while it is empty",
+    "flatpak": "the Package Manager's Flathub apps, installed per-user (#399)",
 }
 
 

@@ -47,6 +47,13 @@
 
 set -uo pipefail
 
+# As root, nothing is looked up relative to where the caller stood. `sudo` keeps the working
+# directory, and Python puts it first on its import path: a `json.py` beside the person, then
+# `sudo yantrik-update check`, ran their code as root through the password-free rule. Every
+# interpreter below is also started isolated (`python3 -I`: no working directory, no PYTHON*
+# variables, no user site).
+[ "$(id -u)" = 0 ] && cd /
+
 # ── Where things live ───────────────────────────────────────────────────────────────────
 PREFIX="${YANTRIK_PREFIX:-/opt/yantrik}"
 BIN_DIR="$PREFIX/bin"
@@ -202,7 +209,7 @@ has_porcelain() {
 # Prints KEY=value lines, `status=` first, and exits 0 ok / 11 not published / 12 unreachable.
 channel_probe() {
   YANTRIK_UPDATE_HOST="$HOST" YANTRIK_UPDATE_SCHEME="$SCHEME" \
-  python3 - "$1" <<'PY'
+  python3 -I - "$1" <<'PY'
 import sys, os, json, urllib.request
 channel = sys.argv[1]
 host = os.environ.get("YANTRIK_UPDATE_HOST", "releases.yantrikos.com")
@@ -1408,7 +1415,9 @@ and this is running as $(id -un). Run: sudo yantrik-update set-channel $new"
 # iputils-ping. A package the image's own lists all install. xdg-desktop-portal-gtk has no
 # command: it is the file picker behind every Save and Upload the browser offers (#33), and a
 # machine installed before the image gained it could not save a page or attach a file.
-REQUIRED_PACKAGES="iproute2 iputils-ping grim curl python3 nano htop swaybg xdg-desktop-portal-gtk"
+# flatpak: the Package Manager installs Flathub apps with it, per-user and without root (#399);
+# a machine installed before the image carried it could search Flathub for nothing.
+REQUIRED_PACKAGES="iproute2 iputils-ping grim curl python3 nano htop swaybg xdg-desktop-portal-gtk flatpak"
 
 # Is this package installed, per dpkg? Prints dpkg's own status word, or nothing.
 pkg_installed() {
@@ -2116,11 +2125,11 @@ cmd_selftest() {
   printf '#!/bin/sh\ncase "$1" in iproute2|curl|python3|grim) echo installed ;; esac\n' > "$old"
   chmod +x "$old"
   out="$(missing_packages "$old")"
-  if [ "$out" = "iputils-ping nano htop swaybg xdg-desktop-portal-gtk" ]; then
+  if [ "$out" = "iputils-ping nano htop swaybg xdg-desktop-portal-gtk flatpak" ]; then
     printf '  %sok%s   a 520-style machine is named package by package\n' "$c_grn" "$c_off"
   else
     printf '  %sFAIL%s a 520-style machine: wanted %s, got %s\n' \
-      "$c_red" "$c_off" "iputils-ping nano htop swaybg xdg-desktop-portal-gtk" "${out:-nothing}"
+      "$c_red" "$c_off" "iputils-ping nano htop swaybg xdg-desktop-portal-gtk flatpak" "${out:-nothing}"
     fails=$((fails + 1))
   fi
 

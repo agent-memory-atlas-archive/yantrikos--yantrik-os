@@ -127,9 +127,10 @@ say "Packages"
 # nano, htop: the person's editor (yantrik-session exports EDITOR=nano) and process viewer;
 # the image shipped neither (#210). iproute2, iputils-ping: `ip`, `ss` and `ping`, named by
 # the mind's network tools — installed here as well so all three provisioning paths lay
-# down the same base system rather than drifting from each other (#210).
+# down the same base system rather than drifting from each other (#210). flatpak: the Package
+# Manager installs Flathub apps with it, per-user and without root (#399).
 virt-customize -a "$IMAGE" \
-  --install labwc,seatd,mesa-utils,foot,chromium,pipewire-pulse,wireplumber,pulseaudio-utils,python3-websocket,qemu-guest-agent,curl,ca-certificates,fontconfig,grim,wlrctl,wlr-randr,swaybg,mpv,nano,htop,iproute2,iputils-ping \
+  --install labwc,seatd,mesa-utils,foot,chromium,pipewire-pulse,wireplumber,pulseaudio-utils,python3-websocket,qemu-guest-agent,curl,ca-certificates,fontconfig,grim,wlrctl,wlr-randr,swaybg,mpv,nano,htop,iproute2,iputils-ping,flatpak \
 
 echo "   desktop, browser, audio, agent surface deps"
 
