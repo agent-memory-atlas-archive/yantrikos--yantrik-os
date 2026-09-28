@@ -720,6 +720,7 @@ from it. Change it with: yantrik-update set-channel nightly" ;;
     reconcile_helpers || true
     reconcile_sysctl || true
     reconcile_registries || true
+    reconcile_podman_socket || true
     return 0
   fi
 
@@ -1693,6 +1694,15 @@ registries_file_ok() {
   ! grep -vqE '^[[:space:]]*(#.*)?$|^unqualified-search-registries[[:space:]]*=[[:space:]]*\["docker\.io"\][[:space:]]*$' "$1"
 }
 
+# podman's API socket off on a machine that got podman from reconcile_packages, as the image has
+# it: the Container Manager drives the podman command, and nothing on this desktop listens.
+reconcile_podman_socket() {
+  [ "$(id -u)" = 0 ] || return 0
+  command -v podman >/dev/null 2>&1 || return 0
+  systemctl disable --now podman.socket >/dev/null 2>&1 || true
+  systemctl --global disable podman.socket >/dev/null 2>&1 || true
+}
+
 reconcile_registries() {
   local dir="$PREFIX/share/containers" dest_dir="/etc/containers/registries.conf.d" f dest
   [ -d "$dir" ] || return 0
@@ -1729,6 +1739,7 @@ cmd_reconcile() {
   reconcile_helpers
   reconcile_sysctl
   reconcile_registries
+  reconcile_podman_socket
   audit_unowned /etc/polkit-1/rules.d '*.rules' polkit
   audit_unowned /etc/sysctl.d '*.conf' sysctl
   audit_unowned /etc/containers/registries.conf.d '*.conf' containers

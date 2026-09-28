@@ -20,14 +20,14 @@ if [ -z "${BASH_COMPLETION_VERSINFO:-}" ] && ! shopt -oq posix \
 fi
 
 # ── Prompt ──
-# user@host, the directory, and inside a git repository the branch, with * for unstaged and +
-# for staged changes. __git_ps1 comes with git; bash-completion usually loads it already. A repo
-# too large for the dirty check to be quick turns it off for itself with
-# `git config bash.showDirtyState false`.
+# user@host, the directory, and inside a git repository its branch. Only the branch: showing
+# changed files means running `git diff` at every prompt, and a repository's own config
+# (core.fsmonitor, clean filters) can make that run a program, so a downloaded or unpacked repo
+# would run code the moment the person cd'd into it. The branch is read without any of that.
+# __git_ps1 comes with git; bash-completion usually loads it already.
 if ! command -v __git_ps1 >/dev/null 2>&1 && [ -r /usr/lib/git-core/git-sh-prompt ]; then
   . /usr/lib/git-core/git-sh-prompt
 fi
-GIT_PS1_SHOWDIRTYSTATE=1
 __yantrik_git() {
   command -v __git_ps1 >/dev/null 2>&1 && __git_ps1 ' (%s)'
 }
