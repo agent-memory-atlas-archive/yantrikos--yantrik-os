@@ -820,6 +820,8 @@ export component App inherits Window {
     in property <bool> pkg-is-applying: false;
     in property <float> pkg-apply-progress: 0.0;
     in property <string> pkg-error-text: "";
+    in property <string> pkg-detail-id: "";
+    in property <string> pkg-detail-source: "";
     in property <string> pkg-detail-name: "";
     in property <string> pkg-detail-version: "";
     in property <string> pkg-detail-description: "";
@@ -2142,6 +2144,8 @@ export component App inherits Window {
                 is-applying: root.pkg-is-applying;
                 apply-progress: root.pkg-apply-progress;
                 error-text: root.pkg-error-text;
+                detail-id: root.pkg-detail-id;
+                detail-source: root.pkg-detail-source;
                 detail-name: root.pkg-detail-name;
                 detail-version: root.pkg-detail-version;
                 detail-description: root.pkg-detail-description;

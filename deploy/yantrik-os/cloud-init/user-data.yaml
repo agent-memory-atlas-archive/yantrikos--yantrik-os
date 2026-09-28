@@ -146,6 +146,11 @@ packages:
   - uidmap
   - passt
   - fuse-overlayfs
+  # Flatpak, so the Package Manager can install apps from Flathub — VS Code, Spotify, Discord,
+  # Steam — that Debian's archive does not carry (#399). Installed per-user by the desktop's own
+  # account, so it needs no root and no sudo rule; the Flathub remote is added the first time
+  # the Package Manager needs it.
+  - flatpak
 
 write_files:
   - path: /etc/yantrik/install.env

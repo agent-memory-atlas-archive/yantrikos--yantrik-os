@@ -129,6 +129,9 @@ pub struct CallerFacts {
     pub agent: Option<bool>,
     /// The attached mind this caller's ancestry belongs to, if any.
     pub attached_mind: Option<String>,
+    /// Whether the kernel says the caller is the mind account (#411): a caller that came in
+    /// through the mind door. A mind by what it is, before anything it says or any /proc walk.
+    pub mind_account: bool,
 }
 
 /// Sort a caller into the person or a mind.
@@ -140,6 +143,10 @@ pub struct CallerFacts {
 /// - A process descended from an attached mind (Hermes, pi through `yos-mcp`).
 /// - Anything else — `yos` typed in the Terminal, labwc's Ctrl+Alt+T — is the person.
 pub fn classify(facts: &CallerFacts, own_pid: u32) -> Requester {
+    // First: the kernel's word on the account outranks everything, a missing pid included.
+    if facts.mind_account {
+        return Requester::Mind(facts.attached_mind.clone().unwrap_or_else(|| "a mind".to_string()));
+    }
     let Some(pid) = facts.pid else { return Requester::Person };
     match facts.agent {
         Some(true) => return Requester::Mind("an agent".to_string()),
@@ -168,7 +175,8 @@ pub fn requester_now() -> Requester {
         }
         _ => None,
     };
-    classify(&CallerFacts { pid, agent, attached_mind }, std::process::id())
+    let mind_account = caller.as_ref().is_some_and(|c| yantrik_ipc_transport::mind_door::is_mind(c.uid));
+    classify(&CallerFacts { pid, agent, attached_mind, mind_account }, std::process::id())
 }
 
 /// Where one launch goes, decided while the call that asked for it is still on this thread.
@@ -591,7 +599,16 @@ mod tests {
     const SHELL: u32 = 4242;
 
     fn facts(pid: Option<u32>, agent: Option<bool>, mind: Option<&str>) -> CallerFacts {
-        CallerFacts { pid, agent, attached_mind: mind.map(str::to_string) }
+        CallerFacts { pid, agent, attached_mind: mind.map(str::to_string), mind_account: false }
+    }
+
+    #[test]
+    fn a_caller_the_kernel_says_is_the_mind_account_is_a_mind_whatever_else_is_true() {
+        let own = 4242;
+        let door = CallerFacts { pid: Some(777), agent: None, attached_mind: None, mind_account: true };
+        assert_eq!(classify(&door, own), Requester::Mind("a mind".to_string()), "no token, no ancestry: still a mind");
+        let named = CallerFacts { attached_mind: Some("Pi".to_string()), ..door };
+        assert_eq!(classify(&named, own), Requester::Mind("Pi".to_string()));
     }
 
     #[test]

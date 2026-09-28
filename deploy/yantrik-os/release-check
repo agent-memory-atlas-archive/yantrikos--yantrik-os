@@ -239,6 +239,7 @@ IMAGE_COMMANDS = {
     "newuidmap": "rootless podman's user mapping (uidmap)",
     "pasta": "rootless podman's network (passt)",
     "fuse-overlayfs": "rootless podman's storage where the kernel's overlay cannot be used",
+    "flatpak": "the Package Manager's Flathub apps, installed per-user (#399)",
 }
 
 

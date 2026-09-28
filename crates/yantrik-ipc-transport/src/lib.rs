@@ -10,6 +10,7 @@ pub mod protocol;
 pub mod server;
 pub mod client;
 pub mod gate;
+pub mod mind_door;
 pub mod owner;
 pub mod peer_identity;
 // An agent's reach: what a role from the agent catalog may touch (design/desk-and-mind, section 5).
