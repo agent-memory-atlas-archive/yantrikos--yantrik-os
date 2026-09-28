@@ -588,7 +588,10 @@ cmd_migrate_ownership() {
   # config.yaml stays the user's until it is split (#397 step c): Settings, OAuth refresh and
   # onboarding write it as the user.
   [ -e "$PREFIX/config.yaml" ] && chown "$owner" "$PREFIX/config.yaml"
-  install_sudo_rule && remove_blanket_sudo
+  local rc=0
+  install_sudo_rule && remove_blanket_sudo || rc=$?
+  reconcile_minds
+  return "$rc"
 }
 
 install_sudo_rule() {
@@ -718,6 +721,7 @@ from it. Change it with: yantrik-update set-channel nightly" ;;
     reconcile_polkit || true
     reconcile_helpers || true
     reconcile_sysctl || true
+    reconcile_minds || true
     return 0
   fi
 
@@ -1627,6 +1631,37 @@ reconcile_sysctl() {
   done
 }
 
+# The mind account and its door (#411). Minds run as `yantrik-mind` (group `yantrik-minds`), not
+# as the person: they cannot open the person's runtime directory, files, compositor or processes.
+# They reach the desktop at /run/yantrik-minds, made at every boot by the tmpfiles entry below:
+# the person's (the desktop's services bind there), the minds' group may only enter it (2750,
+# setgid so the sockets are the group's), nobody else sees in. The services serve that door only
+# to the mind account's uid (crates/yantrik-ipc-transport/src/mind_door.rs). Written by this
+# updater's own code, not from a file in the bundle.
+reconcile_minds() {
+  [ "$(id -u)" = 0 ] || return 0
+  tree_is_roots || return 0
+  local owner conf want
+  owner="$(desktop_owner)"
+  case "$owner" in
+    ''|root|*[!a-z0-9_-]*) warn "cannot tell whose desktop this is; the mind door is not set up"; return 0 ;;
+  esac
+  getent group yantrik-minds >/dev/null 2>&1 || groupadd --system yantrik-minds     || { warn "could not create the group yantrik-minds; the mind door is not set up"; return 0; }
+  if ! getent passwd yantrik-mind >/dev/null 2>&1; then
+    useradd --system --gid yantrik-minds --home-dir /var/lib/yantrik-mind --no-create-home       --shell /usr/sbin/nologin --comment "Yantrik minds" yantrik-mind       || { warn "could not create the account yantrik-mind; the mind door is not set up"; return 0; }
+    info "created the mind account yantrik-mind"
+  fi
+  install -d -o yantrik-mind -g yantrik-minds -m 0750 /var/lib/yantrik-mind
+  conf=/etc/tmpfiles.d/yantrik-minds.conf
+  want="# Yantrik OS (#411): the mind door, where minds (yantrik-mind) reach the desktop of $owner.
+d /run/yantrik-minds 2750 $owner yantrik-minds -"
+  if [ "$(cat "$conf" 2>/dev/null)" != "$want" ]; then
+    printf '%s
+' "$want" > "$conf" && chmod 0644 "$conf" && info "mind door in place: /run/yantrik-minds for $owner"
+  fi
+  systemd-tmpfiles --create "$conf" >/dev/null 2>&1 || warn "could not make /run/yantrik-minds now; it is made at the next boot"
+}
+
 cmd_reconcile() {
   migrate_if_needed
   elevate
@@ -1638,6 +1673,7 @@ cmd_reconcile() {
   reconcile_polkit
   reconcile_helpers
   reconcile_sysctl
+  reconcile_minds
   audit_unowned /etc/polkit-1/rules.d '*.rules' polkit
   audit_unowned /etc/sysctl.d '*.conf' sysctl
 }
