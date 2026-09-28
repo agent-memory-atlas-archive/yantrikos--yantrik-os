@@ -12,6 +12,8 @@ import { Taskbar } from "components/taskbar.slint";
 import { StatusBar } from "components/status_bar.slint";
 import { BootScreen, BootStage } from "boot.slint";
 import { OnboardingScreen } from "onboarding.slint";
+import { InstallerScreen, InstallerDisk, KeyboardChoice } from "installer.slint";
+export { InstallerDisk, KeyboardChoice }
 import { DesktopScreen } from "desktop.slint";
 import { BondScreen, BondData } from "bond.slint";
 import { PersonalityScreen, OpinionData, SharedRefData } from "personality.slint";
@@ -1023,20 +1025,32 @@ export component App inherits Window {
     callback onboarding-set-profile(/* interests */ string, /* home_location */ string,
                                      /* notif_pref */ string);
 
-    // Installer mode (disk install from live ISO)
+    // Installer mode (disk install from live ISO): screen 2 is the installer (installer.slint)
+    // instead of the onboarding.
     in property <bool> onboard-installer-mode: false;
+    // An installed machine's first boot, set up by the installer: the onboarding opens on its
+    // optional-setup welcome instead of asking for a name again.
+    in property <bool> onboard-after-install: false;
     in-out property <int> onboard-install-progress: 0;
     in-out property <string> onboard-install-status: "";
-    in property <string> onboard-disk-1-name: "";
-    in property <string> onboard-disk-1-size: "";
-    in property <string> onboard-disk-1-model: "";
-    in property <string> onboard-disk-2-name: "";
-    in property <string> onboard-disk-2-size: "";
-    in property <string> onboard-disk-2-model: "";
-    in property <string> onboard-disk-3-name: "";
-    in property <string> onboard-disk-3-size: "";
-    in property <string> onboard-disk-3-model: "";
+    in property <[InstallerDisk]> onboard-disks: [];
+    in property <bool> onboard-disks-scanned: false;
     in-out property <string> onboard-selected-disk: "";
+    in property <[KeyboardChoice]> onboard-keyboards: [];
+    in-out property <string> onboard-keyboard: "us";
+    in-out property <string> onboard-timezone: "";
+    in-out property <bool> onboard-username-touched: false;
+    in-out property <bool> onboard-hostname-touched: false;
+    callback onboard-keyboard-chosen(string);
+    // The installer's rules (installer_rules.rs), asked by its screens. Each check answers ""
+    // when the value is acceptable.
+    pure callback installer-derive-username(string) -> string;
+    pure callback installer-hostname-for(string) -> string;
+    pure callback installer-check-full-name(string) -> string;
+    pure callback installer-check-username(string) -> string;
+    pure callback installer-check-hostname(string) -> string;
+    pure callback installer-check-password(string, string) -> string;
+    pure callback installer-check-timezone(string) -> string;
 
     // The onboarding form, mirrored up to the window so the control surface can read and fill
     // it. `OnboardingScreen` lives inside a conditional element, so Rust cannot reach into it;
@@ -1055,7 +1069,8 @@ export component App inherits Window {
 
     callback onboard-install-to-disk(/* username */ string, /* password */ string,
                                      /* full_name */ string, /* hostname */ string,
-                                     /* companion_name */ string, /* target_disk */ string);
+                                     /* keyboard */ string, /* timezone */ string,
+                                     /* target_disk */ string);
     callback onboard-install-reboot();
 
     // AI onboarding setup (V59)
@@ -1217,11 +1232,11 @@ export component App inherits Window {
         }
 
         // Onboarding (first boot only)
-        if current-screen == 2 : OnboardingScreen {
+        if current-screen == 2 && !root.onboard-installer-mode : OnboardingScreen {
             width: 100%; height: 100%;
             ambient-interval-ms: root.ambient-interval-ms;
             companion-name: root.settings-companion-name;
-            installer-mode: root.onboard-installer-mode;
+            after-install: root.onboard-after-install;
             // AI hardware scan properties
             ai-hw-cpu-ok: root.onboard-ai-hw-cpu-ok;
             ai-hw-ram-ok: root.onboard-ai-hw-ram-ok;
@@ -1256,32 +1271,10 @@ export component App inherits Window {
             ai-api-key-submitted(provider, key) => { root.onboard-ai-api-key-submitted(provider, key); }
             ai-test-connection => { root.onboard-ai-test-connection(); }
             ai-skip-setup => { root.onboard-ai-skip-setup(); }
-            disk-1-name: root.onboard-disk-1-name;
-            disk-1-size: root.onboard-disk-1-size;
-            disk-1-model: root.onboard-disk-1-model;
-            disk-2-name: root.onboard-disk-2-name;
-            disk-2-size: root.onboard-disk-2-size;
-            disk-2-model: root.onboard-disk-2-model;
-            disk-3-name: root.onboard-disk-3-name;
-            disk-3-size: root.onboard-disk-3-size;
-            disk-3-model: root.onboard-disk-3-model;
-            selected-disk <=> root.onboard-selected-disk;
-            install-to-disk(username, password, full-name, hostname, comp-name, target-disk) => {
-                root.onboard-install-to-disk(username, password, full-name, hostname, comp-name, target-disk);
-            }
-            install-progress <=> root.onboard-install-progress;
-            install-status <=> root.onboard-install-status;
             phase <=> root.onboard-phase;
             input-user-name <=> root.onboard-input-full-name;
             input-companion-name <=> root.onboard-input-companion;
             input-home-location <=> root.onboard-input-location;
-            input-username <=> root.onboard-input-username;
-            input-password <=> root.onboard-input-password;
-            input-password-confirm <=> root.onboard-input-password-confirm;
-            input-hostname <=> root.onboard-input-hostname;
-            install-error <=> root.onboard-install-error;
-            installing <=> root.onboard-installing;
-            install-reboot => { root.onboard-install-reboot(); }
             ready => {
                 root.current-screen = 1;
                 root.navigate(1);
@@ -1292,6 +1285,47 @@ export component App inherits Window {
                 root.navigate(1);
                 root.onboarding-skip();
             }
+        }
+
+        // The installer (live ISO booted to install): four screens, then the install (#400).
+        if current-screen == 2 && root.onboard-installer-mode : InstallerScreen {
+            width: 100%; height: 100%;
+            step <=> root.onboard-phase;
+            keyboards: root.onboard-keyboards;
+            keyboard <=> root.onboard-keyboard;
+            keyboard-chosen(layout) => { root.onboard-keyboard-chosen(layout); }
+            // To the live desktop, and nothing written: this is a session on the stick, and
+            // the person came to try it, not to finish a setup.
+            try-first => {
+                root.current-screen = 1;
+                root.navigate(1);
+            }
+            full-name <=> root.onboard-input-full-name;
+            username <=> root.onboard-input-username;
+            password <=> root.onboard-input-password;
+            password-confirm <=> root.onboard-input-password-confirm;
+            hostname <=> root.onboard-input-hostname;
+            username-touched <=> root.onboard-username-touched;
+            hostname-touched <=> root.onboard-hostname-touched;
+            disks: root.onboard-disks;
+            disks-scanned: root.onboard-disks-scanned;
+            selected-disk <=> root.onboard-selected-disk;
+            timezone <=> root.onboard-timezone;
+            installing <=> root.onboard-installing;
+            install-progress <=> root.onboard-install-progress;
+            install-status <=> root.onboard-install-status;
+            install-error <=> root.onboard-install-error;
+            install-to-disk(username, password, full-name, hostname, keyboard, timezone, disk) => {
+                root.onboard-install-to-disk(username, password, full-name, hostname, keyboard, timezone, disk);
+            }
+            reboot => { root.onboard-install-reboot(); }
+            derive-username(name) => { return root.installer-derive-username(name); }
+            hostname-for(username) => { return root.installer-hostname-for(username); }
+            check-full-name(name) => { return root.installer-check-full-name(name); }
+            check-username(username) => { return root.installer-check-username(username); }
+            check-hostname(hostname) => { return root.installer-check-hostname(hostname); }
+            check-password(password, confirm) => { return root.installer-check-password(password, confirm); }
+            check-timezone(timezone) => { return root.installer-check-timezone(timezone); }
         }
 
         // Lock screen

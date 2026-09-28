@@ -1,5 +1,10 @@
 #[path="../../../crates/yantrik-ui/src/models.rs"]
 mod production_models;
+// The installer's rules, the production file: the installer probe validates its fields with it.
+#[path="../../../crates/yantrik-ui/src/installer_rules.rs"]
+#[allow(dead_code)]
+mod installer_rules;
+mod installer_tests;
 mod files_tests;
 mod settings_tests;
 mod agents_tests;
@@ -55,6 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.iter().any(|a| a == "verify-agents-route") { return route_tests::run(&window, output); }
     if args.iter().any(|a| a == "verify-monitor") { return monitor_tests::run(&window); }
     if args.iter().any(|a| a == "verify-weather") { return weather_tests::run(&window); }
+    if args.iter().any(|a| a == "verify-installer") { return installer_tests::run(&window, output); }
     if args.iter().any(|a| a == "verify-editor") {
         // #328: the production text editor drawing the very document from the crash report.
         // Slint's software renderer casts glyph coordinates to i16 without a guard; this used
