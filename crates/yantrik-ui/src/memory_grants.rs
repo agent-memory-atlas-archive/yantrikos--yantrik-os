@@ -311,6 +311,14 @@ pub fn save(store: &Store) -> Result<(), String> {
     KEEPER.lock().unwrap_or_else(|e| e.into_inner()).save_to(&path, store)
 }
 
+/// Whether a mind is handed a memory credential with its turns (#447): whether the person's
+/// grants give it anything, judged as [`validate`] judges it, the first-party defaults going only
+/// to the account that attached as the mind account. `store` is `None` when the grants file cannot
+/// be trusted, which hands nobody anything. `uid` is the one the kernel named at attach.
+pub fn carries_memory(store: Option<&Store>, harness: &str, uid: Option<u32>, is_mind: impl Fn(u32) -> bool) -> bool {
+    store.is_some_and(|store| store.grants_for(harness, uid.is_some_and(is_mind)).any())
+}
+
 /// The answer the memory server is given for a credential the desktop issued (#447): who it is,
 /// which mind, which attach, what it may do and for how long the answer holds. `mind` is the
 /// stable id that writes are stamped with.
@@ -421,6 +429,24 @@ mod tests {
         assert_eq!(v["valid_for_ms"], VALID_FOR_MS);
         let keys: Vec<&String> = v.as_object().unwrap().keys().collect();
         assert_eq!(keys.len(), 6, "nothing more: {keys:?}");
+    }
+
+    #[test]
+    fn a_credential_is_carried_only_by_a_mind_the_grants_give_something() {
+        let is_mind = |uid: u32| uid == 990;
+        let store = Store::default();
+        // The first-party Mind's defaults, only from the mind account.
+        assert!(carries_memory(Some(&store), FIRST_PARTY_MIND, Some(990), is_mind));
+        assert!(!carries_memory(Some(&store), FIRST_PARTY_MIND, Some(1000), is_mind), "the name alone earns nothing");
+        assert!(!carries_memory(Some(&store), FIRST_PARTY_MIND, None, is_mind), "nor does an account nobody named");
+        // A third party with no entry has nothing until the person gives it something.
+        assert!(!carries_memory(Some(&store), "pi", Some(1000), is_mind));
+        let mut chosen = Store::default();
+        chosen.minds.insert("pi".into(), Grants { remember: true, ..Grants::default() });
+        assert!(carries_memory(Some(&chosen), "pi", Some(1000), is_mind));
+        // A grants file that cannot be trusted hands nobody anything, the first party included.
+        assert!(!carries_memory(None, FIRST_PARTY_MIND, Some(990), is_mind));
+        assert!(!carries_memory(None, "pi", Some(1000), is_mind));
     }
 
     #[test]
@@ -604,7 +630,7 @@ mod tests {
             assert_eq!(answered["grants"], json!(["remember"]));
             assert_eq!(answered["person_uid"], person());
             let attach = answered["attach"].as_str().unwrap();
-            assert!(attach.starts_with("pi:") && attach.ends_with("@s1"), "{attach}");
+            assert!(attach.starts_with("pi:") && attach.contains("@s1-"), "{attach}");
             // A third party the person never enabled holds a credential that grants nothing.
             assert_eq!(ask(caller(MIND_UID), &digest, Some(&host), Some(Store::default())), Ok(Value::Null));
         }

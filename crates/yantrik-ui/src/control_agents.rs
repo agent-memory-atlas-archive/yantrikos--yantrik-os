@@ -1047,6 +1047,12 @@ mod tests {
         AgentId(s.to_string())
     }
 
+    /// A call on a session from this process, which stands in for the harness that attached it:
+    /// a session answers only the process that attached it and the ones it started.
+    fn as_harness(host: &Host, method: &str, params: &Value) -> Result<Value, String> {
+        host.handle_from(method, params, Some(std::process::id()), None)
+    }
+
     /// Nothing that shows or keeps arguments — `describe shell`, a card, an audit line — is handed a
     /// token by these actions: none takes one, and none takes the caller's own agent either. The
     /// one `agent` argument some of them take is the agent acted ON.
@@ -1085,7 +1091,7 @@ mod tests {
     fn handed_out(host: &Host, session: &str) -> std::collections::HashMap<String, Value> {
         let mut out = std::collections::HashMap::new();
         for _ in 0..16 {
-            let turn = host.handle(protocol::POLL, &json!({ "session": session })).unwrap();
+            let turn = as_harness(&host, protocol::POLL, &json!({ "session": session })).unwrap();
             let Some(conversation) = turn["conversation"].as_str() else { break };
             out.insert(conversation.to_string(), turn.clone());
         }
@@ -1115,13 +1121,13 @@ mod tests {
         let handed = hand_off(&host, &Caller::NoAgent, &shipped(), "Reviewer", "review the change in ~/src/app", "diff --git a/x b/x").unwrap();
         assert_eq!((handed.mind.as_str(), handed.agent.harness()), ("deepseek", "deepseek"), "the Reviewer runs on deepseek first");
 
-        let first = host.handle(protocol::POLL, &json!({ "session": deepseek })).unwrap();
+        let first = as_harness(&host, protocol::POLL, &json!({ "session": deepseek })).unwrap();
         let text = first["text"].as_str().unwrap();
         for says in ["You are the Reviewer", "Find what is wrong with a change", "The task:\nreview the change in ~/src/app", "Read this first:\ndiff --git a/x b/x"] {
             assert!(text.contains(says), "{says:?} missing:\n{text}");
         }
         let token = first["agent_token"].as_str().unwrap().to_string();
-        assert!(host.handle(protocol::POLL, &json!({ "session": pi })).unwrap()["turn_id"].is_null(), "nothing went to pi");
+        assert!(as_harness(&host, protocol::POLL, &json!({ "session": pi })).unwrap()["turn_id"].is_null(), "nothing went to pi");
 
         let (title, role) = agents::store().read(|s| s.agent(&handed.agent).map(|a| (a.meta.title.clone(), a.meta.role.clone()))).unwrap();
         assert_eq!(title, "review the change in ~/src/app", "its row is named for the task, not the brief");
@@ -1246,10 +1252,10 @@ mod tests {
         let harness = {
             let (host, session) = (host.clone(), session.clone());
             std::thread::spawn(move || {
-                let turn = host.handle(protocol::POLL, &json!({ "session": session })).unwrap();
+                let turn = as_harness(&host, protocol::POLL, &json!({ "session": session })).unwrap();
                 let id = turn["turn_id"].clone();
-                host.handle(protocol::CHUNK, &json!({ "session": session, "turn_id": id, "delta": "Verdict — ship on Friday." })).unwrap();
-                host.handle(protocol::COMPLETE, &json!({ "session": session, "turn_id": id })).unwrap();
+                as_harness(&host, protocol::CHUNK, &json!({ "session": session, "turn_id": id, "delta": "Verdict — ship on Friday." })).unwrap();
+                as_harness(&host, protocol::COMPLETE, &json!({ "session": session, "turn_id": id })).unwrap();
             })
         };
         let answered = wait_for_answer(&handed.agent, Duration::from_secs(10));
@@ -1263,8 +1269,8 @@ mod tests {
         // The Chair has two turns: a second is sent, a third is refused.
         assert!(settled(&handed.agent));
         send_to_agent(&host, &Caller::NoAgent, &handed.agent, "and C says never").unwrap();
-        let turn = host.handle(protocol::POLL, &json!({ "session": session })).unwrap();
-        host.handle(protocol::COMPLETE, &json!({ "session": session, "turn_id": turn["turn_id"] })).unwrap();
+        let turn = as_harness(&host, protocol::POLL, &json!({ "session": session })).unwrap();
+        as_harness(&host, protocol::COMPLETE, &json!({ "session": session, "turn_id": turn["turn_id"] })).unwrap();
         assert!(settled(&handed.agent));
         let err = send_to_agent(&host, &Caller::NoAgent, &handed.agent, "one more").unwrap_err();
         assert!(err.contains("is the Chair, whose budget is 2 turns, and it has had them all"), "{err}");
@@ -1339,9 +1345,9 @@ mod tests {
             .as_str()
             .unwrap()
             .to_string();
-        let poll = || host.handle(protocol::POLL, &json!({ "session": session })).unwrap();
+        let poll = || as_harness(&host, protocol::POLL, &json!({ "session": session })).unwrap();
         let finish = |handed: &Value| {
-            host.handle(protocol::COMPLETE, &json!({ "session": session, "turn_id": handed["turn_id"] })).unwrap();
+            as_harness(&host, protocol::COMPLETE, &json!({ "session": session, "turn_id": handed["turn_id"] })).unwrap();
         };
 
         // The parent: an agent of its own, holding a token, with a note waiting for its next turn
@@ -1456,10 +1462,10 @@ mod tests {
 
     /// Finish an agent's open turn the way its harness would: what it said, and done.
     fn answer_as_harness(host: &Host, session: &str, said: &str) {
-        let turn = host.handle(protocol::POLL, &json!({ "session": session })).unwrap();
+        let turn = as_harness(&host, protocol::POLL, &json!({ "session": session })).unwrap();
         let id = turn["turn_id"].clone();
-        host.handle(protocol::CHUNK, &json!({ "session": session, "turn_id": id, "delta": said })).unwrap();
-        host.handle(protocol::COMPLETE, &json!({ "session": session, "turn_id": id })).unwrap();
+        as_harness(&host, protocol::CHUNK, &json!({ "session": session, "turn_id": id, "delta": said })).unwrap();
+        as_harness(&host, protocol::COMPLETE, &json!({ "session": session, "turn_id": id })).unwrap();
     }
 
     fn answered_poll(host: &Host, recipe: &str, agent: &AgentId) -> AgentPoll {

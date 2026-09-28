@@ -24,13 +24,20 @@
 //! ```text
 //! attach  {id, name, conversations?}    → {session}
 //! loop:
-//!   poll  {session}                     → {turn_id, text, context, conversation, agent_token} | {}
+//!   poll  {session}                     → {turn_id, text, context, conversation, agent_token,
+//!                                          memory_credential?} | {}
 //!                                         (+ cancelled: [turn_id], ended: [conversation])
 //!   …if no turn_id: wait POLL_INTERVAL_MS and poll again
 //!   chunk {session, turn_id, delta}     → {}          … as many as you like
 //!   event {session, turn_id, event}     → {}          … optional: what the agent is doing
 //!   complete {session, turn_id}         → {}
 //! ```
+//!
+//! The session is opaque (`s<n>-<random>` today; parse nothing out of it) and answers only whoever
+//! attached it: over a socket where the kernel names the caller, every call on it must come from
+//! the same account, and from the process that attached or one it started. A harness that polls
+//! from a worker is fine; one that hands its session to an unrelated process is refused, and told
+//! to attach again.
 //!
 //! # Conversations
 //!
@@ -169,7 +176,7 @@ pub struct Attach {
 }
 
 /// One conversation a re-attaching harness still holds. See [`Attach::resume`].
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Resume {
     /// `main`, or an id the desktop issued (`c-7f3a91`).
     pub conversation: String,
@@ -185,7 +192,7 @@ pub struct Resume {
 }
 
 /// One turn handed to a harness.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Assignment {
     pub turn_id: u64,
     pub text: String,
@@ -211,6 +218,53 @@ pub struct Assignment {
     /// the model and never written to a log.
     #[serde(default)]
     pub agent_token: String,
+    /// The agent's credential for the person's memory (#447): `mem-` and 256 random bits, the same
+    /// for every turn while the agent lives, present only when the person has granted this mind
+    /// some use of their memory. What the harness presents to the memory server, which asks the
+    /// desktop what it may do; like the token, never shown to the model and never logged.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub memory_credential: String,
+    /// Where to present `memory_credential` (#447): the person's memory server, as
+    /// `unix:/run/yantrik-mind/<uid>/memory.sock` (HTTP path `/mcp`), sent as
+    /// `Authorization: Bearer <credential>`. Only beside a credential, and absent while the
+    /// desktop knows of no server to dial. Not a secret, but never shown to the model either.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub memory_url: String,
+}
+
+/// What stands in for a secret when a struct holding one is printed: whether there is one, never
+/// what it is. A `{:?}` in a log line or a failed assertion is where a token leaks from.
+fn redacted(secret: &str) -> &'static str {
+    if secret.is_empty() {
+        ""
+    } else {
+        "<redacted>"
+    }
+}
+
+impl std::fmt::Debug for Resume {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Resume")
+            .field("conversation", &self.conversation)
+            .field("agent_token", &redacted(&self.agent_token))
+            .field("turn_id", &self.turn_id)
+            .field("prompt", &self.prompt)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for Assignment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Assignment")
+            .field("turn_id", &self.turn_id)
+            .field("text", &self.text)
+            .field("context", &self.context)
+            .field("conversation", &self.conversation)
+            .field("agent_token", &redacted(&self.agent_token))
+            .field("memory_credential", &redacted(&self.memory_credential))
+            .field("memory_url", &self.memory_url)
+            .finish()
+    }
 }
 
 #[cfg(test)]
@@ -257,6 +311,36 @@ mod tests {
         assert_eq!(a.context, None);
         // An assignment from an older desktop has no conversation; it is the one conversation.
         assert_eq!(a.conversation, "");
+    }
+
+    #[test]
+    fn printing_a_turn_or_a_resume_never_prints_its_secrets() {
+        let token = "0123456789abcdef0123456789abcdef";
+        let credential = format!("mem-{}", "a".repeat(64));
+        let turn = Assignment {
+            turn_id: 7,
+            text: "hello".into(),
+            context: None,
+            conversation: "main".into(),
+            agent_token: token.into(),
+            memory_credential: credential.clone(),
+            memory_url: "unix:/run/yantrik-mind/1000/memory.sock".into(),
+        };
+        let resume = Resume { conversation: "main".into(), agent_token: token.into(), turn_id: Some(7), prompt: "hi".into() };
+        for printed in [format!("{turn:?}"), format!("{resume:?}"), format!("{:#?}", Attach {
+            id: "pi".into(),
+            name: "Pi".into(),
+            detail: None,
+            tools: false,
+            memory: false,
+            conversations: true,
+            handover_context: false,
+            resume: vec![resume.clone()],
+        })] {
+            assert!(!printed.contains(token) && !printed.contains(&credential), "{printed}");
+            assert!(printed.contains("<redacted>"), "it says one is there: {printed}");
+        }
+        assert!(format!("{turn:?}").contains("hello"), "the rest is printed as it was");
     }
 
     #[test]

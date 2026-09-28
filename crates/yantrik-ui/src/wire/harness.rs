@@ -128,6 +128,30 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         Some(store) => host.with_runs(store),
         None => host,
     };
+    // A mind the person has granted some use of their memory carries its credential with every
+    // turn (#447); one with none carries nothing. Judged as `memory_validate` judges it: the
+    // person's grants, with the first-party defaults only for the account that attached as the
+    // mind account. A grants file that cannot be trusted hands nobody anything. The host asks
+    // this outside its own lock, when a harness takes a turn.
+    let host = host.with_memory(
+        |harness, uid| {
+            let store = crate::memory_grants::load();
+            crate::memory_grants::carries_memory(store.as_ref(), harness, uid, yantrik_ipc_transport::mind_door::is_mind)
+        },
+        yantrik_ipc_transport::reach::token_digest,
+    )
+    // Where the harness presents it: the person's Mind serves their memory on a socket of its
+    // own (#447), dialled only when it is there. Loopback TCP is a fallback per harness that
+    // is off until one needs it, so it is never offered here.
+    .with_memory_url(|| {
+        use std::os::unix::fs::MetadataExt;
+        let person = unsafe { libc::geteuid() };
+        let socket = format!("/run/yantrik-mind/{person}/memory.sock");
+        // Only a socket the mind account owns: one the person's own processes could have put
+        // there would collect every credential a harness presents to it.
+        let owner = std::fs::symlink_metadata(&socket).ok().map(|m| m.uid());
+        owner.is_some_and(yantrik_ipc_transport::mind_door::is_mind).then(|| format!("unix:{socket}"))
+    });
     let _ = HOST.set(host.clone());
 
     // The agent terminal's side of agents (design/agents-workspace-2026-09-23.md, decision 3):

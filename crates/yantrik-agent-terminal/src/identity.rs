@@ -309,7 +309,7 @@ mod tests {
         let session = attached["session"].as_str().unwrap().to_string();
         let agent = host.start_agent("pi").unwrap();
         let _answer = host.send_to(&agent, Turn::new("tidy the photos")).unwrap();
-        let handed = host.handle(protocol::POLL, &json!({ "session": session })).unwrap();
+        let handed = host.handle_from(protocol::POLL, &json!({ "session": session }), harness_pid, None).unwrap();
         (host, agent, handed["agent_token"].as_str().unwrap().to_string())
     }
 
