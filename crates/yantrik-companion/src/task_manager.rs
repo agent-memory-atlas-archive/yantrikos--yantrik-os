@@ -90,7 +90,7 @@ impl TaskManager {
         let task_id = format!("t{:04x}", self.next_id);
         self.next_id += 1;
 
-        let output_path = format!("/tmp/yantrik-task-{}.out", task_id);
+        let output_path = Self::output_path(&task_id)?;
         let log_file = std::fs::File::create(&output_path)
             .map_err(|e| format!("Failed to create output file: {e}"))?;
         let stderr_file = log_file
@@ -272,8 +272,23 @@ impl TaskManager {
 
     /// Read the last N lines from a task's output file.
     pub fn read_output(task_id: &str, tail_lines: usize) -> String {
-        let path = format!("/tmp/yantrik-task-{}.out", task_id);
-        Self::read_output_from_path(&path, tail_lines)
+        match Self::output_path(task_id) {
+            Ok(path) => Self::read_output_from_path(&path, tail_lines),
+            Err(_) => String::new(),
+        }
+    }
+
+    /// Where a task's stdout and stderr go, and where `read_output` looks for them.
+    ///
+    /// Task ids are a counter (`t0001`, `t0002`, …) that restarts with the process, so under
+    /// `/tmp` every name was guessable in advance: another account could plant a symlink there
+    /// and have `File::create` truncate a file of their choosing, or leave output of its own for
+    /// the agent to read back as the result of a command it ran. The private scratch dir is ours
+    /// alone. The id is also refused if it is not a plain name, since `read_output` takes it from
+    /// the model's tool call. A string, because it is stored in the tasks table as one.
+    fn output_path(task_id: &str) -> Result<String, String> {
+        yantrik_ml::private_dir::scratch_file_string(&format!("yantrik-task-{task_id}.out"))
+            .map_err(|e| format!("No private directory for task output: {e}"))
     }
 
     fn read_output_from_path(path: &str, tail_lines: usize) -> String {

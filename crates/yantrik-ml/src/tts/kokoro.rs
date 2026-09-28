@@ -406,7 +406,10 @@ fn split_sentences(text: &str) -> Vec<String> {
 
 /// Play f32 audio samples through system audio.
 fn play_samples(samples: &[f32], sample_rate: u32) -> Result<()> {
-    let tmp = "/tmp/yantrik-tts.wav";
+    // Private scratch, not a fixed name in /tmp that another account could plant a link at (and
+    // have `File::create` truncate) or read — this is the person's speech.
+    let tmp = crate::private_dir::scratch_file_string("yantrik-tts.wav")?;
+    let tmp = tmp.as_str();
     write_wav(tmp, samples, sample_rate)?;
 
     for (player, args) in &[

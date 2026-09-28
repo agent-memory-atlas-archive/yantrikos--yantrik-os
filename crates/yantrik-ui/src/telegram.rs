@@ -316,7 +316,19 @@ fn handle_voice_message(
     let _ = yantrik_companion::telegram::send_typing(config);
 
     // 1. Download the voice file
-    let ogg_path = format!("/tmp/tg_voice_{}.ogg", update.message_id);
+    // Private scratch: the person's voice, and a message id is no secret, so a name in /tmp could
+    // be read, or planted as a link for the download to write through.
+    let ogg_path = match scratch_path(&format!("tg_voice_{}.ogg", update.message_id)) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "No private directory for the voice file");
+            let _ = yantrik_companion::telegram::send_message(
+                config, "(couldn't download your voice message)",
+            );
+            let _ = yantrik_companion::telegram::clear_reaction(config, update.message_id);
+            return;
+        }
+    };
     let file_path = match yantrik_companion::telegram::get_file(config, &voice.file_id) {
         Ok(p) => p,
         Err(e) => {
@@ -481,10 +493,13 @@ fn handle_voice_message(
     let _ = yantrik_companion::telegram::send_recording_voice(config);
 
     let (rate, pitch) = tts_params_for_bond(bridge);
-    let reply_ogg = format!("/tmp/tg_reply_{}.ogg", update.message_id);
+    let reply = scratch_path(&format!("tg_reply_{}.ogg", update.message_id)).and_then(|reply_ogg| {
+        yantrik_companion::audio_convert::text_to_ogg(&response, &reply_ogg, rate, pitch)?;
+        Ok(reply_ogg)
+    });
 
-    match yantrik_companion::audio_convert::text_to_ogg(&response, &reply_ogg, rate, pitch) {
-        Ok(()) => {
+    match reply {
+        Ok(reply_ogg) => {
             if let Err(e) = yantrik_companion::telegram::send_voice(config, &reply_ogg) {
                 tracing::warn!(error = %e, "Failed to send voice reply");
             } else {
@@ -516,6 +531,12 @@ fn handle_voice_message(
             });
         }
     });
+}
+
+/// A voice file's place in our private scratch dir, as the `&str` the telegram and audio helpers
+/// take.
+fn scratch_path(name: &str) -> Result<String, String> {
+    yantrik_ml::private_dir::scratch_file_string(name).map_err(|e| e.to_string())
 }
 
 /// Lazily load Whisper STT engine (loaded once on first voice message).

@@ -10545,6 +10545,7 @@ dependencies = [
  "yantrik-companion-core",
  "yantrik-ipc-contracts",
  "yantrik-ipc-transport",
+ "yantrik-ml",
  "yantrikdb",
 ]
 
@@ -10793,6 +10794,7 @@ dependencies = [
  "hf-hub 0.5.0",
  "hostname",
  "keyring",
+ "libc",
  "llama-cpp-2",
  "ndarray 0.16.1",
  "ort",

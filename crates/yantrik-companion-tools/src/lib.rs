@@ -63,6 +63,15 @@ pub mod workspace;
 
 use yantrik_companion_core::tools::ToolRegistry;
 
+/// A file in our private scratch dir (`yantrik_ml::private_dir`), as the string that curl, dot,
+/// grim and base64 take on their command lines.
+///
+/// Why not `/tmp`: the payloads carry page text and whole screenshots, and a fixed name in a
+/// shared `/tmp` is one any other account can pre-plant as a symlink before we write to it.
+pub(crate) fn scratch_arg(name: &str) -> Result<String, String> {
+    yantrik_ml::private_dir::scratch_file_string(name).map_err(|e| format!("No private scratch directory: {e}"))
+}
+
 /// Register all pure tools into the given registry.
 pub fn register_all(reg: &mut ToolRegistry) {
     antivirus::register(reg);

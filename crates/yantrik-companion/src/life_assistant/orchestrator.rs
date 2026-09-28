@@ -1132,8 +1132,16 @@ Page text:
         }
     });
 
-    let payload_path = "/tmp/yantrik-extract-payload.json";
-    if let Err(e) = std::fs::write(payload_path, payload.to_string()) {
+    // curl reads the body from this file. It carries the page text, so it goes in our private
+    // scratch dir, not at a fixed name in /tmp that another account could read or pre-plant.
+    let payload_path = match yantrik_ml::private_dir::scratch_file("yantrik-extract-payload.json") {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("No private dir for LLM payload: {e}, falling back to heuristic");
+            return extract_from_text(page_text, fields, source, max);
+        }
+    };
+    if let Err(e) = std::fs::write(&payload_path, payload.to_string()) {
         tracing::warn!("Failed to write LLM payload: {e}, falling back to heuristic");
         return extract_from_text(page_text, fields, source, max);
     }
@@ -1144,7 +1152,7 @@ Page text:
             "-fsSL",
             "--max-time", "60",
             "-H", "Content-Type: application/json",
-            "-d", &format!("@{payload_path}"),
+            "-d", &format!("@{}", payload_path.display()),
             &url,
         ])
         .output()
@@ -1152,12 +1160,12 @@ Page text:
         Ok(o) => o,
         Err(e) => {
             tracing::warn!("LLM curl failed: {e}, falling back to heuristic");
-            let _ = std::fs::remove_file(payload_path);
+            let _ = std::fs::remove_file(&payload_path);
             return extract_from_text(page_text, fields, source, max);
         }
     };
 
-    let _ = std::fs::remove_file(payload_path);
+    let _ = std::fs::remove_file(&payload_path);
 
     if !output.status.success() {
         tracing::warn!("LLM request failed, falling back to heuristic");

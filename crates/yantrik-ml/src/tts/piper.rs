@@ -194,7 +194,9 @@ impl PiperTTS {
                 // aplay failed — synthesize to file instead
                 let raw = self.synthesize_raw(text)?;
                 if !raw.is_empty() {
-                    let tmp = "/tmp/yantrik-piper.wav";
+                    // Private scratch, not a fixed name in /tmp another account could pre-plant.
+                    let tmp = crate::private_dir::scratch_file_string("yantrik-piper.wav")?;
+                    let tmp = tmp.as_str();
                     write_wav_from_raw(tmp, &raw, self.sample_rate)?;
                     play_wav(tmp)?;
                     let _ = std::fs::remove_file(tmp);

@@ -91,11 +91,16 @@ impl ProactiveFeature for ScreenWatcher {
 /// Quick screen check — captures screenshot and gets a brief description.
 /// Returns None if capture or analysis fails (non-fatal).
 fn quick_screen_check() -> Option<String> {
-    // Capture screenshot
+    // Capture screenshot — into our private scratch dir, since it is the whole screen and a fixed
+    // name in /tmp is readable by, and can be pre-planted by, every other account.
+    let path = yantrik_ml::private_dir::scratch_file("yantrik-screen-check.png").ok()?;
     let output = std::process::Command::new("grim")
-        .args(["-t", "png", "/tmp/yantrik-screen-check.png"])
+        .args(["-t", "png"])
+        .arg(&path)
         .output()
         .ok()?;
+    // Nothing reads the capture yet (see below), so it is not left lying around.
+    let _ = std::fs::remove_file(&path);
 
     if !output.status.success() {
         return None;

@@ -1026,7 +1026,8 @@ impl Tool for BrowserScreenshotTool {
             None => return "Error: no screenshot data returned".to_string(),
         };
 
-        // Decode base64 and save to /tmp
+        // Decode base64 and save to our private scratch dir — a page screenshot can show anything
+        // the person had open, so it does not belong in a /tmp every account can read.
         let bytes = match base64_decode(b64_data) {
             Ok(b) => b,
             Err(e) => return format!("Error decoding screenshot: {e}"),
@@ -1036,11 +1037,15 @@ impl Tool for BrowserScreenshotTool {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let path = format!("/tmp/yantrik-screenshot-{ts}.png");
+        let path = match yantrik_ml::private_dir::scratch_file(&format!("yantrik-screenshot-{ts}.png")) {
+            Ok(p) => p,
+            Err(e) => return format!("Error saving screenshot: {e}"),
+        };
 
         match std::fs::write(&path, &bytes) {
             Ok(_) => format!(
-                "Screenshot saved: {path} ({} bytes)\nPage: {} — {}",
+                "Screenshot saved: {} ({} bytes)\nPage: {} — {}",
+                path.display(),
                 bytes.len(),
                 tab.title,
                 tab.url,
@@ -2009,8 +2014,10 @@ impl Tool for BrowserSeeTool {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let img_path = format!("/tmp/yantrik-see-{ts}.png");
-        if let Ok(bytes) = base64_decode(b64_data) {
+        if let (Ok(img_path), Ok(bytes)) = (
+            yantrik_ml::private_dir::scratch_file(&format!("yantrik-see-{ts}.png")),
+            base64_decode(b64_data),
+        ) {
             let _ = std::fs::write(&img_path, &bytes);
         }
 
@@ -2030,8 +2037,12 @@ impl Tool for BrowserSeeTool {
             "stream": false
         });
 
-        let payload_path = "/tmp/yantrik-see-payload.json";
-        if let Err(e) = std::fs::write(payload_path, payload.to_string()) {
+        // curl reads the body from this file, so it must be one nobody else can swap or read.
+        let payload_path = match yantrik_ml::private_dir::scratch_file("yantrik-see-payload.json") {
+            Ok(p) => p,
+            Err(e) => return format!("Error writing payload: {e}"),
+        };
+        if let Err(e) = std::fs::write(&payload_path, payload.to_string()) {
             return format!("Error writing payload: {e}");
         }
 
@@ -2041,19 +2052,19 @@ impl Tool for BrowserSeeTool {
                 "-fsSL",
                 "--max-time", "120",
                 "-H", "Content-Type: application/json",
-                "-d", &format!("@{payload_path}"),
+                "-d", &format!("@{}", payload_path.display()),
                 &url,
             ])
             .output()
         {
             Ok(o) => o,
             Err(e) => {
-                let _ = std::fs::remove_file(payload_path);
+                let _ = std::fs::remove_file(&payload_path);
                 return format!("Vision request failed: {e}");
             }
         };
 
-        let _ = std::fs::remove_file(payload_path);
+        let _ = std::fs::remove_file(&payload_path);
 
         if !output.status.success() {
             return format!("Vision model error: {}", String::from_utf8_lossy(&output.stderr));

@@ -2,7 +2,7 @@
 //!
 //! Uses LLM to generate DOT source, renders via `dot` command to PNG.
 
-use super::{Tool, ToolContext, ToolRegistry, PermissionLevel};
+use super::{Tool, ToolContext, ToolRegistry, PermissionLevel, scratch_arg as scratch};
 
 /// Register canvas tools.
 pub fn register(reg: &mut ToolRegistry, ollama_base: &str, model: &str) {
@@ -37,8 +37,8 @@ Rules:
         "stream": false
     });
 
-    let payload_path = "/tmp/yantrik-canvas-payload.json";
-    std::fs::write(payload_path, payload.to_string())
+    let payload_path = scratch("yantrik-canvas-payload.json")?;
+    std::fs::write(&payload_path, payload.to_string())
         .map_err(|e| format!("Failed to write payload: {e}"))?;
 
     let url = format!("{}/api/chat", ollama_base);
@@ -48,7 +48,7 @@ Rules:
         .output()
         .map_err(|e| format!("curl failed: {e}"))?;
 
-    let _ = std::fs::remove_file(payload_path);
+    let _ = std::fs::remove_file(&payload_path);
 
     if !output.status.success() {
         return Err(format!("LLM request failed: {}", String::from_utf8_lossy(&output.stderr)));
@@ -83,8 +83,8 @@ fn render_dot(dot_source: &str) -> Result<String, String> {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    let out_path = format!("/tmp/yantrik-diagram-{ts}.png");
-    let dot_path = format!("/tmp/yantrik-diagram-{ts}.dot");
+    let out_path = scratch(&format!("yantrik-diagram-{ts}.png"))?;
+    let dot_path = scratch(&format!("yantrik-diagram-{ts}.dot"))?;
 
     std::fs::write(&dot_path, dot_source)
         .map_err(|e| format!("Failed to write DOT file: {e}"))?;
@@ -223,8 +223,11 @@ impl Tool for EditDiagramTool {
             "stream": false
         });
 
-        let payload_path = "/tmp/yantrik-canvas-edit-payload.json";
-        if let Err(e) = std::fs::write(payload_path, payload.to_string()) {
+        let payload_path = match scratch("yantrik-canvas-edit-payload.json") {
+            Ok(p) => p,
+            Err(e) => return format!("Failed to write payload: {e}"),
+        };
+        if let Err(e) = std::fs::write(&payload_path, payload.to_string()) {
             return format!("Failed to write payload: {e}");
         }
 
@@ -234,10 +237,10 @@ impl Tool for EditDiagramTool {
             .args(["-fsSL", "--max-time", "60", "-H", "Content-Type: application/json", "-d", &format!("@{payload_path}"), &url])
             .output() {
             Ok(o) => o,
-            Err(e) => { let _ = std::fs::remove_file(payload_path); return format!("curl failed: {e}"); }
+            Err(e) => { let _ = std::fs::remove_file(&payload_path); return format!("curl failed: {e}"); }
         };
 
-        let _ = std::fs::remove_file(payload_path);
+        let _ = std::fs::remove_file(&payload_path);
 
         if !output.status.success() {
             return format!("LLM request failed: {}", String::from_utf8_lossy(&output.stderr));

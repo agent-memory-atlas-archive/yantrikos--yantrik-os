@@ -3,7 +3,7 @@
 //! Uses Ollama's native `/api/chat` endpoint with multimodal `images` field.
 //! Screenshots captured via `grim` (Wayland).
 
-use super::{Tool, ToolContext, ToolRegistry, PermissionLevel};
+use super::{Tool, ToolContext, ToolRegistry, PermissionLevel, scratch_arg as scratch};
 
 /// Register vision tools with the Ollama base URL (e.g. "http://192.168.4.35:11434").
 pub fn register(reg: &mut ToolRegistry, ollama_base: &str, model: &str) {
@@ -16,9 +16,9 @@ pub fn register(reg: &mut ToolRegistry, ollama_base: &str, model: &str) {
 
 /// Capture a screenshot via grim (Wayland) and return the file path.
 fn capture_screenshot() -> Result<String, String> {
-    let path = "/tmp/yantrik-vision-screenshot.png";
+    let path = scratch("yantrik-vision-screenshot.png")?;
     let output = std::process::Command::new("grim")
-        .args(["-t", "png", path])
+        .args(["-t", "png", &path])
         .output()
         .map_err(|e| format!("grim not available: {e}"))?;
 
@@ -26,7 +26,7 @@ fn capture_screenshot() -> Result<String, String> {
         return Err(format!("grim failed: {}", String::from_utf8_lossy(&output.stderr)));
     }
 
-    Ok(path.to_string())
+    Ok(path)
 }
 
 /// Base64-encode a file using the `base64` CLI tool (avoids Rust crate dep).
@@ -60,8 +60,8 @@ fn vision_request(ollama_base: &str, model: &str, prompt: &str, image_path: &str
     });
 
     // Write payload to temp file (base64 images can be huge)
-    let payload_path = "/tmp/yantrik-vision-payload.json";
-    std::fs::write(payload_path, payload.to_string())
+    let payload_path = scratch("yantrik-vision-payload.json")?;
+    std::fs::write(&payload_path, payload.to_string())
         .map_err(|e| format!("Failed to write payload: {e}"))?;
 
     let url = format!("{}/api/chat", ollama_base);
@@ -79,7 +79,7 @@ fn vision_request(ollama_base: &str, model: &str, prompt: &str, image_path: &str
         .map_err(|e| format!("curl failed: {e}"))?;
 
     // Clean up payload file
-    let _ = std::fs::remove_file(payload_path);
+    let _ = std::fs::remove_file(&payload_path);
 
     if !output.status.success() {
         return Err(format!("Ollama vision request failed: {}", String::from_utf8_lossy(&output.stderr)));
@@ -270,7 +270,10 @@ impl Tool for SmartRenameTool {
             return "Error: vision model returned empty filename".to_string();
         }
 
-        let parent = file_path.parent().unwrap_or(std::path::Path::new("/tmp"));
+        // A rename stays beside the file; there is no sensible elsewhere, least of all /tmp.
+        let Some(parent) = file_path.parent() else {
+            return format!("Error: cannot rename {}", file_path.display());
+        };
         let new_path = parent.join(format!("{new_name}.{ext}"));
 
         if new_path.exists() {
