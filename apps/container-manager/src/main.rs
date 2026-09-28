@@ -655,7 +655,7 @@ fn wire(app: &ContainerManagerApp, health: &Health) {
         let health = health.clone();
         app.on_ct_run(move |image| {
             let Some(ui) = weak.upgrade() else { return };
-            let _ = command(&ui, &health, &["run", "-d", image.as_str()]);
+            let _ = command(&ui, &health, &["run", "-d", "--", image.as_str()]);
         });
     }
     {
@@ -663,7 +663,7 @@ fn wire(app: &ContainerManagerApp, health: &Health) {
         let health = health.clone();
         app.on_ct_pull(move |image| {
             let Some(ui) = weak.upgrade() else { return };
-            let _ = command(&ui, &health, &["pull", image.as_str()]);
+            let _ = command(&ui, &health, &["pull", "--", image.as_str()]);
         });
     }
     {

@@ -11,6 +11,8 @@ use crate::wire::ai_onboarding::auth_type_for;
 use crate::wire::settings::{provider_preset, ProviderStore, ProviderStoreEntry};
 use crate::App;
 
+mod subids;
+
 /// Wire the installer callbacks.
 pub fn wire(ui: &App, _ctx: &AppContext) {
     // Detect installer mode
@@ -513,6 +515,10 @@ fn create_user(mount_dir: &str, state: &InstallerState) -> Result<(), String> {
             username,
         ],
     );
+
+    // Subordinate ids for rootless podman (#401). useradd normally gives the new account a range
+    // from the image's /etc/subuid, and the live user keeps the one the image gave it; checked.
+    subids::ensure(mount_dir, username);
 
     // Set password — use openssl to generate hash, then usermod to set it.
     // chpasswd inside chroot can fail silently with PAM issues.
