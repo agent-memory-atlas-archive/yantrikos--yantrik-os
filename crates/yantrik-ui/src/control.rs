@@ -1262,6 +1262,9 @@ pub fn publish(
                  what it may do, or null for one the desktop does not know",
             )
             .risk("safe")
+            // The answer is about a credential, not about the desktop, and it is asked before
+            // every memory call: the shell's whole state beside it was 35 KB the server discards.
+            .stateless()
             .arg(Param::text("memory_sha256").describe(
                 "The SHA-256 of what the mind presented, as lowercase hex: never the thing itself",
             )),

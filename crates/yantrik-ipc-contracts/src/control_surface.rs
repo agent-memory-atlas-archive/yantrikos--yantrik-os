@@ -261,6 +261,11 @@ pub struct Action {
     /// number for every action on the machine. `None` — the default — says nothing, and a caller
     /// keeps its own.
     pub expected_seconds: Option<u32>,
+    /// Whether the answer is about something other than this app, so the reply carries the result
+    /// alone: no state, no summary, no revision, and the app is not read again after it. For a
+    /// question asked often by another program (the memory server's `memory_validate`, #447),
+    /// where the app's whole state beside a one-line answer was 35 KB of nothing it wanted.
+    pub stateless: bool,
     /// The sentence about ONE call of this action, with that call's own arguments, when the app
     /// can say one (#137). Published as `explains: true` — the fact, never the sentence, which
     /// depends on arguments `describe` does not have; a client that saw the flag asks for it with
@@ -281,8 +286,17 @@ impl Action {
             // are not have to say so.
             deferred: false,
             expected_seconds: None,
+            stateless: false,
             explainer: None,
         }
+    }
+
+    /// Declare that this action answers a question about something other than this app: its
+    /// reply is the result alone, with no state beside it. See
+    /// [`Action::stateless`](Action#structfield.stateless).
+    pub fn stateless(mut self) -> Self {
+        self.stateless = true;
+        self
     }
 
     /// Declare how long a call to this usually takes to answer. See
@@ -398,6 +412,23 @@ pub fn describe_json(app_id: &str, view: &View, actions: &[Action]) -> serde_jso
 ///
 /// `never `ok`, never `done``: `accepted` says the handler ran, `settled` says whether the work
 /// finished. They are different questions and only the app can answer the second.
+/// The reply to an `app.act` of a [`stateless`](Action#structfield.stateless) action: the
+/// result, and nothing of the app's state.
+pub fn act_json_stateless(
+    app_id: &str,
+    action_id: &str,
+    settled: bool,
+    result: serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({
+        "app": app_id,
+        "action_id": action_id,
+        "accepted": true,
+        "settled": settled,
+        "result": result,
+    })
+}
+
 pub fn act_json(
     app_id: &str,
     action_id: &str,
