@@ -124,6 +124,18 @@ class TestWithin(unittest.TestCase):
                       reach.within(nothing, "shell", "show_agent", "safe", {}))
         support.quoted(self, REACH_RS, '"shell.record_unasked_action",')
 
+    def test_names_fold_and_trim_as_rust_does_them(self):
+        # Only A–Z fold: the Kelvin sign lowers to "k" in Python and must not name `kiosk`.
+        self.assertFalse(reach.same_ascii_case("Kiosk", "kiosk"))
+        self.assertTrue(reach.same_ascii_case("Notes", "notes"))
+        self.assertIsNotNone(reach.within(dict(planner(), surfaces=["Kiosk"]), "kiosk",
+                                          "read", "safe", {}))
+        # `str::trim` takes Unicode whitespace and not the separators U+001C–U+001F.
+        self.assertEqual(reach.trim(" 　notes\t"), "notes")
+        self.assertEqual(reach.trim("\x1fnotes"), "\x1fnotes")
+        self.assertIsNotNone(reach.within(planner(), "shell", "open_app", "standard",
+                                          {"name": "\x1fterminal"}))
+
     def test_a_grade_or_a_ceiling_off_the_ladder_never_widens_a_reach(self):
         self.assertIsNotNone(reach.within(coder(), "shell", "agent_run", "catastrophic", {}))
         typo = dict(coder(), ceiling="sensitve")
@@ -375,23 +387,54 @@ class TestTheDoor(support.MachineCase):
                                                       "agent_token": "live"})
             self.assertEqual(done["result"]["result"]["uid"], os.getuid())
 
-    def test_the_door_holds_a_bounded_number_of_connections(self):
+    def ping(self, client):
+        client.sendall(b'{"jsonrpc":"2.0","id":1,"method":"rpc.ping"}\n')
+        return client.recv(4096)
+
+    def connect(self, path, timeout=3):
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.settimeout(timeout)
+        client.connect(path)
+        self.addCleanup(client.close)
+        return client
+
+    def test_one_connection_past_the_bound_waits_for_a_slot(self):
         with mock.patch.object(mind_door, "is_mind", lambda uid: True), \
                 mock.patch.object(mind_door, "DOOR_CONNECTIONS", 1):
             _, server = self.serve()
-            held = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            held.settimeout(3)
-            held.connect(server.door)
-            held.sendall(b'{"jsonrpc":"2.0","id":1,"method":"rpc.ping"}\n')
-            self.assertIn(b"pong", held.recv(4096))
-            self.assertIsNone(self.call(server.door, "app.describe"), "one more is closed")
+            held = self.connect(server.door)
+            self.assertIn(b"pong", self.ping(held))
+            waiting = self.connect(server.door, timeout=0.6)
+            waiting.sendall(b'{"jsonrpc":"2.0","id":2,"method":"rpc.ping"}\n')
+            with self.assertRaises(socket.timeout, msg="not served while the one slot is held"):
+                waiting.recv(4096)
             held.close()
-            for _ in range(50):  # the held connection's thread gives its slot back
-                answer = self.call(server.door, "rpc.ping")
-                if answer is not None:
-                    break
-                threading.Event().wait(0.05)
-            self.assertEqual(answer["result"], "pong")
+            waiting.settimeout(3)
+            self.assertIn(b"pong", waiting.recv(4096), "and served once the slot is free")
+
+    def test_a_line_past_the_limit_is_answered_and_not_read(self):
+        with mock.patch.object(mind_door, "is_mind", lambda uid: True), \
+                mock.patch.object(wire, "DOOR_MAX_LINE", 64):
+            _, server = self.serve()
+            client = self.connect(server.door)
+            client.sendall(b'{"jsonrpc":"2.0","id":1,"method":"app.describe","params":{"x":"'
+                           + b"a" * 200 + b'"}}\n')
+            reply = wire.json.loads(client.recv(4096))
+            self.assertEqual(reply["error"]["code"], wire.RPC_PARSE_ERROR)
+            self.assertIn("request too large", reply["error"]["message"])
+            self.assertIn("Nothing was run", reply["error"]["message"])
+            self.assertEqual(client.recv(4096), b"", "and the connection is closed")
+            # The person's own socket has no such limit: this is the door's rule.
+            self.assertEqual(self.call(server.path, "app.describe", {"x": "a" * 200})["result"]
+                             ["app"], "notes")
+
+    def test_stopping_ends_the_mind_connections_still_open(self):
+        with mock.patch.object(mind_door, "is_mind", lambda uid: True):
+            s, server = self.serve()
+            held = self.connect(server.door)
+            self.assertIn(b"pong", self.ping(held))
+            s.stop()
+            self.assertEqual(held.recv(4096), b"", "the surface is gone, and so is the connection")
 
     def test_no_door_on_a_directory_that_is_not_exactly_as_made(self):
         os.chmod(self.door, 0o2770)

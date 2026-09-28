@@ -50,9 +50,26 @@ class Unanswered(Exception):
     """The shell could not be asked, or its answer was not one it gives. Never "no reach"."""
 
 
+# What Rust's `str::trim` takes off: Unicode `White_Space`, and nothing else. Python's `strip()`
+# also takes the separators U+001C–U+001F, so names are trimmed with this set instead.
+RUST_WHITESPACE = ("\t\n\x0b\x0c\r \x85\xa0        "
+                   "        　")
+_ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
+
+def trim(text):
+    """`str::trim`."""
+    return text.strip(RUST_WHITESPACE)
+
+
+def same_ascii_case(a, b):
+    """`eq_ignore_ascii_case`: only A–Z fold, so no other letter can lower into a name."""
+    return a.translate(_ASCII_LOWER) == b.translate(_ASCII_LOWER)
+
+
 def token_digest(token):
     """The SHA-256 of a token, as lowercase hex, trimmed as the dispatch trims it."""
-    return hashlib.sha256(token.strip().encode("utf-8")).hexdigest()
+    return hashlib.sha256(trim(token).encode("utf-8")).hexdigest()
 
 
 def _ask_shell(token, what):
@@ -71,9 +88,9 @@ def _ask_shell(token, what):
 
 
 def reach_in_reply(reply):
-    """The reach in the shell's answer to `reach_of`: `{"result": {"result": {"reach": ...}}}`
-    as the socket carries it, or `{"result": {"reach": ...}}` as the act's own result. None for a
-    token with no role; `Unanswered` for any other shape — never "no reach"."""
+    """The reach in the shell's answer to `reach_of`, as the socket carries it:
+    `{"result": {..., "result": {"reach": ...}}}`. None for a token with no role; `Unanswered`
+    for any other shape — never "no reach"."""
     result = _act_result(reply)
     if not isinstance(result, dict) or "reach" not in result:
         raise Unanswered("the shell's answer about this agent token's reach is not one it gives")
@@ -135,13 +152,13 @@ def standing_of(token, ask=None):
 def covers(surfaces, app_id, action):
     """Does one of `surfaces` cover `app_id.action`?"""
     for surface in surfaces:
-        surface = surface.strip()
+        surface = trim(surface)
         if "." not in surface:
-            if surface.lower() == app_id.lower():
+            if same_ascii_case(surface, app_id):
                 return True
             continue
         app, named = surface.split(".", 1)
-        if app.lower() != app_id.lower():
+        if not same_ascii_case(app, app_id):
             continue
         if named.endswith("*"):
             if action.startswith(named[:-1]):
@@ -153,18 +170,18 @@ def covers(surfaces, app_id, action):
 
 def names_app(surfaces, app):
     """Does one of `surfaces` name this app — as `app`, `app.action` or `app.prefix*`?"""
-    app = app.strip().lower()
-    return any(s.strip().split(".", 1)[0].lower() == app for s in surfaces)
+    app = trim(app)
+    return any(same_ascii_case(trim(s).split(".", 1)[0], app) for s in surfaces)
 
 
 def opening(app_id, action, args):
     """The app an act opens, when it is `shell.open_app` and its `name` says which one."""
-    if app_id.lower() != "shell" or action != "open_app" or not isinstance(args, dict):
+    if not same_ascii_case(app_id, "shell") or action != "open_app" or not isinstance(args, dict):
         return None
     name = args.get("name")
-    if not isinstance(name, str) or not name.strip():
+    if not isinstance(name, str) or not trim(name):
         return None
-    return name.strip()
+    return trim(name)
 
 
 def surfaces_text(surfaces):
@@ -232,7 +249,7 @@ def require_standing(app_id, action, token, peer, ask=None):
         return None
     if peer is None or not mind_door.is_mind(peer.uid):
         return None
-    token = (token or "").strip()
+    token = trim(token or "")
     if not token:
         raise wire.RpcError(wire.RPC_INVALID_PARAMS,
                             "MIND: a mind acts on the desktop only as an attached agent, with the "

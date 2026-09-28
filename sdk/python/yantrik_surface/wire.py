@@ -34,6 +34,7 @@ import stat
 import struct
 import sys
 import threading
+import time
 import traceback
 from collections import namedtuple
 
@@ -409,13 +410,12 @@ class Server:
             return
         try:
             claim(path)
-            server = _UnixServer(path, _DoorConnection)
+            server = _DoorServer(path)
         except OSError as e:
             print("[yantrik] the mind door could not be opened at %s (%s); minds cannot reach "
                   "this surface" % (path, e), file=sys.stderr)
             return
         server.handler = self.handler
-        server.slots = threading.BoundedSemaphore(mind_door.DOOR_CONNECTIONS)
         try:
             # The minds' group writes it (the directory's setgid gave it the group); nobody else.
             os.chmod(path, 0o660)
@@ -472,6 +472,8 @@ class Server:
         self._inode = None
         self._unlink_links()
         if self._door_server is not None:
+            # The mind connections still open end with the surface, not after it.
+            self._door_server.close_all()
             self._door_server.shutdown()
             self._door_server.server_close()
             self._door_server = None
@@ -579,9 +581,26 @@ class _Connection(socketserver.StreamRequestHandler):
     def handle(self):
         self.serve(peer_cred(self.connection))
 
-    def serve(self, peer):
+    def serve(self, peer, max_line=None):
+        """Answer one request per line until the caller goes away. With `max_line`, a line longer
+        than that is answered as a parse error and the connection is closed: nothing past the
+        limit is buffered."""
         handler = getattr(self.server, "handler", None)
-        for raw in self.rfile:
+        while True:
+            try:
+                raw = self.rfile.readline(max_line + 1) if max_line else self.rfile.readline()
+            except OSError:  # the caller went away, or sat silent past the connection's timeout
+                return
+            if not raw:
+                return
+            if max_line and len(raw) > max_line and not raw.endswith(b"\n"):
+                with contextlib.suppress(OSError):
+                    self.wfile.write(encode(_error(
+                        None, RPC_PARSE_ERROR, "Parse error: request too large — at most %d bytes "
+                        "on one line here; this one was longer, so it was not read and the "
+                        "connection is closed. Nothing was run." % max_line)))
+                    self.wfile.flush()
+                return
             line = raw.decode("utf-8", errors="replace").strip()
             if not line:
                 continue
@@ -593,28 +612,81 @@ class _Connection(socketserver.StreamRequestHandler):
                 return
 
 
+# The longest request line a mind may send at the door, and how long a door connection may sit
+# silent before it is closed. A mind that has not yet shown it is an attached agent could
+# otherwise make the person's app buffer one endless line, or hold every slot open forever.
+DOOR_MAX_LINE = 4 * 1024 * 1024
+DOOR_IDLE = 120.0
+
+
+class _DoorServer(_UnixServer):
+    """The mind door's listener. The peer is checked on the accepting thread, before a thread is
+    started for it, and anyone but the mind account is closed unread. At most `DOOR_CONNECTIONS`
+    are served at once; one more waits to be accepted, as the transport's semaphore makes it wait
+    — a mind holding connections open uses up its own share and nothing of the person's."""
+
+    def __init__(self, path):
+        super().__init__(path, _DoorConnection)
+        self.slots = threading.BoundedSemaphore(mind_door.DOOR_CONNECTIONS)
+        self.held = set()
+        self.held_lock = threading.Lock()
+        self.stopping = False
+        self._refused = 0
+        self._said = None
+
+    def verify_request(self, request, client_address):
+        peer = peer_cred(request)
+        if peer is not None and mind_door.is_mind(peer.uid):
+            return True
+        # Said at most every ten seconds, with a count: a caller that knocks in a loop does not
+        # get to fill the person's log.
+        self._refused += 1
+        now = time.monotonic()
+        if self._said is None or now - self._said >= 10:
+            print("[yantrik] refused %d caller(s) at the mind door that are not the mind account "
+                  "(the last: uid %s)" % (self._refused, peer.uid if peer else "unknown"),
+                  file=sys.stderr)
+            self._refused, self._said = 0, now
+        return False
+
+    def process_request(self, request, client_address):
+        while not self.slots.acquire(timeout=0.5):
+            if self.stopping:
+                self.shutdown_request(request)
+                return
+        with self.held_lock:
+            self.held.add(request)
+        super().process_request(request, client_address)
+
+    def shutdown_request(self, request):
+        with self.held_lock:
+            mine = request in self.held
+            self.held.discard(request)
+        if mine:
+            self.slots.release()
+        super().shutdown_request(request)
+
+    def close_all(self):
+        """End every mind connection still open, and accept no more."""
+        self.stopping = True
+        with self.held_lock:
+            held = list(self.held)
+        for request in held:
+            with contextlib.suppress(OSError):
+                request.shutdown(socket.SHUT_RDWR)
+
+
 class _DoorConnection(_Connection):
-    """One caller at the mind door. Served only when the kernel says it is the mind account;
-    anyone else is closed unread. The directory already keeps everyone else out; this is what
-    makes the uid, not the path, the fact the surface is told. At most `DOOR_CONNECTIONS` at once:
-    one more is closed, where the transport waits to accept it — either way a mind holding
-    connections open uses up its own share and nothing of the person's."""
+    """One caller at the mind door, already checked on accept to be the mind account. Checked
+    again here, so the uid the surface is told is the one the kernel gave for this connection."""
+
+    timeout = DOOR_IDLE
 
     def handle(self):
         peer = peer_cred(self.connection)
         if peer is None or not mind_door.is_mind(peer.uid):
-            print("[yantrik] refused a caller at the mind door that is not the mind account "
-                  "(uid %s)" % (peer.uid if peer else "unknown"), file=sys.stderr)
             return
-        slots = self.server.slots
-        if not slots.acquire(blocking=False):
-            print("[yantrik] the mind door already holds %d connections; one more was closed"
-                  % mind_door.DOOR_CONNECTIONS, file=sys.stderr)
-            return
-        try:
-            self.serve(peer)
-        finally:
-            slots.release()
+        self.serve(peer, max_line=DOOR_MAX_LINE)
 
 
 def encode(reply):
