@@ -11,9 +11,18 @@
 //! Settings offers is a threshold, so the lock fires when the setting says it will. The first
 //! `resumed` after any `idled` is one `UserResumed`.
 //!
-//! The compositor may withhold `idled` while an app holds an idle inhibitor (a video playing
-//! fullscreen), as every Wayland screen locker does. There is deliberately no inhibitor a mind
-//! can take.
+//! The yos control surface offers no way to hold this off. That is not the same as nothing
+//! being able to: on labwc 0.8 any client on the person's Wayland socket can take an idle
+//! inhibitor (the compositor withholds `idled` while one exists, visible or not) or drive the
+//! virtual keyboard and pointer, and both keep the seat "occupied". Closing that means keeping
+//! minds off this socket (#411, #414); `get_input_idle_notification` (notifier v2, labwc 0.9)
+//! will ignore inhibitors.
+//!
+//! Whether the watch is running is public ([`watching`]): a Settings row promising a lock that
+//! cannot come is the bug this module fixes, so when the compositor gives no idle signal the
+//! desktop says so instead of promising.
+
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crossbeam_channel::Sender;
 use wayland_client::globals::{registry_queue_init, GlobalListContents};
@@ -53,6 +62,14 @@ impl Presence {
     }
 }
 
+static WATCHING: AtomicBool = AtomicBool::new(false);
+
+/// Whether the compositor is telling this process when the seat is left alone. False before the
+/// watch starts, when the compositor has no idle notifier, and after the connection ends.
+pub fn watching() -> bool {
+    WATCHING.load(Ordering::SeqCst)
+}
+
 struct State {
     tx: Sender<SystemEvent>,
     presence: Presence,
@@ -69,10 +86,14 @@ impl State {
 /// Watch the seat until the Wayland connection ends. Without a compositor that offers idle
 /// notifications, say so once: auto-lock cannot fire on this session.
 pub fn run_idle_monitor(tx: Sender<SystemEvent>) {
-    match watch(tx) {
-        Ok(()) => {}
-        Err(why) => tracing::warn!(%why, "No idle signal from the compositor; auto-lock cannot fire (#412)"),
-    }
+    let why = match watch(tx.clone()) {
+        Ok(()) => "the watch ended".to_string(),
+        Err(why) => why,
+    };
+    WATCHING.store(false, Ordering::SeqCst);
+    // Not left "away" forever by a watch that stopped mid-absence.
+    let _ = tx.send(SystemEvent::UserResumed);
+    tracing::warn!(%why, "No idle signal from the compositor; auto-lock cannot fire (#412)");
 }
 
 fn watch(tx: Sender<SystemEvent>) -> Result<(), String> {
@@ -89,8 +110,14 @@ fn watch(tx: Sender<SystemEvent>) -> Result<(), String> {
         .iter()
         .map(|&secs| notifier.get_idle_notification(secs * 1000, &seat, &qh, secs))
         .collect();
-    tracing::info!(thresholds = ?THRESHOLDS, "Watching the seat for the person (ext-idle-notify-v1)");
     let mut state = State { tx, presence: Presence::default() };
+    // The requests go out on the next flush; a roundtrip makes sure the compositor has them (and
+    // has not refused them) before this says it is watching.
+    queue
+        .roundtrip(&mut state)
+        .map_err(|e| format!("the compositor refused the idle notifications: {e}"))?;
+    WATCHING.store(true, Ordering::SeqCst);
+    tracing::info!(thresholds = ?THRESHOLDS, "Watching the seat for the person (ext-idle-notify-v1)");
     loop {
         queue
             .blocking_dispatch(&mut state)

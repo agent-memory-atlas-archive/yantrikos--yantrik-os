@@ -28,3 +28,16 @@ pub use event_bus::{
 };
 pub use entity_graph::{EntityGraph, ObjectKind, RelationKind, Relation, UniversalObject};
 pub use observer::{SystemObserver, SystemObserverConfig};
+
+/// Whether the compositor is telling the desktop when the person leaves the seat (#412). Without
+/// it the auto-lock cannot fire, and the desktop must say so rather than promise it.
+pub fn idle_watch_active() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        idle::watching()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}

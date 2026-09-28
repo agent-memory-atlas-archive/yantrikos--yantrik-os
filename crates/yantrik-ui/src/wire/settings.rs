@@ -306,6 +306,27 @@ fn settings_path() -> String {
     format!("{}/.config/yantrik/settings.yaml", home)
 }
 
+/// The auto-lock choices Settings cycles through, 0 meaning never. Each is a threshold the idle
+/// watch reports (`yantrik_os` idle, #412), so each locks on time.
+pub const AUTO_LOCK_CHOICES: &[i32] = &[30, 60, 120, 300, 600, 0];
+
+/// A persisted auto-lock value as one of the choices. The file is anybody's to edit: a negative
+/// value read as "never" while Settings said "30 seconds", and 7200 was shown but never reached.
+/// Anything not offered is the default, five minutes.
+pub fn auto_lock_choice(secs: i32) -> i32 {
+    if AUTO_LOCK_CHOICES.contains(&secs) {
+        secs
+    } else {
+        300
+    }
+}
+
+/// The choice after `current` in the Settings cycle, back to the first after "never".
+pub fn next_auto_lock(current: i32) -> i32 {
+    let at = AUTO_LOCK_CHOICES.iter().position(|&c| c == current);
+    at.map_or(AUTO_LOCK_CHOICES[0], |i| AUTO_LOCK_CHOICES[(i + 1) % AUTO_LOCK_CHOICES.len()])
+}
+
 /// Load persisted settings (or defaults if missing/corrupt).
 pub fn load() -> UserSettings {
     let path = settings_path();
@@ -557,14 +578,7 @@ pub fn wire(ui: &App, ctx: &AppContext) {
     ui.on_cycle_auto_lock(move || {
         let Some(ui) = ui_weak.upgrade() else { return };
         let current = ui.get_settings_auto_lock_secs();
-        let next = match current {
-            30 => 60,
-            60 => 120,
-            120 => 300,
-            300 => 600,
-            600 => 0,
-            _ => 30,
-        };
+        let next = next_auto_lock(current);
         ui.set_settings_auto_lock_secs(next);
         if let Ok(mut st) = s.lock() {
             st.auto_lock_secs = next;
@@ -1572,6 +1586,21 @@ fn format_param_count(size_bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_auto_lock_value_nobody_offered_is_the_default_and_every_offer_cycles() {
+        for offered in AUTO_LOCK_CHOICES {
+            assert_eq!(auto_lock_choice(*offered), *offered);
+        }
+        for edited in [-1, 1, 45, 7200, i32::MAX] {
+            assert_eq!(auto_lock_choice(edited), 300, "{edited} read from the file");
+        }
+        assert_eq!(
+            [30, 60, 120, 300, 600, 0].map(next_auto_lock),
+            [60, 120, 300, 600, 0, 30],
+            "30 s, 1, 2, 5, 10 min, never, and round"
+        );
+    }
     use std::path::{Path, PathBuf};
 
     /// A settings file of our own, in a directory of its own, so the preference store's
