@@ -10755,6 +10755,7 @@ name = "yantrik-lock"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "libc",
  "slint",
  "slint-build",
  "smithay-client-toolkit 0.20.0",

@@ -13,6 +13,7 @@ slint = { workspace = true }
 chrono = { workspace = true }
 smithay-client-toolkit = { version = "0.20", default-features = false, features = ["calloop", "xkbcommon"] }
 wayland-client = "0.31"
+libc = "0.2"
 # So build.rs can resolve the shared theme's include path via `links`.
 yantrik-design-tokens = { workspace = true }
 
