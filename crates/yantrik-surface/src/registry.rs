@@ -3,7 +3,7 @@
 use std::sync::Mutex;
 
 use serde_json::Value;
-use yantrik_ipc_contracts::control_surface::{act_json, describe_json, Action, View};
+use yantrik_ipc_contracts::control_surface::{act_json, act_json_stateless, describe_json, Action, View};
 use yantrik_ipc_transport::gate::{self, decide, Authority, LADDER};
 use yantrik_ipc_transport::reach::{self, Reach};
 
@@ -362,6 +362,12 @@ where
         // it arrived as something that converts without loss, and every default filled in.
         let result = run(&as_declared(spec, args))?;
 
+        // An answer about something other than this app carries nothing of it, and the app is not
+        // read again for a reply that would not use it.
+        if spec.stateless {
+            return Ok(act_json_stateless(&self.app_id, action_id, !spec.deferred, result));
+        }
+
         // Read back through the same path a `describe` would take, so a caller never has to make
         // a second round trip to find out what its own action did. `accepted` says the handler
         // ran; `settled` (from the action's own `deferred`) says whether the work finished —
@@ -640,6 +646,33 @@ mod tests {
         assert_eq!(action["parameters"]["properties"]["prompts"]["items"], json!({"type": "string"}));
         assert_eq!(action["parameters"]["required"], json!(["prompts"]));
         assert!(reg.problems().is_empty(), "{:?}", reg.problems());
+    }
+
+    // ── An answer about something else ──
+
+    #[test]
+    fn a_stateless_action_answers_with_its_result_and_nothing_of_the_app() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let reads = Arc::new(AtomicUsize::new(0));
+        let counted = reads.clone();
+        let reg = surface(
+            "shell",
+            Some(Box::new(move || {
+                counted.fetch_add(1, Ordering::SeqCst);
+                View::new("a desktop").state(json!({ "conversation": ["the person's words"] }))
+            })),
+            vec![(
+                Action::new("validate", "a question about something else").stateless(),
+                Box::new(|_| Ok(json!({ "v": 1 }))),
+            )],
+        );
+        let before = reads.load(Ordering::SeqCst);
+        let answer = reg.act("validate", &json!({}), None, "shell#1", &open()).unwrap();
+        assert_eq!(answer, json!({
+            "app": "shell", "action_id": "shell#1", "accepted": true, "settled": true, "result": { "v": 1 }
+        }));
+        assert_eq!(reads.load(Ordering::SeqCst), before, "the app is not read again for a reply that would not use it");
     }
 
     // ── Accepted is not done ──

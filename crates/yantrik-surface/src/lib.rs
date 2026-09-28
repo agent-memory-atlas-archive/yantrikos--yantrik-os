@@ -118,7 +118,7 @@ pub use serde_json;
 /// two replies built from them. [`Explainer`] is the sentence an action says about one call of
 /// itself (#137); most authors meet it only through [`Action::explain`].
 pub use yantrik_ipc_contracts::control_surface::{
-    act_json, describe_json, Action, Explainer, Param, View, PARAM_TYPES,
+    act_json, act_json_stateless, describe_json, Action, Explainer, Param, View, PARAM_TYPES,
 };
 pub use yantrik_ipc_contracts::email::ServiceError;
 /// The ceiling, mode and grant rule every `app.act` meets. The dispatch calls it; it is exported
