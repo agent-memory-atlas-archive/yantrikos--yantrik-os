@@ -207,6 +207,29 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
             Ok(where_now(&ui))
         },
     );
+    // Whether a path is there, answered by the desktop, which runs as the person and can see
+    // their home: a mind with an account of its own cannot tell "not there" from "hidden from me"
+    // (file_stat.rs). A read: it does not move the Files screen.
+    let surface = surface.action(
+        Action::new(
+            "files_stat",
+            "Whether a path in the person's home exists: `exists` true, false, or \"unknown\" with \
+             a `reason` (not_found, not_allowed, outside, not_a_path); kind, size and modified \
+             (unix seconds) when it does. `~` is the person's home",
+        )
+        .risk("safe")
+        .arg(Param::text("path").describe("An absolute path or ~/…, e.g. ~/notes/today.txt")),
+        |args| {
+            let asked = args["path"].as_str().unwrap_or_default().to_string();
+            let home = std::env::var("HOME").unwrap_or_default();
+            // Off the UI thread: a path under a hung network mount in the home would otherwise
+            // freeze the person's whole desktop in the syscall.
+            let work = move || Ok(crate::file_stat::stat(&asked, std::path::Path::new(&home)));
+            yantrik_app_runtime::control::answer_later(work)
+                .map(|()| serde_json::json!({ "answering": "off the UI thread" }))
+                .or_else(|work| work())
+        },
+    );
     // The grid/list switch in the toolbar, for a caller. Grid is the folder tiles with their
     // item counts and times and the recent row under them; list is one row per entry.
     let weak = ui.as_weak();

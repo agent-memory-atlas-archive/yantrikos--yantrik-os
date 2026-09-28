@@ -64,6 +64,7 @@ mod clipboard;
 #[allow(dead_code)]
 mod features;
 mod filebrowser;
+mod file_stat;
 mod fileops;
 // What minds this machine could have, before any of them is running.
 mod harness_catalogue;
