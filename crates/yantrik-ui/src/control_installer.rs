@@ -118,6 +118,7 @@ const FIELDS: &[&str] = &[
     "keyboard",
     "timezone",
     "disk",
+    "encrypt",
 ];
 
 /// A caller's spelling of a field, reduced to the one in `FIELDS`.
@@ -129,6 +130,7 @@ fn canonical_field(field: &str) -> String {
         "target_disk" | "target" => "disk",
         "layout" | "keyboard_layout" | "keymap" => "keyboard",
         "tz" | "time_zone" | "zone" => "timezone",
+        "encryption" | "encrypted" | "luks" => "encrypt",
         other => other,
     }
     .to_string()
@@ -249,6 +251,7 @@ pub fn state(ui: &App) -> serde_json::Value {
             "hostname": ui.get_onboard_input_hostname().to_string(),
             "keyboard": ui.get_onboard_keyboard().to_string(),
             "timezone": ui.get_onboard_timezone().to_string(),
+            "encrypt": ui.get_onboard_encrypt(),
             "companion_name": ui.get_onboard_input_companion().to_string(),
             "location": ui.get_onboard_input_location().to_string(),
             "password_set": !pw.is_empty(),
@@ -313,9 +316,19 @@ pub fn summary(ui: &App) -> String {
     match blocked_by(ui) {
         Some(why) => format!("Yantrik installer — on the {step} step, not ready to install: {why}"),
         None => format!(
-            "Yantrik installer — on the {step} step, ready to install to {}",
-            ui.get_onboard_selected_disk()
+            "Yantrik installer — on the {step} step, ready to install to {}{}",
+            ui.get_onboard_selected_disk(),
+            if ui.get_onboard_encrypt() { ", encrypted" } else { ", NOT encrypted" }
         ),
+    }
+}
+
+/// A yes or no as a caller might write it; anything else is not an answer.
+fn parse_switch(value: &str) -> Option<bool> {
+    match value.trim().to_lowercase().as_str() {
+        "true" | "yes" | "on" | "1" => Some(true),
+        "false" | "no" | "off" | "0" => Some(false),
+        _ => None,
     }
 }
 
@@ -346,7 +359,8 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                 "Fill in one field of the installer, as if typed into it",
             )
             .arg(Param::text("field").describe(
-                "full_name, username, password, password_confirm, hostname, keyboard, timezone, disk",
+                "full_name, username, password, password_confirm, hostname, keyboard, timezone, disk, \
+                 encrypt (true or false; on unless turned off)",
             ))
             .arg(Param::text("value")),
             move |args| {
@@ -432,6 +446,17 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                         }
                         ui.set_onboard_selected_disk(want.into());
                     }
+                    // The Disk screen's "Encrypt with my password". Only a plain yes or no: a
+                    // value misread as "off" would leave a disk readable by whoever takes it.
+                    "encrypt" => match parse_switch(&value) {
+                        Some(on) => ui.set_onboard_encrypt(on),
+                        None => {
+                            return Err(format!(
+                                "encrypt takes true or false, not `{}`",
+                                value.trim()
+                            ))
+                        }
+                    },
                     other => {
                         return Err(format!(
                             "no field `{other}` in the installer; it takes: {}",
@@ -513,6 +538,7 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                     ui.get_onboard_keyboard(),
                     ui.get_onboard_timezone(),
                     disk.clone(),
+                    ui.get_onboard_encrypt(),
                 );
                 ui.set_onboard_phase(step::INSTALLING);
                 if ui.get_current_screen() != 2 {
@@ -521,6 +547,7 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                 }
                 Ok(serde_json::json!({
                     "installing_to": disk.to_string(),
+                    "encrypted": ui.get_onboard_encrypt(),
                     "watch": "describe the shell and read installer.progress and installer.status; \
                               the machine restarts by itself about ten seconds after it finishes",
                 }))
@@ -576,6 +603,21 @@ mod tests {
         // Consequences of Install, and the old personalisation steps, are not places to go.
         for gone in ["installing", "installed", "interests", "ai-mode", "hardware", ""] {
             assert_eq!(step_for(gone), None, "{gone}");
+        }
+    }
+
+    #[test]
+    fn encryption_is_switched_only_by_a_plain_yes_or_no() {
+        assert_eq!(canonical_field("encryption"), "encrypt");
+        assert_eq!(canonical_field("LUKS"), "encrypt");
+        for yes in ["true", "Yes", " on ", "1"] {
+            assert_eq!(parse_switch(yes), Some(true), "{yes}");
+        }
+        for no in ["false", "NO", "off", "0"] {
+            assert_eq!(parse_switch(no), Some(false), "{no}");
+        }
+        for unclear in ["", "encrypted", "maybe", "nope"] {
+            assert_eq!(parse_switch(unclear), None, "{unclear}");
         }
     }
 

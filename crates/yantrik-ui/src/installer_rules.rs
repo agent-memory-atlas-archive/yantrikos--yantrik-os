@@ -149,10 +149,15 @@ pub fn full_name_problem(full_name: &str) -> Option<String> {
 ///
 /// No strength rule: the password is the person's to choose, and the installer is not the
 /// place to argue about it. An empty one is refused because it would leave an account that
-/// the lock screen at boot (#415) cannot ask anything of.
+/// the lock screen at boot (#415) cannot ask anything of. So is one with a control character
+/// (a newline, a tab, an escape), which the control surface can set and no keyboard types: it
+/// also unlocks the encrypted disk, whose prompt ends a line at the first newline.
 pub fn password_problem(password: &str, confirm: &str) -> Option<String> {
     if password.is_empty() {
         return Some("Choose a password".into());
+    }
+    if password.chars().any(char::is_control) {
+        return Some("A password cannot contain a line break, tab or other control character".into());
     }
     if confirm.is_empty() {
         return Some("Type the password again to confirm it".into());
@@ -342,6 +347,13 @@ mod tests {
         assert!(password_problem("pw", "").unwrap().contains("again"));
         assert!(password_problem("pw", "pW").unwrap().contains("match"));
         assert!(password_problem("correct horse", "correct horse").is_none());
+        assert!(password_problem("über-Straße ключ", "über-Straße ключ").is_none(), "any layout's letters");
+        for typed_by_no_keyboard in ["line\nbreak", "tab\there", "esc\u{1b}[1m"] {
+            assert!(
+                password_problem(typed_by_no_keyboard, typed_by_no_keyboard).unwrap().contains("control"),
+                "{typed_by_no_keyboard:?}"
+            );
+        }
     }
 
     #[test]
