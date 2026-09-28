@@ -395,7 +395,7 @@ pub const BLOCKED_SEGMENTS: &[&str] = &[
 /// Defense layers:
 /// 1. Block `..` traversal
 /// 2. Block known sensitive path segments
-/// 3. Restrict to $HOME or /tmp
+/// 3. Restrict to $HOME or this account's private scratch directory
 /// 4. Resolve symlinks and re-validate the canonical path
 pub fn validate_path(path: &str) -> Result<String, String> {
     let expanded = expand_home(path);
@@ -412,10 +412,9 @@ pub fn validate_path(path: &str) -> Result<String, String> {
         }
     }
 
-    // Must be under $HOME or /tmp
-    let home = std::env::var("HOME").unwrap_or_default();
-    if !expanded.starts_with(&home) && !expanded.starts_with("/tmp") {
-        return Err("Path must be under your home directory or /tmp".to_string());
+    let roots = allowed_roots();
+    if !under_any(&expanded, &roots) {
+        return Err("Path must be under your home directory".to_string());
     }
 
     // Resolve symlinks: if the path exists, canonicalize and re-validate.
@@ -432,7 +431,7 @@ pub fn validate_path(path: &str) -> Result<String, String> {
                         ));
                     }
                 }
-                if !resolved_str.starts_with(&home) && !resolved_str.starts_with("/tmp") {
+                if !under_any(&resolved_str, &roots) {
                     return Err(
                         "Access denied: path resolves outside your home directory".to_string()
                     );
@@ -452,7 +451,7 @@ pub fn validate_path(path: &str) -> Result<String, String> {
                         ));
                     }
                 }
-                if !rp.starts_with(&home) && !rp.starts_with("/tmp") {
+                if !under_any(&rp, &roots) {
                     return Err(
                         "Access denied: parent directory resolves outside your home directory"
                             .to_string(),
@@ -463,6 +462,33 @@ pub fn validate_path(path: &str) -> Result<String, String> {
     }
 
     Ok(expanded)
+}
+
+/// Where the file tools may reach: the home directory, and the private scratch directory the
+/// tools write their own outputs to (a diagram, a screenshot) so the model can open them again.
+///
+/// Not the shared /tmp: anything another account left there, at a name it chose, is text the
+/// model would read as the person's. And not an empty or relative HOME, which as a string prefix
+/// matched every path there is.
+fn allowed_roots() -> Vec<std::path::PathBuf> {
+    let mut roots = Vec::new();
+    if let Ok(home) = std::env::var("HOME") {
+        let home = std::path::PathBuf::from(home);
+        if home.is_absolute() && home != std::path::Path::new("/") {
+            roots.push(home);
+        }
+    }
+    if let Ok(scratch) = yantrik_ml::private_dir::scratch_dir() {
+        roots.push(scratch);
+    }
+    roots
+}
+
+/// Whether `path` is one of `roots` or inside one, compared a component at a time, so
+/// /home/ann does not admit /home/anne.
+fn under_any(path: &str, roots: &[std::path::PathBuf]) -> bool {
+    let path = std::path::Path::new(path);
+    roots.iter().any(|root| path.starts_with(root))
 }
 
 /// Simple glob matching (supports `*`, `*.ext`, `prefix*`).
@@ -749,5 +775,29 @@ mod audit_tests {
         // to keep the first two hundred characters of whatever came back.
         assert!(crate::taint::returns_secret("vault_get", "vault"));
         assert!(!crate::taint::returns_secret("browse", "browser"));
+    }
+}
+
+#[cfg(test)]
+mod path_root_tests {
+    use super::under_any;
+    use std::path::PathBuf;
+
+    #[test]
+    fn a_root_admits_itself_and_what_is_inside_it_only() {
+        let roots = [PathBuf::from("/home/ann"), PathBuf::from("/run/user/1000/yantrik")];
+        assert!(under_any("/home/ann", &roots));
+        assert!(under_any("/home/ann/notes.txt", &roots));
+        assert!(under_any("/run/user/1000/yantrik/diagram.png", &roots));
+        assert!(!under_any("/home/anne/notes.txt", &roots), "a name that starts the same is not inside");
+        assert!(!under_any("/tmp/planted.txt", &roots), "the shared /tmp is not ours");
+        assert!(!under_any("/etc/shadow", &roots));
+    }
+
+    #[test]
+    fn no_roots_admit_nothing() {
+        // An unset or empty HOME used to be the empty prefix, which every path starts with.
+        assert!(!under_any("/etc/shadow", &[]));
+        assert!(!under_any("/", &[]));
     }
 }
