@@ -2553,16 +2553,47 @@ def scene_app(name, indent="    "):
     return lines
 
 
+# What a browser window's app id can be. The desktop's own launcher names it `browser`; the
+# compositor names a Chromium it did not start by what Chromium declares.
+BROWSER_APPS = {"browser", "chromium", "chromium-browser", "google-chrome", "google-chrome-stable",
+                "chrome"}
+
+# Roles that are the window's scaffolding: the frame repeats the title, and a panel with nothing
+# to do is layout.
+SCAFFOLDING = {"frame", "panel", "filler", "section", "grouping", "tool bar", "menu bar"}
+
+
+def _element_name(element):
+    """An element's name as a person would read it. Chromium names a container by U+FFFC, the
+    object replacement character, once per child: `￼￼￼￼` says there are four things inside and
+    nothing about them."""
+    return _flat((element.get("name") or element.get("text") or "").replace("￼", ""), 80)
+
+
+def _element_actions(element):
+    """What it can be asked to do, without the empty names Chromium publishes beside real ones."""
+    return [_flat(a, 30) for a in element.get("actions") or [] if str(a).strip()]
+
+
+def worth_listing(element):
+    """Whether an element says anything: a name or something it can do, and not only scaffolding."""
+    name, actions = _element_name(element), _element_actions(element)
+    if not name and not actions:
+        return False
+    return bool(actions) or (element.get("role") or "") not in SCAFFOLDING
+
+
 def scene_element(element):
     """One accessibility element: its id, role, name and what it can be asked to do."""
-    name = _flat(element.get("name") or element.get("text") or "", 80)
+    name = _element_name(element)
     parts = ["a11y:%s" % _flat(element.get("id", "?"), 16)]
     if element.get("role"):
         parts.append(_flat(element["role"], 30))
     if name:
         parts.append(json.dumps(name, ensure_ascii=False))
-    if element.get("actions"):
-        parts.append("[%s]" % ", ".join(_flat(a, 30) for a in element["actions"]))
+    actions = _element_actions(element)
+    if actions:
+        parts.append("[%s]" % ", ".join(actions))
     return " ".join(parts)
 
 
@@ -2572,11 +2603,14 @@ def scene_elements(elements, limit=SCENE_ELEMENTS, indent="    "):
     name and nothing to do. The second says nothing the first did not."""
     kept, last_actionable = [], None
     for e in elements:
-        name = e.get("name") or e.get("text") or ""
-        if not e.get("actions") and last_actionable is not None and name == last_actionable:
+        if not worth_listing(e):
+            continue
+        name = _element_name(e)
+        acts = _element_actions(e)
+        if not acts and last_actionable is not None and name == last_actionable:
             last_actionable = None
             continue
-        last_actionable = name if e.get("actions") else None
+        last_actionable = name if acts else None
         kept.append(e)
     lines = [indent + scene_element(e) for e in kept[:limit]]
     if len(kept) > limit:
@@ -2703,7 +2737,8 @@ def scene(desktop, accessibility=None):
     view = state.get("mind_view") if isinstance(state.get("mind_view"), dict) else {}
     surfaces = {w.get("app"): scene_surface(w.get("app") or "") for w in windows}
     if accessibility is None and any(
-            not surfaces.get(w.get("app")) and w.get("app") not in ("mind-view", "browser")
+            not surfaces.get(w.get("app")) and w.get("app") != "mind-view"
+            and w.get("app") not in BROWSER_APPS
             for w in windows):
         accessibility = Accessibility()
 
@@ -2716,7 +2751,7 @@ def scene(desktop, accessibility=None):
         if app == "mind-view":
             inside = _flat(", ".join(a for a in view.get("apps") or [] if isinstance(a, str))) or "nothing yet"
             lines.append("- Mind View%s — the minds' own display, holding: %s" % (mark, inside))
-        elif app == "browser":
+        elif app in BROWSER_APPS:
             lines.append("- [browser] %s%s" % (json.dumps(_flat(title, 100), ensure_ascii=False), mark))
             lines.extend(scene_web())
         elif surfaces.get(app):

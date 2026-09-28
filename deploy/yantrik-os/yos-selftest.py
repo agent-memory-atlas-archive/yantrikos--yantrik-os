@@ -1048,7 +1048,10 @@ def main():
                     "a11y.describe": {"elements": [
                         {"id": "w2", "role": "push button", "name": "Save", "actions": ["click"]},
                         {"id": "w3", "role": "label", "name": "Save"},
-                        {"id": "w4", "role": "text", "name": "", "text": "buy  milk\n"}]},
+                        {"id": "w4", "role": "text", "name": "", "text": "buy  milk\n"},
+                        {"id": "w5", "role": "panel", "name": "￼￼￼", "actions": ["", " "]},
+                        {"id": "w6", "role": "frame", "name": "notes.txt - gedit"},
+                        {"id": "w7", "role": "push button", "name": "Close", "actions": ["", "press"]}]},
                 }.get(asked["method"]))
                 accessible.start()
                 extra.append(accessible)
@@ -1057,6 +1060,9 @@ def main():
                       'a11y:w2 push button "Save" [click]' in out
                       and 'a11y:w4 text "buy milk"' in out, out)
                 check("without the label twin a toolkit puts under a button", "a11y:w3" not in out, out)
+                check("nor Chromium's placeholder containers and empty action names, nor the frame",
+                      "a11y:w5" not in out and "a11y:w6" not in out and "[, " not in out
+                      and 'a11y:w7 push button "Close" [press]' in out, out)
                 check("and one with no tree says it publishes none",
                       "no accessibility tree" in out, out)
 
