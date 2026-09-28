@@ -642,7 +642,10 @@ if [ "$(tty)" = "/dev/tty1" ] && [ -z "$WAYLAND_DISPLAY" ]; then
     fi
 
     # Crash guard
-    CRASH_FILE="/tmp/.yantrik-labwc-crash"
+    # The stamp lives in the home, not /tmp: any account can write a fresh one in /tmp, and a
+    # fresh one there is enough to keep this desktop from starting at all.
+    mkdir -p "$HOME/.cache"
+    CRASH_FILE="$HOME/.cache/yantrik-labwc-crash"
     if [ -f "$CRASH_FILE" ]; then
         LAST_CRASH=$(cat "$CRASH_FILE" 2>/dev/null || echo 0)
         NOW=$(date +%s)

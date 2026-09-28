@@ -10367,6 +10367,7 @@ dependencies = [
 name = "yantrik-app-runtime"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "serde",
  "serde_json",
  "slint",
@@ -10453,6 +10454,7 @@ dependencies = [
  "tracing",
  "tungstenite",
  "ureq 2.12.1",
+ "yantrik-ml",
 ]
 
 [[package]]
@@ -10545,6 +10547,7 @@ dependencies = [
  "yantrik-companion-core",
  "yantrik-ipc-contracts",
  "yantrik-ipc-transport",
+ "yantrik-ml",
  "yantrikdb",
 ]
 
@@ -10793,6 +10796,7 @@ dependencies = [
  "hf-hub 0.5.0",
  "hostname",
  "keyring",
+ "libc",
  "llama-cpp-2",
  "ndarray 0.16.1",
  "ort",

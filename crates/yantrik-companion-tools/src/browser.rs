@@ -1026,7 +1026,8 @@ impl Tool for BrowserScreenshotTool {
             None => return "Error: no screenshot data returned".to_string(),
         };
 
-        // Decode base64 and save to /tmp
+        // Decode base64 and save to our private scratch dir — a page screenshot can show anything
+        // the person had open, so it does not belong in a /tmp every account can read.
         let bytes = match base64_decode(b64_data) {
             Ok(b) => b,
             Err(e) => return format!("Error decoding screenshot: {e}"),
@@ -1036,10 +1037,8 @@ impl Tool for BrowserScreenshotTool {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let path = format!("/tmp/yantrik-screenshot-{ts}.png");
-
-        match std::fs::write(&path, &bytes) {
-            Ok(_) => format!(
+        match crate::write_scratch(&format!("yantrik-screenshot-{ts}.png"), &bytes) {
+            Ok(path) => format!(
                 "Screenshot saved: {path} ({} bytes)\nPage: {} — {}",
                 bytes.len(),
                 tab.title,
@@ -2009,9 +2008,8 @@ impl Tool for BrowserSeeTool {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let img_path = format!("/tmp/yantrik-see-{ts}.png");
         if let Ok(bytes) = base64_decode(b64_data) {
-            let _ = std::fs::write(&img_path, &bytes);
+            let _ = crate::write_scratch(&format!("yantrik-see-{ts}.png"), &bytes);
         }
 
         // Append viewport size so coordinates are grounded
@@ -2030,30 +2028,12 @@ impl Tool for BrowserSeeTool {
             "stream": false
         });
 
-        let payload_path = "/tmp/yantrik-see-payload.json";
-        if let Err(e) = std::fs::write(payload_path, payload.to_string()) {
-            return format!("Error writing payload: {e}");
-        }
-
+        // The body goes to curl on its stdin: no file for anyone to swap or read.
         let url = format!("{}/api/chat", self.ollama_base);
-        let output = match std::process::Command::new("curl")
-            .args([
-                "-fsSL",
-                "--max-time", "120",
-                "-H", "Content-Type: application/json",
-                "-d", &format!("@{payload_path}"),
-                &url,
-            ])
-            .output()
-        {
+        let output = match crate::pipe::post_json(&url, 120, payload.to_string().into_bytes()) {
             Ok(o) => o,
-            Err(e) => {
-                let _ = std::fs::remove_file(payload_path);
-                return format!("Vision request failed: {e}");
-            }
+            Err(e) => return format!("Vision request failed: {e}"),
         };
-
-        let _ = std::fs::remove_file(payload_path);
 
         if !output.status.success() {
             return format!("Vision model error: {}", String::from_utf8_lossy(&output.stderr));
