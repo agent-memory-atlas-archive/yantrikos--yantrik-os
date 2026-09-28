@@ -129,7 +129,8 @@ fn chat_view(ui: &App, since: Option<usize>) -> serde_json::Value {
         "state": state,
         "turn": turn,
         "mode": mode,
-        "mind_view": { "running": mind_view["running"], "apps": mind_view["apps"] },
+        // By the names a person reads, as the taskbar's Mind View entry says them.
+        "mind_view": { "running": mind_view["running"], "apps": crate::mind_view::app_names() },
         "waiting_on_you": crate::control_approvals::pending_for_describe()
             .as_array()
             .map(|a| a.len())

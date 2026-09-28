@@ -92,6 +92,8 @@ impl App {
                 self.connected = false;
                 self.note = Some(format!("the desktop is not answering: {why}"));
             }
+            // An act with nothing to say (a message sent) leaves the status line as it was.
+            Update::Said(line) if line.is_empty() => {}
             Update::Said(line) => self.note = Some(line),
         }
     }
