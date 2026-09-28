@@ -610,6 +610,7 @@ cmd_migrate_ownership() {
   local rc=0
   install_sudo_rule && remove_blanket_sudo || rc=$?
   reconcile_minds
+  reconcile_devtools_guard
   return "$rc"
 }
 
@@ -1456,7 +1457,7 @@ and this is running as $(id -un). Run: sudo yantrik-update set-channel $new"
 # it, and this updater downloads nothing but its own bundle, so it comes with the image.
 # flatpak: the Package Manager installs Flathub apps with it, per-user and without root (#399);
 # a machine installed before the image carried it could search Flathub for nothing.
-REQUIRED_PACKAGES="iproute2 iputils-ping grim curl python3 nano htop swaybg xdg-desktop-portal-gtk flatpak git bash-completion podman uidmap passt fuse-overlayfs"
+REQUIRED_PACKAGES="iproute2 iputils-ping grim curl python3 nano htop swaybg xdg-desktop-portal-gtk flatpak git bash-completion podman uidmap passt fuse-overlayfs nftables"
 
 # Is this package installed, per dpkg? Prints dpkg's own status word, or nothing.
 pkg_installed() {
@@ -1803,6 +1804,104 @@ d /run/yantrik-minds 2750 $owner yantrik-minds -"
   systemd-tmpfiles --create "$conf" >/dev/null 2>&1 || warn "could not make /run/yantrik-minds now; it is made at the next boot"
 }
 
+# The browsers' DevTools ports. The desktop's Browser listens on 127.0.0.1:9222 and the
+# companion's on 9223-9322, which is how `yos web` reads and drives a page. Loopback TCP has no
+# owner: until this, every account on the machine — a system service, a container runtime, the
+# mind account — could open those ports and drive the person's logged-in browser, read its cookies
+# and submit its forms, without meeting any gate the bridge puts in front of a mind. This lets
+# root, the person and the mind account connect (the mind's web tools reach the page this way
+# until the browser has a surface at the mind door, #477) and resets everyone else.
+#
+# And the other direction: while a browser is closed its port is free, and any account could
+# listen there and be taken for it — by `browser_login`, which types a vault password into
+# whatever answers, and by every page read a mind is handed. Only root and the person run
+# browsers, so a DevTools port answering from any other account has its data dropped: the
+# handshake may complete, but not one byte of a reply reaches the client. Written by this
+# updater's own code, not from a file in the bundle; the uids go in as numbers.
+DEVTOOLS_GUARD=/etc/yantrik/devtools-guard.nft
+DEVTOOLS_UNIT=/etc/systemd/system/yantrik-devtools-guard.service
+
+devtools_guard_text() {
+  cat <<EOF
+# Yantrik OS: the browsers' DevTools ports (9222-9322 on loopback) are opened by root, $1 and the
+# mind account only, and answered by root and $1 only. Made by yantrik-update; edits here are put
+# back at the next update.
+table inet yantrik_devtools
+delete table inet yantrik_devtools
+table inet yantrik_devtools {
+	chain output {
+		type filter hook output priority filter; policy accept;
+		oifname "lo" tcp dport 9222-9322 meta skuid != { $2 } reject with tcp reset
+		oifname "lo" tcp sport 9222-9322 meta skuid != { $3 } drop
+	}
+}
+EOF
+}
+
+devtools_unit_text() {
+  cat <<EOF
+[Unit]
+Description=Yantrik OS: the browsers' DevTools ports answer the person and the mind account only
+DefaultDependencies=no
+After=nftables.service
+Before=systemd-user-sessions.service
+PartOf=nftables.service
+ReloadPropagatedFrom=nftables.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=$1 -f $DEVTOOLS_GUARD
+ExecReload=$1 -f $DEVTOOLS_GUARD
+
+[Install]
+WantedBy=multi-user.target
+WantedBy=nftables.service
+EOF
+}
+
+reconcile_devtools_guard() {
+  [ "$(id -u)" = 0 ] || return 0
+  tree_is_roots || { warn "the tree is not root's yet; the browsers' DevTools ports are not guarded (yantrik-update migrate-ownership)"; return 0; }
+  local nft owner owner_uid mind_uid allowed answering changed=0
+  nft="$(command -v nft 2>/dev/null)"
+  if [ -z "$nft" ]; then
+    warn "no nft on this machine; the browsers' DevTools ports stay open to every local account"
+    return 0
+  fi
+  owner="$(desktop_owner)"
+  case "$owner" in
+    ''|root|*[!a-z0-9_-]*) warn "cannot tell whose desktop this is; the DevTools ports are not guarded"; return 0 ;;
+  esac
+  owner_uid="$(id -u "$owner" 2>/dev/null)"
+  case "$owner_uid" in ''|*[!0-9]*) return 0 ;; esac
+  allowed="0, $owner_uid"
+  answering="0, $owner_uid"
+  mind_uid="$(id -u yantrik-mind 2>/dev/null)"
+  case "$mind_uid" in ''|*[!0-9]*) ;; *) allowed="$allowed, $mind_uid" ;; esac
+
+  install -d -o root -g root -m 0755 /etc/yantrik
+  if [ "$(cat "$DEVTOOLS_GUARD" 2>/dev/null)" != "$(devtools_guard_text "$owner" "$allowed" "$answering")" ]; then
+    devtools_guard_text "$owner" "$allowed" "$answering" > "$DEVTOOLS_GUARD" && chmod 0644 "$DEVTOOLS_GUARD" && changed=1
+  fi
+  if command -v systemctl >/dev/null 2>&1 && [ -d /etc/systemd/system ]; then
+    if [ "$(cat "$DEVTOOLS_UNIT" 2>/dev/null)" != "$(devtools_unit_text "$nft")" ]; then
+      devtools_unit_text "$nft" > "$DEVTOOLS_UNIT" && chmod 0644 "$DEVTOOLS_UNIT" && changed=1
+      systemctl daemon-reload >/dev/null 2>&1
+    fi
+    systemctl enable yantrik-devtools-guard.service >/dev/null 2>&1 \
+      || warn "could not enable yantrik-devtools-guard.service; the DevTools guard is not kept across boots"
+  fi
+  # Loaded on every run, not only when the file changed: a `flush ruleset` (nftables.conf's first
+  # line, on a reload or by hand) takes the table away while the unit still reads active, and the
+  # load is one atomic transaction that costs nothing when nothing changed.
+  if "$nft" -f "$DEVTOOLS_GUARD" 2>/dev/null; then
+    [ "$changed" = 1 ] && info "the browsers' DevTools ports are opened by root, $owner and the mind account only, and answered by root and $owner"
+  else
+    warn "could not load $DEVTOOLS_GUARD; the DevTools ports stay open to every local account"
+  fi
+}
+
 # logs/ and data/ are the desktop's alone. The installer made logs/ 0777, so any other account on
 # the machine could plant a name there: the session rotates yantrik-os.log and appends to that
 # name, and a symlink to ~/.bashrc put there first would have the shell's output (which carries
@@ -2067,6 +2166,7 @@ cmd_migrate_minds() {
   migrate_if_needed
   elevate "$@"
   reconcile_minds
+  reconcile_devtools_guard
   reconcile_mind_units
   # Before the mind runs as an account of its own: from then on a directory anyone can write is
   # one the mind can write.
@@ -2139,6 +2239,7 @@ cmd_reconcile() {
   reconcile_sysctl
   reconcile_sudo_rule
   reconcile_minds
+  reconcile_devtools_guard
   reconcile_mind_units
   reconcile_private_dirs
   reconcile_registries
@@ -2331,7 +2432,7 @@ cmd_selftest() {
   printf '#!/bin/sh\ncase "$1" in iproute2|curl|python3|grim) echo installed ;; esac\n' > "$old"
   chmod +x "$old"
   out="$(missing_packages "$old")"
-  want="iputils-ping nano htop swaybg xdg-desktop-portal-gtk flatpak git bash-completion podman uidmap passt fuse-overlayfs"
+  want="iputils-ping nano htop swaybg xdg-desktop-portal-gtk flatpak git bash-completion podman uidmap passt fuse-overlayfs nftables"
   if [ "$out" = "$want" ]; then
     printf '  %sok%s   a 520-style machine is named package by package\n' "$c_grn" "$c_off"
   else
@@ -2346,7 +2447,7 @@ cmd_selftest() {
   printf '#!/bin/sh\ncase "$1" in iproute2|iputils-ping|grim|curl|python3|nano|htop|swaybg|xdg-desktop-portal-gtk|flatpak) echo installed ;; esac\n' > "$pre401"
   chmod +x "$pre401"
   out="$(missing_packages "$pre401")"
-  want="git bash-completion podman uidmap passt fuse-overlayfs"
+  want="git bash-completion podman uidmap passt fuse-overlayfs nftables"
   if [ "$out" = "$want" ]; then
     printf '  %sok%s   a machine from before #401 is given git, completion and rootless podman\n' "$c_grn" "$c_off"
   else

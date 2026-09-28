@@ -132,7 +132,7 @@ say "Packages"
 # runtime the Container Manager app runs (#401).
 # Manager installs Flathub apps with it, per-user and without root (#399).
 virt-customize -a "$IMAGE" \
-  --install labwc,seatd,mesa-utils,foot,chromium,pipewire-pulse,wireplumber,pulseaudio-utils,python3-websocket,qemu-guest-agent,curl,ca-certificates,fontconfig,grim,wlrctl,wlr-randr,swaybg,mpv,nano,htop,iproute2,iputils-ping,git,bash-completion,podman,uidmap,passt,fuse-overlayfs,flatpak \
+  --install labwc,seatd,mesa-utils,foot,chromium,pipewire-pulse,wireplumber,pulseaudio-utils,python3-websocket,qemu-guest-agent,curl,ca-certificates,fontconfig,grim,wlrctl,wlr-randr,swaybg,mpv,nano,htop,iproute2,iputils-ping,git,bash-completion,podman,uidmap,passt,fuse-overlayfs,flatpak,nftables \
 
 echo "   desktop, browser, audio, agent surface deps"
 
