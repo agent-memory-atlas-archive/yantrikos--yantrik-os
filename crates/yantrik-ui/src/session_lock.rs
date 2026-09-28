@@ -80,41 +80,62 @@ pub fn engage(
         RUNNING.store(false, Ordering::SeqCst);
         return;
     }
-    std::thread::spawn(move || {
-        let mut starts = 0;
-        loop {
-            starts += 1;
-            match run_once(&bin, &greeting, secret) {
-                Outcome::Unlocked(pin) => {
-                    let (ui, on_unlock) = (ui.clone(), on_unlock.clone());
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = ui.upgrade() {
-                            on_unlock(&ui, &pin);
-                        }
-                    });
-                    break;
-                }
-                Outcome::Unsupported => {
-                    tracing::warn!("This compositor has no session lock; the shell's own screen is the lock (#313)");
-                    break;
-                }
-                Outcome::Died(why) => {
-                    // The compositor may be holding the session locked with nobody to unlock it.
-                    // Giving up would leave the person locked out of their own machine, so another
-                    // is started, however many times it takes.
-                    if starts <= 3 || starts % 60 == 0 {
-                        tracing::warn!(%why, starts, "The session-lock client ended without unlocking; starting it again");
+    std::thread::spawn(move || loop {
+        hold(&bin, &greeting, secret, &ui, &on_unlock);
+        // A lock asked for while this thread was on its way out found RUNNING still set and left
+        // the work to it: take it, rather than leave that lock without a compositor client.
+        RUNNING.store(false, Ordering::SeqCst);
+        if !WANTED.load(Ordering::SeqCst) || RUNNING.swap(true, Ordering::SeqCst) {
+            break;
+        }
+    });
+}
+
+/// Keep a lock client running until the person is back in, or the compositor has no session lock.
+fn hold(
+    bin: &std::path::Path,
+    greeting: &str,
+    secret: crate::lock::Secret,
+    ui: &slint::Weak<App>,
+    on_unlock: &(impl Fn(&App, &str) + Send + Clone + 'static),
+) {
+    let mut starts: u32 = 0;
+    loop {
+        starts += 1;
+        match run_once(bin, greeting, secret) {
+            Outcome::Unlocked(pin) => {
+                // Released here as well as by the unlock itself: that runs later, on the UI thread,
+                // and the caller must not read "still wanted" in between.
+                released();
+                let (ui, on_unlock) = (ui.clone(), on_unlock.clone());
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui.upgrade() {
+                        on_unlock(&ui, &pin);
                     }
-                    std::thread::sleep(std::time::Duration::from_secs((starts.max(1) as u64).min(MOST_PAUSE_SECS)));
-                    if !WANTED.load(Ordering::SeqCst) {
-                        tracing::info!("The desktop was unlocked meanwhile; no lock client is needed");
-                        break;
-                    }
+                });
+                return;
+            }
+            Outcome::Unsupported => {
+                // The shell's own screen is the lock; its unlock releases it.
+                tracing::warn!("This compositor has no session lock; the shell's own screen is the lock (#313)");
+                released();
+                return;
+            }
+            Outcome::Died(why) => {
+                // The compositor may be holding the session locked with nobody to unlock it.
+                // Giving up would leave the person locked out of their own machine, so another is
+                // started, however many times it takes.
+                if starts <= 3 || starts % 60 == 0 {
+                    tracing::warn!(%why, starts, "The session-lock client ended without unlocking; starting it again");
+                }
+                std::thread::sleep(std::time::Duration::from_secs(u64::from(starts).min(MOST_PAUSE_SECS)));
+                if !WANTED.load(Ordering::SeqCst) {
+                    tracing::info!("The desktop was unlocked meanwhile; no lock client is needed");
+                    return;
                 }
             }
         }
-        RUNNING.store(false, Ordering::SeqCst);
-    });
+    }
 }
 
 enum Outcome {
