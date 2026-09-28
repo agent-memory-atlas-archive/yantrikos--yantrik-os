@@ -139,7 +139,15 @@ pub fn wire(ui: &App, ctx: &AppContext) {
             crate::memory_grants::carries_memory(store.as_ref(), harness, uid, yantrik_ipc_transport::mind_door::is_mind)
         },
         yantrik_ipc_transport::reach::token_digest,
-    );
+    )
+    // Where the harness presents it: the person's Mind serves their memory on a socket of its
+    // own (#447), dialled only when it is there. Loopback TCP is a fallback per harness that
+    // is off until one needs it, so it is never offered here.
+    .with_memory_url(|| {
+        let person = unsafe { libc::geteuid() };
+        let socket = format!("/run/yantrik-mind/{person}/memory.sock");
+        std::path::Path::new(&socket).exists().then(|| format!("unix:{socket}"))
+    });
     let _ = HOST.set(host.clone());
 
     // The agent terminal's side of agents (design/agents-workspace-2026-09-23.md, decision 3):

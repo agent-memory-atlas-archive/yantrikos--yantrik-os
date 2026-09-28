@@ -569,6 +569,9 @@ struct MemoryPolicy {
     /// `(harness id, uid it attached with)` -> whether that mind holds any memory grant.
     granted: Arc<dyn Fn(&str, Option<u32>) -> bool + Send + Sync>,
     hash: Arc<dyn Fn(&str) -> String + Send + Sync>,
+    /// Where the person's memory server listens, as the harness should dial it, when the shell
+    /// knows; see [`Host::with_memory_url`].
+    url: Option<Arc<dyn Fn() -> Option<String> + Send + Sync>>,
 }
 
 impl Host {
@@ -603,7 +606,18 @@ impl Host {
         granted: impl Fn(&str, Option<u32>) -> bool + Send + Sync + 'static,
         hash: impl Fn(&str) -> String + Send + Sync + 'static,
     ) -> Host {
-        self.memory = Some(MemoryPolicy { granted: Arc::new(granted), hash: Arc::new(hash) });
+        self.memory = Some(MemoryPolicy { granted: Arc::new(granted), hash: Arc::new(hash), url: None });
+        self
+    }
+
+    /// Where a turn that carries a memory credential tells the harness to present it (#447): the
+    /// person's memory server as `url` answers at hand-over, `None` while there is none to dial. A
+    /// credential with nowhere to go is still handed over, so a harness can say why it has no
+    /// memory rather than finding nothing. Needs [`Host::with_memory`] first.
+    pub fn with_memory_url(mut self, url: impl Fn() -> Option<String> + Send + Sync + 'static) -> Host {
+        if let Some(policy) = self.memory.as_mut() {
+            policy.url = Some(Arc::new(url));
+        }
         self
     }
 
@@ -940,6 +954,7 @@ impl Host {
                 agent_token,
                 // Decided when the harness takes the turn, not now: see `poll`.
                 memory_credential: String::new(),
+                memory_url: String::new(),
             },
             tx,
         });
@@ -1558,6 +1573,14 @@ impl Host {
 
         let mut reply = match next.and_then(|i| harness.queued.remove(i)) {
             Some(Waiting { mut assignment, tx }) => {
+                if !memory_credential.is_empty() {
+                    assignment.memory_url = self
+                        .memory
+                        .as_ref()
+                        .and_then(|p| p.url.as_ref())
+                        .and_then(|url| url())
+                        .unwrap_or_default();
+                }
                 assignment.memory_credential = memory_credential;
                 // What the desktop has to tell this agent rides on the turn that reaches its mind,
                 // taken here rather than when the turn was queued, so a note that arrived while
@@ -2842,7 +2865,8 @@ mod tests {
         let hash = |s: &str| format!("{:0>64}", s.len().to_string() + &s[4..10]);
         let host = host_with_nothing()
             .with_liveness(|pid| pid == 4242)
-            .with_memory(|harness, _uid| harness == "hermes", hash);
+            .with_memory(|harness, _uid| harness == "hermes", hash)
+            .with_memory_url(|| Some("unix:/run/yantrik-mind/1000/memory.sock".to_string()));
         let hermes = host
             .handle_from(protocol::ATTACH, &json!({ "id": "hermes", "name": "Hermes" }), Some(4242), Some(1000))
             .unwrap()["session"]
@@ -2861,6 +2885,7 @@ mod tests {
         let credential = first["memory_credential"].as_str().expect("granted, so carried").to_string();
         assert!(credential.starts_with("mem-") && credential.len() == 68, "{credential}");
         assert_ne!(first["memory_credential"], first["agent_token"], "its own secret, not the token");
+        assert_eq!(first["memory_url"], "unix:/run/yantrik-mind/1000/memory.sock", "where to present it");
         host.handle_from(protocol::COMPLETE, &json!({ "session": hermes, "turn_id": first["turn_id"] }), Some(4242), Some(1000))
             .unwrap();
         let _h2 = host.send_to(&AgentId::new("hermes", AgentId::MAIN), Turn::new("two")).unwrap();
@@ -2872,6 +2897,7 @@ mod tests {
         let _p = host.send_to(&AgentId::new("pi", AgentId::MAIN), Turn::new("three")).unwrap();
         let turn = poll_from(&host, &pi, 4242, Some(1000)).unwrap();
         assert!(turn.get("memory_credential").is_none(), "no grant, no credential: {turn}");
+        assert!(turn.get("memory_url").is_none(), "and nowhere to take one: {turn}");
 
         // A host the shell gave no policy hands none to anyone.
         let bare = host_with_nothing().with_liveness(|pid| pid == 4242);

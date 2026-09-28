@@ -224,6 +224,12 @@ pub struct Assignment {
     /// desktop what it may do; like the token, never shown to the model and never logged.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub memory_credential: String,
+    /// Where to present `memory_credential` (#447): the person's memory server, as
+    /// `unix:/run/yantrik-mind/<uid>/memory.sock` (HTTP path `/mcp`), sent as
+    /// `Authorization: Bearer <credential>`. Only beside a credential, and absent while the
+    /// desktop knows of no server to dial. Not a secret, but never shown to the model either.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub memory_url: String,
 }
 
 /// What stands in for a secret when a struct holding one is printed: whether there is one, never
@@ -256,6 +262,7 @@ impl std::fmt::Debug for Assignment {
             .field("conversation", &self.conversation)
             .field("agent_token", &redacted(&self.agent_token))
             .field("memory_credential", &redacted(&self.memory_credential))
+            .field("memory_url", &self.memory_url)
             .finish()
     }
 }
@@ -317,6 +324,7 @@ mod tests {
             conversation: "main".into(),
             agent_token: token.into(),
             memory_credential: credential.clone(),
+            memory_url: "unix:/run/yantrik-mind/1000/memory.sock".into(),
         };
         let resume = Resume { conversation: "main".into(), agent_token: token.into(), turn_id: Some(7), prompt: "hi".into() };
         for printed in [format!("{turn:?}"), format!("{resume:?}"), format!("{:#?}", Attach {
