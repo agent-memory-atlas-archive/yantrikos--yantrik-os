@@ -10453,6 +10453,7 @@ dependencies = [
  "tracing",
  "tungstenite",
  "ureq 2.12.1",
+ "yantrik-ml",
 ]
 
 [[package]]

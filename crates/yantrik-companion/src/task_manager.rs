@@ -66,7 +66,7 @@ impl TaskManager {
     /// Spawn a command in the background.
     ///
     /// Returns the task_id on success. Stdout and stderr are redirected to
-    /// `/tmp/yantrik-task-{id}.out`.
+    /// `yantrik-task-{id}.out` in the private scratch dir (see `output_path`).
     pub fn spawn(
         &mut self,
         conn: &Connection,
@@ -91,7 +91,9 @@ impl TaskManager {
         self.next_id += 1;
 
         let output_path = Self::output_path(&task_id)?;
-        let log_file = std::fs::File::create(&output_path)
+        // Not a plain create: the file tools can write into scratch too, and a link or second
+        // hard link left at this predictable name must not be followed and emptied.
+        let log_file = yantrik_ml::private_dir::create_scratch(&Self::output_name(&task_id))
             .map_err(|e| format!("Failed to create output file: {e}"))?;
         let stderr_file = log_file
             .try_clone()
@@ -168,13 +170,14 @@ impl TaskManager {
     /// Get status of a specific task.
     pub fn get_status(&self, conn: &Connection, task_id: &str) -> Option<TaskInfo> {
         conn.query_row(
-            "SELECT task_id, command, label, pid, status, exit_code, started_at, finished_at, output_file
+            "SELECT task_id, command, label, pid, status, exit_code, started_at, finished_at
              FROM background_tasks WHERE task_id = ?1",
             [task_id],
             |row| {
-                let output_file: String = row.get(8)?;
+                let task_id: String = row.get(0)?;
                 Ok(TaskInfo {
-                    task_id: row.get(0)?,
+                    output_tail: Self::read_output(&task_id, 20),
+                    task_id,
                     command: row.get(1)?,
                     label: row.get(2)?,
                     pid: row.get(3)?,
@@ -182,7 +185,6 @@ impl TaskManager {
                     exit_code: row.get(5)?,
                     started_at: row.get(6)?,
                     finished_at: row.get(7)?,
-                    output_tail: Self::read_output_from_path(&output_file, 20),
                 })
             },
         )
@@ -193,12 +195,12 @@ impl TaskManager {
     pub fn list(&self, conn: &Connection, status_filter: Option<&str>) -> Vec<TaskInfo> {
         let (sql, params): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = match status_filter {
             Some(s) => (
-                "SELECT task_id, command, label, pid, status, exit_code, started_at, finished_at, output_file
+                "SELECT task_id, command, label, pid, status, exit_code, started_at, finished_at
                  FROM background_tasks WHERE status = ?1 ORDER BY started_at DESC LIMIT 20",
                 vec![Box::new(s.to_string()) as Box<dyn rusqlite::types::ToSql>],
             ),
             None => (
-                "SELECT task_id, command, label, pid, status, exit_code, started_at, finished_at, output_file
+                "SELECT task_id, command, label, pid, status, exit_code, started_at, finished_at
                  FROM background_tasks ORDER BY started_at DESC LIMIT 20",
                 vec![],
             ),
@@ -213,9 +215,10 @@ impl TaskManager {
             params.iter().map(|p| p.as_ref()).collect();
 
         stmt.query_map(param_refs.as_slice(), |row| {
-            let output_file: String = row.get(8)?;
+            let task_id: String = row.get(0)?;
             Ok(TaskInfo {
-                task_id: row.get(0)?,
+                output_tail: Self::read_output(&task_id, 5),
+                task_id,
                 command: row.get(1)?,
                 label: row.get(2)?,
                 pid: row.get(3)?,
@@ -223,7 +226,6 @@ impl TaskManager {
                 exit_code: row.get(5)?,
                 started_at: row.get(6)?,
                 finished_at: row.get(7)?,
-                output_tail: Self::read_output_from_path(&output_file, 5),
             })
         })
         .ok()
@@ -286,9 +288,16 @@ impl TaskManager {
     /// the agent to read back as the result of a command it ran. The private scratch dir is ours
     /// alone. The id is also refused if it is not a plain name, since `read_output` takes it from
     /// the model's tool call. A string, because it is stored in the tasks table as one.
+    ///
+    /// The path is always worked out from the id, never read back from the tasks table: rows
+    /// written before this change point into /tmp, where the file at that name may now be anyone's.
     fn output_path(task_id: &str) -> Result<String, String> {
-        yantrik_ml::private_dir::scratch_file_string(&format!("yantrik-task-{task_id}.out"))
+        yantrik_ml::private_dir::scratch_file_string(&Self::output_name(task_id))
             .map_err(|e| format!("No private directory for task output: {e}"))
+    }
+
+    fn output_name(task_id: &str) -> String {
+        format!("yantrik-task-{task_id}.out")
     }
 
     fn read_output_from_path(path: &str, tail_lines: usize) -> String {

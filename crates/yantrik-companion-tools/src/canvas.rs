@@ -2,7 +2,7 @@
 //!
 //! Uses LLM to generate DOT source, renders via `dot` command to PNG.
 
-use super::{Tool, ToolContext, ToolRegistry, PermissionLevel, scratch_arg as scratch};
+use super::{Tool, ToolContext, ToolRegistry, PermissionLevel, scratch_target, write_scratch};
 
 /// Register canvas tools.
 pub fn register(reg: &mut ToolRegistry, ollama_base: &str, model: &str) {
@@ -37,9 +37,7 @@ Rules:
         "stream": false
     });
 
-    let payload_path = scratch("yantrik-canvas-payload.json")?;
-    std::fs::write(&payload_path, payload.to_string())
-        .map_err(|e| format!("Failed to write payload: {e}"))?;
+    let payload_path = write_scratch("yantrik-canvas-payload.json", payload.to_string().as_bytes())?;
 
     let url = format!("{}/api/chat", ollama_base);
 
@@ -83,11 +81,9 @@ fn render_dot(dot_source: &str) -> Result<String, String> {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    let out_path = scratch(&format!("yantrik-diagram-{ts}.png"))?;
-    let dot_path = scratch(&format!("yantrik-diagram-{ts}.dot"))?;
-
-    std::fs::write(&dot_path, dot_source)
-        .map_err(|e| format!("Failed to write DOT file: {e}"))?;
+    // dot writes the PNG itself, so its name is cleared first; the source we write ourselves.
+    let out_path = scratch_target(&format!("yantrik-diagram-{ts}.png"))?;
+    let dot_path = write_scratch(&format!("yantrik-diagram-{ts}.dot"), dot_source.as_bytes())?;
 
     let output = std::process::Command::new("dot")
         .args(["-Tpng", "-Gdpi=150", "-o", &out_path, &dot_path])
@@ -223,13 +219,10 @@ impl Tool for EditDiagramTool {
             "stream": false
         });
 
-        let payload_path = match scratch("yantrik-canvas-edit-payload.json") {
+        let payload_path = match write_scratch("yantrik-canvas-edit-payload.json", payload.to_string().as_bytes()) {
             Ok(p) => p,
             Err(e) => return format!("Failed to write payload: {e}"),
         };
-        if let Err(e) = std::fs::write(&payload_path, payload.to_string()) {
-            return format!("Failed to write payload: {e}");
-        }
 
         let url = format!("{}/api/chat", self.ollama_base);
 

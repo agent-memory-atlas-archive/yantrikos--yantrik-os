@@ -3,7 +3,7 @@
 //! Uses Ollama's native `/api/chat` endpoint with multimodal `images` field.
 //! Screenshots captured via `grim` (Wayland).
 
-use super::{Tool, ToolContext, ToolRegistry, PermissionLevel, scratch_arg as scratch};
+use super::{Tool, ToolContext, ToolRegistry, PermissionLevel, scratch_target, write_scratch};
 
 /// Register vision tools with the Ollama base URL (e.g. "http://192.168.4.35:11434").
 pub fn register(reg: &mut ToolRegistry, ollama_base: &str, model: &str) {
@@ -16,7 +16,8 @@ pub fn register(reg: &mut ToolRegistry, ollama_base: &str, model: &str) {
 
 /// Capture a screenshot via grim (Wayland) and return the file path.
 fn capture_screenshot() -> Result<String, String> {
-    let path = scratch("yantrik-vision-screenshot.png")?;
+    // grim writes the file itself, so the name is cleared first rather than guarded on open.
+    let path = scratch_target("yantrik-vision-screenshot.png")?;
     let output = std::process::Command::new("grim")
         .args(["-t", "png", &path])
         .output()
@@ -60,9 +61,7 @@ fn vision_request(ollama_base: &str, model: &str, prompt: &str, image_path: &str
     });
 
     // Write payload to temp file (base64 images can be huge)
-    let payload_path = scratch("yantrik-vision-payload.json")?;
-    std::fs::write(&payload_path, payload.to_string())
-        .map_err(|e| format!("Failed to write payload: {e}"))?;
+    let payload_path = write_scratch("yantrik-vision-payload.json", payload.to_string().as_bytes())?;
 
     let url = format!("{}/api/chat", ollama_base);
 

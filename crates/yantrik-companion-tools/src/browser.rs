@@ -1037,15 +1037,9 @@ impl Tool for BrowserScreenshotTool {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let path = match yantrik_ml::private_dir::scratch_file(&format!("yantrik-screenshot-{ts}.png")) {
-            Ok(p) => p,
-            Err(e) => return format!("Error saving screenshot: {e}"),
-        };
-
-        match std::fs::write(&path, &bytes) {
-            Ok(_) => format!(
-                "Screenshot saved: {} ({} bytes)\nPage: {} — {}",
-                path.display(),
+        match crate::write_scratch(&format!("yantrik-screenshot-{ts}.png"), &bytes) {
+            Ok(path) => format!(
+                "Screenshot saved: {path} ({} bytes)\nPage: {} — {}",
                 bytes.len(),
                 tab.title,
                 tab.url,
@@ -2014,11 +2008,8 @@ impl Tool for BrowserSeeTool {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        if let (Ok(img_path), Ok(bytes)) = (
-            yantrik_ml::private_dir::scratch_file(&format!("yantrik-see-{ts}.png")),
-            base64_decode(b64_data),
-        ) {
-            let _ = std::fs::write(&img_path, &bytes);
+        if let Ok(bytes) = base64_decode(b64_data) {
+            let _ = crate::write_scratch(&format!("yantrik-see-{ts}.png"), &bytes);
         }
 
         // Append viewport size so coordinates are grounded
@@ -2038,13 +2029,10 @@ impl Tool for BrowserSeeTool {
         });
 
         // curl reads the body from this file, so it must be one nobody else can swap or read.
-        let payload_path = match yantrik_ml::private_dir::scratch_file("yantrik-see-payload.json") {
+        let payload_path = match crate::write_scratch("yantrik-see-payload.json", payload.to_string().as_bytes()) {
             Ok(p) => p,
             Err(e) => return format!("Error writing payload: {e}"),
         };
-        if let Err(e) = std::fs::write(&payload_path, payload.to_string()) {
-            return format!("Error writing payload: {e}");
-        }
 
         let url = format!("{}/api/chat", self.ollama_base);
         let output = match std::process::Command::new("curl")
@@ -2052,7 +2040,7 @@ impl Tool for BrowserSeeTool {
                 "-fsSL",
                 "--max-time", "120",
                 "-H", "Content-Type: application/json",
-                "-d", &format!("@{}", payload_path.display()),
+                "-d", &format!("@{payload_path}"),
                 &url,
             ])
             .output()

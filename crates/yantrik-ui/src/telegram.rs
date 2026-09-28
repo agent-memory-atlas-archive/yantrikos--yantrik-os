@@ -534,9 +534,10 @@ fn handle_voice_message(
 }
 
 /// A voice file's place in our private scratch dir, as the `&str` the telegram and audio helpers
-/// take.
+/// take. curl and ffmpeg write these, not us, so whatever was at the name (a link left there
+/// through the file tools, say) is removed first rather than followed.
 fn scratch_path(name: &str) -> Result<String, String> {
-    yantrik_ml::private_dir::scratch_file_string(name).map_err(|e| e.to_string())
+    yantrik_ml::private_dir::scratch_target(name).map_err(|e| e.to_string())
 }
 
 /// Lazily load Whisper STT engine (loaded once on first voice message).

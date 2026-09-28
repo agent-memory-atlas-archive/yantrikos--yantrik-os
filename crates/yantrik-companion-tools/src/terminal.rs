@@ -15,8 +15,9 @@ pub fn register(reg: &mut ToolRegistry) {
 /// read by this tool and by `terminal_analysis`, so both look in the same place.
 ///
 /// The writers are the foot `pipe-scrollback` binding and the labwc Super+E binding that
-/// deploy-stack.sh installs; they resolve the same directory in shell (`$XDG_RUNTIME_DIR/yantrik`
-/// when the runtime dir exists, else `~/.cache/yantrik/tmp`), so change both together. It used to
+/// deploy-stack.sh installs; they resolve the same directory in shell
+/// (`$XDG_RUNTIME_DIR/yantrik-scratch` when the runtime dir exists, else `~/.cache/yantrik/tmp`),
+/// so change both together. It used to
 /// be a fixed name in `/tmp`, where anyone could have left a "fresh" dump for us to read as the
 /// person's terminal — and then act on the errors it claimed.
 pub(crate) fn read_scrollback(max_age_secs: u64) -> Option<String> {

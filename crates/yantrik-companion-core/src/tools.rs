@@ -470,6 +470,11 @@ pub fn validate_path(path: &str) -> Result<String, String> {
 /// Not the shared /tmp: anything another account left there, at a name it chose, is text the
 /// model would read as the person's. And not an empty or relative HOME, which as a string prefix
 /// matched every path there is.
+///
+/// Each root is listed as written and as resolved. The path as the model wrote it is checked
+/// before resolution and the canonical path after, and each must meet its own kind: a HOME that
+/// is a link (/home/ann -> /data/ann) would otherwise refuse every file really inside it, because
+/// its canonical paths start /data/ann.
 fn allowed_roots() -> Vec<std::path::PathBuf> {
     let mut roots = Vec::new();
     if let Ok(home) = std::env::var("HOME") {
@@ -481,7 +486,24 @@ fn allowed_roots() -> Vec<std::path::PathBuf> {
     if let Ok(scratch) = yantrik_ml::private_dir::scratch_dir() {
         roots.push(scratch);
     }
-    roots
+    with_canonical(roots)
+}
+
+/// `roots` plus the canonical form of each that resolves somewhere else. A root that resolves
+/// to `/` is dropped in both spellings: it would admit every path there is.
+fn with_canonical(roots: Vec<std::path::PathBuf>) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    for root in roots {
+        let canon = root.canonicalize().ok();
+        if canon.as_deref() == Some(std::path::Path::new("/")) {
+            continue;
+        }
+        if let Some(canon) = canon.filter(|c| *c != root) {
+            out.push(canon);
+        }
+        out.push(root);
+    }
+    out
 }
 
 /// Whether `path` is one of `roots` or inside one, compared a component at a time, so
@@ -780,15 +802,16 @@ mod audit_tests {
 
 #[cfg(test)]
 mod path_root_tests {
-    use super::under_any;
+    use super::{under_any, with_canonical};
     use std::path::PathBuf;
 
     #[test]
     fn a_root_admits_itself_and_what_is_inside_it_only() {
-        let roots = [PathBuf::from("/home/ann"), PathBuf::from("/run/user/1000/yantrik")];
+        let roots = [PathBuf::from("/home/ann"), PathBuf::from("/run/user/1000/yantrik-scratch")];
         assert!(under_any("/home/ann", &roots));
         assert!(under_any("/home/ann/notes.txt", &roots));
-        assert!(under_any("/run/user/1000/yantrik/diagram.png", &roots));
+        assert!(under_any("/run/user/1000/yantrik-scratch/diagram.png", &roots));
+        assert!(!under_any("/run/user/1000/yantrik/companion.sock", &roots), "the socket dir is not scratch");
         assert!(!under_any("/home/anne/notes.txt", &roots), "a name that starts the same is not inside");
         assert!(!under_any("/tmp/planted.txt", &roots), "the shared /tmp is not ours");
         assert!(!under_any("/etc/shadow", &roots));
@@ -799,5 +822,40 @@ mod path_root_tests {
         // An unset or empty HOME used to be the empty prefix, which every path starts with.
         assert!(!under_any("/etc/shadow", &[]));
         assert!(!under_any("/", &[]));
+    }
+
+    #[cfg(unix)]
+    fn scratch_base(tag: &str) -> PathBuf {
+        let base = std::env::temp_dir().join(format!("yantrik-roots-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        base
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_root_that_is_a_link_admits_what_is_really_inside_it() {
+        let base = scratch_base("link");
+        let real = base.join("data-ann");
+        std::fs::create_dir(&real).unwrap();
+        let home = base.join("home-ann");
+        std::os::unix::fs::symlink(&real, &home).unwrap();
+        let roots = with_canonical(vec![home.clone()]);
+        // The resolved path, as validate_path checks it after canonicalizing.
+        let resolved = real.canonicalize().unwrap().join("notes.txt");
+        assert!(under_any(resolved.to_str().unwrap(), &roots));
+        // And the path as written, as it is checked before.
+        assert!(under_any(home.join("notes.txt").to_str().unwrap(), &roots));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_root_that_resolves_to_slash_is_dropped() {
+        let base = scratch_base("slash");
+        let home = base.join("home");
+        std::os::unix::fs::symlink("/", &home).unwrap();
+        assert!(with_canonical(vec![home]).is_empty());
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

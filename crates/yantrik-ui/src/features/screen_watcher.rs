@@ -93,7 +93,8 @@ impl ProactiveFeature for ScreenWatcher {
 fn quick_screen_check() -> Option<String> {
     // Capture screenshot — into our private scratch dir, since it is the whole screen and a fixed
     // name in /tmp is readable by, and can be pre-planted by, every other account.
-    let path = yantrik_ml::private_dir::scratch_file("yantrik-screen-check.png").ok()?;
+    // grim writes it, not us, so the name is cleared first rather than guarded on open.
+    let path = yantrik_ml::private_dir::scratch_target("yantrik-screen-check.png").ok()?;
     let output = std::process::Command::new("grim")
         .args(["-t", "png"])
         .arg(&path)

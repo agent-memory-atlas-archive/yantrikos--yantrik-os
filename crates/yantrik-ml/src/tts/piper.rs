@@ -293,7 +293,8 @@ fn split_sentences(text: &str) -> Vec<String> {
 fn write_wav_from_raw(path: &str, raw: &[u8], sample_rate: u32) -> Result<()> {
     use std::io::Write;
     let data_size = raw.len() as u32;
-    let mut f = std::fs::File::create(path)?;
+    // Only ever a scratch file: never written through a link or second name left there.
+    let mut f = crate::private_dir::create_private_file(std::path::Path::new(path))?;
     f.write_all(b"RIFF")?;
     f.write_all(&(36 + data_size).to_le_bytes())?;
     f.write_all(b"WAVEfmt ")?;

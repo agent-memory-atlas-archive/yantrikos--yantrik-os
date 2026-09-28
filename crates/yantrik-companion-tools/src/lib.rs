@@ -63,13 +63,21 @@ pub mod workspace;
 
 use yantrik_companion_core::tools::ToolRegistry;
 
-/// A file in our private scratch dir (`yantrik_ml::private_dir`), as the string that curl, dot,
-/// grim and base64 take on their command lines.
-///
-/// Why not `/tmp`: the payloads carry page text and whole screenshots, and a fixed name in a
-/// shared `/tmp` is one any other account can pre-plant as a symlink before we write to it.
-pub(crate) fn scratch_arg(name: &str) -> Result<String, String> {
-    yantrik_ml::private_dir::scratch_file_string(name).map_err(|e| format!("No private scratch directory: {e}"))
+// Scratch files for the tools, in our private scratch dir (`yantrik_ml::private_dir`), as the
+// strings curl, dot, grim and base64 take on their command lines. Not `/tmp`: the payloads carry
+// page text and whole screenshots, and a fixed name in a shared `/tmp` is one any other account
+// can pre-plant as a symlink before we write to it.
+
+/// Write a scratch file ourselves — never through a link or second name left at `name`, since
+/// the file tools can write into scratch too — and return its path for the command line.
+pub(crate) fn write_scratch(name: &str, contents: &[u8]) -> Result<String, String> {
+    yantrik_ml::private_dir::write_scratch(name, contents).map_err(|e| format!("Failed to write {name}: {e}"))
+}
+
+/// A scratch path for an external program (grim, dot) to write, with whatever was at the name
+/// removed first: we cannot give another program's `open` an `O_NOFOLLOW`.
+pub(crate) fn scratch_target(name: &str) -> Result<String, String> {
+    yantrik_ml::private_dir::scratch_target(name).map_err(|e| format!("No private scratch directory: {e}"))
 }
 
 /// Register all pure tools into the given registry.

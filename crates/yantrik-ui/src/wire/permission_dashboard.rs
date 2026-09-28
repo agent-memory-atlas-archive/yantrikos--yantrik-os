@@ -925,9 +925,15 @@ pub fn wire(ui: &crate::App, ctx: &crate::app_context::AppContext) {
                 // /tmp — a list of this machine's weakly-permissioned files, readable by every
                 // account, and a name any of them could pre-plant as a link for us to write
                 // through. It is kept (state, not scratch) so it is still there to read later.
+                // Under home, so the file tools can reach it: opened without following a link or
+                // emptying a file that has another name.
                 let written = yantrik_ml::private_dir::state_dir("reports")
                     .map(|dir| dir.join("yantrik_permission_report.txt"))
-                    .and_then(|path| std::fs::write(&path, &report).map(|()| path));
+                    .and_then(|path| {
+                        use std::io::Write;
+                        yantrik_ml::private_dir::create_private_file(&path)?.write_all(report.as_bytes())?;
+                        Ok(path)
+                    });
                 match written {
                     Ok(report_path) => {
                         if let Ok(mut s) = st.lock() {

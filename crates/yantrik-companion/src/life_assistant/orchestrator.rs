@@ -1134,17 +1134,14 @@ Page text:
 
     // curl reads the body from this file. It carries the page text, so it goes in our private
     // scratch dir, not at a fixed name in /tmp that another account could read or pre-plant.
-    let payload_path = match yantrik_ml::private_dir::scratch_file("yantrik-extract-payload.json") {
+    // (`write_scratch` also refuses a link or second hard link left at the name.)
+    let payload_path = match yantrik_ml::private_dir::write_scratch("yantrik-extract-payload.json", payload.to_string().as_bytes()) {
         Ok(p) => p,
         Err(e) => {
-            tracing::warn!("No private dir for LLM payload: {e}, falling back to heuristic");
+            tracing::warn!("Failed to write LLM payload: {e}, falling back to heuristic");
             return extract_from_text(page_text, fields, source, max);
         }
     };
-    if let Err(e) = std::fs::write(&payload_path, payload.to_string()) {
-        tracing::warn!("Failed to write LLM payload: {e}, falling back to heuristic");
-        return extract_from_text(page_text, fields, source, max);
-    }
 
     let url = format!("{}/api/chat", ollama_base);
     let output = match std::process::Command::new("curl")
@@ -1152,7 +1149,7 @@ Page text:
             "-fsSL",
             "--max-time", "60",
             "-H", "Content-Type: application/json",
-            "-d", &format!("@{}", payload_path.display()),
+            "-d", &format!("@{payload_path}"),
             &url,
         ])
         .output()
