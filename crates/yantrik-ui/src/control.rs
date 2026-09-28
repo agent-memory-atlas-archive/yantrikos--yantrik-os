@@ -1245,6 +1245,44 @@ pub fn publish(
             },
         )
         .action(
+            // The memory server's question (#447): a mind has shown it a credential, and before
+            // anything is recalled or kept the server asks the desktop, the identity authority,
+            // whose it is and what it may do. Answered to the person's mind account alone (the
+            // account that serves the memory): asked by anyone else it would be a way to test
+            // whether a stolen credential is still good.
+            Action::new(
+                "memory_validate",
+                "Asked by the person's memory server: which mind a memory credential belongs to and \
+                 what it may do, or null for one the desktop does not know",
+            )
+            .risk("safe")
+            .arg(Param::text("memory_sha256").describe(
+                "The SHA-256 of what the mind presented, as lowercase hex: never the thing itself",
+            )),
+            move |args| {
+                let asker = yantrik_app_runtime::control::caller();
+                if !asker.is_some_and(|c| yantrik_ipc_transport::mind_door::is_mind(c.uid)) {
+                    return Err("only the person's memory server asks this".into());
+                }
+                let digest = args["memory_sha256"].as_str().unwrap_or_default();
+                let Some(host) = crate::wire::harness::host() else { return Ok(serde_json::Value::Null) };
+                let Some((agent, pid)) = host.memory_credential_holder_by_digest(
+                    digest,
+                    yantrik_ipc_transport::reach::token_digest,
+                ) else {
+                    return Ok(serde_json::Value::Null);
+                };
+                let mind = agent.harness();
+                let grants = crate::memory_grants::load()
+                    .grants_for(mind, crate::memory_grants::is_first_party(pid));
+                if !grants.any() {
+                    return Ok(serde_json::Value::Null);
+                }
+                let person = unsafe { libc::geteuid() };
+                Ok(crate::memory_grants::answer(person, mind, &agent.to_string(), &grants))
+            },
+        )
+        .action(
             Action::new("use_harness", "Choose which mind answers when the shell is asked something")
                 .risk("sensitive")
                 .arg(Param::text("id").describe("Harness id, as `describe shell` lists under `minds`")),
