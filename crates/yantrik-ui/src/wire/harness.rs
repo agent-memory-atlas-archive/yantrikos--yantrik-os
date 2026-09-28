@@ -131,12 +131,12 @@ pub fn wire(ui: &App, ctx: &AppContext) {
     // A mind the person has granted some use of their memory carries its credential with every
     // turn (#447); one with none carries nothing. Judged as `memory_validate` judges it: the
     // person's grants, with the first-party defaults only for the account that attached as the
-    // mind account. A grants file that cannot be trusted hands nobody anything.
+    // mind account. A grants file that cannot be trusted hands nobody anything. The host asks
+    // this outside its own lock, when a harness takes a turn.
     let host = host.with_memory(
         |harness, uid| {
-            crate::memory_grants::load().is_some_and(|store| {
-                store.grants_for(harness, uid.is_some_and(yantrik_ipc_transport::mind_door::is_mind)).any()
-            })
+            let store = crate::memory_grants::load();
+            crate::memory_grants::carries_memory(store.as_ref(), harness, uid, yantrik_ipc_transport::mind_door::is_mind)
         },
         yantrik_ipc_transport::reach::token_digest,
     );

@@ -33,6 +33,9 @@
 //!
 //! # What the host enforces
 //!
+//! - **A session answers only whoever attached it**: the same account, and the same process or
+//!   one it started, as the kernel says them. Its id (`s<n>-<random>`) is not a secret it rests
+//!   on; a session attached where the kernel named nobody (the TCP dev path) is held to nothing.
 //! - **One turn at a time per conversation**, first in first out. The next turn for an agent waits
 //!   until the one in flight is completed or failed; different agents run at once. `/stop` alone
 //!   does not wait, because it is how a person interrupts the one that is running.
@@ -218,8 +221,8 @@ struct MemoryCredential {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryHolder {
     pub agent: AgentId,
-    /// The attach it was minted under (`s<n>`): a harness that restarts attaches again, so this
-    /// tells two lives of the same mind apart in an audit.
+    /// The attach it was minted under (`s<n>-<random>`): a harness that restarts attaches again,
+    /// so this tells two lives of the same mind apart in an audit.
     pub session: String,
     /// The process that attached, and the account it ran as, both as the kernel said at accept
     /// (`SO_PEERCRED`). Read then and kept, never looked up again later: by the time a question
@@ -296,7 +299,42 @@ struct Attached {
     answers: Vec<serde_json::Value>,
 }
 
+/// Who is on the other end of a call, as the kernel said at accept (`SO_PEERCRED`). Both `None`
+/// when the transport could not say (the TCP dev path) or the caller did not pass them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Peer {
+    pid: Option<u32>,
+    uid: Option<u32>,
+}
+
 impl Attached {
+    /// Whether a call on this session comes from whoever attached it.
+    ///
+    /// A session id is only a name the harness repeats. Believed on its own, any process of the
+    /// person's could poll another harness's session (the Mind's, say) and be handed its turns,
+    /// which are the person's messages, answer them in its name, and take the memory credential
+    /// that rides on them. So the kernel's word at attach is held against the kernel's word now:
+    /// the same account, and the same process or one it started (a harness may poll from a
+    /// worker). What the attach did not record is not asked for, which keeps the TCP dev path,
+    /// where the kernel names nobody, working as it did.
+    fn admits(&self, peer: Peer, descends: &(dyn Fn(u32, u32) -> bool + Send + Sync)) -> Result<(), String> {
+        if let Some(uid) = self.uid {
+            if peer.uid != Some(uid) {
+                return Err("this session was attached by another account; attach again".into());
+            }
+        }
+        if let Some(pid) = self.pid {
+            if !peer.pid.is_some_and(|caller| caller == pid || descends(caller, pid)) {
+                return Err(
+                    "this session was attached by another process, and answers only that process \
+                     and the ones it started; attach again"
+                        .into(),
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Whether this session still stands for a mind that can poll.
     ///
     /// The grace of missed polls is for a harness that hiccuped — a slow turn or a blip must not
@@ -358,6 +396,52 @@ fn pid_alive(pid: u32) -> bool {
 #[cfg(not(target_os = "linux"))]
 fn pid_alive(_pid: u32) -> bool {
     true
+}
+
+/// How far up the process tree [`pid_descends`] walks before it gives up. A harness's worker is a
+/// few generations below it, never hundreds.
+const ANCESTRY_BOUND: usize = 64;
+
+/// Whether `pid` runs under `ancestor`: the default descent probe every [`Host`] carries,
+/// replaceable per-host by [`Host::with_descent`] for tests that invent process trees.
+///
+/// Walks the parent chain in `/proc/<pid>/stat` up to `ancestor`, pid 1 or [`ANCESTRY_BOUND`]
+/// steps, whichever comes first. A read that fails ends the walk with `false`: a process that
+/// cannot be traced to the harness is not the harness's. Anywhere without `/proc` nothing
+/// descends, and only the attaching process itself is admitted.
+#[cfg(target_os = "linux")]
+fn pid_descends(pid: u32, ancestor: u32) -> bool {
+    let mut at = pid;
+    for _ in 0..ANCESTRY_BOUND {
+        if at == ancestor {
+            return true;
+        }
+        if at <= 1 {
+            return false;
+        }
+        let Some(parent) = std::fs::read_to_string(format!("/proc/{at}/stat")).ok().and_then(|s| parent_in_stat(&s))
+        else {
+            return false;
+        };
+        if parent == at {
+            return false;
+        }
+        at = parent;
+    }
+    false
+}
+
+#[cfg(not(target_os = "linux"))]
+fn pid_descends(_pid: u32, _ancestor: u32) -> bool {
+    false
+}
+
+/// The parent pid in a `/proc/<pid>/stat` line: the second field after the command, which is in
+/// parentheses and may itself hold spaces and parentheses, so it is found from the last `)`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn parent_in_stat(stat: &str) -> Option<u32> {
+    let after = &stat[stat.rfind(')')? + 1..];
+    after.split_whitespace().nth(1)?.parse().ok()
 }
 
 /// One row of the picker.
@@ -467,6 +551,9 @@ pub struct Host {
     /// Asks whether the process that attached still runs — the kernel's `pid_alive` by default,
     /// unless a test injected its own with [`Host::with_liveness`].
     liveness: Arc<dyn Fn(u32) -> bool + Send + Sync>,
+    /// Asks whether a caller's process runs under the one that attached a session:
+    /// `pid_descends` by default, unless a test injected its own with [`Host::with_descent`].
+    descends: Arc<dyn Fn(u32, u32) -> bool + Send + Sync>,
     /// Where each turn is kept as a run (#25), when the shell gave the host somewhere to keep
     /// them: see [`Host::with_runs`].
     runs: Option<Arc<RunStore>>,
@@ -502,6 +589,7 @@ impl Host {
                 resumed: Vec::new(),
             })),
             liveness: Arc::new(pid_alive),
+            descends: Arc::new(pid_descends),
             runs: None,
             memory: None,
         }
@@ -636,6 +724,14 @@ impl Host {
     /// takes the default and never comes through here.
     pub fn with_liveness(mut self, probe: impl Fn(u32) -> bool + Send + Sync + 'static) -> Host {
         self.liveness = Arc::new(probe);
+        self
+    }
+
+    /// The same host, asking `probe(caller, attacher)` whether a caller's process runs under the
+    /// one that attached a session, instead of walking `/proc`. For tests that invent process
+    /// trees; production takes the default and never comes through here.
+    pub fn with_descent(mut self, probe: impl Fn(u32, u32) -> bool + Send + Sync + 'static) -> Host {
+        self.descends = Arc::new(probe);
         self
     }
 
@@ -828,16 +924,9 @@ impl Host {
             }
             harness.agents.insert(conversation.clone(), Agent::new(mint_token()?));
         }
-        let carries_memory = self.memory.as_ref().is_some_and(|p| (p.granted)(harness_id, harness.uid));
         let live = harness.agents.get_mut(&conversation).expect("present or just made");
         live.turns += 1;
         let agent_token = live.token.clone();
-        // A mind with any memory grant gets its credential with every turn, the same one while
-        // the agent lives; one with none gets nothing, and the memory server would refuse it.
-        let memory_credential = match (&self.memory, carries_memory) {
-            (Some(policy), true) => ensure_memory_credential(live, |s| (policy.hash)(s))?,
-            _ => String::new(),
-        };
 
         let turn_id = st.next_turn;
         st.next_turn += 1;
@@ -849,7 +938,8 @@ impl Host {
                 context: turn.context,
                 conversation,
                 agent_token,
-                memory_credential,
+                // Decided when the harness takes the turn, not now: see `poll`.
+                memory_credential: String::new(),
             },
             tx,
         });
@@ -1146,10 +1236,11 @@ impl Host {
     /// The same, told which process is on the other end of the socket and which account it runs
     /// as, as the kernel says them.
     ///
-    /// Only `attach` uses them: the pid of the harness process is recorded then, so that a caller
-    /// later presenting one of its agents' tokens can be checked against it, and the uid beside
-    /// it, so that whether it is the person's own mind account is decided from what the kernel
-    /// said at accept (#447).
+    /// `attach` records them: the pid of the harness process, so that a caller later presenting
+    /// one of its agents' tokens can be checked against it, and the uid beside it, so that
+    /// whether it is the person's own mind account is decided from what the kernel said at
+    /// accept (#447). Every call on the session after that is held to them: only the account
+    /// that attached, from the process that attached or one it started, is answered.
     pub fn handle_from(
         &self,
         method: &str,
@@ -1157,17 +1248,18 @@ impl Host {
         peer_pid: Option<u32>,
         peer_uid: Option<u32>,
     ) -> Result<serde_json::Value, String> {
+        let peer = Peer { pid: peer_pid, uid: peer_uid };
         match method {
             protocol::ATTACH => self.attach(params, peer_pid, peer_uid),
-            protocol::POLL => self.poll(params),
-            protocol::CHUNK => self.chunk(params),
-            protocol::EVENT => self.event(params),
-            protocol::COMPLETE => self.finish(params, None),
+            protocol::POLL => self.poll(params, peer),
+            protocol::CHUNK => self.chunk(params, peer),
+            protocol::EVENT => self.event(params, peer),
+            protocol::COMPLETE => self.finish(params, peer, None),
             protocol::FAIL => {
                 let why = params["error"].as_str().unwrap_or("the harness reported a failure");
-                self.finish(params, Some(why.to_string()))
+                self.finish(params, peer, Some(why.to_string()))
             }
-            protocol::DETACH => self.detach(params),
+            protocol::DETACH => self.detach(params, peer),
             other => Err(format!(
                 "unknown method `{other}`; this service speaks: {}",
                 protocol::METHODS.join(", ")
@@ -1204,9 +1296,13 @@ impl Host {
             ));
         }
 
+        // The counter keeps ids ordered for a reader of the log; the random part is so that one
+        // session's id says nothing about another's. A session answers only whoever attached it
+        // (`Attached::admits`), so this is the second wall, not the only one.
+        let salt = random_hex(SESSION_RANDOM_BYTES)?;
         let mut state = self.lock();
         self.reap(&mut state);
-        let session = format!("s{}", state.next_session);
+        let session = format!("s{}-{salt}", state.next_session);
         state.next_session += 1;
 
         // Re-attaching under an existing id replaces it, which is what a harness that restarted
@@ -1365,10 +1461,14 @@ impl Host {
         std::mem::take(&mut self.lock().resumed)
     }
 
-    /// Find the harness holding this session, refreshing its presence.
+    /// Find the harness holding this session, if `peer` is whoever attached it (see
+    /// [`Attached::admits`]), refreshing its presence. A caller that is refused refreshes
+    /// nothing: it cannot keep a session alive that it does not hold.
     fn touch<'a>(
         attached: &'a mut HashMap<String, Attached>,
         params: &serde_json::Value,
+        peer: Peer,
+        descends: &(dyn Fn(u32, u32) -> bool + Send + Sync),
     ) -> Result<&'a mut Attached, String> {
         let session = params["session"].as_str().unwrap_or_default().to_string();
         if session.is_empty() {
@@ -1376,10 +1476,26 @@ impl Host {
         }
         let harness = attached
             .values_mut()
-            .find(|a| a.session == session)
+            .find(|a| same_secret(&a.session, &session))
             .ok_or_else(|| "this session is not attached any more; call harness.attach again".to_string())?;
+        harness.admits(peer, descends)?;
         harness.last_seen = Instant::now();
         Ok(harness)
+    }
+
+    /// The turn the next poll of `harness` hands over, by its place in the queue: the oldest
+    /// whose conversation has nothing in flight, or a `/stop`, which skips the line.
+    fn next_waiting(harness: &Attached) -> Option<usize> {
+        let busy: HashSet<&str> = harness
+            .in_flight
+            .values()
+            .filter(|f| f.holds_conversation())
+            .map(|f| f.conversation.as_str())
+            .collect();
+        harness
+            .queued
+            .iter()
+            .position(|w| !busy.contains(w.assignment.conversation.as_str()) || interrupts(&w.assignment.text))
     }
 
     /// Hand over a turn if one is waiting, and say what the desktop has stopped waiting for.
@@ -1389,24 +1505,60 @@ impl Host {
     ///
     /// The turn is the oldest one whose conversation has nothing in flight — first in, first out,
     /// one at a time per conversation. `/stop` alone skips the line.
-    fn poll(&self, params: &serde_json::Value) -> Result<serde_json::Value, String> {
+    ///
+    /// Whether the turn carries a memory credential (#447) is decided here too, when the harness
+    /// takes it, not when it was queued: a grant given or taken away while the turn waited is
+    /// the one that counts, and the turn goes only to a caller [`Attached::admits`].
+    fn poll(&self, params: &serde_json::Value, peer: Peer) -> Result<serde_json::Value, String> {
+        // The person's grants are the shell's to read, from a file, so they are asked outside the
+        // host's lock: every harness and the whole UI wait on that lock. Asked only when a turn is
+        // ready to go, and of the mind as it attached (its id and the account the kernel named).
+        let carries_memory = match &self.memory {
+            None => None,
+            Some(policy) => {
+                let asking = {
+                    let mut state = self.lock();
+                    self.reap(&mut state);
+                    let harness = Self::touch(&mut state.attached, params, peer, &*self.descends)?;
+                    Self::next_waiting(harness).map(|_| (harness.announced.id.clone(), harness.uid))
+                };
+                asking.map(|(id, uid)| (policy.granted)(&id, uid))
+            }
+        };
+
         let mut state = self.lock();
         self.reap(&mut state);
-        let harness = Self::touch(&mut state.attached, params)?;
+        // Found again by the same session: an attach in between would have minted a new one, so
+        // this is the same harness, attached by the same account, that the grants were asked about.
+        let harness = Self::touch(&mut state.attached, params, peer, &*self.descends)?;
+        let next = match (&self.memory, carries_memory) {
+            // A turn that became ready after the grants were asked waits for the next poll, a
+            // fifth of a second, rather than going out with nothing decided about it.
+            (Some(_), None) => None,
+            _ => Self::next_waiting(harness),
+        };
 
-        let busy: HashSet<String> = harness
-            .in_flight
-            .values()
-            .filter(|f| f.holds_conversation())
-            .map(|f| f.conversation.clone())
-            .collect();
-        let next = harness
-            .queued
-            .iter()
-            .position(|w| !busy.contains(&w.assignment.conversation) || interrupts(&w.assignment.text));
+        // The credential is settled before the turn leaves the queue, so a failure to mint one
+        // leaves the turn waiting rather than lost.
+        let memory_credential = match (next, &self.memory, carries_memory) {
+            (Some(i), Some(policy), Some(granted)) => {
+                match harness.agents.get_mut(&harness.queued[i].assignment.conversation) {
+                    Some(agent) if granted => ensure_memory_credential(agent, |s| (policy.hash)(s))?,
+                    Some(agent) => {
+                        // No grant now: whatever it was handed before is withdrawn, so the memory
+                        // server finds nothing behind it.
+                        agent.memory = None;
+                        String::new()
+                    }
+                    None => String::new(),
+                }
+            }
+            _ => String::new(),
+        };
 
         let mut reply = match next.and_then(|i| harness.queued.remove(i)) {
             Some(Waiting { mut assignment, tx }) => {
+                assignment.memory_credential = memory_credential;
                 // What the desktop has to tell this agent rides on the turn that reaches its mind,
                 // taken here rather than when the turn was queued, so a note that arrived while
                 // the turn waited still goes with it.
@@ -1439,11 +1591,11 @@ impl Host {
         Ok(reply)
     }
 
-    fn chunk(&self, params: &serde_json::Value) -> Result<serde_json::Value, String> {
+    fn chunk(&self, params: &serde_json::Value, peer: Peer) -> Result<serde_json::Value, String> {
         let turn_id = params["turn_id"].as_u64().ok_or("`turn_id` must be a number")?;
         let delta = params["delta"].as_str().unwrap_or_default().to_string();
         let mut state = self.lock();
-        let harness = Self::touch(&mut state.attached, params)?;
+        let harness = Self::touch(&mut state.attached, params, peer, &*self.descends)?;
         let Some(flight) = harness.in_flight.get_mut(&turn_id) else {
             return Err(harness.not_in_flight(turn_id));
         };
@@ -1469,12 +1621,12 @@ impl Host {
     /// One structured event for a turn in flight. See [`crate::event`] and the module docs for
     /// what is refused; a refusal is an answer (`{"refused": why}`), never an error, because an
     /// event that could not be shown is not a reason to lose the turn.
-    fn event(&self, params: &serde_json::Value) -> Result<serde_json::Value, String> {
+    fn event(&self, params: &serde_json::Value, peer: Peer) -> Result<serde_json::Value, String> {
         let turn_id = params["turn_id"].as_u64().ok_or("`turn_id` must be a number")?;
         let raw = &params["event"];
         let mut state = self.lock();
         let st = &mut *state;
-        let harness = Self::touch(&mut st.attached, params)?;
+        let harness = Self::touch(&mut st.attached, params, peer, &*self.descends)?;
         let counts = &mut st.events;
         let who = harness.announced.id.clone();
 
@@ -1557,10 +1709,15 @@ impl Host {
         Ok(serde_json::json!({}))
     }
 
-    fn finish(&self, params: &serde_json::Value, failure: Option<String>) -> Result<serde_json::Value, String> {
+    fn finish(
+        &self,
+        params: &serde_json::Value,
+        peer: Peer,
+        failure: Option<String>,
+    ) -> Result<serde_json::Value, String> {
         let turn_id = params["turn_id"].as_u64().ok_or("`turn_id` must be a number")?;
         let mut state = self.lock();
-        let harness = Self::touch(&mut state.attached, params)?;
+        let harness = Self::touch(&mut state.attached, params, peer, &*self.descends)?;
         let Some(mut flight) = harness.in_flight.remove(&turn_id) else {
             return Err(harness.not_in_flight(turn_id));
         };
@@ -1593,10 +1750,10 @@ impl Host {
         Ok(if abandoned { serde_json::json!({ "dropped": true }) } else { serde_json::json!({}) })
     }
 
-    fn detach(&self, params: &serde_json::Value) -> Result<serde_json::Value, String> {
+    fn detach(&self, params: &serde_json::Value, peer: Peer) -> Result<serde_json::Value, String> {
         let mut state = self.lock();
         let id = {
-            let harness = Self::touch(&mut state.attached, params)?;
+            let harness = Self::touch(&mut state.attached, params, peer, &*self.descends)?;
             harness.announced.id.clone()
         };
         if let Some(gone) = state.attached.remove(&id) {
@@ -1678,6 +1835,9 @@ fn with_notes(context: Option<String>, notes: Vec<String>) -> Option<String> {
 
 /// An agent token: 128 random bits, as 32 lowercase hex digits.
 const TOKEN_HEX_LEN: usize = 32;
+
+/// The random part of a session id: 64 bits, as 16 hex digits after `s<n>-`.
+const SESSION_RANDOM_BYTES: usize = 8;
 
 fn mint_token() -> Result<String, String> {
     random_hex(TOKEN_HEX_LEN / 2)
@@ -1799,6 +1959,11 @@ mod tests {
 
     fn poll(host: &Host, session: &str) -> serde_json::Value {
         host.handle(protocol::POLL, &json!({ "session": session })).unwrap()
+    }
+
+    /// A poll from the process and account the kernel names for the caller.
+    fn poll_from(host: &Host, session: &str, pid: u32, uid: Option<u32>) -> Result<serde_json::Value, String> {
+        host.handle_from(protocol::POLL, &json!({ "session": session }), Some(pid), uid)
     }
 
     fn event(host: &Host, session: &str, turn_id: u64, event: serde_json::Value) -> Result<serde_json::Value, String> {
@@ -2567,8 +2732,8 @@ mod tests {
         let second = host.start_agent("pi").unwrap();
         let _a = host.send_to(&first, Turn::new("one")).unwrap();
         let _b = host.send_to(&second, Turn::new("two")).unwrap();
-        let token_one = poll(&host, &session)["agent_token"].as_str().unwrap().to_string();
-        let token_two = poll(&host, &session)["agent_token"].as_str().unwrap().to_string();
+        let token_one = poll_from(&host, &session, 4242, None).unwrap()["agent_token"].as_str().unwrap().to_string();
+        let token_two = poll_from(&host, &session, 4242, None).unwrap()["agent_token"].as_str().unwrap().to_string();
 
         assert_eq!(token_one.len(), 32, "128 bits as hex");
         assert!(token_one.chars().all(|c| c.is_ascii_hexdigit()));
@@ -2692,19 +2857,20 @@ mod tests {
             .to_string();
 
         let _h1 = host.send_to(&AgentId::new("hermes", AgentId::MAIN), Turn::new("one")).unwrap();
-        let first = poll(&host, &hermes);
+        let first = poll_from(&host, &hermes, 4242, Some(1000)).unwrap();
         let credential = first["memory_credential"].as_str().expect("granted, so carried").to_string();
         assert!(credential.starts_with("mem-") && credential.len() == 68, "{credential}");
         assert_ne!(first["memory_credential"], first["agent_token"], "its own secret, not the token");
         host.handle_from(protocol::COMPLETE, &json!({ "session": hermes, "turn_id": first["turn_id"] }), Some(4242), Some(1000))
             .unwrap();
         let _h2 = host.send_to(&AgentId::new("hermes", AgentId::MAIN), Turn::new("two")).unwrap();
-        assert_eq!(poll(&host, &hermes)["memory_credential"], credential.as_str(), "the same while it lives");
+        let second = poll_from(&host, &hermes, 4242, Some(1000)).unwrap();
+        assert_eq!(second["memory_credential"], credential.as_str(), "the same while it lives");
         let held = host.memory_credential_holder(&credential).unwrap();
         assert_eq!(held.agent, AgentId::new("hermes", AgentId::MAIN));
 
         let _p = host.send_to(&AgentId::new("pi", AgentId::MAIN), Turn::new("three")).unwrap();
-        let turn = poll(&host, &pi);
+        let turn = poll_from(&host, &pi, 4242, Some(1000)).unwrap();
         assert!(turn.get("memory_credential").is_none(), "no grant, no credential: {turn}");
 
         // A host the shell gave no policy hands none to anyone.
@@ -2716,7 +2882,178 @@ mod tests {
             .unwrap()
             .to_string();
         let _b = bare.send_to(&AgentId::new("hermes", AgentId::MAIN), Turn::new("four")).unwrap();
-        assert!(poll(&bare, &s).get("memory_credential").is_none());
+        assert!(poll_from(&bare, &s, 4242, Some(1000)).unwrap().get("memory_credential").is_none());
+    }
+
+    /// The grant that counts is the one standing when the harness takes the turn: one given while
+    /// the turn waited is honoured, and one taken away withdraws the credential already held.
+    #[test]
+    fn the_memory_credential_is_decided_when_the_turn_is_handed_over_not_when_it_was_queued() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let granted = Arc::new(AtomicBool::new(false));
+        let policy = granted.clone();
+        let hash = |s: &str| format!("{:0>64}", s.len().to_string() + &s[4..10]);
+        let host = host_with_nothing()
+            .with_liveness(|pid| pid == 4242)
+            .with_memory(move |_harness, _uid| policy.load(Ordering::SeqCst), hash);
+        let session = host
+            .handle_from(protocol::ATTACH, &json!({ "id": "hermes", "name": "Hermes" }), Some(4242), Some(1000))
+            .unwrap()["session"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let agent = AgentId::new("hermes", AgentId::MAIN);
+
+        // Queued with no grant; granted before the harness came for it.
+        let _one = host.send_to(&agent, Turn::new("one")).unwrap();
+        granted.store(true, Ordering::SeqCst);
+        let first = poll_from(&host, &session, 4242, Some(1000)).unwrap();
+        let credential = first["memory_credential"].as_str().expect("granted by the time it was taken").to_string();
+        host.handle_from(protocol::COMPLETE, &json!({ "session": session, "turn_id": first["turn_id"] }), Some(4242), Some(1000))
+            .unwrap();
+
+        // Queued while granted; revoked before the harness came for it.
+        let _two = host.send_to(&agent, Turn::new("two")).unwrap();
+        granted.store(false, Ordering::SeqCst);
+        let second = poll_from(&host, &session, 4242, Some(1000)).unwrap();
+        assert_eq!(second["text"], "two");
+        assert!(second.get("memory_credential").is_none(), "revoked while it waited: {second}");
+        assert_eq!(host.memory_credential_holder(&credential), None, "and the one it held names nothing now");
+    }
+
+    /// The person's grants are read from a file by the shell's policy, which must never run with
+    /// the host's lock held: every harness and the whole UI wait on that lock.
+    #[test]
+    fn the_memory_policy_is_asked_without_the_host_lock_held() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let slot: Arc<std::sync::OnceLock<Host>> = Arc::new(std::sync::OnceLock::new());
+        let (asked, locked) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+        let (seen, held) = (slot.clone(), (asked.clone(), locked.clone()));
+        let host = host_with_nothing().with_memory(
+            move |_harness, _uid| {
+                held.0.store(true, Ordering::SeqCst);
+                let host = seen.get().expect("set before any poll");
+                held.1.store(host.state.try_lock().is_err(), Ordering::SeqCst);
+                true
+            },
+            |s: &str| format!("{:0>64}", s.len()),
+        );
+        let _ = slot.set(host.clone());
+        let session = attach(&host, "hermes");
+        let _a = host.send_to(&AgentId::new("hermes", AgentId::MAIN), Turn::new("one")).unwrap();
+        assert!(poll(&host, &session)["memory_credential"].is_string());
+        assert!(asked.load(Ordering::SeqCst), "the policy was asked");
+        assert!(!locked.load(Ordering::SeqCst), "and not under the host's lock");
+    }
+
+    // ── A session answers whoever attached it (#449 review) ─────────
+
+    /// The Mind attached from pid 700 as the mind account (uid 990), and a turn waiting for it.
+    fn mind_with_a_turn_waiting(host: &Host) -> (String, Answer) {
+        let session = host
+            .handle_from(protocol::ATTACH, &json!({ "id": "mind", "name": "Yantrik Mind" }), Some(700), Some(990))
+            .unwrap()["session"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let answer = host.send_to(&AgentId::new("mind", AgentId::MAIN), Turn::new("what did I say about Tuesday?")).unwrap();
+        (session, answer)
+    }
+
+    #[test]
+    fn another_account_polling_the_minds_session_is_refused_and_takes_nothing() {
+        let host = host_with_nothing()
+            .with_liveness(|pid| pid == 700)
+            .with_memory(|_harness, uid| uid == Some(990), |s: &str| format!("{:0>64}", s.len()));
+        let (session, _answer) = mind_with_a_turn_waiting(&host);
+
+        // The person's own process, even from the Mind's own pid as the kernel might reuse it.
+        for pid in [4242, 700] {
+            let err = poll_from(&host, &session, pid, Some(1000)).unwrap_err();
+            assert!(err.contains("another account") && err.contains("attach again"), "{err}");
+        }
+        // A caller the kernel could not name cannot show it is the account either.
+        let err = host.handle(protocol::POLL, &json!({ "session": session })).unwrap_err();
+        assert!(err.contains("another account"), "{err}");
+        // Nor can it close, fail, stream into or detach the Mind's session.
+        for (method, extra) in [
+            (protocol::CHUNK, json!({ "turn_id": 1, "delta": "hi" })),
+            (protocol::EVENT, json!({ "turn_id": 1, "event": { "kind": "status", "text": "x" } })),
+            (protocol::COMPLETE, json!({ "turn_id": 1 })),
+            (protocol::FAIL, json!({ "turn_id": 1, "error": "no" })),
+            (protocol::DETACH, json!({})),
+        ] {
+            let mut params = extra;
+            params["session"] = json!(session);
+            let err = host.handle_from(method, &params, Some(4242), Some(1000)).unwrap_err();
+            assert!(err.contains("another account"), "{method}: {err}");
+        }
+
+        // Nothing was delivered: the turn still waits for the real Mind, credential and all.
+        let turn = poll_from(&host, &session, 700, Some(990)).unwrap();
+        assert_eq!(turn["text"], "what did I say about Tuesday?");
+        assert!(turn["memory_credential"].is_string(), "{turn}");
+        assert!(host.list().iter().any(|e| e.id == "mind"), "and the Mind is still attached");
+    }
+
+    #[test]
+    fn the_same_account_from_a_process_outside_the_harness_is_refused() {
+        // 700 started 701, which started 702; 900 is a stranger of the same account.
+        let tree = |caller: u32, ancestor: u32| matches!((caller, ancestor), (701, 700) | (702, 700) | (702, 701));
+        let host = host_with_nothing().with_liveness(|pid| pid == 700).with_descent(tree);
+        let (session, _answer) = mind_with_a_turn_waiting(&host);
+
+        let err = poll_from(&host, &session, 900, Some(990)).unwrap_err();
+        assert!(err.contains("another process") && err.contains("attach again"), "{err}");
+        let err = host.handle_from(protocol::POLL, &json!({ "session": session }), None, Some(990)).unwrap_err();
+        assert!(err.contains("another process"), "no pid from the kernel is not the harness's: {err}");
+
+        // A worker the harness started polls for it; so does the harness itself.
+        let turn = poll_from(&host, &session, 702, Some(990)).unwrap();
+        assert_eq!(turn["text"], "what did I say about Tuesday?");
+        assert!(poll_from(&host, &session, 700, Some(990)).is_ok());
+    }
+
+    #[test]
+    fn a_session_attached_where_the_kernel_named_nobody_is_held_to_nothing() {
+        // The TCP dev path, and every test above that attaches with `handle`: as before.
+        let host = host_with_nothing();
+        let session = attach(&host, "pi");
+        let _a = host.send_to(&AgentId::new("pi", AgentId::MAIN), Turn::new("one")).unwrap();
+        assert_eq!(poll_from(&host, &session, 4242, Some(1000)).unwrap()["text"], "one");
+    }
+
+    #[test]
+    fn session_ids_cannot_be_guessed_from_one_another() {
+        let host = host_with_nothing();
+        let (one, two) = (attach(&host, "pi"), attach(&host, "hermes"));
+        let random = |s: &str| s.split_once('-').map(|(_, r)| r.to_string()).unwrap_or_default();
+        for s in [&one, &two] {
+            let r = random(s);
+            assert!(s.starts_with('s') && r.len() == 16 && r.bytes().all(|b| b.is_ascii_hexdigit()), "{s}");
+        }
+        assert_ne!(random(&one), random(&two), "more than a counter apart: {one} {two}");
+        // A counter alone, the old shape, names nothing.
+        assert!(host.handle(protocol::POLL, &json!({ "session": "s1" })).unwrap_err().contains("not attached any more"));
+    }
+
+    #[test]
+    fn a_parent_pid_is_read_past_a_command_name_with_spaces_and_parentheses() {
+        assert_eq!(parent_in_stat("4242 (pi) S 700 4242 4242 0 -1"), Some(700));
+        assert_eq!(parent_in_stat("4243 (a (b) c) R 1 1 1 0 -1"), Some(1));
+        assert_eq!(parent_in_stat("garbage"), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_child_of_this_process_descends_from_it_and_pid_one_does_not() {
+        let mut child = std::process::Command::new("sleep").arg("5").spawn().unwrap();
+        assert!(pid_descends(child.id(), std::process::id()));
+        assert!(pid_descends(std::process::id(), std::process::id()));
+        assert!(!pid_descends(1, std::process::id()));
+        assert!(!pid_descends(std::process::id(), child.id()), "a parent does not descend from its child");
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
     /// Agents catalog: the shell asks whether a mind can give a role a conversation of its own, and

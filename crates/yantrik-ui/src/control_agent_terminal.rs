@@ -603,6 +603,16 @@ mod tests {
         Call { pid: Some(std::process::id()), token: Some(token.to_string()) }
     }
 
+    /// A call on a session from this process, which stands in for the harness that attached it:
+    /// a session answers only the process that attached it and the ones it started.
+    fn as_harness(
+        host: &yantrik_harness::Host,
+        method: &str,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        host.handle_from(method, params, Some(std::process::id()), None)
+    }
+
     /// One job's card in its agent's pane, once the store has its end: `(args, provenance, exit
     /// code, output)`. Asked again until the end is there — the terminal answers a waiting call
     /// before its finish listeners have run.
@@ -757,8 +767,8 @@ mod tests {
         let agent = host.start_agent("pi").unwrap();
         let turn = |text: &str| {
             let _answer = host.send_to(&agent, Turn::new(text)).unwrap();
-            let handed = host.handle(protocol::POLL, &json!({ "session": session })).unwrap();
-            host.handle(protocol::COMPLETE, &json!({ "session": session, "turn_id": handed["turn_id"] })).unwrap();
+            let handed = as_harness(&host, protocol::POLL, &json!({ "session": session })).unwrap();
+            as_harness(&host, protocol::COMPLETE, &json!({ "session": session, "turn_id": handed["turn_id"] })).unwrap();
             handed
         };
         let token = turn("build it")["agent_token"].as_str().unwrap().to_string();
