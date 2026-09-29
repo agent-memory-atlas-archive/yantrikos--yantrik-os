@@ -455,9 +455,11 @@ TOOLS = [
                        "two minutes, so this one call can take that long; if they allowed it, it "
                        "ran once with exactly those arguments, and if they said no it did not "
                        "run and you should not ask again unless they raise it themselves. In "
-                       "`auto` or `bypass` it simply runs and is written into their record of "
-                       "unasked actions — report those as things you did, not as things you were "
-                       "permitted. In `plan` every change is refused: say what you WOULD do, in "
+                       "`auto`, `bypass` or `bypass_all` it simply runs and is written into their "
+                       "record of unasked actions — report those as things you did, not as things "
+                       "you were permitted — except that `auto` and `bypass` still ask about "
+                       "anything the app says cannot be undone, and only `bypass_all` does not. "
+                       "In `plan` every change is refused: say what you WOULD do, in "
                        "full, and leave it with them. Never tell a person to edit a setting or an "
                        "environment variable to get past any of this; the card and the mode chip "
                        "are the way, and you can set a STRICTER mode yourself with shell's "
@@ -1679,7 +1681,7 @@ def shell_state():
 # It is duplicated deliberately: the alternative is a second round trip per `os_act` to ask the
 # shell to decide, and the mode already arrives on the read this bridge was making anyway. The
 # cost is that the two can drift; the selftest checks this copy against the same table.
-MODES = ["plan", "ask", "auto", "bypass"]
+MODES = ["plan", "ask", "auto", "bypass", "bypass_all"]
 
 
 def mind_mode(state):
@@ -1764,7 +1766,7 @@ def decide(level, app, action, cannot_undo, mode, rules, machine, cap=None, tool
     `why` is written to be relayed to a person as it stands.
 
     Order is the security argument. The machine's ceiling is consulted FIRST, so no mode — not
-    even bypass — reaches past the owner's standing policy, and nothing above it is ever put in
+    even full bypass — reaches past the owner's standing policy, and nothing above it is ever put in
     front of a person either: a card no answer of theirs could satisfy teaches them that the card
     is noise.
 
@@ -1840,9 +1842,18 @@ def decide(level, app, action, cannot_undo, mode, rules, machine, cap=None, tool
                 "— and let the person decide. They switch the mode from the chip in the status "
                 "bar." % (app, action))
     elif mode == "bypass":
-        # Unchanged, and the one mode that is. Bypass does not ask, by definition and by what
-        # its confirmation says; a card after "Stop asking me anything" would make that panel a
-        # lie. It is written down instead — `would_ask` is true here, so it lands in the audit.
+        # Every grade runs unasked, and what the app says cannot be undone still asks — a
+        # payment, a send, a delete (Pranab's decision, 28 September 2026). `covered` is always
+        # False for such an action, so no session rule answers it here either.
+        if irreversible:
+            verdict, detail = ("run", True) if covered else ("ask", None)
+        else:
+            verdict, detail = "run", would_ask
+    elif mode == "bypass_all":
+        # Full bypass: unchanged from what bypass used to be, and the one mode the app's own
+        # sentence does not touch. It does not ask, by definition and by what its confirmation
+        # says; a card after "asks nothing, not even those" would make that panel a lie. It is
+        # written down instead — `would_ask` is true here, so it lands in the audit.
         verdict, detail = "run", would_ask
     elif mode == "auto":
         if rank >= LADDER.index("dangerous") or irreversible:
@@ -2114,7 +2125,7 @@ def guard_act(args):
     This used to be a wall. `delete_event` is graded `sensitive`, this bridge's ceiling is
     `standard`, and somebody who typed "delete the dentist appointment from my calendar" was told
     to raise an environment variable. Then it became a question. It is now a question the PERSON
-    has already answered in general — plan, ask, auto or bypass — and this reads their answer per
+    has already answered in general — plan, ask, auto, bypass or full bypass — and this reads their answer per
     call rather than applying one policy to a whole day's work.
     """
     app, action = args.get("app"), args.get("action")
@@ -2185,7 +2196,7 @@ def guard_act(args):
             return None, (unreadable or None), None, None
         # The same test the table made. A rule does not cover what the app says cannot be
         # undone, so it must not be NAMED as the thing that let this through either: here that
-        # can only be a bypass, and "Bypass ended" counts what the bypass itself bought. (Only
+        # can only be full bypass, and "Bypass ended" counts what the bypass itself bought. (Only
         # `unasked` actions reach this line, so `cannot_undo` and the table's `irreversible`
         # cannot differ — a `safe` action is never unasked.)
         covered = (app, action) in rules and not cannot_undo
@@ -2497,7 +2508,7 @@ def run_tool(tool, args, present=None):
     if refusal is not None:
         return policy_answer(refusal), False
 
-    # The taint rule is not a permission grade and no mode turns it off — not even bypass. A
+    # The taint rule is not a permission grade and no mode turns it off — not even full bypass. A
     # mode says how much the person trusts the mind; the taint says what this session has
     # already read, which is a fact about the session rather than a policy anybody set.
     refusal = taint_refusal(*outbound_of(tool, args))

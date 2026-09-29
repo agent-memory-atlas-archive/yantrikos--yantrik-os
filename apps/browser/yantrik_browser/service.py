@@ -14,7 +14,8 @@ Grades:
   sensitive  commit                                  — the one press that cannot be taken back:
              a control whose label reads as buying, sending or deleting. Its description says it
              cannot be undone, which the gate reads on every door: it asks in every mode but
-             bypass, and no "allow for this session" covers the next one.
+             full bypass (`bypass_all`) — plain bypass included — and no "allow for this
+             session" covers the next one.
 """
 
 import typing

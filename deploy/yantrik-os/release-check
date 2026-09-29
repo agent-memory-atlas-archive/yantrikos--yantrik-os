@@ -109,14 +109,14 @@ def mind_switch_gate():
 
     `use_harness` is sensitive (#48): it writes the preferred-mind setting, which stands
     after a restart. In plan mode the doors that raise cards refuse it outright, and in ask
-    mode it is a card a person has to answer — only auto and bypass run it unasked, the way
+    mode it is a card a person has to answer — only auto and the two bypasses run it unasked, the way
     every mode used to. Called at the top of a check, before its loop, so a Skipped lands as
     a SKIP verdict rather than being caught as one more dead mind.
     """
     mode = BASELINE.get("mode")
     if mode == "plan":
         raise Skipped("plan mode refuses use_harness, which is sensitive (#48)")
-    if mode not in ("auto", "bypass") and not ARGS.interactive:
+    if mode not in ("auto", "bypass", "bypass_all") and not ARGS.interactive:
         raise Skipped("mode %s makes switching minds a card a person answers; "
                       "run with --interactive" % mode)
 
@@ -133,7 +133,7 @@ def switch_mind(mid):
     so the run asks a person at most once.
     """
     mind_switch_gate()
-    if BASELINE.get("mode") not in ("auto", "bypass") and not _MIND_CARD_ANNOUNCED:
+    if BASELINE.get("mode") not in ("auto", "bypass", "bypass_all") and not _MIND_CARD_ANNOUNCED:
         _MIND_CARD_ANNOUNCED.append(mid)
         print("\n   >>> A card is going up for shell.use_harness — sensitive, because it writes the "
               "preferred-mind setting (#48). Press ALLOW FOR THIS SESSION on the VM and the "
@@ -164,7 +164,7 @@ def take_baseline():
         doc = json.load(open(os.path.expanduser("~/.config/yantrik/mind-mode.json")))
     except (OSError, ValueError):
         return
-    if doc.get("mode") in ("plan", "ask", "auto", "bypass"):
+    if doc.get("mode") in ("plan", "ask", "auto", "bypass", "bypass_all"):
         BASELINE["mode"] = doc["mode"]
 
 
@@ -189,7 +189,7 @@ def _mode_file():
     if not os.path.exists(path):
         raise Failed("%s is missing: apps would all read Ask, whatever the person chose" % path)
     doc = json.load(open(path))
-    if doc.get("mode") not in ("plan", "ask", "auto", "bypass"):
+    if doc.get("mode") not in ("plan", "ask", "auto", "bypass", "bypass_all"):
         raise Failed("mode %r is not one this OS defines" % doc.get("mode"))
     # The mode alone proves nothing: the apps trust the file only while the shell it names is
     # running, in this boot, and read any other file as Ask whatever mode it says (#154,
@@ -459,7 +459,7 @@ def _screens():
 @check("a sensitive act without a grant is refused on every door")
 def _gate():
     mode = BASELINE.get("mode", "ask")
-    if mode in ("auto", "bypass"):
+    if mode in ("auto", "bypass", "bypass_all"):
         raise Skipped("the machine is in %s mode, where sensitive acts run unasked by design" % mode)
     act("shell", "open_app", name="studio")
     if not wait(lambda: rpc("studio", "app.describe", timeout=10), 30, 2):
@@ -728,7 +728,7 @@ def _browser():
 
 @check("a sensitive act through `yos` asks, and runs once a person allows it", tier="rc", interactive=True)
 def _allow():
-    if BASELINE.get("mode") in ("auto", "bypass"):
+    if BASELINE.get("mode") in ("auto", "bypass", "bypass_all"):
         raise Skipped("mode %s runs it unasked" % BASELINE.get("mode"))
     act("shell", "open_app", name="studio")
     wait(lambda: rpc("studio", "app.describe", timeout=10), 30, 2)

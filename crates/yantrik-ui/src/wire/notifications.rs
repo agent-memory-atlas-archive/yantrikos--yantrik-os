@@ -782,7 +782,7 @@ pub fn approval_waiting(requester: &str, app: &str, action: &str) {
     );
 }
 
-/// A bypass ran out on its own.
+/// A bypass of either kind ran out on its own.
 ///
 /// Only when it LAPSED. A person who pressed `Ask` themselves has just watched the chip change
 /// and needs telling nothing; the two people this is for are the one who chose "1 hour" and

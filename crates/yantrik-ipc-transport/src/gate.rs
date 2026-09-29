@@ -26,8 +26,9 @@
 //! 3. **The mode** (`mind-mode.json`, beside the settings): above what it runs unasked, with no
 //!    grant spent and no session rule for the action, the call is refused with `GRANT:` and told
 //!    how to get one. So is an action whose own published description says it cannot be undone
-//!    ([`unrecoverable`]), in every mode but bypass and whatever its grade above `safe`: the
-//!    shell's table and the MCP bridge already asked about those, and until this rule moved here
+//!    ([`unrecoverable`]), in every mode but full bypass (`bypass_all`) and whatever its grade
+//!    above `safe` — plain bypass included, since 28 September 2026: the shell's table and the
+//!    MCP bridge already asked about those, and until this rule moved here
 //!    `yos act` or a raw socket ran `calendar.delete_event` in auto with nobody asked (map gap 4
 //!    of the surface SDK). A session rule never covers one, and in plan mode no session rule
 //!    covers anything — plan raises no card, so there is no standing answer to one.
@@ -150,8 +151,8 @@ pub fn ceiling_from(text: &str) -> String {
 
 // ── The mode, and the grant that stands in for it ───────────────────
 //
-// The ceiling is the machine's wall. Under it the PERSON has a mode — plan, ask, auto or bypass
-// — that says what a caller may do without being asked, and for a while the mode lived only in
+// The ceiling is the machine's wall. Under it the PERSON has a mode — plan, ask, auto, bypass or
+// full bypass (`bypass_all`) — that says what a caller may do without being asked, and for a while the mode lived only in
 // the shell and the MCP bridge: the bridge read it off `describe shell`, raised a card when the
 // mode said to, and ran the action once the person had pressed Allow. Nothing else did. `yos
 // act` and a raw JSON-RPC client on the socket ran a `sensitive` action in `ask` mode with no
@@ -182,8 +183,28 @@ pub const MODE_FILE: &str = "mind-mode.json";
 /// The modes a desktop can be in, strictest first, and what each runs without asking: the
 /// highest grade on [`LADDER`] a caller may use with no grant. One column of the table in the
 /// shell's `mind_mode::Modes::decide` and the bridge's `decide`, which stay the definition.
-pub const MODES: [(&str, &str); 4] =
-    [("plan", "safe"), ("ask", "standard"), ("auto", "sensitive"), ("bypass", "dangerous")];
+///
+/// The two bypasses share a column: both run every grade under the ceiling unasked. What tells
+/// them apart is not a grade but the app's own word that an action cannot be undone — a payment,
+/// a send, a delete. Bypass still asks about those, as every stricter mode does; full bypass
+/// (`bypass_all`) is the one mode that does not ([`Mode::asks_before_what_cannot_be_undone`]).
+pub const MODES: [(&str, &str); 5] = [
+    ("plan", "safe"),
+    ("ask", "standard"),
+    ("auto", "sensitive"),
+    ("bypass", "dangerous"),
+    ("bypass_all", "dangerous"),
+];
+
+/// The modes a person enters for a while and that end on their own — 15 minutes, an hour, or
+/// until the shell restarts — never written down for the next session. The file carries when
+/// one ends, and [`mode_from`] honours that for either.
+pub const TIME_BOXED: [&str; 2] = ["bypass", "bypass_all"];
+
+/// Whether `name` is one of the [`TIME_BOXED`] modes: a bypass of either kind.
+pub fn is_bypass(name: &str) -> bool {
+    TIME_BOXED.contains(&name)
+}
 
 /// What the dispatch runs without a grant in every mode, plan included.
 ///
@@ -230,6 +251,14 @@ impl Mode {
             .find(|(name, _)| *name == self.name)
             .and_then(|(_, top)| grade(top))
             .unwrap_or_else(|| grade("standard").unwrap())
+    }
+
+    /// Whether this mode asks about an action whose own description says it cannot be undone,
+    /// whatever its grade above `safe`. Every mode does except full bypass: that is the whole of
+    /// the difference between it and bypass, and the reason a person picks it on purpose. A name
+    /// that is not a mode reads as `ask` here too, so it asks.
+    pub fn asks_before_what_cannot_be_undone(&self) -> bool {
+        self.name != "bypass_all"
     }
 
     /// Whether a session rule is the person's standing answer for `app.action`.
@@ -319,8 +348,8 @@ fn names_a_live_shell(doc: &serde_json::Value) -> bool {
 /// Read the mode out of what the shell wrote. Public so the shell's own test can prove that
 /// what it writes is what every app will read.
 ///
-/// `now_unix` is for a bypass. The shell folds an expired bypass back on its own tick and
-/// rewrites the file, but a shell that crashed mid-bypass leaves a file saying `bypass` with
+/// `now_unix` is for a bypass, of either kind. The shell folds an expired bypass back on its own
+/// tick and rewrites the file, but a shell that crashed mid-bypass leaves a file saying `bypass` with
 /// nobody left to fold it — so the file carries when the bypass ends and this honours it. A
 /// bypass "until restart" carries no end and is trusted while the shell that wrote the file is
 /// running: the file names that shell and the boot it wrote in, and this checks the name
@@ -343,11 +372,13 @@ pub fn mode_from(text: &str, now_unix: u64) -> Mode {
         tracing::warn!(mode = %name, "{MODE_FILE} names no mode this OS defines; using {DEFAULT_MODE}");
         name = DEFAULT_MODE.to_string();
     }
-    if name == "bypass" {
+    if is_bypass(&name) {
         if let Some(until) = doc["bypass_expires_unix"].as_u64() {
             if now_unix >= until {
+                // What it falls back to is never a bypass: the shell never writes one there, and
+                // a file that says so has had a hand in it.
                 let previous = doc["previous"].as_str().unwrap_or(DEFAULT_MODE);
-                name = if is_mode(previous) && previous != "bypass" {
+                name = if is_mode(previous) && !is_bypass(previous) {
                     previous.to_string()
                 } else {
                     DEFAULT_MODE.to_string()
@@ -615,20 +646,20 @@ pub fn decide(
         return Ok(());
     }
     let mode = &authority.mode;
-    let everything = LADDER.len() - 1;
 
     // The app's own sentence, and the one input here that is not a grade. `safe` is excluded:
     // a read destroys nothing, so wording that happens to match cannot turn a look into a
     // question. The shell's `Modes::decide` and the bridge's `decide` draw the same line.
     let irreversible = level > 0 && unrecoverable(purpose);
 
-    // Bypass runs everything under the ceiling — "Stop asking me anything" is an answer already.
-    // Every other mode runs what its column says, never less than the socket floor, and asks
-    // about anything the app says cannot be undone.
-    let asks = mode.allows() < everything
-        && (irreversible || level > mode.allows().max(grade(SOCKET_FLOOR).unwrap()));
-    // Held from a phone: above its level it asks in every mode, bypass included, and a card is
-    // raised for it (the person answers on the phone, or at the machine).
+    // Every mode runs what its column says, never less than the socket floor — both bypasses
+    // run every grade — and every mode but full bypass asks about anything the app says cannot
+    // be undone. Bypass is "stop asking me, except before a payment, a send or a delete"; full
+    // bypass is "stop asking me anything", an answer the person gave on purpose, for a while.
+    let asks = (irreversible && mode.asks_before_what_cannot_be_undone())
+        || level > mode.allows().max(grade(SOCKET_FLOOR).unwrap());
+    // Held from a phone: above its level it asks in every mode, both bypasses included, and a
+    // card is raised for it (the person answers on the phone, or at the machine).
     let held = authority.asks_above.is_some_and(|above| level > above);
     if !asks && !held {
         return Ok(());
@@ -746,7 +777,7 @@ mod tests {
 
     #[test]
     fn a_call_held_from_a_phone_asks_above_its_level_in_every_mode() {
-        for mode in ["plan", "ask", "auto", "bypass"] {
+        for mode in ["plan", "ask", "auto", "bypass", "bypass_all"] {
             let mut held = at("dangerous", mode);
             held.asks_above = Some(0);
             assert!(decide(&held, "notes", "list_notes", "safe", "List them").is_ok(), "{mode}: a read runs");
@@ -808,6 +839,9 @@ mod tests {
         assert!(err.starts_with("GRANT:") && err.contains("ask mode"), "{err}");
 
         assert!(decide(&at("dangerous", "bypass"), "system-monitor", "kill_process", "dangerous", KILL).is_ok());
+        assert!(decide(&at("dangerous", "bypass_all"), "system-monitor", "kill_process", "dangerous", KILL).is_ok());
+        let err = decide(&at("sensitive", "bypass_all"), "system-monitor", "kill_process", "dangerous", KILL).unwrap_err();
+        assert!(err.starts_with("CEILING:"), "full bypass does not reach past the ceiling either: {err}");
         let mut granted = at("dangerous", "ask");
         granted.granted = true;
         assert!(decide(&granted, "system-monitor", "kill_process", "dangerous", KILL).is_ok());
@@ -815,7 +849,7 @@ mod tests {
 
     #[test]
     fn standard_is_the_floor_in_every_mode_and_the_ceiling_still_binds_it() {
-        for mode in ["plan", "ask", "auto", "bypass"] {
+        for mode in ["plan", "ask", "auto", "bypass", "bypass_all"] {
             assert!(decide(&at("sensitive", mode), "notifications", "notify", "standard", "Post a notification").is_ok(), "{mode}");
         }
         let err = decide(&at("safe", "bypass"), "notifications", "notify", "standard", "Post a notification").unwrap_err();
@@ -854,13 +888,71 @@ mod tests {
                          "Delete an object. Past that undo it is not recoverable.").unwrap_err();
         assert!(err.starts_with("GRANT:") && err.contains("cannot be undone"), "{err}");
 
-        // Bypass asks nobody, a grant answers it, and a `safe` read is never turned into a card.
-        assert!(decide(&at("sensitive", "bypass"), "calendar", "delete_event", "sensitive", delete).is_ok());
+        // Full bypass asks nobody, a grant answers it, and a `safe` read is never turned into a
+        // card. Plain bypass asks, as the next test shows at length.
+        assert!(decide(&at("sensitive", "bypass_all"), "calendar", "delete_event", "sensitive", delete).is_ok());
+        assert!(decide(&at("sensitive", "bypass"), "calendar", "delete_event", "sensitive", delete).is_err());
         let mut granted = at("sensitive", "auto");
         granted.granted = true;
         assert!(decide(&granted, "calendar", "delete_event", "sensitive", delete).is_ok());
         assert!(decide(&at("sensitive", "plan"), "files", "describe_trash", "safe",
                        "Lists what was deleted permanently").is_ok());
+    }
+
+    /// Pranab's decision of 28 September 2026: bypass is two levels. Bypass runs everything under
+    /// the ceiling unasked except what the app's own purpose says cannot be undone — the browser's
+    /// `commit`, a calendar delete — which it asks about exactly as auto does. Full bypass
+    /// (`bypass_all`) is the old bypass: nothing is asked, those included.
+    #[test]
+    fn bypass_still_asks_before_what_cannot_be_undone_and_full_bypass_does_not() {
+        let delete = "Take an event off the calendar. It is not recoverable";
+        let commit = "Press the button that completes the purchase. It cannot be undone";
+
+        let err = decide(&at("dangerous", "bypass"), "calendar", "delete_event", "sensitive", delete).unwrap_err();
+        assert!(err.starts_with("GRANT:") && err.contains("bypass mode, which asks before anything that cannot be undone"), "{err}");
+        assert!(err.contains("request_approval"), "a card is the way forward, as in auto: {err}");
+        assert!(decide(&at("dangerous", "bypass"), "browser", "commit", "sensitive", commit).is_err());
+        // Everything else still runs unasked in bypass, the dangerous grade included.
+        assert!(decide(&at("dangerous", "bypass"), "system-monitor", "kill_process", "dangerous", KILL).is_ok());
+        assert!(decide(&at("dangerous", "bypass"), "calendar", "update_event", "sensitive", "Move it").is_ok());
+
+        for (app, action, purpose) in [("calendar", "delete_event", delete), ("browser", "commit", commit)] {
+            assert!(decide(&at("dangerous", "bypass_all"), app, action, "sensitive", purpose).is_ok(), "{app}.{action}");
+            let mut granted = at("dangerous", "bypass");
+            granted.granted = true;
+            assert!(decide(&granted, app, action, "sensitive", purpose).is_ok(), "a person's Allow answers it in bypass");
+        }
+
+        // No session rule covers one in bypass either: the card never offers a rule for it.
+        let ruled = Authority {
+            ceiling: "dangerous".into(),
+            mode: Mode { name: "bypass".into(), session_rules: vec![("calendar".into(), "delete_event".into())] },
+            granted: false,
+            asks_above: None,
+        };
+        assert!(decide(&ruled, "calendar", "delete_event", "sensitive", delete).is_err());
+
+        assert!(Mode::named("bypass").asks_before_what_cannot_be_undone());
+        assert!(!Mode::named("bypass_all").asks_before_what_cannot_be_undone());
+        assert!(Mode::named("not-a-mode").asks_before_what_cannot_be_undone(), "an unknown name reads as ask");
+        assert_eq!(Mode::named("bypass_all").allows(), Mode::named("bypass").allows());
+    }
+
+    /// Either bypass ends when its file says it ends, even with no shell left to fold it back,
+    /// and neither is ever what it falls back to.
+    #[test]
+    fn either_bypass_ends_on_time_and_never_falls_back_to_a_bypass() {
+        let now = 1_000_000;
+        for name in TIME_BOXED {
+            let live = format!(r#"{{"mode":"{name}","previous":"auto","bypass_expires_unix":{}}}"#, now + 60);
+            assert_eq!(mode_from(&live, now).name, name);
+            assert_eq!(mode_from(&live, now + 60).name, "auto", "{name} ended");
+            for back_to in TIME_BOXED {
+                let odd = format!(r#"{{"mode":"{name}","previous":"{back_to}","bypass_expires_unix":{now}}}"#);
+                assert_eq!(mode_from(&odd, now).name, DEFAULT_MODE, "{name} fell back to {back_to}");
+            }
+        }
+        assert!(is_bypass("bypass") && is_bypass("bypass_all") && !is_bypass("auto"));
     }
 
     #[test]
@@ -1149,7 +1241,7 @@ mod tests {
 
     fn decision_vectors() -> Vec<serde_json::Value> {
         let mut out = Vec::new();
-        for mode in ["plan", "ask", "auto", "bypass"] {
+        for (mode, _) in MODES {
             // The fifth is not a grade: `None` is not `safe`, and the case most likely to be got
             // wrong twice.
             for graded in ["safe", "standard", "sensitive", "dangerous", "spicy"] {
@@ -1417,7 +1509,21 @@ mod tests {
     #[test]
     fn surface_vectors_cover_every_outcome_and_every_axis() {
         let all = decision_vectors();
-        assert_eq!(all.len(), 4 * 5 * 4 * 2 * 2 * 2);
+        assert_eq!(all.len(), MODES.len() * 5 * 4 * 2 * 2 * 2);
+        // And the two bypasses differ exactly where the app says an action cannot be undone.
+        let differ: Vec<_> = all
+            .iter()
+            .filter(|v| v["mode"] == "bypass")
+            .filter(|v| {
+                let id = v["id"].as_str().unwrap().replacen("bypass/", "bypass_all/", 1);
+                all.iter().any(|w| w["id"] == id && (w["outcome"] != v["outcome"] || w["door"] != v["door"]))
+            })
+            .collect();
+        assert!(!differ.is_empty());
+        assert!(differ.iter().all(|v| v["unrecoverable"] == true), "{differ:?}");
+        // A grant answers the question either way, so where one was spent the dispatch allows in
+        // both; only the door — which never has a grant — still tells the two apart there.
+        assert!(differ.iter().filter(|v| v["grant"] == true).all(|v| v["outcome"] == "allow"), "{differ:?}");
         for outcome in ["allow", "CEILING", "GRANT"] {
             assert!(all.iter().any(|v| v["outcome"] == outcome), "{outcome}");
         }

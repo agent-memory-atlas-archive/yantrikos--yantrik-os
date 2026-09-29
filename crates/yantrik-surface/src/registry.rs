@@ -338,8 +338,8 @@ where
 
         // The ceiling and then the mode. The grade read is the one `describe` is showing now (see
         // `regrade`), or the two disagree. With the action's own description beside it: an action
-        // this app says cannot be undone is asked about in every mode but bypass, as the shell
-        // and the bridge ask.
+        // this app says cannot be undone is asked about in every mode but full bypass, as the
+        // shell and the bridge ask.
         let published = self.effective_grade(name, spec.permission);
         decide(authority, &self.app_id, name, published, &spec.description)?;
 
@@ -393,14 +393,15 @@ mod tests {
     /// case rather than inherited from whatever files the machine running them happens to have.
     const OPEN: &str = "dangerous";
 
-    /// Authority that binds nothing: the ceiling and the mode both at the top of the ladder.
+    /// Authority that binds nothing: the ceiling and the mode both at the top of the ladder —
+    /// full bypass, which asks about nothing, not even what cannot be undone.
     fn open() -> Authority {
-        Authority { ceiling: OPEN.into(), mode: Mode::named("bypass"), granted: false, asks_above: None }
+        Authority { ceiling: OPEN.into(), mode: Mode::named("bypass_all"), granted: false, asks_above: None }
     }
 
     /// A machine at `ceiling`, in a mode that asks about nothing under it: the ceiling tests.
     fn under(ceiling: &str) -> Authority {
-        Authority { ceiling: ceiling.into(), mode: Mode::named("bypass"), granted: false, asks_above: None }
+        Authority { ceiling: ceiling.into(), mode: Mode::named("bypass_all"), granted: false, asks_above: None }
     }
 
     /// An open ceiling and the mode under test, with or without a grant spent for the call.
@@ -1002,7 +1003,7 @@ mod tests {
 
     #[test]
     fn a_sensitive_act_runs_in_auto_mode() {
-        for mode in ["auto", "bypass"] {
+        for mode in ["auto", "bypass", "bypass_all"] {
             let ran = Rc::new(Cell::new(false));
             let answer = render_surface(ran.clone())
                 .act("render", &json!({"out": "x.png"}), None, "blender#1", &in_mode(mode, false))
@@ -1014,7 +1015,7 @@ mod tests {
 
     #[test]
     fn a_grant_lets_a_sensitive_act_run_in_any_mode() {
-        for mode in ["plan", "ask", "auto", "bypass"] {
+        for mode in ["plan", "ask", "auto", "bypass", "bypass_all"] {
             let ran = Rc::new(Cell::new(false));
             let answer = render_surface(ran.clone())
                 .act("render", &json!({"out": "x.png"}), None, "blender#1", &in_mode(mode, true))
@@ -1026,7 +1027,7 @@ mod tests {
 
     #[test]
     fn a_standard_act_needs_no_grant_in_any_mode() {
-        for mode in ["plan", "ask", "auto", "bypass"] {
+        for mode in ["plan", "ask", "auto", "bypass", "bypass_all"] {
             let answer = notes_at("Kernel asks")
                 .act("rename", &json!({ "to": "ok" }), None, "notes#1", &in_mode(mode, false))
                 .unwrap_or_else(|e| panic!("{mode}: {e}"));
@@ -1068,7 +1069,7 @@ mod tests {
 
     #[test]
     fn the_ceiling_still_refuses_dangerous_whatever_the_grant_or_mode() {
-        for (mode, granted) in [("bypass", false), ("ask", true), ("bypass", true)] {
+        for (mode, granted) in [("bypass", false), ("ask", true), ("bypass", true), ("bypass_all", false), ("bypass_all", true)] {
             let ran = Rc::new(Cell::new(false));
             let authority = Authority { ceiling: "sensitive".into(), mode: Mode::named(mode), granted, asks_above: None };
             let err = delete_surface(ran.clone())

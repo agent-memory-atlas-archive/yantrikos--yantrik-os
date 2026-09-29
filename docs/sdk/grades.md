@@ -8,7 +8,7 @@ Four levels, in order:
 | `safe` | reading; changes nothing | never asked — not even in `plan` mode |
 | `standard` | changing the program's own state, in a way that can be taken back | not asked in the default mode |
 | `sensitive` | overwriting, sending, spending, anything that leaves the machine, anything the person would want to see first | a card to Allow, in the default mode |
-| `dangerous` | destroying work, ending what someone else is running, running arbitrary code | refused outright under the ceiling this OS ships with; with the ceiling raised, a card in every mode short of `bypass` |
+| `dangerous` | destroying work, ending what someone else is running, running arbitrary code | refused outright under the ceiling this OS ships with; with the ceiling raised, a card in every mode short of `bypass` (and in `bypass` too, if its description says it cannot be undone) |
 
 An action declared without a grade is `standard`. The grade is published in `describe`, so a mind
 can see it before it calls, and the dispatch reads it again when the call arrives.
@@ -120,7 +120,7 @@ what to do instead:
 
 **Say it when it cannot be undone.** A description that says so — any of *not recoverable*,
 *cannot be undone*, *can't be undone*, *irreversible*, *permanently*, *permanent*, *no undo* —
-changes how the dispatch treats the action: it is asked about in every mode but `bypass`, whatever
+changes how the dispatch treats the action: it is asked about in every mode but full bypass (`bypass_all`), whatever
 its grade above `safe`, and no "Allow for this session" covers it. The calendar's `delete_event`
 says "It is not recoverable" for exactly that reason. Leaving the words out is a decision too:
 LibreOffice's `save` describes what it replaces without them, because a person who chose `auto`
@@ -165,7 +165,9 @@ person raises it in Settings.
 Chosen from a chip in the status bar, written by the shell to `mind-mode.json`, and read by the
 dispatch on every call. Each mode runs actions unasked up to a grade: `plan` nothing above `safe`
 (a mind says what it would do instead), `ask` up to `standard`, `auto` up to `sensitive`,
-`bypass` everything under the ceiling (for a while — a bypass expires). Above that, the call is
+`bypass` and `bypass_all` everything under the ceiling (for a while — a bypass expires), and
+the two differ only in what cannot be undone: `bypass` still asks about it, `bypass_all` ("Full
+bypass") does not. Above that, the call is
 refused with `GRANT:`, and the refusal says how to get the person's Allow; `yos act` and the MCP
 bridge do that for a mind, putting a card on the screen and acting again with the grant. The mode
 and the session rules beside it end with the shell that set them: the file names that shell — its
@@ -175,15 +177,15 @@ description does and does not say it cannot be undone:
 
 <!-- output: grade-table -->
 ```text
-sensitive ceiling                    plan             ask              auto             bypass
-safe                                 runs             runs             runs             runs
-standard                             runs             runs             runs             runs
-sensitive                            refused: plan    asks             runs             runs
-dangerous                            refused: ceiling refused: ceiling refused: ceiling refused: ceiling
-safe, says it cannot be undone       runs             runs             runs             runs
-standard, says it cannot be undone   refused: plan    asks             asks             runs
-sensitive, says it cannot be undone  refused: plan    asks             asks             runs
-dangerous, says it cannot be undone  refused: ceiling refused: ceiling refused: ceiling refused: ceiling
+sensitive ceiling                    plan             ask              auto             bypass           bypass_all
+safe                                 runs             runs             runs             runs             runs
+standard                             runs             runs             runs             runs             runs
+sensitive                            refused: plan    asks             runs             runs             runs
+dangerous                            refused: ceiling refused: ceiling refused: ceiling refused: ceiling refused: ceiling
+safe, says it cannot be undone       runs             runs             runs             runs             runs
+standard, says it cannot be undone   refused: plan    asks             asks             asks             runs
+sensitive, says it cannot be undone  refused: plan    asks             asks             asks             runs
+dangerous, says it cannot be undone  refused: ceiling refused: ceiling refused: ceiling refused: ceiling refused: ceiling
 ```
 
 (Generated from the SDK's `gate.decide` by `samples/test_guide.py`. `standard` runs in `plan` on a

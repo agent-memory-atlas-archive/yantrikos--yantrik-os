@@ -13,8 +13,8 @@
 //! - `read_screen` reads the person's desktop — every window they have open, whatever it shows.
 //!   That is theirs, and what is read cannot be unread: `sensitive`, and its description says it
 //!   cannot be undone, which the gate reads on every door (`gate::unrecoverable`). So it asks in
-//!   every mode but bypass — `auto` included — and no "allow for this session" covers it: each
-//!   read is one card.
+//!   every mode but full bypass — `auto` and plain bypass included — and no "allow for this
+//!   session" covers it: each read is one card.
 //!
 //! `read_mind_view` stays `safe` on purpose. Mind View holds only the apps minds opened there,
 //! and every one of those that has a surface is already readable by any mind through describe;
@@ -341,7 +341,7 @@ mod tests {
     }
 
     #[test]
-    fn reading_the_desktop_asks_every_time_in_every_mode_but_bypass() {
+    fn reading_the_desktop_asks_every_time_in_every_mode_but_full_bypass() {
         // The gate reads the description: `unrecoverable` is what makes auto ask and keeps a
         // session rule from covering it. If this sentence loses the words, read_screen goes
         // back to running unasked in auto.

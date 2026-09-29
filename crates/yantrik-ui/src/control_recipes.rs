@@ -283,6 +283,7 @@ mod tests {
         assert!(decide(&at("ask", true, "sensitive"), "shell", "run_recipe", spec.permission, &spec.description).is_ok(), "the person's Allow");
         assert!(decide(&at("auto", false, "sensitive"), "shell", "run_recipe", spec.permission, &spec.description).is_ok());
         assert!(decide(&at("bypass", true, "standard"), "shell", "run_recipe", spec.permission, &spec.description).is_err(), "never above the ceiling");
+        assert!(decide(&at("bypass_all", true, "standard"), "shell", "run_recipe", spec.permission, &spec.description).is_err(), "not even in full bypass");
 
         let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/control_recipes.rs")).unwrap();
         let src = src.split("#[cfg(test)]").next().unwrap();

@@ -152,7 +152,7 @@ takes its writable layer with it and is `dangerous`.
 
 **The description counts too.** Say in it when an action cannot be taken back — "It is not
 recoverable", "cannot be undone", "permanently" (the spec lists the seven phrases). The dispatch
-reads it: in every mode but bypass, such an action is asked about whatever its grade above `safe`,
+reads it: in every mode but full bypass (`bypass_all`) — plain bypass included — such an action is asked about whatever its grade above `safe`,
 and no session rule covers it. Calendar's `delete_event` is `sensitive` and says so; before this
 rule reached the dispatch, `yos act` ran it in auto with nobody asked while the MCP bridge and the
 shell would have asked.

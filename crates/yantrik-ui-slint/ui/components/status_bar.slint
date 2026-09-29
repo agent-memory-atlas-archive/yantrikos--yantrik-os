@@ -72,10 +72,13 @@ export component StatusBar inherits Rectangle {
     in property <string> active-harness-name: "";
     callback active-mind-clicked();
 
-    // What that mind may do without being asked: plan | ask | auto | bypass. The label carries
-    // the countdown during a bypass ("Bypass 43m"). See components/mind_mode_menu.slint.
+    // What that mind may do without being asked: plan | ask | auto | bypass | bypass_all. The
+    // label carries the countdown during either bypass ("Bypass 43m", "Full bypass 43m"). See
+    // components/mind_mode_menu.slint.
     in property <string> mind-mode: "ask";
     in property <string> mind-mode-label: "Ask";
+    // Either bypass: both are red on the chip, because both are "it is not asking you".
+    property <bool> in-bypass: root.mind-mode == "bypass" || root.mind-mode == "bypass_all";
     // Private mode: the Mind is off whatever the mode says, and the chip says that instead.
     in property <bool> private-mode: false;
     callback mind-mode-clicked();
@@ -352,7 +355,7 @@ export component StatusBar inherits Rectangle {
             // Always on the bar, unlike the mind chip beside it, and that is the point: the mode
             // is a fact about what this machine will let happen to it, and a person must never be
             // surprised by it. In `plan` they would otherwise only find out when the mind said it
-            // could not do anything; in `bypass` they are owed a permanent, unmissable reminder
+            // could not do anything; in either bypass they are owed a permanent, unmissable reminder
             // and a countdown, which is why the label carries the time left and this chip goes
             // red rather than accent-tinted.
             //
@@ -370,10 +373,10 @@ export component StatusBar inherits Rectangle {
                     y: (parent.height - 20px) / 2;
                     border-radius: Theme.r-sm;
                     background: root.private-mode ? Theme.tint-accent
-                        : root.mind-mode == "bypass" ? Theme.color-danger-dim
+                        : root.in-bypass ? Theme.color-danger-dim
                         : root.mind-mode == "plan" ? Theme.tint-amber
                         : Theme.hover-fill;
-                    border-width: root.private-mode || root.mind-mode == "bypass" ? 1px : 0px;
+                    border-width: root.private-mode || root.in-bypass ? 1px : 0px;
                     border-color: root.private-mode ? Theme.accent : Theme.color-danger;
 
                     mode-row := HorizontalLayout {
@@ -386,7 +389,7 @@ export component StatusBar inherits Rectangle {
                             commands: root.mind-mode == "plan" && !root.private-mode ? Icons.eye : Icons.shield;
                             size: 12px;
                             tint: root.private-mode ? Theme.accent
-                                : root.mind-mode == "bypass" ? Theme.color-danger
+                                : root.in-bypass ? Theme.color-danger
                                 : root.mind-mode == "plan" ? Theme.amber
                                 : Theme.text-secondary;
                             y: (parent.height - self.height) / 2;
@@ -395,11 +398,11 @@ export component StatusBar inherits Rectangle {
                             text: root.private-mode ? "Private" : root.mind-mode-label;
                             max-width: 120px; overflow: elide;
                             color: root.private-mode ? Theme.accent
-                                : root.mind-mode == "bypass" ? Theme.color-danger
+                                : root.in-bypass ? Theme.color-danger
                                 : root.mind-mode == "plan" ? Theme.amber
                                 : Theme.text-secondary;
                             font-size: Theme.fs-micro;
-                            font-weight: root.private-mode || root.mind-mode == "bypass" ? 700 : 500;
+                            font-weight: root.private-mode || root.in-bypass ? 700 : 500;
                             vertical-alignment: center;
                         }
                     }

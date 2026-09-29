@@ -222,7 +222,9 @@ export component App inherits Window {
     /// These three are the only way this desktop becomes MORE permissive. They are callbacks,
     /// reached by a pointer; nothing on the control surface can raise the mode or make a rule.
     callback mind-mode-chosen(string);
-    callback mind-bypass-chosen(string);
+    /// Which bypass (`bypass` | `bypass_all`) and for how long (`15m` | `1h` | `restart`), from
+    /// the menu's red confirmation and nowhere else.
+    callback mind-bypass-chosen(string, string);
     callback mind-rule-revoked(string, string);
     /// Where a mind's apps open. A person's choice, reached by a pointer like the three above.
     callback mind-view-chosen(bool);
@@ -3068,7 +3070,7 @@ export component App inherits Window {
                 confirming-bypass <=> root.mind-menu-confirming;
                 showing-audit <=> root.mind-menu-audit-open;
                 mode-chosen(m) => { root.mind-mode-chosen(m); root.mind-menu-open = false; }
-                bypass-chosen(d) => { root.mind-bypass-chosen(d); root.mind-menu-open = false; }
+                bypass-chosen(kind, d) => { root.mind-bypass-chosen(kind, d); root.mind-menu-open = false; }
                 rule-revoked(app, action) => { root.mind-rule-revoked(app, action); }
                 mind-view-on: root.mind-view-on;
                 private: root.private-mode;

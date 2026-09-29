@@ -77,7 +77,7 @@
 //!
 //! # The mode, and the grant
 //!
-//! Under the ceiling the person has a *mode* — plan, ask, auto or bypass — that says what may run
+//! Under the ceiling the person has a *mode* — plan, ask, auto, bypass or full bypass — that says what may run
 //! without asking them. For a while that lived only in the MCP bridge: it read the mode, raised
 //! the approval card when the mode said to, and acted once the person pressed Allow. `yos act`
 //! and a raw client on the socket ran the same `sensitive` action in `ask` mode with no card and
@@ -840,14 +840,15 @@ mod tests {
     /// boundary.
     const OPEN: &str = "dangerous";
 
-    /// Authority that binds nothing: the ceiling and the mode both at the top of the ladder.
+    /// Authority that binds nothing: the ceiling and the mode both at the top of the ladder —
+    /// full bypass, which asks about nothing, not even what cannot be undone.
     fn open() -> Authority {
-        Authority { ceiling: OPEN.into(), mode: Mode::named("bypass"), granted: false, asks_above: None }
+        Authority { ceiling: OPEN.into(), mode: Mode::named("bypass_all"), granted: false, asks_above: None }
     }
 
     /// A machine at `ceiling`, in a mode that asks about nothing under it: the ceiling tests.
     fn under(ceiling: &str) -> Authority {
-        Authority { ceiling: ceiling.into(), mode: Mode::named("bypass"), granted: false, asks_above: None }
+        Authority { ceiling: ceiling.into(), mode: Mode::named("bypass_all"), granted: false, asks_above: None }
     }
 
     /// An open ceiling and the mode under test, with or without a grant spent for the call.
@@ -1155,7 +1156,8 @@ mod tests {
     /// The dispatch reads the action's own description, not only its grade: Calendar's
     /// `delete_event` is `sensitive` and says "It is not recoverable", and in auto the shell and
     /// the bridge asked about it while `yos act` ran it (map gap 4 of the surface SDK). Asked
-    /// about on this door too now; bypass still asks nobody.
+    /// about on this door too now, and in bypass too since 28 September 2026: only full bypass
+    /// asks nobody.
     #[test]
     fn what_the_app_says_cannot_be_undone_is_asked_about_in_auto() {
         let delete = |ran: Rc<Cell<bool>>| {
@@ -1181,9 +1183,16 @@ mod tests {
         assert!(!ran.get(), "the handler must not have run");
 
         let ran = Rc::new(Cell::new(false));
-        delete(ran.clone())
+        let err = delete(ran.clone())
             .act("delete_event", &serde_json::json!({"id": "e1"}), None, "calendar#2", &in_mode("bypass", false))
-            .expect("bypass asks nobody");
+            .unwrap_err();
+        assert!(err.contains("bypass mode, which asks before anything that cannot be undone"), "{err}");
+        assert!(!ran.get(), "bypass still asks before a delete");
+
+        let ran = Rc::new(Cell::new(false));
+        delete(ran.clone())
+            .act("delete_event", &serde_json::json!({"id": "e1"}), None, "calendar#3", &in_mode("bypass_all", false))
+            .expect("full bypass asks nobody");
         assert!(ran.get());
     }
 
@@ -1378,6 +1387,9 @@ mod tests {
         let odd = format!(r#"{{"mode":"bypass","previous":"bypass","bypass_expires_unix":{}}}"#, now);
         assert_eq!(mode_from(&odd, now).name, DEFAULT_MODE);
         assert_eq!(mode_from(r#"{"mode":"bypass","previous":"ask","bypass_expires_unix":null}"#, now).name, "bypass");
+        let full = format!(r#"{{"mode":"bypass_all","previous":"auto","bypass_expires_unix":{}}}"#, now + 60);
+        assert_eq!(mode_from(&full, now).name, "bypass_all");
+        assert_eq!(mode_from(&full, now + 60).name, "auto", "full bypass ends on time too");
 
         // And each mode's column of the table: what it runs unasked.
         for (mode, top) in MODES {

@@ -1912,7 +1912,7 @@ DESCRIBE_READS = 3
 SECRET_WORDS = ("passphrase", "password", "passwd", "pin", "secret", "credential", "unlock")
 SECRET_PERMITTED = ("pinned",)
 # `gate::UNRECOVERABLE_PHRASES`. An action whose description says one of these is asked about in
-# every mode but bypass, so the checker never names one in a probe.
+# every mode but full bypass, so the checker never names one in a probe.
 UNRECOVERABLE_PHRASES = ("not recoverable", "cannot be undone", "can't be undone", "irreversible",
                          "permanently", "permanent", "no undo")
 NO_SUCH_ACTION = "yos-check-no-such-action"
