@@ -152,8 +152,12 @@
   };
 
   // A div a site made clickable by hand: the pointer says so, and nothing clickable holds it.
+  // Asking every div for its computed style is what made a long page slow to read (a Hacker
+  // News thread is thousands of spans), so the cheap tests come first and only what is in view
+  // is asked: a hand-made button off screen is found by scrolling to it, like one in view.
+  const HANDMADE_TAGS = new Set(['DIV', 'SPAN', 'LI', 'IMG', 'svg', 'TD']);
   const handmade = (el, win) => {
-    if (!['DIV', 'SPAN', 'LI', 'IMG', 'svg', 'TD'].includes(el.tagName)) return false;
+    if (!HANDMADE_TAGS.has(el.tagName)) return false;
     if (win.getComputedStyle(el).cursor !== 'pointer') return false;
     const parent = el.parentElement;
     if (parent && win.getComputedStyle(parent).cursor === 'pointer') return false;
@@ -193,7 +197,7 @@
     }
     if (el.tagName === 'A' && el.getAttribute('href')) {
       const href = el.getAttribute('href');
-      if (!href.startsWith('javascript:')) s.href = clean(el.href, 120);
+      if (!href.startsWith('javascript:') && href !== '#') s.href = clean(el.href, 120);
     }
     if (el === el.ownerDocument.activeElement) s.focused = true;
     return s;
@@ -244,9 +248,13 @@
     let above = 0, below = 0, total = 0;
     for (const [el, frame] of walk(document.documentElement, TOP)) {
       let role = roleOf(el);
-      const interactive = INTERACTIVE_ROLES.has(role) || (!role && handmade(el, frame.win));
+      let interactive = INTERACTIVE_ROLES.has(role);
       const context = CONTEXT_ROLES.has(role);
-      if (!interactive && !context) continue;
+      if (!interactive && !context) {
+        if (role || !HANDMADE_TAGS.has(el.tagName)) continue;
+        if (!inView(boxOf(el, frame)) || !handmade(el, frame.win)) continue;
+        interactive = true;
+      }
       if (hidden(el, frame.win)) continue;
       if (modal && !composedContains(modal, el) && el !== modal) continue;
       const e = entry(el, frame, role);
@@ -283,8 +291,11 @@
     const out = [];
     for (const [el, frame] of walk(document.documentElement, TOP)) {
       let role = roleOf(el);
-      const interactive = INTERACTIVE_ROLES.has(role) || (!role && handmade(el, frame.win));
-      if (!interactive && !CONTEXT_ROLES.has(role)) continue;
+      let interactive = INTERACTIVE_ROLES.has(role);
+      if (!interactive && !CONTEXT_ROLES.has(role)) {
+        if (role || !HANDMADE_TAGS.has(el.tagName)) continue;
+        if (!inView(boxOf(el, frame)) || !handmade(el, frame.win)) continue;
+      }
       if (hidden(el, frame.win)) continue;
       const e = entry(el, frame, role);
       const hay = (e.name + ' ' + (e.value || '') + ' ' + (e.href || '')).toLowerCase();
@@ -379,6 +390,9 @@
     }
     const form = el.form || el.closest('form');
     if (form) e.in_form = true;
+    // A link that goes somewhere navigates; one with no address or a script is a button.
+    const href = el.tagName === 'A' ? (el.getAttribute('href') || '') : '';
+    if (href && !href.startsWith('javascript:') && !href.startsWith('#')) e.href = el.href;
     return e;
   }
 

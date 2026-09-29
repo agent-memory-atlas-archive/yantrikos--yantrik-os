@@ -45,6 +45,16 @@ def fold_site(site):
     return s[4:] if s.startswith("www.") else s
 
 
+def commitment_of(element):
+    """The commitment a control's label carries — unless it is a link that goes somewhere. A link
+    with an address navigates, which Back undoes: Hacker News's "submit" opens the form, it does
+    not submit anything. A link with no address, or one that runs script, is a button by another
+    name, and is judged like one."""
+    if element.get("role") == "link" and element.get("href"):
+        return None
+    return commit.reads_as_commitment(element.get("name"))
+
+
 class Driver:
     def __init__(self, browser=None):
         self.browser = browser or cdp.Browser()
@@ -96,6 +106,10 @@ class Driver:
             self._run(tab, "watch")
         work()
         took, why = hands.settle(self.browser, tab, limit, since_navigations=before_nav)
+        if why == "limit" and limit < NAVIGATE_LIMIT and (tab.navigations > before_nav or not tab.loaded):
+            # A click that started a page load is given a page load's time, not a click's.
+            more, why = hands.settle(self.browser, tab, NAVIGATE_LIMIT - limit, since_navigations=before_nav)
+            took = round(took + more, 2)
         return self._consequence(tab, doing, before_nav, before_url, before_tabs, took, why, watch)
 
     def _consequence(self, tab, doing, before_nav, before_url, before_tabs, took, why, watched):
@@ -164,7 +178,7 @@ class Driver:
         before trying that `click` will refuse it and `commit` will ask."""
         for e in page.get("elements") or []:
             if not e.get("context"):
-                word = commit.reads_as_commitment(e.get("name"))
+                word = commitment_of(e)
                 if word:
                     e["commitment"] = word
         return page
@@ -279,7 +293,7 @@ class Driver:
             raise Refused("%s (\"%s\") is covered by %s \"%s\" (%s): pressing there would press that "
                           "instead. Deal with it first — often a cookie or sign-in dialog — then try again."
                           % (ref, target["name"], cover.get("role"), cover.get("name"), cover.get("ref")))
-        word = commit.reads_as_commitment(target["name"])
+        word = commitment_of(target)
         if word and not allow_commitment:
             raise Refused("%s (%s \"%s\") reads as a commitment (\"%s\"): pressing it may spend money, "
                           "send something or remove something, and that cannot be taken back. It is "
