@@ -2033,7 +2033,10 @@ reconcile_mind_units() {
   fi
   if [ "$changed" = 1 ]; then
     systemctl daemon-reload >/dev/null 2>&1
-    # A running mind keeps the sandbox it started with until it restarts.
+    # A running unit keeps the sandbox it started with until it restarts: the proxy first, so
+    # the mind comes back to a way out with the new rules (found on VM 520: an egress unit that
+    # gained AF_NETLINK went on running without it until restarted by hand).
+    systemctl try-restart yantrik-egress.service >/dev/null 2>&1 || true
     systemctl try-restart yantrik-mind.service >/dev/null 2>&1 || true
   fi
   return 0
