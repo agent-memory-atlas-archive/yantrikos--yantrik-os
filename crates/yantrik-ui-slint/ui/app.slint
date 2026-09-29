@@ -48,6 +48,8 @@ import { UrgeCardData } from "components/glance_card.slint";
 import { LensResult, ApprovalRequest, ApprovalCard, VaultUnlockRequest, VaultUnlockCard } from "components/intent_lens.slint";
 import { QuestionRequest } from "components/question_card.slint";
 import { MindModeMenu, MindRule, MindAuditEntry } from "components/mind_mode_menu.slint";
+import { MindsPanel, ProviderGroup, AccountRow, AccountMeter, AddChoice } from "components/minds_panel.slint";
+export { ProviderGroup, AccountRow, AccountMeter, AddChoice }
 import { WhisperCardItem } from "components/whisper_card.slint";
 import { BriefSection } from "components/morning_brief.slint";
 import { ClipboardEntryData } from "components/clipboard_panel.slint";
@@ -202,6 +204,19 @@ export component App inherits Window {
     in property <[MindRule]> mind-session-rules: [];
     in property <[MindAuditEntry]> mind-audit: [];
     in-out property <bool> mind-menu-open: false;
+    /// The Minds panel, under the mind chip: the person's accounts, what each has left, and
+    /// "make something". Filled by wire/minds_panel.rs while it is open.
+    in-out property <bool> minds-panel-open: false;
+    in-out property <bool> minds-panel-adding: false;
+    in property <[ProviderGroup]> minds-groups: [];
+    in property <[AddChoice]> minds-choices: [];
+    in property <string> minds-today: "";
+    in property <string> minds-status: "";
+    callback minds-panel-opened();
+    callback minds-use-account(string);
+    callback minds-sign-in(string);
+    callback minds-add(string);
+    callback minds-make(string);
     /// The menu's two sub-panels, held here rather than inside it because the chip that opens
     /// the menu has to be able to reset them, and the menu lives behind an `if`.
     in-out property <bool> mind-menu-confirming: false;
@@ -212,6 +227,7 @@ export component App inherits Window {
     /// `close_mind_menu` is the socket's way to put it away without moving.
     changed current-screen => {
         root.mind-menu-open = false;
+        root.minds-panel-open = false;
         root.mind-menu-confirming = false;
         root.mind-menu-audit-open = false;
         // The taskbar entry's menu belongs to the screen it was opened over for the same
@@ -1419,11 +1435,12 @@ export component App inherits Window {
             ai-privacy-clicked => { root.ai-quick-switcher-open = !root.ai-quick-switcher-open; }
             active-harness-id: root.active-harness-id;
             active-harness-name: root.active-harness-name;
-            // Straight to the section, not to the front door of Settings.
+            // The Minds panel, under the chip; Settings → Minds is its gear.
             active-mind-clicked => {
-                root.settings-category = 8;
-                root.current-screen = 7;
-                root.navigate(7);
+                root.minds-panel-open = !root.minds-panel-open;
+                root.minds-panel-adding = false;
+                root.mind-menu-open = false;
+                if root.minds-panel-open { root.minds-panel-opened(); }
             }
             // Companion
             is-thinking: root.is-thinking;
@@ -2562,6 +2579,7 @@ export component App inherits Window {
             // a question the person walked away from.
             mind-mode-clicked => {
                 root.mind-menu-open = !root.mind-menu-open;
+                root.minds-panel-open = false;
                 root.mind-menu-confirming = false;
                 root.mind-menu-audit-open = false;
             }
@@ -2575,11 +2593,12 @@ export component App inherits Window {
             // declared on DesktopScreen, and forwarding to a root callback of the same name was
             // inventing two that do not exist.
             ai-privacy-clicked => { root.ai-quick-switcher-open = !root.ai-quick-switcher-open; }
-            // Straight to the section, not to the front door of Settings.
+            // The Minds panel, under the chip; Settings → Minds is its gear.
             active-mind-clicked => {
-                root.settings-category = 8;
-                root.current-screen = 7;
-                root.navigate(7);
+                root.minds-panel-open = !root.minds-panel-open;
+                root.minds-panel-adding = false;
+                root.mind-menu-open = false;
+                if root.minds-panel-open { root.minds-panel-opened(); }
             }
             // The "minds can't reach" notice goes to Minds, which lists what is attached (#367).
             minds-notice-clicked => {
@@ -2734,6 +2753,7 @@ export component App inherits Window {
             }
             open-mode => {
                 root.mind-menu-open = !root.mind-menu-open;
+                root.minds-panel-open = false;
                 root.mind-menu-confirming = false;
                 root.mind-menu-audit-open = false;
             }
@@ -3076,6 +3096,44 @@ export component App inherits Window {
                 private: root.private-mode;
                 private-chosen(on) => { root.mind-private-chosen(on); root.mind-menu-open = false; }
                 mind-view-chosen(on) => { root.mind-view-chosen(on); }
+            }
+        }
+
+        // The Minds panel, under the mind chip. The same screens as the mode menu: an account
+        // switched or signed in from a locked screen would be acting on a machine nobody has
+        // unlocked. Anchored 12px in from the right edge for the same reason the menu is.
+        if root.minds-panel-open
+            && root.current-screen != 0 && root.current-screen != 2
+            && root.current-screen != 3 && root.current-screen != 32
+            : Rectangle {
+            width: 100%;
+            height: 100%;
+            background: transparent;
+
+            TouchArea {
+                width: 100%;
+                height: 100%;
+                clicked => { root.minds-panel-open = false; }
+            }
+
+            MindsPanel {
+                x: parent.width - 372px;
+                y: Theme.status-bar-height + Theme.sp-1;
+                groups: root.minds-groups;
+                choices: root.minds-choices;
+                today: root.minds-today;
+                status: root.minds-status;
+                adding <=> root.minds-panel-adding;
+                use-account(id) => { root.minds-use-account(id); }
+                sign-in(id) => { root.minds-sign-in(id); }
+                add(v) => { root.minds-add(v); }
+                make(kind) => { root.minds-make(kind); root.minds-panel-open = false; }
+                manage => {
+                    root.minds-panel-open = false;
+                    root.settings-category = 8;
+                    root.current-screen = 7;
+                    root.navigate(7);
+                }
             }
         }
 

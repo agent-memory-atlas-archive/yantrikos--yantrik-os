@@ -671,3 +671,27 @@ export component DecisionProbe inherits Window {
         }
     }
 }
+
+import { MindsPanel, ProviderGroup, AccountRow, AccountMeter, AddChoice } from "components/minds_panel.slint";
+export { ProviderGroup, AccountRow, AccountMeter, AddChoice }
+// The Minds panel alone, at the status bar's anchor, for verify-minds.
+export component MindsProbe inherits Window {
+    width: 1280px; height: 800px; background: Theme.bg-deep;
+    in property <[ProviderGroup]> groups;
+    in property <[AddChoice]> choices;
+    in property <string> today;
+    in-out property <bool> adding;
+    in-out property <string> action;
+    out property <length> panel-height: panel.height;
+    panel := MindsPanel {
+        x: parent.width - 372px;
+        y: 44px;
+        groups: root.groups; choices: root.choices; today: root.today; status: "";
+        adding <=> root.adding;
+        use-account(id) => { root.action = "use:" + id; }
+        sign-in(id) => { root.action = "signin:" + id; }
+        add(v) => { root.action = "add:" + v; }
+        make(k) => { root.action = "make:" + k; }
+        manage => { root.action = "manage"; }
+    }
+}
