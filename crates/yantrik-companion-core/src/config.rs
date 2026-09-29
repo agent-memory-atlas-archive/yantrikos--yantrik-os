@@ -1118,6 +1118,11 @@ pub struct ChatConfig {
     /// desktop whose channels answer no one.
     #[serde(default)]
     pub people: Vec<ChannelPerson>,
+    /// Channels whose operator can read what is sent (Telegram, Slack, Discord, WhatsApp's Cloud
+    /// API) on which the person still answers approval cards from the phone. End-to-end channels
+    /// (Signal, the paired app) always may; these only when named.
+    #[serde(default)]
+    pub phone_approvals: Vec<String>,
     /// Webhook listen port for WhatsApp (Meta requires a public endpoint).
     #[serde(default = "default_webhook_port")]
     pub webhook_port: u16,
@@ -1143,6 +1148,7 @@ impl Default for ChatConfig {
             slack: SlackConfig::default(),
             signal: SignalConfig::default(),
             people: Vec::new(),
+            phone_approvals: Vec::new(),
             webhook_port: default_webhook_port(),
         }
     }

@@ -88,6 +88,10 @@ pub struct Reach {
     pub surfaces: Vec<String>,
     /// The highest grade it may use, on [`LADDER`].
     pub ceiling: String,
+    /// Above this grade every act asks the person, whatever the mode (`Authority::asks_above`):
+    /// an agent answering a turn from the person's phone. Absent for a role's reach.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asks_above: Option<String>,
 }
 
 /// One line of the file: the digest of a token, and the reach that token carries.
@@ -402,6 +406,7 @@ mod tests {
             name: "Reviewer".into(),
             surfaces: vec!["editor".into(), "documents".into(), "notes".into()],
             ceiling: "safe".into(),
+            asks_above: None,
         }
     }
 
@@ -412,6 +417,7 @@ mod tests {
             name: "Coder".into(),
             surfaces: vec!["shell.agent_*".into(), "editor".into()],
             ceiling: "sensitive".into(),
+            asks_above: None,
         }
     }
 
@@ -423,6 +429,7 @@ mod tests {
             name: "Planner".into(),
             surfaces: vec!["calendar".into(), "notes".into()],
             ceiling: "safe".into(),
+            asks_above: None,
         }
     }
 
@@ -434,6 +441,7 @@ mod tests {
             name: "turn asked from a phone".into(),
             surfaces: vec!["*".into()],
             ceiling: "standard".into(),
+            asks_above: None,
         };
         assert!(within(&phone, "files", "move", "standard", &json!({})).is_ok());
         assert!(within(&phone, "shell", "open_app", "standard", &json!({"name": "notes"})).is_ok());

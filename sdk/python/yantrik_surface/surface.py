@@ -746,6 +746,8 @@ class Surface:
         grant = gate.grant_of(params)
         action_id = self._next_action_id()
         authority = gate.Authority(self.configured_ceiling(), self.configured_mode())
+        # An agent answering a turn from the person's phone asks above what its reach says.
+        authority.held_by(held)
 
         spec = self._find(name)
         if grant:

@@ -38,8 +38,8 @@ pub enum RouterEvent {
     },
 }
 
-/// Who asked, and on what channel: what a turn's origin is made from.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Who asked, and on what channel: what a turn's origin is made from, and where an answer goes.
+#[derive(Debug, Clone)]
 pub struct Asker {
     /// The provider's id: `telegram`, `signal`, `slack`, …
     pub provider: String,
@@ -47,11 +47,44 @@ pub struct Asker {
     pub sender_id: String,
     /// What an answer may carry there: `text`, `voice`, `photo`.
     pub carries: Vec<String>,
+    /// The conversation it was asked in: where a later answer is sent ([`Outbox::send`]).
+    pub conversation: ConversationRef,
+}
+
+/// Sends to a conversation on a channel at any time, not only as the reply the AI callback
+/// returns: an answer that takes a while, or a question for the person (an approval card on
+/// their phone). What it sends is kept in the transcript as the AI's, unless paused.
+#[derive(Clone)]
+pub struct Outbox {
+    providers: Arc<Mutex<HashMap<String, Box<dyn ChatProvider>>>>,
+    db: Arc<Mutex<Connection>>,
+    paused: Arc<dyn Fn() -> bool + Send + Sync>,
+}
+
+impl Outbox {
+    /// Send `text` to `conversation` on `provider`.
+    pub fn send(&self, provider: &str, conversation: &ConversationRef, text: &str) -> Result<(), String> {
+        let receipt = {
+            let mut providers = self.providers.lock().map_err(|_| "the channels are shut".to_string())?;
+            let channel = providers.get_mut(provider).ok_or_else(|| format!("no channel `{provider}` is running"))?;
+            channel.send(conversation, &OutboundMessage::text(text)).map_err(|e| e.to_string())?
+        };
+        if !(self.paused)() {
+            if let Ok(db) = self.db.lock() {
+                if let Ok((rowid, _)) = store::get_or_create_conversation(&db, conversation) {
+                    store::store_ai_response(&db, rowid, &receipt.message.id, text, receipt.timestamp_ms);
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Callback for AI processing. The router calls this when a message needs a response.
-/// Receives: (message_text, conversation_context, policy, asker) → AI response text.
-pub type AiCallback = Box<dyn Fn(&str, &[String], &ConversationPolicy, &Asker) -> Option<String> + Send + Sync>;
+/// Receives: (message_text, conversation_context, policy, asker, outbox) → the reply now, or
+/// `None` to answer later through the outbox (or not at all).
+pub type AiCallback =
+    Box<dyn Fn(&str, &[String], &ConversationPolicy, &Asker, &Outbox) -> Option<String> + Send + Sync>;
 
 /// Callback for brain integration. Called for every non-muted message.
 /// Receives: (sender_name, sender_id, provider, content_type).
@@ -76,7 +109,7 @@ pub struct ChatRouter {
     /// Who the person is on each channel: `(provider id, sender id)`. See [`ChatRouter::set_people`].
     people: std::collections::HashSet<(String, String)>,
     /// Whether nothing is to be kept right now: the person's Private mode. See [`ChatRouter::set_paused`].
-    paused: Option<Box<dyn Fn() -> bool + Send + Sync>>,
+    paused: Arc<dyn Fn() -> bool + Send + Sync>,
 }
 
 impl ChatRouter {
@@ -98,18 +131,23 @@ impl ChatRouter {
             ai_callback: None,
             brain_callback: None,
             people: std::collections::HashSet::new(),
-            paused: None,
+            paused: Arc::new(|| false),
         }
+    }
+
+    /// What sends to a conversation at any time: see [`Outbox`].
+    pub fn outbox(&self) -> Outbox {
+        Outbox { providers: Arc::clone(&self.providers), db: Arc::clone(&self.db), paused: Arc::clone(&self.paused) }
     }
 
     /// Ask `paused` before keeping anything: while it says yes (the person's Private mode), no
     /// message and no answer is written to the transcript.
     pub fn set_paused(&mut self, paused: Box<dyn Fn() -> bool + Send + Sync>) {
-        self.paused = Some(paused);
+        self.paused = Arc::from(paused);
     }
 
     fn keeping(&self) -> bool {
-        !self.paused.as_ref().is_some_and(|p| p())
+        !(self.paused)()
     }
 
     /// Who the person is on each channel. The AI is asked only about a direct message from one
@@ -285,10 +323,11 @@ impl ChatRouter {
                     sender_name: msg.sender.display_name.clone(),
                     sender_id: msg.sender.id.clone(),
                     carries,
+                    conversation: msg.conversation.clone(),
                 };
 
                 // Get AI response
-                if let Some(response) = ai_cb(&content_text, &context, &policy, &asker) {
+                if let Some(response) = ai_cb(&content_text, &context, &policy, &asker, &self.outbox()) {
                     // Send response through provider
                     let out_msg = OutboundMessage::text(&response)
                         .with_reply(msg.message.clone());
@@ -412,7 +451,7 @@ mod people_tests {
     fn router(asked: Arc<AtomicUsize>) -> ChatRouter {
         let db = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
         let mut router = ChatRouter::new(db);
-        router.set_ai_callback(Box::new(move |_, _, _, _| {
+        router.set_ai_callback(Box::new(move |_, _, _, _, _| {
             asked.fetch_add(1, Ordering::SeqCst);
             None
         }));

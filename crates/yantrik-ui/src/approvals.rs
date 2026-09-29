@@ -977,7 +977,7 @@ pub fn request(
     target: &str,
     explained: &str,
 ) -> Result<Requested, String> {
-    locked().request(
+    let requested = locked().request(
         requester,
         verified,
         app,
@@ -989,7 +989,11 @@ pub fn request(
         explained,
         Instant::now(),
         &hhmm(),
-    )
+    )?;
+    // An agent answering a turn from the person's phone raised it: the phone is told, and may
+    // answer it (`channels::card_raised`). After the store's lock is let go.
+    crate::channels::card_raised(&requested.id);
+    Ok(requested)
 }
 
 pub fn status(id: &str) -> Option<Status> {

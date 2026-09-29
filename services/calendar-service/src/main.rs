@@ -771,7 +771,7 @@ mod tests {
     /// A machine at `ceiling`, in `mode`, with no grant spent — the authority pinned per case
     /// rather than inherited from whatever files the machine running the tests has.
     fn at(ceiling: &str, mode: &str) -> Authority {
-        Authority { ceiling: ceiling.into(), mode: gate::Mode::named(mode), granted: false }
+        Authority { ceiling: ceiling.into(), mode: gate::Mode::named(mode), granted: false, asks_above: None }
     }
 
     /// `app.act` for `action` with `args`, and a grant id beside it when the test says one was
@@ -1348,6 +1348,7 @@ mod tests {
                     name: "Coder".into(),
                     surfaces: vec!["calendar".into()],
                     ceiling: "sensitive".into(),
+                    asks_above: None,
                 }),
                 "tok-stranger" => Some(reach::Reach {
                     agent: "deepseek:c-stranger".into(),
@@ -1355,6 +1356,7 @@ mod tests {
                     name: "Reviewer".into(),
                     surfaces: vec!["calendar".into()],
                     ceiling: "sensitive".into(),
+                    asks_above: None,
                 }),
                 _ => None,
             });

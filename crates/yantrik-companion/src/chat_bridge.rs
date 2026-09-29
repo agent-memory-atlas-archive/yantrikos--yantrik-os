@@ -20,6 +20,14 @@ use crate::config::CompanionConfig;
 pub struct ChatHandle {
     _router_thread: Option<thread::JoinHandle<()>>,
     _manager: ProviderManager,
+    outbox: yantrik_chat::router::Outbox,
+}
+
+impl ChatHandle {
+    /// What sends to a conversation on a channel at any time.
+    pub fn outbox(&self) -> yantrik_chat::router::Outbox {
+        self.outbox.clone()
+    }
 }
 
 /// Start the multi-provider chat system.
@@ -209,6 +217,8 @@ pub fn start_chat(
     }
 
     // Start router thread
+    // Taken before the router moves to its thread: what the shell sends unasked goes through it.
+    let outbox = router.outbox();
     let router_handle = thread::Builder::new()
         .name("chat-router".into())
         .spawn(move || {
@@ -254,5 +264,6 @@ pub fn start_chat(
     Some(ChatHandle {
         _router_thread: Some(router_handle),
         _manager: manager,
+        outbox,
     })
 }
