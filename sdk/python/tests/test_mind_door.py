@@ -371,12 +371,14 @@ class TestTheDoor(support.MachineCase):
     def test_a_door_is_served_only_on_a_directory_exactly_as_the_tmpfiles_entry_makes_it(self):
         me, minds = 1000, 990
         self.assertTrue(mind_door.acceptable(me, minds, 0o42750, me, minds))
+        self.assertTrue(mind_door.acceptable(me, minds, 0o42700, me, minds), "closed by Private mode, still served")
+        self.assertFalse(mind_door.acceptable(me, minds, 0o40700, me, minds))
         self.assertFalse(mind_door.acceptable(0, minds, 0o42750, me, minds))
         self.assertFalse(mind_door.acceptable(me, 100, 0o42750, me, minds))
         self.assertFalse(mind_door.acceptable(me, minds, 0o42770, me, minds))
         self.assertFalse(mind_door.acceptable(me, minds, 0o40750, me, minds))
         self.assertFalse(mind_door.acceptable(me, minds, 0o42755, me, minds))
-        support.quoted(self, DOOR_RS, "owner == me && group == minds && mode & 0o7777 == 0o2750")
+        support.quoted(self, DOOR_RS, "owner == me && group == minds && matches!(mode & 0o7777, 0o2750 | 0o2700)")
         support.quoted(self, DOOR_RS, 'pub const DEFAULT_DIR: &str = "/run/yantrik-minds";')
 
     def test_only_a_surface_socket_of_this_session_gets_a_door(self):

@@ -74,6 +74,9 @@ fn now() -> u64 {
 /// when the person turns it, and at start with what `load` read. The slow parts (systemd) run on
 /// a thread of their own.
 pub fn enforce(on: bool, bridge: &Arc<CompanionBridge>) {
+    // The door itself first: while private the mind account enters no socket in it, whatever
+    // build the app serving there runs (an app opened before an update runs the old code).
+    set_door(on);
     bridge.set_private(on);
     bridge.event_bus().set_recording(!on);
     if let Some(host) = crate::wire::harness::host() {
@@ -115,6 +118,9 @@ pub fn watch() {
     let timer = slint::Timer::default();
     timer.start(slint::TimerMode::Repeated, std::time::Duration::from_secs(2), || {
         let on = is_on();
+        // And the door kept as the switch says: something re-creating the directory at its
+        // default mode (tmpfiles) would otherwise open it mid-private.
+        set_door(on);
         if privacy::is_private() == on {
             return;
         }
@@ -132,6 +138,18 @@ pub fn watch() {
         }
     });
     std::mem::forget(timer);
+}
+
+/// Close the mind door (private) or open it, logging a failure rather than stopping: every
+/// door's own refusal still stands behind it.
+fn set_door(closed: bool) {
+    let dir = yantrik_ipc_transport::mind_door::dir();
+    if !dir.exists() {
+        return;
+    }
+    if let Err(e) = yantrik_ipc_transport::mind_door::close_door(&dir, closed) {
+        tracing::warn!(dir = %dir.display(), closed, error = %e, "the mind door's directory could not be set; each door still refuses on its own");
+    }
 }
 
 /// What the desktop says in the Lens when the person writes to a mind while private.

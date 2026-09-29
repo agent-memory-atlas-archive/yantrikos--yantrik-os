@@ -88,7 +88,40 @@ fn lookup_group(name: &str) -> Option<u32> {
 /// group the minds' group, mode exactly 2750 (the person writes, the minds' group enters, new
 /// sockets take the group, nobody else sees in). Anything else and there is no door.
 pub fn acceptable(owner: u32, group: u32, mode: u32, me: u32, minds: u32) -> bool {
-    owner == me && group == minds && mode & 0o7777 == 0o2750
+    // 2750 is the door open; 2700 is the door the person's Private mode closed (`close`), which a
+    // surface still serves on so that it is reachable again the moment Private mode ends.
+    owner == me && group == minds && matches!(mode & 0o7777, 0o2750 | 0o2700)
+}
+
+/// The mode of the door directory with the door open, and closed.
+pub const OPEN: u32 = 0o2750;
+pub const CLOSED: u32 = 0o2700;
+
+/// Close the door (`true`) or open it (`false`): the directory's group loses, or gets back, the
+/// right to enter it, so while closed the mind account reaches no socket in it at all — whatever
+/// build of whatever app is serving there. What the person's Private mode does, beside every
+/// door's own refusal: an app opened before an update runs the old code, which knows nothing of
+/// Private mode (found on VM 520, 29 Sep 2026). Only on a directory that is this account's own
+/// and is a directory, not a link to one.
+#[cfg(unix)]
+pub fn close_door(dir: &Path, closed: bool) -> std::io::Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let meta = std::fs::symlink_metadata(dir)?;
+    // SAFETY: getuid cannot fail.
+    let me = unsafe { libc::getuid() };
+    if !meta.is_dir() || meta.uid() != me {
+        return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "the door directory is not this account's own"));
+    }
+    let want = if closed { CLOSED } else { OPEN };
+    if meta.mode() & 0o7777 != want {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(want))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn close_door(_dir: &Path, _closed: bool) -> std::io::Result<()> {
+    Ok(())
 }
 
 /// The door directory, when this process should serve on it.
@@ -142,6 +175,34 @@ pub fn client_address(service_id: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_door_open_and_closed_are_both_served_and_nothing_else_is() {
+        assert!(acceptable(1000, 990, 0o42750, 1000, 990));
+        assert!(acceptable(1000, 990, 0o42700, 1000, 990), "closed by Private mode, still served");
+        for mode in [0o40750, 0o42755, 0o42770, 0o40700, 0o42711] {
+            assert!(!acceptable(1000, 990, mode, 1000, 990), "{mode:o}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn closing_the_door_takes_the_groups_way_in_and_opening_gives_it_back() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("yantrik-door-close-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(OPEN)).unwrap();
+        close_door(&dir, true).unwrap();
+        assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o7777, CLOSED);
+        close_door(&dir, false).unwrap();
+        assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o7777, OPEN);
+        let link = dir.with_extension("link");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&dir, &link).unwrap();
+        assert!(close_door(&link, true).is_err(), "never through a link");
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
     use super::*;
 
     #[test]
