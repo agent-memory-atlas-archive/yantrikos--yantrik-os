@@ -1076,6 +1076,10 @@ pub struct WhatsAppConfig {
     /// Default recipient phone number in international format.
     #[serde(default)]
     pub recipient: Option<String>,
+    /// The token Meta echoes to verify the webhook. Unset, a fresh random one is made at start:
+    /// a fixed default is a token anyone who read the source knows.
+    #[serde(default)]
+    pub verify_token: Option<String>,
 }
 
 impl Default for WhatsAppConfig {
@@ -1085,6 +1089,7 @@ impl Default for WhatsAppConfig {
             phone_number_id: None,
             access_token: None,
             recipient: None,
+            verify_token: None,
         }
     }
 }
@@ -1108,12 +1113,25 @@ pub struct ChatConfig {
     pub slack: SlackConfig,
     #[serde(default)]
     pub signal: SignalConfig,
+    /// Who the person is on each channel. Only a direct message from one of these is ever
+    /// answered; everyone else, and every group, is not. Empty (and no Telegram `chat_id`) is a
+    /// desktop whose channels answer no one.
+    #[serde(default)]
+    pub people: Vec<ChannelPerson>,
     /// Webhook listen port for WhatsApp (Meta requires a public endpoint).
     #[serde(default = "default_webhook_port")]
     pub webhook_port: u16,
 }
 
 fn default_webhook_port() -> u16 { 9880 }
+
+/// The person, as one channel knows them: the provider (`telegram`, `signal`, `slack`,
+/// `discord`, `matrix`, `irc`, `whatsapp`) and their sender id there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelPerson {
+    pub provider: String,
+    pub id: String,
+}
 
 impl Default for ChatConfig {
     fn default() -> Self {
@@ -1124,6 +1142,7 @@ impl Default for ChatConfig {
             irc: IrcConfig::default(),
             slack: SlackConfig::default(),
             signal: SignalConfig::default(),
+            people: Vec::new(),
             webhook_port: default_webhook_port(),
         }
     }
