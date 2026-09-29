@@ -73,6 +73,14 @@ def notes_surface(ask_shell, ran, **kwargs):
 class TestWithin(unittest.TestCase):
     """`reach::within`, case for case as its own tests have it."""
 
+    def test_a_reach_of_every_app_still_holds_its_ceiling(self):
+        phone = {"agent": "pi:main", "role": "remote", "name": "turn asked from a phone",
+                 "surfaces": ["*"], "ceiling": "standard"}
+        self.assertIsNone(reach.within(phone, "files", "move", "standard", {}))
+        err = reach.within(phone, "calendar", "delete_event", "sensitive", {})
+        self.assertIn("which may touch every app, at most `standard`", err)
+        self.assertFalse(reach.covers(["*x"], "files", "move"))
+
     def test_an_act_on_its_surfaces_and_under_its_ceiling_runs(self):
         self.assertIsNone(reach.within(reviewer(), "notes", "list_notes", "safe", {}))
         self.assertIsNone(reach.within(coder(), "shell", "agent_run", "sensitive", {}))

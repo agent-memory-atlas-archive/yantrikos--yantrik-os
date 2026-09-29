@@ -212,7 +212,7 @@ fn dispatch(
         Some(h) => (crate::agents::handover::with_handover(h, text), context),
         None => (text.to_string(), context),
     };
-    let answer = host.send(yantrik_harness::Turn::new(sent).with_context(context));
+    let answer = host.send(yantrik_harness::Turn::new(sent).with_context(context).with_origin(yantrik_harness::protocol::Origin::desk()));
     // The same turn, recorded as this mind's agent on the Agents screen; the answer passes through.
     let answer = crate::agents::feed::lens_turn(&host.active_id(), text, answer);
     let run_of = crate::agents::feed::main_agent(&host.active_id());

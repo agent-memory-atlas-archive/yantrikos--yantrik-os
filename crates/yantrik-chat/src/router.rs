@@ -38,9 +38,20 @@ pub enum RouterEvent {
     },
 }
 
+/// Who asked, and on what channel: what a turn's origin is made from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Asker {
+    /// The provider's id: `telegram`, `signal`, `slack`, …
+    pub provider: String,
+    pub sender_name: String,
+    pub sender_id: String,
+    /// What an answer may carry there: `text`, `voice`, `photo`.
+    pub carries: Vec<String>,
+}
+
 /// Callback for AI processing. The router calls this when a message needs a response.
-/// Receives: (message_text, conversation_context, policy) → AI response text.
-pub type AiCallback = Box<dyn Fn(&str, &[String], &ConversationPolicy) -> Option<String> + Send + Sync>;
+/// Receives: (message_text, conversation_context, policy, asker) → AI response text.
+pub type AiCallback = Box<dyn Fn(&str, &[String], &ConversationPolicy, &Asker) -> Option<String> + Send + Sync>;
 
 /// Callback for brain integration. Called for every non-muted message.
 /// Receives: (sender_name, sender_id, provider, content_type).
@@ -239,8 +250,27 @@ impl ChatRouter {
                 // Drop db lock before calling AI (may take a while)
                 drop(db);
 
+                // Who asked, and what the channel can carry back.
+                let mut carries = vec!["text".to_string()];
+                if let Ok(providers) = self.providers.lock() {
+                    if let Some(caps) = providers.get(provider_id).map(|p| p.capabilities()) {
+                        if caps.voice {
+                            carries.push("voice".into());
+                        }
+                        if caps.media {
+                            carries.push("photo".into());
+                        }
+                    }
+                }
+                let asker = Asker {
+                    provider: provider_id.to_string(),
+                    sender_name: msg.sender.display_name.clone(),
+                    sender_id: msg.sender.id.clone(),
+                    carries,
+                };
+
                 // Get AI response
-                if let Some(response) = ai_cb(&content_text, &context, &policy) {
+                if let Some(response) = ai_cb(&content_text, &context, &policy, &asker) {
                     // Send response through provider
                     let out_msg = OutboundMessage::text(&response)
                         .with_reply(msg.message.clone());
@@ -363,7 +393,7 @@ mod people_tests {
     fn router(asked: Arc<AtomicUsize>) -> ChatRouter {
         let db = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
         let mut router = ChatRouter::new(db);
-        router.set_ai_callback(Box::new(move |_, _, _| {
+        router.set_ai_callback(Box::new(move |_, _, _, _| {
             asked.fetch_add(1, Ordering::SeqCst);
             None
         }));

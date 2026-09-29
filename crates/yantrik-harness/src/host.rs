@@ -982,6 +982,7 @@ impl Host {
                 // Decided when the harness takes the turn, not now: see `poll`.
                 memory_credential: String::new(),
                 memory_url: String::new(),
+                origin: turn.origin,
             },
             tx,
         });

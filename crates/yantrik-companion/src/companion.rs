@@ -597,6 +597,11 @@ pub struct CompanionService {
     // The same model, its uses and incognito, published for callers on other threads.
     decisions: crate::decisions::Decisions,
 
+    // A ceiling on this turn's tools below the configured one: `Standard` while the person is
+    // asking from a phone (design/channels-2026-09-29.md). Set by every message the worker
+    // takes, so what a remote turn queues keeps it until the person next speaks at the desk.
+    turn_ceiling: Option<PermissionLevel>,
+
     // Model family for family-aware chat templates (tool format, tool results).
     model_family: ModelFamily,
 
@@ -940,6 +945,7 @@ impl CompanionService {
             use_native_tools,
             judge,
             decisions,
+            turn_ceiling: None,
             model_family: capability_profile.family,
             task_manager: std::sync::Mutex::new(task_mgr),
             recent_events: Vec::new(),
@@ -1222,6 +1228,21 @@ impl CompanionService {
         self.judge.as_ref().map(|j| j.info())
     }
 
+    /// Hold the next turns' tools to `ceiling` (`None`: the configured one alone).
+    pub fn set_turn_ceiling(&mut self, ceiling: Option<PermissionLevel>) {
+        self.turn_ceiling = ceiling;
+    }
+
+    /// The highest tool permission this turn may use: the configured one, or the turn's own
+    /// ceiling where that is lower.
+    fn max_permission_now(&self) -> PermissionLevel {
+        let configured = parse_permission(&self.config.tools.max_permission);
+        match self.turn_ceiling {
+            Some(ceiling) if ceiling < configured => ceiling,
+            _ => configured,
+        }
+    }
+
     /// The decision model, its uses and incognito, for callers on other threads: they ask there,
     /// never waiting behind a chat turn here.
     pub fn decisions(&self) -> crate::decisions::Decisions {
@@ -1296,7 +1317,7 @@ impl CompanionService {
         let metadata = self.registry.list_metadata(PermissionLevel::Dangerous);
         let ctx = ToolContext {
             db: &self.db,
-            max_permission: parse_permission(&self.config.tools.max_permission),
+            max_permission: self.max_permission_now(),
             registry_metadata: Some(&metadata),
             task_manager: Some(&self.task_manager),
             incognito: self.incognito,
@@ -1310,7 +1331,7 @@ impl CompanionService {
     /// Names and one-line descriptions only — the full JSON schemas are what the model needs, and
     /// a caller that already knows which tool it wants does not need to read 178 of them.
     pub fn tool_catalog(&self) -> serde_json::Value {
-        let max_perm = parse_permission(&self.config.tools.max_permission);
+        let max_perm = self.max_permission_now();
         let tools: Vec<serde_json::Value> = self
             .registry
             .list_metadata(max_perm)
@@ -1591,7 +1612,7 @@ impl CompanionService {
                     } else {
                         let tool_ctx = ToolContext {
                             db: &self.db,
-                            max_permission: parse_permission(&self.config.tools.max_permission),
+                            max_permission: self.max_permission_now(),
                             registry_metadata: None,
                             task_manager: Some(&self.task_manager),
                             agent_spawner: None,
@@ -1795,7 +1816,7 @@ impl CompanionService {
         // [0] system: context (+ text-injected tools for non-API backends)
         // [1..N-1] conversation history
         // [N] user query
-        let max_perm = parse_permission(&self.config.tools.max_permission);
+        let max_perm = self.max_permission_now();
         let mut messages = Vec::with_capacity(context_messages.len() + 1);
 
         // Dynamic tool selection — adaptive based on model capability profile
@@ -2499,7 +2520,7 @@ impl CompanionService {
                     } else {
                         let tool_ctx = ToolContext {
                             db: &self.db,
-                            max_permission: parse_permission(&self.config.tools.max_permission),
+                            max_permission: self.max_permission_now(),
                             registry_metadata: None,
                             task_manager: Some(&self.task_manager),
                             agent_spawner: None,
@@ -2651,7 +2672,7 @@ impl CompanionService {
         };
 
         // Build message array — single system message (Qwen3.5 requires it):
-        let max_perm = parse_permission(&self.config.tools.max_permission);
+        let max_perm = self.max_permission_now();
         let mut messages = Vec::with_capacity(context_messages.len() + 1);
 
         // Dynamic tool selection — adaptive based on model capability profile

@@ -1113,6 +1113,29 @@ mod tests {
     /// — and the role's reach held before that first turn, on the shell's registry and in the file
     /// a door in another process reads, which never holds the token. Then in reach, off its
     /// surfaces and above its ceiling, as every door decides them; and a stop lets it go.
+    /// A turn asked from a phone holds the agent answering it to `standard` on every door, and
+    /// the turn's end puts it back as it was (design/channels-2026-09-29.md).
+    #[test]
+    fn a_turn_from_a_phone_holds_the_agent_to_standard_until_it_ends() {
+        let host = Host::new(vec![]);
+        let _pi = attach(&host, "pi-remote", true);
+        let agent = agents::model::AgentId::new("pi-remote", agents::model::AgentId::MAIN);
+        let _answer = host.send_to(&agent, yantrik_harness::Turn::new("hello")).unwrap();
+        let token = host.with_agent_token(&agent, |t| t.to_string()).unwrap();
+        assert!(reaches::lookup(&token).is_none(), "at the desk, no role, not held");
+
+        reaches::hold_remote(&host, &agent).unwrap();
+        let held = reaches::lookup(&token).expect("held while the phone's turn runs");
+        assert_eq!((held.ceiling.as_str(), held.surfaces.clone()), ("standard", vec!["*".to_string()]));
+        assert_eq!(reaches::read_as_a_door(&token).unwrap(), Some(held.clone()), "on every door");
+        let json = serde_json::json!({});
+        assert!(yantrik_ipc_transport::reach::within(&held, "files", "move", "standard", &json).is_ok());
+        assert!(yantrik_ipc_transport::reach::within(&held, "files", "delete", "sensitive", &json).is_err());
+
+        reaches::release_remote(&agent);
+        assert!(reaches::lookup(&token).is_none(), "and let go when it ends");
+    }
+
     #[test]
     fn hand_off_starts_the_role_on_its_first_attached_mind_held_to_its_reach() {
         let host = Host::new(vec![]);

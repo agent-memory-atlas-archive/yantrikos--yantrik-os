@@ -65,6 +65,9 @@ pub enum CompanionCommand {
         /// Only [`CompanionHandle::ask`] passes one. The chat UI shows the offline notice from
         /// its own wiring, and a submitted job's subscriber is the board.
         model: Option<Sender<bool>>,
+        /// Asked from away from the machine (a channel): the turn's tools are held to
+        /// `Standard`, and so is what it leaves queued, until the person next speaks at the desk.
+        remote: bool,
     },
     /// Count a conversation turn — one that began with the person's words and was answered.
     ///
@@ -351,6 +354,7 @@ impl CompanionHandle {
                 token_tx,
                 job: None,
                 model: Some(model_tx),
+                remote: false,
             })
             .map_err(|_| AskError::Failed("companion worker is not running".to_string()))?;
 
@@ -456,6 +460,7 @@ impl CompanionHandle {
                 token_tx,
                 job: Some(receipt.ticket.clone()),
                 model: None,
+                remote: false,
             })
             .map_err(|_| "companion worker is not running".to_string())?;
         Ok(receipt)
@@ -650,6 +655,12 @@ impl CompanionBridge {
 
     /// Send a message and get a channel to receive streaming tokens.
     pub fn send_message(&self, text: String) -> Receiver<String> {
+        self.send_message_from(text, false)
+    }
+
+    /// `send_message`, saying whether the person asked it from away from the machine: a remote
+    /// turn's tools are held to `Standard`.
+    pub fn send_message_from(&self, text: String, remote: bool) -> Receiver<String> {
         let (token_tx, token_rx) = crossbeam_channel::unbounded();
         if self
             .cmd_tx
@@ -658,6 +669,7 @@ impl CompanionBridge {
                 token_tx: token_tx.clone(),
                 job: None,
                 model: None,
+                remote,
             })
             .is_err()
         {
@@ -1166,7 +1178,8 @@ fn worker_loop(
                 crate::recipes::record(&recipe_id, outcome.map(|a| a.message));
                 recipes_dirty = true;
             }
-            Ok(CompanionCommand::SendMessage { text, token_tx, job, model }) => {
+            Ok(CompanionCommand::SendMessage { text, token_tx, job, model, remote }) => {
+                companion.set_turn_ceiling(remote.then_some(yantrik_companion::tools::PermissionLevel::Standard));
                 // A turn can create, run or change a recipe through its tools.
                 recipes_dirty = true;
                 // Work that arrived without a ticket gets one here, and that is not bookkeeping:

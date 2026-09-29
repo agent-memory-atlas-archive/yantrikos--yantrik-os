@@ -308,7 +308,7 @@ impl AppContext {
             &chat_config_snapshot,
             // AI callback: the person's message to the mind answering, and its reply. The router
             // asks only about a direct message from one of `chat.people` (`ChatRouter::set_people`).
-            Box::new(move |text: &str, context: &[String], policy: &yantrik_chat::policy::ConversationPolicy| {
+            Box::new(move |text: &str, context: &[String], policy: &yantrik_chat::policy::ConversationPolicy, asker: &yantrik_chat::router::Asker| {
                 let prompt = if context.is_empty() {
                     text.to_string()
                 } else {
@@ -329,7 +329,30 @@ impl AppContext {
                 let Some(host) = crate::wire::harness::host() else {
                     return Some("The desktop is still starting; ask again in a moment.".to_string());
                 };
-                let answer = host.send(yantrik_harness::Turn::new(prompt));
+                // Where it came from (design/channels-2026-09-29.md): the mind reads it, and the
+                // agent answering is held to `standard` until its answer ends — a stolen phone
+                // is not the person at the keyboard. The built-in companion holds itself
+                // (`Turn::is_remote`); a harness mind is held by its token's reach.
+                let origin = yantrik_harness::protocol::Origin {
+                    channel: asker.provider.clone(),
+                    remote: true,
+                    person: asker.sender_name.clone(),
+                    carries: asker.carries.clone(),
+                    trust: crate::channels::trust_of(&asker.provider).to_string(),
+                };
+                let active = host.active_id();
+                let agent = (active != crate::wire::harness::BUILTIN_ID)
+                    .then(|| crate::agents::model::AgentId::new(&active, crate::agents::model::AgentId::MAIN));
+                if let Some(agent) = &agent {
+                    // The main agent exists once its harness is attached; a harness that is not
+                    // cannot answer, and the host says so below.
+                    if host.with_agent_token(agent, |_| ()).is_some() {
+                        if let Err(why) = crate::agents::reaches::hold_remote(host, agent) {
+                            return Some(format!("Nothing was sent: {why}"));
+                        }
+                    }
+                }
+                let answer = host.send(yantrik_harness::Turn::new(prompt).with_origin(origin));
                 let mut full_response = String::new();
                 while let Ok(chunk) = answer.recv() {
                     match chunk {
@@ -341,6 +364,9 @@ impl AppContext {
                         }
                         yantrik_harness::Chunk::Event(_) => {}
                     }
+                }
+                if let Some(agent) = &agent {
+                    crate::agents::reaches::release_remote(agent);
                 }
 
                 if full_response.is_empty() {

@@ -57,6 +57,68 @@ pub fn hold(host: &Host, agent: &AgentId, role: &Role) -> Result<(), String> {
     write(&entries).map_err(|why| format!("the {}'s reach could not be published: {why}", role.name))
 }
 
+/// The reach an agent was under before a remote turn capped it, to put back when the turn ends:
+/// `None` inside for an agent that had no role.
+static BEFORE_REMOTE: Mutex<Vec<(String, Option<Entry>)>> = Mutex::new(Vec::new());
+
+/// The most an agent may do unasked while it answers a turn asked from away from the machine.
+pub const REMOTE_CEILING: &str = "standard";
+
+/// Hold `agent` to [`REMOTE_CEILING`] while it answers a turn asked from a phone
+/// (design/channels-2026-09-29.md): a role's reach keeps its surfaces with the lower ceiling; an
+/// agent with no role gets every app, at that ceiling. An `Err` means it could not be held, and
+/// the turn must not be sent.
+pub fn hold_remote(host: &Host, agent: &AgentId) -> Result<(), String> {
+    let digest = host
+        .with_agent_token(agent, reach::token_digest)
+        .ok_or_else(|| format!("`{agent}` is not live, so there is no token to hold for a turn from a phone"))?;
+    let mut entries = live();
+    let before = entries.iter().find(|e| e.reach.agent == agent.0).cloned();
+    let mut held = match &before {
+        Some(entry) => entry.clone(),
+        None => Entry {
+            token_sha256: digest.clone(),
+            reach: Reach {
+                agent: agent.0.clone(),
+                role: "remote".into(),
+                name: "turn asked from a phone".into(),
+                surfaces: vec!["*".into()],
+                ceiling: REMOTE_CEILING.into(),
+            },
+        },
+    };
+    held.token_sha256 = digest;
+    if yantrik_ipc_transport::gate::grade(&held.reach.ceiling).unwrap_or(usize::MAX) > yantrik_ipc_transport::gate::grade(REMOTE_CEILING).unwrap_or(0) {
+        held.reach.ceiling = REMOTE_CEILING.into();
+    }
+    {
+        let mut saved = BEFORE_REMOTE.lock().unwrap_or_else(|e| e.into_inner());
+        if !saved.iter().any(|(a, _)| a == &agent.0) {
+            saved.push((agent.0.clone(), before));
+        }
+    }
+    entries.retain(|e| e.reach.agent != agent.0);
+    entries.push(held);
+    write(&entries).map_err(|why| format!("a turn from a phone could not be held to `{REMOTE_CEILING}`: {why}"))
+}
+
+/// The remote turn has ended: `agent` is under what it was before [`hold_remote`].
+pub fn release_remote(agent: &AgentId) {
+    let before = {
+        let mut saved = BEFORE_REMOTE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(at) = saved.iter().position(|(a, _)| a == &agent.0) else { return };
+        saved.remove(at).1
+    };
+    let mut entries = live();
+    entries.retain(|e| e.reach.agent != agent.0);
+    if let Some(entry) = before {
+        entries.push(entry);
+    }
+    if let Err(why) = write(&entries) {
+        tracing::warn!(agent = %agent, error = %why, "could not write the agents' reach after a turn from a phone");
+    }
+}
+
 /// Let `agent` go: stopped, it acts no more.
 pub fn release(agent: &AgentId) {
     let mut entries = live();
