@@ -61,6 +61,7 @@ pub mod installer;
 pub mod installer_disk;
 pub mod installer_locale;
 pub mod login;
+pub mod minds_panel;
 pub mod services;
 pub mod vault;
 
@@ -97,6 +98,8 @@ pub fn wire_all(ui: &App, ctx: &AppContext) {
     agents::wire(ui, ctx);
     // After `harness` and `agents`: the panel reads the host and the Agents store they set up.
     crate::mind_panel::wire(ui);
+    // The Minds panel under the mind chip: the person's accounts and what each has left.
+    minds_panel::wire(ui, ctx);
     recipes::wire(ui, ctx);
     about::wire(ui, ctx);
     version::wire(ui, ctx);
