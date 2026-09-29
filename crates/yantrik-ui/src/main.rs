@@ -104,6 +104,8 @@ mod mind_panel;
 /// A desktop of the mind's own, inside one window: where the apps a mind opens are drawn (#239).
 mod mind_view;
 mod session_lock;
+// The snap layouts: rc.xml's regions and keys, and the window menu, kept in step (tests only).
+mod snap_layouts;
 mod notifications;
 mod onboarding;
 mod perception;

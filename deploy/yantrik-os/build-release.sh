@@ -237,6 +237,8 @@ fi
 # not a release of this OS.
 mkdir -p "$ROOT/share/labwc" "$ROOT/share/fonts"
 cp "$PROJECT_ROOT/config/labwc/rc.xml" "$ROOT/share/labwc/rc.xml"
+# The window menu, with its Snap layouts (the regions rc.xml defines).
+cp "$PROJECT_ROOT/config/labwc/menu.xml" "$ROOT/share/labwc/menu.xml"
 cp "$PROJECT_ROOT/config/labwc/themerc" "$ROOT/share/labwc/themerc"
 # The titlebar buttons, which labwc loads from the theme directory in place of its built-in
 # six-by-six bitmaps. Rendered by scripts/render-window-buttons.py. Not optional decoration: the
