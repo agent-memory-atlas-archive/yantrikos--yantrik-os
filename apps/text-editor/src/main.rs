@@ -1488,7 +1488,7 @@ fn surface(ui: &TextEditorApp, s: &State) -> Vec<(Action, Handler)> {
         act(
             "discard",
             "Throw away the unsaved changes in the tab the window is asking about and close it. \
-             The text that was never saved is gone and cannot be recovered.",
+             The text that was never saved is gone and is not recoverable.",
         )
         .risk("sensitive"),
         |ui, s, _| {

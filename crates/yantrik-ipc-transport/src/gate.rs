@@ -185,9 +185,10 @@ pub const MODE_FILE: &str = "mind-mode.json";
 /// shell's `mind_mode::Modes::decide` and the bridge's `decide`, which stay the definition.
 ///
 /// The two bypasses share a column: both run every grade under the ceiling unasked. What tells
-/// them apart is not a grade but the app's own word that an action cannot be undone — a payment,
-/// a send, a delete. Bypass still asks about those, as every stricter mode does; full bypass
-/// (`bypass_all`) is the one mode that does not ([`Mode::asks_before_what_cannot_be_undone`]).
+/// them apart is not a grade but the app's own word that an action cannot be undone
+/// ([`unrecoverable`]) — a purchase, a calendar delete. Bypass still asks about those, as every
+/// stricter mode does; full bypass (`bypass_all`) is the one mode that does not
+/// ([`Mode::asks_before_what_cannot_be_undone`]).
 pub const MODES: [(&str, &str); 5] = [
     ("plan", "safe"),
     ("ask", "standard"),
@@ -654,13 +655,15 @@ pub fn decide(
 
     // Every mode runs what its column says, never less than the socket floor — both bypasses
     // run every grade — and every mode but full bypass asks about anything the app says cannot
-    // be undone. Bypass is "stop asking me, except before a payment, a send or a delete"; full
-    // bypass is "stop asking me anything", an answer the person gave on purpose, for a while.
+    // be undone. Bypass is "stop asking me, except before what an app marks as impossible to
+    // undo"; full bypass is "stop asking me anything", an answer the person gave on purpose, for
+    // a while.
     let asks = (irreversible && mode.asks_before_what_cannot_be_undone())
         || level > mode.allows().max(grade(SOCKET_FLOOR).unwrap());
     // Held from a phone: above its level it asks in every mode, both bypasses included, and a
     // card is raised for it (the person answers on the phone, or at the machine).
-    let held = authority.asks_above.is_some_and(|above| level > above);
+    let held_above = authority.asks_above.filter(|above| level > *above);
+    let held = held_above.is_some();
     if !asks && !held {
         return Ok(());
     }
@@ -674,8 +677,9 @@ pub fn decide(
         return Ok(());
     }
     // In plan mode a held call is refused as plan refuses, with no card: the person's strictest
-    // setting is not loosened for a phone.
-    Err(grant_refusal(app_id, action, graded, mode, irreversible))
+    // setting is not loosened for a phone. Anywhere else a held call is refused for the hold,
+    // and says so — in full bypass the hold is the only reason there is.
+    Err(grant_refusal(app_id, action, graded, mode, irreversible, held_above))
 }
 
 /// The whole rule for one call, for a caller that holds the grade where it holds the call.
@@ -735,11 +739,21 @@ fn within_ceiling(ceiling: &str, app_id: &str, action: &str, graded: &str) -> Re
 /// `CEILING:` and `STALE:`; `yos act` does, and asks on the caller's behalf. Every variant says
 /// "graded `<grade>`", which is where `yos act` reads the grade to ask with.
 ///
-/// Four sentences: plan or not, and whether the reason is the grade or the app's own word that
-/// the action cannot be undone. The second reason is named when it applies, because it is the
-/// one a session rule does not answer — a caller holding a rule for the action needs to know why
-/// the rule did not cover it.
-fn grant_refusal(app: &str, action: &str, graded: &str, mode: &Mode, irreversible: bool) -> String {
+/// Five sentences: plan or not, whether the reason is the grade or the app's own word that the
+/// action cannot be undone, and — outside plan — a call held from the person's phone. The second
+/// reason is named when it applies, because it is the one a session rule does not answer — a
+/// caller holding a rule for the action needs to know why the rule did not cover it. The hold is
+/// named whenever there is one (`held` is the level on [`LADDER`] it asks above), because it is
+/// true in every mode and in full bypass it is the only reason: saying "full bypass asks before
+/// anything that cannot be undone" there would be false.
+fn grant_refusal(
+    app: &str,
+    action: &str,
+    graded: &str,
+    mode: &Mode,
+    irreversible: bool,
+    held: Option<usize>,
+) -> String {
     const HOW: &str = "Ask the shell for approval first (`request_approval` with this app, action \
          and these exact arguments, poll `approval_status`, then send the granted request_id as \
          `grant` on app.act — `yos act` does all of that for you), or have the person at the \
@@ -747,6 +761,14 @@ fn grant_refusal(app: &str, action: &str, graded: &str, mode: &Mode, irreversibl
     const PLAN: &str = "Say what you would do and let the person decide; they switch the mode \
          from the chip in the status bar.";
     let final_word = "its own description says it cannot be undone";
+    if let (Some(above), false) = (held, mode.name == "plan") {
+        return format!(
+            "GRANT: {app}.{action} is graded `{graded}` and this call answers a turn from the \
+             person's phone, which asks before anything above `{above}` whatever the mode — so \
+             it was not run. {HOW}",
+            above = LADDER[above.min(LADDER.len() - 1)],
+        );
+    }
     match (mode.name == "plan", irreversible) {
         (true, false) => format!(
             "GRANT: {app}.{action} is graded `{graded}` and this machine is in plan mode, which \
@@ -789,6 +811,27 @@ mod tests {
             held.granted = true;
             assert!(decide(&held, "notes", "new_note", "standard", "Make a note").is_ok(), "{mode}: the person's Allow runs it");
         }
+        // Refused for the hold, in the hold's words — never for a reason the mode does not have.
+        // In full bypass, on an action that cannot be undone, the hold is the only reason.
+        let mut full = at("dangerous", "bypass_all");
+        full.asks_above = Some(0);
+        let err = decide(&full, "calendar", "delete_event", "sensitive", "Take an event off the calendar. It is not recoverable").unwrap_err();
+        assert_eq!(
+            err,
+            "GRANT: calendar.delete_event is graded `sensitive` and this call answers a turn from \
+             the person's phone, which asks before anything above `safe` whatever the mode — so it \
+             was not run. Ask the shell for approval first (`request_approval` with this app, \
+             action and these exact arguments, poll `approval_status`, then send the granted \
+             request_id as `grant` on app.act — `yos act` does all of that for you), or have the \
+             person at the machine press Allow when the card appears."
+        );
+        assert!(!err.contains("bypass_all mode"), "{err}");
+        // Plan keeps plan's own sentence: it raises no card, for a phone or anybody.
+        let mut planned = at("dangerous", "plan");
+        planned.asks_above = Some(0);
+        let err = decide(&planned, "notes", "new_note", "standard", "Make a note").unwrap_err();
+        assert!(err.contains("plan mode") && !err.contains("phone"), "{err}");
+
         // A standing yes given at the desk is not given to a phone.
         let ruled = Authority {
             ceiling: "dangerous".into(),

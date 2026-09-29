@@ -232,6 +232,23 @@ class TestDecide(unittest.TestCase):
         ruled = Authority("dangerous", Mode("auto", frozenset({("notes", "new_note")})), asks_above=0)
         self.assertIsNotNone(decide(ruled, "notes", "new_note", "standard", "Make a note"))
 
+    def test_a_held_call_is_refused_for_the_hold_in_the_holds_words(self):
+        # In full bypass, on an action that cannot be undone, the hold is the only reason, and
+        # the refusal must not say full bypass asks about it.
+        fragment = "which asks before anything above `{above}` whatever the mode"
+        support.quoted(self, G, fragment)
+        held = Authority("dangerous", Mode("bypass_all", frozenset()), asks_above=0)
+        err = decide(held, "calendar", "delete_event", "sensitive", DELETE)
+        self.assertEqual(err, (
+            "GRANT: calendar.delete_event is graded `sensitive` and this call answers a turn from "
+            "the person's phone, which asks before anything above `safe` whatever the mode — so it "
+            "was not run. " + support.GATE_HOW))
+        self.assertNotIn("bypass_all mode", err)
+        planned = Authority("dangerous", Mode("plan", frozenset()), asks_above=0)
+        err = decide(planned, "notes", "new_note", "standard", "Make a note")
+        self.assertIn("plan mode", err)
+        self.assertNotIn("phone", err)
+
     """`gate.rs`'s own tests, ported one for one."""
 
     def test_the_order_is_ceiling_then_mode_and_each_says_which_it_was(self):

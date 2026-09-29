@@ -1239,9 +1239,10 @@ export component SettingsScreen inherits Rectangle {
                                             text: "No mode reaches past the tool permission above — "
                                                 + root.tool-permission
                                                 + ". That wall is enforced inside every app, and only you can move it. "
-                                                + "Bypass (which still asks before payments, sends and deletes) and Full bypass "
-                                                + "(which asks nothing) are time-boxed and are chosen from the mode chip in the "
-                                                + "status bar, where the countdown stays in front of you.";
+                                                + "Bypass (which still asks before anything an app marks as impossible to undo, "
+                                                + "such as a purchase or a calendar delete) and Full bypass (which asks nothing) "
+                                                + "are time-boxed and are chosen from the mode chip in the status bar, where the "
+                                                + "countdown stays in front of you.";
                                             color: Theme.text-dim;
                                             font-size: Theme.fs-micro;
                                             wrap: word-wrap;

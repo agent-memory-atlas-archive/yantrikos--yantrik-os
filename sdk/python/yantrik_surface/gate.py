@@ -500,9 +500,9 @@ def decide(authority, app_id, action, graded, purpose=""):
     the arguments, the revision guard or the handler. A grant answers every question after the
     ceiling. Every mode runs what its column says (never less than the socket floor; both
     bypasses run every grade), and every mode but full bypass asks about anything whose
-    description says it cannot be undone (a `safe` read excepted). A session rule covers its action — except one
-    that cannot be undone, and except in plan mode, which raises no card and so has no standing
-    answers. Pure: nothing is read and nothing is spent here.
+    description says it cannot be undone (a `safe` read excepted). A session rule covers its
+    action — except one that cannot be undone, and except in plan mode, which raises no card and
+    so has no standing answers. Pure: nothing is read and nothing is spent here.
     """
     level, refusal = within_ceiling(authority.ceiling, app_id, action, graded)
     if refusal is not None:
@@ -511,14 +511,17 @@ def decide(authority, app_id, action, graded, purpose=""):
         return None
     mode = authority.mode
     irreversible = level > 0 and unrecoverable(purpose)
-    asks = (irreversible and mode.asks_before_what_cannot_be_undone())         or level > max(mode.allows(), grade(SOCKET_FLOOR))
-    held = getattr(authority, "asks_above", None) is not None and level > authority.asks_above
+    asks = ((irreversible and mode.asks_before_what_cannot_be_undone())
+            or level > max(mode.allows(), grade(SOCKET_FLOOR)))
+    above = getattr(authority, "asks_above", None)
+    held_above = above if above is not None and level > above else None
+    held = held_above is not None
     if not asks and not held:
         return None
     plan = mode.allows() == 0
     if not held and not plan and not irreversible and mode.covers(app_id, action):
         return None
-    return grant_refusal(app_id, action, graded, mode, irreversible)
+    return grant_refusal(app_id, action, graded, mode, irreversible, held_above)
 
 
 def permit(authority, app_id, action, graded, purpose, args, grant=None, spender=None):
@@ -540,11 +543,17 @@ _PLAN = ("Say what you would do and let the person decide; they switch the mode 
 _FINAL_WORD = "its own description says it cannot be undone"
 
 
-def grant_refusal(app, action, graded, mode, irreversible=False):
+def grant_refusal(app, action, graded, mode, irreversible=False, held=None):
     """The refusal for a call the mode will not run without a grant — `grant_refusal` in the
-    Rust gate, its four sentences to the punctuation: plan or not, and whether the reason is the
-    grade or the action's own word that it cannot be undone. `mode` is a `Mode` or a name."""
+    Rust gate, its five sentences to the punctuation: plan or not, whether the reason is the
+    grade or the action's own word that it cannot be undone, and — outside plan — a call held
+    from the person's phone (`held` is the level on the ladder it asks above, or None). `mode` is
+    a `Mode` or a name."""
     mode = mode if isinstance(mode, Mode) else Mode(mode, frozenset())
+    if held is not None and mode.name != "plan":
+        return ("GRANT: %s.%s is graded `%s` and this call answers a turn from the person's "
+                "phone, which asks before anything above `%s` whatever the mode — so it was not "
+                "run. %s" % (app, action, graded, LADDER[min(held, len(LADDER) - 1)], _HOW))
     if mode.name == "plan" and not irreversible:
         return ("GRANT: %s.%s is graded `%s` and this machine is in plan mode, which raises no "
                 "card for anything above `%s` — so it was not run. %s"

@@ -1104,9 +1104,9 @@ with tempfile.TemporaryDirectory() as d:
           module.decide("safe", "notes", "read", True, "auto", [], "dangerous") == ("run", False),
           module.decide("safe", "notes", "read", True, "auto", [], "dangerous"))
 
-    # Bypass asks about it too (Pranab's decision, 28 September 2026): "still asks before
-    # payments, sends and deletes" is what its confirmation says, and a delete the app says
-    # cannot be undone is exactly that.
+    # Bypass asks about it too (Pranab's decision, 28 September 2026): "still asks if an app
+    # says it cannot be undone" is what its confirmation says, and a delete the app says cannot
+    # be undone is exactly that.
     module, state = case(tmp, "bypass-unrecoverable", mode="bypass", answer="pending",
                          machine_ceiling="dangerous", ceiling=None)
     text, is_error = act(module, "calendar", "delete_event", {"id": "evt-3"})

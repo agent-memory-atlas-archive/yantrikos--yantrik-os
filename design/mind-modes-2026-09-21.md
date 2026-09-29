@@ -28,7 +28,7 @@ decides what happens to an action **at or below** it.
 | `plan` | read only. `os_describe`, `os_apps`, `os_perception`, `web_read` / `web_text` / `web_find` all work. Every `os_act` above `safe`, and `web_go` / `web_click` / `web_type`, is refused with a message that says the desktop is in plan mode, that nothing was changed, and that it should present what it WOULD do. |
 | `ask` (default) | ≤ `standard` runs; `sensitive` and above (≤ ceiling) raises a card. Exactly what shipped yesterday. |
 | `auto` | ≤ `sensitive` runs without asking; `dangerous` (if the ceiling allows it at all) raises a card. |
-| `bypass` | everything ≤ ceiling runs without asking — **except** anything the app's own published purpose says cannot be undone (a payment, a send, a delete), which still raises a card, as in `auto`. Time-boxed: 15 minutes / 1 hour / until the shell restarts, and never persisted. |
+| `bypass` | everything ≤ ceiling runs without asking — **except** anything an app marks as impossible to undo — its own published purpose says so, such as a purchase (`browser.commit`) or a calendar delete — which still raises a card, as in `auto`. Time-boxed: 15 minutes / 1 hour / until the shell restarts, and never persisted. |
 | `bypass_all` ("Full bypass") | everything ≤ ceiling runs without asking, what cannot be undone included — what `bypass` meant until 28 September 2026. Time-boxed and never persisted exactly as `bypass` is. |
 
 *(`auto` gained a second reason to ask later the same day: an action whose own published purpose
@@ -433,18 +433,25 @@ The ✕ is a 24px box at the right edge of the content column: `1256 − 24 = 12
 **The bypass confirmation** replaces the menu's contents inside the same panel, so it starts from
 the same `y = 48`. Since 28 September 2026 it chooses which bypass as well as how long: two rows
 the shape of the mode rows, **Bypass** chosen whenever the confirmation opens, **Full bypass** a
-press away, then the durations, which fire for whichever row is chosen:
+press away, then the paragraph, then the durations, which fire for whichever row is chosen:
 
 | row | extent | **click at** |
 |---|---|---|
 | "Stop asking me, for a while" (18px) | 48…66 | — |
-| the warning paragraph (64px) | 74…138 | — |
-| **Bypass** — "Still asks before payments, sends and deletes." (44px) | 146…190 | **(1098, 168)** |
-| **Full bypass** — "Asks nothing, not even those." (44px) | 198…242 | **(1098, 220)** |
-| **15 minutes** (36px) | 250…286 | **(1098, 268)** |
-| **1 hour** (36px) | 294…330 | **(1098, 312)** |
-| **Until the shell restarts** (36px) | 338…374 | **(1098, 356)** |
-| **Cancel** (36px) | 382…418 | **(1098, 400)** |
+| **Bypass** — "Still asks if an app says it cannot be undone." (44px) | 74…118 | **(1098, 96)** |
+| **Full bypass** — "Asks nothing, not even those." (44px) | 126…170 | **(1098, 148)** |
+| the warning paragraph (96px) | 178…274 | — |
+| **15 minutes** (36px) | 282…318 | **(1098, 300)** |
+| **1 hour** (36px) | 326…362 | **(1098, 344)** |
+| **Until the shell restarts** (36px) | 370…406 | **(1098, 388)** |
+| **Cancel** (36px) | 414…450 | **(1098, 432)** |
+
+**A double-click on Bypass enters nothing.** The menu's **Bypass** row is at 216…260, and the
+confirmation replaces the menu at the same place, so a second click there lands on whatever the
+confirmation has at that y. That is the paragraph (178…274) — no duration starts above 282 — and
+not the Full bypass row either, so a double-click neither enters a bypass nor changes which one is
+chosen. (Before the security review of 29 September the durations started at 250, and a
+double-click in the row's bottom ten pixels entered bypass for fifteen minutes.)
 
 **Enter confirms nothing.** Every control in the menu is a `TouchArea`, which takes no keyboard
 focus in Slint, exactly as the approval card's buttons are — so there is no default action and no
@@ -548,9 +555,9 @@ surface — driven through the bridge **must still raise a card**. Auto is not b
 ### 5. Bypass, and that it is unmistakable
 
 Chip → **Bypass** at `(1098, 238)`. The panel must swap to the confirmation, not to the mode:
-*"Stop asking me, for a while"*, the paragraph, the two bypass rows with **Bypass** chosen, three
-durations and Cancel. Press **15 minutes** at `(1098, 268)`. (For full bypass, press **Full
-bypass** at `(1098, 220)` first; the chip then reads `Full bypass 14m`.)
+*"Stop asking me, for a while"*, the two bypass rows with **Bypass** chosen, the paragraph, three
+durations and Cancel. Press **15 minutes** at `(1098, 300)`. (For full bypass, press **Full
+bypass** at `(1098, 148)` first; the chip then reads `Full bypass 14m`.)
 
 Expect:
 
@@ -1196,7 +1203,7 @@ becomes two levels.**
 
 | mode | runs unasked | asks |
 |---|---|---|
-| `bypass` | everything the machine ceiling allows | anything the app's own published purpose says cannot be undone (`gate::unrecoverable`): payments, sends, deletes — `browser.commit`, `calendar.delete_event`, `shell.read_screen` |
+| `bypass` | everything the machine ceiling allows | anything an app marks as impossible to undo — its own published purpose trips `gate::unrecoverable` — such as a purchase or a calendar delete: `browser.commit`, `calendar.delete_event`, `shell.read_screen`, and the deletes listed below. Only what an app marks: a send or a delete whose description says nothing about undoing runs unasked, as does `terminal.run` |
 | `bypass_all` ("Full bypass") | everything the machine ceiling allows, those included | nothing |
 
 The reasoning is the one the 21 September rule already made for `auto`: the one act a person
@@ -1245,8 +1252,38 @@ deadline rather than turning an hour into "until restart".
 
 **Full bypass only widens the desktop's own gate.** It reaches nothing outside it: not the Mind's
 own broker, not a phone's hold (a call held from a phone asks above its level in every mode, both
-bypasses included), not the bridge's taint rule, and not `YOS_MCP_MAX_PERMISSION`, which can still
-only make things stricter.
+bypasses included, and its refusal names the hold, not the mode), not the bridge's taint rule, and
+not `YOS_MCP_MAX_PERMISSION`, which can still only make things stricter.
+
+**Surfaces must be on an SDK with the two-level gate.** A surface built on an older SDK reads
+`bypass` as "ask nothing" — it lets plain bypass run what the app marks as impossible to undo — and
+reads `bypass_all` as `ask`, because that name is not one it knows.
+
+**What plain bypass asks about is only what an app declares.** The promise on the confirmation is
+the rule, word for word: "still asks if an app says it cannot be undone". So the security review of
+29 September had the real deletes say so in their published descriptions (grades unchanged):
+
+| action | grade | what its description now says |
+|---|---|---|
+| `container-manager.remove` | dangerous | "…It cannot be undone." |
+| `download-manager.cancel` | sensitive | "…Deleting it cannot be undone…" |
+| `snippet-manager.delete` | sensitive | "…There is no trash to take it out of: it cannot be undone." |
+| `network-manager.wifi_forget` | sensitive | "…It cannot be undone: joining it again needs the password again." |
+| `text-editor.discard` | sensitive | "…is gone and is not recoverable." (was "cannot be recovered", which no phrase matched) |
+| `shell.installer_install` | dangerous | "…What was on the disk is not recoverable." |
+| `shell.report_problem` | sensitive | "…Once sent it cannot be undone." |
+
+Audited and left as they are: the Trash moves (`files_delete`, `notes.trash`, `studio.delete`,
+`arcade.delete`), which say they can be brought back; `presentation.delete_slide`, which the deck's
+own undo reverses; `calendar.delete_own_event`, which exists so a caller may take its own event off
+unasked; the overwrites (`save` in LibreOffice, Blender, Document Editor and Presentation;
+`set_content`, `replace_all`), for the reason LibreOffice's README gives — the grade does the
+asking, and the words would take `auto` away; the process kills (`kill_process`, `agent_kill`,
+`stop_agent`); and `terminal.run`, `sensitive` and arbitrary, which is being raised with Pranab.
+Those already matching were `calendar.delete_event`, `browser.commit`, `shell.read_screen`,
+`network-manager.wifi_disconnect` / `wifi_radio`, and Blender's `new_scene` and `delete_object`.
+`cancel_recipe` says "cannot be resumed", which matches no phrase; it is steering a run, not
+destroying anything a person made, and is left as it is.
 
 ### Tests
 

@@ -561,7 +561,7 @@ fn publish_control(app: &ContainerManagerApp, health: &Health) {
         )
         .action(
             // No undo, and the container's writable layer goes with it.
-            Action::new("remove", "Delete a container")
+            Action::new("remove", "Delete a container and its writable layer. It cannot be undone.")
                 .arg(Param::text("container"))
                 .risk("dangerous"),
             move |args| {

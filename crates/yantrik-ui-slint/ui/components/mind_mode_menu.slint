@@ -190,9 +190,9 @@ export component MindModeMenu inherits Rectangle {
 
         // ── The confirmation, when one is up ──
         //
-        // Bypass does not arrive from a single click. This says what it means in the plainest
-        // words available, offers the two bypasses — plain bypass chosen, full bypass a press
-        // away — then the three durations. The durations ARE the answer, so there is no
+        // Bypass does not arrive from a single click. This offers the two bypasses — plain
+        // bypass chosen, full bypass a press away — says what they mean in the plainest words
+        // available, then offers the three durations. The durations ARE the answer, so there is no
         // separate "confirm" to press by reflex. Every row is a fixed height; the y of each is
         // in design/mind-modes-2026-09-21.md.
         if root.confirming-bypass : VerticalLayout {
@@ -207,26 +207,20 @@ export component MindModeMenu inherits Rectangle {
                 vertical-alignment: center;
                 wrap: no-wrap;
             }
-            // 64px is four lines at fs-caption in a 316px column, which is what this wraps to
-            // with the longest ceiling word in it. Fixed rather than preferred, because every
-            // row below it has a written-down y in design/mind-modes-2026-09-21.md.
-            Text {
-                height: 64px;
-                text: "Everything the machine allows, the mind will do without a card or a "
-                    + "wait. Your machine ceiling (" + root.ceiling
-                    + ") still holds. Pick which, then how long.";
-                color: Theme.text-secondary;
-                font-size: Theme.fs-caption;
-                wrap: word-wrap;
-            }
 
-            // The two bypasses, as two rows of the same shape as the modes. Both are danger-red;
-            // the difference is one sentence each, and it is the whole of the difference: what
-            // the app says cannot be undone — a payment, a send, a delete — still raises a card
-            // in bypass, and raises nothing in full bypass.
+            // The two bypasses first, as two rows of the same shape as the modes. Both are
+            // danger-red; the difference is one line each, and it is exactly what the gate
+            // enforces (`Mode::asks_before_what_cannot_be_undone`): an action whose own published
+            // description says it cannot be undone still raises a card in bypass, and nothing
+            // does in full bypass. Not "payments, sends and deletes" — only what an app marks.
+            //
+            // First, and above the paragraph, for the pointer's sake: the menu's Bypass row is at
+            // y 216…260, and a double-click there must land on nothing that acts. Here that is
+            // the paragraph (178…274); every duration starts below it. See the y-table in
+            // design/mind-modes-2026-09-21.md.
             ModeRow {
                 label: "Bypass";
-                means: "Still asks before payments, sends and deletes.";
+                means: "Still asks if an app says it cannot be undone.";
                 selected: root.bypass-kind == "bypass";
                 danger: true;
                 chosen => { root.bypass-kind = "bypass"; }
@@ -237,6 +231,21 @@ export component MindModeMenu inherits Rectangle {
                 selected: root.bypass-kind == "bypass_all";
                 danger: true;
                 chosen => { root.bypass-kind = "bypass_all"; }
+            }
+
+            // 96px is six lines at fs-caption in a 316px column; this wraps to five with the
+            // longest ceiling word in it. Fixed rather than preferred, because every row below it
+            // has a written-down y — and because it is what a double-click on the menu's Bypass
+            // row lands on.
+            Text {
+                height: 96px;
+                text: "Bypass still asks before anything an app marks as impossible to undo, such "
+                    + "as a purchase or a calendar delete; Full bypass asks nothing. Anything else "
+                    + "the machine allows runs without a card. Your ceiling (" + root.ceiling
+                    + ") still holds.";
+                color: Theme.text-secondary;
+                font-size: Theme.fs-caption;
+                wrap: word-wrap;
             }
 
             MenuButton {

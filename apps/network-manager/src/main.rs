@@ -1142,7 +1142,11 @@ fn publish_control(app: &NetworkManagerApp, state: &State) {
         .action(
             // Sensitive: a stored credential, gone. The service refuses the active network, so
             // this cannot take the link down as a side effect.
-            Action::new("wifi_forget", "Delete a saved Wi-Fi network from this machine")
+            Action::new(
+                "wifi_forget",
+                "Delete a saved Wi-Fi network, and the password saved with it, from this machine. \
+                 It cannot be undone: joining it again needs the password again.",
+            )
                 .risk("sensitive")
                 .arg(Param::text("ssid").describe("The saved network to delete")),
             move |args| {

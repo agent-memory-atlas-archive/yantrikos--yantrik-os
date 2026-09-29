@@ -112,7 +112,7 @@ pub enum Mode {
     /// anything the app's own published purpose says cannot be undone, whatever its grade.
     Auto,
     /// Everything below the machine ceiling runs, except what the app's own published purpose
-    /// says cannot be undone — a payment, a send, a delete — which still raises a card, as in
+    /// says cannot be undone (`gate::unrecoverable`) — a purchase, a calendar delete — which still raises a card, as in
     /// `auto`. Time-boxed, never persisted.
     Bypass,
     /// "Full bypass": everything below the machine ceiling runs, what cannot be undone included.
@@ -190,8 +190,8 @@ impl Mode {
             Mode::Plan => "Look, don't touch. It can read anything and change nothing.",
             Mode::Ask => "It asks you before anything that could matter.",
             Mode::Auto => "It gets on with things. You are still asked about the destructive ones.",
-            Mode::Bypass => "It does not ask, except before anything that cannot be undone: payments, sends and deletes.",
-            Mode::BypassAll => "It does not ask. Everything the machine allows, it does — payments, sends and deletes too.",
+            Mode::Bypass => "It does not ask, except before anything an app marks as impossible to undo, such as a purchase or a calendar delete.",
+            Mode::BypassAll => "It does not ask. Everything the machine allows, it does, including what an app marks as impossible to undo.",
         }
     }
 }
@@ -674,8 +674,8 @@ impl Modes {
                 }
             }
             // Bypass runs every grade unasked — and still asks about what cannot be undone, the
-            // one question its confirmation says it keeps ("still asks before payments, sends
-            // and deletes"). Pranab's decision of 28 September 2026: the act a person handing
+            // one question its confirmation says it keeps ("still asks if an app says it cannot
+            // be undone"). Pranab's decision of 28 September 2026: the act a person handing
             // over the keys for an hour most wants a say in is the one that cannot be taken
             // back. No session rule answers it (`ask_or_rule`), as in every other mode.
             Mode::Bypass => {
@@ -1350,7 +1350,7 @@ mod mind_mode_tests {
             (Mode::Auto, "standard", Decision::Ask),
             (Mode::Auto, "sensitive", Decision::Ask),
             (Mode::Auto, "dangerous", Decision::Ask),
-            // Bypass asks too: "still asks before payments, sends and deletes" is what its
+            // Bypass asks too: "still asks if an app says it cannot be undone" is what its
             // confirmation says, whatever the grade.
             (Mode::Bypass, "standard", Decision::Ask),
             (Mode::Bypass, "sensitive", Decision::Ask),

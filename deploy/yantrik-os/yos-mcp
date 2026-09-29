@@ -1842,8 +1842,9 @@ def decide(level, app, action, cannot_undo, mode, rules, machine, cap=None, tool
                 "— and let the person decide. They switch the mode from the chip in the status "
                 "bar." % (app, action))
     elif mode == "bypass":
-        # Every grade runs unasked, and what the app says cannot be undone still asks — a
-        # payment, a send, a delete (Pranab's decision, 28 September 2026). `covered` is always
+        # Every grade runs unasked, and what the app says cannot be undone still asks — only
+        # what an app marks, such as a purchase or a calendar delete (Pranab's decision, 28
+        # September 2026). `covered` is always
         # False for such an action, so no session rule answers it here either.
         if irreversible:
             verdict, detail = ("run", True) if covered else ("ask", None)
