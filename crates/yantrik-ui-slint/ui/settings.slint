@@ -9,6 +9,8 @@ import { SkillStore, SkillData } from "skill_store.slint";
 import { YButton, YIconButton } from "components/y_button.slint";
 import { YInput } from "components/y_input.slint";
 import { Icon, Icons } from "components/icon.slint";
+import { DecisionModelCard, DecisionPreset } from "components/decision_model.slint";
+export { DecisionPreset }
 
 // ── Settings sidebar category item ──
 export struct SettingsCategoryItem {
@@ -318,6 +320,23 @@ export component SettingsScreen inherits Rectangle {
     in property <[AIProviderData]> ai-providers: [];
     in property <[AIModelData]> available-models: [];
     in property <string> provider-test-result: "";      // "success", "error: ...", "testing", ""
+    // Decision model (components/decision_model.slint)
+    in property <[DecisionPreset]> decision-presets: [];
+    in property <string> decision-provider: "";
+    in property <string> decision-endpoint: "";
+    in property <string> decision-model: "";
+    in property <string> decision-key-env: "";
+    in property <bool> decision-route-tools: true;
+    in property <bool> decision-browser-commitments: true;
+    in property <string> decision-where: "";
+    in property <bool> decision-leaves-machine: false;
+    in property <string> decision-status: "";
+    in property <bool> decision-status-good: false;
+    callback decision-choose(string);
+    callback decision-save(string, string, string);
+    callback decision-test();
+    callback decision-toggle-route-tools();
+    callback decision-toggle-browser-commitments();
     in-out property <bool> provider-panel-open: false;
     in-out property <string> editing-provider-id: "";   // empty = new provider
     callback add-provider();
@@ -1725,6 +1744,42 @@ export component SettingsScreen inherits Rectangle {
                                         wrap: word-wrap;
                                     }
                                 }
+                            }
+
+                            // ── DECISION MODEL ──
+                            HorizontalLayout {
+                                spacing: Theme.sp-2;
+                                Rectangle {
+                                    width: 3px; height: 14px;
+                                    border-radius: 1.5px;
+                                    background: Theme.accent;
+                                }
+                                Text {
+                                    text: "DECISION MODEL";
+                                    color: Theme.text-secondary;
+                                    font-size: Theme.fs-caption;
+                                    font-weight: 600;
+                                    letter-spacing: 3px;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            DecisionModelCard {
+                                presets: root.decision-presets;
+                                provider: root.decision-provider;
+                                endpoint: root.decision-endpoint;
+                                model: root.decision-model;
+                                key-env: root.decision-key-env;
+                                route-tools: root.decision-route-tools;
+                                browser-commitments: root.decision-browser-commitments;
+                                where-note: root.decision-where;
+                                leaves-machine: root.decision-leaves-machine;
+                                status: root.decision-status;
+                                status-good: root.decision-status-good;
+                                choose(id) => { root.decision-choose(id); }
+                                save(e, m, k) => { root.decision-save(e, m, k); }
+                                test => { root.decision-test(); }
+                                toggle-route-tools => { root.decision-toggle-route-tools(); }
+                                toggle-browser-commitments => { root.decision-toggle-browser-commitments(); }
                             }
 
                             // ── TASK ROUTING (V60) ──

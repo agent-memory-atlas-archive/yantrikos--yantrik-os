@@ -18,6 +18,7 @@ use yantrikdb_core::YantrikDB;
 
 use crate::companion::{select_tools_adaptive, ALWAYS_TOOLS, CORE_TOOLS};
 use crate::config::JudgeConfig;
+use yantrik_companion_core::judge_config::JudgeKind;
 use crate::tool_cache::ToolCache;
 
 /// The option offered beside the tools, for a request that needs none.
@@ -59,6 +60,36 @@ pub fn decide(r: &Routing, route_at: f64) -> Decision {
         (None, _) => Decision::NoTool,
         (Some(t), true) => Decision::Widen(t.clone()),
         (Some(t), false) => Decision::Only(t.clone()),
+    }
+}
+
+/// The decision model a configuration names, built: a System One server, the chat model, or
+/// none. `llm` is the companion's chat model, for `chat_model`; `llm_endpoint` is where it runs,
+/// for the verdict's locality.
+pub fn build_judge(
+    config: &JudgeConfig,
+    llm: &std::sync::Arc<dyn yantrik_ml::LLMBackend>,
+    llm_endpoint: Option<&str>,
+) -> Option<std::sync::Arc<dyn Judge>> {
+    match config.kind() {
+        JudgeKind::Off => None,
+        JudgeKind::SystemOne(dialect) => Some(std::sync::Arc::new(
+            yantrik_ml::judge::SystemOneJudge::new(
+                &config.endpoint,
+                &config.model,
+                Some(config.api_key_env.as_str()),
+                std::time::Duration::from_millis(config.timeout_ms),
+            )
+            .with_dialect(yantrik_ml::judge::Dialect::named(dialect)),
+        )),
+        JudgeKind::ChatModel => {
+            let locality = match llm_endpoint {
+                Some(url) => yantrik_ml::judge::Locality::of_endpoint(url),
+                // A backend with no address (llama.cpp in process, candle) runs here.
+                None => yantrik_ml::judge::Locality::ThisMachine,
+            };
+            Some(std::sync::Arc::new(yantrik_ml::judge::ChatJudge::new(llm.clone(), locality)))
+        }
     }
 }
 

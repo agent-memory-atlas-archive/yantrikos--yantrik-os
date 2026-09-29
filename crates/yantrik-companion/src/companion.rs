@@ -807,15 +807,12 @@ impl CompanionService {
         // Full tool set discoverable via discover_tools meta-tool.
         let max_perm = parse_permission(&config.tools.max_permission);
         let use_native_tools = llm.backend_name() == "api" && capability_profile.uses_native_tools();
-        let judge: Option<std::sync::Arc<dyn yantrik_ml::judge::Judge>> = config.judge.enabled().then(|| {
-            tracing::info!(endpoint = %config.judge.endpoint, model = %config.judge.model, "tool routing by judge");
-            std::sync::Arc::new(yantrik_ml::judge::SystemOneJudge::new(
-                &config.judge.endpoint,
-                &config.judge.model,
-                Some(config.judge.api_key_env.as_str()),
-                std::time::Duration::from_millis(config.judge.timeout_ms),
-            )) as _
-        });
+        let judge = crate::judge_route::build_judge(&config.judge, &llm, config.llm.api_base_url.as_deref());
+        if let Some(j) = &judge {
+            let info = j.info();
+            tracing::info!(adapter = info.adapter, provider = %info.provider, model = %info.model,
+                           locality = info.locality.as_str(), "decision model");
+        }
 
         // Native tools: only ALWAYS_TOOLS (6 tools) — rest added dynamically per query
         tracing::debug!(always_on = ALWAYS_TOOLS.len(), "Dynamic tool selection initialized");
@@ -1190,7 +1187,50 @@ impl CompanionService {
         self.capability_profile = yantrik_ml::ModelCapabilityProfile::from_model_name(&model_id);
         self.model_family = self.capability_profile.family;
         self.llm = new_llm;
+        // A decision model that is the chat model follows it.
+        if self.config.judge.kind() == yantrik_companion_core::judge_config::JudgeKind::ChatModel {
+            self.judge = crate::judge_route::build_judge(&self.config.judge, &self.llm, self.config.llm.api_base_url.as_deref());
+        }
         tracing::info!(model = %model_id, "LLM backend swapped");
+    }
+
+    /// Switch the decision model at runtime, from Settings. `None` of a judge is Off: every
+    /// caller decides as it would without one.
+    pub fn set_judge_config(&mut self, config: yantrik_companion_core::judge_config::JudgeConfig) {
+        self.judge = crate::judge_route::build_judge(&config, &self.llm, self.config.llm.api_base_url.as_deref());
+        self.config.judge = config;
+        match &self.judge {
+            Some(j) => {
+                let info = j.info();
+                tracing::info!(adapter = info.adapter, provider = %info.provider, model = %info.model,
+                               locality = info.locality.as_str(), "decision model switched");
+            }
+            None => tracing::info!("decision model off"),
+        }
+    }
+
+    /// Who answers decisions now, for describe and Settings: `None` when it is off.
+    pub fn judge_info(&self) -> Option<yantrik_ml::judge::JudgeInfo> {
+        self.judge.as_ref().map(|j| j.info())
+    }
+
+    /// One known question to the decision model in use, for Settings' Test button. The answer
+    /// is known (pressing "Place order" on a checkout spends money), so a result far from yes says
+    /// the model is misconfigured, not only that it answered.
+    pub fn test_judge(&self) -> Result<yantrik_ml::judge::Verdict, String> {
+        let judge = self.judge.as_ref().ok_or("no decision model is set")?;
+        let state = serde_json::json!({
+            "control": {"role": "button", "label": "Place your order"},
+            "page": {"title": "Checkout", "heading": "Review your order"},
+            "nearby_text": "Order total: $42.17",
+        });
+        let verdict = judge.decide(&state, &[("commit", yantrik_ml::judge::Question::Noul {
+            instructions: "Would pressing this control spend money or place an order?".into(),
+        })]);
+        match verdict.get("commit") {
+            Some(yantrik_ml::judge::Answer::Abstain { reason }) => Err(reason.clone()),
+            _ => Ok(verdict),
+        }
     }
 
     /// Persist the current config to disk (config.yaml).

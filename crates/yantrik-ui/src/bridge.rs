@@ -150,6 +150,14 @@ pub enum CompanionCommand {
     SetIncognitoMode {
         enabled: bool,
     },
+    /// Switch the decision model (Settings → Decision model).
+    SetJudge {
+        config: yantrik_companion::config::JudgeConfig,
+    },
+    /// Put one known question to the decision model in use, and say what came back.
+    TestJudge {
+        reply: crossbeam_channel::Sender<Result<yantrik_ml::judge::Verdict, String>>,
+    },
     /// Run a background think cycle.
     Think {
         /// Current interruptibility from FocusFlow (0.0 = deep work, 1.0 = normal).
@@ -296,6 +304,9 @@ pub struct CompanionBridge {
     ambient: AmbientState,
     /// Cognitive event bus — shared with the entire system.
     event_bus: yantrik_os::EventBus,
+    /// The decision model the companion is set to, as Settings shows it: kept here so the UI
+    /// thread reads it without a round trip to the worker. The worker's copy is the one used.
+    judge: Arc<std::sync::Mutex<yantrik_companion::config::JudgeConfig>>,
 }
 
 /// A companion you can use from another thread.
@@ -583,6 +594,7 @@ impl CompanionBridge {
         let ambient_w = ambient.clone();
         let bus_w = event_bus.clone();
 
+        let judge = Arc::new(std::sync::Mutex::new(config.judge.clone()));
         let self_tx = cmd_tx.clone();
         let board_w = board.clone();
         let worker_handle = std::thread::spawn(move || {
@@ -597,6 +609,7 @@ impl CompanionBridge {
             cached_bond_level,
             ambient,
             event_bus,
+            judge,
         }
     }
 
@@ -709,6 +722,28 @@ impl CompanionBridge {
             importance,
             decay,
         });
+    }
+
+    /// The decision model the companion is set to.
+    pub fn judge_config(&self) -> yantrik_companion::config::JudgeConfig {
+        self.judge.lock().map(|j| j.clone()).unwrap_or_default()
+    }
+
+    /// Switch the decision model, from Settings: the companion rebuilds its judge and saves the
+    /// choice to its config, so it is the one used after a restart too.
+    pub fn set_judge(&self, config: yantrik_companion::config::JudgeConfig) {
+        if let Ok(mut j) = self.judge.lock() {
+            *j = config.clone();
+        }
+        let _ = self.cmd_tx.send(CompanionCommand::SetJudge { config });
+    }
+
+    /// Test the decision model in use: one known question, answered off the UI thread. `None`
+    /// when the companion did not answer within `wait`.
+    pub fn test_judge(&self, wait: std::time::Duration) -> Option<Result<yantrik_ml::judge::Verdict, String>> {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        self.cmd_tx.send(CompanionCommand::TestJudge { reply: tx }).ok()?;
+        rx.recv_timeout(wait).ok()
     }
 
     /// Toggle incognito mode (no data persistence while active).
@@ -1393,6 +1428,13 @@ fn worker_loop(
             Ok(CompanionCommand::SetIncognitoMode { enabled }) => {
                 companion.set_incognito(enabled);
                 tracing::info!(incognito = enabled, "Incognito mode toggled");
+            }
+            Ok(CompanionCommand::SetJudge { config }) => {
+                companion.set_judge_config(config);
+                companion.save_config();
+            }
+            Ok(CompanionCommand::TestJudge { reply }) => {
+                let _ = reply.send(companion.test_judge());
             }
             Ok(CompanionCommand::ScoreConversationTurn { text }) => {
                 companion.score_conversation_turn(&text);
