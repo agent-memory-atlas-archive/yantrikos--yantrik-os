@@ -397,18 +397,20 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
             // told somebody to edit an environment variable.
             Action::new(
                 "set_mind_mode",
-                "Tighten what you may do on this desktop without being asked. Four modes, \
-                 loosest first: `bypass` (nothing is asked), `auto` (only destructive actions \
-                 are asked about), `ask` (anything that matters is asked about), `plan` (read \
-                 only — every change is refused). You can only move DOWN this list. A request to \
-                 loosen it is refused: that is the person's decision, made at the keyboard, and \
-                 `plan` is the useful one to set yourself before a long piece of work you want \
-                 checked first.",
+                "Tighten what you may do on this desktop without being asked. Five modes, \
+                 loosest first: `bypass_all` (nothing is asked), `bypass` (nothing is asked \
+                 except before what an app marks as impossible to undo), `auto` (only \
+                 destructive actions are asked about), `ask` (anything that matters is asked \
+                 about), `plan` (read only — every change is refused). You can only move DOWN \
+                 this list, and never INTO a bypass: from `bypass_all` you may step down to \
+                 `bypass`, but neither is entered from here. A request to loosen it is refused: \
+                 that is the person's decision, made at the keyboard, and `plan` is the useful \
+                 one to set yourself before a long piece of work you want checked first.",
             )
             .risk("safe")
             .arg(
                 Param::text("mode")
-                    .describe("plan, ask or auto — and only if it is tighter than the current mode"),
+                    .describe("plan, ask or auto — or bypass, from bypass_all — and only if it is tighter than the current mode"),
             ),
             move |args| {
                 let wanted = required(args, "mode")?;
@@ -433,7 +435,7 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
             Action::new(
                 "record_unasked_action",
                 "Write down one action that ran WITHOUT the person being asked — because the \
-                 desktop is in auto or bypass mode, or because a session rule covers it. Call it \
+                 desktop is in auto, bypass or bypass_all mode, or because a session rule covers it. Call it \
                  straight after the action, with what actually happened. It records; it cannot \
                  authorise anything, and not calling it does not stop anything running. The \
                  person reads these in the mode menu and in ~/.local/share/yantrik/mind-audit.jsonl.",
@@ -445,7 +447,7 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
             .arg(
                 Param::text("mode")
                     .optional()
-                    .describe("The mode it ran under: auto, bypass, or rule"),
+                    .describe("The mode it ran under: auto, bypass, bypass_all, or rule"),
             )
             .arg(
                 Param::object("args_json")
@@ -1351,11 +1353,11 @@ pub fn wire(ui: &App, bridge: std::sync::Arc<crate::bridge::CompanionBridge>) {
     let chosen_ui = ui.as_weak();
     ui.on_mind_mode_chosen(move |mode| {
         let Some(mode) = crate::mind_mode::Mode::parse(&mode) else { return };
-        // Bypass has its own callback because it has its own confirmation and its own duration.
-        // Letting it arrive here would mean one click could enter it, which is the one mode
-        // that must cost a deliberate second answer.
-        if mode == crate::mind_mode::Mode::Bypass {
-            tracing::warn!("bypass does not arrive through the plain mode chooser");
+        // Either bypass has its own callback because it has its own confirmation and its own
+        // duration. Letting one arrive here would mean one click could enter it, and a bypass
+        // is the one kind of mode that must cost a deliberate second answer.
+        if mode.is_bypass() {
+            tracing::warn!(mode = mode.as_str(), "a bypass does not arrive through the plain mode chooser");
             return;
         }
         crate::mind_mode::person_set_mode(mode, crate::mind_mode::Bypass::Hour);
@@ -1365,11 +1367,15 @@ pub fn wire(ui: &App, bridge: std::sync::Arc<crate::bridge::CompanionBridge>) {
         }
     });
 
+    // Which bypass and for how long, both off the red confirmation: `bypass` still asks before
+    // what cannot be undone, `bypass_all` asks nothing. Anything else — a mode that is not a
+    // bypass, a duration that is not one of the three — is dropped, never read as a default.
     let bypass_ui = ui.as_weak();
-    ui.on_mind_bypass_chosen(move |duration| {
+    ui.on_mind_bypass_chosen(move |kind, duration| {
+        let Some(mode) = crate::mind_mode::Mode::parse(&kind).filter(|m| m.is_bypass()) else { return };
         let Some(bypass) = crate::mind_mode::Bypass::parse(&duration) else { return };
-        crate::mind_mode::person_set_mode(crate::mind_mode::Mode::Bypass, bypass);
-        tracing::warn!(duration = %duration, "a person put this desktop into bypass");
+        crate::mind_mode::person_set_mode(mode, bypass);
+        tracing::warn!(mode = mode.as_str(), duration = %duration, "a person put this desktop into a bypass");
         if let Some(ui) = bypass_ui.upgrade() {
             publish_mode(&ui);
         }

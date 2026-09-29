@@ -17,7 +17,8 @@ The order, as the Rust dispatch runs it:
      told how to get one. Every mode runs `standard` on a socket (`SOCKET_FLOOR`), because the
      desktop's own processes make standard calls and cannot yet be told from a mind (#43). So
      is an action whose own published description says it cannot be undone, in every mode but
-     bypass and whatever its grade above `safe`; a session rule never covers one, and in plan
+     full bypass (`bypass_all`) and whatever its grade above `safe` — plain bypass asks about it
+     too; a session rule never covers one, and in plan
      mode no session rule covers anything (docs/surface-protocol.md, section 7).
 
 A grant is spent only through the desktop's own shell: before anything is written to
@@ -41,7 +42,12 @@ LADDER = ("safe", "standard", "sensitive", "dangerous")
 DEFAULT_CEILING = "sensitive"
 MODE_FILE = "mind-mode.json"
 # What each mode runs without a grant: the top of the ladder it allows, strictest mode first.
-MODES = {"plan": "safe", "ask": "standard", "auto": "sensitive", "bypass": "dangerous"}
+# The two bypasses share a column; what tells them apart is that bypass still asks before
+# anything whose own description says it cannot be undone, and full bypass does not.
+MODES = {"plan": "safe", "ask": "standard", "auto": "sensitive", "bypass": "dangerous",
+         "bypass_all": "dangerous"}
+# The modes a person enters for a while and that end on their own (`gate::TIME_BOXED`).
+TIME_BOXED = ("bypass", "bypass_all")
 SOCKET_FLOOR = "standard"
 DEFAULT_MODE = "ask"
 # One hop to the shell and back, as `GRANT_ROUNDTRIP` in the Rust gate.
@@ -137,6 +143,11 @@ class Mode(NamedTuple):
         top = MODES.get(self.name)
         return grade(top) if top is not None else grade("standard")
 
+    def asks_before_what_cannot_be_undone(self):
+        """Whether this mode asks about an action whose own description says it cannot be
+        undone. Every mode does but full bypass; an unknown name reads as `ask`, so it asks."""
+        return self.name != "bypass_all"
+
     def covers(self, app, action):
         """Whether a session rule is the person's standing answer for `app.action`."""
         return (app, action) in self.session_rules
@@ -219,7 +230,7 @@ def _names_a_live_shell(doc):
 def mode_from(text, now):
     """Read the mode out of what the shell wrote, the way `gate::mode_from` does.
 
-    Anything unreadable is `ask`. A bypass whose deadline has passed reads as the mode before
+    Anything unreadable is `ask`. A bypass of either kind whose deadline has passed reads as the mode before
     it (or `ask`), so a shell that died mid-bypass does not leave this app trusting it past the
     minute the person was promised; a bypass with no deadline is trusted while the shell that
     wrote the file is running — the file names it and the boot it wrote in, and a name that is
@@ -236,12 +247,12 @@ def mode_from(text, now):
     name = doc.get("mode") if isinstance(doc.get("mode"), str) else ""
     if name not in MODES:
         name = DEFAULT_MODE
-    if name == "bypass":
+    if name in TIME_BOXED:
         until = _as_u64(doc.get("bypass_expires_unix"))
         if until is not None and now >= until:
             previous = doc.get("previous")
             previous = previous if isinstance(previous, str) else DEFAULT_MODE
-            name = previous if previous in MODES and previous != "bypass" else DEFAULT_MODE
+            name = previous if previous in MODES and previous not in TIME_BOXED else DEFAULT_MODE
     rules = set()
     listed = doc.get("session_rules")
     for rule in listed if isinstance(listed, list) else ():
@@ -487,11 +498,11 @@ def decide(authority, app_id, action, graded, purpose=""):
 
     The ceiling, then the mode — on the grade and the action's own description alone, before
     the arguments, the revision guard or the handler. A grant answers every question after the
-    ceiling. Bypass runs everything under the ceiling; every other mode runs what its column
-    says (never less than the socket floor) and asks about anything whose description says it
-    cannot be undone (a `safe` read excepted). A session rule covers its action — except one
-    that cannot be undone, and except in plan mode, which raises no card and so has no standing
-    answers. Pure: nothing is read and nothing is spent here.
+    ceiling. Every mode runs what its column says (never less than the socket floor; both
+    bypasses run every grade), and every mode but full bypass asks about anything whose
+    description says it cannot be undone (a `safe` read excepted). A session rule covers its
+    action — except one that cannot be undone, and except in plan mode, which raises no card and
+    so has no standing answers. Pure: nothing is read and nothing is spent here.
     """
     level, refusal = within_ceiling(authority.ceiling, app_id, action, graded)
     if refusal is not None:
@@ -499,17 +510,18 @@ def decide(authority, app_id, action, graded, purpose=""):
     if authority.granted:
         return None
     mode = authority.mode
-    everything = len(LADDER) - 1
     irreversible = level > 0 and unrecoverable(purpose)
-    asks = mode.allows() < everything and (
-        irreversible or level > max(mode.allows(), grade(SOCKET_FLOOR)))
-    held = getattr(authority, "asks_above", None) is not None and level > authority.asks_above
+    asks = ((irreversible and mode.asks_before_what_cannot_be_undone())
+            or level > max(mode.allows(), grade(SOCKET_FLOOR)))
+    above = getattr(authority, "asks_above", None)
+    held_above = above if above is not None and level > above else None
+    held = held_above is not None
     if not asks and not held:
         return None
     plan = mode.allows() == 0
     if not held and not plan and not irreversible and mode.covers(app_id, action):
         return None
-    return grant_refusal(app_id, action, graded, mode, irreversible)
+    return grant_refusal(app_id, action, graded, mode, irreversible, held_above)
 
 
 def permit(authority, app_id, action, graded, purpose, args, grant=None, spender=None):
@@ -531,11 +543,17 @@ _PLAN = ("Say what you would do and let the person decide; they switch the mode 
 _FINAL_WORD = "its own description says it cannot be undone"
 
 
-def grant_refusal(app, action, graded, mode, irreversible=False):
+def grant_refusal(app, action, graded, mode, irreversible=False, held=None):
     """The refusal for a call the mode will not run without a grant — `grant_refusal` in the
-    Rust gate, its four sentences to the punctuation: plan or not, and whether the reason is the
-    grade or the action's own word that it cannot be undone. `mode` is a `Mode` or a name."""
+    Rust gate, its five sentences to the punctuation: plan or not, whether the reason is the
+    grade or the action's own word that it cannot be undone, and — outside plan — a call held
+    from the person's phone (`held` is the level on the ladder it asks above, or None). `mode` is
+    a `Mode` or a name."""
     mode = mode if isinstance(mode, Mode) else Mode(mode, frozenset())
+    if held is not None and mode.name != "plan":
+        return ("GRANT: %s.%s is graded `%s` and this call answers a turn from the person's "
+                "phone, which asks before anything above `%s` whatever the mode — so it was not "
+                "run. %s" % (app, action, graded, LADDER[min(held, len(LADDER) - 1)], _HOW))
     if mode.name == "plan" and not irreversible:
         return ("GRANT: %s.%s is graded `%s` and this machine is in plan mode, which raises no "
                 "card for anything above `%s` — so it was not run. %s"

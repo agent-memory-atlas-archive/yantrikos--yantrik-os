@@ -138,7 +138,7 @@ def outcome(grade, mode, description, ceiling="sensitive"):
 
 def grade_table():
     """What the dispatch does with an act, by grade and mode, on the ceiling this OS ships."""
-    modes = ("plan", "ask", "auto", "bypass")
+    modes = ("plan", "ask", "auto", "bypass", "bypass_all")
     rows = [("%-36s %s" % ("sensitive ceiling", "".join("%-17s" % m for m in modes))).rstrip()]
     for label, description in (("", "Do the thing"), (", says it cannot be undone",
                                                       "Do the thing. It cannot be undone")):

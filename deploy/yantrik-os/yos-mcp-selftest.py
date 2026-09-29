@@ -21,8 +21,9 @@ What it is actually checking, in one line each:
   * granted / denied / no-answer / above-the-machine-ceiling / no-shell each produce a distinct
     message, and only the first of them runs anything;
   * a grant whose arguments do not match is refused and nothing runs;
-  * each of the four modes does what `design/mind-modes-2026-09-21.md` says it does — including
-    that `bypass` still cannot pass the machine ceiling and `plan` refuses browser writes;
+  * each of the five modes does what `design/mind-modes-2026-09-21.md` says it does — including
+    that neither bypass can pass the machine ceiling, that `bypass` still asks before what cannot
+    be undone while `bypass_all` does not, and that `plan` refuses browser writes;
   * in `auto`, an action whose own published purpose says it cannot be undone is asked about
     exactly as a `dangerous` one is, the mind is told why, and no session rule covers it;
   * `YOS_MCP_MAX_PERMISSION` can only make things stricter than the desktop's mode;
@@ -227,7 +228,7 @@ SHELL_ACTIONS = """  act: open_app(name)  [standard, settles later]
 """
 # The browser's surface (apps/browser, #477): what every web_* tool is an act on now, with the
 # grades it publishes — looking is safe, using a page standard, and a commitment sensitive and
-# not recoverable, so it asks in every mode but bypass.
+# not recoverable, so it asks in every mode but full bypass.
 DESCRIBE_BROWSER = """Browser - "Example" (example.com)
 revision: b0b0
 {
@@ -1103,16 +1104,32 @@ with tempfile.TemporaryDirectory() as d:
           module.decide("safe", "notes", "read", True, "auto", [], "dangerous") == ("run", False),
           module.decide("safe", "notes", "read", True, "auto", [], "dangerous"))
 
-    # Bypass is the one mode this does not touch. It says "it does not ask" on a red
-    # confirmation with a countdown, and a card after that would make the panel a lie — so the
-    # action runs and the record is what the person gets instead.
-    module, state = case(tmp, "bypass-unrecoverable", mode="bypass",
+    # Bypass asks about it too (Pranab's decision, 28 September 2026): "still asks if an app
+    # says it cannot be undone" is what its confirmation says, and a delete the app says cannot
+    # be undone is exactly that.
+    module, state = case(tmp, "bypass-unrecoverable", mode="bypass", answer="pending",
                          machine_ceiling="dangerous", ceiling=None)
     text, is_error = act(module, "calendar", "delete_event", {"id": "evt-3"})
     s = read(state)
-    check("bypass does not ask about it either, because bypass does not ask",
+    check("bypass asks about what the app says cannot be undone",
+          len(s.get("requests", [])) == 1 and not s.get("acted"), s)
+    check("and nothing is written down as having run unasked", not s.get("audited"), s.get("audited"))
+    check("the table says so for every grade that writes, and no rule answers it",
+          all(module.decide(g, "calendar", "delete_event", True, "bypass",
+                            [("calendar", "delete_event")], "dangerous") == ("ask", None)
+              for g in ("standard", "sensitive", "dangerous")), None)
+
+    # Full bypass is the one mode this does not touch. It says "asks nothing, not even those"
+    # on a red confirmation with a countdown, and a card after that would make the panel a lie —
+    # so the action runs and the record is what the person gets instead.
+    module, state = case(tmp, "full-bypass-unrecoverable", mode="bypass_all",
+                         machine_ceiling="dangerous", ceiling=None)
+    text, is_error = act(module, "calendar", "delete_event", {"id": "evt-3"})
+    s = read(state)
+    check("full bypass does not ask about it, because full bypass does not ask",
           not s.get("requests") and len(s.get("acted", [])) == 1, s)
-    check("and it is written down instead", len(s.get("audited", [])) == 1, s.get("audited"))
+    check("and it is written down instead, under full bypass",
+          [a.get("mode") for a in s.get("audited", [])] == ["bypass_all"], s.get("audited"))
 
     # And the two phrase lists are one list. The shell draws the card's red warning line and
     # refuses a session rule from `approvals::unrecoverable`; this decides whether there is a
@@ -1143,20 +1160,28 @@ with tempfile.TemporaryDirectory() as d:
           module.unrecoverable("Take an event off the calendar. It is not recoverable")
           and not module.unrecoverable("Move a file or folder to recoverable Trash"), None)
 
-    # 13. Bypass: even a dangerous action runs — but only up to the machine's own ceiling.
+    # 13. Bypass: a sensitive action that can be undone runs unasked — but only up to the
+    # machine's own ceiling. And both bypasses stop there.
     module, state = case(tmp, "bypass", mode="bypass", machine_ceiling="dangerous", ceiling=None)
-    text, is_error = act(module, "calendar", "delete_event", {"id": "evt-3"})
+    text, is_error = act(module, "calendar", "move_event", {"id": "evt-9", "date": "2026-10-09"})
     s = read(state)
     check("bypass asks nobody", not s.get("requests"), s)
     check("bypass runs it", not is_error and len(s.get("acted", [])) == 1, text)
-    check("bypass writes it down anyway", len(s.get("audited", [])) == 1, s.get("audited"))
+    check("bypass writes it down anyway",
+          [a.get("mode") for a in s.get("audited", [])] == ["bypass"], s.get("audited"))
+    check("and a dangerous action that can be undone runs too",
+          module.decide("dangerous", "system-monitor", "kill_process", False, "bypass", [],
+                        "dangerous") == ("run", True), None)
 
-    module, state = case(tmp, "bypass-ceiling", mode="bypass", machine_ceiling="standard", ceiling=None)
-    text, is_error = act(module, "calendar", "delete_event", {"id": "evt-3"})
-    s = read(state)
-    check("bypass does NOT reach past the machine ceiling", not s.get("acted"), s)
-    check("and the refusal names the standing policy, not the mode",
-          "tool_permission" in text and "no mode changes it" in text, text)
+    for mode in ("bypass", "bypass_all"):
+        module, state = case(tmp, mode + "-ceiling", mode=mode, machine_ceiling="standard",
+                             ceiling=None)
+        text, is_error = act(module, "calendar", "delete_event", {"id": "evt-3"})
+        s = read(state)
+        check("%s does NOT reach past the machine ceiling" % mode,
+              not s.get("acted") and not s.get("requests"), s)
+        check("and the refusal names the standing policy, not the mode (%s)" % mode,
+              "tool_permission" in text and "no mode changes it" in text, text)
 
     # 14. A session rule: the person said "stop asking me about this one".
     module, state = case(tmp, "rule", mode="ask", answer="pending", ceiling=None,
@@ -1193,13 +1218,17 @@ with tempfile.TemporaryDirectory() as d:
         check("and nothing is recorded as having run under a rule (%s)" % mode,
               not s.get("audited"), s.get("audited"))
 
-    # 15. YOS_MCP_MAX_PERMISSION can only ever be STRICTER than the desktop's mode.
-    module, state = case(tmp, "cap-strict", mode="bypass", machine_ceiling="dangerous",
-                         ceiling="standard", answer="pending")
-    text, is_error = act(module, "calendar", "delete_event", {"id": "evt-3"})
-    s = read(state)
-    check("a stricter session cap turns a bypass run back into a question",
-          len(s.get("requests", [])) == 1 and not s.get("acted"), s)
+    # 15. YOS_MCP_MAX_PERMISSION can only ever be STRICTER than the desktop's mode. Driven
+    # with an action each bypass would otherwise run unasked, so the cap is what moves it.
+    for mode, (action, action_args) in (
+            ("bypass", ("move_event", {"id": "evt-9", "date": "2026-10-09"})),
+            ("bypass_all", ("delete_event", {"id": "evt-3"}))):
+        module, state = case(tmp, "cap-strict-" + mode, mode=mode, machine_ceiling="dangerous",
+                             ceiling="standard", answer="pending")
+        text, is_error = act(module, "calendar", action, action_args)
+        s = read(state)
+        check("a stricter session cap turns a %s run back into a question" % mode,
+              len(s.get("requests", [])) == 1 and not s.get("acted"), s)
 
     module, state = case(tmp, "cap-loose", mode="ask", machine_ceiling="dangerous",
                          ceiling="dangerous", answer="pending")
@@ -1219,18 +1248,21 @@ with tempfile.TemporaryDirectory() as d:
     check("and still asks about a sensitive one",
           len(read(state).get("requests", [])) == 1, read(state))
 
-    # 15c. The taint rule is NOT a permission grade and no mode turns it off — not even bypass.
+    # 15c. The taint rule is NOT a permission grade and no mode turns it off — not even bypass,
+    # and not full bypass either.
     #
     # A mode says how much the person trusts this mind; the taint says what this session has
     # already read. They are different questions, and a bypass that switched off the second one
     # would turn "do not ask me about things" into "carry my private state out to a web page".
-    module, state = case(tmp, "taint-bypass", mode="bypass", machine_ceiling="dangerous",
-                         ceiling=None)
-    module.run_tool(module.BY_NAME["os_describe"], {"app": "calendar"})
-    text, is_error = module.run_tool(module.BY_NAME["web_type"], {"ref": 1, "text": "secret"})
-    check("bypass does not switch off the taint rule",
-          not is_error and text.startswith("REFUSED") and "already read private state" in text, text)
-    check("and nothing reached the browser", not read(state).get("web"), read(state))
+    for mode in ("bypass", "bypass_all"):
+        module, state = case(tmp, "taint-" + mode, mode=mode, machine_ceiling="dangerous",
+                             ceiling=None)
+        module.run_tool(module.BY_NAME["os_describe"], {"app": "calendar"})
+        text, is_error = module.run_tool(module.BY_NAME["web_type"], {"ref": 1, "text": "secret"})
+        check("%s does not switch off the taint rule" % mode,
+              not is_error and text.startswith("REFUSED") and "already read private state" in text,
+              text)
+        check("and nothing reached the browser (%s)" % mode, not read(state).get("web"), read(state))
 
     # 15e. The web tools are acts on the browser's surface (#477): made there through os_act, so
     # its grades, the mode, the cards and the taint are the ones every app meets.
@@ -1258,6 +1290,24 @@ with tempfile.TemporaryDirectory() as d:
           len(s.get("requests", [])) == 1 and s["requests"][0].get("app") == "browser"
           and s["requests"][0].get("action") == "commit"
           and not any(w[0] == "commit" for w in s.get("web", [])), s)
+    # A commitment is a transaction: bypass still asks about it, and only full bypass presses it
+    # unasked (and writes it down).
+    module, state = case(tmp, "web-commit-bypass", mode="bypass", answer="pending",
+                         machine_ceiling="dangerous", ceiling=None)
+    module.run_tool(module.BY_NAME["web_commit"],
+                    {"ref": "e31", "label": "Place order", "site": "example.com"})
+    s = read(state)
+    check("in bypass, web_commit still puts a card up and presses nothing",
+          [r.get("action") for r in s.get("requests", [])] == ["commit"]
+          and not any(w[0] == "commit" for w in s.get("web", [])), s)
+    module, state = case(tmp, "web-commit-full-bypass", mode="bypass_all",
+                         machine_ceiling="dangerous", ceiling=None)
+    module.run_tool(module.BY_NAME["web_commit"],
+                    {"ref": "e31", "label": "Place order", "site": "example.com"})
+    s = read(state)
+    check("in full bypass, web_commit is pressed with nobody asked, and written down",
+          not s.get("requests") and any(w[0] == "commit" for w in s.get("web", []))
+          and [a.get("action") for a in s.get("audited", [])] == ["commit"], s)
     module, state = case(tmp, "web-taint-direct", mode="auto", machine_ceiling="dangerous", ceiling=None)
     module.run_tool(module.BY_NAME["os_describe"], {"app": "calendar"})
     text, is_error = act(module, "Browser", "type", {"ref": "e3", "text": "secret"})
@@ -1444,9 +1494,11 @@ with tempfile.TemporaryDirectory() as d:
 
     # And the file covers what it says it covers. A vector set that had quietly lost its
     # bypass rows would agree with anything.
-    check("the vectors cover all four modes",
-          set(v.get("mode") for v in vectors) == {"plan", "ask", "auto", "bypass"},
+    check("the vectors cover all five modes",
+          set(v.get("mode") for v in vectors) == {"plan", "ask", "auto", "bypass", "bypass_all"},
           sorted(set(v.get("mode") for v in vectors)))
+    check("and the bridge's modes are the shell's, the two bypasses included",
+          module.MODES == ["plan", "ask", "auto", "bypass", "bypass_all"], module.MODES)
     check("every grade, and one this OS does not define",
           {"safe", "standard", "sensitive", "dangerous"} <= set(v.get("grade") for v in vectors)
           and any(v.get("expect") == "refuse_grade" for v in vectors), None)
@@ -1476,8 +1528,9 @@ with tempfile.TemporaryDirectory() as d:
                        if not part.startswith("unrecoverable="))
         others.setdefault(key, {})[bool(v.get("unrecoverable"))] = v.get("expect")
     paired = [by for by in others.values() if len(by) == 2]
+    # The browser's rows are the only ones with no pair: six tools in each mode.
     check("every case is generated both ways, so the axis is a real one",
-          len(paired) * 2 + 24 == len(vectors), (len(paired), len(vectors)))
+          len(paired) * 2 + 6 * len(module.MODES) == len(vectors), (len(paired), len(vectors)))
     moved = [by for by in paired if by[False] != by[True]]
     check("and it changes the answer somewhere: %d cells turn on the app's own sentence"
           % len(moved), bool(moved), None)
@@ -1881,7 +1934,7 @@ with tempfile.TemporaryDirectory() as d:
     # agent on the other end has read nothing private, so its own bridge is clean and would type
     # what it was handed into any page: the taint would be laundered through it. Untainted, the
     # same hand-off runs as the mode says.
-    for mode in ("auto", "bypass"):
+    for mode in ("auto", "bypass", "bypass_all"):
         module, state = case(tmp, "handoff-taint-" + mode, mode=mode, machine_ceiling="dangerous",
                              answer="granted", ceiling=None, token=TOKEN)
         module.run_tool(module.BY_NAME["os_describe"], {"app": "calendar"})

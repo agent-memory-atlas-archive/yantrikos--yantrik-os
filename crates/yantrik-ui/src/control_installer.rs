@@ -513,7 +513,8 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
             // minutes. A caller that treats the reply as "installed" is wrong on both counts.
             Action::new(
                 "installer_install",
-                "Erase the chosen disk and install Yantrik OS onto it",
+                "Erase the chosen disk and install Yantrik OS onto it. What was on the disk is \
+                 not recoverable.",
             )
             .risk("dangerous")
             .defers(),

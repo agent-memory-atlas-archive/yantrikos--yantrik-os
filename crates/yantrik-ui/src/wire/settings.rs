@@ -68,7 +68,7 @@ pub struct UserSettings {
     pub preferred_mind: String,
     /// What a mind on the socket may do without being asked: `plan`, `ask` or `auto`.
     ///
-    /// Deliberately not `bypass`. Bypass is the fourth mode and it is never written here — a
+    /// Deliberately never a bypass. `bypass` and `bypass_all` are never written here — a
     /// machine that booted into "do not ask me about anything" would be in a mode nobody had
     /// chosen in that sitting, and the only thing that makes bypass acceptable is that somebody
     /// picked it, just now, off a confirmation that said what it meant. A bypass persists the
@@ -257,7 +257,7 @@ pub fn mind_mode() -> String {
     }
 }
 
-/// Record the mode. Never called with `bypass` — see the field's comment and `mind_mode::persist`.
+/// Record the mode. Never called with a bypass — see the field's comment and `mind_mode::persist`.
 pub fn set_mind_mode(mode: &str) {
     if let Some(shared) = LIVE.get() {
         if let Ok(mut settings) = shared.lock() {

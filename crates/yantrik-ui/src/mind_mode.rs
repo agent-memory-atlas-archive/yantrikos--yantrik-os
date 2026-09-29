@@ -1,4 +1,4 @@
-//! What the mind may do without being asked — four modes, and what makes each of them safe.
+//! What the mind may do without being asked — five modes, and what makes each of them safe.
 //!
 //! # Why this exists
 //!
@@ -12,7 +12,21 @@
 //!
 //! So the desktop gains what a coding agent's CLI has had for a while: a mode. `plan` reads and
 //! does not touch. `ask` is today's behaviour. `auto` stops asking about the routine sensitive
-//! things. `bypass` stops asking entirely, for a while, and says so loudly.
+//! things. `bypass` stops asking about everything except what cannot be undone — a payment, a
+//! send, a delete — for a while, and says so loudly. `bypass_all` ("Full bypass") stops asking
+//! entirely, those included, on the same terms.
+//!
+//! # Two bypasses, and why
+//!
+//! Pranab's decision of 28 September 2026. Bypass used to be one mode that asked about nothing,
+//! and the one thing a person handing a mind the keys for an hour most often still wants a say in
+//! is the act that cannot be taken back: buying, paying, sending, deleting — what an app's own
+//! published purpose says cannot be undone (`gate::unrecoverable`, the browser's `commit`). So
+//! `bypass` now asks about exactly those, as `auto` does, and runs everything else unasked; the
+//! old behaviour is `bypass_all`, a choice of its own on the same red confirmation. Both are
+//! time-boxed, never persisted, entered only by a person's click, shown red on the chip and
+//! audited the same way; [`Mode::is_bypass`] is the one test for "a bypass of either kind". Full
+//! bypass only widens the desktop's own gate — it reaches nothing outside it.
 //!
 //! # The grade is not the only thing that decides
 //!
@@ -28,7 +42,7 @@
 //! `tool_permission` — the owner's standing policy, enforced inside every app's runtime with a
 //! `CEILING:` refusal — is untouched by any of this. A mode decides what happens to an action at
 //! or below that wall; nothing here can move the wall. [`Modes::decide`] takes the ceiling and
-//! refuses above it before it looks at the mode at all, so even `bypass` cannot reach past it.
+//! refuses above it before it looks at the mode at all, so even full bypass cannot reach past it.
 //!
 //! # Only a person can make this more permissive
 //!
@@ -45,7 +59,7 @@
 //!
 //! # What is deliberately not here
 //!
-//! No standing permission that survives a restart: `bypass` is never written to the settings file
+//! No standing permission that survives a restart: neither bypass is ever written to the settings file
 //! and a session rule dies with the shell. The standing policy on this machine is
 //! `tool_permission`, set at the keyboard, and a second one minted from a card would be a second
 //! place for the truth to live. See `design/mind-modes-2026-09-21.md`.
@@ -85,7 +99,7 @@ const AUDIT_FILE_MAX: u64 = 200 * 1024;
 /// How many lines survive a trim.
 const AUDIT_FILE_KEEP: usize = 400;
 
-// ── The four modes ──────────────────────────────────────────────────
+// ── The five modes ──────────────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
@@ -97,18 +111,35 @@ pub enum Mode {
     /// Sensitive actions run without asking; `dangerous` still raises a card — and so does
     /// anything the app's own published purpose says cannot be undone, whatever its grade.
     Auto,
-    /// Everything below the machine ceiling runs. Time-boxed, never persisted.
+    /// Everything below the machine ceiling runs, except what the app's own published purpose
+    /// says cannot be undone (`gate::unrecoverable`) — a purchase, a calendar delete — which still raises a card, as in
+    /// `auto`. Time-boxed, never persisted.
     Bypass,
+    /// "Full bypass": everything below the machine ceiling runs, what cannot be undone included.
+    /// The loosest mode there is. Time-boxed and never persisted, exactly as `Bypass` is.
+    BypassAll,
 }
 
 impl Mode {
+    /// Every mode, strictest first.
+    pub const ALL: [Mode; 5] = [Mode::Plan, Mode::Ask, Mode::Auto, Mode::Bypass, Mode::BypassAll];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Mode::Plan => "plan",
             Mode::Ask => "ask",
             Mode::Auto => "auto",
             Mode::Bypass => "bypass",
+            Mode::BypassAll => "bypass_all",
         }
+    }
+
+    /// A bypass of either kind: the modes that are time-boxed, never persisted, entered only on
+    /// the red confirmation, and never entered from the socket. Everything that means "while a
+    /// bypass is on" — the deadline, the chip's countdown, the "Bypass ended" notice, what a
+    /// lapse falls back to — asks this rather than naming one of the two.
+    pub fn is_bypass(self) -> bool {
+        matches!(self, Mode::Bypass | Mode::BypassAll)
     }
 
     pub fn parse(text: &str) -> Option<Mode> {
@@ -117,6 +148,7 @@ impl Mode {
             "ask" => Some(Mode::Ask),
             "auto" => Some(Mode::Auto),
             "bypass" => Some(Mode::Bypass),
+            "bypass_all" => Some(Mode::BypassAll),
             _ => None,
         }
     }
@@ -129,6 +161,7 @@ impl Mode {
             Mode::Ask => 1,
             Mode::Auto => 2,
             Mode::Bypass => 3,
+            Mode::BypassAll => 4,
         }
     }
 
@@ -139,6 +172,7 @@ impl Mode {
             Mode::Ask => "Ask",
             Mode::Auto => "Auto",
             Mode::Bypass => "Bypass",
+            Mode::BypassAll => "Full bypass",
         }
     }
 
@@ -156,7 +190,8 @@ impl Mode {
             Mode::Plan => "Look, don't touch. It can read anything and change nothing.",
             Mode::Ask => "It asks you before anything that could matter.",
             Mode::Auto => "It gets on with things. You are still asked about the destructive ones.",
-            Mode::Bypass => "It does not ask. Everything the machine allows, it does.",
+            Mode::Bypass => "It does not ask, except before anything an app marks as impossible to undo, such as a purchase or a calendar delete.",
+            Mode::BypassAll => "It does not ask. Everything the machine allows, it does, including what an app marks as impossible to undo.",
         }
     }
 }
@@ -308,13 +343,13 @@ pub struct BypassEnded {
 #[derive(Clone, Debug)]
 pub struct Modes {
     mode: Mode,
-    /// What a lapsing bypass returns to. Only meaningful while `mode` is `Bypass`, and kept
+    /// What a lapsing bypass returns to. Only meaningful while `mode` is a bypass, and kept
     /// rather than recomputed so "back to where you were" is a fact rather than a guess.
     previous: Mode,
     /// `None` while in bypass means "until the shell restarts".
     bypass_until: Option<Instant>,
-    /// When the running bypass started, on the audit's clock. Only meaningful while `mode` is
-    /// `Bypass`; it is what makes "N things ran without asking **while bypass was on**" a
+    /// When the running bypass started, on the audit's clock. Only meaningful while `mode` is a
+    /// bypass; it is what makes "N things ran without asking **while bypass was on**" a
     /// countable claim rather than a guess at the whole log.
     bypass_started_unix: u64,
     /// A lapse that has happened and has not been reported yet. Armed by [`Modes::lapse`] and
@@ -332,8 +367,8 @@ impl Default for Modes {
 
 impl Modes {
     pub fn new(mode: Mode) -> Self {
-        // A machine must not come up in bypass, so nothing can construct one that has.
-        let mode = if mode == Mode::Bypass { Mode::Ask } else { mode };
+        // A machine must not come up in either bypass, so nothing can construct one that has.
+        let mode = if mode.is_bypass() { Mode::Ask } else { mode };
         Modes {
             mode,
             previous: mode,
@@ -354,7 +389,7 @@ impl Modes {
     /// merely because no timer happened to fire. [`Modes::lapse`] makes the same fact visible to
     /// the screen; this is what every decision reads.
     pub fn mode(&self, now: Instant) -> Mode {
-        if self.mode == Mode::Bypass {
+        if self.mode.is_bypass() {
             if let Some(until) = self.bypass_until {
                 if now >= until {
                     return self.previous;
@@ -366,7 +401,7 @@ impl Modes {
 
     /// What a bypass will fall back to. The mode itself when there is no bypass running.
     pub fn previous(&self, now: Instant) -> Mode {
-        if self.mode(now) == Mode::Bypass {
+        if self.mode(now).is_bypass() {
             self.previous
         } else {
             self.mode(now)
@@ -375,7 +410,7 @@ impl Modes {
 
     /// How much of the bypass is left. `None` when not in bypass, or when it runs until restart.
     pub fn bypass_left(&self, now: Instant) -> Option<Duration> {
-        if self.mode(now) != Mode::Bypass {
+        if !self.mode(now).is_bypass() {
             return None;
         }
         self.bypass_until.map(|until| until.saturating_duration_since(now))
@@ -383,7 +418,7 @@ impl Modes {
 
     /// True while a bypass with no deadline is running.
     pub fn bypass_until_restart(&self, now: Instant) -> bool {
-        self.mode(now) == Mode::Bypass && self.bypass_until.is_none()
+        self.mode(now).is_bypass() && self.bypass_until.is_none()
     }
 
     pub fn rules(&self) -> &[Rule] {
@@ -421,8 +456,10 @@ impl Modes {
 
     /// A person chose a mode. **UI only** — see the module doc.
     ///
-    /// `bypass` is only ever reached through this function, which is only ever reached from a
-    /// click on a confirmation that says what it means. There is no other constructor for it.
+    /// Either bypass is only ever reached through this function, which is only ever reached from
+    /// a click on a confirmation that says what it means. There is no other constructor for one.
+    /// Moving from one bypass to the other is one bypass as far as the person is concerned: the
+    /// window it started keeps its start, and it still falls back to where it came from.
     ///
     /// `started_unix` is the wall clock, carried beside `now` because the audit is written with
     /// one and a lapse has to count the entries inside its own window. See [`unix_now`].
@@ -439,17 +476,17 @@ impl Modes {
         // Ask mode" over the top of somebody who has just pressed Plan would be telling them
         // something that is no longer true.
         self.lapsed = None;
-        if mode == Mode::Bypass {
+        if mode.is_bypass() {
             // Remember where to come back to, and do not let a bypass chosen twice make its own
-            // previous mode `bypass` — that would strand the machine there when it lapsed.
-            if self.mode != Mode::Bypass {
+            // previous mode a bypass — that would strand the machine there when it lapsed.
+            if !self.mode.is_bypass() {
                 self.previous = self.mode;
                 // Only the first of two back-to-back bypasses starts the window. A person who
                 // extends one is in one bypass as far as they are concerned, and the count they
                 // are shown at the end should cover all of it.
                 self.bypass_started_unix = started_unix;
             }
-            self.mode = Mode::Bypass;
+            self.mode = mode;
             self.bypass_until = bypass.deadline(now);
             return;
         }
@@ -477,8 +514,16 @@ impl Modes {
                  set_mind_mode to `{}` or `plan` — and saying what you would do and waiting is \
                  usually the faster route anyway.",
                 current.as_str(),
-                if current == Mode::Bypass { "auto" } else { "ask" },
+                if current.is_bypass() { "auto" } else { "ask" },
             ));
+        }
+        if mode.is_bypass() {
+            // Full bypass down to bypass: a lowering, and still the same bypass — the same
+            // deadline, the same window, the same mode to fall back to. Ending the clock here
+            // would turn "tighten it for the rest of the hour" into "bypass until restart".
+            self.mode = mode;
+            self.lapsed = None;
+            return Ok(mode);
         }
         // Lowering out of a bypass ends it rather than leaving a deadline that would later
         // "lapse" the machine back into something looser than what was just chosen.
@@ -490,6 +535,26 @@ impl Modes {
         // exists. A bypass ended from the socket is not a lapse either way.
         self.lapsed = None;
         Ok(mode)
+    }
+
+    /// [`Modes::lower_to`] for a caller on the socket, which may never ENTER a bypass.
+    ///
+    /// Either bypass has to be chosen at the keyboard, on a confirmation that says what it means
+    /// and for how long. The one bypass the socket may name is plain bypass while full bypass is
+    /// running: that is a lowering — the mind asking to be asked again before what cannot be
+    /// undone — and it keeps the deadline the person chose.
+    pub fn lower_from_socket(&mut self, wanted: Mode, now: Instant) -> Result<Mode, String> {
+        let current = self.mode(now);
+        let lowering_within_a_bypass = wanted == Mode::Bypass && current == Mode::BypassAll;
+        if wanted.is_bypass() && !lowering_within_a_bypass {
+            return Err(format!(
+                "{} cannot be entered from here at all — a bypass is the one kind of mode that \
+                 has to be chosen at the keyboard, on a confirmation that says what it means and \
+                 for how long. Nothing was changed.",
+                wanted.as_str(),
+            ));
+        }
+        self.lower_to(wanted, now)
     }
 
     /// A person pressed "Allow for this session". **UI only** — see the module doc.
@@ -528,7 +593,7 @@ impl Modes {
     /// The whole decision table, in one place.
     ///
     /// Order matters and is the security argument: the machine ceiling is consulted BEFORE the
-    /// mode, so no mode — not even bypass — can reach past the owner's standing policy, and
+    /// mode, so no mode — not even full bypass — can reach past the owner's standing policy, and
     /// nothing above it is ever put in front of a person either. A card nobody's answer could
     /// satisfy teaches them that the card is noise.
     ///
@@ -608,12 +673,24 @@ impl Modes {
                     }
                 }
             }
-            // Unchanged by the rule above, and the one mode that is: bypass does not ask, by
-            // definition and by what its confirmation says. A person who pressed "Stop asking me
-            // anything" on a red panel with a countdown has answered this question already, and
-            // a card after that would make the confirmation a lie. It is written down instead —
-            // `would_ask` is true here, so it lands in the audit.
-            Mode::Bypass => Decision::Run { unasked: would_ask },
+            // Bypass runs every grade unasked — and still asks about what cannot be undone, the
+            // one question its confirmation says it keeps ("still asks if an app says it cannot
+            // be undone"). Pranab's decision of 28 September 2026: the act a person handing
+            // over the keys for an hour most wants a say in is the one that cannot be taken
+            // back. No session rule answers it (`ask_or_rule`), as in every other mode.
+            Mode::Bypass => {
+                if irreversible {
+                    self.ask_or_rule(app, action, irreversible)
+                } else {
+                    Decision::Run { unasked: would_ask }
+                }
+            }
+            // Unchanged by the rule above, and the one mode that is: full bypass does not ask, by
+            // definition and by what its confirmation says. A person who pressed "asks nothing,
+            // not even those" on a red panel with a countdown has answered this question already,
+            // and a card after that would make the confirmation a lie. It is written down
+            // instead — `would_ask` is true here, so it lands in the audit.
+            Mode::BypassAll => Decision::Run { unasked: would_ask },
             Mode::Auto => {
                 if rank >= DANGEROUS || irreversible {
                     self.ask_or_rule(app, action, irreversible)
@@ -668,10 +745,11 @@ fn locked() -> std::sync::MutexGuard<'static, Modes> {
 fn stored_mode() -> Mode {
     let saved = crate::wire::settings::mind_mode();
     match Mode::parse(&saved) {
-        // A settings file that says `bypass` was hand-edited or written by a past bug. Booting
-        // into it would mean a machine that does not ask, from the first second, with nobody
-        // having chosen that in this sitting.
-        Some(Mode::Bypass) | None => Mode::Ask,
+        // A settings file that says either bypass was hand-edited or written by a past bug.
+        // Booting into it would mean a machine that does not ask, from the first second, with
+        // nobody having chosen that in this sitting.
+        Some(mode) if mode.is_bypass() => Mode::Ask,
+        None => Mode::Ask,
         Some(mode) => mode,
     }
 }
@@ -704,17 +782,18 @@ pub fn take_lapse_notice() -> Option<BypassEnded> {
 
 /// How many actions ran unasked inside one bypass window.
 ///
-/// `mode` is what the action actually ran under, as the bridge reported it. An action a session
-/// RULE covered is recorded as `rule` and is deliberately NOT counted: it would have run in
-/// `ask` mode too, and this sentence is about what the bypass itself bought.
+/// `mode` is what the action actually ran under, as the bridge reported it — either bypass, since
+/// one window can move from one to the other. An action a session RULE covered is recorded as
+/// `rule` and is deliberately NOT counted: it would have run in `ask` mode too, and this sentence
+/// is about what the bypass itself bought.
 pub fn unasked_during(entries: &[AuditEntry], since_unix: u64) -> usize {
     entries
         .iter()
-        .filter(|e| e.mode == Mode::Bypass.as_str() && e.unix >= since_unix)
+        .filter(|e| Mode::parse(&e.mode).is_some_and(Mode::is_bypass) && e.unix >= since_unix)
         .count()
 }
 
-/// What the "Bypass ended" notification says.
+/// What the "Bypass ended" notification says, for either bypass.
 ///
 /// Two things, one sentence each: where the machine is now, in its own published words so this
 /// and the mode menu can never describe `auto` differently — and what the bypass cost, which is
@@ -761,20 +840,13 @@ pub fn decide(grade: &str, app: &str, action: &str, unrecoverable: bool) -> Deci
 pub fn lower_from_socket(mode: &str) -> Result<Mode, String> {
     let Some(wanted) = Mode::parse(mode) else {
         return Err(format!(
-            "`{mode}` is not a mode. This desktop has four: plan (read only), ask (you are asked \
+            "`{mode}` is not a mode. This desktop has five: plan (read only), ask (you are asked \
              about anything that matters), auto (only destructive actions are asked about), \
-             bypass (nothing is asked). From here you can only tighten it."
+             bypass (nothing is asked except before what cannot be undone), bypass_all (nothing \
+             is asked at all). From here you can only tighten it."
         ));
     };
-    if wanted == Mode::Bypass {
-        return Err(
-            "bypass cannot be entered from here at all — it is the one mode that has to be \
-             chosen at the keyboard, on a confirmation that says what it means and for how long. \
-             Nothing was changed."
-                .to_string(),
-        );
-    }
-    let settled = locked().lower_to(wanted, Instant::now())?;
+    let settled = locked().lower_from_socket(wanted, Instant::now())?;
     persist(settled);
     Ok(settled)
 }
@@ -802,23 +874,21 @@ pub(crate) fn person_revoke_rule(app: &str, action: &str) {
 
 /// What goes in the settings file for a mode that is live right now.
 ///
-/// A machine that booted into bypass would be a machine nobody had chosen that for in this
-/// sitting, which is the one outcome this whole feature must not produce. So a bypass stores the
-/// mode it will fall back to, and the file is always something safe to start from. Pure, and
-/// separate from the write, because "bypass is never persisted" is a property worth a test and
+/// A machine that booted into either bypass would be a machine nobody had chosen that for in
+/// this sitting, which is the one outcome this whole feature must not produce. So a bypass stores
+/// the mode it will fall back to, and the file is always something safe to start from. Pure, and
+/// separate from the write, because "no bypass is ever persisted" is a property worth a test and
 /// a test should not need a settings file.
 fn to_store(mode: Mode, previous: Mode) -> Mode {
-    match mode {
-        Mode::Bypass => {
-            // Belt and braces: a `previous` of bypass would defeat the whole point, and
-            // `person_set_mode` already refuses to record one.
-            if previous == Mode::Bypass {
-                Mode::Ask
-            } else {
-                previous
-            }
-        }
-        other => other,
+    if !mode.is_bypass() {
+        return mode;
+    }
+    // Belt and braces: a `previous` that is a bypass would defeat the whole point, and
+    // `person_set_mode` already refuses to record one.
+    if previous.is_bypass() {
+        Mode::Ask
+    } else {
+        previous
     }
 }
 
@@ -837,7 +907,8 @@ fn persist(mode: Mode) {
 // published the way the ceiling already is — a small file beside `settings.yaml`, rewritten
 // whenever the mode or the rules change, read by every dispatch per call.
 //
-// Bypass IS written here, unlike in `settings.yaml`. This file is a fact about now, not a mode
+// A bypass IS written here, unlike in `settings.yaml` — as `bypass` or `bypass_all`, because the
+// apps enforce the difference (`gate::Mode::asks_before_what_cannot_be_undone`). This file is a fact about now, not a mode
 // to boot into, and the next shell start rewrites it before anything can read a stale one. A
 // bypass with a deadline carries it, so a shell that died mid-bypass leaves a file the apps stop
 // trusting at the minute the person was promised. A bypass "until restart" carries no minute,
@@ -987,20 +1058,26 @@ pub fn rules_summary() -> String {
 pub fn chip_label() -> String {
     let now = Instant::now();
     let guard = locked();
-    let mode = guard.mode(now);
-    if mode != Mode::Bypass {
-        return mode.label().to_string();
+    chip_text(guard.mode(now), guard.bypass_left(now))
+}
+
+/// [`chip_label`] without the lock, so the words are a test: "Bypass 43m", "Full bypass 59s",
+/// "Full bypass · no end". The mode's own label leads, so the two bypasses never read alike.
+fn chip_text(mode: Mode, left: Option<Duration>) -> String {
+    let label = mode.label();
+    if !mode.is_bypass() {
+        return label.to_string();
     }
-    match guard.bypass_left(now) {
+    match left {
         Some(left) => {
             let secs = left.as_secs();
             if secs >= 60 {
-                format!("Bypass {}m", secs / 60)
+                format!("{label} {}m", secs / 60)
             } else {
-                format!("Bypass {secs}s")
+                format!("{label} {secs}s")
             }
         }
-        None => "Bypass · no end".to_string(),
+        None => format!("{label} · no end"),
     }
 }
 
@@ -1189,10 +1266,10 @@ mod mind_mode_tests {
         matches!(d, Decision::Run { .. })
     }
 
-    /// The whole table, four modes by four grades, with the ceiling out of the way.
+    /// The whole table, five modes by four grades, with the ceiling out of the way.
     ///
-    /// Written as a table rather than as sixteen assertions because the table IS the feature:
-    /// somebody changing one cell should have to change one line here and see the other fifteen
+    /// Written as a table rather than as twenty assertions because the table IS the feature:
+    /// somebody changing one cell should have to change one line here and see the other nineteen
     /// stay put.
     ///
     /// Every case here is an action the app says nothing about recoverability for, which is the
@@ -1220,15 +1297,16 @@ mod mind_mode_tests {
             (Mode::Bypass, "standard", Decision::Run { unasked: false }),
             (Mode::Bypass, "sensitive", Decision::Run { unasked: true }),
             (Mode::Bypass, "dangerous", Decision::Run { unasked: true }),
+            // The two bypasses are the same column for anything that can be undone.
+            (Mode::BypassAll, "safe", Decision::Run { unasked: false }),
+            (Mode::BypassAll, "standard", Decision::Run { unasked: false }),
+            (Mode::BypassAll, "sensitive", Decision::Run { unasked: true }),
+            (Mode::BypassAll, "dangerous", Decision::Run { unasked: true }),
         ];
 
         for (mode, grade, want) in expect {
             let mut modes = at(Mode::Ask);
-            if *mode == Mode::Bypass {
-                modes.person_set_mode(Mode::Bypass, Bypass::Hour, now, 0);
-            } else {
-                modes.person_set_mode(*mode, Bypass::Hour, now, 0);
-            }
+            modes.person_set_mode(*mode, Bypass::Hour, now, 0);
             // `files.move`, not `calendar.delete_event`: this table is about the grade alone, and
             // the action it is driven with must be one the app says nothing about undoing.
             let got = modes.decide(grade, "files", "move", false, "dangerous", now);
@@ -1246,7 +1324,9 @@ mod mind_mode_tests {
     /// Found live on 21 September 2026 — `calendar.delete_event`, graded `sensitive`, published
     /// as "It is not recoverable", ran in `auto` with nobody asked while the mode menu said
     /// "You are still asked about the destructive ones". The four cells that moved are `ask` and
-    /// `auto` at `standard` and `sensitive`; everything else is what it was.
+    /// `auto` at `standard` and `sensitive`; everything else is what it was. On 28 September
+    /// 2026 bypass's three writing cells moved too, to asking: what used to be bypass is full
+    /// bypass now, and its cells are the old ones.
     #[test]
     fn mind_mode_what_cannot_be_undone_is_asked_about_in_auto() {
         let now = Instant::now();
@@ -1256,6 +1336,7 @@ mod mind_mode_tests {
             (Mode::Ask, "safe", Decision::Run { unasked: false }),
             (Mode::Auto, "safe", Decision::Run { unasked: false }),
             (Mode::Bypass, "safe", Decision::Run { unasked: false }),
+            (Mode::BypassAll, "safe", Decision::Run { unasked: false }),
             // Plan refuses every write already, for its own reasons.
             (Mode::Plan, "standard", Decision::Refuse { why: String::new() }),
             (Mode::Plan, "sensitive", Decision::Refuse { why: String::new() }),
@@ -1269,12 +1350,17 @@ mod mind_mode_tests {
             (Mode::Auto, "standard", Decision::Ask),
             (Mode::Auto, "sensitive", Decision::Ask),
             (Mode::Auto, "dangerous", Decision::Ask),
-            // Bypass does not ask. It says so on a red confirmation with a countdown, and a
+            // Bypass asks too: "still asks if an app says it cannot be undone" is what its
+            // confirmation says, whatever the grade.
+            (Mode::Bypass, "standard", Decision::Ask),
+            (Mode::Bypass, "sensitive", Decision::Ask),
+            (Mode::Bypass, "dangerous", Decision::Ask),
+            // Full bypass does not ask. It says so on a red confirmation with a countdown, and a
             // card after that would make the confirmation a lie — so it is written down
             // instead, which is what `unasked: true` at `standard` means here.
-            (Mode::Bypass, "standard", Decision::Run { unasked: true }),
-            (Mode::Bypass, "sensitive", Decision::Run { unasked: true }),
-            (Mode::Bypass, "dangerous", Decision::Run { unasked: true }),
+            (Mode::BypassAll, "standard", Decision::Run { unasked: true }),
+            (Mode::BypassAll, "sensitive", Decision::Run { unasked: true }),
+            (Mode::BypassAll, "dangerous", Decision::Run { unasked: true }),
         ];
 
         for (mode, grade, want) in expect {
@@ -1314,7 +1400,7 @@ mod mind_mode_tests {
     #[test]
     fn mind_mode_the_ceiling_still_outranks_what_cannot_be_undone() {
         let now = Instant::now();
-        for mode in [Mode::Plan, Mode::Ask, Mode::Auto, Mode::Bypass] {
+        for mode in Mode::ALL {
             let mut modes = at(Mode::Ask);
             modes.person_set_mode(mode, Bypass::Hour, now, 0);
             let got = modes.decide("sensitive", "calendar", "delete_event", true, "standard", now);
@@ -1344,7 +1430,7 @@ mod mind_mode_tests {
     #[test]
     fn mind_mode_the_machine_ceiling_is_above_every_mode() {
         let now = Instant::now();
-        for mode in [Mode::Plan, Mode::Ask, Mode::Auto, Mode::Bypass] {
+        for mode in Mode::ALL {
             let mut modes = at(Mode::Ask);
             modes.person_set_mode(mode, Bypass::UntilRestart, now, 0);
             let got = modes.decide("dangerous", "system", "kill", false, "standard", now);
@@ -1366,7 +1452,7 @@ mod mind_mode_tests {
     #[test]
     fn mind_mode_an_undefined_grade_is_refused_in_every_mode() {
         let now = Instant::now();
-        for mode in [Mode::Plan, Mode::Ask, Mode::Auto, Mode::Bypass] {
+        for mode in Mode::ALL {
             let mut modes = at(Mode::Ask);
             modes.person_set_mode(mode, Bypass::Hour, now, 0);
             let got = modes.decide("spicy", "notes", "write", false, "dangerous", now);
@@ -1398,6 +1484,127 @@ mod mind_mode_tests {
         assert!(modes.lapse(later), "the screen has something new to show");
         assert!(!modes.lapse(later), "and only once");
         assert_eq!(modes.mode(later), Mode::Auto);
+    }
+
+    /// Full bypass is time-boxed exactly as bypass is: it ends on its clock, back to where the
+    /// machine was, and the mode it came back to decides again.
+    #[test]
+    fn mind_mode_full_bypass_expires_back_to_what_it_was() {
+        let now = Instant::now();
+        let mut modes = at(Mode::Ask);
+        modes.person_set_mode(Mode::Auto, Bypass::Hour, now, 0);
+        modes.person_set_mode(Mode::BypassAll, Bypass::Minutes15, now, 0);
+        assert_eq!(modes.mode(now), Mode::BypassAll);
+        assert_eq!(modes.bypass_left(now).map(|d| d.as_secs()), Some(15 * 60));
+        assert_eq!(modes.previous(now), Mode::Auto);
+
+        let later = now + Duration::from_secs(15 * 60 + 1);
+        assert_eq!(modes.mode(later), Mode::Auto, "a lapsed full bypass is not still in force");
+        assert_eq!(
+            modes.decide("sensitive", "calendar", "delete_event", true, "dangerous", later),
+            Decision::Ask
+        );
+        assert!(modes.lapse(later));
+        assert_eq!(modes.take_lapse().map(|l| l.back_to), Some(Mode::Auto), "and it is announced");
+    }
+
+    /// Pranab's decision of 28 September 2026, cell by cell: bypass asks before what cannot be
+    /// undone and full bypass does not; both run everything else; no session rule answers the
+    /// question bypass still asks.
+    #[test]
+    fn mind_mode_bypass_asks_before_what_cannot_be_undone_and_full_bypass_does_not() {
+        let now = Instant::now();
+        let mut modes = at(Mode::Ask);
+        modes.rules = vec![Rule { app: "browser".into(), action: "commit".into() }];
+        modes.person_set_mode(Mode::Bypass, Bypass::Hour, now, 0);
+        assert_eq!(modes.decide("sensitive", "browser", "commit", true, "dangerous", now), Decision::Ask);
+        assert_eq!(
+            modes.decide("dangerous", "system-monitor", "kill_process", false, "dangerous", now),
+            Decision::Run { unasked: true },
+            "everything else still runs unasked, and is written down"
+        );
+
+        modes.person_set_mode(Mode::BypassAll, Bypass::Hour, now, 0);
+        assert_eq!(
+            modes.decide("sensitive", "browser", "commit", true, "dangerous", now),
+            Decision::Run { unasked: true },
+            "full bypass runs it, and the audit records it"
+        );
+        // And the ceiling still outranks it.
+        let Decision::Refuse { why } = modes.decide("dangerous", "browser", "commit", true, "sensitive", now)
+        else {
+            panic!("full bypass reached past the machine ceiling");
+        };
+        assert!(why.contains("tool_permission"), "{why}");
+    }
+
+    /// Moving between the two bypasses is one bypass: its window keeps its start, its deadline
+    /// is the one last chosen, and it still falls back to where it came from — never to a bypass.
+    #[test]
+    fn mind_mode_moving_between_the_bypasses_is_one_bypass() {
+        let now = Instant::now();
+        let mut modes = at(Mode::Ask);
+        modes.person_set_mode(Mode::Plan, Bypass::Hour, now, 0);
+        modes.person_set_mode(Mode::Bypass, Bypass::Hour, now, 1_790_000_000);
+        modes.person_set_mode(Mode::BypassAll, Bypass::Minutes15, now + Duration::from_secs(60), 1_790_000_060);
+        assert_eq!(modes.previous(now), Mode::Plan, "not `bypass`");
+        assert_eq!(modes.bypass_started_unix, 1_790_000_000, "the window opened with the first");
+        let after = now + Duration::from_secs(60 + 15 * 60 + 1);
+        assert_eq!(modes.mode(after), Mode::Plan);
+        assert!(modes.lapse(after));
+        assert_eq!(modes.take_lapse().map(|l| l.started_unix), Some(1_790_000_000));
+    }
+
+    /// The socket may never enter a bypass of either kind — and may step full bypass down to
+    /// bypass, which is a lowering and keeps the person's deadline.
+    #[test]
+    fn mind_mode_the_socket_enters_neither_bypass_but_may_step_full_bypass_down() {
+        let now = Instant::now();
+        for from in [Mode::Plan, Mode::Ask, Mode::Auto] {
+            for wanted in [Mode::Bypass, Mode::BypassAll] {
+                let mut modes = at(from);
+                let err = modes.lower_from_socket(wanted, now).expect_err("never from the socket");
+                assert!(err.contains("cannot be entered from here"), "{err}");
+                assert!(err.contains(wanted.as_str()), "{err}");
+                assert_eq!(modes.mode(now), from, "{from:?} → {wanted:?}: nothing moved");
+            }
+        }
+        // Already in bypass: asking for either is still not something the socket does.
+        let mut modes = at(Mode::Ask);
+        modes.person_set_mode(Mode::Bypass, Bypass::Hour, now, 0);
+        assert!(modes.lower_from_socket(Mode::BypassAll, now).is_err(), "a raise, and a bypass");
+        assert!(modes.lower_from_socket(Mode::Bypass, now).is_err());
+        assert_eq!(modes.mode(now), Mode::Bypass);
+
+        // Full bypass down to bypass: allowed, and the clock the person chose still runs.
+        let mut modes = at(Mode::Auto);
+        modes.person_set_mode(Mode::BypassAll, Bypass::Minutes15, now, 0);
+        assert_eq!(modes.lower_from_socket(Mode::Bypass, now).unwrap(), Mode::Bypass);
+        assert_eq!(modes.mode(now), Mode::Bypass);
+        assert_eq!(modes.previous(now), Mode::Auto);
+        assert_eq!(modes.bypass_left(now).map(|d| d.as_secs()), Some(15 * 60), "same deadline");
+        assert_eq!(modes.mode(now + Duration::from_secs(15 * 60)), Mode::Auto, "and it ends on it");
+        assert_eq!(to_store(modes.mode(now), modes.previous(now)), Mode::Auto, "never persisted");
+
+        // And out of either bypass to anything below it, as before.
+        for down in [Mode::Auto, Mode::Ask, Mode::Plan] {
+            let mut modes = at(Mode::Ask);
+            modes.person_set_mode(Mode::BypassAll, Bypass::Hour, now, 0);
+            assert_eq!(modes.lower_from_socket(down, now).unwrap(), down);
+            assert!(modes.bypass_left(now).is_none(), "{down:?}: the bypass is over");
+            assert_eq!(modes.mode(now + Duration::from_secs(60 * 60 + 1)), down);
+        }
+    }
+
+    /// The chip says which bypass, and counts down either the same way.
+    #[test]
+    fn mind_mode_the_chip_names_which_bypass() {
+        assert_eq!(chip_text(Mode::Auto, None), "Auto");
+        assert_eq!(chip_text(Mode::Bypass, Some(Duration::from_secs(43 * 60 + 5))), "Bypass 43m");
+        assert_eq!(chip_text(Mode::BypassAll, Some(Duration::from_secs(43 * 60 + 5))), "Full bypass 43m");
+        assert_eq!(chip_text(Mode::BypassAll, Some(Duration::from_secs(59))), "Full bypass 59s");
+        assert_eq!(chip_text(Mode::BypassAll, None), "Full bypass · no end");
+        assert_eq!(chip_text(Mode::Bypass, None), "Bypass · no end");
     }
 
     /// What this shell publishes is what every app enforces (issue #116). The runtime reads
@@ -1453,6 +1660,21 @@ mod mind_mode_tests {
         let mut rebooted = doc.clone();
         rebooted["boot_id"] = serde_json::json!("00000000-0000-0000-0000-000000000000");
         assert_eq!(mode_from(&rebooted.to_string(), unix).name, "ask");
+
+        // Full bypass is published under its own name, so the apps can tell it from bypass —
+        // and they do: bypass asks before what cannot be undone, full bypass does not.
+        let mut modes = at(Mode::Ask);
+        modes.person_set_mode(Mode::Auto, Bypass::Hour, now, 0);
+        modes.person_set_mode(Mode::BypassAll, Bypass::Minutes15, now, unix);
+        let text = policy_json(&modes, now, unix);
+        let read = mode_from(&text, unix);
+        assert_eq!(read.name, "bypass_all");
+        assert!(!read.asks_before_what_cannot_be_undone());
+        assert_eq!(mode_from(&text, unix + 15 * 60).name, "auto", "back to what it was");
+        modes.lower_from_socket(Mode::Bypass, now).unwrap();
+        let read = mode_from(&policy_json(&modes, now, unix), unix);
+        assert_eq!(read.name, "bypass");
+        assert!(read.asks_before_what_cannot_be_undone());
     }
 
     /// Choosing bypass twice must not strand the machine there.
@@ -1484,6 +1706,12 @@ mod mind_mode_tests {
     /// half is what makes a hand-edited `settings.yaml` harmless.
     #[test]
     fn mind_mode_bypass_is_never_persisted_and_never_booted_into() {
+        for bypass in [Mode::Bypass, Mode::BypassAll] {
+            assert_eq!(to_store(bypass, Mode::Auto), Mode::Auto, "{bypass:?}");
+            assert_eq!(to_store(bypass, Mode::Bypass), Mode::Ask, "{bypass:?}");
+            assert_eq!(to_store(bypass, Mode::BypassAll), Mode::Ask, "{bypass:?}");
+            assert_eq!(Modes::new(bypass).mode(Instant::now()), Mode::Ask, "{bypass:?}");
+        }
         assert_eq!(to_store(Mode::Bypass, Mode::Auto).as_str(), "auto");
         assert_eq!(to_store(Mode::Bypass, Mode::Plan).as_str(), "plan");
         assert_eq!(to_store(Mode::Bypass, Mode::Bypass).as_str(), "ask");
@@ -1627,7 +1855,7 @@ mod mind_mode_tests {
         assert_eq!(modes.mode(now), Mode::Plan);
 
         // Up is not, in any of its shapes.
-        for wanted in [Mode::Ask, Mode::Auto, Mode::Bypass] {
+        for wanted in [Mode::Ask, Mode::Auto, Mode::Bypass, Mode::BypassAll] {
             let err = modes
                 .lower_to(wanted, now)
                 .expect_err("only a person raises the mode");
@@ -1661,6 +1889,15 @@ mod mind_mode_tests {
         assert!(Mode::Plan.permissiveness() < Mode::Ask.permissiveness());
         assert!(Mode::Ask.permissiveness() < Mode::Auto.permissiveness());
         assert!(Mode::Auto.permissiveness() < Mode::Bypass.permissiveness());
+        assert!(Mode::Bypass.permissiveness() < Mode::BypassAll.permissiveness(), "full bypass is the loosest");
+        for mode in Mode::ALL {
+            assert_eq!(Mode::parse(mode.as_str()), Some(mode));
+            assert_eq!(mode.is_bypass(), matches!(mode, Mode::Bypass | Mode::BypassAll));
+            // The shell's names are the apps' names: `gate::MODES` is what the file is read with.
+            assert!(yantrik_ipc_transport::gate::MODES.iter().any(|(m, _)| *m == mode.as_str()), "{mode:?}");
+            assert_eq!(yantrik_ipc_transport::gate::is_bypass(mode.as_str()), mode.is_bypass());
+        }
+        assert_eq!(yantrik_ipc_transport::gate::MODES.len(), Mode::ALL.len());
     }
 
     #[test]
@@ -1817,6 +2054,8 @@ mod mind_mode_tests {
             // Inside it.
             audit_entry("bypass", start),
             audit_entry("bypass", start + 30),
+            // Inside it, under full bypass: one window can move from one bypass to the other.
+            audit_entry("bypass_all", start + 20),
             // Inside it, but covered by a session rule — it would have run in `ask` mode too,
             // so it is not something the bypass bought.
             audit_entry("rule", start + 40),
@@ -1824,7 +2063,7 @@ mod mind_mode_tests {
             // the filter is on what the action RAN under, not on when it happened.
             audit_entry("auto", start + 50),
         ];
-        assert_eq!(unasked_during(&entries, start), 2);
+        assert_eq!(unasked_during(&entries, start), 3);
         assert_eq!(unasked_during(&entries, start + 31), 0, "a window with nothing in it");
         assert_eq!(unasked_during(&[], start), 0, "and no audit at all");
     }
@@ -1998,7 +2237,7 @@ mod mind_mode_tests {
         let now = Instant::now();
         let mut out: Vec<serde_json::Value> = Vec::new();
 
-        let modes_all = [Mode::Plan, Mode::Ask, Mode::Auto, Mode::Bypass];
+        let modes_all = Mode::ALL;
         // The fifth is not a grade. `None` is not `safe`, and an action whose cost was never
         // read is refused in every mode — the case most likely to be got wrong twice.
         let grades = ["safe", "standard", "sensitive", "dangerous", "spicy"];
@@ -2186,7 +2425,10 @@ mod mind_mode_tests {
              \x20   \"dangerous one is, and no session rule covers one in any mode. It was\",\n\
              \x20   \"carried and ignored before that, under the name `recoverable`, which is why\",\n\
              \x20   \"the axis was already here to turn on. safe is excluded: a read destroys\",\n\
-             \x20   \"nothing, so matching wording cannot make one into a question.\"\n\
+             \x20   \"nothing, so matching wording cannot make one into a question.\",\n\
+             \x20   \"\",\n\
+             \x20   \"Since 28 September 2026 bypass asks about such an action too, and\",\n\
+             \x20   \"bypass_all (Full bypass) is the one mode that runs it unasked.\"\n\
              \x20 ],\n",
         );
         text.push_str(

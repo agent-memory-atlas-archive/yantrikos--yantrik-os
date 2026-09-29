@@ -989,7 +989,8 @@ pub fn publish(
                  down, listed under `problems` in describe - to the project's report intake, with a \
                  note. Graded sensitive because the record leaves the machine. It carries no name, \
                  hostname or address; the bytes sent are exactly the record as the file holds it, \
-                 which is what the Report a problem screen shows. The answer says where it landed.",
+                 which is what the Report a problem screen shows. The answer says where it landed. \
+                 Once sent it cannot be undone.",
             )
             .risk("sensitive")
             .defers()

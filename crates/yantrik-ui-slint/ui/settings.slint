@@ -229,8 +229,10 @@ export component SettingsScreen inherits Rectangle {
     in property <string> mind-mode: "ask";
     in property <string> mind-mode-label: "Ask";
     in property <string> mind-mode-means: "";
+    // Either bypass — `bypass` or `bypass_all` ("Full bypass") — lights the one Bypass button.
+    property <bool> mind-in-bypass: root.mind-mode == "bypass" || root.mind-mode == "bypass_all";
     callback mind-mode-chosen(string);
-    /// Bypass is not set from here. It routes to the status bar's menu, which is where the
+    /// Neither bypass is set from here. It routes to the status bar's menu, which is where the
     /// confirmation and the durations live — one place, so there is one thing to get right.
     callback mind-bypass-requested();
 
@@ -1164,8 +1166,9 @@ export component SettingsScreen inherits Rectangle {
                                     // Directly under the ceiling above it, and saying so, because
                                     // the pair is the whole policy: the ceiling is the wall no
                                     // mode can reach past, and the mode decides what happens
-                                    // below it. The same four choices as the status-bar chip; the
-                                    // chip is where the countdown lives, so Bypass sends you
+                                    // below it. The same choices as the status-bar chip, the two
+                                    // bypasses behind one button; the chip is where the countdown
+                                    // lives and where the two are told apart, so Bypass sends you
                                     // there rather than having a second confirmation here.
                                     Rectangle { height: 1px; background: Theme.border-subtle; }
 
@@ -1190,11 +1193,14 @@ export component SettingsScreen inherits Rectangle {
                                                 height: 28px;
                                                 horizontal-stretch: 1;
                                                 border-radius: Theme.r-sm;
-                                                background: root.mind-mode == choice.id
+                                                // Chosen: this mode, or — for the Bypass button — either bypass.
+                                                property <bool> on: root.mind-mode == choice.id
+                                                    || (choice.id == "bypass" && root.mind-in-bypass);
+                                                background: self.on
                                                     ? (choice.id == "bypass" ? Theme.color-danger-dim : Theme.tint-accent)
                                                     : (mode-ta.has-hover ? Theme.hover-fill : transparent);
                                                 border-width: 1px;
-                                                border-color: root.mind-mode == choice.id
+                                                border-color: self.on
                                                     ? (choice.id == "bypass" ? Theme.color-danger : Theme.accent-dim)
                                                     : Theme.border-subtle;
 
@@ -1209,13 +1215,14 @@ export component SettingsScreen inherits Rectangle {
                                                     }
                                                 }
                                                 Text {
-                                                    text: choice.id == "bypass" && root.mind-mode == "bypass"
+                                                    text: choice.id == "bypass" && root.mind-in-bypass
                                                         ? root.mind-mode-label : choice.label;
                                                     color: choice.id == "bypass" ? Theme.color-danger
-                                                        : root.mind-mode == choice.id ? AppIdentity.accent
+                                                        : parent.on ? AppIdentity.accent
                                                         : Theme.text-secondary;
                                                     font-size: Theme.fs-micro;
-                                                    font-weight: root.mind-mode == choice.id ? 700 : 500;
+                                                    font-weight: parent.on ? 700 : 500;
+                                                    overflow: elide;
                                                     horizontal-alignment: center;
                                                     vertical-alignment: center;
                                                 }
@@ -1232,8 +1239,10 @@ export component SettingsScreen inherits Rectangle {
                                             text: "No mode reaches past the tool permission above — "
                                                 + root.tool-permission
                                                 + ". That wall is enforced inside every app, and only you can move it. "
-                                                + "Bypass is time-boxed and is chosen from the mode chip in the status bar, "
-                                                + "where its countdown stays in front of you.";
+                                                + "Bypass (which still asks before anything an app marks as impossible to undo, "
+                                                + "such as a purchase or a calendar delete) and Full bypass (which asks nothing) "
+                                                + "are time-boxed and are chosen from the mode chip in the status bar, where the "
+                                                + "countdown stays in front of you.";
                                             color: Theme.text-dim;
                                             font-size: Theme.fs-micro;
                                             wrap: word-wrap;
