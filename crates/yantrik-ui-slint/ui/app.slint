@@ -226,6 +226,11 @@ export component App inherits Window {
     callback mind-rule-revoked(string, string);
     /// Where a mind's apps open. A person's choice, reached by a pointer like the three above.
     callback mind-view-chosen(bool);
+    /// Private mode: the Mind off and nothing recorded, until the person turns it off
+    /// (`crate::private_mode`). Set by the shell; changed only by a pointer, from the mode menu or
+    /// the Lens's offer to leave it.
+    in property <bool> private-mode: false;
+    callback mind-private-chosen(bool);
 
     // ── The mind panel: where it is drawn, how open, and the room it takes ──
     //
@@ -1450,8 +1455,15 @@ export component App inherits Window {
             // The mind's own questions (#25), answered through the same one path as in Agents.
             questions: root.lens-questions;
             question-answer(agent, request, answer) => { AgentsState.answer-question(agent, request, answer); }
-            // A chat reply's link to its run: the Agents pane of that one run.
-            open-run(run) => { AgentsState.show-agent(run); }
+            // A chat reply's link to its run: the Agents pane of that one run. Or the desktop's
+            // offer, while private, to leave Private mode (`private_mode::LEAVE_LINK`).
+            open-run(run) => {
+                if run == "private:leave" {
+                    root.mind-private-chosen(false);
+                } else {
+                    AgentsState.show-agent(run);
+                }
+            }
             lens-can-open-in-agents: root.lens-can-open-in-agents;
             lens-open-in-agents => { root.lens-open-in-agents(); }
             lens-open-history => { root.lens-open-history(); }
@@ -2543,6 +2555,7 @@ export component App inherits Window {
             harness-driving: root.harness-driving;
             mind-mode: root.mind-mode;
             mind-mode-label: root.mind-mode-label;
+            private-mode: root.private-mode;
             // Closing it also drops the two sub-panels, so it never reopens mid-confirmation on
             // a question the person walked away from.
             mind-mode-clicked => {
@@ -3058,6 +3071,8 @@ export component App inherits Window {
                 bypass-chosen(d) => { root.mind-bypass-chosen(d); root.mind-menu-open = false; }
                 rule-revoked(app, action) => { root.mind-rule-revoked(app, action); }
                 mind-view-on: root.mind-view-on;
+                private: root.private-mode;
+                private-chosen(on) => { root.mind-private-chosen(on); root.mind-menu-open = false; }
                 mind-view-chosen(on) => { root.mind-view-chosen(on); }
             }
         }

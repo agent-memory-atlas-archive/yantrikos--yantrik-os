@@ -178,6 +178,14 @@ fn dispatch(
         return;
     }
 
+    // Private mode: the Mind is off. Not a word goes to it; the desktop says so under the
+    // person's own words, with the way out as the reply's link (`private_mode::LEAVE_LINK`).
+    if crate::private_mode::is_on() {
+        let mind = host.list().into_iter().find(|e| e.id == active).map(|e| e.name).unwrap_or_else(|| active.clone());
+        streaming::offer(ui_weak, Some(text), &crate::private_mode::lens_offer(&mind), crate::private_mode::LEAVE_LINK);
+        return;
+    }
+
     // A mind already at work is answered by the desktop first, from its own record of the task:
     // what it was asked, how long it has run, its last steps, and whether it looks stuck. The
     // mind itself could only say "still working" (#246), and a status question sat queued behind

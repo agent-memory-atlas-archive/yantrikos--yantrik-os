@@ -1229,7 +1229,7 @@ pub fn machine_ceiling() -> String {
 /// This is the whole of the granting path. Two callbacks, each one line, each reachable only
 /// from a `TouchArea` in `intent_lens.slint`. Nothing else in this crate calls
 /// `approvals::grant` or `approvals::deny`, and they are `pub(crate)` so nothing outside it can.
-pub fn wire(ui: &App) {
+pub fn wire(ui: &App, bridge: std::sync::Arc<crate::bridge::CompanionBridge>) {
     // The apps spend a grant through this shell's `consume_approval` over the socket. This
     // shell's own dispatch cannot — asking itself over its own socket from its own RPC thread is
     // a call that cannot be answered until it returns — so it spends them in-process, through
@@ -1349,6 +1349,24 @@ pub fn wire(ui: &App) {
         tracing::info!(app = %app, action = %action, "a person revoked a session rule");
         if let Some(ui) = revoke_ui.upgrade() {
             publish_mode(&ui);
+        }
+    });
+
+    // Private mode (Pranab, 28 September 2026): the Mind off and nothing recorded, until the
+    // person turns it off. A pointer's choice like the modes, from the menu or the Lens's offer to
+    // leave it: nothing on the socket reaches it. The file is written first; if it cannot be, the
+    // switch shows where it really is rather than where it was pressed.
+    let private_ui = ui.as_weak();
+    ui.on_mind_private_chosen(move |on| {
+        match crate::private_mode::person_set_private(on) {
+            Ok(()) => {
+                bridge.set_private(on);
+                tracing::warn!(on, "a person turned Private mode {}", if on { "on" } else { "off" });
+            }
+            Err(e) => tracing::error!(on, error = %e, "Private mode could not be written; it did not change"),
+        }
+        if let Some(ui) = private_ui.upgrade() {
+            ui.set_private_mode(crate::private_mode::is_on());
         }
     });
 
@@ -2125,14 +2143,14 @@ mod control_approvals_tests {
     }
 
     /// The words that would be a way to loosen the mode, or mint a session rule, if one existed.
-    const MODE_WORDS: &[&str] = &["mode", "rule", "bypass", "permission", "ceiling"];
+    const MODE_WORDS: &[&str] = &["mode", "rule", "bypass", "permission", "ceiling", "private", "privacy"];
 
     /// The one action allowed to carry them, and why it is not a way to loosen anything:
     /// `set_mind_mode` refuses every request that would make the desktop more permissive.
     const MODE_PERMITTED: &[&str] = &["set_mind_mode"];
 
     /// The functions in `mind_mode` that a person's click reaches, and nothing else may.
-    const PERSON_ONLY: &[&str] = &["person_set_mode", "person_add_rule", "person_revoke_rule"];
+    const PERSON_ONLY: &[&str] = &["person_set_mode", "person_add_rule", "person_revoke_rule", "person_set_private"];
 
     /// The function those callbacks are wired in. Anything else naming them is the bug.
     const CALLBACK_HOME: &str = "wire";

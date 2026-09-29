@@ -305,6 +305,9 @@ pub struct CompanionBridge {
     judge: Arc<std::sync::Mutex<yantrik_companion::config::JudgeConfig>>,
     /// The decision model in use, asked on the caller's thread (`yantrik_companion::decisions`).
     decisions: yantrik_companion::decisions::Decisions,
+    /// The Settings incognito switch, and Private mode: the companion is incognito while either is on.
+    incognito_setting: AtomicBool,
+    private: AtomicBool,
 }
 
 /// A companion you can use from another thread.
@@ -619,6 +622,8 @@ impl CompanionBridge {
             event_bus,
             judge,
             decisions,
+            incognito_setting: AtomicBool::new(false),
+            private: AtomicBool::new(false),
         }
     }
 
@@ -758,8 +763,22 @@ impl CompanionBridge {
         self.decisions.test()
     }
 
-    /// Toggle incognito mode (no data persistence while active).
+    /// Toggle incognito mode (no data persistence while active): the person's Settings switch.
+    /// The companion is incognito while this or Private mode is on.
     pub fn set_incognito(&self, enabled: bool) {
+        self.incognito_setting.store(enabled, Ordering::SeqCst);
+        self.send_incognito();
+    }
+
+    /// Private mode came on or went off (`crate::private_mode`): the companion is incognito for
+    /// as long as it is on, and back to the Settings switch after.
+    pub fn set_private(&self, on: bool) {
+        self.private.store(on, Ordering::SeqCst);
+        self.send_incognito();
+    }
+
+    fn send_incognito(&self) {
+        let enabled = self.incognito_setting.load(Ordering::SeqCst) || self.private.load(Ordering::SeqCst);
         let _ = self.cmd_tx.send(CompanionCommand::SetIncognitoMode { enabled });
     }
 

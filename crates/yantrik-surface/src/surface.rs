@@ -152,6 +152,8 @@ impl Surface {
     ) -> Result<Value, ServiceError> {
         let call = ActCall::parse(params)?;
         let who = peer.map(Caller::from);
+        // Private mode first: while it is on, no agent acts at all.
+        call.require_not_private(who)?;
         // A mind account's call acts only as a live agent (#411), before anything else.
         call.require_standing(self.registry.app_id(), who)?;
         let reach = call.reach()?;

@@ -38,7 +38,7 @@ import time
 import traceback
 from collections import namedtuple
 
-from . import mind_door
+from . import mind_door, privacy
 
 # JSON-RPC error codes, the transport's own constants.
 RPC_PARSE_ERROR = -32700
@@ -581,11 +581,13 @@ class _Connection(socketserver.StreamRequestHandler):
     def handle(self):
         self.serve(peer_cred(self.connection))
 
-    def serve(self, peer, max_line=None):
+    def serve(self, peer, max_line=None, door=False):
         """Answer one request per line until the caller goes away. With `max_line`, a line longer
         than that is answered as a parse error and the connection is closed: nothing past the
-        limit is buffered."""
+        limit is buffered. At the `door`, every request is refused while the person is private."""
         handler = getattr(self.server, "handler", None)
+        if door:
+            handler = _PrivateDoor(handler)
         while True:
             try:
                 raw = self.rfile.readline(max_line + 1) if max_line else self.rfile.readline()
@@ -697,7 +699,23 @@ class _DoorConnection(_Connection):
         peer = peer_cred(self.connection)
         if peer is None or not mind_door.is_mind(peer.uid):
             return
-        self.serve(peer, max_line=DOOR_MAX_LINE)
+        self.serve(peer, max_line=DOOR_MAX_LINE, door=True)
+
+
+class _PrivateDoor:
+    """A door handler that refuses every request while the person is in Private mode, asked per
+    request so turning it on reaches a mind already connected, and passes it on otherwise."""
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.service_id = getattr(inner, "service_id", "app")
+
+    def handle_from(self, method, params, peer):
+        if privacy.is_private():
+            raise RpcError(RPC_INVALID_PARAMS, privacy.REFUSAL)
+        if hasattr(self.inner, "handle_from"):
+            return self.inner.handle_from(method, params, peer)
+        return self.inner.handle(method, params)
 
 
 def encode(reply):

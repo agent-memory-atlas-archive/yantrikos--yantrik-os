@@ -65,6 +65,7 @@ import io
 import json
 import os
 import pathlib
+import re
 import socket
 import stat
 import sys
@@ -2245,6 +2246,45 @@ with tempfile.TemporaryDirectory() as t:
         module.going_round("os_act", call, policy, False)
     check("a REFUSED policy answer counts as the same failure too, flagged or not",
           "[From the desktop:" in module.going_round("os_act", call, policy, False))
+
+# Private mode: every caller of this bridge is an agent, so while the person is private no tool
+# runs at all.
+with tempfile.TemporaryDirectory() as t:
+    tmp = pathlib.Path(t)
+    # Not even a read the sockets could not tell from the person's own. The
+    # file fails closed: anything but a clear `"private": false` is private.
+    module, state = case(tmp, "private", token=TOKEN)
+    home = tmp / "private-home"
+    (home / ".config" / "yantrik").mkdir(parents=True)
+    privacy = home / ".config" / "yantrik" / "privacy.json"
+    replies, ran = [], []
+    module.reply = lambda msg_id, result=None, error=None: replies.append(result or error)
+    module.call_tool = lambda tool, arguments: ran.append(tool["name"]) or ("ran", False, None)
+    saved_home = os.environ.get("HOME")
+    os.environ["HOME"] = str(home)
+    try:
+        check("no privacy file is not private", not module.private_now())
+        privacy.write_text(json.dumps({"private": True, "since": 1}), encoding="utf-8")
+        module.serve_call(7, module.BY_NAME["os_describe"], {"app": "shell"})
+        said = replies[-1]["content"][0]["text"]
+        check("while private, a tool answers with the transport's refusal and runs nothing",
+              replies[-1]["isError"] and said.startswith("PRIVATE:") and not ran, (replies[-1], ran))
+        privacy.write_text("{", encoding="utf-8")
+        check("a privacy file that cannot be read is private", module.private_now())
+        privacy.write_text(json.dumps({"private": False}), encoding="utf-8")
+        check("and a clear false is not", not module.private_now())
+    finally:
+        if saved_home is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = saved_home
+    rust = (HERE.parent.parent / "crates/yantrik-ipc-transport/src/privacy.rs").read_text(encoding="utf-8")
+    # A string continuation (a backslash at a line end) drops the newline and the next line's
+    # indent, as rustc does.
+    refusal = re.search(r'pub const REFUSAL: &str = "(.*?)";', re.sub(r"\\\n\s*", "", rust), re.S)
+    check("the refusal is the transport's word for word",
+          refusal is not None and refusal.group(1) == module.PRIVACY_REFUSAL,
+          refusal.group(1) if refusal else "no REFUSAL in privacy.rs")
 
 print()
 if failures:

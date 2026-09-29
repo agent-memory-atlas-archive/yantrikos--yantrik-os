@@ -462,6 +462,40 @@ impl Drop for RpcServer {
     }
 }
 
+/// A door handler that answers every request with the privacy refusal while the person is in
+/// Private mode, and passes it on otherwise.
+#[cfg(unix)]
+struct PrivateDoor {
+    inner: Arc<dyn ServiceHandler>,
+    /// Asked per request: `privacy::is_private`, or a stand-in in tests.
+    private: fn() -> bool,
+}
+
+#[cfg(unix)]
+impl ServiceHandler for PrivateDoor {
+    fn service_id(&self) -> &str {
+        self.inner.service_id()
+    }
+
+    fn handle(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value, yantrik_ipc_contracts::email::ServiceError> {
+        self.handle_from(method, params, None)
+    }
+
+    fn handle_from(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        peer: Option<PeerCred>,
+    ) -> Result<serde_json::Value, yantrik_ipc_contracts::email::ServiceError> {
+        if (self.private)() {
+            // An application answer (-32602), not a transport failure: the mind is told why and
+            // draws no conclusion that the desktop is down.
+            return Err(yantrik_ipc_contracts::email::ServiceError { code: -32602, message: crate::privacy::REFUSAL.to_string() });
+        }
+        self.inner.handle_from(method, params, peer)
+    }
+}
+
 /// Mind connections one door serves at a time.
 #[cfg(unix)]
 const DOOR_CONNECTIONS: usize = 32;
@@ -471,6 +505,9 @@ const DOOR_CONNECTIONS: usize = 32;
 /// not the path, the fact a handler is told.
 #[cfg(unix)]
 async fn serve_door(listener: tokio::net::UnixListener, handler: Arc<dyn ServiceHandler>) {
+    // Private mode is asked on every request, not once per connection: turning it on reaches a
+    // mind that is already connected (`crate::privacy`).
+    let handler: Arc<dyn ServiceHandler> = Arc::new(PrivateDoor { inner: handler, private: crate::privacy::is_private });
     // A bounded number of mind connections at once: a mind that opens connections and holds them
     // uses up its own share and nothing of the person's.
     let slots = Arc::new(tokio::sync::Semaphore::new(DOOR_CONNECTIONS));
@@ -501,6 +538,33 @@ async fn serve_door(listener: tokio::net::UnixListener, handler: Arc<dyn Service
                 tracing::warn!(uid = other.map(|p| p.uid), service = handler.service_id(), "refused a caller at the mind door that is not the mind account");
             }
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod private_door_tests {
+    use super::*;
+
+    struct Echo;
+
+    impl ServiceHandler for Echo {
+        fn service_id(&self) -> &str {
+            "echo"
+        }
+        fn handle(&self, method: &str, _: serde_json::Value) -> Result<serde_json::Value, yantrik_ipc_contracts::email::ServiceError> {
+            Ok(serde_json::json!(method))
+        }
+    }
+
+    #[test]
+    fn a_private_door_answers_every_method_with_the_refusal() {
+        let door = PrivateDoor { inner: Arc::new(Echo), private: || true };
+        for method in ["app.describe", "app.act", "memory_validate", "anything"] {
+            let err = door.handle_from(method, serde_json::json!({}), None).unwrap_err();
+            assert_eq!((err.code, err.message.as_str()), (-32602, crate::privacy::REFUSAL), "{method}");
+        }
+        let open = PrivateDoor { inner: Arc::new(Echo), private: || false };
+        assert_eq!(open.handle_from("app.describe", serde_json::json!({}), None).unwrap(), "app.describe");
     }
 }
 

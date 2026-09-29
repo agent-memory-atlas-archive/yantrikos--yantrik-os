@@ -176,8 +176,9 @@ pub fn wire(ui: &App, ctx: &AppContext) {
             all_urges.extend(registry.borrow_mut().tick(&ctx));
         }
 
-        // 2b. Feed events into activity accumulator + detect issues
-        {
+        // 2b. Feed events into activity accumulator + detect issues. Not in Private mode: what
+        // the person runs and where they connect is not recorded while it is on.
+        if !crate::private_mode::is_on() {
             let mut acc = accumulator.borrow_mut();
             let snap = snapshot.borrow();
             for event in &events {

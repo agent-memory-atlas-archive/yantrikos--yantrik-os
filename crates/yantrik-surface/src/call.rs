@@ -112,6 +112,18 @@ impl ActCall {
         }
     }
 
+    /// While the person is in Private mode (`yantrik_ipc_transport::privacy`), no agent acts: a
+    /// call that carries an agent token, or comes from the mind account, is refused before
+    /// anything else is looked at. The person's own calls, which carry neither, are unaffected.
+    pub fn require_not_private(&self, who: Option<Caller>) -> Result<(), ServiceError> {
+        let token = !self.agent_token.as_deref().map(str::trim).unwrap_or_default().is_empty();
+        let mind = who.is_some_and(|c| yantrik_ipc_transport::mind_door::is_mind(c.uid));
+        if (token || mind) && yantrik_ipc_transport::privacy::is_private() {
+            return Err(refusal(yantrik_ipc_transport::privacy::REFUSAL.into()));
+        }
+        Ok(())
+    }
+
     /// A caller the kernel says is the mind account (#411) acts only as an agent the shell has
     /// attached: with the token its harness was given, and a token the shell knows. Without one it
     /// would act unheld by any reach, as nobody in particular. Everyone else is unaffected.

@@ -53,6 +53,8 @@ mod control_files;
 mod control_screen;
 /// The decision model, asked by the person's own surfaces (the browser's commitment check).
 mod control_decide;
+/// Private mode: the Mind off and nothing recorded, until the person turns it off.
+mod private_mode;
 /// Where a mind may take the Files screen, and what it may do with the folder there (#443).
 mod control_files_mind;
 /// Whether a mind may paste the Files clipboard into the folder on screen (#443).
