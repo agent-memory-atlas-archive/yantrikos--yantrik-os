@@ -273,6 +273,22 @@ revision: 7e57
          command: string - one command line
 """
 
+# A description that runs to three lines, as `yos` prints one: every line at the purpose's
+# indent, and the sentence the gate reads for "runs whatever it is given" on the last of them.
+DESCRIBE_SCRIPTS = """Scripts - 2 saved
+revision: 5c21
+{
+  "saved": 2
+}
+  act: run(name)  [sensitive, settles later]
+       Run one of the saved scripts by name, in the person's session.
+       It answers when the script exits, with what it printed.
+       What it runs can do anything you can.
+         name: string - the script's name
+  act: list()  [safe, settles on return]
+       The saved scripts.
+"""
+
 # Two `sensitive` actions, and the difference between them is the sentence under the signature.
 # `move_event` is the routine sensitive surface `auto` exists for; `delete_event` says it cannot
 # be undone, so `auto` asks about it anyway. Before 21 September 2026 there was only the second
@@ -342,6 +358,9 @@ if argv[:1] == ["describe"]:
         raise SystemExit(0)
     if target == "terminal" and state.get("terminal_open"):
         sys.stdout.write(DESCRIBE_TERMINAL)
+        raise SystemExit(0)
+    if target == "scripts":
+        sys.stdout.write(DESCRIBE_SCRIPTS)
         raise SystemExit(0)
     if target in (state.get("no_socket_for") or []):
         # A declared app whose window is closed, in the real `yos`'s words — including the
@@ -1192,6 +1211,17 @@ with tempfile.TemporaryDirectory() as d:
           module.OPEN_ENDED == published.get("open_ended")
           and module.open_ended("Type a line. " + published.get("open_ended", "?").upper())
           and not module.open_ended("Type a line."), (module.OPEN_ENDED, published.get("open_ended")))
+    # The whole description is read, not the line under the signature: the sentence that
+    # makes an action open-ended comes at its end (security review of #504).
+    module, state = case(tmp, "open-ended-multiline", mode="auto", answer="pending", ceiling=None)
+    grade, purpose = module.action_detail("scripts", "run")
+    check("a description on several lines is read whole, the open-ended sentence included",
+          grade == "sensitive" and purpose.startswith("Run one of the saved scripts")
+          and purpose.endswith(module.OPEN_ENDED) and module.open_ended(purpose), (grade, purpose))
+    check("and it stops at the arguments", "name: string" not in purpose, purpose)
+    act(module, "scripts", "run", {"name": "backup"})
+    check("so in auto the script asks before it runs",
+          [r.get("action") for r in read(state).get("requests", [])] == ["run"], read(state))
     module, state = case(tmp, "open-ended-bypass", mode="bypass", answer="pending",
                          machine_ceiling="dangerous", ceiling=None, terminal_open=True)
     act(module, "terminal", "run", {"command": "ls"})

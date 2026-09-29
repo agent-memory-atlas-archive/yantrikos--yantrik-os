@@ -1601,8 +1601,10 @@ def action_detail(app, action):
         `       Delete an event from the calendar. It is not recoverable.`
         `         id: string — the event's id, as list_events reports it`
 
-    Two-space signature, seven-space purpose, nine-space arguments — so the purpose is the line
-    under the signature indented past it but not as far as an argument.
+    Two-space signature, seven-space purpose, nine-space arguments — so the purpose is every
+    line under the signature indented past it but not as far as an argument. Every line, not the
+    first: a description that runs to a second line (`yos` indents each one) carries on there,
+    and the sentence that says an action runs whatever it is given comes at the end of it.
 
     **Not `--fold`.** The folded form is for a mind reading a describe, and it prints a large
     family of actions as signatures only — no purpose lines. This function's whole job is to
@@ -1641,12 +1643,12 @@ def action_detail(app, action):
         m = re.match(r"^\s*act:\s*([A-Za-z0-9_]+)\([^)]*\)\s*\[([a-z]+),", line)
         if not m or m.group(1) != action:
             continue
-        purpose = ""
-        if i + 1 < len(lines):
-            after = lines[i + 1]
-            if after.startswith("       ") and not after.startswith("         "):
-                purpose = after.strip()
-        return m.group(2), purpose
+        said = []
+        for after in lines[i + 1:]:
+            if not after.startswith("       ") or after.startswith("         "):
+                break
+            said.append(after.strip())
+        return m.group(2), " ".join(said)
     return None, ""
 
 

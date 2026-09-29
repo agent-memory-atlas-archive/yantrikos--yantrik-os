@@ -57,6 +57,10 @@ class TestReadingTheFiles(unittest.TestCase):
         self.assertEqual(mode_from(json.dumps(dict(bypass, previous="bypass")), now + 60).name,
                          "ask")
         self.assertEqual(mode_from(json.dumps(dict(bypass, previous=None)), now + 60).name, "ask")
+        # A lapse is a lowering: the session rules the file lists end with the bypass.
+        ruled = dict(bypass, session_rules=[{"app": "terminal", "action": "run"}])
+        self.assertEqual(len(mode_from(json.dumps(ruled), now).session_rules), 1)
+        self.assertEqual(mode_from(json.dumps(ruled), now + 60), ("auto", set()))
         # Full bypass is time-boxed the same way, and neither bypass is ever what one ends in.
         full = dict(bypass, mode="bypass_all")
         self.assertEqual(mode_from(json.dumps(full), now).name, "bypass_all")

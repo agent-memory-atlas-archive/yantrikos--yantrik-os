@@ -815,9 +815,17 @@ fn allowed_on_card(origin: &RecipeOrigin, call: &AgentCall<'_>, role: &catalog::
     // themselves — the recipe a person is being asked to start is in the `purpose` above. For
     // the same reason there is no per-call sentence (#137): the purpose above already differs
     // by the one argument this call carries.
-    match approvals::request(
-        &origin.label(), verified, "shell", "hand_off", args, "sensitive", &purpose, "", "",
-    ) {
+    // The shell's own `hand_off` publishes this purpose itself, so it is the app's sentence too.
+    let asked = approvals::Asked {
+        app: "shell",
+        action: "hand_off",
+        grade: "sensitive",
+        purpose: &purpose,
+        published: &purpose,
+        target: "",
+        explained: "",
+    };
+    match approvals::request(&origin.label(), verified, asked, args) {
         Ok(asked) => {
             asks.insert(key, asked.id);
             Err(AgentRefusal::Ask(waiting))

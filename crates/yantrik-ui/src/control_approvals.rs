@@ -178,11 +178,11 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                 // What the phone is shown of it: the app's own sentence, never the caller's, since
                 // a mind could describe a deletion as tidying (security review, 29 Sep 2026).
                 let published_summary = approvals::summary_of(&published_purpose);
-                // And the card shows the app's own words when the caller sent none, so the red
-                // warning line, the session-rule offer and the decision above all read one
-                // sentence rather than three.
-                let purpose =
-                    if purpose.trim().is_empty() { published_purpose } else { purpose };
+                // The card carries both: the caller's words, and the app's own sentence beside
+                // them, always. The red warning line, the session-rule offer and the rule check
+                // are read from the app's sentence (with the caller's, which can only add
+                // caution), so a caller that describes `terminal.run` as "list /tmp" cannot get
+                // a card that forgets the action can run anything (security review of #504).
 
                 // An agent answering a turn from the person's phone is asked about everything above
                 // a read, whatever the mode and whatever the desk's session rules: its door asks
@@ -247,8 +247,18 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                 // what it was. Display only, like the naming line: `parsed` reaches the store
                 // untouched and the grant binds to those bytes, never to a sentence about them.
                 let asked = approvals::request(
-                    &requester, verified, &app, &action, parsed, &grade, &purpose, &target,
-                    &explained,
+                    &requester,
+                    verified,
+                    approvals::Asked {
+                        app: &app,
+                        action: &action,
+                        grade: &grade,
+                        purpose: &purpose,
+                        published: &published_purpose,
+                        target: &target,
+                        explained: &explained,
+                    },
+                    parsed,
                 )?;
 
                 // To the phone, when an agent answering a turn from it raised it: once, when it
@@ -1337,7 +1347,9 @@ pub fn wire(ui: &App, bridge: std::sync::Arc<crate::bridge::CompanionBridge>) {
         }
         if let Some(card) = card {
             if let Err(e) =
-                crate::mind_mode::person_add_rule(&card.app, &card.action, &card.grade, &card.purpose)
+                // `said`, not `purpose`: the app's own sentence, whole, which the caller cannot
+                // leave out and the card's bound cannot cut (#504).
+                crate::mind_mode::person_add_rule(&card.app, &card.action, &card.grade, &card.said)
             {
                 tracing::warn!(request = %id, reason = %e, "no session rule was made for it");
             }
@@ -1868,6 +1880,7 @@ fn publish_mode(ui: &App) {
         })
         .unwrap_or_default();
     ui.set_mind_session_rules(ModelRc::new(VecModel::from(rules)));
+    ui.set_mind_rules_cleared(crate::mind_mode::cleared_note().into());
 
     // Newest first on screen. The list answers "what has it just done", and a person scanning it
     // reads from the top — which is the opposite of the transcript order the approval records
@@ -2529,6 +2542,7 @@ mod control_approvals_tests {
                 target: String::new(),
                 explained: String::new(),
                 warning: "The app says this cannot be undone.".into(),
+                said: String::new(),
                 can_session: false,
                 status: Status::Pending,
                 record: String::new(),
@@ -2726,6 +2740,7 @@ mod control_approvals_tests {
                 target: String::new(),
                 explained: String::new(),
                 warning: String::new(),
+                said: String::new(),
                 can_session: false,
                 status,
                 record: String::new(),
@@ -3188,6 +3203,7 @@ mod target_line_tests {
             target: line.clone(),
             explained: sentence.clone(),
             warning: String::new(),
+            said: String::new(),
             can_session: false,
             status: Status::Pending,
             record: String::new(),
@@ -3293,13 +3309,16 @@ mod grant_spends_tests {
         let asked = approvals::request(
             "pi 0.9",
             Verified { agent: "pi:c-182".into(), ..Verified::default() },
-            "notes",
-            "create_note",
+            approvals::Asked {
+                app: "notes",
+                action: "create_note",
+                grade: "standard",
+                purpose: "Create a note",
+                published: "",
+                target: "",
+                explained: "",
+            },
             args.clone(),
-            "standard",
-            "Create a note",
-            "",
-            "",
         )
         .unwrap();
         approvals::grant(&asked.id).unwrap();
@@ -3346,13 +3365,16 @@ mod grant_spends_tests {
         let person = approvals::request(
             "yos",
             Verified::default(),
-            "notes",
-            "create_note",
+            approvals::Asked {
+                app: "notes",
+                action: "create_note",
+                grade: "standard",
+                purpose: "Create a note",
+                published: "",
+                target: "",
+                explained: "",
+            },
             args.clone(),
-            "standard",
-            "Create a note",
-            "",
-            "",
         )
         .unwrap();
         approvals::grant(&person.id).unwrap();

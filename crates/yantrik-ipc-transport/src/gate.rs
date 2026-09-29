@@ -398,9 +398,14 @@ pub fn mode_from(text: &str, now_unix: u64) -> Mode {
         tracing::warn!(mode = %name, "{MODE_FILE} names no mode this OS defines; using {DEFAULT_MODE}");
         name = DEFAULT_MODE.to_string();
     }
+    // A bypass whose deadline has passed has lowered the mode, and a lowering clears the
+    // session rules (the shell's `mind_mode`, since 29 September 2026): the file a shell wrote
+    // during the bypass still lists them until its next write, so they are dropped here too.
+    let mut lapsed = false;
     if is_bypass(&name) {
         if let Some(until) = doc["bypass_expires_unix"].as_u64() {
             if now_unix >= until {
+                lapsed = true;
                 // What it falls back to is never a bypass: the shell never writes one there, and
                 // a file that says so has had a hand in it.
                 let previous = doc["previous"].as_str().unwrap_or(DEFAULT_MODE);
@@ -414,6 +419,7 @@ pub fn mode_from(text: &str, now_unix: u64) -> Mode {
     }
     let session_rules = doc["session_rules"]
         .as_array()
+        .filter(|_| !lapsed)
         .map(|list| {
             list.iter()
                 .filter_map(|r| {
@@ -1054,6 +1060,15 @@ mod tests {
     #[test]
     fn either_bypass_ends_on_time_and_never_falls_back_to_a_bypass() {
         let now = 1_000_000;
+        // And the session rules the file lists end with it: a lapse is a lowering.
+        let ruled = format!(
+            r#"{{"mode":"bypass","previous":"auto","bypass_expires_unix":{},"session_rules":[{{"app":"terminal","action":"run"}}]}}"#,
+            now + 60
+        );
+        assert_eq!(mode_from(&ruled, now).session_rules.len(), 1, "in force while the bypass is");
+        let after = mode_from(&ruled, now + 60);
+        assert_eq!(after.name, "auto");
+        assert!(after.session_rules.is_empty(), "and gone once it has run out");
         for name in TIME_BOXED {
             let live = format!(r#"{{"mode":"{name}","previous":"auto","bypass_expires_unix":{}}}"#, now + 60);
             assert_eq!(mode_from(&live, now).name, name);

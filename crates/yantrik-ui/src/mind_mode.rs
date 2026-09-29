@@ -388,6 +388,13 @@ pub struct Modes {
     /// notification, not sixty a minute.
     lapsed: Option<Lapse>,
     rules: Vec<Rule>,
+    /// The rules the last lowering of the mode took away, for the mode menu's one line about it
+    /// ("Cleared when the mode was lowered: …"). Emptied when the person allows something for
+    /// the session again, which makes the line about the old rules stale.
+    cleared: Vec<Rule>,
+    /// The same rules, until the audit has a line for them. Taken by [`Modes::take_unaudited`]
+    /// outside the lock, because the audit writes a file.
+    unaudited: Vec<Rule>,
 }
 
 impl Default for Modes {
@@ -411,6 +418,8 @@ impl Modes {
             // no lapse to announce because nothing lapsed — the shell simply restarted.
             lapsed: None,
             rules: Vec::new(),
+            cleared: Vec::new(),
+            unaudited: Vec::new(),
         }
     }
 
@@ -456,6 +465,40 @@ impl Modes {
         &self.rules
     }
 
+    /// The rules in force at `now`. A bypass whose clock has run out but that no tick has folded
+    /// back yet has lowered the mode already ([`Modes::mode`] derives it), and a lowering clears
+    /// the rules — so none are in force in that second either, and none are published for it.
+    pub fn rules_at(&self, now: Instant) -> &[Rule] {
+        if self.mode.is_bypass() && self.mode(now) != self.mode {
+            &[]
+        } else {
+            &self.rules
+        }
+    }
+
+    /// The rules the last lowering cleared, for the mode menu. Empty when there is nothing to say.
+    pub fn cleared(&self) -> &[Rule] {
+        &self.cleared
+    }
+
+    /// The rules cleared since the audit last wrote them down. Taken, not read.
+    pub fn take_unaudited(&mut self) -> Vec<Rule> {
+        std::mem::take(&mut self.unaudited)
+    }
+
+    /// Clear every session rule: the mode has just been lowered (Pranab's rule, 29 September
+    /// 2026 — a person tightening the mode must not leave looser standing answers behind). A
+    /// rule is per `(app, action)` and covers every mind, child agent, recipe role and raw socket
+    /// caller, so "stricter now" has to mean the rules go too. Nothing to do, and nothing said,
+    /// when there are none.
+    fn clear_rules_for_lowering(&mut self) {
+        if self.rules.is_empty() {
+            return;
+        }
+        self.cleared = self.rules.clone();
+        self.unaudited.append(&mut self.rules);
+    }
+
     /// Fold an expired bypass back into the stored mode. Returns whether anything changed.
     ///
     /// The decision path does not need this — [`Modes::mode`] already derives it — but the chip
@@ -468,6 +511,9 @@ impl Modes {
     pub fn lapse(&mut self, now: Instant) -> bool {
         let effective = self.mode(now);
         if effective != self.mode {
+            // A lapse is a lowering: the bypass is over, and so are the rules given under it
+            // or before it.
+            self.clear_rules_for_lowering();
             self.lapsed = Some(Lapse { back_to: effective, started_unix: self.bypass_started_unix });
             self.mode = effective;
             self.bypass_until = None;
@@ -507,6 +553,11 @@ impl Modes {
         // Ask mode" over the top of somebody who has just pressed Plan would be telling them
         // something that is no longer true.
         self.lapsed = None;
+        // Down is down: the standing answers given at a looser mode go with it. Up keeps them —
+        // a person loosening the mode has not taken anything back.
+        if mode.permissiveness() < self.mode.permissiveness() {
+            self.clear_rules_for_lowering();
+        }
         if mode.is_bypass() {
             // Remember where to come back to, and do not let a bypass chosen twice make its own
             // previous mode a bypass — that would strand the machine there when it lapsed.
@@ -548,6 +599,9 @@ impl Modes {
                 if current.is_bypass() { "auto" } else { "ask" },
             ));
         }
+        // A lowering from the socket clears the rules as a person's does: whoever tightened it,
+        // the desktop is stricter now, and no answer given at the looser mode stands.
+        self.clear_rules_for_lowering();
         if mode.is_bypass() {
             // Full bypass down to bypass: a lowering, and still the same bypass — the same
             // deadline, the same window, the same mode to fall back to. Ending the clock here
@@ -609,6 +663,8 @@ impl Modes {
             return Ok(());
         }
         self.rules.push(Rule { app: app.to_string(), action: action.to_string() });
+        // A new standing answer makes the line about the old ones stale.
+        self.cleared.clear();
         Ok(())
     }
 
@@ -725,7 +781,7 @@ impl Modes {
             // the rest of the session.
             Mode::Bypass => {
                 if irreversible || open {
-                    self.ask_or_rule(app, action, irreversible)
+                    self.ask_or_rule(app, action, irreversible, now)
                 } else {
                     Decision::Run { unasked: would_ask }
                 }
@@ -738,14 +794,14 @@ impl Modes {
             Mode::BypassAll => Decision::Run { unasked: would_ask },
             Mode::Auto => {
                 if rank >= DANGEROUS || irreversible || open {
-                    self.ask_or_rule(app, action, irreversible)
+                    self.ask_or_rule(app, action, irreversible, now)
                 } else {
                     Decision::Run { unasked: would_ask }
                 }
             }
             Mode::Ask => {
                 if would_ask {
-                    self.ask_or_rule(app, action, irreversible)
+                    self.ask_or_rule(app, action, irreversible, now)
                 } else {
                     Decision::Run { unasked: false }
                 }
@@ -763,8 +819,12 @@ impl Modes {
     /// has since become irreversible. Checked here as well, the two cannot disagree, and the
     /// `auto` rule above means something: a card raised because the app says it cannot be undone
     /// must not be answered by a rule the card would never have offered.
-    fn ask_or_rule(&self, app: &str, action: &str, irreversible: bool) -> Decision {
-        if !irreversible && self.rule_covers(app, action) {
+    ///
+    /// And only a rule in force at `now` ([`Modes::rules_at`]): a bypass that has run out has
+    /// lowered the mode, and the rules went with it, whether or not a tick has folded it back.
+    fn ask_or_rule(&self, app: &str, action: &str, irreversible: bool, now: Instant) -> Decision {
+        let live = self.rules_at(now).iter().any(|r| r.app == app && r.action == action);
+        if !irreversible && live && self.rule_covers(app, action) {
             Decision::Run { unasked: true }
         } else {
             Decision::Ask
@@ -805,7 +865,56 @@ pub fn current() -> Mode {
 
 /// Fold an expired bypass back. Returns whether the screen has something new to show.
 pub fn lapse() -> bool {
-    locked().lapse(Instant::now())
+    let changed = locked().lapse(Instant::now());
+    audit_cleared();
+    changed
+}
+
+/// Write down the rules a lowering cleared, once, as one line in the audit — the record the
+/// mode menu shows — so "it stopped running my commands unasked" has its reason on file. Taken
+/// under the lock and written after it, because the audit writes a file.
+///
+/// The line's mode is `lowered`, which is no mode: the "Bypass ended" count reads only lines
+/// that ran under a bypass, and this ran nothing.
+fn audit_cleared() {
+    let (cleared, now_in) = {
+        let mut guard = locked();
+        (guard.take_unaudited(), guard.mode(Instant::now()))
+    };
+    if cleared.is_empty() {
+        return;
+    }
+    let names: Vec<String> = cleared.iter().map(|r| format!("{}.{}", r.app, r.action)).collect();
+    record(
+        "lowered",
+        "the desktop",
+        &approvals::Verified::default(),
+        "shell",
+        "clear_session_rules",
+        &serde_json::json!({ "rules": names }),
+        "safe",
+        &cleared_sentence(&names, now_in),
+    );
+}
+
+/// What the audit and the mode menu say about rules a lowering cleared.
+fn cleared_sentence(names: &[String], now_in: Mode) -> String {
+    let what = if names.len() == 1 { "a session rule".to_string() } else { format!("{} session rules", names.len()) };
+    format!(
+        "cleared {what} when the mode went down to {}: {}",
+        now_in.label(),
+        names.join(", ")
+    )
+}
+
+/// The mode menu's one line about the rules the last lowering cleared, or empty.
+pub fn cleared_note() -> String {
+    let guard = locked();
+    if guard.cleared().is_empty() {
+        return String::new();
+    }
+    let names: Vec<String> = guard.cleared().iter().map(|r| format!("{}.{}", r.app, r.action)).collect();
+    format!("Cleared when the mode was lowered: {}", names.join(", "))
 }
 
 /// The one notice a lapsing bypass owes the person, or `None`.
@@ -892,6 +1001,7 @@ pub fn lower_from_socket(mode: &str) -> Result<Mode, String> {
         ));
     };
     let settled = locked().lower_from_socket(wanted, Instant::now())?;
+    audit_cleared();
     persist(settled);
     Ok(settled)
 }
@@ -899,6 +1009,7 @@ pub fn lower_from_socket(mode: &str) -> Result<Mode, String> {
 /// **UI only.** See the module doc: the single caller is the mode menu's callback.
 pub(crate) fn person_set_mode(mode: Mode, bypass: Bypass) {
     locked().person_set_mode(mode, bypass, Instant::now(), unix_now());
+    audit_cleared();
     persist(mode);
 }
 
@@ -987,7 +1098,7 @@ fn shell_identity() -> Option<&'static (u32, u64, String)> {
 /// nothing on any tick.
 pub fn policy_json(modes: &Modes, now: Instant, now_unix: u64) -> String {
     let rules: Vec<serde_json::Value> = modes
-        .rules()
+        .rules_at(now)
         .iter()
         .map(|r| serde_json::json!({"app": r.app, "action": r.action}))
         .collect();
@@ -1056,7 +1167,12 @@ pub fn snapshot() -> serde_json::Value {
     let guard = locked();
     let mode = guard.mode(now);
     let rules: Vec<serde_json::Value> = guard
-        .rules()
+        .rules_at(now)
+        .iter()
+        .map(|r| serde_json::json!({"app": r.app, "action": r.action}))
+        .collect();
+    let cleared: Vec<serde_json::Value> = guard
+        .cleared()
         .iter()
         .map(|r| serde_json::json!({"app": r.app, "action": r.action}))
         .collect();
@@ -1080,6 +1196,9 @@ pub fn snapshot() -> serde_json::Value {
         },
         "bypass_until_restart": until_restart,
         "session_rules": serde_json::Value::Array(rules),
+        // What the last lowering of the mode took away: a rule is per (app, action), covers
+        // every caller, and goes when the mode is lowered or the shell restarts.
+        "session_rules_cleared": serde_json::Value::Array(cleared),
     })
 }
 
@@ -1088,12 +1207,12 @@ pub fn snapshot() -> serde_json::Value {
 /// Cheap on purpose: the screen asks this once a second, and [`snapshot`] reads the machine
 /// ceiling off disk, which is not a thing to do sixty times a minute for a menu nobody has open.
 pub fn rules_summary() -> String {
-    locked()
-        .rules()
-        .iter()
-        .map(|r| format!("{}.{}", r.app, r.action))
-        .collect::<Vec<_>>()
-        .join(",")
+    let guard = locked();
+    let names = |rules: &[Rule]| {
+        rules.iter().map(|r| format!("{}.{}", r.app, r.action)).collect::<Vec<_>>().join(",")
+    };
+    // The cleared list too, so the menu redraws its line the tick a lowering takes rules away.
+    format!("{}|{}", names(guard.rules()), names(guard.cleared()))
 }
 
 /// The chip's text: the mode, plus the countdown while one is running.
@@ -1469,6 +1588,65 @@ mod mind_mode_tests {
         assert!(approvals::open_ended(run) && approvals::may_offer_session_rule("sensitive", run));
         let mut modes = at(Mode::Ask);
         modes.person_add_rule("terminal", "run", "sensitive", run).expect("a person may allow it for the session");
+    }
+
+    /// Pranab's rule for the session rules (29 September 2026): the person tightening the mode
+    /// must not leave looser standing answers behind. Any lowering clears them — a person's, the
+    /// socket's, a bypass running out — and says so once for the audit; raising keeps them.
+    #[test]
+    fn mind_mode_lowering_the_mode_clears_the_session_rules() {
+        let now = Instant::now();
+        let run = "Type a command line into the active shell. What it runs can do anything you can.";
+        let with_rule = |mode: Mode| {
+            let mut modes = at(Mode::Ask);
+            modes.person_set_mode(mode, Bypass::Minutes15, now, 0);
+            modes.person_add_rule("terminal", "run", "sensitive", run).unwrap();
+            modes
+        };
+
+        // A person going down: auto → ask, bypass → plan.
+        for (from, to) in [(Mode::Auto, Mode::Ask), (Mode::Bypass, Mode::Plan), (Mode::BypassAll, Mode::Bypass)] {
+            let mut modes = with_rule(from);
+            modes.person_set_mode(to, Bypass::Hour, now, 0);
+            assert!(modes.rules().is_empty(), "{from:?} → {to:?}: the rules went");
+            assert_eq!(modes.cleared().len(), 1, "and the menu has a line about them");
+            assert_eq!(modes.take_unaudited().len(), 1, "and the audit a line, once");
+            assert!(modes.take_unaudited().is_empty());
+        }
+        // Going up keeps them: nothing was taken back.
+        let mut modes = with_rule(Mode::Ask);
+        modes.person_set_mode(Mode::Auto, Bypass::Hour, now, 0);
+        assert_eq!(modes.rules().len(), 1);
+        assert!(modes.cleared().is_empty());
+
+        // The socket lowering clears them too.
+        let mut modes = with_rule(Mode::Auto);
+        modes.lower_to(Mode::Ask, now).unwrap();
+        assert!(modes.rules().is_empty() && modes.take_unaudited().len() == 1);
+
+        // A bypass running out is a lowering — and in the second before a tick folds it back,
+        // no rule is in force and none is published for the apps.
+        let mut modes = with_rule(Mode::Bypass);
+        let after = now + Duration::from_secs(15 * 60 + 1);
+        assert!(modes.rules_at(after).is_empty(), "the clock has lowered it already");
+        assert_eq!(
+            modes.decide("sensitive", "terminal", "run", Declared { cannot_be_undone: false, open_ended: true }, "dangerous", after),
+            Decision::Ask,
+            "a rule given in bypass does not answer after it lapsed"
+        );
+        let text = policy_json(&modes, after, 1_800_000_000);
+        assert!(text.contains("\"session_rules\": []"), "{text}");
+        assert!(modes.lapse(after));
+        assert!(modes.rules().is_empty() && modes.cleared().len() == 1);
+
+        // A new rule makes the old line stale.
+        modes.person_add_rule("files", "move", "sensitive", "Move a file.").unwrap();
+        assert!(modes.cleared().is_empty());
+
+        assert_eq!(
+            cleared_sentence(&["terminal.run".to_string()], Mode::Ask),
+            "cleared a session rule when the mode went down to Ask: terminal.run"
+        );
     }
 
     /// Where an action says both, cannot-be-undone wins: it asks every time, and no rule — the

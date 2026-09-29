@@ -418,7 +418,9 @@ What it does not do, said plainly:
 lands on the same row.
 
 With **n** session rules listed, everything from the second separator down shifts by
-`4 + 16 + 28n` px. For one rule:
+`4 + 16 + 28n` px. With none listed but a lowering of the mode having just cleared some, the
+section shows one 24px line instead ("Cleared when the mode was lowered: terminal.run"), and the
+rows shift exactly as they do for one rule. For one rule:
 
 | row | extent | click at |
 |---|---|---|
@@ -1350,6 +1352,33 @@ this machine is in auto mode, which asks once before running anything like that 
 run. … Allowed for this session from the card, the calls after it run unasked until the shell
 restarts."*
 
+**What a session rule covers, and for how long.** A rule is per `(app, action)`: allowing
+`terminal.run` for the session lets every mind, child agent, recipe role and raw socket caller run
+any command through it — not only the one that asked. It lasts until the shell restarts, or until
+the mode is lowered: Pranab's rule is that a person tightening the mode must not leave looser
+standing answers behind, so any lowering — a person's, the socket's `set_mind_mode`, or a bypass
+running out — clears every session rule (`Modes::clear_rules_for_lowering`). The audit gets one
+line for it (`shell.clear_session_rules`, mode `lowered`, "cleared a session rule when the mode
+went down to Ask: terminal.run"), the mode menu one line where the rules were, and `describe
+shell` lists them under `mind_mode.session_rules_cleared`. Raising the mode keeps them. A bypass
+whose clock has run out has lowered the mode before any tick folds it back, so its rules are in
+force for no second after the deadline — in the shell (`Modes::rules_at`) and in every app, whose
+`gate::mode_from` drops the rules of a lapsed bypass from the file.
+
+**The card says so** (security review of #504). A mind that asked for `terminal.run` with its own
+purpose — "list /tmp" — got a card showing only that, and a session button that then allowed any
+command. The card now keeps the app's published sentence beside the caller's words
+(`approvals::Asked::published`), shows it under them always, and reads the red warning, the offer
+of "Allow for this session" and the rule check when it is pressed from the app's sentence (with the
+caller's, which can only add caution) — never from a caller's paraphrase, and never from a purpose
+cut to fit the card. So a caller that leaves "cannot be undone" out of its purpose is not offered,
+and cannot store, a standing yes for an irreversible action. The warning for an open-ended action:
+*"What it runs can do anything you can. Allowing it for the session lets any mind or caller on
+this desktop run any command through it, until the shell restarts or the mode is lowered."* The
+session button's own caption reads "covers every mind and caller, until restart or the mode is
+lowered". The bridge reads the whole description, not the line under the signature, and `yos`
+indents every line of one that runs to several.
+
 **The copy.** `Mode::meaning` for `auto` and `bypass` says "once per session before running
 commands"; the confirmation's Bypass row reads "Asks before what can't be undone; commands once."
 and its paragraph names both, inside the same fixed heights.
@@ -1363,3 +1392,7 @@ and its paragraph names both, inside the same fixed heights.
 | `crates/yantrik-ui/src/mind_mode.rs`, `approvals.rs` | the same table through `Modes::decide`; the card offers the rule for a command and not for one that cannot be undone; `mind-mode-vectors.json` carries `open_ended` |
 | `sdk/python/tests/test_gate.py` | the Python gate rule for rule, and `Action(open_ended=True)` / `@surface.action(open_ended=True)` held to the Rust builder |
 | `deploy/yantrik-os/yos-mcp-selftest.py` | the bridge's table; `terminal.run` asks in bypass and runs in full bypass; `run_command` asks once in auto and runs under the session's rule; the sentence is the gate's |
+| `crates/yantrik-ui/src/approvals.rs` (#504 review) | the card shows the app's sentence whatever the caller wrote, warns what the session rule covers, and offers the rule — and allows it to be stored — from the app's sentence |
+| `crates/yantrik-ui/src/mind_mode.rs` (#504 review) | a person's, the socket's and a lapse's lowering each clear the rules and leave one line for the audit and the menu; raising keeps them; a lapsed bypass's rules answer nothing and are not published |
+| `gate.rs`, `gate.py` (#504 review) | `mode_from` drops the session rules of a bypass that has run out |
+| `yos-mcp-selftest.py`, `yos-selftest.py` (#504 review) | a three-line description is read whole and asks as open-ended; `yos` prints every line of a description at the purpose's indent |

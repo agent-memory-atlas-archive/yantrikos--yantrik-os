@@ -278,14 +278,18 @@ def mode_from(text, now):
     name = doc.get("mode") if isinstance(doc.get("mode"), str) else ""
     if name not in MODES:
         name = DEFAULT_MODE
+    # A bypass whose deadline has passed has lowered the mode, and a lowering clears the
+    # session rules, as `gate::mode_from` drops them.
+    lapsed = False
     if name in TIME_BOXED:
         until = _as_u64(doc.get("bypass_expires_unix"))
         if until is not None and now >= until:
+            lapsed = True
             previous = doc.get("previous")
             previous = previous if isinstance(previous, str) else DEFAULT_MODE
             name = previous if previous in MODES and previous not in TIME_BOXED else DEFAULT_MODE
     rules = set()
-    listed = doc.get("session_rules")
+    listed = doc.get("session_rules") if not lapsed else None
     for rule in listed if isinstance(listed, list) else ():
         if isinstance(rule, dict) and isinstance(rule.get("app"), str) \
                 and isinstance(rule.get("action"), str):

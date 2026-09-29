@@ -2006,6 +2006,7 @@ mod tests {
             target: String::new(),
             explained: String::new(),
             warning: String::new(),
+            said: String::new(),
             can_session: true,
             status: crate::approvals::Status::Pending,
             record: String::new(),
@@ -2110,8 +2111,8 @@ mod tests {
         let lens = read("../yantrik-ui-slint/ui/components/intent_lens.slint");
         let row = lens.split("if root.data.can-session :").nth(1).expect("the session row is drawn");
         assert!(
-            row.lines().take(45).any(|l| l.contains("this rule covers every mind on the desktop, not only the one asking")),
-            "the session row says whose sessions the rule covers, inside the row that mints it"
+            row.lines().take(45).any(|l| l.contains("covers every mind and caller, until restart or the mode is lowered")),
+            "the session row says whose sessions the rule covers, and until when, inside the row that mints it"
         );
     }
 

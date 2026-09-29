@@ -363,6 +363,18 @@ def main():
     started = []
     services = []
 
+    # A description that runs to more than one line stays the action's purpose on every line:
+    # the MCP bridge reads the purpose off this text, and the sentence that says an action runs
+    # whatever it is given comes at its end (security review of #504).
+    rendered = yos.render_action({
+        "name": "run", "permission": "sensitive", "settles": "later",
+        "description": "Run a saved script.\nWhat it runs can do anything you can.",
+        "parameters": {"properties": {"name": {"type": "string"}}, "required": ["name"]},
+    }, False).splitlines()
+    check("a description on two lines is printed at the purpose's indent on both",
+          rendered[1:3] == ["       Run a saved script.", "       What it runs can do anything you can."]
+          and rendered[3].startswith("         name"), rendered)
+
     def perception_reply(_self, asked):
         return PAGE if asked["method"] == "perception.since" else {}
 

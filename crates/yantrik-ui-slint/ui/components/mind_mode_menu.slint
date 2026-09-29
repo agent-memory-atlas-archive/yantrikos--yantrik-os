@@ -141,6 +141,10 @@ export component MindModeMenu inherits Rectangle {
     in property <string> mode-label: "Ask";
     in property <string> ceiling: "sensitive";
     in property <[MindRule]> rules: [];
+    // One line about the rules the last lowering of the mode took away, or empty. A person who
+    // tightens the mode loses their "Allow for this session" answers with it (29 September
+    // 2026), and is told so here rather than finding out from the next card.
+    in property <string> rules-cleared: "";
     in property <[MindAuditEntry]> audit: [];
 
     // The confirmation is a second screen inside the same box rather than a dialog over it, so
@@ -342,7 +346,11 @@ export component MindModeMenu inherits Rectangle {
             }
 
             // ── The standing yeses, each with a way out of it ──
-            if root.rules.length > 0 : VerticalLayout {
+            //
+            // Or, when a lowering has just cleared them, one fixed 24px line saying which went:
+            // with no rules listed it takes the place of one rule row, so the rows under it shift
+            // exactly as they do for one rule (design/mind-modes-2026-09-21.md).
+            if root.rules.length > 0 || root.rules-cleared != "" : VerticalLayout {
                 spacing: Theme.sp-1;
 
                 Rectangle { height: 1px; background: Theme.border-subtle; }
@@ -354,6 +362,15 @@ export component MindModeMenu inherits Rectangle {
                     font-weight: 600;
                     vertical-alignment: center;
                     wrap: no-wrap;
+                }
+                if root.rules.length == 0 : Text {
+                    height: 24px;
+                    text: root.rules-cleared;
+                    color: Theme.text-dim;
+                    font-size: Theme.fs-micro;
+                    vertical-alignment: center;
+                    wrap: no-wrap;
+                    overflow: elide;
                 }
                 for rule in root.rules : Rectangle {
                     height: 24px;

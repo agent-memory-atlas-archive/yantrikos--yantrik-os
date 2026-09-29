@@ -1106,7 +1106,12 @@ def render_action(action, brief=False):
         action.get("permission", "?"), action.get("settles", "?"))]
     purpose = (action.get("description") or "").strip()
     if purpose:
-        lines.append("       %s" % purpose)
+        # Every line of it at the purpose's indent: a description that runs to a second line
+        # must stay the purpose, not fall to column zero where a reader — the MCP bridge's
+        # `action_detail` among them — can no longer tell it is part of this action. The
+        # sentence that says an action runs whatever it is given comes last, so the last line
+        # is the one that must not be lost (security review of #504).
+        lines.extend("       %s" % part.strip() for part in purpose.splitlines() if part.strip())
     for n in names:
         spec = props[n] or {}
         kind = spec.get("type", "any")
