@@ -45,7 +45,9 @@ RestrictRealtime=yes
 RestrictNamespaces=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# AF_NETLINK: getifaddrs asks the kernel for this machine's own addresses through it, and those
+# are never a destination. Without it the list came back empty (VM 520, 29 Sep 2026).
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 CapabilityBoundingSet=
 AmbientCapabilities=
 UMask=0077

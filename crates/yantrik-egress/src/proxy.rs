@@ -210,8 +210,11 @@ async fn one(proxy: &Proxy, stream: &mut TcpStream, peer: SocketAddr) -> Result<
         return Err("did not resolve");
     }
     let own = crate::local::addresses();
+    if own.is_none() {
+        tracing::warn!("this machine's own addresses could not be read; every local-network address is refused");
+    }
     let class = |a: &SocketAddr| {
-        if crate::local::is_own(a.ip(), &own) {
+        if crate::local::is_own(a.ip(), own.as_deref()) {
             Place::Forbidden
         } else {
             place_of(a.ip())
