@@ -55,6 +55,8 @@ mod control_screen;
 mod control_decide;
 /// Private mode: the Mind off and nothing recorded, until the person turns it off.
 mod private_mode;
+/// What Private mode stops outright: the agents that run as the person, frozen.
+mod private_freeze;
 /// Where a mind may take the Files screen, and what it may do with the folder there (#443).
 mod control_files_mind;
 /// Whether a mind may paste the Files clipboard into the folder on screen (#443).
@@ -131,6 +133,10 @@ fn main() {
     // being read as the name of a config file that does not exist.
     yantrik_version::handle_version_flag("yantrik-ui");
 
+    // Private mode lasts until the person turns it off, so it is read back before the companion,
+    // the clipboard watcher or the harness socket can start thinking it is off.
+    let private_at_start = private_mode::load();
+
     // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -138,6 +144,9 @@ fn main() {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
+    if private_at_start {
+        tracing::warn!("Private mode is on, as the person left it: no mind is listening, nothing is recorded");
+    }
 
     // The shell does not go through the runtime's `init_tracing`, so it installs the same
     // panic hook itself: a panic here becomes a problem record before it becomes a stack trace.

@@ -811,6 +811,12 @@ pub fn bypass_ended(ended: crate::mind_mode::BypassEnded) {
     notify::send(notification);
 }
 
+/// Private mode could not do what the person asked, or something other than the shell changed it.
+/// Said as a notification so it survives the menu closing and is seen whatever screen is up.
+pub fn private_mode_notice(title: &str, body: &str) {
+    notify::send(notify::Notification::new("Yantrik", title.to_string()).body(body.to_string()).urgency(Urgency::Critical));
+}
+
 /// The mind finished saying something while the Lens was closed.
 ///
 /// The bridge used to raise a private toast for this, which nothing kept: closing it lost the

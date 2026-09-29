@@ -31,14 +31,44 @@ pub const PRIVACY_FILE: &str = "privacy.json";
 pub const REFUSAL: &str = "PRIVATE: the person has turned on Private mode. Nothing on this desktop is shown to \
                            agents or done for them until they turn it off. Nothing was run.";
 
-/// Where the shell publishes Private mode.
-pub fn privacy_path() -> PathBuf {
-    settings_path().with_file_name(PRIVACY_FILE)
+/// Where the shell publishes Private mode, or `None` when this process cannot tell whose home it
+/// is. `HOME` when it is an absolute path, else the account's home from the password database: a
+/// process started with `HOME` unset or relative read `./.config/yantrik/privacy.json`, found
+/// nothing there, and took the person for not private (security review, 29 Sep 2026).
+pub fn privacy_path() -> Option<PathBuf> {
+    let settings = settings_path();
+    if settings.is_absolute() {
+        return Some(settings.with_file_name(PRIVACY_FILE));
+    }
+    account_home().map(|home| home.join(".config/yantrik").join(PRIVACY_FILE))
 }
 
-/// Whether the person is in Private mode now. Read per call.
+#[cfg(unix)]
+fn account_home() -> Option<PathBuf> {
+    // SAFETY: getpwuid_r with our own uid, a zeroed passwd and a buffer we own.
+    let uid = unsafe { libc::getuid() };
+    let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut buf = vec![0 as libc::c_char; 4096];
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+    let rc = unsafe { libc::getpwuid_r(uid, &mut pwd, buf.as_mut_ptr(), buf.len(), &mut result) };
+    if rc != 0 || result.is_null() || pwd.pw_dir.is_null() {
+        return None;
+    }
+    let dir = unsafe { std::ffi::CStr::from_ptr(pwd.pw_dir) }.to_string_lossy().to_string();
+    let dir = PathBuf::from(dir);
+    dir.is_absolute().then_some(dir)
+}
+
+#[cfg(not(unix))]
+fn account_home() -> Option<PathBuf> {
+    None
+}
+
+/// Whether the person is in Private mode now. Read per call. A process that cannot find the file
+/// takes the person to be private.
 pub fn is_private() -> bool {
-    match std::fs::read_to_string(privacy_path()) {
+    let Some(path) = privacy_path() else { return true };
+    match std::fs::read_to_string(path) {
         Ok(text) => private_in(&text),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
         Err(_) => true,
@@ -53,22 +83,33 @@ pub fn private_in(text: &str) -> bool {
     }
 }
 
-/// Publish Private mode (the shell only). Written whole to a temporary file and renamed, so a
-/// reader never sees half of it (which would read as private, but should not have to).
+/// Publish Private mode (the shell only). Written whole to a new file of a name nobody could have
+/// prepared, created exclusively and never through a link, then renamed over the old one: a
+/// fixed `privacy.json.tmp` could be made a directory, so Private never turned on, or a link, so
+/// the write landed somewhere else (security review, 29 Sep 2026).
 pub fn publish(private: bool, since_unix: u64) -> std::io::Result<()> {
-    let path = privacy_path();
+    use std::io::Write;
+    let path = privacy_path()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no home directory to publish Private mode in"))?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let tmp = path.with_extension("json.tmp");
-    let body = json!({ "private": private, "since": since_unix }).to_string();
-    std::fs::write(&tmp, body)?;
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let tmp = path.with_file_name(format!(".{PRIVACY_FILE}.{}.{nanos:x}", std::process::id()));
+    let mut open = std::fs::OpenOptions::new();
+    open.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+        use std::os::unix::fs::OpenOptionsExt;
+        open.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     }
-    std::fs::rename(&tmp, &path)
+    let body = json!({ "private": private, "since": since_unix }).to_string();
+    let written = open.open(&tmp).and_then(|mut f| f.write_all(body.as_bytes()).and_then(|()| f.sync_all()));
+    if let Err(e) = written.and_then(|()| std::fs::rename(&tmp, &path)) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

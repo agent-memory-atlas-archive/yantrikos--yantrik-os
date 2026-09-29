@@ -560,6 +560,9 @@ pub struct Host {
     /// Whether a mind is handed a memory credential with its turns (#447), when the shell said
     /// how to decide: see [`Host::with_memory`].
     memory: Option<MemoryPolicy>,
+    /// Why no turn goes to any mind right now, when something paused them all: the person's
+    /// Private mode. See [`Host::pause`].
+    paused: Arc<std::sync::RwLock<Option<String>>>,
 }
 
 /// How the host decides who carries a memory credential, and how it digests one. The decision
@@ -595,6 +598,24 @@ impl Host {
             descends: Arc::new(pid_descends),
             runs: None,
             memory: None,
+            paused: Arc::new(std::sync::RwLock::new(None)),
+        }
+    }
+
+    /// Stop every turn to every mind, built-in included, saying `why` to whoever asks (`Some`), or
+    /// let them through again (`None`). A turn refused here is not queued for later: what the
+    /// person or an agent tried to send while paused is never delivered.
+    pub fn pause(&self, why: Option<String>) {
+        if let Ok(mut paused) = self.paused.write() {
+            *paused = why;
+        }
+    }
+
+    /// Why turns are paused, if they are. A poisoned lock reads as paused.
+    pub fn paused(&self) -> Option<String> {
+        match self.paused.read() {
+            Ok(p) => p.clone(),
+            Err(_) => Some("turns are paused".to_string()),
         }
     }
 
@@ -840,6 +861,9 @@ impl Host {
     /// Returns immediately. A built-in answers on its own thread; an attached one is handed the
     /// turn by its next poll, once its `main` conversation has nothing else in flight.
     pub fn send(&self, turn: Turn) -> Answer {
+        if let Some(why) = self.paused() {
+            return failed(why);
+        }
         let active = self.active_id();
 
         if let Some(builtin) = self.builtin(&active) {
@@ -915,6 +939,9 @@ impl Host {
     /// starting a new one under the old name would be a pretence. `<harness>:main` is always
     /// there to be talked to while its harness is attached.
     pub fn send_to(&self, agent: &AgentId, turn: Turn) -> Result<Answer, String> {
+        if let Some(why) = self.paused() {
+            return Err(why);
+        }
         let harness_id = agent.harness();
         if self.builtin(harness_id).is_some() {
             return Err(format!(
@@ -1949,6 +1976,19 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::sync::mpsc;
+
+    #[test]
+    fn a_paused_host_sends_no_turn_to_any_mind_and_keeps_none_for_later() {
+        let host = Host::new(vec![Arc::new(Builtin) as Arc<dyn Harness>]);
+        host.pause(Some("Private mode is on".into()));
+        assert_eq!(host.send_to(&AgentId::new("pi", AgentId::MAIN), Turn::new("x")).err().as_deref(), Some("Private mode is on"));
+        assert!(
+            matches!(host.send(Turn::new("x")).recv(), Ok(Chunk::Failed(why)) if why == "Private mode is on"),
+            "the built-in is paused too"
+        );
+        host.pause(None);
+        assert!(host.paused().is_none());
+    }
 
     struct Builtin;
 

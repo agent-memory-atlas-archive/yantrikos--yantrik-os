@@ -21,10 +21,20 @@ REFUSAL = ("PRIVATE: the person has turned on Private mode. Nothing on this desk
 
 
 def privacy_path():
-    """Where the shell publishes Private mode: beside the settings file. (`gate` is imported
-    here, not at the top: `wire` imports this module, and `gate` imports `wire`.)"""
+    """Where the shell publishes Private mode, or None when this process cannot tell whose home it
+    is: `HOME` when absolute, else the account's home from the password database, as the
+    transport finds it. (`gate` is imported here, not at the top: `wire` imports this module, and
+    `gate` imports `wire`.)"""
     from . import gate
-    return os.path.join(os.path.dirname(gate.settings_path()), PRIVACY_FILE)
+    settings = gate.settings_path()
+    if os.path.isabs(settings):
+        return os.path.join(os.path.dirname(settings), PRIVACY_FILE)
+    try:
+        import pwd
+        home = pwd.getpwuid(os.getuid()).pw_dir
+    except (ImportError, KeyError, OSError):
+        return None
+    return os.path.join(home, ".config", "yantrik", PRIVACY_FILE) if os.path.isabs(home) else None
 
 
 def private_in(text):
@@ -40,9 +50,13 @@ def private_in(text):
 
 
 def is_private():
-    """Whether the person is in Private mode now."""
+    """Whether the person is in Private mode now. A process that cannot find the file takes the
+    person to be private."""
+    path = privacy_path()
+    if path is None:
+        return True
     try:
-        with open(privacy_path(), encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             return private_in(f.read())
     except FileNotFoundError:
         return False

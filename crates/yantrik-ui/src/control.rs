@@ -442,12 +442,14 @@ pub fn publish(
     // `control_approvals`.
     crate::control_approvals::wire(ui, ctx.bridge.clone());
 
-    // Private mode lasts until the person turns it off, so it is read back before anything else
-    // is published: the companion goes incognito and the chip says so from the first frame.
-    // Agents are refused by the file itself (`yantrik_ipc_transport::privacy`), from boot.
-    let private = crate::private_mode::load();
+    // Private mode, as `main` read it back before anything started: the chip says so from the
+    // first frame, and the desktop is made what it says — agents frozen, turns paused, nothing
+    // recorded. Agents are refused by the file itself (`yantrik_ipc_transport::privacy`) from
+    // boot. And the file is kept the shell's word from here on.
+    let private = crate::private_mode::is_on();
     ui.set_private_mode(private);
-    ctx.bridge.set_private(private);
+    crate::private_mode::enforce(private, &ctx.bridge);
+    crate::private_mode::watch();
 
     // The catalogue, not a copy of it. The control surface answers from the same live list
     // the launcher shows, so an app installed a moment ago is launchable by name without

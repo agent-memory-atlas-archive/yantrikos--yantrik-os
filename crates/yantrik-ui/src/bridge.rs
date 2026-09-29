@@ -604,6 +604,12 @@ impl CompanionBridge {
         let bus_w = event_bus.clone();
 
         let judge = Arc::new(std::sync::Mutex::new(config.judge.clone()));
+        // Private mode is read before the worker exists (`private_mode::load` in main), so the
+        // first command the worker takes is incognito, ahead of anything it could record.
+        let private = crate::private_mode::is_on();
+        if private {
+            let _ = cmd_tx.send(CompanionCommand::SetIncognitoMode { enabled: true });
+        }
         let decisions = yantrik_companion::decisions::Decisions::default();
         let decisions_w = decisions.clone();
         let self_tx = cmd_tx.clone();
@@ -623,7 +629,7 @@ impl CompanionBridge {
             judge,
             decisions,
             incognito_setting: AtomicBool::new(false),
-            private: AtomicBool::new(false),
+            private: AtomicBool::new(private),
         }
     }
 
@@ -892,6 +898,42 @@ fn signal_recipe(cmd_tx: &Sender<CompanionCommand>, queued: &mut std::collection
     }
 }
 
+/// Whether the worker drops `cmd` while the person is in Private mode, answering whoever waits on
+/// it that nothing was done. Everything the person does not ask for directly, and every question
+/// to the companion, is dropped; the switches (incognito, the decision model, the provider) and
+/// the reads the shell's own screens need are not.
+fn paused_while_private(cmd: &CompanionCommand, recipe_signals: &mut std::collections::HashSet<String>) -> bool {
+    const SAID: &str = "Private mode is on: the companion is off until you turn it off.";
+    match cmd {
+        CompanionCommand::ProcessRecipeStep { recipe_id } => {
+            recipe_signals.remove(recipe_id);
+            true
+        }
+        CompanionCommand::Think { .. }
+        | CompanionCommand::ProcessNextTask
+        | CompanionCommand::SetSystemContext { .. }
+        | CompanionCommand::RecordSystemEvent { .. }
+        | CompanionCommand::RecordSnapshot { .. }
+        | CompanionCommand::RecordIssue { .. }
+        | CompanionCommand::ScoreConversationTurn { .. } => true,
+        CompanionCommand::StartRecipe { reply_tx, .. } => {
+            if let Some(tx) = reply_tx {
+                let _ = tx.send(Err(SAID.to_string()));
+            }
+            true
+        }
+        CompanionCommand::SendMessage { token_tx, model, .. } => {
+            let _ = token_tx.send(format!("__REPLACE__{SAID}"));
+            if let Some(tx) = model {
+                let _ = tx.send(false);
+            }
+            let _ = token_tx.send("__DONE__".to_string());
+            true
+        }
+        _ => false,
+    }
+}
+
 /// The worker thread's main loop.
 fn worker_loop(
     config: CompanionConfig,
@@ -1059,7 +1101,7 @@ fn worker_loop(
         }
         // The mind panel: the worker has reached its loop, so the memory count it pushes is a count.
         crate::mind_panel::worker_up();
-        if recipe_clock.elapsed() >= recipe_tick {
+        if recipe_clock.elapsed() >= recipe_tick && !crate::private_mode::is_on() {
             recipe_clock = std::time::Instant::now();
             let due = yantrik_companion::recipe_executor::due(&companion.db.conn());
             for rid in due {
@@ -1069,6 +1111,16 @@ fn worker_loop(
         let received = cmd_rx.recv_timeout(recipe_tick.saturating_sub(recipe_clock.elapsed()));
         if matches!(received, Err(crossbeam_channel::RecvTimeoutError::Timeout)) {
             continue;
+        }
+        // Private mode: the companion does nothing of its own accord and hears nothing about the
+        // person. It does not think, look at the focused window, run recipes, record what the
+        // system saw, or answer anyone; what was dropped is not done later.
+        if crate::private_mode::is_on() {
+            if let Ok(cmd) = &received {
+                if paused_while_private(cmd, &mut recipe_signals) {
+                    continue;
+                }
+            }
         }
         match received {
             Ok(CompanionCommand::RefreshRecipes) => recipes_dirty = true,

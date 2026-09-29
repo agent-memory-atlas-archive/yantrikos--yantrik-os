@@ -1360,10 +1360,16 @@ pub fn wire(ui: &App, bridge: std::sync::Arc<crate::bridge::CompanionBridge>) {
     ui.on_mind_private_chosen(move |on| {
         match crate::private_mode::person_set_private(on) {
             Ok(()) => {
-                bridge.set_private(on);
+                crate::private_mode::enforce(on, &bridge);
                 tracing::warn!(on, "a person turned Private mode {}", if on { "on" } else { "off" });
             }
-            Err(e) => tracing::error!(on, error = %e, "Private mode could not be written; it did not change"),
+            Err(e) => {
+                tracing::error!(on, error = %e, "Private mode could not be written; it did not change");
+                crate::wire::notifications::private_mode_notice(
+                    if on { "Private mode did not turn on" } else { "Private mode did not turn off" },
+                    &format!("Its file could not be written: {e}"),
+                );
+            }
         }
         if let Some(ui) = private_ui.upgrade() {
             ui.set_private_mode(crate::private_mode::is_on());

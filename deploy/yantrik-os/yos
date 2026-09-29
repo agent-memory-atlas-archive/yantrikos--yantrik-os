@@ -2907,7 +2907,16 @@ PRIVACY_REFUSAL = ("PRIVATE: the person has turned on Private mode. Nothing on t
 
 
 def private_now():
-    home = os.environ.get("HOME") or os.environ.get("USERPROFILE") or "."
+    home = os.environ.get("HOME") or os.environ.get("USERPROFILE") or ""
+    if not os.path.isabs(home):
+        # Never "." (the transport's rule): an unknown home is taken to be private.
+        try:
+            import pwd
+            home = pwd.getpwuid(os.getuid()).pw_dir
+        except (ImportError, KeyError, OSError):
+            return True
+        if not os.path.isabs(home):
+            return True
     try:
         with open(os.path.join(home, ".config", "yantrik", "privacy.json"), encoding="utf-8") as f:
             value = json.loads(f.read())

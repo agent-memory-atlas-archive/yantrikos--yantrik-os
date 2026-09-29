@@ -212,7 +212,11 @@ fn pump(
                 done = true;
                 break;
             }
-            // The run this reply was: its link, not its text.
+            // The run this reply was: its link, not its text. Never the desktop's own offer to
+            // leave Private mode, which only the desktop puts on a bubble (`streaming::offer`).
+            if token.strip_prefix(RUN_MARK) == Some(crate::private_mode::LEAVE_LINK) {
+                continue;
+            }
             if let Some(run) = token.strip_prefix(RUN_MARK) {
                 if let Some(ui) = ui_weak.upgrade() {
                     let messages = ui.get_messages();
