@@ -13,7 +13,16 @@
 //   focus/clear/pick   the small moves typing and choosing need.
 //   watch()/changes()  what appeared on the page between an action and its settling.
 (() => {
-  if (globalThis.__yb) return 'ready';
+  // A page can make `globalThis.__yb` exist (an element with id="__yb" is a named property of
+  // the window, in every world), so the registry is recognised by a mark only it carries.
+  if (globalThis.__yb && globalThis.__yb.__yantrik === true) return 'ready';
+
+  // `document.title` and `document.activeElement` can be shadowed by the page: an <img
+  // name="title"> is what `document.title` reads, on every world. The prototype's getters cannot.
+  const DOC_TITLE = Object.getOwnPropertyDescriptor(Document.prototype, 'title').get;
+  const DOC_ACTIVE = Object.getOwnPropertyDescriptor(Document.prototype, 'activeElement').get;
+  const titleOf = (doc) => String(DOC_TITLE.call(doc) || '');
+  const activeIn = (doc) => DOC_ACTIVE.call(doc);
 
   // ── refs: one per element, for the element's lifetime ──
   const ids = new WeakMap();
@@ -131,6 +140,9 @@
       if (wrap && textOf(wrap)) return clean(textOf(wrap), 100);
       const t = (el.getAttribute('type') || '').toLowerCase();
       if (['submit', 'button', 'reset'].includes(t) && el.value) return clean(el.value, 100);
+      if (t === 'image' && el.getAttribute('alt')) return clean(el.getAttribute('alt'), 100);
+      if (t === 'submit' || t === 'image') return 'Submit';
+      if (t === 'reset') return 'Reset';
       const ph = el.getAttribute('placeholder') || el.getAttribute('title') || el.getAttribute('name');
       if (ph) return clean(ph, 100);
       return '';
@@ -193,14 +205,70 @@
     }
     if (role === 'heading') {
       const m = /^H([1-6])$/.exec(el.tagName);
-      s.level = m ? +m[1] : +(el.getAttribute('aria-level') || 2);
+      const lv = m ? +m[1] : parseInt(el.getAttribute('aria-level') || '2', 10);
+      s.level = Math.min(6, Math.max(1, Number.isFinite(lv) ? lv : 2));
     }
-    if (el.tagName === 'A' && el.getAttribute('href')) {
-      const href = el.getAttribute('href');
-      if (!href.startsWith('javascript:') && href !== '#') s.href = clean(el.href, 120);
+    if (el.tagName === 'A') {
+      const link = linkOf(el);
+      if (link.href) s.href = clean(link.href, 120);
+      if (link.scripted) s.scripted = true;
     }
-    if (el === el.ownerDocument.activeElement) s.focused = true;
+    if (el === activeIn(el.ownerDocument)) s.focused = true;
     return s;
+  };
+
+  // Where a link goes, if it goes anywhere: an http(s) address other than this page's own
+  // fragment. `scripted` when something besides the address decides what the click does —
+  // Rails' data-method="delete", Turbo's data-turbo-method, an onclick.
+  const linkOf = (el) => {
+    const out = { href: '', scripted: false };
+    const raw = (el.getAttribute('href') || '').trim();
+    let proto = '';
+    try { proto = (el.protocol || '').toLowerCase(); } catch (e) { proto = ''; }
+    const samePage = raw.startsWith('#') || raw === '';
+    if ((proto === 'http:' || proto === 'https:') && !samePage) out.href = el.href;
+    if (el.hasAttribute('data-method') || el.hasAttribute('data-turbo-method') ||
+        el.hasAttribute('onclick') || el.hasAttribute('data-remote')) out.scripted = true;
+    return out;
+  };
+
+  // The deepest focused element: through shadow roots and same-origin frames.
+  const deepActive = (doc) => {
+    let a = activeIn(doc || document);
+    for (let guard = 0; a && guard < 20; guard++) {
+      if (a.shadowRoot && a.shadowRoot.activeElement) { a = a.shadowRoot.activeElement; continue; }
+      if (a.tagName === 'IFRAME' || a.tagName === 'FRAME') {
+        let inner = null;
+        try { inner = a.contentDocument; } catch (e) { inner = null; }
+        const next = inner && activeIn(inner);
+        if (next && next !== inner.body) { a = next; continue; }
+      }
+      break;
+    }
+    return a;
+  };
+
+  // The control a press at this element would really press: the element itself when it is one,
+  // else the nearest control that holds it.
+  const controlOf = (el, win) => {
+    for (let up = el, n = 0; up && n < 12; up = up.parentElement || (up.getRootNode && up.getRootNode().host), n++) {
+      if (up.nodeType !== 1) continue;
+      const role = roleOf(up);
+      if (INTERACTIVE_ROLES.has(role)) return up;
+      if (!role && HANDMADE_TAGS.has(up.tagName) && handmade(up, up.ownerDocument.defaultView || win)) return up;
+    }
+    return null;
+  };
+
+  const describeControl = (c) => {
+    const role = roleOf(c) || 'clickable';
+    const d = { ref: refOf(c), role, name: nameOf(c) };
+    if (c.tagName === 'A') {
+      const link = linkOf(c);
+      if (link.href) d.href = link.href;
+      if (link.scripted) d.scripted = true;
+    }
+    return d;
   };
 
   const boxOf = (el, frame) => {
@@ -270,7 +338,7 @@
     const doc = document.scrollingElement || document.documentElement;
     return {
       url: location.href,
-      title: document.title,
+      title: titleOf(document),
       viewport: [window.innerWidth, window.innerHeight],
       scroll: [Math.round(window.scrollX), Math.round(window.scrollY)],
       page: [doc.scrollWidth, doc.scrollHeight],
@@ -376,6 +444,13 @@
     const y = Math.round(first.top + first.height / 2 + f.oy);
     const role = roleOf(el) || 'clickable';
     const e = { ref, role, name: nameOf(el), x, y, box: [Math.round(r.left + f.ox), Math.round(r.top + f.oy), Math.round(r.width), Math.round(r.height)] };
+    if (el.tagName === 'IFRAME' || el.tagName === 'FRAME') e.frame_element = true;
+    if (CONTEXT_ROLES.has(role)) e.not_a_control = true;
+    if (el.tagName === 'A') {
+      const link = linkOf(el);
+      if (link.href) e.href = link.href;
+      if (link.scripted) e.scripted = true;
+    }
     if (r.width < 1 || r.height < 1) { e.invisible = true; return e; }
     if (el.disabled || el.getAttribute('aria-disabled') === 'true') e.disabled = true;
     const hit = deepHit(x, y);
@@ -387,6 +462,11 @@
         if (role === 'dialog' || role === 'alertdialog' || up.getAttribute('aria-modal') === 'true') { cover = up; break; }
       }
       e.covered_by = { ref: refOf(cover), role: roleOf(cover) || cover.tagName.toLowerCase(), name: nameOf(cover) };
+    } else if (hit) {
+      // A press at the middle of a container lands on whatever control is there: that is the
+      // one to judge, not the container's name.
+      const landing = controlOf(hit, window);
+      if (landing && landing !== el) e.lands_on = describeControl(landing);
     }
     const form = el.form || el.closest('form');
     if (form) e.in_form = true;
@@ -410,27 +490,38 @@
         sel.removeAllRanges(); sel.addRange(range);
       }
     }
-    const deepActive = (doc) => {
-      let a = doc.activeElement;
-      while (a && a.shadowRoot && a.shadowRoot.activeElement) a = a.shadowRoot.activeElement;
-      return a;
-    };
     const active = deepActive(el.ownerDocument);
     return { focused: active === el || composedContains(el, active), role: roleOf(el), name: nameOf(el),
              password: (el.getAttribute('type') || '').toLowerCase() === 'password' };
   }
 
-  // The submit controls of the form an element is in: what Enter would press.
-  function submits(ref) {
-    const el = byRef(ref) || document.activeElement;
-    if (!el) return [];
+  // What Enter or Space may press from here: the focused control itself, every button of its form
+  // (form.elements has the ones tied to it from outside with form=), and — for a field with no
+  // form, like a chat composer — the buttons in the few containers around it.
+  function pressables(ref) {
+    const el = (ref && byRef(ref)) || deepActive(document);
+    if (!el) return { focused: null, around: [] };
+    const out = { focused: describeControl(el), around: [] };
+    const seen = new Set();
+    const add = (c) => { if (c && !seen.has(c) && c !== el) { seen.add(c); out.around.push(describeControl(c)); } };
     const form = el.form || (el.closest && el.closest('form'));
-    if (!form) return [];
-    return Array.from(form.querySelectorAll('button:not([type]), button[type="submit"], input[type="submit"], input[type="image"]'))
-      .map((b) => nameOf(b)).filter(Boolean);
+    if (form) {
+      for (const c of Array.from(form.elements || [])) {
+        const t = (c.getAttribute('type') || '').toLowerCase();
+        if (c.tagName === 'BUTTON' || ['submit', 'image', 'button'].includes(t)) add(c);
+      }
+      for (const c of Array.from(form.querySelectorAll('[role="button"]'))) add(c);
+    } else {
+      let up = el.parentElement;
+      for (let n = 0; up && n < 4; up = up.parentElement, n++) {
+        for (const c of Array.from(up.querySelectorAll('button, [role="button"], input[type="submit"]'))) add(c);
+        if (out.around.length) break;
+      }
+    }
+    return out;
   }
 
-  function pick(ref, option) {
+  function pick(ref, option, peek) {
     const el = byRef(ref);
     if (!el) return { gone: true };
     if (el.tagName !== 'SELECT') return { not_select: true, role: roleOf(el) };
@@ -440,6 +531,7 @@
       opts.find((o) => o.value.toLowerCase() === want) ||
       opts.find((o) => o.text.toLowerCase().includes(want));
     if (!o) return { no_option: true, options: opts.slice(0, 20).map((o) => clean(o.text, 40)) };
+    if (peek) return { would_choose: clean(o.text, 60), list: nameOf(el) };
     el.value = o.value;
     el.dispatchEvent(new Event('input', { bubbles: true }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
@@ -489,7 +581,7 @@
     return { mutations, appeared: still.slice(0, 8) };
   }
 
-  const where = () => ({ url: location.href, title: document.title });
+  const where = () => ({ url: location.href, title: titleOf(document) });
 
   // The page's videos and sounds: playing or not, where, and whether the player says an advert
   // is showing (YouTube's does, in its class names) — a pre-roll transcribes as cleanly as the
@@ -507,6 +599,7 @@
     return out;
   }
 
-  globalThis.__yb = { snapshot, find, text, target, focus, submits, pick, scrollBy, watch, changes, where, media };
+  globalThis.__yb = { __yantrik: true, snapshot, find, text, target, focus, pressables, pick,
+                      scrollBy, watch, changes, where, media };
   return 'installed';
 })()

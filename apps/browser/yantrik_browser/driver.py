@@ -26,6 +26,22 @@ class Refused(Exception):
     """An action declining, with the sentence the caller reads."""
 
 
+class PageRefused(Refused):
+    """The page said no and nothing was pressed or typed: a ref that is gone, a control covered
+    or disabled, a commitment. Answered with `PAGE:` in front, which the MCP bridge reads as a
+    policy answer — "REFUSED — nothing was run" — rather than a failure to try again."""
+
+    def __init__(self, sentence):
+        super().__init__("PAGE: " + sentence)
+
+
+BUSY_WAIT = 20.0      # seconds an act waits for the one before it to finish
+
+# Controls that Enter or Space presses when they have the focus.
+PRESSED_BY_KEYS = {"button", "link", "clickable", "menuitem", "menuitemcheckbox", "menuitemradio",
+                   "tab", "switch", "checkbox", "radio", "option", "treeitem"}
+
+
 def short(target_id):
     return target_id[:8]
 
@@ -46,19 +62,41 @@ def fold_site(site):
 
 
 def commitment_of(element):
-    """The commitment a control's label carries — unless it is a link that goes somewhere. A link
-    with an address navigates, which Back undoes: Hacker News's "submit" opens the form, it does
-    not submit anything. A link with no address, or one that runs script, is a button by another
-    name, and is judged like one."""
-    if element.get("role") == "link" and element.get("href"):
+    """The commitment a control's label carries.
+
+    A link with an address navigates, which Back undoes: Hacker News's "submit" opens the form, it
+    does not submit anything. So a link is let through on the soft words (commit.LINK_WORDS) —
+    and only when nothing but its address decides what it does. A link that says delete, pay or
+    unsubscribe, or one with data-method or an onclick on it, is judged like the button it is."""
+    word = commit.reads_as_commitment(element.get("name"))
+    if (word and element.get("role") == "link" and element.get("href")
+            and not element.get("scripted") and word in commit.LINK_WORDS):
         return None
-    return commit.reads_as_commitment(element.get("name"))
+    return word
 
 
 class Driver:
     def __init__(self, browser=None):
         self.browser = browser or cdp.Browser()
         self.lock = threading.RLock()
+        self.last_status = {"open": False}
+
+    def held(self, wait=BUSY_WAIT):
+        """The driver, for one action: waited for up to `wait` seconds, then refused as busy. A
+        page that hangs holds one action, not every caller of the browser behind it."""
+        driver = self
+
+        class Held:
+            def __enter__(self):
+                if not driver.lock.acquire(timeout=wait):
+                    raise Refused("the browser is busy with another action (a page may be slow to "
+                                  "answer); try again in a few seconds")
+                return driver
+
+            def __exit__(self, *exc):
+                driver.lock.release()
+                return False
+        return Held()
 
     # ── plumbing ──
 
@@ -91,8 +129,8 @@ class Driver:
     def _target(self, tab, ref):
         t = self._run(tab, "target", ref)
         if not t or t.get("gone"):
-            raise Refused("%s is no longer on the page — it changed since it was read. Read it again "
-                          "and use the new ref." % ref)
+            raise PageRefused("%s is no longer on the page — it changed since it was read. Read it "
+                              "again and use the new ref." % ref)
         return t
 
     # ── what an act answers with ──
@@ -150,8 +188,17 @@ class Driver:
     # ── reading ──
 
     def status(self):
-        """The view: whether the browser is open, its tabs, and the one actions go to."""
-        with self.lock:
+        """The view: whether the browser is open, its tabs, and the one actions go to. It never
+        waits behind an act for long: while one runs it answers with what it last knew."""
+        if not self.lock.acquire(timeout=1.0):
+            return dict(self.last_status, busy=True)
+        try:
+            return self._status()
+        finally:
+            self.lock.release()
+
+    def _status(self):
+        if True:
             try:
                 self.browser.connect()
             except (cdp.BrowserClosed, cdp.CdpError):
@@ -166,12 +213,13 @@ class Driver:
                     active.url, active.title = here.get("url", active.url), here.get("title", active.title)
                 except (cdp.CdpError, cdp.BrowserClosed):
                     pass
-            return {
+            self.last_status = {
                 "open": True,
-                "tabs": [{"tab": short(t.id), "title": t.title[:100], "url": t.url[:200],
+                "tabs": [{"tab": short(t.id), "title": str(t.title)[:100], "url": str(t.url)[:200],
                           "active": t is active} for t in pages],
                 "dialog": active.dialog if active else None,
             }
+            return self.last_status
 
     def _marked(self, page):
         """A reading with every control that reads as a commitment marked: the reader learns
@@ -184,7 +232,7 @@ class Driver:
         return page
 
     def read(self, tab=None, all=False):
-        with self.lock:
+        with self.held():
             t = self._tab(tab)
             page = self._marked(self._run(t, "snapshot", bool(all)))
             page["tab"] = short(t.id)
@@ -193,20 +241,20 @@ class Driver:
             return page
 
     def media(self, tab=None):
-        with self.lock:
+        with self.held():
             t = self._tab(tab)
             return {"media": self._run(t, "media"), "url": t.url, "title": t.title}
 
     def find(self, query, tab=None):
         if not str(query or "").strip():
             raise Refused("find needs words to look for")
-        with self.lock:
+        with self.held():
             t = self._tab(tab)
             found = self._marked({"elements": self._run(t, "find", query, 40)})["elements"]
             return {"query": query, "found": found, "url": t.url, "tab": short(t.id)}
 
     def text(self, tab=None, limit=TEXT_LIMIT):
-        with self.lock:
+        with self.held():
             t = self._tab(tab)
             got = self._run(t, "text", max(200, min(int(limit or TEXT_LIMIT), 200000)))
             got["url"] = t.url
@@ -217,24 +265,27 @@ class Driver:
         return self.status()
 
     def wait(self, text=None, seconds=5.0, tab=None):
+        """Wait for words, or for the page to settle. The browser is held for one look at a time,
+        not for the whole wait, so a thirty-second wait holds nobody else up."""
         seconds = max(0.5, min(float(seconds or 5), 30.0))
-        with self.lock:
-            t = self._tab(tab)
-            deadline = time.monotonic() + seconds
-            while True:
-                if text:
-                    found = self._run(t, "find", text, 1)
-                    if found:
-                        return {"appeared": True, "element": found[0], "url": t.url}
-                    body = self._run(t, "text", 200000)
-                    if text.lower() in (body.get("text") or "").lower():
-                        return {"appeared": True, "url": t.url}
-                else:
-                    took, why = hands.settle(self.browser, t, seconds)
-                    return {"settled_in": took, "still_loading": why == "limit", "url": t.url}
-                if time.monotonic() >= deadline:
-                    return {"appeared": False, "waited": seconds, "url": t.url}
-                time.sleep(0.25)
+        deadline = time.monotonic() + seconds
+        if not text:
+            with self.held():
+                t = self._tab(tab)
+                took, why = hands.settle(self.browser, t, seconds)
+                return {"settled_in": took, "still_loading": why == "limit", "url": t.url}
+        while True:
+            with self.held():
+                t = self._tab(tab)
+                found = self._run(t, "find", text, 1)
+                if found:
+                    return {"appeared": True, "element": found[0], "url": t.url}
+                body = self._run(t, "text", 200000)
+                if text.lower() in (body.get("text") or "").lower():
+                    return {"appeared": True, "url": t.url}
+            if time.monotonic() >= deadline:
+                return {"appeared": False, "waited": seconds, "url": t.url}
+            time.sleep(0.4)
 
     # ── going places ──
 
@@ -247,7 +298,7 @@ class Driver:
         scheme = urllib.parse.urlsplit(url).scheme.lower()
         if scheme not in ("http", "https", "about"):
             raise Refused("go opens web pages (http, https); `%s:` is not one" % scheme)
-        with self.lock:
+        with self.held():
             if new_tab:
                 self._tab(None)
                 before = {t.id for t in self.browser.pages()}
@@ -260,7 +311,7 @@ class Driver:
                              limit=NAVIGATE_LIMIT, watch=False)
 
     def history(self, step, tab=None):
-        with self.lock:
+        with self.held():
             t = self._tab(tab)
             h = self._call("Page.getNavigationHistory", tab=t)
             index = h.get("currentIndex", 0) + step
@@ -273,7 +324,7 @@ class Driver:
                              limit=NAVIGATE_LIMIT, watch=False)
 
     def reload(self, tab=None):
-        with self.lock:
+        with self.held():
             t = self._tab(tab)
             return self._act(t, "reloaded %s" % t.url, lambda: self._call("Page.reload", {}, t),
                              limit=NAVIGATE_LIMIT, watch=False)
@@ -282,79 +333,118 @@ class Driver:
 
     def _pressable(self, t, ref, allow_commitment=False):
         target = self._target(t, ref)
+        if target.get("frame_element"):
+            raise PageRefused("%s is a frame from another site: what is inside it cannot be read, so it "
+                              "is not pressed blind. Nothing was pressed." % ref)
+        if target.get("not_a_control"):
+            raise PageRefused("%s is a %s (\"%s\"), not a control: press one of the controls read lists "
+                              "inside it. Nothing was pressed." % (ref, target["role"], target["name"]))
         if target.get("invisible"):
-            raise Refused("%s (%s \"%s\") has no size on the page: it cannot be pressed. Read the "
+            raise PageRefused("%s (%s \"%s\") has no size on the page: it cannot be pressed. Read the "
                           "page again; it may be inside something closed." % (ref, target["role"], target["name"]))
         if target.get("disabled"):
-            raise Refused("%s (%s \"%s\") is disabled: the page will not let it be pressed yet — "
+            raise PageRefused("%s (%s \"%s\") is disabled: the page will not let it be pressed yet — "
                           "usually a field it needs is empty or invalid." % (ref, target["role"], target["name"]))
         cover = target.get("covered_by")
         if cover:
-            raise Refused("%s (\"%s\") is covered by %s \"%s\" (%s): pressing there would press that "
+            raise PageRefused("%s (\"%s\") is covered by %s \"%s\" (%s): pressing there would press that "
                           "instead. Deal with it first — often a cookie or sign-in dialog — then try again."
                           % (ref, target["name"], cover.get("role"), cover.get("name"), cover.get("ref")))
+        landing = target.get("lands_on")
+        if landing and commitment_of(landing):
+            # The press would land on a control inside this one, and that control is the
+            # commitment: it is the one to name, and commit presses it by its own ref.
+            raise PageRefused("pressing %s would press %s \"%s\" (%s) inside it, which reads as a "
+                              "commitment (\"%s\"). It is pressed with commit ref=%s label=\"%s\" site=%s, "
+                              "which asks the person first. Nothing was pressed."
+                              % (ref, landing["role"], landing["name"], landing["ref"], commitment_of(landing),
+                                 landing["ref"], landing["name"], fold_site(t.url)))
         word = commitment_of(target)
         if word and not allow_commitment:
-            raise Refused("%s (%s \"%s\") reads as a commitment (\"%s\"): pressing it may spend money, "
-                          "send something or remove something, and that cannot be taken back. It is "
-                          "pressed with commit ref=%s label=\"%s\" site=%s, which asks the person first."
-                          % (ref, target["role"], target["name"], word, ref, target["name"], fold_site(t.url)))
+            raise PageRefused("%s (%s \"%s\") reads as a commitment (\"%s\"): pressing it may spend money, "
+                              "send something or remove something, and that cannot be taken back. It is "
+                              "pressed with commit ref=%s label=\"%s\" site=%s, which asks the person first. "
+                              "Nothing was pressed."
+                              % (ref, target["role"], target["name"], word, ref, target["name"], fold_site(t.url)))
         return target
 
     def click(self, ref, tab=None):
-        with self.lock:
+        with self.held():
             t = self._tab(tab)
             target = self._pressable(t, ref)
             return self._act(t, "clicked %s \"%s\" (%s)" % (target["role"], target["name"], ref),
                              lambda: hands.click(self.browser, t, target["x"], target["y"]))
 
     def commit(self, ref, label, site, tab=None):
-        with self.lock:
+        with self.held():
             t = self._tab(tab)
             here = fold_site(t.url)
             if fold_site(site) != here:
-                raise Refused("this tab is on %s, not %s: nothing was pressed. The page changed since "
+                raise PageRefused("this tab is on %s, not %s: nothing was pressed. The page changed since "
                               "the person was asked." % (here, fold_site(site)))
             if ref == "dialog":
                 if not t.dialog:
-                    raise Refused("no dialog is open on %s: nothing was accepted" % here)
-                if not commit.same_label(t.dialog.get("message", "")[:len(label) + 20][:len(str(label))], label) \
-                        and not commit.same_label(t.dialog.get("message"), label):
-                    raise Refused("the dialog now says \"%s\", not \"%s\": nothing was accepted"
-                                  % (t.dialog.get("message"), label))
+                    raise PageRefused("no dialog is open on %s: nothing was accepted" % here)
+                if not commit.same_label(t.dialog.get("message"), label):
+                    raise PageRefused("the dialog says \"%s\", and label must be that whole message, as the "
+                                      "person is shown it: nothing was accepted"
+                                      % (t.dialog.get("message") or "")[:200])
                 self._call("Page.handleJavaScriptDialog", {"accept": True}, t)
                 return {"did": "accepted the dialog \"%s\"" % t.dialog.get("message"), "url": t.url}
             target = self._pressable(t, ref, allow_commitment=True)
             if not commit.same_label(target["name"], label):
-                raise Refused("%s now reads \"%s\", not \"%s\": nothing was pressed. The page changed "
+                raise PageRefused("%s now reads \"%s\", not \"%s\": nothing was pressed. The page changed "
                               "since the person was asked." % (ref, target["name"], label))
             return self._act(t, "pressed %s \"%s\" (%s) on %s" % (target["role"], target["name"], ref, here),
                              lambda: hands.click(self.browser, t, target["x"], target["y"]))
 
-    def _enter_is_safe(self, t, ref):
-        names = self._run(t, "submits", ref) or []
-        for name in names:
-            word = commit.reads_as_commitment(name)
+    def _key_is_safe(self, t, ref, key, typed=False):
+        """Refuse Enter or Space where it could press a commitment: on a focused control that reads
+        as one, or from a field whose form (or, with no form, whose surroundings — a chat box's
+        Send) has one. Asked again just before the key is sent, after any typing, since a label
+        can change as a field fills in."""
+        if key not in ("Enter", " "):
+            return
+        found = self._run(t, "pressables", ref) or {}
+        focused = found.get("focused") or {}
+        # A field's own label says nothing about what Enter does ("Order note" is a note): only a
+        # focused control that a key presses is judged by its own name.
+        word = commitment_of(focused) if focused.get("role") in PRESSED_BY_KEYS else None
+        if word:
+            raise PageRefused("%s would press %s \"%s\" (%s), which reads as a commitment (\"%s\")%s. It "
+                              "is pressed with commit ref=%s label=\"%s\" site=%s, which asks the person first."
+                              % ("Enter" if key == "Enter" else "Space", focused.get("role"), focused.get("name"),
+                                 focused.get("ref"), word, "; the text was typed and the key was not pressed"
+                                 if typed else "; nothing was pressed", focused.get("ref"), focused.get("name"),
+                                 fold_site(t.url)))
+        if key != "Enter":
+            return
+        for c in found.get("around") or []:
+            word = commitment_of(c)
             if word:
-                raise Refused("Enter here would submit a form whose button reads \"%s\" (\"%s\"), and "
-                              "that cannot be taken back. Press that button with commit instead, which "
-                              "asks the person first; nothing was typed." % (name, word))
+                raise PageRefused("Enter here could press %s \"%s\" (%s), which reads as a commitment "
+                                  "(\"%s\")%s. Press it with commit ref=%s label=\"%s\" site=%s, which asks "
+                                  "the person first."
+                                  % (c.get("role"), c.get("name"), c.get("ref"), word,
+                                     "; the text was typed and Enter was not pressed" if typed
+                                     else "; nothing was pressed", c.get("ref"), c.get("name"), fold_site(t.url)))
 
     def type(self, ref, text, clear=True, enter=False, tab=None):
-        with self.lock:
+        with self.held():
             t = self._tab(tab)
             target = self._target(t, ref)
             if target.get("covered_by"):
                 cover = target["covered_by"]
-                raise Refused("%s (\"%s\") is covered by %s \"%s\" (%s): deal with that first."
-                              % (ref, target["name"], cover.get("role"), cover.get("name"), cover.get("ref")))
+                raise PageRefused("%s (\"%s\") is covered by %s \"%s\" (%s): deal with that first. Nothing "
+                                  "was typed." % (ref, target["name"], cover.get("role"), cover.get("name"),
+                                                  cover.get("ref")))
             if enter:
-                self._enter_is_safe(t, ref)
+                self._key_is_safe(t, ref, "Enter")
             focused = self._run(t, "focus", ref, bool(clear))
             if not focused or focused.get("gone"):
-                raise Refused("%s is no longer on the page; read it again" % ref)
+                raise PageRefused("%s is no longer on the page; read it again" % ref)
             if not focused.get("focused"):
-                raise Refused("%s (%s \"%s\") would not take the focus, so nothing was typed. It may "
+                raise PageRefused("%s (%s \"%s\") would not take the focus, so nothing was typed. It may "
                               "not be a field; read the page again." % (ref, focused.get("role"), focused.get("name")))
 
             def work():
@@ -362,6 +452,7 @@ class Driver:
                     hands.press(self.browser, t, "delete")
                 hands.insert_text(self.browser, t, str(text))
                 if enter:
+                    self._key_is_safe(t, ref, "Enter", typed=True)
                     hands.press(self.browser, t, "enter")
             shown = "(%d characters)" % len(str(text)) if focused.get("password") else "\"%s\"" % str(text)[:80]
             return self._act(t, "typed %s into %s \"%s\" (%s)%s" % (
@@ -373,38 +464,47 @@ class Driver:
         if k is None:
             raise Refused("`%s` is not a key this knows. Keys: %s, a letter or digit, with ctrl+, "
                           "shift+, alt+ or meta+ in front" % (key, ", ".join(sorted(hands.KEYS))))
-        with self.lock:
+        with self.held():
             t = self._tab(tab)
             if ref:
                 focused = self._run(t, "focus", ref, False)
                 if not focused or focused.get("gone"):
-                    raise Refused("%s is no longer on the page; read it again" % ref)
-            if k[0] == "Enter":
-                self._enter_is_safe(t, ref)
-            return self._act(t, "pressed %s%s" % (key, (" in %s" % ref) if ref else ""),
-                             lambda: hands.press(self.browser, t, key),
+                    raise PageRefused("%s is no longer on the page; read it again" % ref)
+            self._key_is_safe(t, ref, k[0])
+
+            def work():
+                self._key_is_safe(t, ref, k[0])
+                hands.press(self.browser, t, key)
+            return self._act(t, "pressed %s%s" % (key, (" in %s" % ref) if ref else ""), work,
                              limit=NAVIGATE_LIMIT if k[0] == "Enter" else ACT_LIMIT)
 
     def select(self, ref, option, tab=None):
-        with self.lock:
+        with self.held():
             t = self._tab(tab)
+            peek = self._run(t, "pick", ref, str(option), True) or {}
+            if peek.get("would_choose"):
+                word = commit.reads_as_commitment(peek["would_choose"])
+                if word:
+                    raise PageRefused("choosing \"%s\" in %s reads as a commitment (\"%s\"): a list that "
+                                      "acts when it changes would do it at once. That is the person's to "
+                                      "choose; nothing was chosen." % (peek["would_choose"], ref, word))
             got = {}
 
             def work():
                 got.update(self._run(t, "pick", ref, str(option)) or {})
             out = self._act(t, "chose \"%s\" in %s" % (option, ref), work)
             if got.get("gone"):
-                raise Refused("%s is no longer on the page; read it again" % ref)
+                raise PageRefused("%s is no longer on the page; read it again" % ref)
             if got.get("not_select"):
-                raise Refused("%s is a %s, not a list to choose from: click it to open it, then click "
+                raise PageRefused("%s is a %s, not a list to choose from: click it to open it, then click "
                               "the option" % (ref, got.get("role") or "control"))
             if got.get("no_option"):
-                raise Refused("%s has no option \"%s\". It has: %s" % (ref, option, ", ".join(got.get("options", []))))
+                raise PageRefused("%s has no option \"%s\". It has: %s" % (ref, option, ", ".join(got.get("options", []))))
             out["did"] = "chose \"%s\" in %s" % (got.get("chosen"), ref)
             return out
 
     def scroll(self, direction="down", ref=None, tab=None):
-        with self.lock:
+        with self.held():
             t = self._tab(tab)
             if ref:
                 moved = self._run(t, "scrollBy", 0, ref)
@@ -424,14 +524,14 @@ class Driver:
             return page
 
     def dialog(self, accept=True, text=None, tab=None):
-        with self.lock:
+        with self.held():
             t = self._tab(tab)
             if not t.dialog:
-                raise Refused("no dialog is open in this tab")
-            message = t.dialog.get("message", "")
+                raise PageRefused("no dialog is open in this tab")
+            message = " ".join(str(t.dialog.get("message", "")).split())
             word = commit.reads_as_commitment(message)
-            if accept and word and t.dialog.get("type") == "confirm":
-                raise Refused("the dialog asks \"%s\", which reads as a commitment (\"%s\"). It is accepted "
+            if accept and word and t.dialog.get("type") in ("confirm", "prompt", "beforeunload"):
+                raise PageRefused("the dialog asks \"%s\", which reads as a commitment (\"%s\"). It is accepted "
                               "with commit ref=dialog label=\"%s\" site=%s, which asks the person first."
                               % (message[:120], word, message[:120], fold_site(t.url)))
             params = {"accept": bool(accept)}
@@ -444,14 +544,14 @@ class Driver:
                     "url": t.url, "settled_in": took}
 
     def switch(self, tab):
-        with self.lock:
+        with self.held():
             t = self._tab(tab)
             self._call("Target.activateTarget", {"targetId": t.id})
             self.browser.active = t
             return {"did": "switched to tab %s" % short(t.id), "url": t.url, "title": t.title}
 
     def close_tab(self, tab):
-        with self.lock:
+        with self.held():
             t = self._tab(tab)
             if len(self.browser.pages()) <= 1:
                 raise Refused("that is the browser's last tab; closing it would close the browser")

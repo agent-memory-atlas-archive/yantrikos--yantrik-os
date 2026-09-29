@@ -1533,7 +1533,11 @@ def render_element(e, page_url=""):
     role, name = e.get("role", "?"), _flat(e.get("name", ""), 90)
     if e.get("context"):
         if role == "heading":
-            return "%s %s" % ("#" * int(e.get("level") or 2), name)
+            try:
+                level = min(6, max(1, int(e.get("level") or 2)))
+            except (TypeError, ValueError):
+                level = 2
+            return "%s %s" % ("#" * level, name)
         if role in ("alert", "status"):
             return "! %s" % name
         return "▣ %s \"%s\" [%s]" % (role, name, e.get("ref"))
@@ -1609,9 +1613,17 @@ def render_page(page, header=True):
     return "\n".join(out)
 
 
+def _fenced_text(text):
+    """A page's prose between the fence lines, with any line of it that would read as a fence
+    turned so it cannot: the page's text is the page's, and cannot end the page early."""
+    return "\n".join(("| " + line) if line.lstrip().startswith("---") else line
+                     for line in str(text).splitlines())
+
+
 def render_consequence(c):
     """What an act did to the page."""
-    out = ["%s%s." % (c.get("did", "done")[:1].upper(), c.get("did", "done")[1:])]
+    did = _flat(c.get("did", "done"), 300)
+    out = ["%s%s." % (did[:1].upper(), did[1:])]
     if c.get("still_loading"):
         out.append("The page had not finished after %s s; read it again before relying on it." % c.get("settled_in"))
     if c.get("new_tabs"):
@@ -1655,7 +1667,7 @@ def render_browser(result):
     if "text" in result and "size" in result:
         tail = ("\n[... %d more characters: text with a larger limit]" % (result["size"] - len(result["text"]))
                 if result.get("clipped") else "")
-        return "%s\n%s\n%s%s" % (PAGE_BEGINS, result["text"], PAGE_ENDS, tail)
+        return "%s\n%s\n%s%s" % (PAGE_BEGINS, _fenced_text(result["text"]), PAGE_ENDS, tail)
     if "media" in result:
         items = result.get("media") or []
         if not items:
@@ -1821,7 +1833,7 @@ def cmd_listen(argv):
     # take the transcription down with it — it only costs us the advert check.
     ad = ""
     try:
-        playing = (request("browser", "app.act", {"action": "media", "args": {}}, timeout=10)
+        playing = (request("browser", "app.act", with_token({"action": "media", "args": {}}), timeout=10)
                    .get("result") or {}).get("media") or []
         shown = [m for m in playing if m.get("ad")]
         if shown:
@@ -2735,10 +2747,20 @@ class Accessibility:
         return note + scene_elements(elements, indent=indent)
 
 
+def with_token(params):
+    """An act's params with the agent token this was started with, beside the arguments as `yos
+    act` sends it: a mind reaching an app at the door is refused without one."""
+    token, _ = take_agent_token([])
+    if token:
+        params = dict(params, agent_token=token)
+    return params
+
+
 def scene_web(indent="    "):
     """The browser's page, through its surface: title, address, and what can be done on it."""
     try:
-        page = request("browser", "app.act", {"action": "read", "args": {}}, timeout=15).get("result")
+        page = request("browser", "app.act", with_token({"action": "read", "args": {}}),
+                       timeout=15).get("result")
     except Unreachable as e:
         return ["%snot readable: %s" % (indent, plain(e))]
     if not isinstance(page, dict) or "elements" not in page:

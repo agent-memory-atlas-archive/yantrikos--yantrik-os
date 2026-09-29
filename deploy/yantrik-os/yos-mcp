@@ -1178,17 +1178,51 @@ def run_browser_tool(tool, args):
     return run_tool(full, act, present=present_browser)
 
 
+BROWSER_NAMES = {"browser", "chromium"}     # what app-browser answers to (its aliases)
+# The browser's actions that put the caller's words into a page, whatever they are called: typing,
+# a key that types a character, a prompt's answer, a choice in a list. Each is web_type to the taint.
+BROWSER_WRITES = {"type", "press", "dialog", "select"}
+# Keys that carry no text: pressing them says nothing.
+SILENT_KEYS = {"enter", "return", "tab", "escape", "esc", "backspace", "delete", "arrowup", "up",
+               "arrowdown", "down", "arrowleft", "left", "arrowright", "right", "pageup",
+               "pagedown", "home", "end"}
+
+
+def browser_args(args):
+    """An os_act's arguments as the object the browser will get — read the way `act_pairs` reads
+    them, so the taint judges exactly what is sent: an object, JSON that arrived as text, or one
+    bare value for the action's one argument that carries words."""
+    inner = args.get("args")
+    if isinstance(inner, str):
+        try:
+            parsed = json.loads(inner)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, dict):
+            inner = parsed
+        else:
+            one = {"go": "url", "type": "text", "press": "key", "dialog": "text", "select": "option"}
+            inner = {one.get(str(args.get("action") or ""), "value"): inner}
+    return inner if isinstance(inner, dict) else {}
+
+
 def outbound_of(tool, args):
     """The outbound name and arguments the taint rule reads for a call: a web tool's own, or —
-    for os_act on the browser, which is what every web tool now is — the web tool it amounts to."""
-    if tool["name"] != "os_act" or surface_name(args.get("app")) != "browser":
+    for os_act on the browser, which is what every web tool now is — the web tool it amounts to.
+    Every way words reach a page counts: typing, a key with a character on it, a prompt's
+    answer, a choice in a list, and a URL carrying data."""
+    if tool["name"] != "os_act" or surface_name(args.get("app")) not in BROWSER_NAMES:
         return tool["name"], args
-    inner = args.get("args") if isinstance(args.get("args"), dict) else {}
+    inner = browser_args(args)
     action = str(args.get("action") or "")
-    if action == "type":
-        return "web_type", inner
     if action == "go":
         return "web_go", inner
+    if action in BROWSER_WRITES:
+        if action == "press" and str(inner.get("key") or "").strip().lower().split("+")[-1] in SILENT_KEYS:
+            return tool["name"], args
+        if action == "dialog" and not inner.get("text"):
+            return tool["name"], args
+        return "web_type", inner
     return tool["name"], args
 
 
@@ -2520,6 +2554,11 @@ def run_tool(tool, args, present=None):
                 "the person allowed %s.%s, but the grant could not be spent: %s Nothing was "
                 "run. Tell them it did not go through." % (app, args.get("action"), why)), False
         return policy_answer(why), False
+    if p.returncode != 0 and tool["name"] == "os_act" and "PAGE:" in err:
+        # The browser's own "no": the ref is gone, the control is covered or disabled, or it reads
+        # as a commitment that only commit presses. Nothing was pressed or typed, and the same
+        # call again would meet the same answer — a policy answer, not a fault to retry.
+        return policy_answer(re.sub(r"^yos: (\S+\.app\.act refused: )?(PAGE: )?", "", err.strip())), False
     if p.returncode != 0 and tool["name"] == "os_act" and "REACH:" in err:
         # This agent was started as a catalog role, and the act is outside the role's reach. A
         # policy answer, as GRANT is: the desktop is healthy and said no, naming the role.

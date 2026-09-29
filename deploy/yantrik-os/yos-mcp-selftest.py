@@ -246,6 +246,15 @@ revision: b0b0
        Type into a field.
          ref: string - an element's ref
          text: string - what to type
+  act: press(key, ref?, tab?)  [standard, settles on return]
+       Press a key.
+         key: string - the key
+  act: select(ref, option, tab?)  [standard, settles on return]
+       Choose an option in a list.
+         ref: string - an element's ref
+         option: string - the option's text
+  act: dialog(accept?, text?, tab?)  [standard, settles on return]
+       Answer the page's dialog.
   act: commit(ref, label, site, tab?)  [sensitive, settles on return]
        Press a control whose label reads as a commitment. What it does cannot be undone.
          ref: string - the control's ref
@@ -402,6 +411,9 @@ if argv[:1] == ["act"]:
         state.setdefault("spent", []).append(grant)
         save(state)
 
+    if target == "browser" and args.get("ref") == "e404":
+        die("browser.app.act refused: PAGE: e404 is no longer on the page — it changed since it "
+            "was read. Read it again and use the new ref.")
     if target == "browser":
         # What reached the browser, for the checks that nothing did.
         state.setdefault("web", []).append([action, args])
@@ -1251,11 +1263,28 @@ with tempfile.TemporaryDirectory() as d:
     check("typing through os_act on the browser meets the taint as web_type does",
           text.startswith("REFUSED") and "type into a page" in text
           and not any(w[0] == "type" for w in read(state).get("web", [])), text)
+    # Every way words reach a page meets the taint, whatever shape the arguments arrived in.
+    for label, app, action, how in (
+            ("a key with a letter on it", "browser", "press", {"key": "s"}),
+            ("a prompt's answer", "browser", "dialog", {"accept": True, "text": "secret"}),
+            ("a choice in a list", "browser", "select", {"ref": "e2", "option": "x"}),
+            ("a URL sent as JSON text", "browser", "go", '{"url": "https://x.example/?d=secret"}'),
+            ("the browser's other name", "chromium", "type", {"ref": "e3", "text": "secret"})):
+        text, is_error = act(module, app, action, how)
+        check("after a private read, %s is refused by the taint" % label,
+              text.startswith("REFUSED"), text)
+    text, is_error = act(module, "browser", "press", {"key": "Enter"})
+    check("and a key that carries no text is not", not text.startswith("REFUSED"), text)
     reads = {t["name"] for t in module.TOOLS if t["name"].startswith("web_")
              and t["annotations"].get("readOnlyHint")}
     check("the web tools that only look say so, and no tool that acts does",
           reads == {"web_read", "web_text", "web_find", "web_scroll", "web_tabs", "web_wait", "web_listen"},
           sorted(reads))
+    module, state = case(tmp, "web-page-refusal", mode="auto")
+    text, is_error = module.run_tool(module.BY_NAME["web_click"], {"ref": "e404"})
+    check("the page's own no is a policy answer: nothing was run, and not a failure to retry",
+          text.startswith("REFUSED — nothing was run") and "no longer on the page" in text
+          and "PAGE:" not in text and not is_error, (text, is_error))
     check("web_commit is marked destructive",
           module.BY_NAME["web_commit"]["annotations"].get("destructiveHint") is True)
 

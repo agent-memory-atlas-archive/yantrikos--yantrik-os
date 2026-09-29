@@ -66,6 +66,7 @@ class Browser:
         self.cond = threading.Condition()     # replies and events
         self.replies = {}
         self.abandoned = set()                 # ids whose answer nobody waits for any more
+        self.generation = 0                    # which connection is the current one
         self.ids = 0
         self.tabs = {}                         # target id -> Tab, in the order they appeared
         self.by_session = {}
@@ -95,29 +96,43 @@ class Browser:
             raise BrowserClosed()
         # The origin the desktop's launcher allows (wire/dock.rs, --remote-allow-origins): its own
         # debugging address and nothing wider.
-        self.ws = create_connection(url, origin=self.address, timeout=None, suppress_origin=False)
-        self.alive = True
+        self.close()
+        ws = create_connection(url, origin=self.address, timeout=None, suppress_origin=False)
+        with self.cond:
+            self.generation += 1
+            generation = self.generation
+            self.ws = ws
+            self.alive = True
+            self.replies.clear()
+            self.abandoned.clear()
         self.tabs.clear()
         self.by_session.clear()
         self.active = None
-        self.reader = threading.Thread(target=self._read, name="cdp-reader", daemon=True)
+        self.reader = threading.Thread(target=self._read, args=(ws, generation), name="cdp-reader",
+                                       daemon=True)
         self.reader.start()
         self.call("Target.setDiscoverTargets", {"discover": True})
         for info in self.call("Target.getTargets").get("targetInfos", []):
             self._saw_target(info)
 
     def close(self):
-        self.alive = False
+        with self.cond:
+            self.alive = False
+            ws, self.ws = self.ws, None
+            self.cond.notify_all()
         try:
-            if self.ws:
-                self.ws.close()
+            if ws:
+                ws.close()
         except Exception:  # noqa: BLE001
             pass
 
-    def _read(self):
-        while self.alive:
+    def _read(self, ws, generation):
+        """The reader of one connection. It reads its own socket, never `self.ws`, and on its way
+        out marks the browser gone only if its connection is still the current one — a reader
+        left behind by a reconnect cannot end the connection that replaced it."""
+        while True:
             try:
-                raw = self.ws.recv()
+                raw = ws.recv()
             except Exception:  # noqa: BLE001 - the browser went away
                 break
             if not raw:
@@ -127,6 +142,8 @@ class Browser:
             except ValueError:
                 continue
             with self.cond:
+                if generation != self.generation:
+                    return
                 if "id" in msg:
                     if msg["id"] in self.abandoned:
                         self.abandoned.discard(msg["id"])
@@ -136,7 +153,8 @@ class Browser:
                     self._event(msg)
                 self.cond.notify_all()
         with self.cond:
-            self.alive = False
+            if generation == self.generation:
+                self.alive = False
             self.cond.notify_all()
 
     def call(self, method, params=None, session=None, timeout=CALL_TIMEOUT, until=None):
@@ -166,6 +184,7 @@ class Browser:
                     return None
                 left = deadline - time.monotonic()
                 if left <= 0:
+                    self.abandoned.add(mid)
                     raise CdpError("the browser did not answer %s in %d s" % (method, timeout))
                 self.cond.wait(min(left, 0.2) if until is not None else left)
             reply = self.replies.pop(mid)
@@ -183,8 +202,8 @@ class Browser:
             tab = Tab(info["targetId"])
             tab.opened_by = info.get("openerId")
             self.tabs[tab.id] = tab
-        tab.url = info.get("url", tab.url)
-        tab.title = info.get("title", tab.title)
+        tab.url = str(info.get("url", tab.url) or "")
+        tab.title = str(info.get("title", tab.title) or "")
 
     def _event(self, msg):
         method = msg.get("method", "")
@@ -313,7 +332,8 @@ class Browser:
     def run(self, tab, fn, *args, timeout=CALL_TIMEOUT):
         """Call `__yb.<fn>(*args)` in the tab's isolated world, making it on a page that has none."""
         expression = "globalThis.__yb.%s(%s)" % (fn, ", ".join(json.dumps(a) for a in args))
-        guarded = "(() => { if (!globalThis.__yb) return {__missing: true}; return %s; })()" % expression
+        guarded = ("(() => { if (!globalThis.__yb || globalThis.__yb.__yantrik !== true) "
+                   "return {__missing: true}; return %s; })()" % expression)
         for attempt in (1, 2, 3):
             self.world(tab)
             try:
