@@ -69,7 +69,7 @@ pub fn actions(surface: ControlSurface, companion: CompanionHandle) -> ControlSu
                 return Err("`recipe` is empty".into());
             }
             let inputs = inputs_arg(args)?;
-            let leave = leave_for(&crate::control_agents::caller()?)?;
+            let leave = leave_for(&crate::control_agents::delegating_caller()?)?;
             let handle = start.clone();
             // The worker may be in the middle of an answer: wait for it off the UI thread.
             let work = move || {
@@ -173,6 +173,9 @@ fn request(
     refusal: &str,
 ) -> Result<serde_json::Value, String> {
     let want = args["recipe"].as_str().unwrap_or_default().trim();
+    // An agent answering the person's phone answers, pauses and resumes no recipe: the recipe's
+    // agents would carry on unheld.
+    crate::control_agents::refuse_from_phone(&crate::control_agents::caller()?)?;
     let view = resolve(want)?;
     if !allowed(&view) {
         return Err(format!("`{}` {refusal} — it is {}", view.name, view.status));

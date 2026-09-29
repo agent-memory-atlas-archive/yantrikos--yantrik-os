@@ -211,7 +211,9 @@ class TestDecide(unittest.TestCase):
             held = Authority("dangerous", Mode(mode, frozenset()), asks_above=0)
             self.assertIsNone(decide(held, "notes", "list_notes", "safe", "List them"), mode)
             err = decide(held, "notes", "new_note", "standard", "Make a note")
-            self.assertTrue(err and err.startswith("GRANT:") and "request_approval" in err, (mode, err))
+            self.assertTrue(err and err.startswith("GRANT:"), (mode, err))
+            if mode != "plan":
+                self.assertIn("request_approval", err, mode)
             held.granted = True
             self.assertIsNone(decide(held, "notes", "new_note", "standard", "Make a note"), mode)
         ruled = Authority("dangerous", Mode("auto", frozenset({("notes", "new_note")})), asks_above=0)

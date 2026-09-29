@@ -183,10 +183,20 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                     Some(Ok(ref a)) if crate::agents::reaches::is_held_remote(a)
                 ) && yantrik_ipc_transport::gate::grade(&grade).unwrap_or(usize::MAX)
                     > yantrik_ipc_transport::gate::grade(crate::agents::reaches::REMOTE_ASKS_ABOVE).unwrap_or(0);
-                let decision = if held_from_phone {
-                    crate::mind_mode::Decision::Ask
-                } else {
-                    crate::mind_mode::decide(&grade, &app, &action, cannot_be_undone)
+                // The mode and the machine's ceiling decide first: a refusal stands. Plan mode
+                // changes nothing from a phone either. Otherwise a held agent is always asked, where
+                // the mode or a desk session rule would have let it run.
+                let decision = match crate::mind_mode::decide(&grade, &app, &action, cannot_be_undone) {
+                    refused @ crate::mind_mode::Decision::Refuse { .. } => refused,
+                    _ if held_from_phone && crate::mind_mode::current().as_str() == "plan" => {
+                        crate::mind_mode::Decision::Refuse {
+                            why: "this desktop is in plan mode: nothing changes, and no card is raised, \
+                                  for a turn asked from the person's phone either."
+                                .into(),
+                        }
+                    }
+                    _ if held_from_phone => crate::mind_mode::Decision::Ask,
+                    other => other,
                 };
                 match decision {
                     // The same sentence the bridge relays, from the same function, so a mind

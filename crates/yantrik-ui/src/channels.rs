@@ -51,7 +51,18 @@ pub fn trust_of(provider: &str) -> &'static str {
 /// Acts no phone answers, whatever their grade: they run commands as the person, and an Allow
 /// for one is a remote shell (security review, 29 Sep 2026). They wait for the machine, as what
 /// cannot be undone does.
-const NEVER_FROM_A_PHONE: &[(&str, &str)] = &[("shell", "agent_run"), ("shell", "agent_input"), ("terminal", "*")];
+const NEVER_FROM_A_PHONE: &[(&str, &str)] = &[
+    ("shell", "agent_run"),
+    ("shell", "agent_input"),
+    ("terminal", "*"),
+    // Work handed on runs unheld: a phone starts and steers none.
+    ("shell", "run_recipe"),
+    ("shell", "answer_recipe"),
+    ("shell", "resume_recipe"),
+    ("shell", "hand_off"),
+    ("shell", "new_agent"),
+    ("shell", "send_to_agent"),
+];
 
 fn never_from_a_phone(app: &str, action: &str) -> bool {
     NEVER_FROM_A_PHONE.iter().any(|(a, x)| a.eq_ignore_ascii_case(app) && (*x == "*" || *x == action))
@@ -271,7 +282,10 @@ impl PhoneTurnGuard {
 
 impl Drop for PhoneTurnGuard {
     fn drop(&mut self) {
-        PHONE_TURNS.lock().unwrap_or_else(|e| e.into_inner()).retain(|t| t.id != self.0);
+        // In the order `card_raised` takes them, held together, so no code is added for this turn
+        // after it is gone.
+        let mut turns = PHONE_TURNS.lock().unwrap_or_else(|e| e.into_inner());
+        turns.retain(|t| t.id != self.0);
         PHONE_CARDS.lock().unwrap_or_else(|e| e.into_inner()).retain(|c| c.turn != self.0);
     }
 }
@@ -299,18 +313,26 @@ pub fn card_raised(card_id: &str, irreversible: bool, published: &str) {
         return;
     };
     let Some(outbox) = OUTBOX.get().cloned() else { return };
-    let mut what = format!("{} asks to run {}.{} ({}).", turn.mind, card.app, card.action, card.grade);
+    // Every line drawn as one line of text: a name or an argument carrying a newline must not draw
+    // a line of its own on the phone.
+    let one_line = |s: &str| s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect::<String>();
+    let mut what = format!("{} asks to run {}.{} ({}).", one_line(&turn.mind), one_line(&card.app), one_line(&card.action), one_line(&card.grade));
     if !published.trim().is_empty() {
-        what.push_str(&format!("\n{published}"));
+        what.push_str(&format!("\n{}", one_line(published)));
     }
     if !card.target.trim().is_empty() {
-        what.push_str(&format!("\n{}", card.target.trim()));
+        what.push_str(&format!("\n{}", one_line(card.target.trim())));
     }
-    for row in card.args.iter().take(8) {
-        what.push_str(&format!("\n  {row}"));
+    for row in &card.args {
+        what.push_str(&format!("\n  {}", one_line(row)));
     }
+    // A code only for a card the phone is shown whole: an argument cut short, or more of them
+    // than fit, is a grant bound to what the person did not see.
+    let whole = card.args.iter().all(|r| !r.ends_with('…') && !r.starts_with('…'));
     let said = if irreversible || never_from_a_phone(&card.app, &card.action) {
         format!("{what}\nThis one waits for you at the machine: it cannot be undone, or it runs commands as you.")
+    } else if !whole {
+        format!("{what}\nThis one waits for you at the machine: it is too long to show here in full.")
     } else if !approvals_on(&turn.provider) {
         format!(
             "{what}\nIt is waiting on the desktop's screen: approvals from {} are off, since {} can read what is sent here.",
@@ -322,6 +344,11 @@ pub fn card_raised(card_id: &str, irreversible: bool, published: &str) {
             return;
         };
         {
+            // The turn still live, checked with the codes held: one that ended in between keeps no code.
+            let turns = PHONE_TURNS.lock().unwrap_or_else(|e| e.into_inner());
+            if !turns.iter().any(|t| t.id == turn.id) {
+                return;
+            }
             let mut cards = PHONE_CARDS.lock().unwrap_or_else(|e| e.into_inner());
             let now = Instant::now();
             cards.retain(|c| c.until > now && c.card_id != card.id);

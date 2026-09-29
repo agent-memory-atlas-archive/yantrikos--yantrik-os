@@ -642,9 +642,9 @@ pub fn decide(
     if !held && !plan && !irreversible && mode.covers(app_id, action) {
         return Ok(());
     }
-    // A held call's refusal is always the asking one, never plan's "no card": it is to be asked.
-    let asking = if held && plan { Mode::named("ask") } else { mode.clone() };
-    Err(grant_refusal(app_id, action, graded, &asking, irreversible))
+    // In plan mode a held call is refused as plan refuses, with no card: the person's strictest
+    // setting is not loosened for a phone.
+    Err(grant_refusal(app_id, action, graded, mode, irreversible))
 }
 
 /// The whole rule for one call, for a caller that holds the grade where it holds the call.
@@ -751,7 +751,10 @@ mod tests {
             held.asks_above = Some(0);
             assert!(decide(&held, "notes", "list_notes", "safe", "List them").is_ok(), "{mode}: a read runs");
             let err = decide(&held, "notes", "new_note", "standard", "Make a note").unwrap_err();
-            assert!(err.starts_with("GRANT:") && err.contains("request_approval"), "{mode}: a card is asked for: {err}");
+            assert!(err.starts_with("GRANT:"), "{mode}: asked: {err}");
+            if mode != "plan" {
+                assert!(err.contains("request_approval"), "{mode}: a card is asked for: {err}");
+            }
             held.granted = true;
             assert!(decide(&held, "notes", "new_note", "standard", "Make a note").is_ok(), "{mode}: the person's Allow runs it");
         }

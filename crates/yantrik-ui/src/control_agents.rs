@@ -107,19 +107,27 @@ pub(crate) fn caller() -> Result<Caller, String> {
     }
 }
 
-/// The caller of a call that hands work to another agent: refused while that caller is answering
-/// a turn from a phone, whose hold would not bind the agent it hands to (security review, 29 Sep).
-fn delegating_caller() -> Result<Caller, String> {
+/// The caller of a call that hands work to another agent, or starts or steers a recipe: refused
+/// while that caller is answering a turn from a phone, whose hold would not bind the agents that
+/// work goes to (security reviews, 29 Sep).
+pub(crate) fn delegating_caller() -> Result<Caller, String> {
     let caller = caller()?;
-    if let Caller::Agent(me) = &caller {
+    refuse_from_phone(&caller)?;
+    Ok(caller)
+}
+
+/// Refused while `caller` is answering a turn from the person's phone.
+pub(crate) fn refuse_from_phone(caller: &Caller) -> Result<(), String> {
+    if let Caller::Agent(me) = caller {
         if reaches::is_held_remote(me) {
             return Err(format!(
                 "`{me}` is answering a turn asked from the person's phone, and hands no work to another \
-                 agent until it is done: what a phone may ask is held on this agent alone."
+                 agent and starts or steers no recipe until it is done: what a phone may ask is held \
+                 on this agent alone."
             ));
         }
     }
-    Ok(caller)
+    Ok(())
 }
 
 fn host() -> Result<&'static Host, String> {
@@ -534,6 +542,10 @@ pub fn hand_off_as(
     task: &str,
     context: &str,
 ) -> Result<Handed, String> {
+    // Not for an agent answering a turn from the person's phone: the role it hands to is not held.
+    if let Some(parent) = parent {
+        refuse_from_phone(&Caller::Agent(parent.clone()))?;
+    }
     if role.trim().is_empty() {
         return Err(format!("`role` is empty: a role from the catalog — {}.", catalog.listing()));
     }

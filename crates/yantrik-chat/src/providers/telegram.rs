@@ -30,21 +30,29 @@ impl TelegramProvider {
     /// Execute a Telegram Bot API method via curl.
     fn api_call(&self, method: &str, body: &serde_json::Value) -> Result<serde_json::Value, ChatError> {
         let url = format!("https://api.telegram.org/bot{}/{}", self.bot_token, method);
-
-        let output = std::process::Command::new("curl")
+        // The URL (it holds the bot token) and the body (it may hold an approval card's code) go
+        // to curl as a config on stdin, never on its command line, which every account on the
+        // machine can read in /proc (security review, 29 Sep 2026).
+        let config = format!("url = \"{}\"\ndata = \"{}\"\n", curl_quote(&url), curl_quote(&body.to_string()));
+        let max_time = if method == "getUpdates" { format!("{}", self.poll_timeout + 5) } else { "10".into() };
+        let mut child = std::process::Command::new("curl")
             .arg("-s")
             .arg("-X").arg("POST")
             .arg("-H").arg("Content-Type: application/json")
             .arg("--connect-timeout").arg("5")
-            .arg("--max-time").arg(if method == "getUpdates" {
-                format!("{}", self.poll_timeout + 5)
-            } else {
-                "10".into()
-            })
-            .arg("-d").arg(body.to_string())
-            .arg(&url)
-            .output()
+            .arg("--max-time").arg(max_time)
+            .arg("-K").arg("-")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
             .map_err(|e| ChatError::Network(format!("curl failed: {e}")))?;
+        {
+            use std::io::Write;
+            let mut stdin = child.stdin.take().ok_or_else(|| ChatError::Network("curl has no stdin".into()))?;
+            stdin.write_all(config.as_bytes()).map_err(|e| ChatError::Network(format!("curl's config: {e}")))?;
+        }
+        let output = child.wait_with_output().map_err(|e| ChatError::Network(format!("curl failed: {e}")))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         if stdout.trim().is_empty() {
@@ -529,4 +537,32 @@ fn parse_telegram_edit(
         new_content: MessageContent::Text { text: text.to_string() },
         timestamp_ms: timestamp,
     }))
+}
+
+/// A value for a curl config file's double-quoted string: backslashes and quotes escaped, and no
+/// raw line breaks, which would end the line.
+fn curl_quote(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod curl_tests {
+    use super::curl_quote;
+
+    #[test]
+    fn a_value_cannot_end_its_line_or_its_string() {
+        assert_eq!(curl_quote(r#"{"text":"a\"b"}"#), r#"{\"text\":\"a\\\"b\"}"#);
+        assert_eq!(curl_quote("line\nurl = \"evil\""), r#"line\nurl = \"evil\""#);
+    }
 }

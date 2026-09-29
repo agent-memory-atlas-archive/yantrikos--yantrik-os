@@ -509,8 +509,7 @@ def decide(authority, app_id, action, graded, purpose=""):
     plan = mode.allows() == 0
     if not held and not plan and not irreversible and mode.covers(app_id, action):
         return None
-    asking = Mode("ask", frozenset()) if held and plan else mode
-    return grant_refusal(app_id, action, graded, asking, irreversible)
+    return grant_refusal(app_id, action, graded, mode, irreversible)
 
 
 def permit(authority, app_id, action, graded, purpose, args, grant=None, spender=None):
