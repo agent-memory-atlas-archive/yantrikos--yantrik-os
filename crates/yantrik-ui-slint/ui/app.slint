@@ -14,13 +14,13 @@ import { BootScreen, BootStage } from "boot.slint";
 import { OnboardingScreen } from "onboarding.slint";
 import { InstallerScreen, InstallerDisk, KeyboardChoice } from "installer.slint";
 export { InstallerDisk, KeyboardChoice }
-export { DecisionPreset } from "settings.slint";
+export { DecisionPreset, DecisionUse } from "settings.slint";
 import { DesktopScreen } from "desktop.slint";
 import { BondScreen, BondData } from "bond.slint";
 import { PersonalityScreen, OpinionData, SharedRefData } from "personality.slint";
 import { LockScreen } from "lock.slint";
 import { LoginScreen } from "login.slint";
-import { SettingsScreen, SettingsCategoryItem, AIProviderData, AIModelData, AIStatusData, HarnessData, HarnessRowData, DecisionPreset } from "settings.slint";
+import { SettingsScreen, SettingsCategoryItem, AIProviderData, AIModelData, AIStatusData, HarnessData, HarnessRowData, DecisionPreset, DecisionUse } from "settings.slint";
 import { SkillData } from "skill_store.slint";
 import { MemoryBrowser, MemoryItem } from "memory_browser.slint";
 import { FileBrowser, FileEntry, BreadcrumbSegment, FileDetailData, FileTabData, FileOpItem, FilePlaceData, FileRecentData, OpenWithItem } from "file_browser.slint";
@@ -529,8 +529,7 @@ export component App inherits Window {
     in property <string> settings-decision-endpoint: "";
     in property <string> settings-decision-model: "";
     in property <string> settings-decision-key-env: "";
-    in property <bool> settings-decision-route-tools: true;
-    in property <bool> settings-decision-browser-commitments: true;
+    in property <[DecisionUse]> settings-decision-uses: [];
     in property <string> settings-decision-where: "";
     in property <bool> settings-decision-leaves-machine: false;
     in property <string> settings-decision-status: "";
@@ -538,8 +537,7 @@ export component App inherits Window {
     callback decision-choose(string);
     callback decision-save(string, string, string);
     callback decision-test();
-    callback decision-toggle-route-tools();
-    callback decision-toggle-browser-commitments();
+    callback decision-toggle-use(string);
     in property <[SettingsCategoryItem]> settings-categories;
     // Which Settings section is open, so anything can deep-link to one.
     in-out property <int> settings-category: 0;
@@ -1777,8 +1775,7 @@ export component App inherits Window {
                 decision-endpoint: root.settings-decision-endpoint;
                 decision-model: root.settings-decision-model;
                 decision-key-env: root.settings-decision-key-env;
-                decision-route-tools: root.settings-decision-route-tools;
-                decision-browser-commitments: root.settings-decision-browser-commitments;
+                decision-uses: root.settings-decision-uses;
                 decision-where: root.settings-decision-where;
                 decision-leaves-machine: root.settings-decision-leaves-machine;
                 decision-status: root.settings-decision-status;
@@ -1786,8 +1783,7 @@ export component App inherits Window {
                 decision-choose(a0) => { root.decision-choose(a0); }
                 decision-save(a0, a1, a2) => { root.decision-save(a0, a1, a2); }
                 decision-test => { root.decision-test(); }
-                decision-toggle-route-tools => { root.decision-toggle-route-tools(); }
-                decision-toggle-browser-commitments => { root.decision-toggle-browser-commitments(); }
+                decision-toggle-use(id) => { root.decision-toggle-use(id); }
                 categories: root.settings-categories;
                 active-category <=> root.settings-category;
                 search-query <=> root.settings-query;

@@ -1,10 +1,11 @@
 // Settings → AI & Intelligence → Decision model.
 //
 // The small model that makes quick yes/no and pick-one judgements for the desktop: which tool a
-// request needs, whether a browser press would buy, send or delete something. Optional: Off
-// means every such decision is made the way it would be without one. The person picks which
-// model answers, sees where it runs (a cloud model receives what is judged), tests it, and turns
-// each use on or off. Every model answers in the same shape, so switching changes nothing else.
+// request needs, whether a browser press would buy, send or delete something, an agent's own
+// quick questions. Optional: Off means every such decision is made the way it would be without
+// one. The person picks which model answers, sees where it runs (a cloud model receives what is
+// judged), tests it, and turns each use on or off, told what each one sends. Every model answers
+// in the same shape, so switching changes nothing else.
 
 import { Theme } from "theme.slint";
 import { YButton } from "y_button.slint";
@@ -15,14 +16,21 @@ export struct DecisionPreset {
     label: string,
 }
 
+// One use of the decision model (JUDGE_USES in judge_config.rs).
+export struct DecisionUse {
+    id: string,
+    label: string,
+    sends: string,     // what it sends the model, in words
+    on: bool,
+}
+
 export component DecisionModelCard inherits Rectangle {
     in property <[DecisionPreset]> presets;
     in property <string> provider;              // the active preset's id
     in property <string> endpoint;
     in property <string> model;
     in property <string> key-env;
-    in property <bool> route-tools;
-    in property <bool> browser-commitments;
+    in property <[DecisionUse]> uses;
     in property <string> where-note;            // where the chosen model runs, in words
     in property <string> status;                // "", "testing", or what the last test found
     in property <bool> status-good;             // the last test answered
@@ -30,8 +38,7 @@ export component DecisionModelCard inherits Rectangle {
     callback choose(string);                    // a preset id
     callback save(string, string, string);      // endpoint, model, key variable
     callback test();
-    callback toggle-route-tools();
-    callback toggle-browser-commitments();
+    callback toggle-use(string);                // a use's id
 
     // The form's own copy, so typing does not fight the saved values.
     property <string> form-endpoint: root.endpoint;
@@ -50,7 +57,7 @@ export component DecisionModelCard inherits Rectangle {
         spacing: Theme.sp-3;
 
         Text {
-            text: "A small, fast model for quick judgements: which tool a request needs, and whether a press in the browser would buy, send or delete something. Optional; with it off, those decisions are made as they would be without it.";
+            text: "A small, fast model for quick judgements across the desktop: which tool a request needs, whether a press in the browser would buy, send or delete something, and agents' own quick questions. Optional; with it off, those decisions are made as they would be without it.";
             color: Theme.text-secondary;
             font-size: Theme.fs-body;
             wrap: word-wrap;
@@ -143,37 +150,29 @@ export component DecisionModelCard inherits Rectangle {
 
         if root.provider != "off" && root.provider != "" : VerticalLayout {
             spacing: Theme.sp-2;
-            HorizontalLayout {
+            for u in root.uses : HorizontalLayout {
                 spacing: Theme.sp-2;
-                Text {
-                    text: "Choose which tool a request needs";
-                    color: Theme.text-primary;
-                    font-size: Theme.fs-body;
-                    vertical-alignment: center;
+                VerticalLayout {
                     horizontal-stretch: 1;
+                    alignment: center;
+                    Text {
+                        text: u.label;
+                        color: Theme.text-primary;
+                        font-size: Theme.fs-body;
+                        wrap: word-wrap;
+                    }
+                    Text {
+                        text: "Sends " + u.sends;
+                        color: root.leaves-machine ? Theme.amber : Theme.text-secondary;
+                        font-size: Theme.fs-caption;
+                        wrap: word-wrap;
+                    }
                 }
                 YButton {
-                    label: root.route-tools ? "On" : "Off";
-                    variant: root.route-tools ? 0 : 1;
+                    label: u.on ? "On" : "Off";
+                    variant: u.on ? 0 : 1;
                     size: 0;
-                    clicked => { root.toggle-route-tools(); }
-                }
-            }
-            HorizontalLayout {
-                spacing: Theme.sp-2;
-                Text {
-                    text: "Spot purchases, sends and deletes in the browser (adds a card, never removes one)";
-                    color: Theme.text-primary;
-                    font-size: Theme.fs-body;
-                    vertical-alignment: center;
-                    wrap: word-wrap;
-                    horizontal-stretch: 1;
-                }
-                YButton {
-                    label: root.browser-commitments ? "On" : "Off";
-                    variant: root.browser-commitments ? 0 : 1;
-                    size: 0;
-                    clicked => { root.toggle-browser-commitments(); }
+                    clicked => { root.toggle-use(u.id); }
                 }
             }
         }

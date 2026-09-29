@@ -1501,15 +1501,39 @@ def carries_private(app, action):
             "not a fault, and not something to route around." % (saw, app, action))
 
 
+# Every address this session has gone to, as `visited_form` spells it. Once the session has read
+# something private, it may go back to these and nowhere new.
+_VISITED = set()
+
+
+def visited_form(url):
+    """An address as the visited set compares it: scheme and host folded, the rest as written."""
+    try:
+        from urllib.parse import urlsplit
+        u = urlsplit(str(url or "").strip())
+    except Exception:
+        return str(url or "").strip()
+    return "%s://%s%s%s%s" % (u.scheme.lower(), (u.netloc or "").lower(), u.path or "/",
+                              "?" + u.query if u.query else "", "#" + u.fragment if u.fragment else "")
+
+
 def taint_refusal(name, args):
     """Refuse an outbound call once this session has seen private data. None = allow."""
-    if TAINT_OFF or not _SAW_PRIVATE or name not in OUTBOUND:
-        return None
-    if name == "web_go" and not payload_in_url(args.get("url", "")):
-        # Plain navigation carries nothing out; going somewhere is not saying something.
+    if name == "web_go":
+        where = visited_form(args.get("url", ""))
+        if TAINT_OFF or not _SAW_PRIVATE:
+            _VISITED.add(where)
+            return None
+        # A tainted session goes back to where it has been, and nowhere new. A bare path or a host
+        # carries data as well as a query does — https://<secret>.example.net/<secret> needs no
+        # `?` — so "no query string" is not the test; "an address chosen before anything private
+        # was read, or since, from what the session already had" is (security review, 29 Sep 2026).
+        if where in _VISITED and not payload_in_url(args.get("url", "")):
+            return None
+    elif TAINT_OFF or not _SAW_PRIVATE or name not in OUTBOUND:
         return None
     saw = ", ".join(dict.fromkeys(_SAW_PRIVATE))
-    what = "type into a page" if name == "web_type" else "open a URL carrying data in it"
+    what = "type into a page" if name == "web_type" else "open an address it has not been to (any new address can carry data out, in its host or its path)"
     return ("this session has already read private state (%s), so it will not %s. "
             "Whatever is on this machine could be carried out that way, and nothing here "
             "can tell an innocent string from a secret. A person has to do this part, or "

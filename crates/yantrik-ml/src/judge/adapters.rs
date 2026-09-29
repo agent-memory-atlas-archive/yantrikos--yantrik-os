@@ -31,6 +31,9 @@ impl Judge for OffJudge {
     }
 }
 
+/// How long a chat-model decision may take.
+pub const CHAT_DECISION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
 /// The chat model answering the same typed questions, for a machine with no System One server.
 ///
 /// It is asked to write the answer as JSON and nothing else. Its numbers are what it wrote down,
@@ -40,12 +43,16 @@ impl Judge for OffJudge {
 pub struct ChatJudge {
     llm: Arc<dyn LLMBackend>,
     locality: Locality,
+    /// How long a decision waits for the chat model before it abstains. A chat backend has no
+    /// bound of its own that a caller can count on, and a decision that never ends holds its
+    /// caller's place (`control_decide`) for as long as it runs.
+    timeout: std::time::Duration,
 }
 
 impl ChatJudge {
     /// `locality` is where the chat backend runs, which the caller knows from its configuration.
     pub fn new(llm: Arc<dyn LLMBackend>, locality: Locality) -> Self {
-        Self { llm, locality }
+        Self { llm, locality, timeout: CHAT_DECISION_TIMEOUT }
     }
 
     fn prompt(state: &Value, questions: &[(&str, Question)]) -> String {
@@ -97,8 +104,19 @@ impl Judge for ChatJudge {
 
     fn ask(&self, state: &Value, questions: &[(&str, Question)]) -> Result<HashMap<String, Answer>> {
         let config = GenerationConfig { max_tokens: 400, temperature: 0.0, ..GenerationConfig::default() };
-        let reply = self.llm.chat(&[ChatMessage::user(Self::prompt(state, questions))], &config, None)?;
-        parse_chat_answers(&reply.text, questions)
+        let prompt = Self::prompt(state, questions);
+        let llm = self.llm.clone();
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        std::thread::Builder::new()
+            .name("chat-judge".into())
+            .spawn(move || {
+                let _ = tx.send(llm.chat(&[ChatMessage::user(prompt)], &config, None).map(|r| r.text));
+            })
+            .map_err(|e| anyhow!("could not ask the chat model: {e}"))?;
+        let text = rx
+            .recv_timeout(self.timeout)
+            .map_err(|_| anyhow!("the chat model did not answer within {} s", self.timeout.as_secs()))??;
+        parse_chat_answers(&text, questions)
     }
 }
 

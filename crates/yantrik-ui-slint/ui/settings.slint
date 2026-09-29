@@ -9,8 +9,8 @@ import { SkillStore, SkillData } from "skill_store.slint";
 import { YButton, YIconButton } from "components/y_button.slint";
 import { YInput } from "components/y_input.slint";
 import { Icon, Icons } from "components/icon.slint";
-import { DecisionModelCard, DecisionPreset } from "components/decision_model.slint";
-export { DecisionPreset }
+import { DecisionModelCard, DecisionPreset, DecisionUse } from "components/decision_model.slint";
+export { DecisionPreset, DecisionUse }
 
 // ── Settings sidebar category item ──
 export struct SettingsCategoryItem {
@@ -326,8 +326,7 @@ export component SettingsScreen inherits Rectangle {
     in property <string> decision-endpoint: "";
     in property <string> decision-model: "";
     in property <string> decision-key-env: "";
-    in property <bool> decision-route-tools: true;
-    in property <bool> decision-browser-commitments: true;
+    in property <[DecisionUse]> decision-uses: [];
     in property <string> decision-where: "";
     in property <bool> decision-leaves-machine: false;
     in property <string> decision-status: "";
@@ -335,8 +334,7 @@ export component SettingsScreen inherits Rectangle {
     callback decision-choose(string);
     callback decision-save(string, string, string);
     callback decision-test();
-    callback decision-toggle-route-tools();
-    callback decision-toggle-browser-commitments();
+    callback decision-toggle-use(string);
     in-out property <bool> provider-panel-open: false;
     in-out property <string> editing-provider-id: "";   // empty = new provider
     callback add-provider();
@@ -1769,8 +1767,7 @@ export component SettingsScreen inherits Rectangle {
                                 endpoint: root.decision-endpoint;
                                 model: root.decision-model;
                                 key-env: root.decision-key-env;
-                                route-tools: root.decision-route-tools;
-                                browser-commitments: root.decision-browser-commitments;
+                                uses: root.decision-uses;
                                 where-note: root.decision-where;
                                 leaves-machine: root.decision-leaves-machine;
                                 status: root.decision-status;
@@ -1778,8 +1775,7 @@ export component SettingsScreen inherits Rectangle {
                                 choose(id) => { root.decision-choose(id); }
                                 save(e, m, k) => { root.decision-save(e, m, k); }
                                 test => { root.decision-test(); }
-                                toggle-route-tools => { root.decision-toggle-route-tools(); }
-                                toggle-browser-commitments => { root.decision-toggle-browser-commitments(); }
+                                toggle-use(id) => { root.decision-toggle-use(id); }
                             }
 
                             // ── TASK ROUTING (V60) ──
