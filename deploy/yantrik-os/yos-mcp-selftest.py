@@ -224,6 +224,43 @@ SHELL_ACTIONS = """  act: open_app(name)  [standard, settles later]
          context?: string - what it should read first
          wait_seconds?: number - seconds to wait for its answer
 """
+# The browser's surface (apps/browser, #477): what every web_* tool is an act on now, with the
+# grades it publishes — looking is safe, using a page standard, and a commitment sensitive and
+# not recoverable, so it asks in every mode but bypass.
+DESCRIBE_BROWSER = """Browser - "Example" (example.com)
+revision: b0b0
+{
+  "open": true
+}
+  act: read(tab?, all?)  [safe, settles on return]
+       What is on the page.
+  act: text(tab?, limit?)  [safe, settles on return]
+       What the page says.
+  act: go(url, new_tab?, tab?)  [standard, settles on return]
+       Open a web page.
+         url: string - where
+  act: click(ref, tab?)  [standard, settles on return]
+       Press an element.
+         ref: string - an element's ref
+  act: type(ref, text, clear?, enter?, tab?)  [standard, settles on return]
+       Type into a field.
+         ref: string - an element's ref
+         text: string - what to type
+  act: press(key, ref?, tab?)  [standard, settles on return]
+       Press a key.
+         key: string - the key
+  act: select(ref, option, tab?)  [standard, settles on return]
+       Choose an option in a list.
+         ref: string - an element's ref
+         option: string - the option's text
+  act: dialog(accept?, text?, tab?)  [standard, settles on return]
+       Answer the page's dialog.
+  act: commit(ref, label, site, tab?)  [sensitive, settles on return]
+       Press a control whose label reads as a commitment. What it does cannot be undone.
+         ref: string - the control's ref
+         label: string - its label
+         site: string - the page's site
+"""
 DESCRIBE_TERMINAL = """Terminal - 1 tab
 revision: 7e57
 {
@@ -298,6 +335,9 @@ if argv[:1] == ["describe"]:
     if target == "calendar":
         sys.stdout.write(DESCRIBE_CALENDAR)
         raise SystemExit(0)
+    if target == "browser":
+        sys.stdout.write(DESCRIBE_BROWSER)
+        raise SystemExit(0)
     if target == "terminal" and state.get("terminal_open"):
         sys.stdout.write(DESCRIBE_TERMINAL)
         raise SystemExit(0)
@@ -335,7 +375,7 @@ if argv[:1] == ["act"]:
         grant = rest[at + 1]
         rest = rest[:at] + rest[at + 2:]
     no_ask = "--no-ask" in rest
-    rest = [a for a in rest if a != "--no-ask"]
+    rest = [a for a in rest if a not in ("--no-ask", "--full")]
     args = parse_args(rest, declared(target, action))
     # An agent started as a catalog role, asking about or acting outside its reach: the shell and
     # the app's own dispatch refuse it in the reach's words (yantrik_ipc_transport::reach) — before
@@ -370,6 +410,16 @@ if argv[:1] == ["act"]:
             spent_refusal("wrong app.")
         state.setdefault("spent", []).append(grant)
         save(state)
+
+    if target == "browser" and args.get("ref") == "e404":
+        die("browser.app.act refused: PAGE: e404 is no longer on the page — it changed since it "
+            "was read. Read it again and use the new ref.")
+    if target == "browser":
+        # What reached the browser, for the checks that nothing did.
+        state.setdefault("web", []).append([action, args])
+        save(state)
+        envelope({"did": "%s done" % action, "url": "https://example.com/", "title": "Example"})
+        raise SystemExit(0)
 
     if target == "shell" and action == "request_approval":
         if state.get("shell_down"):
@@ -1180,6 +1230,63 @@ with tempfile.TemporaryDirectory() as d:
     check("bypass does not switch off the taint rule",
           not is_error and text.startswith("REFUSED") and "already read private state" in text, text)
     check("and nothing reached the browser", not read(state).get("web"), read(state))
+
+    # 15e. The web tools are acts on the browser's surface (#477): made there through os_act, so
+    # its grades, the mode, the cards and the taint are the ones every app meets.
+    module, state = case(tmp, "web-surface", mode="ask", answer="pending")
+    # The page is rendered by the real yos's `render_browser` — the one renderer the command
+    # line uses — loaded the way the bridge loads it, in place of the fake's (which has none).
+    from importlib.machinery import SourceFileLoader
+    import importlib.util as _iu
+    _loader = SourceFileLoader("yos_renderer", str(HERE / "yos"))
+    _real = _iu.module_from_spec(_iu.spec_from_loader("yos_renderer", _loader))
+    _loader.exec_module(_real)
+    saved_module = list(module._YOS_MODULE)
+    module._YOS_MODULE[:] = [_real]
+    text, is_error = module.run_tool(module.BY_NAME["web_click"], {"ref": 12})
+    module._YOS_MODULE[:] = saved_module
+    s = read(state)
+    check("web_click is an act on the browser, with the ref as the browser writes it",
+          not is_error and ["click", {"ref": "e12"}] in s.get("web", []), (text, s.get("web")))
+    check("and its answer reaches the mind as a sentence, not JSON",
+          text.startswith("Click done") and "{" not in text, text)
+    text, is_error = module.run_tool(module.BY_NAME["web_commit"],
+                                     {"ref": "e31", "label": "Place order", "site": "example.com"})
+    s = read(state)
+    check("web_commit puts a card on the person's screen before anything is pressed",
+          len(s.get("requests", [])) == 1 and s["requests"][0].get("app") == "browser"
+          and s["requests"][0].get("action") == "commit"
+          and not any(w[0] == "commit" for w in s.get("web", [])), s)
+    module, state = case(tmp, "web-taint-direct", mode="auto", machine_ceiling="dangerous", ceiling=None)
+    module.run_tool(module.BY_NAME["os_describe"], {"app": "calendar"})
+    text, is_error = act(module, "Browser", "type", {"ref": "e3", "text": "secret"})
+    check("typing through os_act on the browser meets the taint as web_type does",
+          text.startswith("REFUSED") and "type into a page" in text
+          and not any(w[0] == "type" for w in read(state).get("web", [])), text)
+    # Every way words reach a page meets the taint, whatever shape the arguments arrived in.
+    for label, app, action, how in (
+            ("a key with a letter on it", "browser", "press", {"key": "s"}),
+            ("a prompt's answer", "browser", "dialog", {"accept": True, "text": "secret"}),
+            ("a choice in a list", "browser", "select", {"ref": "e2", "option": "x"}),
+            ("a URL sent as JSON text", "browser", "go", '{"url": "https://x.example/?d=secret"}'),
+            ("the browser's other name", "chromium", "type", {"ref": "e3", "text": "secret"})):
+        text, is_error = act(module, app, action, how)
+        check("after a private read, %s is refused by the taint" % label,
+              text.startswith("REFUSED"), text)
+    text, is_error = act(module, "browser", "press", {"key": "Enter"})
+    check("and a key that carries no text is not", not text.startswith("REFUSED"), text)
+    reads = {t["name"] for t in module.TOOLS if t["name"].startswith("web_")
+             and t["annotations"].get("readOnlyHint")}
+    check("the web tools that only look say so, and no tool that acts does",
+          reads == {"web_read", "web_text", "web_find", "web_scroll", "web_tabs", "web_wait", "web_listen"},
+          sorted(reads))
+    module, state = case(tmp, "web-page-refusal", mode="auto")
+    text, is_error = module.run_tool(module.BY_NAME["web_click"], {"ref": "e404"})
+    check("the page's own no is a policy answer: nothing was run, and not a failure to retry",
+          text.startswith("REFUSED — nothing was run") and "no longer on the page" in text
+          and "PAGE:" not in text and not is_error, (text, is_error))
+    check("web_commit is marked destructive",
+          module.BY_NAME["web_commit"]["annotations"].get("destructiveHint") is True)
 
     # 15d. A display's text, read through os_act, is a private read like os_screen: the next
     # thing typed into a page is refused (#257).

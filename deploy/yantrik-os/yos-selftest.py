@@ -1121,6 +1121,53 @@ def main():
                 for svc in extra:
                     svc.close()
 
+            print("yos web: a client of the browser's surface (#477)")
+            browser_sock = sockets / "app-browser.sock"
+            asked_browser = []
+            page = {"url": "https://shop.example/cart", "title": "Cart", "tab": "1a2b3c4d",
+                    "scroll": [0, 0], "page": [1280, 2400], "viewport": [1280, 800], "below": 7,
+                    "elements": [
+                        {"ref": "e1", "role": "heading", "name": "Your cart", "context": True, "level": 1},
+                        {"ref": "e4", "role": "textbox", "name": "Coupon", "value": "SAVE10"},
+                        {"ref": "e7", "role": "link", "name": "Keep shopping",
+                         "href": "https://shop.example/aisles"},
+                        {"ref": "e9", "role": "button", "name": "Place order", "commitment": "order"},
+                        {"ref": "e10", "role": "alert", "name": "Coupon applied", "context": True}]}
+
+            def browser_reply(_s, asked):
+                if asked["method"] != "app.act":
+                    return {"app": "browser", "summary": "Browser", "state": {}, "actions": []}
+                asked_browser.append(asked["params"])
+                action = asked["params"]["action"]
+                if action == "read":
+                    return {"accepted": True, "settled": True, "summary": "Browser", "result": page}
+                return {"accepted": True, "settled": True, "summary": "Browser",
+                        "result": {"did": "clicked button \"Apply\" (e12)", "settled_in": 0.4,
+                                   "appeared": ["Coupon applied"], "url": page["url"], "title": "Cart"}}
+            fake_browser = FakeService(browser_sock, browser_reply)
+            fake_browser.start()
+            try:
+                out, err, code = run(lambda: yos.cmd_web([]))
+                check("yos web reads the page through the surface",
+                      asked_browser and asked_browser[-1]["action"] == "read", asked_browser)
+                check("each thing is one line with its ref, the heading and alert in their place",
+                      '[e4] textbox "Coupon" = "SAVE10"' in out and "# Your cart" in out
+                      and "! Coupon applied" in out and "→ /aisles" in out and "7 more below" in out, out)
+                check("a commitment is marked, and the page is fenced as the site's",
+                      "⚠ commitment (order): commit asks the person" in out
+                      and "--- page begins" in out and "--- page ends ---" in out, out)
+                out, err, code = run(lambda: yos.cmd_web(["click", "12"]))
+                check("yos web click 12 presses ref e12, and says what it did and what appeared",
+                      asked_browser[-1] == {"action": "click", "args": {"ref": "e12"}}
+                      and 'Clicked button "Apply" (e12).' in out and 'appeared: "Coupon applied"' in out,
+                      (asked_browser[-1], out))
+                out, err, code = run(lambda: yos.cmd_web(["commit", "e9", "Place", "order", "shop.example"]))
+                check("yos web commit carries the label and the site the person will be shown",
+                      asked_browser[-1]["args"] == {"ref": "e9", "label": "Place order", "site": "shop.example"},
+                      asked_browser[-1])
+            finally:
+                fake_browser.close()
+
             print("yos ls, with a desktop that lists what it can open")
             listing = [
                 {"name": "howdy", "opens": "app", "describe_as": "howdy", "running": True,
