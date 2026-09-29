@@ -167,7 +167,9 @@ fn close_door_in(dir: &Path, closed: bool, minds: u32) -> std::io::Result<usize>
             continue;
         }
         let mode = s.st_mode as u32 & 0o777;
-        let want = if closed && mode != SOCKET_CLOSED {
+        // Closing takes only what the group was given (its write, which connect needs), so a
+        // socket that never let the group in is not changed, and so not widened on opening.
+        let want = if closed && mode & 0o020 != 0 {
             SOCKET_CLOSED
         } else if !closed && mode == SOCKET_CLOSED {
             SOCKET_OPEN
@@ -274,18 +276,16 @@ mod tests {
         std::fs::write(&file, "x").unwrap();
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o640)).unwrap();
 
-        assert_eq!(close_door_in(&dir, true, gid).unwrap(), 2);
-        assert_eq!((mode(&a), mode(&b)), (SOCKET_CLOSED, SOCKET_CLOSED));
+        assert_eq!(close_door_in(&dir, true, gid).unwrap(), 1);
+        assert_eq!(mode(&a), SOCKET_CLOSED);
+        assert_eq!(mode(&b), 0o640, "a socket that never let the group connect is left as it is");
         assert_eq!(mode(&file), 0o640, "only sockets");
         assert_eq!(mode(&dir), 0o2750, "the directory is never changed: its setgid must survive");
         assert_eq!(close_door_in(&dir, true, gid).unwrap(), 0, "closing twice changes nothing");
 
-        assert_eq!(close_door_in(&dir, false, gid).unwrap(), 2);
-        assert_eq!((mode(&a), mode(&b)), (SOCKET_OPEN, SOCKET_OPEN));
-        // A socket that is not at the closed mode is not the door's to open.
-        std::fs::set_permissions(&b, std::fs::Permissions::from_mode(0o640)).unwrap();
-        assert_eq!(close_door_in(&dir, false, gid).unwrap(), 0);
-        assert_eq!(mode(&b), 0o640);
+        assert_eq!(close_door_in(&dir, false, gid).unwrap(), 1);
+        assert_eq!(mode(&a), SOCKET_OPEN);
+        assert_eq!(mode(&b), 0o640, "a Private-mode cycle widens nothing");
 
         // Not the door (wrong group, wrong mode, a link to it) and nothing is touched.
         assert!(close_door_in(&dir, true, gid.wrapping_add(1)).is_err());
