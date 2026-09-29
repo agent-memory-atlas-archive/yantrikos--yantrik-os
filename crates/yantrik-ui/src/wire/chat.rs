@@ -171,6 +171,15 @@ fn dispatch(
         .then(|| crate::agents::store().read(|s| crate::agents::handover::for_turn(s.agents(), &active, crate::agents::model::now())))
         .flatten();
 
+    // Private mode: no mind is talked to, the built-in companion included. Not a word goes to
+    // one; the desktop says so under the person's own words, with the way out as the reply's
+    // link (`private_mode::LEAVE_LINK`).
+    if crate::private_mode::is_on() {
+        let mind = host.list().into_iter().find(|e| e.id == active).map(|e| e.name).unwrap_or_else(|| active.clone());
+        streaming::offer(ui_weak, Some(text), &crate::private_mode::lens_offer(&mind), crate::private_mode::LEAVE_LINK);
+        return;
+    }
+
     // The builtin keeps its own path: it carries tool calls, the __REPLACE__ convention and the
     // job board, none of which the harness protocol has or needs.
     if active == super::harness::BUILTIN_ID {

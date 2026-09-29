@@ -115,6 +115,20 @@ pub fn say(ui_weak: &slint::Weak<App>, asked: Option<&str>, role: &str, said: &s
     });
 }
 
+/// `say` as the desktop, with a link under the words: `link` is what the bubble's link carries
+/// (a run id, or `private_mode::LEAVE_LINK`).
+pub fn offer(ui_weak: &slint::Weak<App>, asked: Option<&str>, said: &str, link: &str) {
+    say(ui_weak, asked, "desktop", said);
+    let Some(ui) = ui_weak.upgrade() else { return };
+    let messages = ui.get_messages();
+    let Some(model) = messages.as_any().downcast_ref::<VecModel<MessageData>>() else { return };
+    let last = model.row_count().saturating_sub(1);
+    if let Some(mut row) = model.row_data(last) {
+        row.run = link.into();
+        model.set_row_data(last, row);
+    }
+}
+
 /// Stream an answer into a bubble of its own, under a question already in the conversation.
 pub fn stream_answer(ui_weak: slint::Weak<App>, token_rx: crossbeam_channel::Receiver<String>, streams: &Streams) {
     let Some(row) = open_bubbles(&ui_weak, None) else {
@@ -198,7 +212,11 @@ fn pump(
                 done = true;
                 break;
             }
-            // The run this reply was: its link, not its text.
+            // The run this reply was: its link, not its text. Never the desktop's own offer to
+            // leave Private mode, which only the desktop puts on a bubble (`streaming::offer`).
+            if token.strip_prefix(RUN_MARK) == Some(crate::private_mode::LEAVE_LINK) {
+                continue;
+            }
             if let Some(run) = token.strip_prefix(RUN_MARK) {
                 if let Some(ui) = ui_weak.upgrade() {
                     let messages = ui.get_messages();

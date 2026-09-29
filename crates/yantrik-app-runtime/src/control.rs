@@ -543,6 +543,8 @@ impl ControlRpc {
 
             "app.act" => {
                 let call = ActCall::parse(&params)?;
+                // Private mode first: while it is on, no agent acts at all.
+                call.require_not_private(who)?;
                 // A mind account's call acts only as a live agent (#411), before anything else.
                 call.require_standing(&self.app_id, who)?;
                 // Agents catalog: the calling agent's reach (`yantrik_ipc_transport::reach`) —

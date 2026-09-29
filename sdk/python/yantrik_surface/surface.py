@@ -34,7 +34,7 @@ import threading
 import types
 import typing
 
-from . import gate, reach, wire
+from . import gate, mind_door, privacy, reach, wire
 
 PROTOCOL = 1
 SETTLES = ("on return", "later")
@@ -730,6 +730,9 @@ class Surface:
             args = dict(args)
         # Lifted off before anything reads `args` — the grant below is bound to them.
         token = gate.agent_token_of(params, args)
+        # Private mode first: while it is on, no agent acts at all — a token, or the mind account.
+        if (token or (peer is not None and mind_door.is_mind(peer.uid))) and privacy.is_private():
+            raise wire.RpcError(wire.RPC_INVALID_PARAMS, privacy.REFUSAL)
         # A caller the kernel says is the mind account acts only as a live agent (#411), before
         # anything else is decided about its call.
         reach.require_standing(self.app_id, name, token, peer, self._ask_shell)

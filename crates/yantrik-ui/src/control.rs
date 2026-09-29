@@ -440,7 +440,16 @@ pub fn publish(
     // The Allow and Deny buttons, before anything can be asked for. They are Slint callbacks
     // and nothing else: granting is a click, never an action on this surface. See
     // `control_approvals`.
-    crate::control_approvals::wire(ui);
+    crate::control_approvals::wire(ui, ctx.bridge.clone());
+
+    // Private mode, as `main` read it back before anything started: the chip says so from the
+    // first frame, and the desktop is made what it says — agents frozen, turns paused, nothing
+    // recorded. Agents are refused by the file itself (`yantrik_ipc_transport::privacy`) from
+    // boot. And the file is kept the shell's word from here on.
+    let private = crate::private_mode::is_on();
+    ui.set_private_mode(private);
+    crate::private_mode::enforce(private, &ctx.bridge);
+    crate::private_mode::watch();
 
     // The catalogue, not a copy of it. The control surface answers from the same live list
     // the launcher shows, so an app installed a moment ago is launchable by name without
@@ -929,7 +938,10 @@ pub fn publish(
                         screen,
                     ),
                 )
-                .with("incognito", ui.get_settings_incognito_mode())
+                .with("incognito", ui.get_settings_incognito_mode() || crate::private_mode::is_on())
+                // Private mode: only the person ever reads this as true. While it is on, an agent
+                // is refused before describe runs (`yantrik_ipc_transport::privacy`).
+                .with("private", crate::private_mode::is_on())
                 .with("settings", serde_json::json!({"category":ui.get_settings_category(),"query":ui.get_settings_query().to_string(),"dark":ui.get_settings_dark_mode(),"accent":ui.get_settings_accent_color().to_string(),"wallpaper":ui.get_wallpaper_path().to_string(),"save_error":ui.get_settings_save_error(),"save_status":ui.get_settings_save_status().to_string(),"auto_lock_secs":ui.get_settings_auto_lock_secs(),"auto_lock_available":ui.get_settings_auto_lock_available()}))
         }
     };

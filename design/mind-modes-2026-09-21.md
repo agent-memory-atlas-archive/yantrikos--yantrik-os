@@ -372,9 +372,38 @@ every row a fixed height:
 | *(with no session rules)* "See what it did without asking" (28px) | 324…352 | **(1098, 338)** |
 | *(with no session rules)* separator | 360 | — |
 | *(with no session rules)* "Apps it opens go … in Mind View / on my desktop" (28px, #239) | 369…397 | **(1098, 383)** |
+| *(with no session rules)* separator | 405 | — |
+| *(with no session rules)* **Private** (44px, 2026-09-29) | 414…458 | **(1098, 436)** |
 
-The Mind View row is last so that no row above it moved when it was added. It also moves down
-while the audit list is open, by that list's height.
+The Mind View row was last so that no row above it moved when it was added, and Private came
+after it for the same reason. Both move down while the audit list is open, by that list's height.
+
+**Private** is not a mode. While it is on, the Mind is off whatever the mode says: the mind door
+and every surface's dispatch refuse agents (`yantrik_ipc_transport::privacy`), the Lens sends
+nothing to an attached mind and offers "Leave Private mode →" instead, and the shell records
+nothing (companion incognito, clipboard, activity feed). It lasts until the person turns it off,
+through restarts (`~/.config/yantrik/privacy.json`). Like the modes, only a pointer changes it:
+`private_mode::person_set_private` is called from `control_approvals::wire` alone, and no action
+named for privacy may be published. The chip reads "Private" while it is on.
+
+What turning it on does (`private_mode::enforce`), after the security review of 29 September:
+every turn to every mind is refused by the harness host (the built-in companion included, and a
+refused turn is never delivered later); the agents that run as the person are frozen by the
+cgroup freezer (`private_freeze`: the harness manifests' units and `hermes-gateway`), their
+commands killed and the cards waiting on their behalf withdrawn; the companion's worker does
+nothing of its own accord (no thinking, focus tracking, recipes, recording) and its socket answers
+no one; the event log, clipboard, activity feed and screen watcher record nothing. The shell reads
+the file back before anything starts, and puts it back within two seconds if anything else
+changes it, telling the person.
+
+What it does not do, said plainly:
+- A harness the person started by hand, outside the desktop's units, is not frozen: the harness
+  socket refuses it, but its own shell and file tools are the person's.
+- Something running as the person can press the Private row with a synthetic pointer, as it can
+  any row of this menu. The agents that could are frozen while private.
+- The Mind's process keeps running, boxed in its own account; the desktop stops serving it, and
+  every door request answers PRIVATE. What it already remembers stays with it.
+- Apps keep their own records (browser history, notification history, documents).
 
 `x = 1098` is the horizontal centre of the content column (`940 + 316/2`); any `x` in 940…1256
 lands on the same row.

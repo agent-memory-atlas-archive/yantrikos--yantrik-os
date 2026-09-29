@@ -23,6 +23,7 @@ export struct MessageData {
     blocks: [ContentBlock],
     // The run this reply was, when the turn did work (`mind:main#n`): chat and agent work are
     // different things, and a reply that did work links to its run in Agents. "" for talk.
+    // `private:leave` is the desktop's offer, while private, to leave Private mode.
     run: string,
 }
 
@@ -140,7 +141,7 @@ export component MessageBubble inherits Rectangle {
                     clicked => { root.open-run(data.run); }
                     run-link := Text {
                         y: 4px;
-                        text: "Open the run →";
+                        text: data.run == "private:leave" ? "Leave Private mode →" : "Open the run →";
                         color: Theme.cyan-light;
                         font-size: Theme.font-small;
                         font-weight: 600;

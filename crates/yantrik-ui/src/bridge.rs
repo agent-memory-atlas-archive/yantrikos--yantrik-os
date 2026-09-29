@@ -305,6 +305,9 @@ pub struct CompanionBridge {
     judge: Arc<std::sync::Mutex<yantrik_companion::config::JudgeConfig>>,
     /// The decision model in use, asked on the caller's thread (`yantrik_companion::decisions`).
     decisions: yantrik_companion::decisions::Decisions,
+    /// The Settings incognito switch, and Private mode: the companion is incognito while either is on.
+    incognito_setting: AtomicBool,
+    private: AtomicBool,
 }
 
 /// A companion you can use from another thread.
@@ -601,6 +604,12 @@ impl CompanionBridge {
         let bus_w = event_bus.clone();
 
         let judge = Arc::new(std::sync::Mutex::new(config.judge.clone()));
+        // Private mode is read before the worker exists (`private_mode::load` in main), so the
+        // first command the worker takes is incognito, ahead of anything it could record.
+        let private = crate::private_mode::is_on();
+        if private {
+            let _ = cmd_tx.send(CompanionCommand::SetIncognitoMode { enabled: true });
+        }
         let decisions = yantrik_companion::decisions::Decisions::default();
         let decisions_w = decisions.clone();
         let self_tx = cmd_tx.clone();
@@ -619,6 +628,8 @@ impl CompanionBridge {
             event_bus,
             judge,
             decisions,
+            incognito_setting: AtomicBool::new(false),
+            private: AtomicBool::new(private),
         }
     }
 
@@ -758,8 +769,22 @@ impl CompanionBridge {
         self.decisions.test()
     }
 
-    /// Toggle incognito mode (no data persistence while active).
+    /// Toggle incognito mode (no data persistence while active): the person's Settings switch.
+    /// The companion is incognito while this or Private mode is on.
     pub fn set_incognito(&self, enabled: bool) {
+        self.incognito_setting.store(enabled, Ordering::SeqCst);
+        self.send_incognito();
+    }
+
+    /// Private mode came on or went off (`crate::private_mode`): the companion is incognito for
+    /// as long as it is on, and back to the Settings switch after.
+    pub fn set_private(&self, on: bool) {
+        self.private.store(on, Ordering::SeqCst);
+        self.send_incognito();
+    }
+
+    fn send_incognito(&self) {
+        let enabled = self.incognito_setting.load(Ordering::SeqCst) || self.private.load(Ordering::SeqCst);
         let _ = self.cmd_tx.send(CompanionCommand::SetIncognitoMode { enabled });
     }
 
@@ -870,6 +895,42 @@ fn agreed_roles(
 fn signal_recipe(cmd_tx: &Sender<CompanionCommand>, queued: &mut std::collections::HashSet<String>, recipe_id: String) {
     if queued.insert(recipe_id.clone()) {
         let _ = cmd_tx.send(CompanionCommand::ProcessRecipeStep { recipe_id });
+    }
+}
+
+/// Whether the worker drops `cmd` while the person is in Private mode, answering whoever waits on
+/// it that nothing was done. Everything the person does not ask for directly, and every question
+/// to the companion, is dropped; the switches (incognito, the decision model, the provider) and
+/// the reads the shell's own screens need are not.
+fn paused_while_private(cmd: &CompanionCommand, recipe_signals: &mut std::collections::HashSet<String>) -> bool {
+    const SAID: &str = "Private mode is on: the companion is off until you turn it off.";
+    match cmd {
+        CompanionCommand::ProcessRecipeStep { recipe_id } => {
+            recipe_signals.remove(recipe_id);
+            true
+        }
+        CompanionCommand::Think { .. }
+        | CompanionCommand::ProcessNextTask
+        | CompanionCommand::SetSystemContext { .. }
+        | CompanionCommand::RecordSystemEvent { .. }
+        | CompanionCommand::RecordSnapshot { .. }
+        | CompanionCommand::RecordIssue { .. }
+        | CompanionCommand::ScoreConversationTurn { .. } => true,
+        CompanionCommand::StartRecipe { reply_tx, .. } => {
+            if let Some(tx) = reply_tx {
+                let _ = tx.send(Err(SAID.to_string()));
+            }
+            true
+        }
+        CompanionCommand::SendMessage { token_tx, model, .. } => {
+            let _ = token_tx.send(format!("__REPLACE__{SAID}"));
+            if let Some(tx) = model {
+                let _ = tx.send(false);
+            }
+            let _ = token_tx.send("__DONE__".to_string());
+            true
+        }
+        _ => false,
     }
 }
 
@@ -1040,7 +1101,7 @@ fn worker_loop(
         }
         // The mind panel: the worker has reached its loop, so the memory count it pushes is a count.
         crate::mind_panel::worker_up();
-        if recipe_clock.elapsed() >= recipe_tick {
+        if recipe_clock.elapsed() >= recipe_tick && !crate::private_mode::is_on() {
             recipe_clock = std::time::Instant::now();
             let due = yantrik_companion::recipe_executor::due(&companion.db.conn());
             for rid in due {
@@ -1050,6 +1111,16 @@ fn worker_loop(
         let received = cmd_rx.recv_timeout(recipe_tick.saturating_sub(recipe_clock.elapsed()));
         if matches!(received, Err(crossbeam_channel::RecvTimeoutError::Timeout)) {
             continue;
+        }
+        // Private mode: the companion does nothing of its own accord and hears nothing about the
+        // person. It does not think, look at the focused window, run recipes, record what the
+        // system saw, or answer anyone; what was dropped is not done later.
+        if crate::private_mode::is_on() {
+            if let Ok(cmd) = &received {
+                if paused_while_private(cmd, &mut recipe_signals) {
+                    continue;
+                }
+            }
         }
         match received {
             Ok(CompanionCommand::RefreshRecipes) => recipes_dirty = true,

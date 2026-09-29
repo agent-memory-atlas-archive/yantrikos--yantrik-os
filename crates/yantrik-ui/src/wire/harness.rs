@@ -590,13 +590,20 @@ impl yantrik_ipc_transport::server::ServiceHandler for HarnessService {
         // 0 is what the transport writes when the kernel gave no pid.
         let pid = peer.and_then(|p| u32::try_from(p.pid).ok()).filter(|pid| *pid > 0);
         let uid = peer.map(|p| p.uid);
-        let refused = first_party_claim_refused(
-            method,
-            &params,
-            uid,
-            self.door_served,
-            yantrik_ipc_transport::mind_door::is_mind,
-        );
+        // Private mode: every harness is an agent, and no agent is served while it is on — at the
+        // door (where the transport already refuses) and on the person's own socket, where a
+        // harness running as the person attaches and polls.
+        let refused = if crate::private_mode::is_on() {
+            Some(yantrik_ipc_transport::privacy::REFUSAL.to_string())
+        } else {
+            first_party_claim_refused(
+                method,
+                &params,
+                uid,
+                self.door_served,
+                yantrik_ipc_transport::mind_door::is_mind,
+            )
+        };
         let answer = match refused {
             Some(why) => Err(why),
             None => self.host.handle_from(method, &params, pid, uid),

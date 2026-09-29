@@ -2744,6 +2744,39 @@ def going_round(tool_name, arguments, text, is_error):
     return "%s\n\n[From the desktop: %s]" % (text, said)
 
 
+# ── Private mode ─────────────────────────────────────────────────────────────────────────────
+#
+# While the person has it on, no agent sees or does anything on this desktop. The sockets refuse
+# an agent's token and the mind account themselves (`yantrik_ipc_transport::privacy`); this is for
+# what they cannot tell apart — an agent's harness running as the person, reading describe with
+# no token. The file and the sentence are the transport's: absent is off, anything but a clear
+# `"private": false` is on.
+PRIVACY_REFUSAL = ("PRIVATE: the person has turned on Private mode. Nothing on this desktop is shown "
+                   "to agents or done for them until they turn it off. Nothing was run.")
+
+
+def private_now():
+    home = os.environ.get("HOME") or os.environ.get("USERPROFILE") or ""
+    if not os.path.isabs(home):
+        # Never "." (the transport's rule): an unknown home is taken to be private.
+        try:
+            import pwd
+            home = pwd.getpwuid(os.getuid()).pw_dir
+        except (ImportError, KeyError, OSError):
+            return True
+        if not os.path.isabs(home):
+            return True
+    try:
+        with open(os.path.join(home, ".config", "yantrik", "privacy.json"), encoding="utf-8") as f:
+            value = json.loads(f.read())
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError, UnicodeDecodeError):
+        return True
+    flag = value.get("private", True) if isinstance(value, dict) else True
+    return flag if isinstance(flag, bool) else True
+
+
 def serve_call(msg_id, tool, arguments):
     """Run one tools/call and answer it. The body of a worker thread; must not raise.
 
@@ -2753,6 +2786,10 @@ def serve_call(msg_id, tool, arguments):
     Nothing this returns, in either place, repeats the agent token.
     """
     meta = None
+    if private_now():
+        # Every caller of this bridge is an agent: nothing runs while the person is private.
+        reply(msg_id, {"content": [{"type": "text", "text": PRIVACY_REFUSAL}], "isError": True})
+        return
     try:
         text, is_error, meta = call_tool(tool, arguments)
     except Exception as e:  # a malformed argument must not take the server down
