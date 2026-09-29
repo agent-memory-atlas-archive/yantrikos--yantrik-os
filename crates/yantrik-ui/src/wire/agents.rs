@@ -2007,6 +2007,7 @@ mod tests {
             explained: String::new(),
             warning: String::new(),
             said: String::new(),
+            caller_says: String::new(),
             can_session: true,
             status: crate::approvals::Status::Pending,
             record: String::new(),

@@ -52,6 +52,7 @@ fn card(summary: &str) -> ApprovalRequest {
         action: "run_recipe".into(),
         summary: summary.into(),
         purpose: RUN_RECIPE_PURPOSE.into(),
+        caller_says: "".into(),
         grade: "sensitive".into(),
         args: lines(&[
             "recipe: builtin_formation_council",

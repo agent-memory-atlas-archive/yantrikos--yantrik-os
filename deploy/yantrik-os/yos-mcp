@@ -1622,8 +1622,12 @@ def action_detail(app, action):
         ungraded_because(app, action, (p.stderr or "").strip() if p is not None else
                          "the desktop did not answer in time")
         return None, ""
-    lines = (p.stdout or "").splitlines()
-    offered = re.findall(r"^\s*act:\s*([A-Za-z0-9_]+)\(", p.stdout or "", re.M)
+    # `split("\n")`, not `splitlines()`: the latter also breaks on U+2028, U+2029 and \x85,
+    # which app text in the state may carry raw — and a line it made could read as an action.
+    # And `^  act:` exactly, the two-space indent `yos` gives an action and nothing else
+    # (re-review of #504).
+    lines = (p.stdout or "").split("\n")
+    offered = re.findall(r"^  act: ([A-Za-z0-9_]+)\(", p.stdout or "", re.M)
     if offered:
         ungraded_because(app, action,
                          "%s is open and offers no action called %s. It offers: %s"
@@ -1640,7 +1644,7 @@ def action_detail(app, action):
                          "%s is not open: only its background service answered, which "
                          "reports what is stored and takes no actions" % app)
     for i, line in enumerate(lines):
-        m = re.match(r"^\s*act:\s*([A-Za-z0-9_]+)\([^)]*\)\s*\[([a-z]+),", line)
+        m = re.match(r"^  act: ([A-Za-z0-9_]+)\([^)]*\)  \[([a-z]+),", line)
         if not m or m.group(1) != action:
             continue
         said = []

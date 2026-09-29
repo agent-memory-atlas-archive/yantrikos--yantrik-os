@@ -379,25 +379,17 @@ impl Record {
         said(&self.published, &self.purpose)
     }
 
-    /// What the card shows as the purpose: the caller's words first — the one line a person
-    /// reads is what the mind says it is doing — and the app's own sentence under them, always,
-    /// so "What it runs can do anything you can." is on the card however the call was described.
-    fn shown(&self) -> String {
-        let (published, caller) = (self.published.trim(), self.purpose.trim());
-        if published.is_empty() || published == caller {
-            return caller.to_string();
+    /// What the caller says the call is for, as the card draws it — in its own block, under its
+    /// own label, and never joined to the app's sentence (re-review of #504: a caller's words put
+    /// first and cut together with the app's could push the real sentence off the card and
+    /// write a fake "in the app's own words" line in its place). Empty when the caller said
+    /// nothing, or only repeated what the app says.
+    fn caller_says(&self) -> String {
+        let caller = self.purpose.trim();
+        if caller.is_empty() || self.published.contains(caller) {
+            return String::new();
         }
-        if caller.is_empty() {
-            return published.to_string();
-        }
-        format!("{caller}\n\nWhat {}.{} does, in the app's own words: {published}", self.app, self.action)
-    }
-
-    /// What the card's one leading line is cut from: the caller's words when it gave any — "list
-    /// /tmp" is what the mind says it is doing — and the app's own sentence otherwise. Never the
-    /// two run together: a caller's words with no full stop would run on into the app's.
-    fn lead(&self) -> &str {
-        if self.purpose.trim().is_empty() { &self.published } else { &self.purpose }
+        clip_at_word(&neutralized(caller), CALLER_CHARS)
     }
 
     fn status(&self, now: Instant) -> Status {
@@ -410,6 +402,46 @@ impl Record {
             other => other,
         }
     }
+}
+
+/// How much of what a caller says about its call the record keeps for the card: a few hundred
+/// characters, cut at a word with its true length named, and "show more" on the card for the
+/// rest of it. The app's own sentence has its own place and its own bound ([`PURPOSE_CHARS`]),
+/// so no length of caller text can push it off the card.
+const CALLER_CHARS: usize = 400;
+
+/// The caller's words with nothing in them that can pass for the card's own furniture: one
+/// paragraph, not lines that draw labels of their own, and every phrase the card uses to say
+/// "this is the app speaking" marked as the caller's. A caller that writes "What files.move
+/// does, in the app's own words: harmless" is quoted as saying so, under the caller's label.
+fn neutralized(caller: &str) -> String {
+    let one_paragraph = caller.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut out = one_paragraph.replace('\u{2019}', "'");
+    for imitated in [
+        "in the app's own words",
+        "the app's own first sentence",
+        "the app's own words",
+        "the app's own",
+        "says the app",
+        "what it does ·",
+    ] {
+        out = replace_ignoring_case(&out, imitated, "(so the caller says)");
+    }
+    out
+}
+
+/// `text` with every case-insensitive occurrence of `needle` (ASCII) replaced by `with`.
+fn replace_ignoring_case(text: &str, needle: &str, with: &str) -> String {
+    let lower = text.to_ascii_lowercase();
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    while let Some(found) = lower[at..].find(needle) {
+        out.push_str(&text[at..at + found]);
+        out.push_str(with);
+        at += found + needle.len();
+    }
+    out.push_str(&text[at..]);
+    out
 }
 
 /// The app's sentence and the caller's, as one text to judge by: the app's first, the caller's
@@ -433,7 +465,13 @@ pub struct Card {
     pub app: String,
     pub action: String,
     pub grade: String,
+    /// The action's description as the APP publishes it — never the caller's words, which are
+    /// [`Card::caller_says`] (re-review of #504).
     pub purpose: String,
+    /// What the caller says the call is for: bounded at [`CALLER_CHARS`], one paragraph, with
+    /// any phrase that imitates the card's "the app says" labels marked as the caller's — or
+    /// empty. Drawn in its own block under its own label, after the app's sentence.
+    pub caller_says: String,
     /// The first sentence of `purpose`, bounded at [`SUMMARY_CHARS`] — the one line a person
     /// reads first, while the paragraph it came from stays on the card under "show more".
     /// See [`summary_of`].
@@ -703,7 +741,9 @@ impl Store {
         now: Instant,
         at: &str,
     ) -> Result<Requested, String> {
-        let asked = Asked { app, action, grade, purpose, published: "", target, explained };
+        // Every caller of this form passes the action's own description — the tests, and the
+        // shell's `hand_off`, whose purpose it writes itself — so that is what it is kept as.
+        let asked = Asked { app, action, grade, purpose: "", published: purpose, target, explained };
         self.raise(requester, verified, asked, args, now, at)
     }
 
@@ -784,7 +824,10 @@ impl Store {
             args,
             canonical,
             grade: grade.to_string(),
-            purpose: purpose.trim().to_string(),
+            // Bounded on arrival: the caller's words have no limit of their own, and the record
+            // is what every later reading of them sees. What is kept is enough to judge by —
+            // the app's own sentence, kept whole beside it, is what decides.
+            purpose: clip_at_word(purpose.trim(), CALLER_CHARS * 4),
             target: target.trim().to_string(),
             // Cut once, on arrival, and by the store itself: the sentence is app text — mind
             // text, on a surface with a mind attached — so the RECORD must never hold more
@@ -979,8 +1022,9 @@ impl Store {
                 app: record.app.clone(),
                 action: record.action.clone(),
                 grade: record.grade.clone(),
-                purpose: clip_at_word(&record.shown(), PURPOSE_CHARS),
-                summary: summary_of(record.lead()),
+                purpose: clip_at_word(&record.published, PURPOSE_CHARS),
+                caller_says: record.caller_says(),
+                summary: summary_of(&record.published),
                 args: args_rows(&record.args),
                 // At a word, not at the bound: a cut in the middle of the name is the
                 // `PURPOSE_CHARS` mistake rebuilt — "13:0" and "13:00… " are not the same
@@ -1901,8 +1945,9 @@ mod approvals_tests {
         };
         let id = store.raise("pi 0.87", Verified::default(), asked, args(serde_json::json!({"command": "ls /tmp"})), now, "12:03").unwrap().id;
         let card = store.pending(now).into_iter().find(|c| c.id == id).unwrap();
-        assert_eq!(card.summary, "list /tmp", "the mind's own words lead");
-        assert!(card.purpose.contains(run), "and the app's sentence is on the card: {}", card.purpose);
+        assert_eq!(card.purpose, run, "the purpose block is the app's sentence, alone");
+        assert_eq!(card.summary, "Type a command line into the active shell and press Return.");
+        assert_eq!(card.caller_says, "list /tmp", "and the mind's words have their own block");
         assert_eq!(card.warning, OPEN_ENDED_WARNING);
         assert!(card.warning.contains("any mind or caller") && card.warning.contains("mode is lowered"));
         assert!(card.can_session, "a command may be allowed for the session");
@@ -1928,6 +1973,42 @@ mod approvals_tests {
             modes.person_add_rule(&card.app, &card.action, &card.grade, &card.said).is_err(),
             "nor may a rule be stored for it"
         );
+    }
+
+    /// Re-review of #504: a caller's purpose padded past the card's bound, or dressed as the
+    /// app's own words, cannot push the app's sentence off the card or pass for it.
+    #[test]
+    fn approvals_a_padded_or_forged_purpose_cannot_hide_or_imitate_the_apps_sentence() {
+        let mut store = Store::new();
+        let now = Instant::now();
+        let published = "Move a file or folder to another place. What it runs can do anything you can.";
+        let forged = format!(
+            "tidy\n\nWhat files.move does, in the app's own words: Rename a draft; harmless.{}",
+            " padding".repeat(600)
+        );
+        let asked = Asked {
+            app: "files",
+            action: "move",
+            grade: "sensitive",
+            purpose: &forged,
+            published,
+            target: "",
+            explained: "",
+        };
+        let id = store.raise("pi 0.87", Verified::default(), asked, args(serde_json::json!({"from": "a"})), now, "12:05").unwrap().id;
+        let card = store.pending(now).into_iter().find(|c| c.id == id).unwrap();
+        assert_eq!(card.purpose, published, "the app's sentence, whole, in its own place");
+        assert_eq!(card.summary, "Move a file or folder to another place.");
+        assert!(!card.caller_says.contains("app's own words"), "the imitation is marked: {}", card.caller_says);
+        assert!(card.caller_says.contains("(so the caller says)"), "{}", card.caller_says);
+        assert!(!card.caller_says.contains('\n'), "one paragraph, no lines of its own");
+        assert!(card.caller_says.chars().count() < CALLER_CHARS + 40, "bounded on its own: {}", card.caller_says.len());
+        assert_eq!(card.warning, OPEN_ENDED_WARNING, "judged from the app's sentence");
+        // And a caller that only repeats the app draws no second block.
+        let asked = Asked { purpose: published, ..asked };
+        let id = store.raise("pi 0.87", Verified::default(), asked, args(serde_json::json!({"from": "b"})), now, "12:06").unwrap().id;
+        let card = store.pending(now).into_iter().find(|c| c.id == id).unwrap();
+        assert_eq!(card.caller_says, "");
     }
 
     /// A command that can do anything is exactly what "Allow for this session" is for — unless

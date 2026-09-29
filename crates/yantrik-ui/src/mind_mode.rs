@@ -650,6 +650,22 @@ impl Modes {
         grade: &str,
         purpose: &str,
     ) -> Result<(), String> {
+        self.person_add_rule_at(app, action, grade, purpose, Instant::now())
+    }
+
+    /// [`Modes::person_add_rule`] at `now`. A bypass whose clock ran out a moment ago is folded
+    /// back first (re-review of #504): otherwise a rule added in that second was cleared by the
+    /// next tick's lapse — a person's "Allow for this session" silently undone a second later.
+    /// Folded first, the lapse clears the rules made before it, and this one stands.
+    pub(crate) fn person_add_rule_at(
+        &mut self,
+        app: &str,
+        action: &str,
+        grade: &str,
+        purpose: &str,
+        now: Instant,
+    ) -> Result<(), String> {
+        self.lapse(now);
         if !approvals::may_offer_session_rule(grade, purpose) {
             // The card does not draw this button for such an action, so reaching here means the
             // published grade or purpose changed between the paint and the press. Refuse rather
@@ -1020,7 +1036,10 @@ pub(crate) fn person_add_rule(
     grade: &str,
     purpose: &str,
 ) -> Result<(), String> {
-    locked().person_add_rule(app, action, grade, purpose)
+    let added = locked().person_add_rule(app, action, grade, purpose);
+    // Adding one may have folded a lapsed bypass back first, which clears the older rules.
+    audit_cleared();
+    added
 }
 
 /// **UI only.** See the module doc: the single caller is the ✕ beside a rule in the menu.
@@ -1647,6 +1666,26 @@ mod mind_mode_tests {
             cleared_sentence(&["terminal.run".to_string()], Mode::Ask),
             "cleared a session rule when the mode went down to Ask: terminal.run"
         );
+    }
+
+    /// Re-review of #504: a rule added in the second after a bypass ran out — before any tick
+    /// folded it back — stands. The lapse happens first and clears the rules made before it.
+    #[test]
+    fn mind_mode_a_rule_added_just_after_a_bypass_lapsed_stands() {
+        let now = Instant::now();
+        let mut modes = at(Mode::Ask);
+        modes.person_set_mode(Mode::Auto, Bypass::Hour, now, 0);
+        modes.person_add_rule("files", "move", "sensitive", "Move a file.").unwrap();
+        modes.person_set_mode(Mode::Bypass, Bypass::Minutes15, now, 0);
+        let after = now + Duration::from_secs(15 * 60 + 1);
+        modes
+            .person_add_rule_at("calendar", "move_event", "sensitive", "Move an event.", after)
+            .unwrap();
+        assert!(!modes.lapse(after + Duration::from_secs(1)), "the lapse already happened");
+        assert_eq!(modes.rules().len(), 1, "the new rule stands");
+        assert_eq!(modes.rules()[0].action, "move_event");
+        assert_eq!(modes.take_unaudited().len(), 1, "and the rule from before the bypass went");
+        assert_eq!(modes.take_lapse().map(|l| l.back_to), Some(Mode::Auto), "the lapse is still announced");
     }
 
     /// Where an action says both, cannot-be-undone wins: it asks every time, and no rule — the

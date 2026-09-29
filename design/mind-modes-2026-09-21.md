@@ -1367,8 +1367,14 @@ force for no second after the deadline — in the shell (`Modes::rules_at`) and 
 
 **The card says so** (security review of #504). A mind that asked for `terminal.run` with its own
 purpose — "list /tmp" — got a card showing only that, and a session button that then allowed any
-command. The card now keeps the app's published sentence beside the caller's words
-(`approvals::Asked::published`), shows it under them always, and reads the red warning, the offer
+command. The card now keeps the app's published sentence apart from the caller's words
+(`approvals::Asked::published`) and draws each in its own place under its own label: the app's
+first (the summary line and the paragraph, "says the app about the action"), then the caller's
+("says the caller about this call · nothing checks it"), bounded on its own at a few hundred
+characters with its own "show more", as one paragraph, with every phrase the card uses for the
+app's voice marked "(so the caller says)". The two are never joined: joined and cut together, a
+padded caller purpose pushed the app's sentence off the card and a forged "What files.move does, in
+the app's own words: harmless" line took its place (re-review of #504). It reads the red warning, the offer
 of "Allow for this session" and the rule check when it is pressed from the app's sentence (with the
 caller's, which can only add caution) — never from a caller's paraphrase, and never from a purpose
 cut to fit the card. So a caller that leaves "cannot be undone" out of its purpose is not offered,
@@ -1377,7 +1383,11 @@ and cannot store, a standing yes for an irreversible action. The warning for an 
 this desktop run any command through it, until the shell restarts or the mode is lowered."* The
 session button's own caption reads "covers every mind and caller, until restart or the mode is
 lowered". The bridge reads the whole description, not the line under the signature, and `yos`
-indents every line of one that runs to several.
+indents every line of one that runs to several. It splits `yos`'s text on the newline alone (not
+`splitlines()`, which also breaks on U+2028, U+2029 and `\x85`) and reads an action only from a
+line indented exactly `  act: `; `yos` prints app text — a summary, an argument's description, a
+state value — with no raw line break in it, so none can plant an `act:` line of its own. A rule
+added in the second after a bypass ran out stands: `person_add_rule` folds the lapse first.
 
 **The copy.** `Mode::meaning` for `auto` and `bypass` says "once per session before running
 commands"; the confirmation's Bypass row reads "Asks before what can't be undone; commands once."

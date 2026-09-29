@@ -1686,6 +1686,8 @@ pub(crate) fn row_for(card: Card) -> crate::ApprovalRequest {
         } else {
             card.purpose.into()
         },
+        // The caller's words, apart from the app's and labelled as the caller's (#504).
+        caller_says: card.caller_says.into(),
         // The first sentence of that description, and the line the card leads with (#218):
         // the whole paragraph is for the person who wants it, under "show more", not the first
         // thing everybody has to read. Empty when the app publishes nothing — the card hides
@@ -2543,6 +2545,7 @@ mod control_approvals_tests {
                 explained: String::new(),
                 warning: "The app says this cannot be undone.".into(),
                 said: String::new(),
+                caller_says: String::new(),
                 can_session: false,
                 status: Status::Pending,
                 record: String::new(),
@@ -2741,6 +2744,7 @@ mod control_approvals_tests {
                 explained: String::new(),
                 warning: String::new(),
                 said: String::new(),
+                caller_says: String::new(),
                 can_session: false,
                 status,
                 record: String::new(),
@@ -3204,6 +3208,7 @@ mod target_line_tests {
             explained: sentence.clone(),
             warning: String::new(),
             said: String::new(),
+            caller_says: String::new(),
             can_session: false,
             status: Status::Pending,
             record: String::new(),
