@@ -86,7 +86,7 @@ impl AppContext {
         ui.global::<ThemeMode>().set_dark(user_settings.dark_mode);
         ui.set_settings_dark_mode(user_settings.dark_mode);
         ui.set_settings_tool_permission(user_settings.tool_permission.clone().into());
-        ui.set_settings_auto_lock_secs(user_settings.auto_lock_secs);
+        ui.set_settings_auto_lock_secs(crate::wire::settings::auto_lock_choice(user_settings.auto_lock_secs));
         // The only place do-not-disturb comes back after a restart. Everything that suppresses a
         // toast reads `dnd_mode` off the window (see `wire::notifications::maybe_toast`), so this
         // one line is what makes "held until I say otherwise" mean anything across a reboot.
@@ -147,6 +147,13 @@ impl AppContext {
         if !crate::onboarding::marker_path().exists() {
             ui.set_onboarding_step(1);
             tracing::info!("First boot detected — onboarding enabled");
+            // Installed by the graphical installer, which already made the account: open on
+            // the optional-setup welcome (phase 3), past the animation and the name question.
+            if crate::onboarding::after_install_marker_path().exists() {
+                ui.set_onboard_after_install(true);
+                ui.set_onboard_phase(3);
+                tracing::info!("First boot after install — offering the optional setup");
+            }
         }
 
         // Lock screen PIN file
@@ -297,11 +304,11 @@ impl AppContext {
 
         // Start multi-provider chat system (Discord, Matrix, IRC, Slack, Signal, etc.)
         // This also handles Telegram if configured, replacing the legacy poller.
-        let chat_bridge_ref = bridge.clone();
         let _chat_handle = yantrik_companion::chat_bridge::start_chat(
             &chat_config_snapshot,
-            // AI callback: sends message through CompanionBridge, collects streaming response
-            Box::new(move |text: &str, context: &[String], policy: &yantrik_chat::policy::ConversationPolicy| {
+            // AI callback: the person's message to the mind answering, and its reply. The router
+            // asks only about a direct message from one of `chat.people` (`ChatRouter::set_people`).
+            Box::new(move |text: &str, context: &[String], policy: &yantrik_chat::policy::ConversationPolicy, asker: &yantrik_chat::router::Asker| {
                 let prompt = if context.is_empty() {
                     text.to_string()
                 } else {
@@ -315,27 +322,9 @@ impl AppContext {
                     format!("[Chat context]\n{history}\n\n[Latest message]\n{text}")
                 };
 
-                // Send through bridge and collect all tokens
-                let token_rx = chat_bridge_ref.send_message(prompt);
-                let mut full_response = String::new();
-                let mut replacing = false;
-                while let Ok(token) = token_rx.recv() {
-                    match token.as_str() {
-                        "__DONE__" => break,
-                        "__REPLACE__" => {
-                            full_response.clear();
-                            replacing = true;
-                        }
-                        _ => {
-                            if replacing {
-                                full_response = token;
-                                replacing = false;
-                            } else {
-                                full_response.push_str(&token);
-                            }
-                        }
-                    }
-                }
+                // To the mind answering, from the phone (design/channels-2026-09-29.md): see
+                // `channels::ask_from_phone` for which minds answer a phone and how it is held.
+                let mut full_response = crate::channels::ask_from_phone(prompt, asker);
 
                 if full_response.is_empty() {
                     return None;
@@ -362,6 +351,8 @@ impl AppContext {
                 // Brain integration happens via the CompanionBridge's RecordSystemEvent command
                 // The companion worker thread will process this and update brain state
             }),
+            // Private mode: the channels keep nothing while it is on.
+            Box::new(crate::private_mode::is_on),
         );
 
         // Set up UI models

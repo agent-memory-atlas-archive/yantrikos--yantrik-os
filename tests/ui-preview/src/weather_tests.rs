@@ -88,6 +88,22 @@ pub fn run(window: &MinimalSoftwareWindow) -> Result<(), Box<dyn std::error::Err
         ));
     }
 
+    // The hourly strip reads in the forecast location's local time, not the machine's, so the
+    // section says whose time it is (#220). The label renders when the app supplies one and
+    // draws nothing — zero width — when it does not.
+    ui.set_hourly_tz_label("Fixture Bay time".into());
+    settle(1400, 900);
+    if ui.get_hourly_tz_width() <= 0.0 {
+        problems.push(
+            "the hourly section did not render its \"Fixture Bay time\" label even though one was set".into(),
+        );
+    }
+    ui.set_hourly_tz_label("".into());
+    settle(1400, 900);
+    if ui.get_hourly_tz_width() > 0.0 {
+        problems.push("the hourly section drew a timezone label with none set".into());
+    }
+
     assert!(problems.is_empty(), "Weather hero problems:\n{}", problems.join("\n"));
     println!("PASS: Weather hero tiles stay out from under the context rail at the default 1000x720 and return to their design width in a wide window");
     Ok(())

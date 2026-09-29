@@ -32,6 +32,7 @@ pub fn start_chat(
     config: &CompanionConfig,
     ai_callback: AiCallback,
     brain_callback: BrainCallback,
+    paused: Box<dyn Fn() -> bool + Send + Sync>,
 ) -> Option<ChatHandle> {
     // Check master switch + legacy providers
     let chat = &config.chat;
@@ -73,6 +74,34 @@ pub fn start_chat(
     // Wire callbacks
     router.set_ai_callback(ai_callback);
     router.set_brain_callback(brain_callback);
+    // Nothing is kept while the person is private.
+    router.set_paused(paused);
+
+    // Who the person is: the named people, and the Telegram chat the bot was set up with (a
+    // private chat's id is its person's). Nobody else is ever answered.
+    // Not IRC: a nick is anyone's to take while its owner is away, over plain text, so no nick is
+    // the person (security review, 29 Sep 2026).
+    let mut people: Vec<(String, String)> = chat
+        .people
+        .iter()
+        .filter(|p| {
+            let irc = p.provider.trim().eq_ignore_ascii_case("irc");
+            if irc {
+                tracing::warn!(id = %p.id, "Chat: an IRC nick cannot name the person; ignored in chat.people");
+            }
+            !irc
+        })
+        .map(|p| (p.provider.trim().to_string(), p.id.trim().to_string()))
+        .collect();
+    if tg.enabled {
+        if let Some(chat_id) = tg.chat_id.as_deref().map(str::trim).filter(|c| !c.is_empty() && !c.starts_with('-')) {
+            people.push(("telegram".to_string(), chat_id.to_string()));
+        }
+    }
+    if people.is_empty() {
+        tracing::warn!("Chat: no one is named as the person on any channel (chat.people); channels will answer no one");
+    }
+    router.set_people(people);
 
     // Create manager
     let inbound_tx = router.inbound_sender();
@@ -100,7 +129,10 @@ pub fn start_chat(
                 phone_id.clone(),
                 token.clone(),
                 wa.recipient.clone(),
-                "yantrik_verify".to_string(),
+                wa.verify_token
+                    .clone()
+                    .filter(|t| !t.trim().is_empty())
+                    .unwrap_or_else(|| uuid7::uuid7().to_string()),
             );
             manager.start_provider(Box::new(provider));
             started += 1;
@@ -203,7 +235,7 @@ pub fn start_chat(
                             sender = %sender_name,
                             replied,
                             "Chat: {}",
-                            if content_preview.len() > 60 { &content_preview[..60] } else { &content_preview },
+                            &content_preview[..content_preview.floor_char_boundary(60)],
                         );
                     }
                     RouterEvent::ProviderStatus { provider, health } => {

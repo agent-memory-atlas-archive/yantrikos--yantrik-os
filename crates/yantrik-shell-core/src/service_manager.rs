@@ -157,6 +157,18 @@ impl ServiceManager {
         inner.services.get(id).map(|s| s.status.clone())
     }
 
+    /// The process id of a service this manager started and that is still running, `None`
+    /// otherwise. What a service's own socket calls can be matched against: the kernel names the
+    /// caller's pid, and only the manager knows which pid is the service.
+    pub fn pid(&self, id: &str) -> Option<u32> {
+        let mut inner = self.inner.lock().unwrap();
+        let child = inner.processes.get_mut(id)?;
+        match child.try_wait() {
+            Ok(None) => Some(child.id()),
+            _ => None,
+        }
+    }
+
     /// List all registered services.
     pub fn list(&self) -> Vec<ServiceEntry> {
         let inner = self.inner.lock().unwrap();

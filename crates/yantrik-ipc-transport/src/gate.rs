@@ -159,7 +159,15 @@ pub fn ceiling_from(text: &str) -> String {
 //
 // So the mode is read here too, the way the ceiling is: the shell writes it to a small file
 // beside `settings.yaml` whenever it changes (`mind_mode::publish_policy_file` in the shell), and
-// every dispatch reads it per call. A call above what the mode allows must carry a GRANT — the
+// every dispatch reads it per call. The file also names the shell that wrote it — its pid, the
+// start time the kernel gives that pid, and the boot the machine was in — and a file whose shell
+// is not running reads as `ask`: a shell that died in bypass, or with "allow for this session"
+// rules, must not keep either in force until the next shell start happens to rewrite the file
+// (#154). The boot id is the part a reboot cannot leave standing: the file itself survives one
+// on disk, and in theory the kernel could hand a new process the same pid at the same start
+// tick, so without it the old shell's name could still match (#333).
+//
+// A call above what the mode allows must carry a GRANT — the
 // `request_id` the shell's `request_approval` minted and a person's Allow turned into one — and
 // the dispatch spends it through the shell's `consume_approval` before the handler runs. The
 // bridge and `yos act` ask for the card on the caller's behalf; a raw client can do the same
@@ -244,18 +252,91 @@ fn unix_now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
+/// The start time of `pid` — field 22 of `/proc/<pid>/stat`, clock ticks since boot — or
+/// `None` when there is no such process or no `/proc` to ask.
+///
+/// A pid on its own says nothing: the kernel reuses them, and a recycled pid would resurrect a
+/// dead shell's mode. A pid and the start time it was recorded with name one process, because
+/// whatever reuses the pid does not also reuse the boot tick it started at.
+pub fn proc_start_ticks(pid: u32) -> Option<u64> {
+    proc_stat(pid).map(|(_, start)| start)
+}
+
+/// `pid`'s state character (field 3 of `/proc/<pid>/stat`) and start time (field 22), or `None`
+/// when there is no such process or no `/proc` to ask.
+fn proc_stat(pid: u32) -> Option<(char, u64)> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // Field 2, the command name, may hold spaces and parentheses — a shell called `(tmux)` is
+    // one field — so the fields are counted from the LAST `)`, which closes it. The token after
+    // that is field 3, the state, and starttime is field 22: index 19 from there.
+    let after_comm = stat.rsplit_once(')')?.1;
+    let mut fields = after_comm.split_whitespace();
+    let state = fields.next()?.chars().next()?;
+    let start = fields.nth(18)?.parse().ok()?;
+    Some((state, start))
+}
+
+/// The boot this machine is in — `/proc/sys/kernel/random/boot_id` — or `None` when there is no
+/// `/proc` to ask. The kernel picks a fresh random id on every boot, so an identity recorded
+/// under a different one names a machine that has since restarted (#333).
+pub fn boot_id() -> Option<String> {
+    std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .ok()
+        .map(|text| text.trim().to_string())
+        .filter(|id| !id.is_empty())
+}
+
+/// Whether the shell that wrote `doc` is the process still running under that pid, in this boot.
+///
+/// A file that names no shell — one an older shell wrote, or a program wrote by hand — reads as
+/// it always did: anybody who can write this file can write any mode into it, so demanding an
+/// identity from such a writer would close no door the same-uid limit leaves open (#154, item 5).
+/// A file that DOES name one is trusted only while that shell runs, and less than the whole
+/// identity — a pid with no start time, or a file from before the boot id existed with no boot
+/// to tie the pair to — names no process anybody can find alive, so it fails closed like a dead
+/// one.
+fn names_a_live_shell(doc: &serde_json::Value) -> bool {
+    let pid = doc.get("shell_pid").and_then(|v| v.as_u64());
+    let start = doc.get("shell_start_ticks").and_then(|v| v.as_u64());
+    let boot = doc.get("boot_id").and_then(|v| v.as_str());
+    let (Some(pid), Some(start), Some(boot)) = (pid, start, boot) else {
+        return pid.is_none() && start.is_none() && boot.is_none();
+    };
+    let Ok(pid) = u32::try_from(pid) else { return false };
+    let Some(this_boot) = boot_id() else { return false };
+    if boot.trim() != this_boot {
+        return false;
+    }
+    match proc_stat(pid) {
+        // A zombie has exited but not been reaped: it keeps its pid and its start time in
+        // /proc, and the shell behind them is gone all the same. `X` is the kernel's own
+        // "dead", which some kernels show instead of removing the entry.
+        Some((state, started)) => started == start && state != 'Z' && state != 'X',
+        None => false,
+    }
+}
+
 /// Read the mode out of what the shell wrote. Public so the shell's own test can prove that
 /// what it writes is what every app will read.
 ///
 /// `now_unix` is for a bypass. The shell folds an expired bypass back on its own tick and
 /// rewrites the file, but a shell that crashed mid-bypass leaves a file saying `bypass` with
 /// nobody left to fold it — so the file carries when the bypass ends and this honours it. A
-/// bypass "until restart" carries no end and is trusted until the next shell start rewrites it.
+/// bypass "until restart" carries no end and is trusted while the shell that wrote the file is
+/// running: the file names that shell and the boot it wrote in, and this checks the name
+/// against the process table and the machine's boot id, so a shell that died — and a machine
+/// that rebooted — leave `ask` behind rather than its last mode (#154, #333).
 pub fn mode_from(text: &str, now_unix: u64) -> Mode {
     let Ok(doc) = serde_json::from_str::<serde_json::Value>(text) else {
         tracing::warn!("{MODE_FILE} is not JSON; using {DEFAULT_MODE}");
         return Mode::named(DEFAULT_MODE);
     };
+    if !names_a_live_shell(&doc) {
+        // The rules go with the shell: "allow for this session" was an answer to cards a
+        // process that is gone will never raise again.
+        tracing::warn!("{MODE_FILE} names a shell that is not running; using {DEFAULT_MODE}");
+        return Mode::named(DEFAULT_MODE);
+    }
     let is_mode = |name: &str| MODES.iter().any(|(m, _)| *m == name);
     let mut name = doc["mode"].as_str().unwrap_or("").to_string();
     if !is_mode(&name) {
@@ -289,9 +370,30 @@ pub fn mode_from(text: &str, now_unix: u64) -> Mode {
 
 // ── Spending a grant ────────────────────────────────────────────────
 
-/// How this process spends a grant: the token and the exact triple in, and either it is burned
-/// or the reason it was not.
-type Spender = dyn Fn(&str, &str, &str, &serde_json::Value) -> Result<(), String> + Send + Sync;
+/// Who the call that carries a grant arrived as (#182): the agent token that rode beside `args`
+/// on the `app.act`, and the pid the kernel stamped on that call.
+///
+/// A grant is for the agent it was asked for, and the shell can only hold that line if the spend
+/// says who is spending. The pid travels with the token because the shell believes a token only
+/// from the process tree it was issued into — and by the time a forwarded spend reaches the
+/// shell, the socket peer is the app doing the forwarding, not the process the token rode in
+/// from. So the app hands over the kernel's own account of that process, and the shell resolves
+/// the token against it the same way it would have resolved it at the door.
+#[derive(Clone, Debug)]
+pub struct CallingAgent {
+    /// What rode beside `args`, never among them.
+    pub token: String,
+    /// The kernel's account of the process that sent it — `None` when the call arrived with no
+    /// process the kernel could name, which the shell's resolver refuses as it always has.
+    pub pid: Option<u32>,
+}
+
+/// How this process spends a grant: the id and the exact triple in, who the call arrived as
+/// (`None` for a caller that runs as no agent), and either it is burned or the reason it was not.
+type Spender =
+    dyn Fn(&str, &str, &str, &serde_json::Value, Option<&CallingAgent>) -> Result<(), String>
+        + Send
+        + Sync;
 
 static SPENDER: OnceLock<Box<Spender>> = OnceLock::new();
 
@@ -305,12 +407,12 @@ const SHELL: &str = "app-shell";
 
 /// Install the function this process spends grants with.
 ///
-/// The shell calls this once, with its own `approvals::consume`, because the shell IS the store
-/// — and asking itself over its own socket from its own RPC thread is a call that cannot be
-/// answered until the call returns. Every other process leaves it unset and spends grants over
-/// the shell's socket. A second call changes nothing: the store does not move.
+/// The shell calls this once, with its own in-process spender over the store it IS — asking
+/// itself over its own socket from its own RPC thread is a call that cannot be answered until
+/// the call returns. Every other process leaves it unset and spends grants over the shell's
+/// socket. A second call changes nothing: the store does not move.
 pub fn spend_grants_with(
-    spend: impl Fn(&str, &str, &str, &serde_json::Value) -> Result<(), String>
+    spend: impl Fn(&str, &str, &str, &serde_json::Value, Option<&CallingAgent>) -> Result<(), String>
         + Send
         + Sync
         + 'static,
@@ -329,22 +431,52 @@ pub fn spend_grants_with(
 /// stands behind this call, so before the grant is written to the socket the process listening on
 /// it must be a `yantrik-ui` binary (`owner::must_be_the_shell`, from `SO_PEERCRED` and
 /// `/proc/<pid>/exe`). Anything else that bound `app-shell.sock` is refused and never sees it.
-fn spend_grant(id: &str, app: &str, action: &str, args: &serde_json::Value) -> Result<(), String> {
+///
+/// The agent the call arrived as rides along (#182): without it the shell cannot tell whose
+/// grant this is being spent for, and a request id handed to another agent would spend it. A
+/// caller that runs as no agent — the person's own `yos act` — sends `None` and is let through
+/// as before.
+fn spend_grant(
+    id: &str,
+    app: &str,
+    action: &str,
+    args: &serde_json::Value,
+    caller: Option<&CallingAgent>,
+) -> Result<(), String> {
     if let Some(spend) = SPENDER.get() {
-        return spend(id, app, action, args);
+        return spend(id, app, action, args, caller);
     }
     SyncRpcClient::for_service(SHELL)
         .with_timeout(GRANT_ROUNDTRIP)
         .expecting_peer(crate::owner::must_be_the_shell)
-        .call(
-            "app.act",
-            serde_json::json!({
-                "action": "consume_approval",
-                "args": { "request_id": id, "app": app, "action": action, "args_json": args },
-            }),
-        )
+        .call("app.act", spend_params(id, app, action, args, caller))
         .map(|_| ())
         .map_err(|e| e.message)
+}
+
+/// The `app.act` that carries a spend to the shell: `consume_approval` with the grant's exact
+/// triple, and the calling agent beside it (#182) — the token where every agent token rides,
+/// beside `args`, and the pid the kernel stamped on the call it arrived in among the arguments,
+/// because the peer of this forwarded call is the app and the shell checks a token against the
+/// process tree it was issued into.
+fn spend_params(
+    id: &str,
+    app: &str,
+    action: &str,
+    args: &serde_json::Value,
+    caller: Option<&CallingAgent>,
+) -> serde_json::Value {
+    let mut params = serde_json::json!({
+        "action": "consume_approval",
+        "args": { "request_id": id, "app": app, "action": action, "args_json": args },
+    });
+    if let Some(caller) = caller {
+        params[AGENT_TOKEN] = serde_json::json!(caller.token);
+        if let Some(pid) = caller.pid {
+            params["args"]["caller_pid"] = serde_json::json!(pid);
+        }
+    }
+    params
 }
 
 /// The grant an `app.act` call carries: the `request_id` the shell answered `request_approval`
@@ -421,6 +553,10 @@ impl Authority {
     /// refusal and the grant is left for the shell to hold. Any grant attached is spent once the
     /// ceiling passes, whether or not the mode would have asked: a replayed, swapped or invented
     /// grant ends the call here, in the shell's words, rather than being ignored.
+    ///
+    /// `caller` is the agent this call arrived as, handed to the spend so the shell can refuse a
+    /// grant spent by an agent it was not asked for (#182); `None` for a caller that runs as no
+    /// agent.
     pub fn spend(
         &mut self,
         id: &str,
@@ -428,9 +564,10 @@ impl Authority {
         action: &str,
         graded: &str,
         args: &serde_json::Value,
+        caller: Option<&CallingAgent>,
     ) -> Result<(), String> {
         within_ceiling(&self.ceiling, app_id, action, graded)?;
-        spend_grant(id, app_id, action, args).map_err(|why| {
+        spend_grant(id, app_id, action, args, caller).map_err(|why| {
             format!(
                 "GRANT: `{id}` does not authorise {app_id}.{action} — {why} Nothing was run; \
                  a grant covers one action, once, with the arguments the person was shown."
@@ -509,9 +646,10 @@ pub fn permit(
     purpose: &str,
     args: &serde_json::Value,
     grant: Option<&str>,
+    caller: Option<&CallingAgent>,
 ) -> Result<(), String> {
     if let Some(id) = grant {
-        authority.spend(id, app_id, action, graded, args)?;
+        authority.spend(id, app_id, action, graded, args, caller)?;
     }
     decide(authority, app_id, action, graded, purpose)
 }
@@ -606,7 +744,7 @@ mod tests {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
             let spent = std::sync::Mutex::new(std::collections::HashSet::<String>::new());
-            spend_grants_with(move |id, app, action, args| {
+            spend_grants_with(move |id, app, action, args, _caller| {
                 if !id.starts_with("ok-") {
                     return Err(format!("no approval request `{id}`."));
                 }
@@ -729,17 +867,17 @@ mod tests {
         let args = serde_json::json!({"pid": 42});
 
         let mut tight = at("sensitive", "ask");
-        let err = permit(&mut tight, "system-monitor", "kill_process", "dangerous", KILL, &args, Some("ok-154"))
+        let err = permit(&mut tight, "system-monitor", "kill_process", "dangerous", KILL, &args, Some("ok-154"), None)
             .unwrap_err();
         assert!(err.starts_with("CEILING:"), "the ceiling's refusal, not the grant's: {err}");
         assert!(!tight.granted);
 
         let mut raised = at("dangerous", "ask");
-        permit(&mut raised, "system-monitor", "kill_process", "dangerous", KILL, &args, Some("ok-154"))
+        permit(&mut raised, "system-monitor", "kill_process", "dangerous", KILL, &args, Some("ok-154"), None)
             .expect("the grant was left unspent by the refusal, so it holds now");
         assert!(raised.granted);
 
-        let err = permit(&mut at("dangerous", "ask"), "system-monitor", "kill_process", "dangerous", KILL, &args, Some("ok-154"))
+        let err = permit(&mut at("dangerous", "ask"), "system-monitor", "kill_process", "dangerous", KILL, &args, Some("ok-154"), None)
             .unwrap_err();
         assert!(err.starts_with("GRANT:") && err.contains("already used"), "and holds once: {err}");
     }
@@ -748,7 +886,7 @@ mod tests {
     fn a_grant_that_does_not_hold_ends_the_call_in_the_shells_words() {
         spend_through_a_stand_in_shell();
         let err = permit(&mut at("dangerous", "bypass"), "system-monitor", "kill_process", "dangerous", KILL,
-                         &serde_json::json!({"pid": 42}), Some("made-up"))
+                         &serde_json::json!({"pid": 42}), Some("made-up"), None)
             .unwrap_err();
         assert!(err.starts_with("GRANT: `made-up` does not authorise system-monitor.kill_process"), "{err}");
         assert!(err.contains("no approval request"), "{err}");
@@ -777,15 +915,159 @@ mod tests {
         assert_eq!(agent_token_of(&params, &mut args).as_deref(), Some("tok-1"));
         assert_eq!(args, serde_json::json!({"pid": 42}));
         let mut authority = at("dangerous", "ask");
-        permit(&mut authority, "system-monitor", "kill_process", "dangerous", KILL, &args, grant_of(&params).as_deref())
+        permit(&mut authority, "system-monitor", "kill_process", "dangerous", KILL, &args, grant_of(&params).as_deref(), None)
             .expect("bound to {\"pid\": 42}, which is what the shell was handed");
         assert!(authority.granted);
+    }
+
+    /// #182: the spend an app forwards says who is spending — the token beside `args`, where it
+    /// rode on the call it arrived in, and the pid the kernel stamped on that call among the
+    /// arguments, because the peer of the forwarded call is the app and the shell checks a token
+    /// against the process tree it was issued into. A spend for a caller that runs as no agent
+    /// keeps the shape it always had: nothing to say.
+    #[test]
+    fn a_forwarded_spend_names_the_agent_it_is_spending_for() {
+        let args = serde_json::json!({"pid": 42});
+        let plain = spend_params("appr-1", "system-monitor", "kill_process", &args, None);
+        assert_eq!(plain, serde_json::json!({
+            "action": "consume_approval",
+            "args": { "request_id": "appr-1", "app": "system-monitor", "action": "kill_process",
+                      "args_json": args },
+        }));
+
+        let caller = CallingAgent { token: "tok-b".into(), pid: Some(4242) };
+        let forwarded = spend_params("appr-1", "system-monitor", "kill_process", &args, Some(&caller));
+        assert_eq!(forwarded[AGENT_TOKEN], "tok-b", "the token beside `args`, where it always rides");
+        assert_eq!(forwarded["args"]["caller_pid"], 4242);
+        assert_eq!(forwarded["args"]["args_json"], args, "the grant's arguments are untouched");
+        assert!(forwarded["args"].get(AGENT_TOKEN).is_none(), "no token among the arguments");
+
+        // A token whose call arrived with no process the kernel could name is forwarded without a
+        // pid, and the shell's resolver refuses it as it always has — never spent as no-agent.
+        let pidless = spend_params("appr-1", "system-monitor", "kill_process", &args,
+                                   Some(&CallingAgent { token: "tok-b".into(), pid: None }));
+        assert_eq!(pidless[AGENT_TOKEN], "tok-b");
+        assert!(pidless["args"].get("caller_pid").is_none());
     }
 
     #[test]
     fn the_mode_file_sits_beside_the_settings_file() {
         assert_eq!(mode_path().parent(), settings_path().parent());
         assert!(mode_path().ends_with(MODE_FILE));
+    }
+
+    /// #154, item 1: a shell that died in bypass — or with "allow for this session" rules —
+    /// left its last mode in the file, and nothing rewrote it until the next shell start. The
+    /// file names the shell that wrote it, and a name that is not running reads as `ask`.
+    #[test]
+    fn a_mode_file_that_names_a_dead_shell_reads_as_ask() {
+        // The dead pid is deterministic, not a guess at the process table: a child that has
+        // been waited is gone from /proc, and if the kernel hands the pid out again, the start
+        // time recorded here belongs to the child that was reaped, so the pair still names
+        // nothing alive. Nothing sleeps and nothing races.
+        let mut child = std::process::Command::new("true").spawn().expect("a child to reap");
+        let started = proc_start_ticks(child.id()).expect("a running child has a start time");
+        child.wait().expect("the child can be waited");
+        let boot = boot_id().expect("this machine has booted");
+
+        let dead = serde_json::json!({
+            "mode": "bypass",
+            "previous": "auto",
+            "bypass_expires_unix": null,
+            "shell_pid": child.id(),
+            "shell_start_ticks": started,
+            "boot_id": boot,
+            "session_rules": [{"app": "calendar", "action": "delete_event"}],
+        });
+        let read = mode_from(&dead.to_string(), 0);
+        assert_eq!(read.name, DEFAULT_MODE, "a dead shell's bypass is not in force");
+        assert!(read.session_rules.is_empty(), "and its session rules died with it");
+
+        // A live pid is not enough on its own: this process's own pid under a start time that
+        // is not the kernel's — what a reused pid would look like — also reads as `ask`.
+        let pid = std::process::id();
+        let real = proc_start_ticks(pid).expect("this test is itself running");
+        let reused = serde_json::json!({"mode": "auto", "shell_pid": pid,
+                                        "shell_start_ticks": real + 1, "boot_id": boot});
+        assert_eq!(mode_from(&reused.to_string(), 0).name, DEFAULT_MODE);
+
+        // A live shell's own identity is honoured, and half an identity — a pid with no start
+        // time to check it against — names no process anybody can find alive.
+        let alive = serde_json::json!({"mode": "auto", "shell_pid": pid,
+                                       "shell_start_ticks": real, "boot_id": boot});
+        assert_eq!(mode_from(&alive.to_string(), 0).name, "auto");
+        let half = serde_json::json!({"mode": "auto", "shell_pid": pid});
+        assert_eq!(mode_from(&half.to_string(), 0).name, DEFAULT_MODE);
+
+        // A file that names no shell at all reads the way it always has.
+        assert_eq!(mode_from(r#"{"mode":"auto"}"#, 0).name, "auto");
+    }
+
+    /// #333, item 1: the identity used to be the pid and start time alone, and the file
+    /// outlives a reboot on disk — in theory a new process could come up under the same pair
+    /// and resurrect the mode a dead shell left behind. The boot id in the file is the part no
+    /// reboot leaves standing: the kernel picks a fresh one every boot.
+    #[test]
+    fn an_identity_from_another_boot_reads_as_ask() {
+        let pid = std::process::id();
+        let start = proc_start_ticks(pid).expect("this test is itself running");
+        let boot = boot_id().expect("this machine has booted");
+
+        // The whole identity, recorded in this boot, is honoured.
+        let alive = serde_json::json!({"mode": "bypass", "shell_pid": pid,
+                                       "shell_start_ticks": start, "boot_id": boot});
+        assert_eq!(mode_from(&alive.to_string(), 0).name, "bypass");
+
+        // The same pid under the same start time, recorded in a boot that has ended: what the
+        // file left on disk across a reboot would look like if the kernel handed the pair out
+        // again.
+        let stale_boot = serde_json::json!({"mode": "bypass", "shell_pid": pid,
+                                            "shell_start_ticks": start,
+                                            "boot_id": "00000000-0000-0000-0000-000000000000"});
+        assert_eq!(mode_from(&stale_boot.to_string(), 0).name, DEFAULT_MODE);
+
+        // A file from before the boot id existed names a live pid under a live start time and
+        // nothing to tie the pair to this boot: two thirds of an identity fails closed like
+        // half of one.
+        let pre_upgrade = serde_json::json!({"mode": "bypass", "shell_pid": pid,
+                                             "shell_start_ticks": start});
+        assert_eq!(mode_from(&pre_upgrade.to_string(), 0).name, DEFAULT_MODE);
+
+        // And a boot id on its own is no identity at all.
+        let lonely = serde_json::json!({"mode": "bypass", "boot_id": boot});
+        assert_eq!(mode_from(&lonely.to_string(), 0).name, DEFAULT_MODE);
+    }
+
+    /// #333, item 2: a child that has exited but not been reaped keeps its pid and its start
+    /// time in /proc — as a zombie. An identity checked against the pair alone would call the
+    /// shell behind them alive; the state character says it is not.
+    #[test]
+    fn a_shell_that_is_a_zombie_is_not_alive_either() {
+        let mut child = std::process::Command::new("true").spawn().expect("a child to exit");
+        let pid = child.id();
+        // Wait for the state the assertion needs — the child a zombie, unreaped — not for a
+        // fixed time.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let zombied = loop {
+            if proc_stat(pid).map(|(state, _)| state) == Some('Z') {
+                break true;
+            }
+            if std::time::Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let started = proc_start_ticks(pid).expect("a zombie keeps its start time");
+        let doc = serde_json::json!({
+            "mode": "bypass", "shell_pid": pid, "shell_start_ticks": started,
+            "boot_id": boot_id().expect("this machine has booted"),
+        });
+        // Read while the zombie is still unreaped: the pid and start time are both in /proc
+        // and both match the file, so only the state stands between this and `bypass`.
+        let read = mode_from(&doc.to_string(), 0).name;
+        child.wait().expect("the zombie can be reaped");
+        assert!(zombied, "the child never reached the zombie state");
+        assert_eq!(read, DEFAULT_MODE, "a zombie's bypass died with it");
     }
 
     // ── The vectors every other implementation replays ─────────────────

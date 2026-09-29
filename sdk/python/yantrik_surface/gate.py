@@ -148,13 +148,82 @@ def _as_u64(value):
     return None
 
 
+def _proc_stat(pid):
+    """`pid`'s state character (field 3 of `/proc/<pid>/stat`) and start time (field 22), or
+    None when there is no such process or no `/proc` to ask."""
+    try:
+        with open("/proc/%d/stat" % pid, "rb") as f:
+            stat = f.read().decode("utf-8", "replace")
+    except (OSError, ValueError):
+        return None
+    # Field 2, the command name, may hold spaces and parentheses, so the fields are counted
+    # from the LAST `)`. The token after that is field 3, the state, and starttime is field 22.
+    fields = stat.rpartition(")")[2].split()
+    if len(fields) < 20 or not fields[0]:
+        return None
+    try:
+        return fields[0][0], int(fields[19])
+    except ValueError:
+        return None
+
+
+def proc_start_ticks(pid):
+    """`pid`'s start time — field 22 of `/proc/<pid>/stat`, clock ticks since boot — or None
+    when there is no such process or no `/proc` to ask.
+
+    A pid on its own says nothing: the kernel reuses them, and a recycled pid would resurrect
+    a dead shell's mode. A pid and the start time it was recorded with name one process,
+    because whatever reuses the pid does not also reuse the boot tick it started at.
+    """
+    seen = _proc_stat(pid)
+    return None if seen is None else seen[1]
+
+
+def boot_id():
+    """The boot this machine is in — `/proc/sys/kernel/random/boot_id` — or None when there is
+    no `/proc` to ask. The kernel picks a fresh random id on every boot, so an identity
+    recorded under a different one names a machine that has since restarted (#333)."""
+    try:
+        with open("/proc/sys/kernel/random/boot_id", "rb") as f:
+            text = f.read().decode("utf-8", "replace")
+    except (OSError, ValueError):
+        return None
+    return text.strip() or None
+
+
+def _names_a_live_shell(doc):
+    """Whether the shell that wrote `doc` is the process still running under that pid, in this
+    boot — `gate::names_a_live_shell`, whose comment carries the reasoning. A file that names
+    no shell reads as it always did; a file that names one is trusted only while it runs, and
+    less than the whole identity — a pid with no start time, or a file from before the boot id
+    existed with no boot to tie the pair to — fails closed like a dead one."""
+    pid = _as_u64(doc.get("shell_pid"))
+    start = _as_u64(doc.get("shell_start_ticks"))
+    boot = doc.get("boot_id") if isinstance(doc.get("boot_id"), str) else None
+    if pid is None or start is None or boot is None:
+        return pid is None and start is None and boot is None
+    if pid > 0xFFFFFFFF:
+        return False
+    this_boot = boot_id()
+    if this_boot is None or boot.strip() != this_boot:
+        return False
+    seen = _proc_stat(pid)
+    if seen is None:
+        return False
+    state, started = seen
+    # A zombie has exited but not been reaped: it keeps its pid and its start time in /proc,
+    # and the shell behind them is gone all the same. `X` is the kernel's own "dead".
+    return started == start and state not in ("Z", "X")
+
+
 def mode_from(text, now):
     """Read the mode out of what the shell wrote, the way `gate::mode_from` does.
 
     Anything unreadable is `ask`. A bypass whose deadline has passed reads as the mode before
     it (or `ask`), so a shell that died mid-bypass does not leave this app trusting it past the
-    minute the person was promised; a bypass with no deadline is trusted until the next shell
-    start rewrites the file.
+    minute the person was promised; a bypass with no deadline is trusted while the shell that
+    wrote the file is running — the file names it and the boot it wrote in, and a name that is
+    not running, or a boot that has ended, reads as `ask`, session rules and all (#154, #333).
     """
     try:
         doc = json.loads(text)
@@ -162,6 +231,8 @@ def mode_from(text, now):
         return Mode(DEFAULT_MODE, frozenset())
     if not isinstance(doc, dict):
         doc = {}
+    if not _names_a_live_shell(doc):
+        return Mode(DEFAULT_MODE, frozenset())
     name = doc.get("mode") if isinstance(doc.get("mode"), str) else ""
     if name not in MODES:
         name = DEFAULT_MODE
@@ -272,21 +343,44 @@ class GrantRefused(Exception):
     """The shell would not spend a grant; the message is the shell's own sentence."""
 
 
-def spend_through_shell(grant, app, action, args):
+class CallingAgent(NamedTuple):
+    """Who a call arrived as, for spending its grant (#182): the token that rode beside `args`,
+    and the pid the kernel stamped on the call (None when it named none)."""
+    token: str
+    pid: object = None
+
+
+def spend_params(grant, app, action, args, caller=None):
+    """The `app.act` that carries a spend to the shell — `spend_params` in the Rust gate:
+    `consume_approval` with the grant's exact triple, and the calling agent beside it (#182) — the
+    token where every agent token rides, beside `args`, and the pid the kernel stamped on the call
+    among the arguments, because the peer of this forwarded call is the app and the shell checks a
+    token against the process tree it was issued into."""
+    params = {
+        "action": "consume_approval",
+        "args": {"request_id": grant, "app": app, "action": action, "args_json": args},
+    }
+    if caller is not None:
+        params[AGENT_TOKEN] = caller.token
+        if caller.pid is not None:
+            params["args"]["caller_pid"] = caller.pid
+    return params
+
+
+def spend_through_shell(grant, app, action, args, caller=None):
     """Burn `grant` for exactly `app.action(args)` through the shell's `consume_approval`.
 
     Only through the shell: before the grant is written to `app-shell.sock`, the process
     listening on it must pass `must_be_the_shell`. The check of the grant is the shell's —
-    granted, unspent, unexpired, bound to this app, this action and these arguments — and a
-    refusal carries the shell's sentence. A shell that cannot be reached is a refusal too, worded
-    as the Rust client words it.
+    granted, unspent, unexpired, bound to this app, this action and these arguments, and to the
+    agent the call arrived as (#182) — and a refusal carries the shell's sentence. A shell that
+    cannot be reached is a refusal too, worded as the Rust client words it. `caller` is None for
+    a call that runs as no agent (the person's own), which is let through as before.
     """
     path = wire.default_socket_path(SHELL)
     try:
-        reply = wire.call_once(path, "app.act", {
-            "action": "consume_approval",
-            "args": {"request_id": grant, "app": app, "action": action, "args_json": args},
-        }, timeout=GRANT_ROUNDTRIP, peer_rule=must_be_the_shell)
+        reply = wire.call_once(path, "app.act", spend_params(grant, app, action, args, caller),
+                               timeout=GRANT_ROUNDTRIP, peer_rule=must_be_the_shell)
     except wire.PeerRefused as e:
         raise GrantRefused(str(e)) from e
     except ConnectionError as e:
@@ -322,19 +416,24 @@ class Authority:
         """The ceiling and the mode as the files say them now, and no grant yet."""
         return cls(configured_ceiling(settings), configured_mode(mode), False)
 
-    def spend(self, grant, app_id, action, graded, args, spender=None):
+    def spend(self, grant, app_id, action, graded, args, spender=None, caller=None):
         """Spend `grant` for exactly `app_id.action(args)`, graded `graded` — but only if the
         ceiling lets that grade be used at all. Returns the refusal, or None once spent.
 
         Any grant attached is spent once the ceiling passes, whether or not the mode would
         have asked: a replayed, swapped or invented grant ends the call here, in the shell's
-        words, rather than being ignored.
+        words, rather than being ignored. `caller` is the agent the call arrived as (#182), or
+        None for the person's own call; a spender is given it only when there is one.
         """
         _, refusal = within_ceiling(self.ceiling, app_id, action, graded)
         if refusal is not None:
             return refusal
+        spend = spender or spend_through_shell
         try:
-            (spender or spend_through_shell)(grant, app_id, action, args)
+            if caller is None:
+                spend(grant, app_id, action, args)
+            else:
+                spend(grant, app_id, action, args, caller)
         except GrantRefused as why:
             return ("GRANT: `%s` does not authorise %s.%s — %s Nothing was run; a grant covers "
                     "one action, once, with the arguments the person was shown."

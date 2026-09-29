@@ -5,6 +5,9 @@ ceiling → grant → mode, a grant spent only past the ceiling (#154), and what
 import contextlib
 import io
 import json
+import os
+import subprocess
+import time
 import unittest
 
 import support
@@ -71,6 +74,116 @@ class TestReadingTheFiles(unittest.TestCase):
             self.assertEqual(gate.mode_path().rsplit("/", 1)[0],
                              gate.settings_path().rsplit("/", 1)[0])
             self.assertTrue(gate.mode_path().endswith("mind-mode.json"))
+
+    # #154, item 1: a shell that died in bypass left its last mode in the file, and nothing
+    # rewrote it until the next shell start. The file names the shell that wrote it, and a
+    # name that is not running reads as `ask`.
+    @unittest.skipUnless(os.path.isdir("/proc"), "the liveness check reads /proc")
+    def test_a_mode_file_that_names_a_dead_shell_reads_as_ask(self):
+        # The dead pid is deterministic, not a guess at the process table: a child that has
+        # been waited is gone from /proc, and if the kernel hands the pid out again, the
+        # start time recorded here belongs to the child that was reaped, so the pair still
+        # names nothing alive. Nothing sleeps and nothing races.
+        boot = gate.boot_id()
+        self.assertIsNotNone(boot, "this machine has booted")
+        child = subprocess.Popen(["sleep", "30"])
+        try:
+            started = gate.proc_start_ticks(child.pid)
+            self.assertIsNotNone(started, "a running child has a start time")
+        finally:
+            child.kill()
+            child.wait()
+        dead = {"mode": "bypass", "previous": "auto", "bypass_expires_unix": None,
+                "shell_pid": child.pid, "shell_start_ticks": started, "boot_id": boot,
+                "session_rules": [{"app": "calendar", "action": "delete_event"}]}
+        read = mode_from(json.dumps(dead), 0)
+        self.assertEqual(read.name, "ask", "a dead shell's bypass is not in force")
+        self.assertEqual(read.session_rules, frozenset(), "its session rules died with it")
+
+        # A live pid is not enough on its own: this process's own pid under a start time that
+        # is not the kernel's — what a reused pid would look like — also reads as `ask`.
+        live = gate.proc_start_ticks(os.getpid())
+        self.assertIsNotNone(live, "this test is itself running")
+        reused = {"mode": "auto", "shell_pid": os.getpid(), "shell_start_ticks": live + 1,
+                  "boot_id": boot}
+        self.assertEqual(mode_from(json.dumps(reused), 0).name, "ask")
+
+        # A live shell's own identity is honoured, and half an identity fails closed.
+        alive = {"mode": "auto", "shell_pid": os.getpid(), "shell_start_ticks": live,
+                 "boot_id": boot}
+        self.assertEqual(mode_from(json.dumps(alive), 0).name, "auto")
+        half = {"mode": "auto", "shell_pid": os.getpid()}
+        self.assertEqual(mode_from(json.dumps(half), 0).name, "ask")
+
+        # A file that names no shell at all reads the way it always has.
+        self.assertEqual(mode_from('{"mode":"auto"}', 0).name, "auto")
+
+    # #333, item 1: the identity used to be the pid and start time alone, and the file
+    # outlives a reboot on disk — in theory a new process could come up under the same pair
+    # and resurrect the mode a dead shell left behind. The boot id in the file is the part no
+    # reboot leaves standing: the kernel picks a fresh one every boot.
+    @unittest.skipUnless(os.path.isfile("/proc/sys/kernel/random/boot_id"),
+                         "the boot id check reads /proc")
+    def test_an_identity_from_another_boot_reads_as_ask(self):
+        boot = gate.boot_id()
+        self.assertIsNotNone(boot)
+        live = gate.proc_start_ticks(os.getpid())
+        self.assertIsNotNone(live, "this test is itself running")
+
+        # The whole identity, recorded in this boot, is honoured.
+        alive = {"mode": "bypass", "shell_pid": os.getpid(), "shell_start_ticks": live,
+                 "boot_id": boot}
+        self.assertEqual(mode_from(json.dumps(alive), 0).name, "bypass")
+
+        # The same pid under the same start time, recorded in a boot that has ended: what the
+        # file left on disk across a reboot would look like if the kernel handed the pair out
+        # again.
+        stale = dict(alive, boot_id="00000000-0000-0000-0000-000000000000")
+        self.assertEqual(mode_from(json.dumps(stale), 0).name, "ask")
+
+        # A file from before the boot id existed names a live pid under a live start time and
+        # nothing to tie the pair to this boot: two thirds of an identity fails closed like
+        # half of one.
+        pre_upgrade = {"mode": "bypass", "shell_pid": os.getpid(), "shell_start_ticks": live}
+        self.assertEqual(mode_from(json.dumps(pre_upgrade), 0).name, "ask")
+
+        # And a boot id on its own is no identity at all.
+        lonely = {"mode": "bypass", "boot_id": boot}
+        self.assertEqual(mode_from(json.dumps(lonely), 0).name, "ask")
+
+    # #333, item 2: a child that exits and is NOT reaped keeps its pid and its start time in
+    # /proc — as a zombie. An identity checked against the pair alone would call the shell
+    # behind them alive; the state character says it is not.
+    @unittest.skipUnless(os.path.isdir("/proc"), "the liveness check reads /proc")
+    def test_a_shell_that_is_a_zombie_is_not_alive_either(self):
+        boot = gate.boot_id()
+        self.assertIsNotNone(boot, "this machine has booted")
+        child = subprocess.Popen(["true"])
+        started = None
+        deadline = time.monotonic() + 10
+        try:
+            # Wait for the state the assertion needs — the child a zombie, unreaped — not for
+            # a fixed time.
+            while started is None and time.monotonic() < deadline:
+                try:
+                    with open("/proc/%d/stat" % child.pid, "rb") as f:
+                        fields = f.read().decode("utf-8", "replace").rpartition(")")[2].split()
+                    if fields and fields[0] == "Z":
+                        started = int(fields[19])
+                except (OSError, ValueError):
+                    pass
+                if started is None:
+                    time.sleep(0.05)
+            self.assertIsNotNone(started, "the child never reached the zombie state")
+            doc = {"mode": "bypass", "shell_pid": child.pid, "shell_start_ticks": started,
+                   "boot_id": boot}
+            # Read while the zombie is still unreaped: the pid and start time are both in
+            # /proc and both match the file, so only the state stands between this and
+            # `bypass`.
+            self.assertEqual(mode_from(json.dumps(doc), 0).name, "ask",
+                             "a zombie's bypass died with it")
+        finally:
+            child.wait()
 
     def test_the_tables_are_the_rust_tables(self):
         support.quoted(self, G, 'pub const LADDER: [&str; 4] = ["safe", "standard", "sensitive", '
@@ -244,9 +357,11 @@ class Shell:
     def __init__(self):
         self.spent = []
         self.calls = []
+        self.callers = []
 
-    def __call__(self, grant, app, action, args):
+    def __call__(self, grant, app, action, args, caller=None):
         self.calls.append((grant, app, action, args))
+        self.callers.append(caller)
         if not grant.startswith("ok-"):
             raise GrantRefused("no approval request `%s`." % grant)
         if (app, action, args) != ("system-monitor", "kill_process", {"pid": 42}):
@@ -257,8 +372,14 @@ class Shell:
         self.spent.append(grant)
 
 
+def no_reach(token, what):
+    """The shell's answer to `reach_of` for a live token with no role: nothing to hold it to."""
+    return {"jsonrpc": "2.0", "id": 1, "result": {"accepted": True, "settled": True,
+                                                  "result": {"reach": None, "known": True}}}
+
+
 def sysmon(shell):
-    s = Surface("system-monitor", spend_grant=shell)
+    s = Surface("system-monitor", spend_grant=shell, ask_shell=no_reach)
     seen = {}
 
     @s.action("kill_process", grade="dangerous")
@@ -360,6 +481,8 @@ class TestGrants(support.MachineCase):
                                         {"pid": 42})])
         self.assertEqual(seen["token"], "tok-1", "the token beside args reaches the handler")
         self.assertIsNone(agent_token(), "and is gone once the dispatch is over")
+        # Spent as no agent: the shell cannot yet believe an agent forwarded by a Python app (#466).
+        self.assertEqual(shell.callers, [None])
 
     def test_a_token_inside_args_alone_is_removed_and_not_used(self):
         self.machine.set_mode("bypass")

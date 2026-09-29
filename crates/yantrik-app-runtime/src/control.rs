@@ -17,7 +17,13 @@
 //! app.describe {}                                  → { app, summary, state, revision, actions }
 //! app.act      { action, args, expect_revision? }  → { accepted, action_id, settled, result,
 //!                                                      revision, summary, state }
+//! app.explain  { action, args }                    → { app, action, explanation }
 //! ```
+//!
+//! `app.explain` is the optional third method (#137): the sentence an action says about ONE call
+//! of itself, with that call's own arguments, for the approval card the shell builds. An action
+//! publishes `explains: true` in `describe` when it can speak; a surface that does not implement
+//! the method answers `-32601` like any unknown one, and the card is exactly what it was.
 //!
 //! `describe` is a few hundred bytes of exact truth, always current. `act` is the same surface
 //! turned around: the actions an app already exposes to its own buttons, offered to the mind by
@@ -153,8 +159,8 @@ use std::time::Duration;
 use yantrik_ipc_contracts::email::ServiceError;
 use yantrik_ipc_transport::server::{PeerCred, RpcServer, ServiceHandler};
 use yantrik_surface::{
-    finish_later, next_action_id, refusal, ActCall, AgentTokenScope, CallerScope, Later, LaterScope,
-    LocalRegistry, NO_SUCH_METHOD, UNANSWERED,
+    finish_later, next_action_id, refusal, ActCall, Later, LaterScope, LocalRegistry,
+    NO_SUCH_METHOD, UNANSWERED,
 };
 
 /// How long the RPC thread waits for the UI thread to answer.
@@ -253,9 +259,9 @@ pub fn other_names(app_id: &str) -> &'static [&'static str] {
 // `ControlRpc::dispatch`), and the registry decides with `gate::decide` inside the same turn of
 // the event loop as the handler.
 pub use yantrik_ipc_transport::gate::{
-    configured_ceiling, configured_mode, decide, grant_of, mode_from, mode_path, permit,
-    spend_grants_with, unrecoverable, Authority, Mode, AGENT_TOKEN, DEFAULT_MODE, LADDER, MODES,
-    MODE_FILE, SOCKET_FLOOR, UNRECOVERABLE_PHRASES,
+    boot_id, configured_ceiling, configured_mode, decide, grant_of, mode_from, mode_path, permit,
+    proc_start_ticks, spend_grants_with, unrecoverable, Authority, CallingAgent, Mode, AGENT_TOKEN,
+    DEFAULT_MODE, LADDER, MODES, MODE_FILE, SOCKET_FLOOR, UNRECOVERABLE_PHRASES,
 };
 #[cfg(test)]
 use yantrik_ipc_transport::gate::{agent_token_of, ceiling_from, DEFAULT_CEILING};
@@ -269,7 +275,7 @@ use yantrik_ipc_transport::gate::{agent_token_of, ceiling_from, DEFAULT_CEILING}
 // `control::View` / `control::Action` / `control::Param` caller is unchanged, and the shell
 // window and a headless service now share one definition of what an app is.
 pub use yantrik_ipc_contracts::control_surface::{
-    act_json, describe_json, Action, Param, View, PROTOCOL,
+    act_json, describe_json, Action, Explainer, Param, View, PROTOCOL,
 };
 
 // ── The registry, which lives on the UI thread ──────────────────────
@@ -295,7 +301,20 @@ thread_local! {
 // The handler signature is untouched: fourteen apps build `|args| { ... }` closures and none of
 // them has to change. A handler that cares reads `control::caller()`; every other one never
 // learns this exists.
-pub use yantrik_surface::{agent_token, answer_later, caller, Caller};
+pub use yantrik_surface::{agent_token, answer_later, caller, AgentTokenScope, Caller, CallerScope};
+
+/// Whether the call being dispatched on this thread is an agent's rather than the person's: the
+/// mind's own account by the kernel's word, or any caller that presented an agent token, believed
+/// or not - one that presented a token is not the person. An app that holds a rule for agents
+/// only (which files they may name, #443) asks this inside the handler, where both are in scope.
+///
+/// It cannot see an agent that runs as the person and presents no token, nor tell whether the
+/// caller descends from an attached mind: that takes the shell's /proc walk
+/// (`mind_view::requester_now`). A `describe` carries no token, so there only the mind account
+/// is seen.
+pub fn agent_is_calling() -> bool {
+    agent_token().is_some() || caller().is_some_and(|c| yantrik_ipc_transport::mind_door::is_mind(c.uid))
+}
 
 /// The grade THIS app publishes for one of its own actions.
 ///
@@ -484,6 +503,15 @@ impl ServiceHandler for ControlRpc {
         peer: Option<PeerCred>,
     ) -> Result<serde_json::Value, ServiceError> {
         let who = peer.map(Caller::from);
+        // The agent the call arrived as, kept for the view read again after deferred work: that
+        // read is a describe of the app's state, and a state that tells an agent less than the
+        // person (the shell's, #475) has to know it is an agent reading, token and all.
+        let token = params
+            .get(AGENT_TOKEN)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_string);
         // Nothing left over from an earlier call on this thread can be taken for this one's.
         LATER_HANDED.with(|cell| cell.borrow_mut().take());
         let answer = self.dispatch(method, params, who);
@@ -491,8 +519,12 @@ impl ServiceHandler for ControlRpc {
         match (answer, later) {
             // The work runs here, off the UI thread, and the view beside its result is read
             // again on the UI thread once it has.
-            (Ok(envelope), Some(later)) if method == "app.act" => finish_later(envelope, later, || {
-                on_ui_thread(who, |reg| reg.snapshot()).ok()
+            (Ok(envelope), Some(later)) if method == "app.act" => finish_later(envelope, later, move || {
+                on_ui_thread(who, move |reg| {
+                    let _agent = AgentTokenScope::enter(token);
+                    reg.snapshot()
+                })
+                .ok()
             }),
             (answer, _) => answer,
         }
@@ -511,6 +543,10 @@ impl ControlRpc {
 
             "app.act" => {
                 let call = ActCall::parse(&params)?;
+                // Private mode first: while it is on, no agent acts at all.
+                call.require_not_private(who)?;
+                // A mind account's call acts only as a live agent (#411), before anything else.
+                call.require_standing(&self.app_id, who)?;
                 // Agents catalog: the calling agent's reach (`yantrik_ipc_transport::reach`) —
                 // read here, where IO belongs, and held to below before any grant is spent and
                 // before the handler runs. No token, or a token with no reach, is not held.
@@ -529,7 +565,7 @@ impl ControlRpc {
                 // grant, which is one a person has just answered a card for. Should the app
                 // regrade the action between this read and the dispatch, the dispatch still
                 // decides on the grade it publishes then; the most that race can cost is the grant.
-                call.spend_grant(&mut authority, &self.app_id, || {
+                call.spend_grant(&mut authority, &self.app_id, who, || {
                     let (name, args, reach) = (call.action.clone(), call.args.clone(), reach.clone());
                     on_ui_thread(who, move |reg| {
                         reg.within_reach(reach.as_ref(), &name, &args).and_then(|()| reg.check_call(&name, &args))
@@ -550,6 +586,32 @@ impl ControlRpc {
                 .map_err(unanswered)?
                 // An action that legitimately refuses is an application error, not a transport
                 // failure: -32602 keeps it out of the client's circuit breaker.
+                .map_err(refusal)
+            }
+
+            // The sentence about ONE call, in the app's own words (#137). The shell asks this
+            // when it builds an approval card for an action whose describe said `explains`.
+            // Reading, not acting: no ceiling, no mode, no grant, no reach — it changes nothing
+            // and spends nothing, so it takes none of what `app.act` holds a call to. Read on
+            // this thread, spoken on the UI one, like everything else the registry owns.
+            "app.explain" => {
+                let action = params["action"].as_str().unwrap_or("").trim().to_string();
+                if action.is_empty() {
+                    return Err(refusal("app.explain needs a non-empty `action`".into()));
+                }
+                let args = params.get("args").cloned().unwrap_or_else(|| serde_json::json!({}));
+                on_ui_thread(who, move |reg| {
+                    reg.explain(&action, &args).map(|explanation| {
+                        serde_json::json!({
+                            "app": reg.app_id(),
+                            "action": action,
+                            "explanation": explanation,
+                        })
+                    })
+                })
+                .map_err(unanswered)?
+                // "This action says nothing about one call of itself" is an answer, not a
+                // transport failure: -32602, so the asker draws no line instead of retrying.
                 .map_err(refusal)
             }
 
@@ -1146,8 +1208,24 @@ mod tests {
     fn spend_through_a_stand_in_shell() {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
+            // The stand-in shell answers what a token may reach, as the shell does (#189): the
+            // reviewer's token is held to its role; every other token has no role, so a call
+            // carrying it is held by nothing but the grade, the mode and the grant. One reader
+            // per process, as the shell has one registry.
+            use yantrik_ipc_transport::reach;
+            reach::read_reach_with(|token| {
+                (token == "tok-reach-reviewer").then(|| reach::Reach {
+                    agent: "deepseek:c-reach1".into(),
+                    role: "reviewer".into(),
+                    name: "Reviewer".into(),
+                    surfaces: vec!["caller-test.echo".into(), "caller-test.nuke".into()],
+                    ceiling: "safe".into(),
+                })
+            });
             let spent = std::sync::Mutex::new(std::collections::HashSet::<String>::new());
-            spend_grants_with(move |id, app, action, args| {
+            spend_grants_with(move |id, app, action, args, caller| {
+                SPEND_CALLERS.lock().unwrap_or_else(|e| e.into_inner())
+                    .push((id.to_string(), caller.map(|c| (c.token.clone(), c.pid))));
                 if let Some((a, x, bound)) = allowed(id) {
                     if (a.as_str(), x.as_str(), &bound) != (app, action, args) {
                         return Err(format!("`{id}` was approved for {a}.{x} with {bound}, and this call carries {args}."));
@@ -1182,6 +1260,10 @@ mod tests {
         std::sync::Mutex::new(Vec::new());
     /// The allowed grants the stand-in has spent.
     static SPENT_GRANTS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    /// Who each spend the stand-in saw arrived as (#182): id → the caller's claim, `None` for a
+    /// call that runs as no agent.
+    static SPEND_CALLERS: std::sync::Mutex<Vec<(String, Option<(String, Option<u32>)>)>> =
+        std::sync::Mutex::new(Vec::new());
 
     fn allow(id: &str, app: &str, action: &str, args: serde_json::Value) {
         ALLOWED.lock().unwrap_or_else(|e| e.into_inner()).push((id.into(), app.into(), action.into(), args));
@@ -1200,10 +1282,20 @@ mod tests {
         SPENT_GRANTS.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|g| g == id)
     }
 
+    /// Who the stand-in was told is spending `id` (#182); `None` when it never saw the spend.
+    fn spend_caller(id: &str) -> Option<Option<(String, Option<u32>)>> {
+        SPEND_CALLERS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|(g, _)| g == id)
+            .map(|(_, c)| c.clone())
+    }
+
     /// Spend `id` for `blender.render`, graded `sensitive`, under `authority`, the way the RPC
     /// thread does before anything reaches the UI thread.
     fn spend_for_render(mut authority: Authority, id: &str, args: &serde_json::Value) -> Result<Authority, String> {
-        authority.spend(id, "blender", "render", "sensitive", args).map(|()| authority)
+        authority.spend(id, "blender", "render", "sensitive", args, None).map(|()| authority)
     }
 
     /// A grant is spent on the RPC thread, before anything reaches the UI thread: a spent one,
@@ -1291,6 +1383,18 @@ mod tests {
     }
 
     #[test]
+    fn a_call_with_a_token_is_an_agent_and_the_persons_own_is_not() {
+        let me = unsafe { libc::getuid() };
+        let _person = CallerScope::enter(Some(Caller { pid: 4242, uid: me, gid: me }));
+        assert!(!agent_is_calling(), "the person's own account, no token");
+        {
+            let _agent = AgentTokenScope::enter(Some("tok-anything".into()));
+            assert!(agent_is_calling(), "a token, believed or not, is not the person");
+        }
+        assert!(!agent_is_calling(), "and the token goes with its call");
+    }
+
+    #[test]
     fn the_agent_token_is_lifted_off_the_arguments() {
         let mut args = serde_json::json!({"command": "ls", "agent_token": "x"});
         let params = serde_json::json!({"agent_token": "  tok-b  "});
@@ -1370,9 +1474,13 @@ mod tests {
                         (
                             // What a handler that records or shows its arguments would record or
                             // show — an approval card, an audit line — and the token beside them.
+                            // Says one sentence about a call of itself (#137), so the wire
+                            // round-trip below has an action to ask; the others declared none and
+                            // stand for every action that did not opt in.
                             Action::new("echo", "Answer with the arguments and the agent token as the handler got them")
                                 .risk("safe")
-                                .arg(Param::text("command").optional()),
+                                .arg(Param::text("command").optional())
+                                .explain(|args| format!("this call echoes {args}")),
                             Box::new(|args| {
                                 Ok(serde_json::json!({ "args": args, "agent_token": agent_token() }))
                             }),
@@ -1457,6 +1565,65 @@ mod tests {
         assert_eq!(run.status.code(), Some(1), "a failed check is a non-zero exit");
     }
 
+    /// #137, over the wire: `describe` says which actions can speak about one call of
+    /// themselves, and `app.explain` brings the sentence back — from the action it belongs to,
+    /// for the arguments the call carries, through the hop to the UI thread and back. An action
+    /// that declared none is refused as an application answer (-32602), which is what tells the
+    /// asker to draw no line rather than treat the surface as broken.
+    #[cfg(unix)]
+    #[test]
+    fn an_explainer_travels_the_socket_beside_the_action_it_belongs_to() {
+        let described = call(r#"{"jsonrpc":"2.0","id":1,"method":"app.describe","params":{}}"#);
+        let explains = |name: &str| {
+            described["result"]["actions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|a| a["name"] == name)
+                .unwrap()
+                .get("explains")
+                .cloned()
+        };
+        assert_eq!(explains("echo"), Some(serde_json::json!(true)), "the fact rides describe");
+        assert_eq!(explains("who"), None, "an action that declared none publishes what it always did");
+
+        let asked = |action: &str, args: serde_json::Value| {
+            call(
+                &serde_json::json!({
+                    "jsonrpc": "2.0", "id": 2, "method": "app.explain",
+                    "params": { "action": action, "args": args },
+                })
+                .to_string(),
+            )
+        };
+        let reply = asked("echo", serde_json::json!({ "command": "ls" }));
+        assert_eq!(reply["result"]["app"], "caller-test");
+        assert_eq!(reply["result"]["action"], "echo");
+        assert_eq!(reply["result"]["explanation"], "this call echoes {\"command\":\"ls\"}");
+
+        let reply = asked("who", serde_json::json!({}));
+        assert_eq!(reply["error"]["code"], -32602, "{reply}");
+        assert!(
+            reply["error"]["message"].as_str().unwrap().contains("`who` says nothing about one call"),
+            "{reply}"
+        );
+
+        // An action the surface does not have is refused the way `act` refuses one.
+        let reply = asked("nope", serde_json::json!({}));
+        assert!(
+            reply["error"]["message"].as_str().unwrap().starts_with("unknown action `nope`"),
+            "{reply}"
+        );
+
+        // A missing or empty action never reaches the registry.
+        let reply = call(r#"{"jsonrpc":"2.0","id":5,"method":"app.explain","params":{}}"#);
+        assert_eq!(reply["error"]["code"], -32602, "{reply}");
+        let reply = call(
+            r#"{"jsonrpc":"2.0","id":6,"method":"app.explain","params":{"action":"  ","args":{}}}"#,
+        );
+        assert_eq!(reply["error"]["code"], -32602, "{reply}");
+    }
+
     /// A person's Allow is not used up on a call its own arguments refuse. Over the real socket, on
     /// the window's door: a grant for `slow {"ms": 10}` carried by a call whose `ms` is not an
     /// integer is refused for the argument — before the ceiling, before the spend — and is still
@@ -1503,18 +1670,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn an_agent_is_held_to_its_reach_on_the_socket_before_any_grant_is_spent() {
-        use yantrik_ipc_transport::reach;
-
+        // The stand-in shell's reader holds `tok-reach-reviewer` to the reviewer's reach.
         spend_through_a_stand_in_shell();
-        reach::read_reach_with(|token| {
-            (token == "tok-reach-reviewer").then(|| reach::Reach {
-                agent: "deepseek:c-reach1".into(),
-                role: "reviewer".into(),
-                name: "Reviewer".into(),
-                surfaces: vec!["caller-test.echo".into(), "caller-test.nuke".into()],
-                ceiling: "safe".into(),
-            })
-        });
         let act = |action: &str, token: &str, grant: Option<&str>| {
             let mut params = serde_json::json!({ "action": action, "args": {}, "agent_token": token });
             if let Some(grant) = grant {
@@ -1702,5 +1859,40 @@ mod tests {
         // And the grant the two refusals carried was never spent.
         spend_for_render(open(), "fresh-socket", &serde_json::json!({"out": "x.png"}))
             .expect("nothing spent `fresh-socket` on the way to either refusal");
+    }
+
+    /// #182: a grant is for the agent it was asked for, and the shell can only hold that line if
+    /// the spend says who is spending. So when a call that carries an agent token spends a grant
+    /// through this dispatch, the shell is told the token — beside `args`, as it arrived — and
+    /// the pid the kernel stamped on the call: the process the token rode in from, checked the
+    /// same way the shell would have checked it at its own door. A call with no token spends as
+    /// no agent, exactly as the person's own `yos act` always has.
+    #[cfg(unix)]
+    #[test]
+    fn a_spend_names_the_agent_whose_call_it_rides_on() {
+        spend_through_a_stand_in_shell();
+        let args = serde_json::json!({"command": "ls"});
+        allow("spend-182-agent", "caller-test", "echo", args.clone());
+        allow("spend-182-person", "caller-test", "echo", args.clone());
+
+        let act = |grant: &str, token: Option<&str>| {
+            let mut params = serde_json::json!({ "action": "echo", "args": args, "grant": grant });
+            if let Some(token) = token {
+                params["agent_token"] = serde_json::json!(token);
+            }
+            call(&serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "app.act", "params": params}).to_string())
+        };
+
+        let reply = act("spend-182-agent", Some("tok-182"));
+        assert_eq!(reply["result"]["result"]["agent_token"], "tok-182", "the act itself ran: {reply}");
+        assert_eq!(
+            spend_caller("spend-182-agent"),
+            Some(Some(("tok-182".to_string(), Some(std::process::id())))),
+            "the spend carries the token and the kernel's account of the process it arrived in"
+        );
+
+        let reply = act("spend-182-person", None);
+        assert!(reply["result"].is_object(), "the same act with no token still runs: {reply}");
+        assert_eq!(spend_caller("spend-182-person"), Some(None), "no token, no agent claimed");
     }
 }
