@@ -118,9 +118,12 @@ pub fn watch() {
     let timer = slint::Timer::default();
     timer.start(slint::TimerMode::Repeated, std::time::Duration::from_secs(2), || {
         let on = is_on();
-        // And the door kept as the switch says: something re-creating the directory at its
-        // default mode (tmpfiles) would otherwise open it mid-private.
-        set_door(on);
+        // While private, the door is kept closed: an old app restarted, or a socket bound by a
+        // build that does not know Private mode, would otherwise be a way in. Never opened from
+        // here — only leaving Private mode opens it (`enforce`).
+        if on {
+            set_door(true);
+        }
         if privacy::is_private() == on {
             return;
         }
@@ -140,15 +143,30 @@ pub fn watch() {
     std::mem::forget(timer);
 }
 
-/// Close the mind door (private) or open it, logging a failure rather than stopping: every
-/// door's own refusal still stands behind it.
+/// Close the mind door (private) or open it. A door that could not be closed is said to the person,
+/// once per Private mode, as a failed freeze is: the chip would otherwise read Private with a way
+/// in still open. Every door's own refusal still stands behind it.
 fn set_door(closed: bool) {
+    static TOLD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     let dir = yantrik_ipc_transport::mind_door::dir();
     if !dir.exists() {
         return;
     }
-    if let Err(e) = yantrik_ipc_transport::mind_door::close_door(&dir, closed) {
-        tracing::warn!(dir = %dir.display(), closed, error = %e, "the mind door's directory could not be set; each door still refuses on its own");
+    match yantrik_ipc_transport::mind_door::close_door(&dir, closed) {
+        Ok(n) if n > 0 => tracing::info!(dir = %dir.display(), closed, sockets = n, "mind door"),
+        Ok(_) => {}
+        Err(e) => {
+            tracing::error!(dir = %dir.display(), closed, error = %e, "the mind door could not be set");
+            if closed && !TOLD.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                crate::wire::notifications::private_mode_notice(
+                    "The mind door is still open",
+                    &format!("Private mode is on, and each app still refuses minds, but the door itself could not be closed: {e}"),
+                );
+            }
+        }
+    }
+    if !closed {
+        TOLD.store(false, std::sync::atomic::Ordering::SeqCst);
     }
 }
 

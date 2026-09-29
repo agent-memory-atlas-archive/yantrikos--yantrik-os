@@ -66,9 +66,8 @@ def is_mind(uid):
 
 def acceptable(owner, group, mode, me, minds):
     """What a door directory must be for this process to serve on it: owned by this process's uid,
-    group the minds' group, mode 2750 — or 2700, the door the person's Private mode closed, still
-    served so it is reachable again the moment Private mode ends."""
-    return owner == me and group == minds and mode & 0o7777 in (0o2750, 0o2700)
+    group the minds' group, mode exactly 2750."""
+    return owner == me and group == minds and mode & 0o7777 == 0o2750
 
 
 def serving_dir():
