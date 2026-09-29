@@ -61,6 +61,10 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ReadWritePaths=/var/lib/yantrik-mind
 ProtectHome=yes
+# The desktop's own log, memory and settings are the person's, not the mind's: the log holds what
+# they type to the built-in companion, data/ its memories, config.yaml their provider keys. Out of
+# this unit's sight even should a file in them come out readable (security review, 29 Sep 2026).
+InaccessiblePaths=-/opt/yantrik/logs -/opt/yantrik/data -/opt/yantrik/config.yaml
 PrivateTmp=yes
 PrivateDevices=yes
 ProtectKernelTunables=yes
