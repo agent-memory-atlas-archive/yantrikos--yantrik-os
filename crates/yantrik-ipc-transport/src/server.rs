@@ -344,8 +344,9 @@ impl RpcServer {
         crate::owner::claim(door_path)?;
         let listener = tokio::net::UnixListener::bind(door_path)?;
         self.door = Some(door_path.display().to_string());
-        // The minds' group writes it (the directory's setgid gave it the group); nobody else.
-        std::fs::set_permissions(door_path, std::fs::Permissions::from_mode(0o660))?;
+        // The minds' group writes it (the directory's setgid gave it the group); nobody else. Bound
+        // closed while the person is in Private mode; the shell opens it when they leave it.
+        std::fs::set_permissions(door_path, std::fs::Permissions::from_mode(crate::mind_door::socket_mode()))?;
         tracing::info!(door = %door_path.display(), "RPC server listening at the mind door");
         Ok(listener)
     }

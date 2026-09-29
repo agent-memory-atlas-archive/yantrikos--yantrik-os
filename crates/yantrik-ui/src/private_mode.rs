@@ -74,6 +74,9 @@ fn now() -> u64 {
 /// when the person turns it, and at start with what `load` read. The slow parts (systemd) run on
 /// a thread of their own.
 pub fn enforce(on: bool, bridge: &Arc<CompanionBridge>) {
+    // The door itself first: while private the mind account enters no socket in it, whatever
+    // build the app serving there runs (an app opened before an update runs the old code).
+    set_door(on);
     bridge.set_private(on);
     bridge.event_bus().set_recording(!on);
     if let Some(host) = crate::wire::harness::host() {
@@ -115,6 +118,12 @@ pub fn watch() {
     let timer = slint::Timer::default();
     timer.start(slint::TimerMode::Repeated, std::time::Duration::from_secs(2), || {
         let on = is_on();
+        // While private, the door is kept closed: an old app restarted, or a socket bound by a
+        // build that does not know Private mode, would otherwise be a way in. Never opened from
+        // here — only leaving Private mode opens it (`enforce`).
+        if on {
+            set_door(true);
+        }
         if privacy::is_private() == on {
             return;
         }
@@ -132,6 +141,33 @@ pub fn watch() {
         }
     });
     std::mem::forget(timer);
+}
+
+/// Close the mind door (private) or open it. A door that could not be closed is said to the person,
+/// once per Private mode, as a failed freeze is: the chip would otherwise read Private with a way
+/// in still open. Every door's own refusal still stands behind it.
+fn set_door(closed: bool) {
+    static TOLD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let dir = yantrik_ipc_transport::mind_door::dir();
+    if !dir.exists() {
+        return;
+    }
+    match yantrik_ipc_transport::mind_door::close_door(&dir, closed) {
+        Ok(n) if n > 0 => tracing::info!(dir = %dir.display(), closed, sockets = n, "mind door"),
+        Ok(_) => {}
+        Err(e) => {
+            tracing::error!(dir = %dir.display(), closed, error = %e, "the mind door could not be set");
+            if closed && !TOLD.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                crate::wire::notifications::private_mode_notice(
+                    "The mind door is still open",
+                    &format!("Private mode is on, and each app still refuses minds, but the door itself could not be closed: {e}"),
+                );
+            }
+        }
+    }
+    if !closed {
+        TOLD.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// What the desktop says in the Lens when the person writes to a mind while private.

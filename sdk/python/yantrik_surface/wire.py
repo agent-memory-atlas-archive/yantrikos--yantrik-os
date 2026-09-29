@@ -418,7 +418,9 @@ class Server:
         server.handler = self.handler
         try:
             # The minds' group writes it (the directory's setgid gave it the group); nobody else.
-            os.chmod(path, 0o660)
+            # Bound closed while the person is in Private mode; the shell opens it when they
+            # leave it (mind_door::close_door in the transport).
+            os.chmod(path, 0o600 if privacy.is_private() else 0o660)
         except OSError as e:
             server.server_close()
             with contextlib.suppress(OSError):
