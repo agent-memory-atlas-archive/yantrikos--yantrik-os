@@ -511,7 +511,7 @@ for conf in "$UNPACK/share/containers/"*.conf; do
     sudo install -m 0644 -o root -g root "$conf" "$ROOTFS/etc/containers/registries.conf.d/$(basename "$conf")"
 done
 [ -r "$UNPACK/share/shell/bashrc" ] || fail "release tarball carries no share/shell/bashrc — every new account's ~/.bashrc sources it"
-for required in share/labwc/rc.xml share/labwc/autostart bin/yantrik-session bin/yantrik-shell \
+for required in share/labwc/rc.xml share/labwc/menu.xml share/labwc/autostart bin/yantrik-session bin/yantrik-shell \
                 share/icons/hicolor/scalable/apps/yantrik.svg; do
     [ -e "$ROOTFS/opt/yantrik/$required" ] || fail "$required missing from the image — the desktop session would not be the shipped one"
 done
