@@ -17,6 +17,8 @@ use super::Question;
 pub const MAX_QUESTIONS: usize = 16;
 pub const MAX_OPTIONS: usize = 64;
 pub const MAX_TEXT: usize = 2000;
+/// Longest question id or option name: a key for code, not a place for text.
+pub const MAX_KEY: usize = 64;
 
 /// The questions in a wire-form `questions` object, in id order; a sentence when it is not one.
 pub fn questions_from_json(v: &Value) -> Result<Vec<(String, Question)>, String> {
@@ -29,6 +31,9 @@ pub fn questions_from_json(v: &Value) -> Result<Vec<(String, Question)>, String>
     }
     let mut out = Vec::with_capacity(obj.len());
     for (id, q) in obj {
+        if id.is_empty() || id.chars().count() > MAX_KEY {
+            return Err(format!("a question id is between 1 and {MAX_KEY} characters"));
+        }
         let text = |k: &str| -> Result<String, String> {
             let t = q.get(k).and_then(Value::as_str).unwrap_or("").trim().to_string();
             if t.chars().count() > MAX_TEXT {
@@ -47,6 +52,9 @@ pub fn questions_from_json(v: &Value) -> Result<Vec<(String, Question)>, String>
             }
             c.iter()
                 .map(|(k, v)| {
+                    if k.is_empty() || k.chars().count() > MAX_KEY {
+                        return Err(format!("{id}: an option's name is between 1 and {MAX_KEY} characters"));
+                    }
                     let v = v.as_str().ok_or_else(|| format!("{id}: criterion {k} is not text"))?;
                     if v.chars().count() > MAX_TEXT {
                         return Err(format!("{id}: criterion {k} is too long"));
@@ -101,6 +109,8 @@ mod tests {
             json!({"q": {"type": "choice", "instructions": "x"}}),
             json!({"q": {"type": "score", "instructions": "x", "criteria": {"0": "a", "2": "b"}}}),
             json!({"q": {"type": "noul", "instructions": "x".repeat(MAX_TEXT + 1)}}),
+            json!({"q".repeat(MAX_KEY + 1): {"type": "noul", "instructions": "x"}}),
+            json!({"q": {"type": "choice", "instructions": "x", "criteria": {"o".repeat(MAX_KEY + 1): "a"}}}),
         ] {
             assert!(questions_from_json(&bad).is_err(), "{bad}");
         }

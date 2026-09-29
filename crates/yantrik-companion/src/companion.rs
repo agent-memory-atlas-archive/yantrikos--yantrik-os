@@ -811,7 +811,7 @@ impl CompanionService {
         let use_native_tools = llm.backend_name() == "api" && capability_profile.uses_native_tools();
         let judge = crate::judge_route::build_judge(&config.judge, &llm, crate::judge_route::chat_locality(&config.llm));
         let decisions = crate::decisions::Decisions::default();
-        decisions.publish(judge.clone(), &config.judge, false);
+        decisions.publish(judge.clone(), &config.judge, false, crate::judge_route::chat_locality(&config.llm));
         if let Some(j) = &judge {
             let info = j.info();
             tracing::info!(adapter = info.adapter, provider = %info.provider, model = %info.model,
@@ -1236,7 +1236,7 @@ impl CompanionService {
     }
 
     fn publish_decisions(&self) {
-        self.decisions.publish(self.judge.clone(), &self.config.judge, self.incognito);
+        self.decisions.publish(self.judge.clone(), &self.config.judge, self.incognito, crate::judge_route::chat_locality(&self.config.llm));
     }
 
     /// Persist the current config to disk (config.yaml).

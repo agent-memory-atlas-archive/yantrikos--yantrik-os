@@ -31,19 +31,33 @@ pub enum Caller {
 #[derive(Clone, Default)]
 pub struct Decisions(Arc<RwLock<Desk>>);
 
-#[derive(Default)]
 struct Desk {
     judge: Option<Arc<dyn Judge>>,
     config: JudgeConfig,
     incognito: bool,
+    /// Where the chat model runs (`judge_route::chat_locality`), for Settings to say where a
+    /// `chat_model` decision model would send what it judges before one is built.
+    chat_at: Locality,
+}
+
+impl Default for Desk {
+    fn default() -> Self {
+        // Nothing published yet: no model, and the chat model assumed to be in the cloud.
+        Desk { judge: None, config: JudgeConfig::default(), incognito: false, chat_at: Locality::Cloud }
+    }
 }
 
 impl Decisions {
     /// What the companion now uses; called whenever the model, its uses or incognito change.
-    pub fn publish(&self, judge: Option<Arc<dyn Judge>>, config: &JudgeConfig, incognito: bool) {
+    pub fn publish(&self, judge: Option<Arc<dyn Judge>>, config: &JudgeConfig, incognito: bool, chat_at: Locality) {
         if let Ok(mut desk) = self.0.write() {
-            *desk = Desk { judge, config: config.clone(), incognito };
+            *desk = Desk { judge, config: config.clone(), incognito, chat_at };
         }
+    }
+
+    /// Where the chat model runs, as last published.
+    pub fn chat_locality(&self) -> Locality {
+        self.0.read().map(|d| d.chat_at).unwrap_or(Locality::Cloud)
     }
 
     /// Who answers now, `None` when no model is set.
@@ -63,7 +77,9 @@ impl Decisions {
     /// Put wire-form `questions` about `state` to the model, for the use `purpose`. `Err` is a
     /// refusal or a malformed request, and nothing was sent; an answer the model could not give
     /// is an abstention inside the verdict.
-    pub fn ask(&self, state: &Value, questions: &Value, purpose: &str, caller: Caller) -> Result<Verdict, String> {
+    /// Whether `caller` may ask for `purpose` of the model in use now: every refusal `ask` makes
+    /// before anything is sent, and cheap, so a door can decide before it holds a place.
+    pub fn admit(&self, purpose: &str, caller: Caller) -> Result<(), String> {
         let door: Vec<&str> = JUDGE_USES.iter().filter(|u| u.door).map(|u| u.id).collect();
         let Some(the_use) = judge_use(purpose).filter(|u| u.door) else {
             return Err(format!("`{purpose}` is not a use of the decision model that can be asked for ({})", door.join(", ")));
@@ -71,22 +87,35 @@ impl Decisions {
         if caller == Caller::Agent && !the_use.for_agents {
             return Err(format!("an agent asks the decision model for `agent`, not `{purpose}`: refused, nothing was sent."));
         }
+        if caller == Caller::Agent {
+            let (judge, _, _) = self.now();
+            if let Some(judge) = judge {
+                if !matches!(judge.info().locality, Locality::ThisMachine | Locality::Home) {
+                    return Err(AGENT_TO_CLOUD.into());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn ask(&self, state: &Value, questions: &Value, purpose: &str, caller: Caller) -> Result<Verdict, String> {
+        self.admit(purpose, caller)?;
         let parsed = yantrik_ml::judge::questions_from_json(questions)?;
         let asked: Vec<(&str, Question)> = parsed.iter().map(|(id, q)| (id.as_str(), q.clone())).collect();
         let (judge, config, incognito) = self.now();
         if incognito {
             return Ok(abstaining(state, &asked, "incognito: nothing is sent to a decision model"));
         }
-        if !config.use_on(purpose) {
-            return Ok(abstaining(state, &asked, "this use of the decision model is switched off in Settings"));
-        }
         let Some(judge) = judge else {
             return Ok(abstaining(state, &asked, "no decision model is set"));
         };
-        if caller == Caller::Agent && !matches!(judge.info().locality, Locality::ThisMachine | Locality::Home) {
-            return Err("the decision model in use is not on this machine or the home network, and an agent's \
-                        questions go only to one that is: refused, nothing was sent."
-                .into());
+        // The same judge the locality is read from and the question is put to: one snapshot.
+        let at = judge.info().locality;
+        if caller == Caller::Agent && !matches!(at, Locality::ThisMachine | Locality::Home) {
+            return Err(AGENT_TO_CLOUD.into());
+        }
+        if !config.use_on_where(purpose, at == Locality::Cloud) {
+            return Ok(abstaining(state, &asked, "this use of the decision model is switched off in Settings"));
         }
         Ok(judge.decide(state, &asked))
     }
@@ -116,6 +145,9 @@ impl Decisions {
         }
     }
 }
+
+const AGENT_TO_CLOUD: &str = "the decision model in use is not on this machine or the home network, and an agent's \
+                              questions go only to one that is: refused, nothing was sent.";
 
 /// A verdict that abstains on every question, saying why.
 fn abstaining(state: &Value, asked: &[(&str, Question)], why: &str) -> Verdict {
@@ -155,7 +187,7 @@ mod tests {
     fn desk(at: Locality) -> (Decisions, Arc<Yes>) {
         let yes = Arc::new(Yes(at, AtomicUsize::new(0)));
         let d = Decisions::default();
-        d.publish(Some(yes.clone()), &JudgeConfig::default(), false);
+        d.publish(Some(yes.clone()), &JudgeConfig::default(), false, Locality::ThisMachine);
         (d, yes)
     }
 
@@ -169,13 +201,24 @@ mod tests {
 
     #[test]
     fn a_surface_asks_for_any_use_with_a_door() {
-        let (d, _) = desk(Locality::Cloud);
+        let (d, _) = desk(Locality::Home);
         for purpose in ["browser_commitment", "agent"] {
             let v = d.ask(&json!({}), &q(), purpose, Caller::Person).unwrap();
             assert_eq!(v.get("q"), Some(&Answer::Noul(0.9)), "{purpose}");
         }
         assert!(d.ask(&json!({}), &q(), "route_tools", Caller::Person).is_err(), "tool choice is the companion's own");
         assert!(d.ask(&json!({}), &q(), "wire_money", Caller::Person).is_err());
+    }
+
+    #[test]
+    fn a_cloud_model_is_sent_pages_only_once_the_person_switches_that_on() {
+        let (d, yes) = desk(Locality::Cloud);
+        assert!(abstained(&d.ask(&json!({}), &q(), "browser_commitment", Caller::Person).unwrap()));
+        assert_eq!(yes.1.load(Ordering::SeqCst), 0, "nothing went to the cloud");
+        let mut config = JudgeConfig::default();
+        config.set_use("browser_commitment", true);
+        d.publish(Some(yes.clone()), &config, false, Locality::Cloud);
+        assert!(!abstained(&d.ask(&json!({}), &q(), "browser_commitment", Caller::Person).unwrap()));
     }
 
     #[test]
@@ -196,11 +239,11 @@ mod tests {
         let (d, yes) = desk(Locality::ThisMachine);
         let mut config = JudgeConfig::default();
         config.set_use("browser_commitment", false);
-        d.publish(Some(yes.clone()), &config, false);
+        d.publish(Some(yes.clone()), &config, false, Locality::ThisMachine);
         let v = d.ask(&json!({}), &q(), "browser_commitment", Caller::Person).unwrap();
         assert!(abstained(&v));
         assert!(!abstained(&d.ask(&json!({}), &q(), "agent", Caller::Person).unwrap()), "the other uses are still on");
-        d.publish(Some(yes.clone()), &JudgeConfig::default(), true);
+        d.publish(Some(yes.clone()), &JudgeConfig::default(), true, Locality::ThisMachine);
         assert!(abstained(&d.ask(&json!({}), &q(), "agent", Caller::Agent).unwrap()));
         assert_eq!(yes.1.load(Ordering::SeqCst), 1, "only the use that was on asked the model");
         let none = Decisions::default();

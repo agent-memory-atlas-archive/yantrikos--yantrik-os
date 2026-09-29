@@ -96,7 +96,7 @@ impl ToolRegistry {
                 // The second gate, and a different question from the first. Permission asks
                 // whether this tool may ever run; this asks whether it may run *now*, given what
                 // has already entered the conversation. See `crate::taint`.
-                if let Err(refusal) = crate::taint::check(name, tool.category()) {
+                if let Err(refusal) = crate::taint::check_call(name, tool.category(), args) {
                     tracing::warn!("{}", refusal);
                     audit_log(ctx.db, name, tool.category(), args, &refusal);
                     return refusal;
@@ -105,7 +105,7 @@ impl ToolRegistry {
                 let result = tool.execute(ctx, args);
                 // Recorded after the fact, because what a tool returns is what taints the turn —
                 // and a tool that failed returned nothing to be tainted by.
-                crate::taint::note(name, tool.category());
+                crate::taint::note_call(name, tool.category(), args);
                 audit_log(ctx.db, name, tool.category(), args, &result);
                 return result;
             }

@@ -181,8 +181,30 @@ impl JudgeConfig {
         self.kind() != JudgeKind::Off
     }
 
-    /// Whether the use `id` is on. An unknown use is off: nothing asks the model for a use the
-    /// person was never shown.
+    /// Whether the use `id` is on for a model that runs in the cloud (`cloud`) or in the house.
+    /// What the person switched decides; unswitched, a use is on in the house, and in the cloud
+    /// only tool choice is: a model somebody set up to choose tools does not quietly start
+    /// receiving the pages they browse (security review, 29 Sep 2026).
+    pub fn use_on_where(&self, id: &str, cloud: bool) -> bool {
+        if judge_use(id).is_none() {
+            return false;
+        }
+        if self.uses.contains_key(id) || self.legacy_of(id).is_some() {
+            return self.use_on(id);
+        }
+        id == "route_tools" || !cloud
+    }
+
+    fn legacy_of(&self, id: &str) -> Option<bool> {
+        match id {
+            "route_tools" => self.legacy_route_tools,
+            "browser_commitment" => self.legacy_browser_commitments,
+            _ => None,
+        }
+    }
+
+    /// Whether the use `id` is on, wherever the model runs: what the person switched, or on.
+    /// An unknown use is off: nothing asks the model for a use the person was never shown.
     pub fn use_on(&self, id: &str) -> bool {
         if judge_use(id).is_none() {
             return false;
@@ -261,6 +283,18 @@ mod tests {
         assert!(!c.use_on("mail_everyone") && c.uses.is_empty(), "and cannot be switched on");
         c.set_use("agent", false);
         assert!(!c.use_on("agent") && c.use_on("route_tools"));
+    }
+
+    #[test]
+    fn a_cloud_model_gets_only_tool_choice_until_the_person_says_otherwise() {
+        let mut c = JudgeConfig::default();
+        assert!(c.use_on_where("route_tools", true));
+        assert!(!c.use_on_where("browser_commitment", true) && !c.use_on_where("agent", true));
+        assert!(c.use_on_where("browser_commitment", false) && c.use_on_where("agent", false));
+        c.set_use("browser_commitment", true);
+        assert!(c.use_on_where("browser_commitment", true), "switched on, it is on in the cloud too");
+        c.set_use("route_tools", false);
+        assert!(!c.use_on_where("route_tools", true) && !c.use_on_where("route_tools", false));
     }
 
     #[test]

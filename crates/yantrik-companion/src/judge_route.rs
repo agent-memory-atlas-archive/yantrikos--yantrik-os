@@ -67,12 +67,26 @@ pub fn decide(r: &Routing, route_at: f64) -> Decision {
 /// default one, or, with none, this machine only for the backends that run in this process.
 /// Anything else without an address (the Claude CLI) is the cloud: saying what was judged stayed
 /// home when it did not is the mistake that matters.
+///
+/// With a fallback configured, the farther of the two: when the primary is down, a chat-model
+/// judge's questions go to the fallback (security review, 29 Sep 2026).
 pub fn chat_locality(llm: &yantrik_companion_core::config::LLMConfig) -> yantrik_ml::judge::Locality {
     use yantrik_ml::judge::Locality;
-    match llm.resolve_api_base_url() {
+    let of = |url: Option<String>, backend: &str| match url {
         Some(url) => Locality::of_endpoint(&url),
-        None if matches!(llm.backend.as_str(), "candle" | "llamacpp") => Locality::ThisMachine,
+        None if matches!(backend, "candle" | "llamacpp") => Locality::ThisMachine,
         None => Locality::Cloud,
+    };
+    let primary = of(llm.resolve_api_base_url(), &llm.backend);
+    let fallback = llm.fallback.as_ref().map(|f| of(f.api_base_url.clone().filter(|u| !u.trim().is_empty()), &f.backend));
+    let far = |l: Locality| match l {
+        Locality::Nowhere | Locality::ThisMachine => 0,
+        Locality::Home => 1,
+        Locality::Cloud => 2,
+    };
+    match fallback {
+        Some(f) if far(f) > far(primary) => f,
+        _ => primary,
     }
 }
 

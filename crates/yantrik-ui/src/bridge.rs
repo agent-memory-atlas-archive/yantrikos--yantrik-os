@@ -733,6 +733,11 @@ impl CompanionBridge {
         });
     }
 
+    /// The decision model in use, its uses and where the chat model runs, as last published.
+    pub fn decisions(&self) -> &yantrik_companion::decisions::Decisions {
+        &self.decisions
+    }
+
     /// The decision model the companion is set to.
     pub fn judge_config(&self) -> yantrik_companion::config::JudgeConfig {
         self.judge.lock().map(|j| j.clone()).unwrap_or_default()

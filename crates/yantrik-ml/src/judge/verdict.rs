@@ -34,31 +34,47 @@ impl Locality {
     /// that cannot be told apart is called cloud: saying the state stayed home when it did not is
     /// the mistake that matters.
     pub fn of_endpoint(endpoint: &str) -> Locality {
-        let rest = endpoint.split("://").nth(1).unwrap_or(endpoint);
-        let authority = rest.split('/').next().unwrap_or("");
+        // The authority ends at the first `/`, `?` or `#`, as every URL parser reads it: a host
+        // cut at `/` alone took `http://evil.example?@127.0.0.1` for loopback (security review,
+        // 29 Sep 2026). Userinfo is what comes before the last `@` inside it.
+        let rest = endpoint.trim().split_once("://").map(|(_, r)| r).unwrap_or(endpoint.trim());
+        let authority = rest.split(['/', '?', '#', '\\']).next().unwrap_or("");
         let host = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
-        let host = if host.starts_with('[') {
-            host.trim_start_matches('[').split(']').next().unwrap_or("")
+        let host = if let Some(bracketed) = host.strip_prefix('[') {
+            bracketed.split(']').next().unwrap_or("")
         } else {
             host.split(':').next().unwrap_or("")
         }
+        .trim_end_matches('.')
         .to_ascii_lowercase();
-        if host == "localhost" || host == "::1" || host.starts_with("127.") {
+        // Only an address that IS loopback is this machine: `127.attacker.example` is a name.
+        if host == "localhost" {
             return Locality::ThisMachine;
         }
-        if host.ends_with(".local") || host.ends_with(".lan") || host.ends_with(".home.arpa") {
-            return Locality::Home;
-        }
         if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
+            if ip.is_loopback() {
+                return Locality::ThisMachine;
+            }
             if ip.is_private() || ip.is_link_local() {
                 return Locality::Home;
             }
+            return Locality::Cloud;
         }
         if let Ok(ip) = host.parse::<std::net::Ipv6Addr>() {
+            if ip.is_loopback() {
+                return Locality::ThisMachine;
+            }
             let first = ip.segments()[0];
             if (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80 {
                 return Locality::Home;
             }
+            return Locality::Cloud;
+        }
+        if !host.is_empty()
+            && host.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
+            && (host.ends_with(".local") || host.ends_with(".lan") || host.ends_with(".home.arpa"))
+        {
+            return Locality::Home;
         }
         Locality::Cloud
     }
@@ -152,6 +168,14 @@ mod tests {
             ("https://api.typesafe.ai", Locality::Cloud),
             ("https://192.168.4.20.evil.example", Locality::Cloud),
             ("http://user@8.8.8.8:80", Locality::Cloud),
+            ("http://127.attacker.example:8009", Locality::Cloud),
+            ("http://evil.example?@127.0.0.1:8009", Locality::Cloud),
+            ("http://evil.example#@127.0.0.1", Locality::Cloud),
+            ("http://evil.example\\@127.0.0.1", Locality::Cloud),
+            ("http://localhost.evil.example", Locality::Cloud),
+            ("http://LOCALHOST.:8009", Locality::ThisMachine),
+            ("http://127.0.0.2:8009", Locality::ThisMachine),
+            ("http://[::ffff:127.0.0.1]:8009", Locality::Cloud),
         ] {
             assert_eq!(Locality::of_endpoint(endpoint), want, "{endpoint}");
         }

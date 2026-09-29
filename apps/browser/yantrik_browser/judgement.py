@@ -49,6 +49,16 @@ def _ask_shell(state):
     }, timeout=BUDGET, peer_rule=gate.must_be_the_shell)
 
 
+def where_of(url):
+    """The page's address without its query or fragment: where the page is, not what the address
+    carries — sign-in codes and reset tokens ride in those, and a cloud model is not sent them."""
+    try:
+        u = urllib.parse.urlsplit(url or "")
+        return urllib.parse.urlunsplit((u.scheme, u.hostname or "", u.path, "", ""))[:300]
+    except ValueError:
+        return ""
+
+
 def yes_in(reply):
     """The probability of yes in the shell's answer, and who gave it; (None, reason) when the
     model abstained or the answer is not a verdict."""
@@ -76,7 +86,7 @@ class Judgement:
     def state_of(self, control, url, title):
         return {
             "control": {"role": control.get("role") or "clickable", "label": control.get("name") or "(no label: an icon)"},
-            "page": {"title": (title or "")[:200], "url": (url or "")[:300], "heading": (control.get("heading") or "")[:200]},
+            "page": {"title": (title or "")[:200], "url": where_of(url), "heading": (control.get("heading") or "")[:200]},
             "nearby_text": (control.get("nearby") or "")[:400],
         }
 
@@ -97,10 +107,14 @@ class Judgement:
                 p, who = yes_in(self.ask(state))
             except (OSError, ConnectionError, ValueError, wire.PeerRefused) as e:
                 p, who = None, str(e)
-            with self.lock:
-                if len(self.cache) >= CACHE_SIZE:
-                    self.cache.pop(next(iter(self.cache)))
-                self.cache[key] = (p, who, now)
+            # Only an answer is remembered. A model that was busy, slow or refused is asked again
+            # next time: remembering "no answer" for ten minutes let whoever kept it busy once
+            # leave a control unchecked for all of them (security review, 29 Sep 2026).
+            if p is not None:
+                with self.lock:
+                    if len(self.cache) >= CACHE_SIZE:
+                        self.cache.pop(next(iter(self.cache)))
+                    self.cache[key] = (p, who, now)
         if p is not None and p >= THRESHOLD:
             return "judged a commitment by %s, p = %.2f" % (who, p)
         return None
