@@ -806,7 +806,7 @@ mod tests {
     use super::*;
 
     fn at(ceiling: &str, mode: &str) -> Authority {
-        Authority { ceiling: ceiling.into(), mode: gate::Mode::named(mode), granted: false }
+        Authority { ceiling: ceiling.into(), mode: gate::Mode::named(mode), granted: false, asks_above: None }
     }
 
     fn pin(grant: Option<&str>) -> serde_json::Value {

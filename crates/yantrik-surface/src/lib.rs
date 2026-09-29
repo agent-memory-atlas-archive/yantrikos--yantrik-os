@@ -208,6 +208,7 @@ mod over_a_socket {
                     name: "Counter".into(),
                     surfaces: vec!["counter.increment".into(), "counter.who".into()],
                     ceiling: "standard".into(),
+                    asks_above: None,
                 })
             });
 

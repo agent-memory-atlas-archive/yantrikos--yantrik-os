@@ -99,7 +99,15 @@ def reach_in_reply(reply):
         return None
     if not _is_reach(reach):
         raise Unanswered("the shell's answer about this agent token's reach does not read")
-    return {k: reach[k] for k in ("agent", "role", "name", "surfaces", "ceiling")}
+    held = {k: reach[k] for k in ("agent", "role", "name", "surfaces", "ceiling")}
+    # An agent answering a turn from the person's phone asks above this, whatever the mode
+    # (`gate::Authority::asks_above`). Dropping it let such a turn act unasked on every Python
+    # surface (security review, 29 Sep 2026). Anything but a level on the ladder reads as asking
+    # about everything.
+    if reach.get("asks_above") is not None:
+        level = reach["asks_above"]
+        held["asks_above"] = level if isinstance(level, str) and gate.grade(level) is not None else "safe"
+    return held
 
 
 def known_in_reply(reply):

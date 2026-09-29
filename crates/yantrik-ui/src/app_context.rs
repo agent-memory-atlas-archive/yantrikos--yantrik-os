@@ -308,37 +308,10 @@ impl AppContext {
             &chat_config_snapshot,
             // AI callback: the person's message to the mind answering, and its reply. The router
             // asks only about a direct message from one of `chat.people` (`ChatRouter::set_people`).
-            Box::new(move |text: &str, context: &[String], policy: &yantrik_chat::policy::ConversationPolicy, asker: &yantrik_chat::router::Asker| {
-                let prompt = if context.is_empty() {
-                    text.to_string()
-                } else {
-                    let history = context.iter()
-                        .rev()
-                        .take(6)
-                        .rev()
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    format!("[Chat context]\n{history}\n\n[Latest message]\n{text}")
-                };
-
-                // To the mind answering, from the phone (design/channels-2026-09-29.md): see
-                // `channels::ask_from_phone` for which minds answer a phone and how it is held.
-                let mut full_response = crate::channels::ask_from_phone(prompt, asker);
-
-                if full_response.is_empty() {
-                    return None;
-                }
-
-                // Respect max reply length from policy
-                if let Some(max_len) = policy.max_reply_length {
-                    if full_response.len() > max_len {
-                        let boundary = full_response.floor_char_boundary(max_len.saturating_sub(3));
-                        full_response = format!("{}...", &full_response[..boundary]);
-                    }
-                }
-
-                Some(full_response)
+            Box::new(move |text: &str, context: &[String], policy: &yantrik_chat::policy::ConversationPolicy, asker: &yantrik_chat::router::Asker, outbox: &yantrik_chat::router::Outbox| {
+                // The mind answering, from the phone, answered later through the outbox; or an
+                // answer to a card on the phone, answered now. See `channels`.
+                crate::channels::from_phone(text, context, policy.max_reply_length, asker, outbox)
             }),
             // Brain callback: record events for cross-platform memory
             Box::new(move |sender_name: &str, _sender_id: &str, provider: &str, content_type: &str| {
@@ -353,7 +326,14 @@ impl AppContext {
             }),
             // Private mode: the channels keep nothing while it is on.
             Box::new(crate::private_mode::is_on),
+            // An answer to a card on the phone is never kept: its code is not context.
+            Box::new(crate::channels::is_card_answer),
         );
+        // What the shell sends to a channel unasked (a card on the phone), and which channels the
+        // person trusts with an Allow though their operator can read them.
+        if let Some(handle) = &_chat_handle {
+            crate::channels::configure(handle.outbox(), chat_config_snapshot.chat.phone_approvals.clone());
+        }
 
         // Set up UI models
         ui.set_messages(ModelRc::new(VecModel::<MessageData>::default()));

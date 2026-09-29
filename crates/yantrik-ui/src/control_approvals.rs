@@ -166,13 +166,39 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                 // shell surface publishes no description here to read.
                 let cannot_be_undone = approvals::unrecoverable(&published_purpose)
                     || approvals::unrecoverable(&purpose);
+                // What the phone is shown of it: the app's own sentence, never the caller's, since
+                // a mind could describe a deletion as tidying (security review, 29 Sep 2026).
+                let published_summary = approvals::summary_of(&published_purpose);
                 // And the card shows the app's own words when the caller sent none, so the red
                 // warning line, the session-rule offer and the decision above all read one
                 // sentence rather than three.
                 let purpose =
                     if purpose.trim().is_empty() { published_purpose } else { purpose };
 
-                match crate::mind_mode::decide(&grade, &app, &action, cannot_be_undone) {
+                // An agent answering a turn from the person's phone is asked about everything above
+                // a read, whatever the mode and whatever the desk's session rules: its door asks
+                // (`gate::Authority::asks_above`), so the card must be raised, not waved through.
+                let held_from_phone = matches!(
+                    crate::control_agent_terminal::calling_agent(),
+                    Some(Ok(ref a)) if crate::agents::reaches::is_held_remote(a)
+                ) && yantrik_ipc_transport::gate::grade(&grade).unwrap_or(usize::MAX)
+                    > yantrik_ipc_transport::gate::grade(crate::agents::reaches::REMOTE_ASKS_ABOVE).unwrap_or(0);
+                // The mode and the machine's ceiling decide first: a refusal stands. Plan mode
+                // changes nothing from a phone either. Otherwise a held agent is always asked, where
+                // the mode or a desk session rule would have let it run.
+                let decision = match crate::mind_mode::decide(&grade, &app, &action, cannot_be_undone) {
+                    refused @ crate::mind_mode::Decision::Refuse { .. } => refused,
+                    _ if held_from_phone && crate::mind_mode::current().as_str() == "plan" => {
+                        crate::mind_mode::Decision::Refuse {
+                            why: "this desktop is in plan mode: nothing changes, and no card is raised, \
+                                  for a turn asked from the person's phone either."
+                                .into(),
+                        }
+                    }
+                    _ if held_from_phone => crate::mind_mode::Decision::Ask,
+                    other => other,
+                };
+                match decision {
                     // The same sentence the bridge relays, from the same function, so a mind
                     // that reached the shell directly and one that came through the bridge hear
                     // one story rather than two.
@@ -215,6 +241,12 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                     &requester, verified, &app, &action, parsed, &grade, &purpose, &target,
                     &explained,
                 )?;
+
+                // To the phone, when an agent answering a turn from it raised it: once, when it
+                // first appears, never again for a repeat of the same request.
+                if asked.fresh {
+                    crate::channels::card_raised(&asked.id, cannot_be_undone, &published_summary);
+                }
 
                 // And in the pane of the agent that asked: the same card, under the same request
                 // id, so answering it there answers it here (design decision 4). Only for the

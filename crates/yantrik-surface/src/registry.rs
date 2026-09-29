@@ -395,17 +395,17 @@ mod tests {
 
     /// Authority that binds nothing: the ceiling and the mode both at the top of the ladder.
     fn open() -> Authority {
-        Authority { ceiling: OPEN.into(), mode: Mode::named("bypass"), granted: false }
+        Authority { ceiling: OPEN.into(), mode: Mode::named("bypass"), granted: false, asks_above: None }
     }
 
     /// A machine at `ceiling`, in a mode that asks about nothing under it: the ceiling tests.
     fn under(ceiling: &str) -> Authority {
-        Authority { ceiling: ceiling.into(), mode: Mode::named("bypass"), granted: false }
+        Authority { ceiling: ceiling.into(), mode: Mode::named("bypass"), granted: false, asks_above: None }
     }
 
     /// An open ceiling and the mode under test, with or without a grant spent for the call.
     fn in_mode(mode: &str, granted: bool) -> Authority {
-        Authority { ceiling: OPEN.into(), mode: Mode::named(mode), granted }
+        Authority { ceiling: OPEN.into(), mode: Mode::named(mode), granted, asks_above: None }
     }
 
     /// A registry built the way an app builds one.
@@ -1050,7 +1050,7 @@ mod tests {
         let with_rule = |app: &str, action: &str| {
             let mut mode = Mode::named("ask");
             mode.session_rules.push((app.to_string(), action.to_string()));
-            Authority { ceiling: OPEN.into(), mode, granted: false }
+            Authority { ceiling: OPEN.into(), mode, granted: false, asks_above: None }
         };
         let args = json!({"out": "anything.png"});
 
@@ -1070,7 +1070,7 @@ mod tests {
     fn the_ceiling_still_refuses_dangerous_whatever_the_grant_or_mode() {
         for (mode, granted) in [("bypass", false), ("ask", true), ("bypass", true)] {
             let ran = Rc::new(Cell::new(false));
-            let authority = Authority { ceiling: "sensitive".into(), mode: Mode::named(mode), granted };
+            let authority = Authority { ceiling: "sensitive".into(), mode: Mode::named(mode), granted, asks_above: None };
             let err = delete_surface(ran.clone())
                 .act("files_delete", &json!({"name": "x"}), None, "shell#1", &authority)
                 .unwrap_err();
@@ -1128,7 +1128,7 @@ mod tests {
             if v["session_rule"] == true {
                 mode.session_rules.push((app.clone(), action.clone()));
             }
-            let authority = Authority { ceiling: text("ceiling"), mode, granted: v["grant"] == true };
+            let authority = Authority { ceiling: text("ceiling"), mode, granted: v["grant"] == true, asks_above: None };
 
             let answer = reg.act(&action, &json!({}), None, "vector#1", &authority);
             match v["outcome"].as_str() {
@@ -1197,6 +1197,7 @@ mod tests {
             name: "Planner".into(),
             surfaces: vec!["calendar".into(), "notes".into()],
             ceiling: "safe".into(),
+            asks_above: None,
         };
         assert_eq!(shell.published_grade("open_app"), Some("standard"), "the grade this reach is below");
 

@@ -557,6 +557,9 @@ impl ControlRpc {
                 // IO, spending a grant is a round trip, and the dispatch closure is a turn of
                 // the event loop.
                 let mut authority = Authority::now();
+                // An agent answering a turn from the person's phone asks above what its reach
+                // says, whatever the mode (design/channels-2026-09-29.md).
+                authority.held_by(reach.as_ref());
                 // A grant is spent only once everything that could still refuse the call without
                 // asking anybody has passed: the action exists, the agent's reach covers it, its
                 // arguments are right, and the ceiling allows its grade (#154) — or a person's
@@ -839,17 +842,17 @@ mod tests {
 
     /// Authority that binds nothing: the ceiling and the mode both at the top of the ladder.
     fn open() -> Authority {
-        Authority { ceiling: OPEN.into(), mode: Mode::named("bypass"), granted: false }
+        Authority { ceiling: OPEN.into(), mode: Mode::named("bypass"), granted: false, asks_above: None }
     }
 
     /// A machine at `ceiling`, in a mode that asks about nothing under it: the ceiling tests.
     fn under(ceiling: &str) -> Authority {
-        Authority { ceiling: ceiling.into(), mode: Mode::named("bypass"), granted: false }
+        Authority { ceiling: ceiling.into(), mode: Mode::named("bypass"), granted: false, asks_above: None }
     }
 
     /// An open ceiling and the mode under test, with or without a grant spent for the call.
     fn in_mode(mode: &str, granted: bool) -> Authority {
-        Authority { ceiling: OPEN.into(), mode: Mode::named(mode), granted }
+        Authority { ceiling: OPEN.into(), mode: Mode::named(mode), granted, asks_above: None }
     }
 
     type Act = Box<dyn Fn(&serde_json::Value) -> Result<serde_json::Value, String>>;
@@ -1220,6 +1223,7 @@ mod tests {
                     name: "Reviewer".into(),
                     surfaces: vec!["caller-test.echo".into(), "caller-test.nuke".into()],
                     ceiling: "safe".into(),
+                    asks_above: None,
                 })
             });
             let spent = std::sync::Mutex::new(std::collections::HashSet::<String>::new());

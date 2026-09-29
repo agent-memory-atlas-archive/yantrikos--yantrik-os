@@ -299,6 +299,7 @@ mod tests {
             ceiling: "sensitive".into(),
             mode: yantrik_ipc_transport::gate::Mode::named("ask"),
             granted: false,
+            asks_above: None,
         };
         call.spend_grant(&mut authority, "notes", None, || panic!("asked for a grade with no grant to spend"))
             .unwrap();

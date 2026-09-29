@@ -404,12 +404,20 @@ class Authority:
     """What is known about one call before its action runs: the ceiling and the mode as the
     files say them, and whether a grant was attached and spent."""
 
-    def __init__(self, ceiling=DEFAULT_CEILING, mode=None, granted=False):
+    def __init__(self, ceiling=DEFAULT_CEILING, mode=None, granted=False, asks_above=None):
         self.ceiling = ceiling
         self.mode = mode if mode is not None else Mode(DEFAULT_MODE, frozenset())
         if isinstance(self.mode, str):
             self.mode = Mode(self.mode, frozenset())
         self.granted = granted
+        # Above this level every act asks, whatever the mode, and no session rule answers: the
+        # agent is answering a turn from the person's phone (`gate::Authority::asks_above`).
+        self.asks_above = asks_above
+
+    def held_by(self, reach):
+        """Hold the call to `reach`'s `asks_above`, when its agent's reach has one."""
+        level = (reach or {}).get("asks_above") if isinstance(reach, dict) else None
+        self.asks_above = None if level is None else (grade(level) if grade(level) is not None else 0)
 
     @classmethod
     def now(cls, settings=None, mode=None):
@@ -495,10 +503,11 @@ def decide(authority, app_id, action, graded, purpose=""):
     irreversible = level > 0 and unrecoverable(purpose)
     asks = mode.allows() < everything and (
         irreversible or level > max(mode.allows(), grade(SOCKET_FLOOR)))
-    if not asks:
+    held = getattr(authority, "asks_above", None) is not None and level > authority.asks_above
+    if not asks and not held:
         return None
     plan = mode.allows() == 0
-    if not plan and not irreversible and mode.covers(app_id, action):
+    if not held and not plan and not irreversible and mode.covers(app_id, action):
         return None
     return grant_refusal(app_id, action, graded, mode, irreversible)
 

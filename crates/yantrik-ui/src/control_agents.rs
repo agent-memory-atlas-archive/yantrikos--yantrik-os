@@ -107,19 +107,27 @@ pub(crate) fn caller() -> Result<Caller, String> {
     }
 }
 
-/// The caller of a call that hands work to another agent: refused while that caller is answering
-/// a turn from a phone, whose hold would not bind the agent it hands to (security review, 29 Sep).
-fn delegating_caller() -> Result<Caller, String> {
+/// The caller of a call that hands work to another agent, or starts or steers a recipe: refused
+/// while that caller is answering a turn from a phone, whose hold would not bind the agents that
+/// work goes to (security reviews, 29 Sep).
+pub(crate) fn delegating_caller() -> Result<Caller, String> {
     let caller = caller()?;
-    if let Caller::Agent(me) = &caller {
+    refuse_from_phone(&caller)?;
+    Ok(caller)
+}
+
+/// Refused while `caller` is answering a turn from the person's phone.
+pub(crate) fn refuse_from_phone(caller: &Caller) -> Result<(), String> {
+    if let Caller::Agent(me) = caller {
         if reaches::is_held_remote(me) {
             return Err(format!(
                 "`{me}` is answering a turn asked from the person's phone, and hands no work to another \
-                 agent until it is done: what a phone may ask is held on this agent alone."
+                 agent and starts or steers no recipe until it is done: what a phone may ask is held \
+                 on this agent alone."
             ));
         }
     }
-    Ok(caller)
+    Ok(())
 }
 
 fn host() -> Result<&'static Host, String> {
@@ -534,6 +542,10 @@ pub fn hand_off_as(
     task: &str,
     context: &str,
 ) -> Result<Handed, String> {
+    // Not for an agent answering a turn from the person's phone: the role it hands to is not held.
+    if let Some(parent) = parent {
+        refuse_from_phone(&Caller::Agent(parent.clone()))?;
+    }
     if role.trim().is_empty() {
         return Err(format!("`role` is empty: a role from the catalog — {}.", catalog.listing()));
     }
@@ -1142,11 +1154,22 @@ mod tests {
         let first = reaches::hold_remote(&host, &agent).unwrap();
         assert!(first.holds(&token));
         let held = reaches::lookup(&token).expect("held while the phone's turn runs");
-        assert_eq!((held.ceiling.as_str(), held.surfaces.clone()), ("safe", vec!["*".to_string()]));
+        assert_eq!((held.ceiling.as_str(), held.surfaces.clone()), ("sensitive", vec!["*".to_string()]));
+        assert_eq!(held.asks_above.as_deref(), Some("safe"), "above a read, every act asks the person");
         assert_eq!(reaches::read_as_a_door(&token).unwrap(), Some(held.clone()), "on every door");
         let json = serde_json::json!({});
-        assert!(yantrik_ipc_transport::reach::within(&held, "files", "list", "safe", &json).is_ok());
-        assert!(yantrik_ipc_transport::reach::within(&held, "files", "move", "standard", &json).is_err(), "a phone reads; it changes nothing");
+        assert!(yantrik_ipc_transport::reach::within(&held, "files", "move", "sensitive", &json).is_ok(), "the gate asks; the reach lets it be asked");
+        assert!(yantrik_ipc_transport::reach::within(&held, "files", "delete", "dangerous", &json).is_err(), "nothing above sensitive from a phone");
+        let mut authority = yantrik_ipc_transport::gate::Authority {
+            ceiling: "dangerous".into(),
+            mode: yantrik_ipc_transport::gate::Mode::named("bypass"),
+            granted: false,
+            asks_above: None,
+        };
+        authority.held_by(Some(&held));
+        assert!(yantrik_ipc_transport::gate::decide(&authority, "files", "list", "safe", "List").is_ok());
+        let asked = yantrik_ipc_transport::gate::decide(&authority, "files", "move", "standard", "Move a file").unwrap_err();
+        assert!(asked.starts_with("GRANT:"), "even in bypass, a phone's act asks: {asked}");
         assert!(reaches::is_held_remote(&agent));
 
         let second = reaches::hold_remote(&host, &agent).unwrap();

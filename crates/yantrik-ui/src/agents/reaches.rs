@@ -61,11 +61,13 @@ pub fn hold(host: &Host, agent: &AgentId, role: &Role) -> Result<(), String> {
 /// it was under before the first, to put back when the last ends (`None`: it had no role).
 static REMOTE: Mutex<Vec<(String, usize, Option<Entry>)>> = Mutex::new(Vec::new());
 
-/// The most an agent may do unasked while it answers a turn asked from away from the machine:
-/// read. Anything that changes something is refused until P2 asks the person on the phone
-/// (design/channels-2026-09-29.md). Not `standard`: for the built-in companion that grade
-/// includes sending email, overwriting a file and starting sub-agents (security review, 29 Sep).
-pub const REMOTE_CEILING: &str = "safe";
+/// What an agent answering a turn from the person's phone may do (design/channels-2026-09-29.md):
+/// read unasked ([`REMOTE_ASKS_ABOVE`]); anything up to [`REMOTE_CEILING`] only once the person
+/// allows it (on the phone, or at the machine); nothing above it. Not `standard` unasked: for the
+/// built-in companion that grade includes sending email and overwriting a file (security review,
+/// 29 Sep).
+pub const REMOTE_ASKS_ABOVE: &str = "safe";
+pub const REMOTE_CEILING: &str = "sensitive";
 
 /// A turn from a phone, holding its agent to [`REMOTE_CEILING`] on every door until dropped.
 pub struct RemoteHold {
@@ -109,9 +111,11 @@ pub fn hold_remote(host: &Host, agent: &AgentId) -> Result<RemoteHold, String> {
             name: "turn asked from a phone".into(),
             surfaces: vec!["*".into()],
             ceiling: REMOTE_CEILING.into(),
+            asks_above: None,
         },
     });
     held.token_sha256 = digest.clone();
+    held.reach.asks_above = Some(REMOTE_ASKS_ABOVE.into());
     let lower = |c: &str| yantrik_ipc_transport::gate::grade(c).unwrap_or(usize::MAX);
     if lower(&held.reach.ceiling) > lower(REMOTE_CEILING) {
         held.reach.ceiling = REMOTE_CEILING.into();

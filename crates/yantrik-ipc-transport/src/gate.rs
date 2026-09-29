@@ -532,6 +532,10 @@ pub struct Authority {
     /// A grant was attached to the call and the shell spent it. Never true for a grant the
     /// shell refused: that refusal ends the call.
     pub granted: bool,
+    /// Above this level (on [`LADDER`]) the call asks, whatever the mode, and no session rule
+    /// answers for it: the agent calling is answering a turn from the person's phone
+    /// (design/channels-2026-09-29.md), set from its reach. `None` for everyone else.
+    pub asks_above: Option<usize>,
 }
 
 impl Authority {
@@ -541,7 +545,12 @@ impl Authority {
     /// service builds it in its handler. Tests build the struct instead, so the machine running
     /// them lends them neither its ceiling nor its mode.
     pub fn now() -> Authority {
-        Authority { ceiling: configured_ceiling(), mode: configured_mode(), granted: false }
+        Authority { ceiling: configured_ceiling(), mode: configured_mode(), granted: false, asks_above: None }
+    }
+
+    /// Hold the call to `reach`'s `asks_above`, when its agent's reach has one.
+    pub fn held_by(&mut self, reach: Option<&crate::reach::Reach>) {
+        self.asks_above = reach.and_then(|r| r.asks_above.as_deref()).map(|level| grade(level).unwrap_or(0));
     }
 
     /// Spend grant `id` for exactly `app_id.action(args)`, whose surface grades it `graded` —
@@ -618,17 +627,23 @@ pub fn decide(
     // about anything the app says cannot be undone.
     let asks = mode.allows() < everything
         && (irreversible || level > mode.allows().max(grade(SOCKET_FLOOR).unwrap()));
-    if !asks {
+    // Held from a phone: above its level it asks in every mode, bypass included, and a card is
+    // raised for it (the person answers on the phone, or at the machine).
+    let held = authority.asks_above.is_some_and(|above| level > above);
+    if !asks && !held {
         return Ok(());
     }
 
     // A session rule is the person's standing answer for this one action and covers it the way a
     // grant would — except for an action that cannot be undone, which the card never offers a
-    // rule for, and except in plan mode, which raises no card and so has no standing answers.
+    // rule for, except in plan mode, which raises no card and so has no standing answers, and
+    // except for a call held from a phone: an Allow given at the desk is not given to a phone.
     let plan = mode.allows() == 0;
-    if !plan && !irreversible && mode.covers(app_id, action) {
+    if !held && !plan && !irreversible && mode.covers(app_id, action) {
         return Ok(());
     }
+    // In plan mode a held call is refused as plan refuses, with no card: the person's strictest
+    // setting is not loosened for a phone.
     Err(grant_refusal(app_id, action, graded, mode, irreversible))
 }
 
@@ -729,8 +744,32 @@ fn grant_refusal(app: &str, action: &str, graded: &str, mode: &Mode, irreversibl
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_call_held_from_a_phone_asks_above_its_level_in_every_mode() {
+        for mode in ["plan", "ask", "auto", "bypass"] {
+            let mut held = at("dangerous", mode);
+            held.asks_above = Some(0);
+            assert!(decide(&held, "notes", "list_notes", "safe", "List them").is_ok(), "{mode}: a read runs");
+            let err = decide(&held, "notes", "new_note", "standard", "Make a note").unwrap_err();
+            assert!(err.starts_with("GRANT:"), "{mode}: asked: {err}");
+            if mode != "plan" {
+                assert!(err.contains("request_approval"), "{mode}: a card is asked for: {err}");
+            }
+            held.granted = true;
+            assert!(decide(&held, "notes", "new_note", "standard", "Make a note").is_ok(), "{mode}: the person's Allow runs it");
+        }
+        // A standing yes given at the desk is not given to a phone.
+        let ruled = Authority {
+            ceiling: "dangerous".into(),
+            mode: Mode { name: "auto".into(), session_rules: vec![("notes".into(), "new_note".into())] },
+            granted: false,
+            asks_above: Some(0),
+        };
+        assert!(decide(&ruled, "notes", "new_note", "standard", "Make a note").is_err());
+    }
+
     fn at(ceiling: &str, mode: &str) -> Authority {
-        Authority { ceiling: ceiling.into(), mode: Mode::named(mode), granted: false }
+        Authority { ceiling: ceiling.into(), mode: Mode::named(mode), granted: false, asks_above: None }
     }
 
     /// What System Monitor publishes for `kill_process`. Recoverable wording, so these tests are
@@ -831,6 +870,7 @@ mod tests {
             ceiling: "dangerous".into(),
             mode: Mode { name: mode.into(), session_rules: vec![("calendar".into(), action.into())] },
             granted: false,
+            asks_above: None,
         };
         assert!(decide(&with_rule("ask", "update_event"), "calendar", "update_event", "sensitive", "Move it").is_ok());
         let err = decide(&with_rule("ask", "delete_event"), "calendar", "delete_event", "sensitive", delete).unwrap_err();
@@ -1127,6 +1167,7 @@ mod tests {
                                     ceiling: ceiling.to_string(),
                                     mode: Mode { name: mode.to_string(), session_rules: rules.clone() },
                                     granted,
+                                    asks_above: None,
                                 };
                                 let decided = decide(&authority(granted), app, action, graded, purpose);
                                 let without = decide(&authority(false), app, action, graded, purpose);

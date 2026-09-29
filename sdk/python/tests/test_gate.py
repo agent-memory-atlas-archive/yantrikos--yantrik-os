@@ -206,6 +206,19 @@ def at(ceiling, mode, granted=False):
 
 
 class TestDecide(unittest.TestCase):
+    def test_a_call_held_from_a_phone_asks_above_its_level_in_every_mode(self):
+        for mode in ("plan", "ask", "auto", "bypass"):
+            held = Authority("dangerous", Mode(mode, frozenset()), asks_above=0)
+            self.assertIsNone(decide(held, "notes", "list_notes", "safe", "List them"), mode)
+            err = decide(held, "notes", "new_note", "standard", "Make a note")
+            self.assertTrue(err and err.startswith("GRANT:"), (mode, err))
+            if mode != "plan":
+                self.assertIn("request_approval", err, mode)
+            held.granted = True
+            self.assertIsNone(decide(held, "notes", "new_note", "standard", "Make a note"), mode)
+        ruled = Authority("dangerous", Mode("auto", frozenset({("notes", "new_note")})), asks_above=0)
+        self.assertIsNotNone(decide(ruled, "notes", "new_note", "standard", "Make a note"))
+
     """`gate.rs`'s own tests, ported one for one."""
 
     def test_the_order_is_ceiling_then_mode_and_each_says_which_it_was(self):

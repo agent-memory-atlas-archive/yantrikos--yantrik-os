@@ -917,7 +917,7 @@ mod tests {
     }
 
     fn at(ceiling: &str, mode: &str) -> Authority {
-        Authority { ceiling: ceiling.into(), mode: gate::Mode::named(mode), granted: false }
+        Authority { ceiling: ceiling.into(), mode: gate::Mode::named(mode), granted: false, asks_above: None }
     }
 
     fn notify(grant: Option<&str>) -> serde_json::Value {
