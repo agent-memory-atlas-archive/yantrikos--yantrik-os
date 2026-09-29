@@ -75,6 +75,8 @@ pub struct ChatRouter {
     brain_callback: Option<BrainCallback>,
     /// Who the person is on each channel: `(provider id, sender id)`. See [`ChatRouter::set_people`].
     people: std::collections::HashSet<(String, String)>,
+    /// Whether nothing is to be kept right now: the person's Private mode. See [`ChatRouter::set_paused`].
+    paused: Option<Box<dyn Fn() -> bool + Send + Sync>>,
 }
 
 impl ChatRouter {
@@ -96,7 +98,18 @@ impl ChatRouter {
             ai_callback: None,
             brain_callback: None,
             people: std::collections::HashSet::new(),
+            paused: None,
         }
+    }
+
+    /// Ask `paused` before keeping anything: while it says yes (the person's Private mode), no
+    /// message and no answer is written to the transcript.
+    pub fn set_paused(&mut self, paused: Box<dyn Fn() -> bool + Send + Sync>) {
+        self.paused = Some(paused);
+    }
+
+    fn keeping(&self) -> bool {
+        !self.paused.as_ref().is_some_and(|p| p())
     }
 
     /// Who the person is on each channel. The AI is asked only about a direct message from one
@@ -193,6 +206,15 @@ impl ChatRouter {
         }
         store::mark_event_seen(&db, provider_id, &msg.event_id);
 
+        // Only the person's words are kept, and nothing at all while the person is private: a
+        // stranger who writes to the bot gets no reply and no row, and cannot grow the store.
+        let from_person = self.people.contains(&(provider_id.to_string(), msg.sender.id.clone()));
+        if !from_person {
+            tracing::debug!(provider = provider_id, "Chat: not the person; not answered, not kept");
+            return;
+        }
+        let keeping = self.keeping();
+
         // Resolve conversation + policy
         let (conv_rowid, policy) = match store::get_or_create_conversation(&db, &msg.conversation) {
             Ok(r) => r,
@@ -203,7 +225,9 @@ impl ChatRouter {
         };
 
         // Store message in transcript
-        store::store_message(&db, conv_rowid, &msg);
+        if keeping {
+            store::store_message(&db, conv_rowid, &msg);
+        }
 
         // Feed brain (for all non-muted conversations)
         if policy::should_feed_brain(&policy) {
@@ -221,17 +245,11 @@ impl ChatRouter {
 
         // Check if AI should reply
         let current_hour = chrono::Local::now().hour() as u8;
-        let from_person = self.people.contains(&(provider_id.to_string(), msg.sender.id.clone()));
         let direct = msg.conversation.kind == crate::model::ConversationKind::Direct;
-        if !from_person || !direct {
-            tracing::debug!(
-                provider = provider_id,
-                from_person,
-                direct,
-                "Chat: not the person in a direct message; nothing is asked of the AI"
-            );
+        if !direct {
+            tracing::debug!(provider = provider_id, "Chat: the person, but not in a direct message; nothing is asked of the AI");
         }
-        let should_reply = from_person && direct && policy::should_ai_reply(&msg, &policy, current_hour);
+        let should_reply = direct && policy::should_ai_reply(&msg, &policy, current_hour);
 
         if should_reply {
             if let Some(ai_cb) = &self.ai_callback {
@@ -283,7 +301,8 @@ impl ChatRouter {
                             match provider.send(&msg.conversation, &out_msg) {
                                 Ok(receipt) => {
                                     // Store AI response in transcript
-                                    if let Ok(db) = self.db.lock() {
+                                    let db = if keeping { self.db.lock().ok() } else { None };
+                                    if let Some(db) = db {
                                         store::store_ai_response(
                                             &db,
                                             conv_rowid,

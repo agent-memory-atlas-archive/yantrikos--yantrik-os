@@ -65,8 +65,9 @@ pub enum CompanionCommand {
         /// Only [`CompanionHandle::ask`] passes one. The chat UI shows the offline notice from
         /// its own wiring, and a submitted job's subscriber is the board.
         model: Option<Sender<bool>>,
-        /// Asked from away from the machine (a channel): the turn's tools are held to
-        /// `Standard`, and so is what it leaves queued, until the person next speaks at the desk.
+        /// Asked from away from the machine (a channel): the turn's tools are held to `Safe` —
+        /// it reads, it changes nothing — and so is what the worker runs after it, until the
+        /// person next speaks at the desk.
         remote: bool,
     },
     /// Count a conversation turn — one that began with the person's words and was answered.
@@ -659,7 +660,7 @@ impl CompanionBridge {
     }
 
     /// `send_message`, saying whether the person asked it from away from the machine: a remote
-    /// turn's tools are held to `Standard`.
+    /// turn's tools are held to `Safe`.
     pub fn send_message_from(&self, text: String, remote: bool) -> Receiver<String> {
         let (token_tx, token_rx) = crossbeam_channel::unbounded();
         if self
@@ -1179,7 +1180,8 @@ fn worker_loop(
                 recipes_dirty = true;
             }
             Ok(CompanionCommand::SendMessage { text, token_tx, job, model, remote }) => {
-                companion.set_turn_ceiling(remote.then_some(yantrik_companion::tools::PermissionLevel::Standard));
+                // From a phone, the turn reads and changes nothing (channels, P1).
+                companion.set_turn_ceiling(remote.then_some(yantrik_companion::tools::PermissionLevel::Safe));
                 // A turn can create, run or change a recipe through its tools.
                 recipes_dirty = true;
                 // Work that arrived without a ticket gets one here, and that is not bookkeeping:

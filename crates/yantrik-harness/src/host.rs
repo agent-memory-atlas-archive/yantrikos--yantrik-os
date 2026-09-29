@@ -1125,6 +1125,49 @@ impl Host {
         harness.agents.values_mut().filter_map(|agent| agent.memory.take()).map(|held| held.digest).collect()
     }
 
+    /// The account an attached harness ran as when it attached, as the kernel said at accept.
+    /// `None` when nothing by that id is attached or the kernel gave none (the TCP dev path).
+    pub fn attached_uid(&self, harness_id: &str) -> Option<u32> {
+        let mut state = self.lock();
+        self.reap(&mut state);
+        state.attached.get(harness_id).and_then(|h| h.uid)
+    }
+
+    /// The main agent of an attached harness, made now with its token if it has not answered
+    /// yet, so a caller can hold the agent before its first turn is queued.
+    pub fn ensure_main(&self, harness_id: &str) -> Result<AgentId, String> {
+        let mut state = self.lock();
+        self.reap(&mut state);
+        let harness = state
+            .attached
+            .get_mut(harness_id)
+            .ok_or_else(|| format!("`{harness_id}` is not attached"))?;
+        if !harness.agents.contains_key(AgentId::MAIN) {
+            harness.agents.insert(AgentId::MAIN.to_string(), Agent::new(mint_token()?));
+        }
+        Ok(AgentId::new(harness_id, AgentId::MAIN))
+    }
+
+    /// Send a turn to a built-in harness by id, whichever mind is active: a caller that decided
+    /// on the built-in is not redirected by a switch made in between. `None` when `harness_id` is
+    /// no built-in.
+    pub fn send_builtin(&self, harness_id: &str, turn: Turn) -> Option<Answer> {
+        if let Some(why) = self.paused() {
+            return Some(failed(why));
+        }
+        self.builtin(harness_id).map(|b| b.send(turn))
+    }
+
+    /// [`Host::send_to`], but only while the agent still holds the token `held` says it held:
+    /// an agent stopped and remade between a hold and its turn would carry a token nothing holds.
+    pub fn send_to_holding(&self, agent: &AgentId, turn: Turn, held: impl Fn(&str) -> bool) -> Result<Answer, String> {
+        let still = self.with_agent_token(agent, |t| held(t)).unwrap_or(false);
+        if !still {
+            return Err(format!("`{agent}` changed before the turn was sent; nothing was sent"));
+        }
+        self.send_to(agent, turn)
+    }
+
     /// Whether an attached harness holds a conversation per agent — `None` when nothing by that id
     /// is attached. A role from the agent catalog is only ever started as a conversation of its
     /// own: a harness that holds one has only the person's own conversation to offer.

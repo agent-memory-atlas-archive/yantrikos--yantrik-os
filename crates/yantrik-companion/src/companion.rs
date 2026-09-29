@@ -597,9 +597,9 @@ pub struct CompanionService {
     // The same model, its uses and incognito, published for callers on other threads.
     decisions: crate::decisions::Decisions,
 
-    // A ceiling on this turn's tools below the configured one: `Standard` while the person is
+    // A ceiling on this turn's tools below the configured one: `Safe` while the person is
     // asking from a phone (design/channels-2026-09-29.md). Set by every message the worker
-    // takes, so what a remote turn queues keeps it until the person next speaks at the desk.
+    // takes, so what runs after a remote turn keeps it until the next message.
     turn_ceiling: Option<PermissionLevel>,
 
     // Model family for family-aware chat templates (tool format, tool results).

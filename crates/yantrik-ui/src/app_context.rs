@@ -322,52 +322,9 @@ impl AppContext {
                     format!("[Chat context]\n{history}\n\n[Latest message]\n{text}")
                 };
 
-                // To whichever mind is answering, through the harness host — the Lens's own path
-                // (`wire::chat::dispatch`), so the active mind, the hand-over and Private mode hold
-                // for a message from a channel as for one typed at the desk. It used to go to the
-                // built-in companion whatever mind the person had chosen, past all three.
-                let Some(host) = crate::wire::harness::host() else {
-                    return Some("The desktop is still starting; ask again in a moment.".to_string());
-                };
-                // Where it came from (design/channels-2026-09-29.md): the mind reads it, and the
-                // agent answering is held to `standard` until its answer ends — a stolen phone
-                // is not the person at the keyboard. The built-in companion holds itself
-                // (`Turn::is_remote`); a harness mind is held by its token's reach.
-                let origin = yantrik_harness::protocol::Origin {
-                    channel: asker.provider.clone(),
-                    remote: true,
-                    person: asker.sender_name.clone(),
-                    carries: asker.carries.clone(),
-                    trust: crate::channels::trust_of(&asker.provider).to_string(),
-                };
-                let active = host.active_id();
-                let agent = (active != crate::wire::harness::BUILTIN_ID)
-                    .then(|| crate::agents::model::AgentId::new(&active, crate::agents::model::AgentId::MAIN));
-                if let Some(agent) = &agent {
-                    // The main agent exists once its harness is attached; a harness that is not
-                    // cannot answer, and the host says so below.
-                    if host.with_agent_token(agent, |_| ()).is_some() {
-                        if let Err(why) = crate::agents::reaches::hold_remote(host, agent) {
-                            return Some(format!("Nothing was sent: {why}"));
-                        }
-                    }
-                }
-                let answer = host.send(yantrik_harness::Turn::new(prompt).with_origin(origin));
-                let mut full_response = String::new();
-                while let Ok(chunk) = answer.recv() {
-                    match chunk {
-                        yantrik_harness::Chunk::Text(t) => full_response.push_str(&t),
-                        // Said, not swallowed: the person asked and should hear why nothing came.
-                        yantrik_harness::Chunk::Failed(why) => {
-                            full_response = why;
-                            break;
-                        }
-                        yantrik_harness::Chunk::Event(_) => {}
-                    }
-                }
-                if let Some(agent) = &agent {
-                    crate::agents::reaches::release_remote(agent);
-                }
+                // To the mind answering, from the phone (design/channels-2026-09-29.md): see
+                // `channels::ask_from_phone` for which minds answer a phone and how it is held.
+                let mut full_response = crate::channels::ask_from_phone(prompt, asker);
 
                 if full_response.is_empty() {
                     return None;
@@ -394,6 +351,8 @@ impl AppContext {
                 // Brain integration happens via the CompanionBridge's RecordSystemEvent command
                 // The companion worker thread will process this and update brain state
             }),
+            // Private mode: the channels keep nothing while it is on.
+            Box::new(crate::private_mode::is_on),
         );
 
         // Set up UI models

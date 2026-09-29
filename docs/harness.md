@@ -34,8 +34,9 @@ A turn may carry `origin`, where the person asked it from (design/channels-2026-
 `{"channel": "lens"|"telegram"|"signal"|…, "remote": bool, "person", "carries": ["text","voice","photo"],
 "trust": "local"|"e2e"|"provider-readable"}`. Absent when the desktop does not say. Use it for register
 (terse on a phone) and for what to send back. While a turn is `remote`, the agent answering it is
-held to `standard` on every door, whatever the mode: anything graded above is refused with a
-sentence saying so, to be done at the machine.
+held to `safe` on every door, whatever the mode: it reads, and anything graded above is refused
+with a sentence saying so, and it hands no work to another agent. Only a mind running as its own
+account is sent a remote turn; one running as the person is not, since nothing could hold it.
 
 ## Why the harness dials in
 

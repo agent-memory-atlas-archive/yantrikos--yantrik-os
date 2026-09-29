@@ -79,7 +79,7 @@ impl Harness for Companion {
     }
 
     fn send(&self, turn: Turn) -> Answer {
-        // Asked from a phone, the companion's tools are held to `Standard` for it.
+        // Asked from a phone, the companion reads and changes nothing for it.
         let remote = turn.is_remote();
         let tokens = self.bridge.send_message_from(turn.text, remote);
         let (tx, rx) = std::sync::mpsc::channel();

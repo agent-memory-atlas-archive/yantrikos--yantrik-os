@@ -107,6 +107,21 @@ pub(crate) fn caller() -> Result<Caller, String> {
     }
 }
 
+/// The caller of a call that hands work to another agent: refused while that caller is answering
+/// a turn from a phone, whose hold would not bind the agent it hands to (security review, 29 Sep).
+fn delegating_caller() -> Result<Caller, String> {
+    let caller = caller()?;
+    if let Caller::Agent(me) = &caller {
+        if reaches::is_held_remote(me) {
+            return Err(format!(
+                "`{me}` is answering a turn asked from the person's phone, and hands no work to another \
+                 agent until it is done: what a phone may ask is held on this agent alone."
+            ));
+        }
+    }
+    Ok(caller)
+}
+
 fn host() -> Result<&'static Host, String> {
     crate::wire::harness::host().ok_or_else(|| "the harness host is not running yet".to_string())
 }
@@ -242,8 +257,8 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
     });
     reaches::reset();
     surface
-        .action(new, |args| new_agent(host()?, &caller()?, &text(args, "mind"), &text(args, "task")))
-        .action(send, |args| send_to_agent(host()?, &caller()?, &agent_arg(args)?, &text(args, "text")))
+        .action(new, |args| new_agent(host()?, &delegating_caller()?, &text(args, "mind"), &text(args, "task")))
+        .action(send, |args| send_to_agent(host()?, &delegating_caller()?, &agent_arg(args)?, &text(args, "text")))
         .action(stop, |args| stop_agent(host()?, &caller()?, &agent_arg(args)?))
         .action(read, |args| read_agent(&caller()?, &agent_arg(args)?, args.get("last")))
         .action(show, move |args| {
@@ -261,7 +276,7 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
             let wait = wait_arg(args)?;
             let handed = hand_off(
                 host()?,
-                &caller()?,
+                &delegating_caller()?,
                 &Catalog::load(),
                 &text(args, "role"),
                 &text(args, "task"),
@@ -1124,16 +1139,21 @@ mod tests {
         let token = host.with_agent_token(&agent, |t| t.to_string()).unwrap();
         assert!(reaches::lookup(&token).is_none(), "at the desk, no role, not held");
 
-        reaches::hold_remote(&host, &agent).unwrap();
+        let first = reaches::hold_remote(&host, &agent).unwrap();
+        assert!(first.holds(&token));
         let held = reaches::lookup(&token).expect("held while the phone's turn runs");
-        assert_eq!((held.ceiling.as_str(), held.surfaces.clone()), ("standard", vec!["*".to_string()]));
+        assert_eq!((held.ceiling.as_str(), held.surfaces.clone()), ("safe", vec!["*".to_string()]));
         assert_eq!(reaches::read_as_a_door(&token).unwrap(), Some(held.clone()), "on every door");
         let json = serde_json::json!({});
-        assert!(yantrik_ipc_transport::reach::within(&held, "files", "move", "standard", &json).is_ok());
-        assert!(yantrik_ipc_transport::reach::within(&held, "files", "delete", "sensitive", &json).is_err());
+        assert!(yantrik_ipc_transport::reach::within(&held, "files", "list", "safe", &json).is_ok());
+        assert!(yantrik_ipc_transport::reach::within(&held, "files", "move", "standard", &json).is_err(), "a phone reads; it changes nothing");
+        assert!(reaches::is_held_remote(&agent));
 
-        reaches::release_remote(&agent);
-        assert!(reaches::lookup(&token).is_none(), "and let go when it ends");
+        let second = reaches::hold_remote(&host, &agent).unwrap();
+        drop(first);
+        assert!(reaches::lookup(&token).is_some(), "two turns from the phone: the first ending does not free the second");
+        drop(second);
+        assert!(reaches::lookup(&token).is_none() && !reaches::is_held_remote(&agent), "and let go when the last ends");
     }
 
     #[test]
