@@ -123,7 +123,7 @@ class Driver:
                 changes = None
             if changes and changes.get("appeared"):
                 out["appeared"] = changes["appeared"]
-        page = self._run(tab, "snapshot", False)
+        page = self._marked(self._run(tab, "snapshot", False))
         out["url"] = page.get("url")
         out["title"] = page.get("title")
         if navigated or new:
@@ -159,21 +159,36 @@ class Driver:
                 "dialog": active.dialog if active else None,
             }
 
+    def _marked(self, page):
+        """A reading with every control that reads as a commitment marked: the reader learns
+        before trying that `click` will refuse it and `commit` will ask."""
+        for e in page.get("elements") or []:
+            if not e.get("context"):
+                word = commit.reads_as_commitment(e.get("name"))
+                if word:
+                    e["commitment"] = word
+        return page
+
     def read(self, tab=None, all=False):
         with self.lock:
             t = self._tab(tab)
-            page = self._run(t, "snapshot", bool(all))
+            page = self._marked(self._run(t, "snapshot", bool(all)))
             page["tab"] = short(t.id)
             if t.dialog:
                 page["dialog"] = dict(t.dialog)
             return page
+
+    def media(self, tab=None):
+        with self.lock:
+            t = self._tab(tab)
+            return {"media": self._run(t, "media"), "url": t.url, "title": t.title}
 
     def find(self, query, tab=None):
         if not str(query or "").strip():
             raise Refused("find needs words to look for")
         with self.lock:
             t = self._tab(tab)
-            found = self._run(t, "find", query, 40)
+            found = self._marked({"elements": self._run(t, "find", query, 40)})["elements"]
             return {"query": query, "found": found, "url": t.url, "tab": short(t.id)}
 
     def text(self, tab=None, limit=TEXT_LIMIT):
@@ -390,7 +405,7 @@ class Driver:
                     raise Refused("scroll goes up, down, top or bottom — or to a ref")
                 self._run(t, "scrollBy", int(dy), None)
             hands.settle(self.browser, t, 1.5)
-            page = self._run(t, "snapshot", False)
+            page = self._marked(self._run(t, "snapshot", False))
             page["tab"] = short(t.id)
             return page
 

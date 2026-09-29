@@ -169,12 +169,18 @@ for f in yos yos-mcp release-check yantrik-mind-launch; do
 done
 echo "   + yos, yos-mcp, release-check"
 
-# The page reader `yos web` evaluates in the browser. It sits beside yos because yos looks for
-# it there. It was referenced from the day `yos web` was written and never committed, so every
-# published build answered web_read and web_find with "scan.js is missing next to yos".
-[ -f "$SCRIPT_DIR/scan.js" ] || fail "missing $SCRIPT_DIR/scan.js — yos web cannot read a page without it"
-cp "$SCRIPT_DIR/scan.js" "$ROOT/bin/scan.js"
-echo "   + scan.js"
+# The browser as an app (#477): yantrik-browser holds the one DevTools connection and serves
+# app-browser, which `yos web` and every mind's web tools are clients of. A Python program, like
+# the Blender addon, with the surface SDK vendored beside it in share/browser so it always runs
+# with the SDK it was released with. The desktop's service manager starts it (main.rs).
+[ -f "$PROJECT_ROOT/apps/browser/yantrik-browser" ] || fail "apps/browser/yantrik-browser missing — nothing could drive the browser"
+install -m 0755 "$PROJECT_ROOT/apps/browser/yantrik-browser" "$ROOT/bin/yantrik-browser"
+mkdir -p "$ROOT/share/browser"
+cp -r "$PROJECT_ROOT/apps/browser/yantrik_browser" "$ROOT/share/browser/"   || fail "apps/browser/yantrik_browser missing — the browser service would import nothing"
+cp -r "$PROJECT_ROOT/sdk/python/yantrik_surface" "$ROOT/share/browser/"   || fail "sdk/python/yantrik_surface missing — the browser service would have no surface to serve"
+find "$ROOT/share/browser" -name __pycache__ -type d -prune -exec rm -rf {} +
+[ -f "$ROOT/share/browser/yantrik_browser/page.js" ] || fail "the browser service's page reader (page.js) did not ship"
+echo "   + yantrik-browser (the browser's surface, with yantrik_surface vendored in share/browser)"
 
 # The updater ships in the image so a machine can update itself. It is a script, not a
 # compiled binary, so binary discovery does not find it either — and a machine that cannot

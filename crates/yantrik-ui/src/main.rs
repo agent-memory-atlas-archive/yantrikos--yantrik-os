@@ -327,6 +327,10 @@ fn start_services() -> yantrik_shell_core::service_manager::ServiceManager {
     // Reads windows we did not write. Autostarted: it costs nothing when there is no
     // accessibility bus, and connects lazily if one appears later.
     mgr.register("a11y", "a11y-service", true);
+    // The browser as an app (#477): the one DevTools client, serving app-browser to `yos web` and
+    // every mind's web tools. Autostarted: a socket and a thread while no browser is open, and it
+    // connects when one is.
+    mgr.register("browser", "yantrik-browser", true);
     // The kernel's periphery. Not autostarted, because it wants CAP_NET_ADMIN and CAP_SYS_ADMIN
     // to open its descriptors and a desktop session cannot grant either: started from here it
     // comes up on PSI alone, which is worth having on request and not worth running all session

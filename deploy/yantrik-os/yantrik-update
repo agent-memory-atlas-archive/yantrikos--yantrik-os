@@ -1805,12 +1805,12 @@ d /run/yantrik-minds 2750 $owner yantrik-minds -"
 }
 
 # The browsers' DevTools ports. The desktop's Browser listens on 127.0.0.1:9222 and the
-# companion's on 9223-9322, which is how `yos web` reads and drives a page. Loopback TCP has no
-# owner: until this, every account on the machine — a system service, a container runtime, the
-# mind account — could open those ports and drive the person's logged-in browser, read its cookies
-# and submit its forms, without meeting any gate the bridge puts in front of a mind. This lets
-# root, the person and the mind account connect (the mind's web tools reach the page this way
-# until the browser has a surface at the mind door, #477) and resets everyone else.
+# companion's on 9223-9322. Loopback TCP has no owner: until this, every account on the machine —
+# a system service, a container runtime, the mind account — could open those ports and drive the
+# person's logged-in browser, read its cookies and submit its forms, without meeting any gate.
+# Now only root and the person connect. Minds reach the browser the way they reach every other
+# app: through its surface at the mind door (app-browser, apps/browser, #477), which the person's
+# own session serves and which holds the one DevTools connection. Everyone else is reset.
 #
 # And the other direction: while a browser is closed its port is free, and any account could
 # listen there and be taken for it — by `browser_login`, which types a vault password into
@@ -1823,9 +1823,9 @@ DEVTOOLS_UNIT=/etc/systemd/system/yantrik-devtools-guard.service
 
 devtools_guard_text() {
   cat <<EOF
-# Yantrik OS: the browsers' DevTools ports (9222-9322 on loopback) are opened by root, $1 and the
-# mind account only, and answered by root and $1 only. Made by yantrik-update; edits here are put
-# back at the next update.
+# Yantrik OS: the browsers' DevTools ports (9222-9322 on loopback) are opened and answered by
+# root and $1 only; minds use the browser's surface at the mind door. Made by yantrik-update;
+# edits here are put back at the next update.
 table inet yantrik_devtools
 delete table inet yantrik_devtools
 table inet yantrik_devtools {
@@ -1841,7 +1841,7 @@ EOF
 devtools_unit_text() {
   cat <<EOF
 [Unit]
-Description=Yantrik OS: the browsers' DevTools ports answer the person and the mind account only
+Description=Yantrik OS: the browsers' DevTools ports answer the person only
 DefaultDependencies=no
 After=nftables.service
 Before=systemd-user-sessions.service
@@ -1863,7 +1863,7 @@ EOF
 reconcile_devtools_guard() {
   [ "$(id -u)" = 0 ] || return 0
   tree_is_roots || { warn "the tree is not root's yet; the browsers' DevTools ports are not guarded (yantrik-update migrate-ownership)"; return 0; }
-  local nft owner owner_uid mind_uid allowed answering changed=0
+  local nft owner owner_uid allowed answering changed=0
   nft="$(command -v nft 2>/dev/null)"
   if [ -z "$nft" ]; then
     warn "no nft on this machine; the browsers' DevTools ports stay open to every local account"
@@ -1877,8 +1877,6 @@ reconcile_devtools_guard() {
   case "$owner_uid" in ''|*[!0-9]*) return 0 ;; esac
   allowed="0, $owner_uid"
   answering="0, $owner_uid"
-  mind_uid="$(id -u yantrik-mind 2>/dev/null)"
-  case "$mind_uid" in ''|*[!0-9]*) ;; *) allowed="$allowed, $mind_uid" ;; esac
 
   install -d -o root -g root -m 0755 /etc/yantrik
   if [ "$(cat "$DEVTOOLS_GUARD" 2>/dev/null)" != "$(devtools_guard_text "$owner" "$allowed" "$answering")" ]; then
@@ -1896,7 +1894,7 @@ reconcile_devtools_guard() {
   # line, on a reload or by hand) takes the table away while the unit still reads active, and the
   # load is one atomic transaction that costs nothing when nothing changed.
   if "$nft" -f "$DEVTOOLS_GUARD" 2>/dev/null; then
-    [ "$changed" = 1 ] && info "the browsers' DevTools ports are opened by root, $owner and the mind account only, and answered by root and $owner"
+    [ "$changed" = 1 ] && info "the browsers' DevTools ports answer root and $owner only; minds use the browser's surface"
   else
     warn "could not load $DEVTOOLS_GUARD; the DevTools ports stay open to every local account"
   fi

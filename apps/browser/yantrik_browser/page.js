@@ -477,6 +477,22 @@
 
   const where = () => ({ url: location.href, title: document.title });
 
-  globalThis.__yb = { snapshot, find, text, target, focus, submits, pick, scrollBy, watch, changes, where };
+  // The page's videos and sounds: playing or not, where, and whether the player says an advert
+  // is showing (YouTube's does, in its class names) — a pre-roll transcribes as cleanly as the
+  // video and reads like the page's own content.
+  function media() {
+    const out = [];
+    for (const [el, frame] of walk(document.documentElement, TOP)) {
+      if (el.tagName !== 'VIDEO' && el.tagName !== 'AUDIO') continue;
+      const player = el.closest('.html5-video-player');
+      const ad = !!(player && (player.classList.contains('ad-showing') || player.classList.contains('ad-interrupting')));
+      out.push({ ref: refOf(el), kind: el.tagName.toLowerCase(), playing: !el.paused && !el.ended,
+                 at: Math.round(el.currentTime || 0), length: Math.round(el.duration || 0) || null,
+                 muted: el.muted, ad: ad || undefined, box: boxOf(el, frame) });
+    }
+    return out;
+  }
+
+  globalThis.__yb = { snapshot, find, text, target, focus, submits, pick, scrollBy, watch, changes, where, media };
   return 'installed';
 })()

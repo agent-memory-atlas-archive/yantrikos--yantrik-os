@@ -8,7 +8,7 @@ the way they reach every other app: `describe browser`, `act browser click ref=e
 the mind door, under the same grades, mode and cards.
 
 Grades:
-  safe       read, find, text, tabs, wait, scroll   — looking
+  safe       read, find, text, tabs, media, wait, scroll — looking
   standard   go, back, forward, reload, click, type, press, select, new_tab, switch_tab,
              close_tab, dialog                       — using a page as a person does
   sensitive  commit                                  — the one press that cannot be taken back:
@@ -82,6 +82,12 @@ def build(driver=None, **surface_options):
     def tabs() -> dict:
         """The tabs that are open, and which one actions go to"""
         return now(d.tabs)
+
+    @s.action(grade="safe")
+    def media(tab: Tab = "") -> dict:
+        """The page's videos and sounds: whether each is playing, where it is, and whether the
+        player says an advert is showing"""
+        return now(lambda: d.media(tab or None))
 
     @s.action(grade="safe", expected_seconds=5)
     def wait(text: str = "", seconds: float = 5.0, tab: Tab = "") -> dict:
