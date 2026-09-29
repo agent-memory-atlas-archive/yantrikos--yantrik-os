@@ -304,14 +304,6 @@ impl Tool for ReadFileTool {
 
 pub struct RunCommandTool;
 
-/// Safe command allowlist — only read-only, harmless commands.
-const SAFE_COMMANDS: &[&str] = &[
-    "ls", "cat", "head", "tail", "date", "uptime", "df", "free",
-    "whoami", "pwd", "echo", "wc", "file", "stat", "uname",
-    "hostname", "id", "which", "env", "printenv",
-    "sha256sum", "md5sum", "du", "sort", "grep", "find", "diff", "bc", "cal",
-];
-
 impl Tool for RunCommandTool {
     fn name(&self) -> &'static str { "run_command" }
     fn permission(&self) -> PermissionLevel { PermissionLevel::Safe }
@@ -340,36 +332,21 @@ impl Tool for RunCommandTool {
             return "Error: command is required".to_string();
         }
 
-        let base_cmd = command.split_whitespace().next().unwrap_or("");
-        if !SAFE_COMMANDS.contains(&base_cmd) {
-            return format!(
-                "Error: '{}' is not in the safe command list. Allowed: {}",
-                base_cmd,
-                SAFE_COMMANDS.join(", ")
-            );
+        // Read-only programs, started directly with their words: no shell (crate::safe_command).
+        let argv = match crate::safe_command::words(command) {
+            Ok(w) => w,
+            Err(e) => return format!("Error: {e}"),
+        };
+        let home = std::env::var("HOME").unwrap_or_default();
+        if let Err(e) = crate::safe_command::check(&argv, &home) {
+            return format!("Error: {e}");
         }
-
-        // Block shell metacharacters
-        if command.contains('|') || command.contains(';') || command.contains('&')
-            || command.contains('`') || command.contains('$') || command.contains('>')
-            || command.contains('<')
-        {
-            return "Error: shell metacharacters (|;&`$><) are not allowed".to_string();
-        }
-
-        // Block harmful commands (defense-in-depth even with allowlist)
+        // Defense in depth, as before.
         if let Some(reason) = crate::sanitize::detect_harmful_command(command) {
             return format!("Error: blocked — {reason}");
         }
-
-        match std::process::Command::new("sh")
-            .arg("-c")
-            .arg(command)
-            .output()
-        {
-            Ok(output) => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
+        match crate::safe_command::run(&argv) {
+            Ok((stdout, stderr)) => {
                 let mut result = String::new();
                 if !stdout.is_empty() {
                     let truncated = if stdout.len() > 2000 { &stdout[..stdout.floor_char_boundary(2000)] } else { &stdout };
@@ -377,7 +354,8 @@ impl Tool for RunCommandTool {
                 }
                 if !stderr.is_empty() {
                     let end = stderr.floor_char_boundary(stderr.len().min(500));
-                    result.push_str(&format!("\nStderr: {}", &stderr[..end]));
+                    result.push_str(&format!("
+Stderr: {}", &stderr[..end]));
                 }
                 if result.is_empty() {
                     "(no output)".to_string()
@@ -385,7 +363,7 @@ impl Tool for RunCommandTool {
                     result
                 }
             }
-            Err(e) => format!("Failed to run command: {e}"),
+            Err(e) => format!("Error: {e}"),
         }
     }
 }
