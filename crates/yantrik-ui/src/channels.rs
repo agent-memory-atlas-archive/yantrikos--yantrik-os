@@ -1,30 +1,24 @@
 //! What the desktop knows about each channel a person can reach it from, how a message from one
 //! is answered, and how a card is answered from the phone (design/channels-2026-09-29.md).
 //!
-//! **Who answers a phone.** A message from the person's phone goes to the mind answering, held
-//! so that a stolen phone is not the person at the keyboard. Only a mind that can be held
-//! answers:
-//!
-//! - the built-in companion, which holds its own tools to `Safe` for the turn (`Turn::is_remote`);
-//! - a mind running as its own account, whose every act carries its token (the mind door refuses
-//!   one without), held through that token's reach on every door: reads run, anything up to
-//!   `sensitive` asks the person, nothing above runs (`reaches::hold_remote`).
-//!
-//! A mind running as the person is not held by anything: it could drop its token, or use its own
-//! shell. It does not answer a phone; the phone is told why.
+//! **Who answers a phone.** Only the built-in companion (Pranab, 29 Sep 2026). It holds its own
+//! tools to `Safe` for the turn (`Turn::is_remote`), so a stolen phone is not the person at the
+//! keyboard. A mind with a shell of its own — the Mind, Hermes, pi — cannot be held to what a
+//! phone may ask, even running as its own account: it could start a command that waits out the
+//! hold, or act with another of its agents' tokens. When such a mind is the answering one, the
+//! phone is told it answers only at the desk, and nothing is sent to it.
 //!
 //! **Answered later.** The router asks one message at a time, so a turn from the phone is answered
 //! on a thread of its own and its answer sent when it comes ([`Outbox`]): a mind waiting on the
 //! person's Allow must not hold up the very message that carries it.
 //!
-//! **Cards on the phone.** A card raised by an agent answering a phone turn is sent to that phone
-//! with a one-time code: the person replies `ALLOW 123456` or `DENY 123456`, from the same identity
-//! on the same channel, before the card expires, once. Never for an act the app says cannot be
-//! undone — that waits for the machine — and not on a channel whose operator can read it unless the
-//! person turned approvals on for it (`chat.phone_approvals`). The desktop's card stays on the
-//! screen as well; whichever answer comes first decides. This is the one place other than the
-//! card's own buttons that answers a card, and it answers only for the person: the words come
-//! from the person's identity on the channel, which no mind can write as.
+//! **Cards on the phone.** The machinery for answering a card from the phone — a one-time code,
+//! `ALLOW 123456` / `DENY 123456` from the same identity in the same conversation, once, before it
+//! expires; never for what cannot be undone or runs commands as the person; only on a channel the
+//! person trusts with an Allow — is built and tested, and waits for its first caller: a card path
+//! for the built-in companion's own tools, which today simply stay read-only from a phone. It is
+//! the one place other than the card's own buttons that answers a card, and it answers only for
+//! the person: the words come from their identity on the channel, which no mind can write as.
 
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -193,11 +187,10 @@ pub fn is_card_answer(text: &str) -> bool {
             && code.len() == 6 && code.chars().all(|c| c.is_ascii_digit()))
 }
 
-/// What the phone is told when the mind answering runs as the person.
-fn unheld(name: &str) -> String {
+/// What the phone is told when the answering mind is not the built-in companion.
+fn desk_only(name: &str) -> String {
     format!(
-        "{name} runs as you on this desktop, so nothing can hold it to what a phone may ask. \
-         Talk to it at the machine, or make the built-in companion or the Yantrik Mind the answering mind."
+        "{name} answers only at the desk. From your phone you talk to the built-in companion: make it          the answering mind, or ask again when you are back."
     )
 }
 
@@ -224,14 +217,20 @@ fn ask_from_phone(prompt: String, asker: &Asker) -> String {
             None => "The desktop's companion is not available right now.".to_string(),
         };
     }
+    // Only the built-in companion answers a phone (Pranab, 29 Sep 2026). A mind with a shell of
+    // its own — the Mind, Hermes, pi — cannot be held to what a phone may ask: it could start a
+    // command that waits out the hold, or act with another of its agents' tokens (security review
+    // of the phone cards, N2 and N3). So the phone is told, and nothing is sent to it.
     let name = host.list().into_iter().find(|e| e.id == active).map(|e| e.name).unwrap_or_else(|| active.clone());
-    let own_account = host.attached_uid(&active).is_some_and(yantrik_ipc_transport::mind_door::is_mind);
-    if !own_account {
-        return unheld(&name);
-    }
-    // The agent made before it is held, and held before its turn is queued; the turn goes only to
-    // the agent holding the token that was held.
-    let agent: AgentId = match host.ensure_main(&active) {
+    tracing::info!(mind = %active, "a turn from a phone was not sent: only the built-in companion answers a phone");
+    desk_only(&name)
+}
+
+/// The held turn for a mind answering from the phone: kept for the day a mind can be held whole
+/// (its own phone conversation, its processes ended with the turn). Not reached today.
+#[allow(dead_code)]
+fn ask_held_mind(host: &yantrik_harness::Host, active: &str, name: &str, turn: Turn, asker: &Asker) -> String {
+    let agent: AgentId = match host.ensure_main(active) {
         Ok(agent) => agent,
         Err(why) => {
             tracing::warn!(mind = %active, reason = %why, "a turn from a phone found no mind to answer");
@@ -245,11 +244,10 @@ fn ask_from_phone(prompt: String, asker: &Asker) -> String {
             return "Nothing was sent: this mind could not be held to what a phone may ask.".to_string();
         }
     };
-    // Where a card this agent raises is to go while it answers.
     let here = PhoneTurnGuard::enter(PhoneTurn {
         id: NEXT_TURN.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
         agent: agent.0.clone(),
-        mind: name.clone(),
+        mind: name.to_string(),
         provider: asker.provider.clone(),
         sender_id: asker.sender_id.clone(),
         conversation: asker.conversation.clone(),
@@ -262,8 +260,6 @@ fn ask_from_phone(prompt: String, asker: &Asker) -> String {
         }
     };
     let said = gather(answer);
-    // The turn's place (and every code raised in it) goes before the hold does: an agent no
-    // longer held never has a card sent to the phone, nor a code there still answering one.
     drop(here);
     drop(hold);
     said
