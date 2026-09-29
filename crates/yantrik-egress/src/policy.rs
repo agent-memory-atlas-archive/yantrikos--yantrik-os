@@ -152,7 +152,13 @@ impl Policy {
         if place == Place::Forbidden {
             return Verdict::Refuse(format!("{host} is this machine or an address that is never a destination; the mind reaches this desktop through its door."));
         }
-        let rule = self.rules.iter().find(|r| r.matches(host, port));
+        // The rule that allows this request, if any does; otherwise the first that names the host
+        // and port, for the sentence that says why not — the same choice `before_resolve` made.
+        let rule = self
+            .rules
+            .iter()
+            .find(|r| r.matches(host, port) && (!http || r.http) && (place != Place::Lan || r.lan))
+            .or_else(|| self.rules.iter().find(|r| r.matches(host, port)));
         match (self.mode, rule) {
             (_, Some(r)) if http && !r.http => {
                 Verdict::Refuse(format!("{host}:{port} is allowed as a tunnel only (https), not plain http."))

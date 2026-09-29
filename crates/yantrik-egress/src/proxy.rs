@@ -15,10 +15,13 @@
 //!    request after it.
 
 use std::net::{IpAddr, SocketAddr};
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
 
@@ -92,21 +95,33 @@ fn now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-/// TCP keepalive, so a far end that vanished is noticed rather than held.
+/// TCP keepalive, probing after a minute of quiet, so a far end that vanished is noticed well
+/// inside [`IDLE`] rather than after the kernel's two hours.
 fn keepalive(s: &TcpStream) {
     #[cfg(unix)]
     {
         use std::os::fd::AsRawFd;
-        let on: libc::c_int = 1;
-        // SAFETY: setsockopt on a socket we own, with a pointer to an int that outlives the call.
-        unsafe {
-            libc::setsockopt(
-                s.as_raw_fd(),
-                libc::SOL_SOCKET,
-                libc::SO_KEEPALIVE,
-                &on as *const _ as *const libc::c_void,
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            );
+        let set = |level: libc::c_int, name: libc::c_int, value: libc::c_int| {
+            // SAFETY: setsockopt on a socket we own, with a pointer to an int that outlives the call.
+            let rc = unsafe {
+                libc::setsockopt(
+                    s.as_raw_fd(),
+                    level,
+                    name,
+                    &value as *const _ as *const libc::c_void,
+                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                )
+            };
+            if rc != 0 {
+                tracing::debug!(name, "a keepalive option was not taken");
+            }
+        };
+        set(libc::SOL_SOCKET, libc::SO_KEEPALIVE, 1);
+        #[cfg(target_os = "linux")]
+        {
+            set(libc::IPPROTO_TCP, libc::TCP_KEEPIDLE, 60);
+            set(libc::IPPROTO_TCP, libc::TCP_KEEPINTVL, 15);
+            set(libc::IPPROTO_TCP, libc::TCP_KEEPCNT, 4);
         }
     }
 }
@@ -255,9 +270,7 @@ async fn one(proxy: &Proxy, stream: &mut TcpStream, peer: SocketAddr) -> Result<
             if !rest.is_empty() {
                 upstream.write_all(&rest).await.map_err(|_| "write failed")?;
             }
-            let (mut cr, mut cw) = stream.split();
-            let (mut ur, mut uw) = upstream.split();
-            splice(&mut cr, &mut cw, &mut ur, &mut uw).await;
+            splice(stream, &mut upstream).await;
         }
         Target::Http { head, body, .. } => {
             upstream.write_all(&head).await.map_err(|_| "write failed")?;
@@ -293,34 +306,65 @@ async fn one(proxy: &Proxy, stream: &mut TcpStream, peer: SocketAddr) -> Result<
     Ok(())
 }
 
-/// Bytes both ways, until either side ends or nothing moves for [`IDLE`].
-async fn splice<A, B, C, D>(cr: &mut A, cw: &mut B, ur: &mut C, uw: &mut D)
-where
-    A: AsyncRead + Unpin,
-    B: AsyncWrite + Unpin,
-    C: AsyncRead + Unpin,
-    D: AsyncWrite + Unpin,
-{
-    let mut up = vec![0u8; 16 * 1024];
-    let mut down = vec![0u8; 16 * 1024];
-    loop {
-        let moved = tokio::time::timeout(IDLE, async {
-            tokio::select! {
-                r = cr.read(&mut up) => match r {
-                    Ok(n) if n > 0 => uw.write_all(&up[..n]).await.is_ok(),
-                    _ => false,
-                },
-                r = ur.read(&mut down) => match r {
-                    Ok(n) if n > 0 => cw.write_all(&down[..n]).await.is_ok(),
-                    _ => false,
-                },
+/// Bytes both ways — each direction on its own, so neither waits on the other, and a side that
+/// finishes sending leaves the other still answering — until both are done or nothing has moved
+/// either way for [`IDLE`].
+async fn splice(client: &mut TcpStream, upstream: &mut TcpStream) {
+    let start = Instant::now();
+    let last = Arc::new(AtomicU64::new(0));
+    let mut c = Watched { inner: client, last: last.clone(), start };
+    let mut u = Watched { inner: upstream, last: last.clone(), start };
+    let watchdog = async {
+        loop {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            let quiet = start.elapsed().saturating_sub(Duration::from_millis(last.load(Ordering::Relaxed)));
+            if quiet >= IDLE {
+                return;
             }
-        })
-        .await;
-        if !matches!(moved, Ok(true)) {
-            break;
         }
+    };
+    tokio::select! {
+        _ = tokio::io::copy_bidirectional(&mut c, &mut u) => {}
+        _ = watchdog => { tracing::debug!("a tunnel closed after being quiet"); }
     }
-    let _ = uw.shutdown().await;
-    let _ = cw.shutdown().await;
+}
+
+/// A stream that notes when bytes last moved through it.
+struct Watched<'a> {
+    inner: &'a mut TcpStream,
+    last: Arc<AtomicU64>,
+    start: Instant,
+}
+
+impl Watched<'_> {
+    fn touch(&self) {
+        self.last.store(self.start.elapsed().as_millis() as u64, Ordering::Relaxed);
+    }
+}
+
+impl AsyncRead for Watched<'_> {
+    fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        let r = Pin::new(&mut *self.inner).poll_read(cx, buf);
+        if buf.filled().len() > before {
+            self.touch();
+        }
+        r
+    }
+}
+
+impl AsyncWrite for Watched<'_> {
+    fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, data: &[u8]) -> Poll<std::io::Result<usize>> {
+        let r = Pin::new(&mut *self.inner).poll_write(cx, data);
+        if matches!(r, Poll::Ready(Ok(n)) if n > 0) {
+            self.touch();
+        }
+        r
+    }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut *self.inner).poll_flush(cx)
+    }
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut *self.inner).poll_shutdown(cx)
+    }
 }

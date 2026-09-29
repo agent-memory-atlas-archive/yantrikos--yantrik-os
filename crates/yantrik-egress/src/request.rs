@@ -89,6 +89,10 @@ pub fn parse(head: &[u8]) -> Result<Target, Bad> {
         if name.is_empty() || name.bytes().any(|b| !(b.is_ascii_alphanumeric() || b"-_".contains(&b))) {
             return Err(Bad("not a header name"));
         }
+        // No control byte in a value but tab: a NUL or a stray escape reads differently upstream.
+        if value.bytes().any(|b| (b < 0x20 && b != b'\t') || b == 0x7f) {
+            return Err(Bad("a control character in a header"));
+        }
         let lower = name.to_ascii_lowercase();
         match lower.as_str() {
             "host" | "connection" | "keep-alive" | "upgrade" | "te" | "trailer" => continue,
@@ -96,9 +100,16 @@ pub fn parse(head: &[u8]) -> Result<Target, Bad> {
             // Only a body whose length is said: a chunked one has its end where the upstream
             // reads it, which is not always where this proxy would.
             "transfer-encoding" => return Err(Bad("a chunked body; send it with Content-Length")),
+            // Digits only, and written again in the one form: `+5` or `5\x0b` read as 5 here and
+            // as something else upstream would put the body's end somewhere else.
             "content-length" => {
-                body = value.trim().parse().map_err(|_| Bad("Content-Length is not a number"))?;
+                let v = value.trim_matches([' ', '\t']);
+                if v.is_empty() || v.len() > 18 || !v.bytes().all(|b| b.is_ascii_digit()) {
+                    return Err(Bad("Content-Length is not a number"));
+                }
+                body = v.parse().map_err(|_| Bad("Content-Length is not a number"))?;
                 lengths += 1;
+                continue;
             }
             _ => {}
         }
@@ -107,6 +118,9 @@ pub fn parse(head: &[u8]) -> Result<Target, Bad> {
     }
     if lengths > 1 {
         return Err(Bad("more than one Content-Length"));
+    }
+    if lengths == 1 {
+        out.push_str(&format!("Content-Length: {body}\r\n"));
     }
     out.push_str("Connection: close\r\n\r\n");
     Ok(Target::Http { host, port, head: out.into_bytes(), body })
@@ -195,6 +209,9 @@ mod tests {
             b"POST http://a.example/ HTTP/1.1\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\n",
             b"POST http://a.example/ HTTP/1.1\r\nContent-Length: -1\r\n\r\n",
             b"GET http://a.example/ HTTP/1.1\r\nBad Name: 1\r\n\r\n",
+            b"POST http://a.example/ HTTP/1.1\r\nContent-Length: +5\r\n\r\n",
+            b"POST http://a.example/ HTTP/1.1\r\nContent-Length: 5\x0b\r\n\r\n",
+            b"GET http://a.example/ HTTP/1.1\r\nX-A: a\x00b\r\n\r\n",
         ] {
             assert!(parse(bad).is_err(), "{:?}", String::from_utf8_lossy(bad));
         }
