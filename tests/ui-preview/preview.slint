@@ -638,3 +638,36 @@ export component InstallerProbe inherits Window {
         check-timezone(t) => { return root.check-timezone(t); }
     }
 }
+
+// Settings → Decision model (components/decision_model.slint), filled with fixture data by
+// src/decision_tests.rs. Callbacks are recorded there, never acted on.
+import { DecisionModelCard, DecisionPreset } from "components/decision_model.slint";
+export component DecisionProbe inherits Window {
+    in property <length> canvas-width: 720px;
+    in property <length> canvas-height: 780px;
+    width: root.canvas-width; height: root.canvas-height; background: Theme.bg-deep;
+    in property <[DecisionPreset]> presets;
+    in-out property <string> provider: "kev";
+    in property <string> endpoint: "http://192.168.4.20:8009";
+    in property <string> model: "kev-latest";
+    in property <string> status;
+    in property <bool> status-good;
+    in property <string> where-note;
+    in property <bool> leaves;
+    in-out property <string> action;
+    VerticalLayout {
+        padding: 24px;
+        alignment: start;
+        DecisionModelCard {
+            presets: root.presets; provider: root.provider; endpoint: root.endpoint; model: root.model;
+            key-env: ""; route-tools: true; browser-commitments: true;
+            where-note: root.where-note; leaves-machine: root.leaves;
+            status: root.status; status-good: root.status-good;
+            choose(id) => { root.action = "choose:" + id; }
+            save(e, m, k) => { root.action = "save:" + e; }
+            test => { root.action = "test"; }
+            toggle-route-tools => { root.action = "route"; }
+            toggle-browser-commitments => { root.action = "commit"; }
+        }
+    }
+}

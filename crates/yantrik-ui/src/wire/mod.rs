@@ -44,6 +44,7 @@ pub mod version;
 pub mod ai_assist;
 pub mod ai_onboarding;
 pub mod ai_provider;
+pub mod decision_model;
 pub mod boot;
 pub mod location;
 pub mod pins;
@@ -104,6 +105,7 @@ pub fn wire_all(ui: &App, ctx: &AppContext) {
     cross_app::wire(ui, ctx);
     ai_onboarding::wire(ui, ctx);
     ai_provider::wire(ui, ctx);
+    decision_model::wire(ui, ctx);
     installer::wire(ui, ctx);
     login::wire(ui, ctx);
     // After `login`, which is the other place a secret reaches the vault, and before `callbacks`,

@@ -14,6 +14,7 @@ run verify-weather
 run target/ui-validation/installer.png 1280 800 verify-installer
 run target/ui-validation/editor.png 1100 760 verify-editor
 run target/ui-validation/unused.png 800 600 verify-launcher
+run target/ui-validation/decision.png 720 780 verify-decision
 run target/ui-validation/unused.png 1280 800 verify-apps
 run target/ui-validation/mind-panel.png 1280 800 verify-mind-panel
 run target/ui-validation/unused.png 1280 800 verify-screen-controls
