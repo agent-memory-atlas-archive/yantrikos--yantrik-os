@@ -346,6 +346,7 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
         action: "move".into(),
         summary: "Move files or folders to another place, or into the recoverable Trash.".into(),
         purpose: "Move files or folders to another place, or into the recoverable Trash.".into(),
+        caller_says: "".into(),
         grade: "sensitive".into(),
         args: lines(&["from: ~/Pictures/copy of a.jpg", "to: ~/.local/share/Trash"]),
         // Files names no handle — both arguments are paths a person can read (#54).

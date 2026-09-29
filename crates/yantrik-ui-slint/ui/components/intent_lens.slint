@@ -71,7 +71,13 @@ export struct ApprovalRequest {
     // (`summary_of`), so it is the app's own words and not a third name for the action. Empty
     // when the app publishes nothing; the card then hides this row rather than inventing one.
     summary: string,
-    purpose: string,        // the action's own published description
+    purpose: string,        // the action's own published description — never the caller's
+    // What the CALLER says the call is for: nothing checks it. Its own block, under its own
+    // label, after the app's sentence — never joined to it (re-review of #504: joined and cut
+    // together, a padded caller purpose pushed the app's sentence off the card and drew a fake
+    // "in the app's own words" line in its place). One paragraph, bounded, with the phrases the
+    // card uses for the app's voice marked as the caller's. Empty when it said nothing new.
+    caller-says: string,
     grade: string,          // safe | standard | sensitive | dangerous
     args: [string],         // one `key: value` per entry, each already cut to fit one line
     // What one of those arguments stands for, in the app's own words:
@@ -163,6 +169,9 @@ export component ApprovalCard inherits Rectangle {
     // inside the scrolling details section would also fight the outer one for the gesture.
     property <length> purpose-clamp: 42px;
     property <bool> purpose-open: false;
+    // The caller's words get two lines before "show more": they are a claim, not the action.
+    property <length> caller-clamp: 28px;
+    property <bool> caller-open: false;
 
     height: body.preferred-height;
     background: transparent;
@@ -487,6 +496,53 @@ export component ApprovalCard inherits Rectangle {
                 }
             }
 
+            // What the caller says it is for, after the app's sentence and labelled as the
+            // caller's: clamped to two lines under its own "show more", so no length of it can
+            // push the app's sentence down, and it cannot start a line of its own that reads as
+            // one of this card's labels (approvals.rs gives it as one neutralized paragraph).
+            if root.data.caller-says != "" : VerticalLayout {
+                spacing: 0px;
+
+                Rectangle {
+                    height: root.caller-open ? caller-text.preferred-height
+                        : min(caller-text.preferred-height, root.caller-clamp);
+                    clip: true;
+
+                    caller-text := Text {
+                        width: parent.width;
+                        y: 0px;
+                        text: root.data.caller-says;
+                        color: Theme.text-secondary;
+                        font-size: Theme.fs-caption;
+                        font-italic: true;
+                        wrap: word-wrap;
+                        vertical-alignment: top;
+                    }
+                }
+                if caller-text.preferred-height > root.caller-clamp : caller-more := TouchArea {
+                    width: caller-more-label.preferred-width + 16px;
+                    height: 20px;
+                    mouse-cursor: pointer;
+                    clicked => { root.caller-open = !root.caller-open; }
+
+                    caller-more-label := Text {
+                        width: parent.width;
+                        height: parent.height;
+                        text: root.caller-open ? "show less" : "show more";
+                        color: caller-more.has-hover ? Theme.amber-light : Theme.text-dim;
+                        font-size: Theme.fs-micro;
+                        vertical-alignment: center;
+                    }
+                }
+                Text {
+                    text: "says the caller about this call · nothing checks it";
+                    color: Theme.text-dim;
+                    font-size: Theme.fs-micro;
+                    wrap: no-wrap;
+                    overflow: elide;
+                }
+            }
+
             // The arguments, exactly as the grant is bound to them.
             //
             // One Text per argument, `no-wrap` and elided, so the box is exactly as many lines
@@ -713,7 +769,7 @@ export component ApprovalCard inherits Rectangle {
                     }
                 }
                 Text {
-                    text: "this rule covers every mind on the desktop, not only the one asking";
+                    text: "covers every mind and caller, until restart or the mode is lowered";
                     color: Theme.text-dim;
                     font-size: Theme.fs-micro;
                     horizontal-alignment: center;

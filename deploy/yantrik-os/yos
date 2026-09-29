@@ -947,11 +947,38 @@ def cmd_ls(argv):
               % ", ".join(internal))
 
 
+# The characters a reader may take for the end of a line: the newline and the carriage return,
+# and every other one Python's `str.splitlines` also splits on — the vertical tab, the form feed,
+# the file, group and record separators, and three Unicode separators. App text — a summary, a
+# note's title in the state, an argument's description — must never start a line of its own in a
+# describe, or it could print an `  act: x(...)  [safe, ...]` line of its own above the real one
+# (reviews of #504), and the MCP bridge reads its grades and purposes off this text. (`json.dumps`
+# already escapes the control characters among these inside the state; `without_raw_breaks`
+# escapes the three it leaves raw.)
+LINE_BREAKS = ("\r\n", "\n", "\r", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\u2028", "\u2029",
+               "\x85")
+
+
+def one_line(text):
+    """`text` with every line break in it turned into a space."""
+    text = str(text)
+    for brk in LINE_BREAKS:
+        text = text.replace(brk, " ")
+    return text
+
+
+def without_raw_breaks(json_text):
+    """JSON with the separators `json.dumps(ensure_ascii=False)` leaves raw written as the
+    escapes they are, so the text parses the same and splits into no extra lines anywhere."""
+    return (json_text.replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+            .replace("\x85", "\\u0085"))
+
+
 def cmd_describe(argv):
     if not argv:
         die("usage: yos describe <shell|notes|...>")
     view = call(argv[0], "app.describe")
-    print(view.get("summary", "(no summary)"))
+    print(one_line(view.get("summary", "(no summary)")))
     if "revision" in view:
         print("revision: %s" % view["revision"])
     fold = "--fold" in argv
@@ -1014,7 +1041,7 @@ def render_state(state, app, fold):
     if fold and app.lower() in ("shell", "app-shell") and "apps" in state:
         state = {k: v for k, v in state.items() if k != "apps"}
         note = "\n(what `open_app` can open is listed by os_apps / `yos ls`, not repeated here)"
-    rows = ["  %s: %s" % (json.dumps(k), json.dumps(state[k], ensure_ascii=False))
+    rows = ["  %s: %s" % (json.dumps(k), without_raw_breaks(json.dumps(state[k], ensure_ascii=False)))
             for k in state_keys_in_order(state)]
     return "{\n" + ",\n".join(rows) + "\n}" + note
 
@@ -1106,13 +1133,18 @@ def render_action(action, brief=False):
         action.get("permission", "?"), action.get("settles", "?"))]
     purpose = (action.get("description") or "").strip()
     if purpose:
-        lines.append("       %s" % purpose)
+        # Every line of it at the purpose's indent: a description that runs to a second line
+        # must stay the purpose, not fall to column zero where a reader — the MCP bridge's
+        # `action_detail` among them — can no longer tell it is part of this action. The
+        # sentence that says an action runs whatever it is given comes last, so the last line
+        # is the one that must not be lost (security review of #504).
+        lines.extend("       %s" % part.strip() for part in purpose.splitlines() if part.strip())
     for n in names:
         spec = props[n] or {}
         kind = spec.get("type", "any")
         if spec.get("enum"):
             kind = "one of " + " | ".join(str(v) for v in spec["enum"])
-        about = (spec.get("description") or "").strip()
+        about = one_line((spec.get("description") or "").strip())
         lines.append("         %s%s: %s%s" % (
             n, "" if n in required else "?", kind, (" — " + about) if about else ""))
     return "\n".join(lines)

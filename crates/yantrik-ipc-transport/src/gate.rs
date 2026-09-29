@@ -104,6 +104,23 @@ pub fn unrecoverable(purpose: &str) -> bool {
     UNRECOVERABLE_PHRASES.iter().any(|phrase| lower.contains(phrase))
 }
 
+// ── What runs whatever it is given ──────────────────────────────────
+
+pub use yantrik_ipc_contracts::control_surface::OPEN_ENDED;
+
+/// Does the app's own description declare that the action runs whatever it is given — a command
+/// line, a script, keystrokes into a shell — so it can do anything the person can?
+///
+/// Declared, not guessed: an app says it with `Action::open_ended()`, which puts [`OPEN_ENDED`]
+/// at the end of the description, and this looks for that one sentence (case aside). What it
+/// decides, in [`decide`]: above `safe` it asks in `ask`, `auto` and plain bypass, and — unlike
+/// what [`unrecoverable`] reads — a session rule covers it, so a mind asks once per session to
+/// run commands rather than once per command. When an action says both, cannot-be-undone wins:
+/// it asks every time and no rule answers it.
+pub fn open_ended(purpose: &str) -> bool {
+    purpose.to_lowercase().contains(&OPEN_ENDED.to_lowercase())
+}
+
 /// The ceiling used when `settings.yaml` is missing, unreadable, or says nothing usable —
 /// the same default the shell's own `UserSettings` carries, so a machine that has never
 /// opened Settings behaves the way Settings would show it.
@@ -262,6 +279,14 @@ impl Mode {
         self.name != "bypass_all"
     }
 
+    /// Whether this mode asks about an action that runs whatever it is given ([`open_ended`])
+    /// before it runs, whatever its grade above `safe`. The same modes as for what cannot be
+    /// undone — every mode but full bypass — with one difference that is not here but in
+    /// [`decide`]: a session rule answers this question, and never that one.
+    pub fn asks_before_open_ended(&self) -> bool {
+        self.name != "bypass_all"
+    }
+
     /// Whether a session rule is the person's standing answer for `app.action`.
     pub fn covers(&self, app: &str, action: &str) -> bool {
         self.session_rules.iter().any(|(a, x)| a == app && x == action)
@@ -373,9 +398,14 @@ pub fn mode_from(text: &str, now_unix: u64) -> Mode {
         tracing::warn!(mode = %name, "{MODE_FILE} names no mode this OS defines; using {DEFAULT_MODE}");
         name = DEFAULT_MODE.to_string();
     }
+    // A bypass whose deadline has passed has lowered the mode, and a lowering clears the
+    // session rules (the shell's `mind_mode`, since 29 September 2026): the file a shell wrote
+    // during the bypass still lists them until its next write, so they are dropped here too.
+    let mut lapsed = false;
     if is_bypass(&name) {
         if let Some(until) = doc["bypass_expires_unix"].as_u64() {
             if now_unix >= until {
+                lapsed = true;
                 // What it falls back to is never a bypass: the shell never writes one there, and
                 // a file that says so has had a hand in it.
                 let previous = doc["previous"].as_str().unwrap_or(DEFAULT_MODE);
@@ -389,6 +419,7 @@ pub fn mode_from(text: &str, now_unix: u64) -> Mode {
     }
     let session_rules = doc["session_rules"]
         .as_array()
+        .filter(|_| !lapsed)
         .map(|list| {
             list.iter()
                 .filter_map(|r| {
@@ -652,13 +683,18 @@ pub fn decide(
     // a read destroys nothing, so wording that happens to match cannot turn a look into a
     // question. The shell's `Modes::decide` and the bridge's `decide` draw the same line.
     let irreversible = level > 0 && unrecoverable(purpose);
+    // And the app's word that the action runs whatever it is given (Pranab's decision of 29
+    // September 2026). Cannot-be-undone wins where an action says both: that one always asks,
+    // and this one is answered by a session rule.
+    let open = level > 0 && !irreversible && open_ended(purpose);
 
     // Every mode runs what its column says, never less than the socket floor — both bypasses
     // run every grade — and every mode but full bypass asks about anything the app says cannot
-    // be undone. Bypass is "stop asking me, except before what an app marks as impossible to
-    // undo"; full bypass is "stop asking me anything", an answer the person gave on purpose, for
-    // a while.
+    // be undone, and about anything it says runs whatever it is given. Bypass is "stop asking
+    // me, except before what an app marks as impossible to undo, and once before commands"; full
+    // bypass is "stop asking me anything", an answer the person gave on purpose, for a while.
     let asks = (irreversible && mode.asks_before_what_cannot_be_undone())
+        || (open && mode.asks_before_open_ended())
         || level > mode.allows().max(grade(SOCKET_FLOOR).unwrap());
     // Held from a phone: above its level it asks in every mode, both bypasses included, and a
     // card is raised for it (the person answers on the phone, or at the machine).
@@ -669,9 +705,10 @@ pub fn decide(
     }
 
     // A session rule is the person's standing answer for this one action and covers it the way a
-    // grant would — except for an action that cannot be undone, which the card never offers a
-    // rule for, except in plan mode, which raises no card and so has no standing answers, and
-    // except for a call held from a phone: an Allow given at the desk is not given to a phone.
+    // grant would — an open-ended one included, which is the point of asking about those once —
+    // except for an action that cannot be undone, which the card never offers a rule for, except
+    // in plan mode, which raises no card and so has no standing answers, and except for a call
+    // held from a phone: an Allow given at the desk is not given to a phone.
     let plan = mode.allows() == 0;
     if !held && !plan && !irreversible && mode.covers(app_id, action) {
         return Ok(());
@@ -679,7 +716,24 @@ pub fn decide(
     // In plan mode a held call is refused as plan refuses, with no card: the person's strictest
     // setting is not loosened for a phone. Anywhere else a held call is refused for the hold,
     // and says so — in full bypass the hold is the only reason there is.
-    Err(grant_refusal(app_id, action, graded, mode, irreversible, held_above))
+    let why = if irreversible {
+        Why::CannotBeUndone
+    } else if open && mode.asks_before_open_ended() {
+        Why::OpenEnded
+    } else {
+        Why::Grade
+    };
+    Err(grant_refusal(app_id, action, graded, mode, why, held_above))
+}
+
+/// Which of the mode's reasons a refusal names. The grade is the default one; the other two are
+/// the app's own sentence, and each is named when it applies because each changes what a session
+/// rule does — one is never answered by a rule, the other is answered by one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Why {
+    Grade,
+    CannotBeUndone,
+    OpenEnded,
 }
 
 /// The whole rule for one call, for a caller that holds the grade where it holds the call.
@@ -739,10 +793,13 @@ fn within_ceiling(ceiling: &str, app_id: &str, action: &str, graded: &str) -> Re
 /// `CEILING:` and `STALE:`; `yos act` does, and asks on the caller's behalf. Every variant says
 /// "graded `<grade>`", which is where `yos act` reads the grade to ask with.
 ///
-/// Five sentences: plan or not, whether the reason is the grade or the app's own word that the
-/// action cannot be undone, and — outside plan — a call held from the person's phone. The second
-/// reason is named when it applies, because it is the one a session rule does not answer — a
-/// caller holding a rule for the action needs to know why the rule did not cover it. The hold is
+/// Seven sentences: plan or not; whether the reason is the grade, the app's own word that the
+/// action cannot be undone, or its word that the action runs whatever it is given; and — outside
+/// plan — a call held from the person's phone. The second reason is named when it applies,
+/// because it is the one a session rule does not answer — a caller holding a rule for the action
+/// needs to know why the rule did not cover it. The third says the opposite: that the card can
+/// allow it for the session, so the next call need not ask (not for a `dangerous` one, which the
+/// card never offers a standing yes for). The hold is
 /// named whenever there is one (`held` is the level on [`LADDER`] it asks above), because it is
 /// true in every mode and in full bypass it is the only reason: saying "full bypass asks before
 /// anything that cannot be undone" there would be false.
@@ -751,7 +808,7 @@ fn grant_refusal(
     action: &str,
     graded: &str,
     mode: &Mode,
-    irreversible: bool,
+    why: Why,
     held: Option<usize>,
 ) -> String {
     const HOW: &str = "Ask the shell for approval first (`request_approval` with this app, action \
@@ -761,6 +818,7 @@ fn grant_refusal(
     const PLAN: &str = "Say what you would do and let the person decide; they switch the mode \
          from the chip in the status bar.";
     let final_word = "its own description says it cannot be undone";
+    let open_word = "its own description says what it runs can do anything you can";
     if let (Some(above), false) = (held, mode.name == "plan") {
         return format!(
             "GRANT: {app}.{action} is graded `{graded}` and this call answers a turn from the \
@@ -769,22 +827,38 @@ fn grant_refusal(
             above = LADDER[above.min(LADDER.len() - 1)],
         );
     }
-    match (mode.name == "plan", irreversible) {
-        (true, false) => format!(
+    match (mode.name == "plan", why) {
+        (true, Why::Grade) => format!(
             "GRANT: {app}.{action} is graded `{graded}` and this machine is in plan mode, which \
              raises no card for anything above `{SOCKET_FLOOR}` — so it was not run. {PLAN}"
         ),
-        (true, true) => format!(
+        (true, Why::CannotBeUndone) => format!(
             "GRANT: {app}.{action} is graded `{graded}` and {final_word}, and this machine is in \
              plan mode, which raises no card for that — so it was not run. {PLAN}"
         ),
-        (false, false) => format!(
+        (true, Why::OpenEnded) => format!(
+            "GRANT: {app}.{action} is graded `{graded}` and {open_word}, and this machine is in \
+             plan mode, which raises no card for that — so it was not run. {PLAN}"
+        ),
+        (false, Why::OpenEnded) => format!(
+            "GRANT: {app}.{action} is graded `{graded}` and {open_word}, and this machine is in \
+             {mode} mode, which asks once before running anything like that — so it was not \
+             run. {HOW}{session}",
+            mode = mode.name,
+            session = if graded == "dangerous" {
+                ""
+            } else {
+                " Allowed for this session from the card, the calls after it run unasked until \
+                 the shell restarts."
+            },
+        ),
+        (false, Why::Grade) => format!(
             "GRANT: {app}.{action} is graded `{graded}` and this machine is in {mode} mode, which \
              runs nothing above `{allowed}` without asking — so it was not run. {HOW}",
             mode = mode.name,
             allowed = LADDER[mode.allows().max(grade(SOCKET_FLOOR).unwrap())],
         ),
-        (false, true) => format!(
+        (false, Why::CannotBeUndone) => format!(
             "GRANT: {app}.{action} is graded `{graded}` and {final_word}, and this machine is in \
              {mode} mode, which asks before anything that cannot be undone — so it was not run. \
              {HOW}",
@@ -986,6 +1060,15 @@ mod tests {
     #[test]
     fn either_bypass_ends_on_time_and_never_falls_back_to_a_bypass() {
         let now = 1_000_000;
+        // And the session rules the file lists end with it: a lapse is a lowering.
+        let ruled = format!(
+            r#"{{"mode":"bypass","previous":"auto","bypass_expires_unix":{},"session_rules":[{{"app":"terminal","action":"run"}}]}}"#,
+            now + 60
+        );
+        assert_eq!(mode_from(&ruled, now).session_rules.len(), 1, "in force while the bypass is");
+        let after = mode_from(&ruled, now + 60);
+        assert_eq!(after.name, "auto");
+        assert!(after.session_rules.is_empty(), "and gone once it has run out");
         for name in TIME_BOXED {
             let live = format!(r#"{{"mode":"{name}","previous":"auto","bypass_expires_unix":{}}}"#, now + 60);
             assert_eq!(mode_from(&live, now).name, name);
@@ -996,6 +1079,75 @@ mod tests {
             }
         }
         assert!(is_bypass("bypass") && is_bypass("bypass_all") && !is_bypass("auto"));
+    }
+
+    const RUN: &str = "Type a command line into the active shell and press Return. What it runs can do anything you can.";
+
+    /// Pranab's decision of 29 September 2026: a command that can do anything asks once, and a
+    /// session rule covers the rest. In ask, auto and plain bypass an open-ended action above
+    /// `safe` asks — even a `standard` one on the socket floor — and the refusal says a session
+    /// rule would answer it; with the rule, it runs.
+    #[test]
+    fn an_open_ended_action_asks_once_and_a_session_rule_covers_it() {
+        for mode in ["ask", "auto", "bypass"] {
+            for graded in ["standard", "sensitive"] {
+                let err = decide(&at("sensitive", mode), "terminal", "run", graded, RUN).unwrap_err();
+                assert!(err.starts_with(&format!("GRANT: terminal.run is graded `{graded}`")), "{mode}: {err}");
+                assert!(err.contains("what it runs can do anything you can"), "{mode}: {err}");
+                assert!(err.contains(&format!("{mode} mode, which asks once before running anything like that")), "{err}");
+                assert!(err.contains("Allowed for this session from the card"), "{mode}: the way out is named: {err}");
+                let ruled = Authority {
+                    ceiling: "sensitive".into(),
+                    mode: Mode { name: mode.into(), session_rules: vec![("terminal".into(), "run".into())] },
+                    granted: false,
+                    asks_above: None,
+                };
+                assert!(decide(&ruled, "terminal", "run", graded, RUN).is_ok(), "{mode}/{graded}: the rule covers it");
+            }
+        }
+        // A read is a read, whatever it declares; full bypass asks nothing; plan refuses it.
+        assert!(decide(&at("sensitive", "ask"), "terminal", "read", "safe", RUN).is_ok());
+        assert!(decide(&at("sensitive", "bypass_all"), "terminal", "run", "sensitive", RUN).is_ok());
+        let err = decide(&at("sensitive", "plan"), "terminal", "run", "standard", RUN).unwrap_err();
+        assert!(err.contains("plan mode, which raises no card for that"), "{err}");
+        // A `dangerous` one still asks, and is not offered a standing yes it could not get.
+        let err = decide(&at("dangerous", "bypass"), "blender", "run_python", "dangerous", RUN).unwrap_err();
+        assert!(!err.contains("for this session"), "{err}");
+        // And the ceiling outranks it like everything else.
+        assert!(decide(&at("standard", "bypass_all"), "terminal", "run", "sensitive", RUN).unwrap_err().starts_with("CEILING:"));
+        assert!(open_ended(RUN) && open_ended(&RUN.to_uppercase()) && !open_ended("Run it"));
+        assert!(Mode::named("bypass").asks_before_open_ended() && !Mode::named("bypass_all").asks_before_open_ended());
+    }
+
+    /// Where an action is both, cannot-be-undone wins: it asks every time, the refusal names the
+    /// irreversible reason, and no session rule answers it.
+    #[test]
+    fn what_cannot_be_undone_wins_over_open_ended() {
+        let both = "Run a script, then delete it and everything it wrote. It cannot be undone. What it runs can do anything you can.";
+        let ruled = Authority {
+            ceiling: "dangerous".into(),
+            mode: Mode { name: "bypass".into(), session_rules: vec![("terminal".into(), "run_and_clean".into())] },
+            granted: false,
+            asks_above: None,
+        };
+        let err = decide(&ruled, "terminal", "run_and_clean", "sensitive", both).unwrap_err();
+        assert!(err.contains("its own description says it cannot be undone"), "{err}");
+        assert!(!err.contains("for this session"), "{err}");
+        assert!(decide(&at("dangerous", "bypass_all"), "terminal", "run_and_clean", "sensitive", both).is_ok());
+    }
+
+    /// The phone's hold is unchanged: a held call asks, and no desk rule for an open-ended action
+    /// answers it.
+    #[test]
+    fn a_held_call_asks_about_an_open_ended_action_whatever_the_rule() {
+        let held = Authority {
+            ceiling: "dangerous".into(),
+            mode: Mode { name: "auto".into(), session_rules: vec![("terminal".into(), "run".into())] },
+            granted: false,
+            asks_above: Some(0),
+        };
+        let err = decide(&held, "terminal", "run", "sensitive", RUN).unwrap_err();
+        assert!(err.contains("person's phone"), "{err}");
     }
 
     #[test]
@@ -1256,12 +1408,22 @@ mod tests {
     use yantrik_ipc_contracts::control_surface::{act_json, describe_json, Action, Param, View};
 
     /// The action a vector is about, so an id reads like something a person could check on a
-    /// real machine. The pair is cosmetic to `decide`; the description is not.
-    fn subject(unrecoverable: bool) -> (&'static str, &'static str, &'static str) {
-        if unrecoverable {
-            ("calendar", "delete_event", "Take an event off the calendar. It is not recoverable")
-        } else {
-            ("calendar", "update_event", "Change an event's title, time or notes")
+    /// real machine. The pair is cosmetic to `decide`; the description is not. The fourth — an
+    /// action that says both — is the case where cannot-be-undone must win.
+    fn subject(unrecoverable: bool, open: bool) -> (&'static str, &'static str, &'static str) {
+        match (unrecoverable, open) {
+            (false, false) => ("calendar", "update_event", "Change an event's title, time or notes"),
+            (true, false) => ("calendar", "delete_event", "Take an event off the calendar. It is not recoverable"),
+            (false, true) => (
+                "terminal",
+                "run",
+                "Type a command line into the active shell and press Return. What it runs can do anything you can.",
+            ),
+            (true, true) => (
+                "terminal",
+                "run_and_clean",
+                "Run a script, then delete it and everything it wrote. It cannot be undone. What it runs can do anything you can.",
+            ),
         }
     }
 
@@ -1289,8 +1451,8 @@ mod tests {
             // wrong twice.
             for graded in ["safe", "standard", "sensitive", "dangerous", "spicy"] {
                 for ceiling in LADDER {
-                    for cannot_undo in [false, true] {
-                        let (app, action, purpose) = subject(cannot_undo);
+                    for (cannot_undo, open) in [(false, false), (true, false), (false, true), (true, true)] {
+                        let (app, action, purpose) = subject(cannot_undo, open);
                         for session_rule in [false, true] {
                             for granted in [false, true] {
                                 let rules = if session_rule {
@@ -1316,7 +1478,7 @@ mod tests {
                                 };
                                 let mut vector = serde_json::json!({
                                     "id": format!(
-                                        "{mode}/{graded}/ceiling={ceiling}/unrecoverable={cannot_undo}/rule={session_rule}/grant={granted}"
+                                        "{mode}/{graded}/ceiling={ceiling}/unrecoverable={cannot_undo}/open_ended={open}/rule={session_rule}/grant={granted}"
                                     ),
                                     "app": app,
                                     "action": action,
@@ -1327,6 +1489,7 @@ mod tests {
                                     "session_rule": session_rule,
                                     "grant": granted,
                                     "unrecoverable": unrecoverable(purpose),
+                                    "open_ended": open_ended(purpose),
                                     "outcome": outcome,
                                     "refusal": refusal,
                                     "door": door,
@@ -1347,6 +1510,7 @@ mod tests {
     fn purpose_vectors() -> Vec<serde_json::Value> {
         [
             "Take an event off the calendar. It is not recoverable",
+            "Type a command line into the active shell and press Return. What it runs can do anything you can.",
             "Move a file or folder to recoverable Trash",
             "Throw the current scene away and start an empty one. Anything unsaved in it is lost, and in a background Blender there is no undo to argue with.",
             "Erase the disk. This CANNOT BE UNDONE.",
@@ -1358,7 +1522,7 @@ mod tests {
             "",
         ]
         .into_iter()
-        .map(|p| serde_json::json!({ "purpose": p, "unrecoverable": unrecoverable(p) }))
+        .map(|p| serde_json::json!({ "purpose": p, "unrecoverable": unrecoverable(p), "open_ended": open_ended(p) }))
         .collect()
     }
 
@@ -1454,7 +1618,8 @@ mod tests {
                 "",
                 "Inputs: grade (spicy is not a grade), ceiling (tool_permission), mode, session_rule (a rule for this very",
                 "app.action), grant (a grant was attached and the shell spent it), purpose and unrecoverable (the action's",
-                "own published description, and what gate::unrecoverable reads in it).",
+                "own published description, and what gate::unrecoverable reads in it), open_ended (what gate::open_ended",
+                "reads in it: the `open_ended` sentence below, which Action::open_ended appends to a description).",
                 "outcome: allow | CEILING | GRANT, and refusal is the exact sentence (null when allowed).",
                 "door: run | ask | refuse — what a door that raises cards does with the same inputs, which never include",
                 "a grant. It differs from the dispatch only where a vector carries `note` (the socket floor in plan)."
@@ -1464,6 +1629,7 @@ mod tests {
             "modes": MODES.iter().map(|(m, top)| serde_json::json!([m, top])).collect::<Vec<_>>(),
             "socket_floor": SOCKET_FLOOR,
             "phrases": UNRECOVERABLE_PHRASES,
+            "open_ended": OPEN_ENDED,
         });
         let mut text = serde_json::to_string_pretty(&header).expect("plain json");
         // Reopen the object: drop its closing brace and the newline before it, and carry on inside.
@@ -1552,7 +1718,7 @@ mod tests {
     #[test]
     fn surface_vectors_cover_every_outcome_and_every_axis() {
         let all = decision_vectors();
-        assert_eq!(all.len(), MODES.len() * 5 * 4 * 2 * 2 * 2);
+        assert_eq!(all.len(), MODES.len() * 5 * 4 * 4 * 2 * 2);
         // And the two bypasses differ exactly where the app says an action cannot be undone.
         let differ: Vec<_> = all
             .iter()
@@ -1563,7 +1729,7 @@ mod tests {
             })
             .collect();
         assert!(!differ.is_empty());
-        assert!(differ.iter().all(|v| v["unrecoverable"] == true), "{differ:?}");
+        assert!(differ.iter().all(|v| v["unrecoverable"] == true || v["open_ended"] == true), "{differ:?}");
         // A grant answers the question either way, so where one was spent the dispatch allows in
         // both; only the door — which never has a grant — still tells the two apart there.
         assert!(differ.iter().filter(|v| v["grant"] == true).all(|v| v["outcome"] == "allow"), "{differ:?}");
@@ -1578,5 +1744,25 @@ mod tests {
             all.iter().any(|w| w["id"] == id && w["outcome"] == "allow")
         }).count();
         assert!(flips > 0, "the app's own sentence changes the answer somewhere");
+
+        // The open-ended axis is a real one too, and it is the one a session rule answers: in
+        // ask, auto and bypass an open-ended action above `safe` is a GRANT without a rule and
+        // runs with one — and where it ALSO cannot be undone, the rule answers nothing.
+        let find = |id: String| all.iter().find(|v| v["id"] == id).unwrap_or_else(|| panic!("{id}"));
+        for mode in ["ask", "auto", "bypass"] {
+            for graded in ["standard", "sensitive"] {
+                let at = |undo: bool, rule: bool| {
+                    find(format!("{mode}/{graded}/ceiling=sensitive/unrecoverable={undo}/open_ended=true/rule={rule}/grant=false"))
+                };
+                assert_eq!(at(false, false)["outcome"], "GRANT", "{mode}/{graded}");
+                assert_eq!(at(false, false)["door"], "ask", "{mode}/{graded}");
+                assert_eq!(at(false, true)["outcome"], "allow", "{mode}/{graded}: the rule covers it");
+                assert_eq!(at(true, true)["outcome"], "GRANT", "{mode}/{graded}: cannot-be-undone wins");
+            }
+        }
+        let full = find("bypass_all/sensitive/ceiling=sensitive/unrecoverable=false/open_ended=true/rule=false/grant=false".into());
+        assert_eq!(full["outcome"], "allow", "full bypass runs it unasked");
+        let plan = find("plan/standard/ceiling=sensitive/unrecoverable=false/open_ended=true/rule=true/grant=false".into());
+        assert_eq!((plan["outcome"].as_str(), plan["door"].as_str()), (Some("GRANT"), Some("refuse")), "plan refuses it, rule or not");
     }
 }

@@ -259,9 +259,10 @@ pub fn other_names(app_id: &str) -> &'static [&'static str] {
 // `ControlRpc::dispatch`), and the registry decides with `gate::decide` inside the same turn of
 // the event loop as the handler.
 pub use yantrik_ipc_transport::gate::{
-    boot_id, configured_ceiling, configured_mode, decide, grant_of, mode_from, mode_path, permit,
-    proc_start_ticks, spend_grants_with, unrecoverable, Authority, CallingAgent, Mode, AGENT_TOKEN,
-    DEFAULT_MODE, LADDER, MODES, MODE_FILE, SOCKET_FLOOR, UNRECOVERABLE_PHRASES,
+    boot_id, configured_ceiling, configured_mode, decide, grant_of, mode_from, mode_path, open_ended,
+    permit, proc_start_ticks, spend_grants_with, unrecoverable, Authority, CallingAgent, Mode,
+    AGENT_TOKEN, DEFAULT_MODE, LADDER, MODES, MODE_FILE, OPEN_ENDED, SOCKET_FLOOR,
+    UNRECOVERABLE_PHRASES,
 };
 #[cfg(test)]
 use yantrik_ipc_transport::gate::{agent_token_of, ceiling_from, DEFAULT_CEILING};
@@ -329,6 +330,15 @@ pub fn agent_is_calling() -> bool {
 /// a refusal, not a default.
 pub fn published_grade(action: &str) -> Option<&'static str> {
     REGISTRY.with(|cell| cell.borrow().as_ref().and_then(|reg| reg.published_grade(action)))
+}
+
+/// The description THIS app publishes for one of its own actions, beside [`published_grade`] and
+/// for the same reason: the shell asking itself over its socket is a call that cannot be
+/// answered. The shell's approval card reads it so that what the gate reads in a description —
+/// that it cannot be undone, or that it runs whatever it is given — is read on the card's path
+/// too, and the card and the dispatch cannot disagree about the shell's own actions.
+pub fn published_description(action: &str) -> Option<String> {
+    REGISTRY.with(|cell| cell.borrow().as_ref().and_then(|reg| reg.published_description(action)))
 }
 
 /// Re-declare the grade THIS app publishes for one of its own actions, while it is running.

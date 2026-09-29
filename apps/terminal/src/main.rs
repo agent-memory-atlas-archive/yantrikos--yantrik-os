@@ -930,7 +930,9 @@ fn surface(ui: &TerminalApp, state: &State) -> Vec<(Action, Handler)> {
         // `dangerous` grade would put it above the shipped `sensitive` ceiling and leave the app
         // publishing nothing a mind could use. What the command itself may destroy is the
         // machine's ceiling to decide — `tool_permission` in settings.yaml — not this app's, and
-        // the person can see and interrupt every line that arrives.
+        // the person can see and interrupt every line that arrives. Open-ended: the line is
+        // whatever it is given, so it asks once in ask, auto and bypass, and a session rule
+        // answers the rest (29 September 2026).
         act(
             "run",
             "Type a command line into the active shell and press Return. It does not wait for \
@@ -940,6 +942,7 @@ fn surface(ui: &TerminalApp, state: &State) -> Vec<(Action, Handler)> {
         )
         .risk("sensitive")
         .defers()
+        .open_ended()
         .arg(arg(
             "command",
             "One command line, exactly as it would be typed; a newline is added. It is \
@@ -985,7 +988,9 @@ fn surface(ui: &TerminalApp, state: &State) -> Vec<(Action, Handler)> {
 
     add(
         // Sensitive for the same reason as `run`: whatever is waiting on the other end of the
-        // PTY reads these bytes, and a program at a prompt cannot tell them from typing.
+        // PTY reads these bytes, and a program at a prompt cannot tell them from typing — which
+        // makes it open-ended as `run` is: a line ending in \n at the shell's prompt is a command.
+        // `new_tab` and `open_directory` are not: they start a shell and run nothing they are given.
         act(
             "send_input",
             "Send raw bytes to the active shell without pressing Return — for answering a \
@@ -994,6 +999,7 @@ fn surface(ui: &TerminalApp, state: &State) -> Vec<(Action, Handler)> {
         )
         .risk("sensitive")
         .defers()
+        .open_ended()
         .arg(arg(
             "text",
             "The exact characters to send, with no newline added: end it with \\n to submit a \

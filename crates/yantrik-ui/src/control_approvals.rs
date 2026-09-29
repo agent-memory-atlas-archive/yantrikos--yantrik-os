@@ -166,14 +166,23 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                 // shell surface publishes no description here to read.
                 let cannot_be_undone = approvals::unrecoverable(&published_purpose)
                     || approvals::unrecoverable(&purpose);
+                // And whether it runs whatever it is given (29 September 2026), read the same
+                // way: either sentence saying so asks — which can only tighten — and a session
+                // rule answers it, which `may_offer_session_rule` offers for it.
+                let runs_anything = approvals::open_ended(&published_purpose)
+                    || approvals::open_ended(&purpose);
+                let declared = crate::mind_mode::Declared {
+                    cannot_be_undone,
+                    open_ended: runs_anything,
+                };
                 // What the phone is shown of it: the app's own sentence, never the caller's, since
                 // a mind could describe a deletion as tidying (security review, 29 Sep 2026).
                 let published_summary = approvals::summary_of(&published_purpose);
-                // And the card shows the app's own words when the caller sent none, so the red
-                // warning line, the session-rule offer and the decision above all read one
-                // sentence rather than three.
-                let purpose =
-                    if purpose.trim().is_empty() { published_purpose } else { purpose };
+                // The card carries both: the caller's words, and the app's own sentence beside
+                // them, always. The red warning line, the session-rule offer and the rule check
+                // are read from the app's sentence (with the caller's, which can only add
+                // caution), so a caller that describes `terminal.run` as "list /tmp" cannot get
+                // a card that forgets the action can run anything (security review of #504).
 
                 // An agent answering a turn from the person's phone is asked about everything above
                 // a read, whatever the mode and whatever the desk's session rules: its door asks
@@ -186,7 +195,7 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                 // The mode and the machine's ceiling decide first: a refusal stands. Plan mode
                 // changes nothing from a phone either. Otherwise a held agent is always asked, where
                 // the mode or a desk session rule would have let it run.
-                let decision = match crate::mind_mode::decide(&grade, &app, &action, cannot_be_undone) {
+                let decision = match crate::mind_mode::decide(&grade, &app, &action, declared) {
                     refused @ crate::mind_mode::Decision::Refuse { .. } => refused,
                     _ if held_from_phone && crate::mind_mode::current().as_str() == "plan" => {
                         crate::mind_mode::Decision::Refuse {
@@ -238,8 +247,18 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                 // what it was. Display only, like the naming line: `parsed` reaches the store
                 // untouched and the grant binds to those bytes, never to a sentence about them.
                 let asked = approvals::request(
-                    &requester, verified, &app, &action, parsed, &grade, &purpose, &target,
-                    &explained,
+                    &requester,
+                    verified,
+                    approvals::Asked {
+                        app: &app,
+                        action: &action,
+                        grade: &grade,
+                        purpose: &purpose,
+                        published: &published_purpose,
+                        target: &target,
+                        explained: &explained,
+                    },
+                    parsed,
                 )?;
 
                 // To the phone, when an agent answering a turn from it raised it: once, when it
@@ -707,11 +726,18 @@ fn published_detail_in(
 
     // The shell asking the shell. Over the socket this would be a call the shell's own UI thread
     // has to answer while it is blocked making it — so it is read straight out of the registry
-    // that thread already holds. The registry carries grades and nothing else: the shell's own
-    // actions take paths, prompts and names, no opaque handle that needs a naming index.
+    // that thread already holds: the grade, and the description beside it, which the gate reads
+    // for what cannot be undone and what runs whatever it is given. Without the description the
+    // card and the dispatch disagreed about the shell's own actions — `agent_run` asked at the
+    // socket and ran unasked here in auto. The shell's actions take paths, prompts and names, no
+    // opaque handle that needs a naming index.
     if surface == "shell" {
         return yantrik_app_runtime::control::published_grade(action)
-            .map(|grade| (grade.to_string(), String::new(), Naming::new(), String::new()))
+            .map(|grade| {
+                let purpose =
+                    yantrik_app_runtime::control::published_description(action).unwrap_or_default();
+                (grade.to_string(), purpose, Naming::new(), String::new())
+            })
             .ok_or_else(|| {
                 format!(
                     "`shell` publishes no action called `{action}`, so there is nothing to ask \
@@ -1321,7 +1347,9 @@ pub fn wire(ui: &App, bridge: std::sync::Arc<crate::bridge::CompanionBridge>) {
         }
         if let Some(card) = card {
             if let Err(e) =
-                crate::mind_mode::person_add_rule(&card.app, &card.action, &card.grade, &card.purpose)
+                // `said`, not `purpose`: the app's own sentence, whole, which the caller cannot
+                // leave out and the card's bound cannot cut (#504).
+                crate::mind_mode::person_add_rule(&card.app, &card.action, &card.grade, &card.said)
             {
                 tracing::warn!(request = %id, reason = %e, "no session rule was made for it");
             }
@@ -1658,6 +1686,8 @@ pub(crate) fn row_for(card: Card) -> crate::ApprovalRequest {
         } else {
             card.purpose.into()
         },
+        // The caller's words, apart from the app's and labelled as the caller's (#504).
+        caller_says: card.caller_says.into(),
         // The first sentence of that description, and the line the card leads with (#218):
         // the whole paragraph is for the person who wants it, under "show more", not the first
         // thing everybody has to read. Empty when the app publishes nothing — the card hides
@@ -1852,6 +1882,7 @@ fn publish_mode(ui: &App) {
         })
         .unwrap_or_default();
     ui.set_mind_session_rules(ModelRc::new(VecModel::from(rules)));
+    ui.set_mind_rules_cleared(crate::mind_mode::cleared_note().into());
 
     // Newest first on screen. The list answers "what has it just done", and a person scanning it
     // reads from the top — which is the opposite of the transcript order the approval records
@@ -2513,6 +2544,8 @@ mod control_approvals_tests {
                 target: String::new(),
                 explained: String::new(),
                 warning: "The app says this cannot be undone.".into(),
+                said: String::new(),
+                caller_says: String::new(),
                 can_session: false,
                 status: Status::Pending,
                 record: String::new(),
@@ -2710,6 +2743,8 @@ mod control_approvals_tests {
                 target: String::new(),
                 explained: String::new(),
                 warning: String::new(),
+                said: String::new(),
+                caller_says: String::new(),
                 can_session: false,
                 status,
                 record: String::new(),
@@ -3172,6 +3207,8 @@ mod target_line_tests {
             target: line.clone(),
             explained: sentence.clone(),
             warning: String::new(),
+            said: String::new(),
+            caller_says: String::new(),
             can_session: false,
             status: Status::Pending,
             record: String::new(),
@@ -3277,13 +3314,16 @@ mod grant_spends_tests {
         let asked = approvals::request(
             "pi 0.9",
             Verified { agent: "pi:c-182".into(), ..Verified::default() },
-            "notes",
-            "create_note",
+            approvals::Asked {
+                app: "notes",
+                action: "create_note",
+                grade: "standard",
+                purpose: "Create a note",
+                published: "",
+                target: "",
+                explained: "",
+            },
             args.clone(),
-            "standard",
-            "Create a note",
-            "",
-            "",
         )
         .unwrap();
         approvals::grant(&asked.id).unwrap();
@@ -3330,13 +3370,16 @@ mod grant_spends_tests {
         let person = approvals::request(
             "yos",
             Verified::default(),
-            "notes",
-            "create_note",
+            approvals::Asked {
+                app: "notes",
+                action: "create_note",
+                grade: "standard",
+                purpose: "Create a note",
+                published: "",
+                target: "",
+                explained: "",
+            },
             args.clone(),
-            "standard",
-            "Create a note",
-            "",
-            "",
         )
         .unwrap();
         approvals::grant(&person.id).unwrap();

@@ -236,6 +236,31 @@ impl std::fmt::Debug for Explainer {
     }
 }
 
+/// The sentence that makes an action open-ended: what it runs is whatever it was given, so it
+/// can do anything the person can. [`Action::open_ended`] appends it to the description, and
+/// `yantrik_ipc_transport::gate::open_ended` looks for it, so the reader of the description is
+/// told exactly what the gate enforces — the shape `gate::unrecoverable` already reads, with one
+/// sentence instead of seven phrases, because this is a declaration and not a guess at prose.
+///
+/// What it means at the gate (Pranab's decision of 29 September 2026): above `safe` it asks in
+/// `ask`, `auto` and plain bypass, and a session rule DOES cover it — a mind asks once per
+/// session to run commands, not once per command. Full bypass runs it unasked; plan refuses it.
+pub const OPEN_ENDED: &str = "What it runs can do anything you can.";
+
+/// `description` with [`OPEN_ENDED`] said at its end, once. Pure, so the Python SDK's copy can
+/// be held to it sentence for sentence.
+pub fn with_open_ended(description: &str) -> String {
+    if description.contains(OPEN_ENDED) {
+        return description.to_string();
+    }
+    let said = description.trim_end();
+    if said.is_empty() {
+        return OPEN_ENDED.to_string();
+    }
+    let stop = if said.ends_with(['.', '!', '?']) { "" } else { "." };
+    format!("{said}{stop} {OPEN_ENDED}")
+}
+
 /// One thing an app can be asked to do.
 #[derive(Clone, Debug)]
 pub struct Action {
@@ -332,6 +357,16 @@ impl Action {
     /// killing a process, deleting a file, sending mail.
     pub fn risk(mut self, permission: &'static str) -> Self {
         self.permission = permission;
+        self
+    }
+
+    /// Declare that this action runs whatever it is given — a command line, a script, keystrokes
+    /// into a shell — so it can do anything the person can. It says so in the description
+    /// ([`OPEN_ENDED`]), which is what the gate reads: asked about once per session in `ask`,
+    /// `auto` and bypass, a session rule answering the rest. Mark only what truly runs arbitrary
+    /// input; the grade still says how much the action itself costs.
+    pub fn open_ended(mut self) -> Self {
+        self.description = with_open_ended(&self.description);
         self
     }
 
@@ -446,6 +481,22 @@ pub fn act_json(
         "summary": view.summary,
         "state": view.state,
     })
+}
+
+#[cfg(test)]
+mod open_ended_tests {
+    use super::*;
+
+    #[test]
+    fn an_open_ended_action_says_so_once_at_the_end_of_its_description() {
+        let run = Action::new("run", "Type a command line into the shell").open_ended();
+        assert_eq!(run.description, "Type a command line into the shell. What it runs can do anything you can.");
+        let again = run.clone().open_ended();
+        assert_eq!(again.description, run.description, "said once, however often it is declared");
+        assert_eq!(with_open_ended("Run it.  "), "Run it. What it runs can do anything you can.");
+        assert_eq!(with_open_ended(""), OPEN_ENDED);
+        assert_eq!(run.schema()["description"], run.description.as_str(), "published as it reads");
+    }
 }
 
 #[cfg(test)]

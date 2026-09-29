@@ -345,6 +345,13 @@ struct Record {
     /// sentence about them changes nothing about what was allowed. It DOES close the standing
     /// yes: a card carrying one offers no session rule (see [`Card::can_session`]).
     explained: String,
+    /// The action's description as the APP publishes it, whatever the caller said beside it —
+    /// empty only for a caller that raised the card with no published sentence to read (the
+    /// store's own tests). What the card warns from, whether it offers a standing yes, and what
+    /// a session rule is checked against are all read from this and the caller's words together
+    /// ([`Record::said`]): a caller that leaves "cannot be undone" or the open-ended sentence out
+    /// of its own purpose must not get a card that forgets them (security review of #504).
+    published: String,
     created: Instant,
     /// Wall-clock `HH:MM` for the transcript record. `Instant` cannot render as a time of day,
     /// and the record a person reads afterwards is about when, not about how long ago.
@@ -365,6 +372,26 @@ struct Record {
 }
 
 impl Record {
+    /// Everything said about the action: the app's own sentence, then the caller's words when
+    /// they add anything. Read whole — never cut to the card's bound — by the warning, the
+    /// session-rule offer and the rule check, so a phrase past [`PURPOSE_CHARS`] still counts.
+    fn said(&self) -> String {
+        said(&self.published, &self.purpose)
+    }
+
+    /// What the caller says the call is for, as the card draws it — in its own block, under its
+    /// own label, and never joined to the app's sentence (re-review of #504: a caller's words put
+    /// first and cut together with the app's could push the real sentence off the card and
+    /// write a fake "in the app's own words" line in its place). Empty when the caller said
+    /// nothing, or only repeated what the app says.
+    fn caller_says(&self) -> String {
+        let caller = self.purpose.trim();
+        if caller.is_empty() || self.published.contains(caller) {
+            return String::new();
+        }
+        clip_at_word(&neutralized(caller), CALLER_CHARS)
+    }
+
     fn status(&self, now: Instant) -> Status {
         match self.state {
             Status::Pending if now.duration_since(self.created) >= REQUEST_TTL => Status::Expired,
@@ -377,6 +404,136 @@ impl Record {
     }
 }
 
+/// How much of what a caller says about its call the record keeps for the card: a few hundred
+/// characters, cut at a word with its true length named, and "show more" on the card for the
+/// rest of it. The app's own sentence has its own place and its own bound ([`PURPOSE_CHARS`]),
+/// so no length of caller text can push it off the card.
+const CALLER_CHARS: usize = 400;
+
+/// The caller's words with nothing in them that can pass for the card's own furniture: one
+/// paragraph, not lines that draw labels of their own, and every phrase the card uses to say
+/// "this is the app speaking" marked as the caller's. A caller that writes "What files.move
+/// does, in the app's own words: harmless" is quoted as saying so, under the caller's label.
+fn neutralized(caller: &str) -> String {
+    // Nothing invisible, and nothing that reorders what is drawn: a zero-width space inside
+    // "app's own words" or a right-to-left override would slip the phrase past the match and
+    // still read as it on screen (third review of #504). Then one paragraph, and one apostrophe.
+    let visible: String = caller.chars().filter(|c| !is_format_char(*c)).collect();
+    let one_paragraph = visible.split_whitespace().collect::<Vec<_>>().join(" ");
+    let out: String =
+        one_paragraph.chars().map(|c| if is_apostrophe(c) { '\'' } else { c }).collect();
+    mark_imitations(&out, "(so the caller says)")
+}
+
+/// The phrases the card uses for the app's own voice, which a caller's words must not carry.
+const IMITATED: [&str; 7] = [
+    "in the app's own words",
+    "the app's own first sentence",
+    "the app's own words",
+    "the app's own",
+    "says the app",
+    "the same for every call of it",
+    "what it does ·",
+];
+
+/// Unicode format characters (category Cf) and bidi controls: drawn as nothing, or as a
+/// reordering of what is around them. The ranges the card can meet in text: soft hyphen, the
+/// Arabic letter mark, the Mongolian vowel separator, zero-width space to right-to-left mark,
+/// the embeddings and overrides, word joiner to the invisible operators and the isolates, the
+/// byte-order mark, the interlinear annotation marks, and the tag characters.
+fn is_format_char(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x00AD
+            | 0x061C
+            | 0x180E
+            | 0x200B..=0x200F
+            | 0x202A..=0x202E
+            | 0x2060..=0x2064
+            | 0x2066..=0x206F
+            | 0xFEFF
+            | 0xFFF9..=0xFFFB
+            | 0xE0001
+            | 0xE0020..=0xE007F
+    )
+}
+
+/// Every character that is drawn as an apostrophe.
+fn is_apostrophe(c: char) -> bool {
+    matches!(
+        c,
+        '\u{2019}' | '\u{2018}' | '\u{201B}' | '\u{02BC}' | '\u{02B9}' | '\u{FF07}' | '\u{2032}'
+            | '\u{00B4}' | '`'
+    )
+}
+
+/// The letter a lookalike is drawn as, for matching only: Cyrillic and Greek letters drawn as
+/// Latin ones, full-width Latin, and the dots the card's labels use. The text shown keeps its
+/// own letters — a caller writing in Russian is not rewritten — and only a span that spells one
+/// of [`IMITATED`] is replaced.
+fn skeleton_char(c: char) -> char {
+    let folded = match c {
+        'а' | 'А' | 'ɑ' | 'α' => 'a',
+        'В' => 'b',
+        'с' | 'С' | 'ϲ' => 'c',
+        'ԁ' => 'd',
+        'е' | 'Е' | 'ε' => 'e',
+        'һ' | 'Н' => 'h',
+        'і' | 'І' | 'ι' => 'i',
+        'ј' => 'j',
+        'К' | 'κ' => 'k',
+        'ӏ' => 'l',
+        'М' => 'm',
+        'о' | 'О' | 'ο' | 'σ' => 'o',
+        'р' | 'Р' | 'ρ' => 'p',
+        'ԛ' => 'q',
+        'ѕ' => 's',
+        'Т' | 'τ' => 't',
+        'υ' => 'u',
+        'ԝ' => 'w',
+        'х' | 'Х' | 'χ' => 'x',
+        'у' | 'У' | 'γ' => 'y',
+        '•' | '‧' | '∙' | '⋅' => '·',
+        '\u{FF21}'..='\u{FF3A}' => char::from_u32(c as u32 - 0xFF21 + 'a' as u32).unwrap_or(c),
+        '\u{FF41}'..='\u{FF5A}' => char::from_u32(c as u32 - 0xFF41 + 'a' as u32).unwrap_or(c),
+        _ => c,
+    };
+    folded.to_ascii_lowercase()
+}
+
+/// `text` with every span whose skeleton spells one of [`IMITATED`] replaced by `with`.
+fn mark_imitations(text: &str, with: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let skeleton: Vec<char> = chars.iter().map(|c| skeleton_char(*c)).collect();
+    let needles: Vec<Vec<char>> = IMITATED.iter().map(|n| n.chars().collect()).collect();
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    while at < chars.len() {
+        match needles.iter().find(|n| skeleton[at..].starts_with(n)) {
+            Some(needle) => {
+                out.push_str(with);
+                at += needle.len();
+            }
+            None => {
+                out.push(chars[at]);
+                at += 1;
+            }
+        }
+    }
+    out
+}
+
+/// The app's sentence and the caller's, as one text to judge by: the app's first, the caller's
+/// after it when it adds anything. Either can only add a reason to be careful — a caller who
+/// writes "this cannot be undone" has asked for more caution, which is not worth refusing.
+fn said(published: &str, caller: &str) -> String {
+    let (published, caller) = (published.trim(), caller.trim());
+    if published.is_empty() || published.contains(caller) {
+        return if published.is_empty() { caller.to_string() } else { published.to_string() };
+    }
+    format!("{published} {caller}")
+}
+
 /// One request as the UI and `describe` see it.
 #[derive(Clone, Debug)]
 pub struct Card {
@@ -387,7 +544,13 @@ pub struct Card {
     pub app: String,
     pub action: String,
     pub grade: String,
+    /// The action's description as the APP publishes it — never the caller's words, which are
+    /// [`Card::caller_says`] (re-review of #504).
     pub purpose: String,
+    /// What the caller says the call is for: bounded at [`CALLER_CHARS`], one paragraph, with
+    /// any phrase that imitates the card's "the app says" labels marked as the caller's — or
+    /// empty. Drawn in its own block under its own label, after the app's sentence.
+    pub caller_says: String,
     /// The first sentence of `purpose`, bounded at [`SUMMARY_CHARS`] — the one line a person
     /// reads first, while the paragraph it came from stays on the card under "show more".
     /// See [`summary_of`].
@@ -414,6 +577,11 @@ pub struct Card {
     pub explained: String,
     /// A sentence to put in front of the buttons, or empty. See [`warning_for`].
     pub warning: String,
+    /// Everything said about the action, whole: the app's published sentence and the caller's
+    /// words ([`Record::said`]). Not drawn. It is what "Allow for this session" is checked
+    /// against when pressed (`mind_mode::person_add_rule`), so the check reads what the app
+    /// says and not the caller's paraphrase, nor a purpose cut to fit the card.
+    pub said: String,
     /// Whether the card may offer "Allow for this session" as a third choice. See
     /// [`may_offer_session_rule`] — computed from the purpose as the app published it, not from
     /// `purpose` above, so that even a description long enough to be cut at [`PURPOSE_CHARS`]
@@ -517,6 +685,17 @@ pub fn unrecoverable(purpose: &str) -> bool {
     yantrik_app_runtime::control::unrecoverable(purpose)
 }
 
+/// Does the app's own sentence declare that this action runs whatever it is given — a command
+/// line, keystrokes into a shell — so it can do anything the person can? The gate's reading of
+/// it (`gate::open_ended`), for the same reason [`unrecoverable`] is the gate's.
+///
+/// It is deliberately NOT one of [`may_offer_session_rule`]'s exclusions. Such an action asks
+/// once, and "Allow for this session" is the answer that makes asking once mean something: a
+/// mind asks to run commands once per session, not once per command.
+pub fn open_ended(purpose: &str) -> bool {
+    yantrik_app_runtime::control::open_ended(purpose)
+}
+
 /// May the card offer "Allow for this session" for this action?
 ///
 /// Two exclusions, both of them about what a standing yes would cost if it were wrong. A
@@ -536,13 +715,44 @@ pub fn may_offer_session_rule(grade: &str, purpose: &str) -> bool {
 /// that sentence is the exact failure commit d73760d fixed one layer down.
 pub fn warning_for(grade: &str, purpose: &str) -> String {
     let unrecoverable = unrecoverable(purpose);
+    // Cannot-be-undone wins, at the gate and here: that card offers no standing yes to explain.
+    let open = open_ended(purpose) && !unrecoverable;
 
     match (grade == "dangerous", unrecoverable) {
         (true, true) => "This is graded dangerous and the app says it cannot be undone.".into(),
+        (true, false) if open => {
+            "This is graded dangerous, and what it runs can do anything you can.".into()
+        }
         (true, false) => "This is graded dangerous — it can destroy work or state.".into(),
         (false, true) => "The app says this cannot be undone.".into(),
+        (false, false) if open => OPEN_ENDED_WARNING.into(),
         (false, false) => String::new(),
     }
+}
+
+/// The warning on a card for an action that runs whatever it is given, saying what "Allow for
+/// this session" would cover: not this command, but every command, from anyone, for a while.
+/// A rule is per `(app, action)` — it covers every mind, child agent, recipe role and raw
+/// socket caller — and it lasts until the shell restarts or the mode is lowered (`mind_mode`
+/// clears the rules then).
+pub const OPEN_ENDED_WARNING: &str = "What it runs can do anything you can. Allowing it for the \
+     session lets any mind or caller on this desktop run any command through it, until the \
+     shell restarts or the mode is lowered.";
+
+/// What one request is about, beside who asked and with what arguments: the text parts of it.
+/// A struct because the published sentence made nine positional strings, and two strings side
+/// by side are one swap away from the card showing the caller's words as the app's.
+#[derive(Clone, Copy, Debug)]
+pub struct Asked<'a> {
+    pub app: &'a str,
+    pub action: &'a str,
+    pub grade: &'a str,
+    /// What the caller says it is doing.
+    pub purpose: &'a str,
+    /// What the app publishes the action does. See [`Record::said`].
+    pub published: &'a str,
+    pub target: &'a str,
+    pub explained: &'a str,
 }
 
 /// What [`Store::request`] answers with.
@@ -610,6 +820,25 @@ impl Store {
         now: Instant,
         at: &str,
     ) -> Result<Requested, String> {
+        // Every caller of this form passes the action's own description — the tests, and the
+        // shell's `hand_off`, whose purpose it writes itself — so that is what it is kept as.
+        let asked = Asked { app, action, grade, purpose: "", published: purpose, target, explained };
+        self.raise(requester, verified, asked, args, now, at)
+    }
+
+    /// [`Store::request`] with the app's own published sentence beside the caller's words —
+    /// what the shell's `request_approval` uses, so the card warns and offers from what the app
+    /// says (#504).
+    pub fn raise(
+        &mut self,
+        requester: &str,
+        verified: Verified,
+        asked: Asked<'_>,
+        args: serde_json::Value,
+        now: Instant,
+        at: &str,
+    ) -> Result<Requested, String> {
+        let Asked { app, action, grade, purpose, published, target, explained } = asked;
         self.prune(now);
 
         let canonical = canonical(&args);
@@ -674,7 +903,10 @@ impl Store {
             args,
             canonical,
             grade: grade.to_string(),
-            purpose: purpose.trim().to_string(),
+            // Bounded on arrival: the caller's words have no limit of their own, and the record
+            // is what every later reading of them sees. What is kept is enough to judge by —
+            // the app's own sentence, kept whole beside it, is what decides.
+            purpose: clip_at_word(purpose.trim(), CALLER_CHARS * 4),
             target: target.trim().to_string(),
             // Cut once, on arrival, and by the store itself: the sentence is app text — mind
             // text, on a surface with a mind attached — so the RECORD must never hold more
@@ -682,6 +914,7 @@ impl Store {
             // a second cut would replace the marker that names the sentence's true length
             // with one naming the length of the already-cut line.
             explained: clip_at_word(explained.trim(), EXPLAINED_CHARS),
+            published: published.trim().to_string(),
             created: now,
             created_at: at.to_string(),
             decided: None,
@@ -868,8 +1101,9 @@ impl Store {
                 app: record.app.clone(),
                 action: record.action.clone(),
                 grade: record.grade.clone(),
-                purpose: clip_at_word(&record.purpose, PURPOSE_CHARS),
-                summary: summary_of(&record.purpose),
+                purpose: clip_at_word(&record.published, PURPOSE_CHARS),
+                caller_says: record.caller_says(),
+                summary: summary_of(&record.published),
                 args: args_rows(&record.args),
                 // At a word, not at the bound: a cut in the middle of the name is the
                 // `PURPOSE_CHARS` mistake rebuilt — "13:0" and "13:00… " are not the same
@@ -879,12 +1113,14 @@ impl Store {
                 // the record itself is bounded there, so this is a pass-through — cutting
                 // again here would rename the true length the marker names (#137).
                 explained: record.explained.clone(),
-                warning: warning_for(&record.grade, &record.purpose),
+                // From what the app says, not what the caller chose to repeat of it (#504).
+                warning: warning_for(&record.grade, &record.said()),
                 // A card that needed a sentence about THIS call to be understood must not offer
                 // a standing yes: the session rule would cover every later call of the action,
                 // and the sentence the person just read explained exactly one (#137).
-                can_session: may_offer_session_rule(&record.grade, &record.purpose)
+                can_session: may_offer_session_rule(&record.grade, &record.said())
                     && record.explained.is_empty(),
+                said: record.said(),
                 status,
                 record: record_line(record, status),
                 age_secs: now.duration_since(record.created).as_secs(),
@@ -972,27 +1208,10 @@ fn hhmm() -> String {
 pub fn request(
     requester: &str,
     verified: Verified,
-    app: &str,
-    action: &str,
+    asked: Asked<'_>,
     args: serde_json::Value,
-    grade: &str,
-    purpose: &str,
-    target: &str,
-    explained: &str,
 ) -> Result<Requested, String> {
-    locked().request(
-        requester,
-        verified,
-        app,
-        action,
-        args,
-        grade,
-        purpose,
-        target,
-        explained,
-        Instant::now(),
-        &hhmm(),
-    )
+    locked().raise(requester, verified, asked, args, Instant::now(), &hhmm())
 }
 
 pub fn status(id: &str) -> Option<Status> {
@@ -1783,6 +2002,129 @@ mod approvals_tests {
             .id;
         let card = store.pending(now).into_iter().find(|c| c.id == none).expect("the card");
         assert_eq!(card.summary, "");
+    }
+
+    /// Security review of #504: a mind asking for `terminal.run` with its own purpose — "list
+    /// /tmp" — got a card with no word of what the app says the action is, and a session button
+    /// that then allowed any command. The card now shows the app's sentence under the caller's,
+    /// warns what the standing yes covers, and offers it (or not) from the app's sentence.
+    #[test]
+    fn approvals_the_card_shows_what_the_app_says_whatever_the_caller_wrote() {
+        let mut store = Store::new();
+        let now = Instant::now();
+        let run = "Type a command line into the active shell and press Return. What it runs can do anything you can.";
+        let asked = Asked {
+            app: "terminal",
+            action: "run",
+            grade: "sensitive",
+            purpose: "list /tmp",
+            published: run,
+            target: "",
+            explained: "",
+        };
+        let id = store.raise("pi 0.87", Verified::default(), asked, args(serde_json::json!({"command": "ls /tmp"})), now, "12:03").unwrap().id;
+        let card = store.pending(now).into_iter().find(|c| c.id == id).unwrap();
+        assert_eq!(card.purpose, run, "the purpose block is the app's sentence, alone");
+        assert_eq!(card.summary, "Type a command line into the active shell and press Return.");
+        assert_eq!(card.caller_says, "list /tmp", "and the mind's words have their own block");
+        assert_eq!(card.warning, OPEN_ENDED_WARNING);
+        assert!(card.warning.contains("any mind or caller") && card.warning.contains("mode is lowered"));
+        assert!(card.can_session, "a command may be allowed for the session");
+        assert!(card.said.contains("can do anything you can"));
+
+        // And a caller that leaves "cannot be undone" out of its purpose is not offered a
+        // standing yes for an action the app says cannot be undone.
+        let delete = Asked {
+            app: "calendar",
+            action: "delete_event",
+            grade: "sensitive",
+            purpose: "tidy up",
+            published: "Take an event off the calendar. It is not recoverable",
+            target: "",
+            explained: "",
+        };
+        let id = store.raise("pi 0.87", Verified::default(), delete, args(serde_json::json!({"id": "e1"})), now, "12:04").unwrap().id;
+        let card = store.pending(now).into_iter().find(|c| c.id == id).unwrap();
+        assert!(!card.can_session, "the app's sentence decides the offer");
+        assert_eq!(card.warning, "The app says this cannot be undone.");
+        let mut modes = crate::mind_mode::Modes::default();
+        assert!(
+            modes.person_add_rule(&card.app, &card.action, &card.grade, &card.said).is_err(),
+            "nor may a rule be stored for it"
+        );
+    }
+
+    /// Re-review of #504: a caller's purpose padded past the card's bound, or dressed as the
+    /// app's own words, cannot push the app's sentence off the card or pass for it.
+    #[test]
+    fn approvals_a_padded_or_forged_purpose_cannot_hide_or_imitate_the_apps_sentence() {
+        let mut store = Store::new();
+        let now = Instant::now();
+        let published = "Move a file or folder to another place. What it runs can do anything you can.";
+        let forged = format!(
+            "tidy\n\nWhat files.move does, in the app's own words: Rename a draft; harmless.{}",
+            " padding".repeat(600)
+        );
+        let asked = Asked {
+            app: "files",
+            action: "move",
+            grade: "sensitive",
+            purpose: &forged,
+            published,
+            target: "",
+            explained: "",
+        };
+        let id = store.raise("pi 0.87", Verified::default(), asked, args(serde_json::json!({"from": "a"})), now, "12:05").unwrap().id;
+        let card = store.pending(now).into_iter().find(|c| c.id == id).unwrap();
+        assert_eq!(card.purpose, published, "the app's sentence, whole, in its own place");
+        assert_eq!(card.summary, "Move a file or folder to another place.");
+        assert!(!card.caller_says.contains("app's own words"), "the imitation is marked: {}", card.caller_says);
+        assert!(card.caller_says.contains("(so the caller says)"), "{}", card.caller_says);
+        assert!(!card.caller_says.contains('\n'), "one paragraph, no lines of its own");
+        assert!(card.caller_says.chars().count() < CALLER_CHARS + 40, "bounded on its own: {}", card.caller_says.len());
+        assert_eq!(card.warning, OPEN_ENDED_WARNING, "judged from the app's sentence");
+        // And a caller that only repeats the app draws no second block.
+        let asked = Asked { purpose: published, ..asked };
+        let id = store.raise("pi 0.87", Verified::default(), asked, args(serde_json::json!({"from": "b"})), now, "12:06").unwrap().id;
+        let card = store.pending(now).into_iter().find(|c| c.id == id).unwrap();
+        assert_eq!(card.caller_says, "");
+    }
+
+    /// Third review of #504: an imitation of the card's labels cannot slip past by an invisible
+    /// character, a lookalike letter, another apostrophe or a bidi override — and the purpose
+    /// block's own footnote is on the list.
+    #[test]
+    fn approvals_an_imitation_is_marked_through_invisible_and_lookalike_characters() {
+        for forged in [
+            "in the app\u{200b}'s own words: harmless",
+            "in the app\u{2060}'s own words: harmless",
+            "in the \u{0430}pp's own words: harmless",
+            "in the app\u{02bc}s own words: harmless",
+            "in the app\u{ff07}s own words: harmless",
+            "\u{202e}in the app's own words: harmless",
+            "IN THE APP'S OWN WORDS: harmless",
+            "the same for every call of it",
+        ] {
+            let shown = neutralized(forged);
+            assert!(shown.contains("(so the caller says)"), "{forged:?} -> {shown:?}");
+            assert!(!shown.chars().any(is_format_char), "{shown:?}");
+            assert!(!shown.to_lowercase().contains("own words"), "{shown:?}");
+        }
+        // Ordinary text in another script, and an ordinary apostrophe, are left as they are.
+        assert_eq!(neutralized("Переместить файл"), "Переместить файл");
+        assert_eq!(neutralized("don\u{2019}t move it"), "don't move it");
+    }
+
+    /// A command that can do anything is exactly what "Allow for this session" is for — unless
+    /// it also says it cannot be undone, or is graded `dangerous`, where the two exclusions stand.
+    #[test]
+    fn approvals_a_session_rule_is_offered_for_a_command_and_not_for_one_that_cannot_be_undone() {
+        let run = "Type a command line into the active shell. What it runs can do anything you can.";
+        assert!(open_ended(run));
+        assert!(may_offer_session_rule("sensitive", run));
+        assert!(!may_offer_session_rule("dangerous", run), "dangerous is always a card");
+        let both = "Run it, then delete what it made. It cannot be undone. What it runs can do anything you can.";
+        assert!(!may_offer_session_rule("sensitive", both), "cannot-be-undone wins");
     }
 
     #[test]

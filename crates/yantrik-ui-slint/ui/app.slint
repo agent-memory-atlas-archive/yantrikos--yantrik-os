@@ -202,6 +202,8 @@ export component App inherits Window {
     /// Whether the apps a mind opens go into Mind View (#239) rather than onto this desktop.
     in property <bool> mind-view-on: true;
     in property <[MindRule]> mind-session-rules: [];
+    /// The mode menu's line about rules the last lowering of the mode cleared, or empty.
+    in property <string> mind-rules-cleared: "";
     in property <[MindAuditEntry]> mind-audit: [];
     in-out property <bool> mind-menu-open: false;
     /// The Minds panel, under the mind chip: the person's accounts, what each has left, and
@@ -3086,6 +3088,7 @@ export component App inherits Window {
                 mode-label: root.mind-mode-label;
                 ceiling: root.mind-ceiling;
                 rules: root.mind-session-rules;
+                rules-cleared: root.mind-rules-cleared;
                 audit: root.mind-audit;
                 confirming-bypass <=> root.mind-menu-confirming;
                 showing-audit <=> root.mind-menu-audit-open;

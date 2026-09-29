@@ -402,7 +402,9 @@ fn specs() -> [Action; 4] {
     [
         // Sensitive, like the Terminal's own `run`: whatever the command does, it does as the
         // person. Deferred because the answer may be `running: true` — the work outlives the call
-        // — and the caller has to read `running` rather than assume.
+        // — and the caller has to read `running` rather than assume. Open-ended: the command is
+        // whatever it is given, so it asks once in ask, auto and bypass and a session rule
+        // answers the rest (29 September 2026).
         Action::new(
             "agent_run",
             &format!(
@@ -416,6 +418,7 @@ fn specs() -> [Action; 4] {
         )
         .risk("sensitive")
         .defers()
+        .open_ended()
         .arg(Param::text("command").describe(
             "One command line, as it would be typed. Pipes, redirection, `&&` and `cd` work; it \
              runs under bash",
@@ -445,7 +448,8 @@ fn specs() -> [Action; 4] {
                 .describe("Seconds to wait for it to finish. Default 120, at most 600"),
         ),
         // Sensitive for the Terminal `send_input`'s reason: a program at a prompt cannot tell
-        // these bytes from typing, and the prompt may be `sudo`'s.
+        // these bytes from typing, and the prompt may be `sudo`'s. Open-ended for the same
+        // reason: typed into a shell, they are a command.
         Action::new(
             "agent_input",
             &format!(
@@ -455,6 +459,7 @@ fn specs() -> [Action; 4] {
             ),
         )
         .risk("sensitive")
+        .open_ended()
         .arg(Param::text("job").describe("The `job` id `agent_run` answered with"))
         .arg(Param::text("text").describe("The exact characters to send, up to 64 KiB")),
         Action::new(
