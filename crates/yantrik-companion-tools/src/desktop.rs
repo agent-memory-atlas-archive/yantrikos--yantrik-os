@@ -338,6 +338,7 @@ impl Tool for RunCommandTool {
             Err(e) => return format!("Error: {e}"),
         };
         let home = std::env::var("HOME").unwrap_or_default();
+        let argv = crate::safe_command::expand(&argv, &home);
         if let Err(e) = crate::safe_command::check(&argv, &home) {
             return format!("Error: {e}");
         }
