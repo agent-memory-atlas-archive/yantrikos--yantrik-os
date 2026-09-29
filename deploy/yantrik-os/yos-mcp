@@ -1327,16 +1327,19 @@ def action_parameters(app, action):
     p = yos(["describe", app], SHELL_CALL_TIMEOUT)
     if p is None or p.returncode != 0:
         return {}
-    lines = (p.stdout or "").splitlines()
+    # As `action_detail` reads it: `split("\n")`, never `splitlines()`, which also breaks on
+    # characters app text may carry, and an action only where `yos` puts one — `  act: `, two
+    # spaces and nothing looser (third review of #504).
+    lines = (p.stdout or "").split("\n")
     for i, line in enumerate(lines):
-        m = re.match(r"^\s*act:\s*([A-Za-z0-9_]+)\(([^)]*)\)", line)
+        m = re.match(r"^  act: ([A-Za-z0-9_]+)\(([^)]*)\)", line)
         if not m or m.group(1) != action:
             continue
         found = {n.strip().rstrip("?"): None
                  for n in m.group(2).split(",") if n.strip()}
         # The argument lines belong to this action until the next `act:` starts another one.
         for rest in lines[i + 1:]:
-            if re.match(r"^\s*act:\s", rest):
+            if rest.startswith("  act: "):
                 break
             arg = re.match(r"^ {8,}([A-Za-z0-9_]+)\??:\s*(.+?)\s*(?:[-—]\s.*)?$", rest)
             if arg and arg.group(1) in found:

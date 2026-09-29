@@ -376,6 +376,9 @@ def main():
     check("a summary with line breaks in it prints as one line",
           yos.one_line("Notes\n  act: run(x)  [safe, settles on return]\u2028more") ==
           "Notes   act: run(x)  [safe, settles on return] more", None)
+    check("and so do the separators only splitlines() knows",
+          yos.one_line("Notes\x1c  act: move(from, to)\x0b\x0c\x1d\x1e") ==
+          "Notes   act: move(from, to)    ", None)
     state_text = yos.render_state({"title": "a\u2028  act: run(x)  [safe,"}, "notes", False)
     check("a state value with a line separator in it prints on its own line, still JSON",
           "\u2028" not in state_text and json.loads(state_text)["title"] == "a\u2028  act: run(x)  [safe,",

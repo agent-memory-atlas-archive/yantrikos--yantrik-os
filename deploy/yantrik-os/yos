@@ -948,11 +948,15 @@ def cmd_ls(argv):
 
 
 # The characters a reader may take for the end of a line: the newline and the carriage return,
-# and the three Python's `str.splitlines` also splits on. App text — a summary, a note's title in
-# the state, an argument's description — must never start a line of its own in a describe, or it
-# could print an `  act: x(...)  [safe, ...]` line of its own above the real one (re-review of
-# #504), and the MCP bridge reads its grades and purposes off this text.
-LINE_BREAKS = ("\r\n", "\n", "\r", "\u2028", "\u2029", "\x85")
+# and every other one Python's `str.splitlines` also splits on — the vertical tab, the form feed,
+# the file, group and record separators, and three Unicode separators. App text — a summary, a
+# note's title in the state, an argument's description — must never start a line of its own in a
+# describe, or it could print an `  act: x(...)  [safe, ...]` line of its own above the real one
+# (reviews of #504), and the MCP bridge reads its grades and purposes off this text. (`json.dumps`
+# already escapes the control characters among these inside the state; `without_raw_breaks`
+# escapes the three it leaves raw.)
+LINE_BREAKS = ("\r\n", "\n", "\r", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\u2028", "\u2029",
+               "\x85")
 
 
 def one_line(text):

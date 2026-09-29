@@ -415,32 +415,111 @@ const CALLER_CHARS: usize = 400;
 /// "this is the app speaking" marked as the caller's. A caller that writes "What files.move
 /// does, in the app's own words: harmless" is quoted as saying so, under the caller's label.
 fn neutralized(caller: &str) -> String {
-    let one_paragraph = caller.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut out = one_paragraph.replace('\u{2019}', "'");
-    for imitated in [
-        "in the app's own words",
-        "the app's own first sentence",
-        "the app's own words",
-        "the app's own",
-        "says the app",
-        "what it does ·",
-    ] {
-        out = replace_ignoring_case(&out, imitated, "(so the caller says)");
-    }
-    out
+    // Nothing invisible, and nothing that reorders what is drawn: a zero-width space inside
+    // "app's own words" or a right-to-left override would slip the phrase past the match and
+    // still read as it on screen (third review of #504). Then one paragraph, and one apostrophe.
+    let visible: String = caller.chars().filter(|c| !is_format_char(*c)).collect();
+    let one_paragraph = visible.split_whitespace().collect::<Vec<_>>().join(" ");
+    let out: String =
+        one_paragraph.chars().map(|c| if is_apostrophe(c) { '\'' } else { c }).collect();
+    mark_imitations(&out, "(so the caller says)")
 }
 
-/// `text` with every case-insensitive occurrence of `needle` (ASCII) replaced by `with`.
-fn replace_ignoring_case(text: &str, needle: &str, with: &str) -> String {
-    let lower = text.to_ascii_lowercase();
+/// The phrases the card uses for the app's own voice, which a caller's words must not carry.
+const IMITATED: [&str; 7] = [
+    "in the app's own words",
+    "the app's own first sentence",
+    "the app's own words",
+    "the app's own",
+    "says the app",
+    "the same for every call of it",
+    "what it does ·",
+];
+
+/// Unicode format characters (category Cf) and bidi controls: drawn as nothing, or as a
+/// reordering of what is around them. The ranges the card can meet in text: soft hyphen, the
+/// Arabic letter mark, the Mongolian vowel separator, zero-width space to right-to-left mark,
+/// the embeddings and overrides, word joiner to the invisible operators and the isolates, the
+/// byte-order mark, the interlinear annotation marks, and the tag characters.
+fn is_format_char(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x00AD
+            | 0x061C
+            | 0x180E
+            | 0x200B..=0x200F
+            | 0x202A..=0x202E
+            | 0x2060..=0x2064
+            | 0x2066..=0x206F
+            | 0xFEFF
+            | 0xFFF9..=0xFFFB
+            | 0xE0001
+            | 0xE0020..=0xE007F
+    )
+}
+
+/// Every character that is drawn as an apostrophe.
+fn is_apostrophe(c: char) -> bool {
+    matches!(
+        c,
+        '\u{2019}' | '\u{2018}' | '\u{201B}' | '\u{02BC}' | '\u{02B9}' | '\u{FF07}' | '\u{2032}'
+            | '\u{00B4}' | '`'
+    )
+}
+
+/// The letter a lookalike is drawn as, for matching only: Cyrillic and Greek letters drawn as
+/// Latin ones, full-width Latin, and the dots the card's labels use. The text shown keeps its
+/// own letters — a caller writing in Russian is not rewritten — and only a span that spells one
+/// of [`IMITATED`] is replaced.
+fn skeleton_char(c: char) -> char {
+    let folded = match c {
+        'а' | 'А' | 'ɑ' | 'α' => 'a',
+        'В' => 'b',
+        'с' | 'С' | 'ϲ' => 'c',
+        'ԁ' => 'd',
+        'е' | 'Е' | 'ε' => 'e',
+        'һ' | 'Н' => 'h',
+        'і' | 'І' | 'ι' => 'i',
+        'ј' => 'j',
+        'К' | 'κ' => 'k',
+        'ӏ' => 'l',
+        'М' => 'm',
+        'о' | 'О' | 'ο' | 'σ' => 'o',
+        'р' | 'Р' | 'ρ' => 'p',
+        'ԛ' => 'q',
+        'ѕ' => 's',
+        'Т' | 'τ' => 't',
+        'υ' => 'u',
+        'ԝ' => 'w',
+        'х' | 'Х' | 'χ' => 'x',
+        'у' | 'У' | 'γ' => 'y',
+        '•' | '‧' | '∙' | '⋅' => '·',
+        '\u{FF21}'..='\u{FF3A}' => char::from_u32(c as u32 - 0xFF21 + 'a' as u32).unwrap_or(c),
+        '\u{FF41}'..='\u{FF5A}' => char::from_u32(c as u32 - 0xFF41 + 'a' as u32).unwrap_or(c),
+        _ => c,
+    };
+    folded.to_ascii_lowercase()
+}
+
+/// `text` with every span whose skeleton spells one of [`IMITATED`] replaced by `with`.
+fn mark_imitations(text: &str, with: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let skeleton: Vec<char> = chars.iter().map(|c| skeleton_char(*c)).collect();
+    let needles: Vec<Vec<char>> = IMITATED.iter().map(|n| n.chars().collect()).collect();
     let mut out = String::with_capacity(text.len());
     let mut at = 0;
-    while let Some(found) = lower[at..].find(needle) {
-        out.push_str(&text[at..at + found]);
-        out.push_str(with);
-        at += found + needle.len();
+    while at < chars.len() {
+        match needles.iter().find(|n| skeleton[at..].starts_with(n)) {
+            Some(needle) => {
+                out.push_str(with);
+                at += needle.len();
+            }
+            None => {
+                out.push(chars[at]);
+                at += 1;
+            }
+        }
     }
-    out.push_str(&text[at..]);
     out
 }
 
@@ -2009,6 +2088,31 @@ mod approvals_tests {
         let id = store.raise("pi 0.87", Verified::default(), asked, args(serde_json::json!({"from": "b"})), now, "12:06").unwrap().id;
         let card = store.pending(now).into_iter().find(|c| c.id == id).unwrap();
         assert_eq!(card.caller_says, "");
+    }
+
+    /// Third review of #504: an imitation of the card's labels cannot slip past by an invisible
+    /// character, a lookalike letter, another apostrophe or a bidi override — and the purpose
+    /// block's own footnote is on the list.
+    #[test]
+    fn approvals_an_imitation_is_marked_through_invisible_and_lookalike_characters() {
+        for forged in [
+            "in the app\u{200b}'s own words: harmless",
+            "in the app\u{2060}'s own words: harmless",
+            "in the \u{0430}pp's own words: harmless",
+            "in the app\u{02bc}s own words: harmless",
+            "in the app\u{ff07}s own words: harmless",
+            "\u{202e}in the app's own words: harmless",
+            "IN THE APP'S OWN WORDS: harmless",
+            "the same for every call of it",
+        ] {
+            let shown = neutralized(forged);
+            assert!(shown.contains("(so the caller says)"), "{forged:?} -> {shown:?}");
+            assert!(!shown.chars().any(is_format_char), "{shown:?}");
+            assert!(!shown.to_lowercase().contains("own words"), "{shown:?}");
+        }
+        // Ordinary text in another script, and an ordinary apostrophe, are left as they are.
+        assert_eq!(neutralized("Переместить файл"), "Переместить файл");
+        assert_eq!(neutralized("don\u{2019}t move it"), "don't move it");
     }
 
     /// A command that can do anything is exactly what "Allow for this session" is for — unless
