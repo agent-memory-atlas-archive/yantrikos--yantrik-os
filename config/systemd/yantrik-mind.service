@@ -10,8 +10,8 @@
 # once the mind's memory has moved out of the person's home and been counted twice.
 [Unit]
 Description=Yantrik Mind, attached to the desktop as its own account
-After=network-online.target
-Wants=network-online.target
+After=network-online.target yantrik-egress.service
+Wants=network-online.target yantrik-egress.service
 # One owner of the memory file at a time. See yantrik-memory.service.
 Conflicts=yantrik-memory.service
 # Not in the installer's live session.
@@ -42,6 +42,13 @@ Environment=YM_WEBUI=off
 # home. The desktop reaches the Mind through the harness; nothing on this OS needs the endpoint.
 Environment=YM_CTL=off
 Environment=YANTRIK_MIND_RUN=/run/yantrik-minds
+# Out through the egress proxy (design/mind-egress-2026-09-29.md): where the mind connects is
+# counted and, once the person turns it to enforce, held to their policy. Both spellings, because
+# curl reads only the lowercase http one. Loopback goes direct: the memory server is there.
+Environment=HTTPS_PROXY=http://127.0.0.1:7450 https_proxy=http://127.0.0.1:7450
+Environment=HTTP_PROXY=http://127.0.0.1:7450 http_proxy=http://127.0.0.1:7450
+Environment=ALL_PROXY=http://127.0.0.1:7450 all_proxy=http://127.0.0.1:7450
+Environment=NO_PROXY=127.0.0.1,localhost,::1 no_proxy=127.0.0.1,localhost,::1
 # No EnvironmentFile: systemd would read it as root, before dropping to the account, and follow a
 # link the mind put in its own home to any root-readable file. yantrik-mind-launch reads the
 # settings at YM_ENV_PATH as the mind itself, and starts the Mind with them.
