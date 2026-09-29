@@ -41,6 +41,7 @@ pub fn start_chat(
     ai_callback: AiCallback,
     brain_callback: BrainCallback,
     paused: Box<dyn Fn() -> bool + Send + Sync>,
+    unkept: Box<dyn Fn(&str) -> bool + Send + Sync>,
 ) -> Option<ChatHandle> {
     // Check master switch + legacy providers
     let chat = &config.chat;
@@ -84,6 +85,8 @@ pub fn start_chat(
     router.set_brain_callback(brain_callback);
     // Nothing is kept while the person is private.
     router.set_paused(paused);
+    // Nor any answer to an approval card.
+    router.set_unkept(unkept);
 
     // Who the person is: the named people, and the Telegram chat the bot was set up with (a
     // private chat's id is its person's). Nobody else is ever answered.
@@ -113,7 +116,7 @@ pub fn start_chat(
 
     // Create manager
     let inbound_tx = router.inbound_sender();
-    let mut manager = ProviderManager::new(inbound_tx, Some(event_tx));
+    let mut manager = ProviderManager::new(inbound_tx, Some(event_tx)).with_channels(router.channels());
 
     // Instantiate and start enabled providers
     let mut started = 0;

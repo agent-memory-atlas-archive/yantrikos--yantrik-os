@@ -15,12 +15,15 @@
 //!
 //! # The invariant: a mind must not be able to approve itself
 //!
-//! [`grant`] and [`deny`] are `pub(crate)` and have exactly one caller: the Slint callback in
-//! `control_approvals.rs` that a person's click reaches. There is no `app.act` action on the
-//! shell that grants or denies, and `published_actions_cannot_grant` in `control_approvals.rs`
-//! reads the source of every `control*.rs` file and fails if one appears. Everything a caller on
-//! the socket *can* do — raise a request, poll it, burn a grant — is `safe`, because none of it
-//! decides anything. The decision is a click.
+//! [`grant`] and [`deny`] are `pub(crate)` and have two callers, both the person: the Slint
+//! callback in `control_approvals.rs` that a person's click reaches, and `channels::card_answer`,
+//! the person's `ALLOW <code>` from their own identity on a channel no mind can write as, for a
+//! card sent to their phone while an agent answered a turn from it (design/channels-2026-09-29.md
+//! — never for what cannot be undone, nor for what runs commands as the person). There is no
+//! `app.act` action on the shell that grants or denies, and `published_actions_cannot_grant` in
+//! `control_approvals.rs` reads the source of every `control*.rs` file and fails if one appears.
+//! Everything a caller on the socket *can* do — raise a request, poll it, burn a grant — is
+//! `safe`, because none of it decides anything. The decision is the person's.
 //!
 //! That is the whole security argument, and it rests on the surface being small enough to read.
 //! Do not add a way to grant from code. If some future automation needs standing permission,
@@ -977,7 +980,7 @@ pub fn request(
     target: &str,
     explained: &str,
 ) -> Result<Requested, String> {
-    let requested = locked().request(
+    locked().request(
         requester,
         verified,
         app,
@@ -989,11 +992,7 @@ pub fn request(
         explained,
         Instant::now(),
         &hhmm(),
-    )?;
-    // An agent answering a turn from the person's phone raised it: the phone is told, and may
-    // answer it (`channels::card_raised`). After the store's lock is let go.
-    crate::channels::card_raised(&requested.id);
-    Ok(requested)
+    )
 }
 
 pub fn status(id: &str) -> Option<Status> {

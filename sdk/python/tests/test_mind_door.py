@@ -73,6 +73,21 @@ def notes_surface(ask_shell, ran, **kwargs):
 class TestWithin(unittest.TestCase):
     """`reach::within`, case for case as its own tests have it."""
 
+    def test_a_phones_hold_survives_the_shells_answer_and_asks_on_a_python_surface(self):
+        # The regression the security review of 29 Sep found: `asks_above` was dropped here, and a
+        # phone's turn acted unasked on every Python surface.
+        reply = {"jsonrpc": "2.0", "id": 1, "result": {
+            "app": "shell", "action_id": "app-shell#1", "accepted": True, "settled": True,
+            "result": {"reach": {"agent": "pi:main", "role": "remote", "name": "turn asked from a phone",
+                                 "surfaces": ["*"], "ceiling": "sensitive", "asks_above": "safe"},
+                       "known": True}}}
+        held = reach.reach_in_reply(reply)
+        self.assertEqual(held.get("asks_above"), "safe")
+        authority = gate.Authority("dangerous", gate.Mode("bypass", frozenset()))
+        authority.held_by(held)
+        self.assertIsNone(gate.decide(authority, "browser", "read", "safe", "Read the page"))
+        self.assertTrue(gate.decide(authority, "browser", "go", "standard", "Go to a page").startswith("GRANT:"))
+
     def test_a_reach_of_every_app_still_holds_its_ceiling(self):
         phone = {"agent": "pi:main", "role": "remote", "name": "turn asked from a phone",
                  "surfaces": ["*"], "ceiling": "standard"}

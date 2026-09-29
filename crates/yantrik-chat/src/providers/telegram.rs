@@ -188,6 +188,14 @@ impl ChatProvider for TelegramProvider {
         Ok(events)
     }
 
+    fn outbound(&self) -> Option<std::sync::Arc<dyn Outbound>> {
+        // Sending is one Bot API call with the token: a second instance does it from any thread.
+        Some(std::sync::Arc::new(Locked(std::sync::Mutex::new(TelegramProvider::new(
+            self.bot_token.clone(),
+            self.chat_id.clone(),
+        )))))
+    }
+
     fn send(
         &mut self,
         target: &ConversationRef,

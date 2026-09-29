@@ -326,6 +326,8 @@ impl AppContext {
             }),
             // Private mode: the channels keep nothing while it is on.
             Box::new(crate::private_mode::is_on),
+            // An answer to a card on the phone is never kept: its code is not context.
+            Box::new(crate::channels::is_card_answer),
         );
         // What the shell sends to a channel unasked (a card on the phone), and which channels the
         // person trusts with an Allow though their operator can read them.
