@@ -92,7 +92,6 @@ component MetricTile inherits Rectangle {
     // at all: three of them plus the gutters claimed 499px whatever the window said.
     min-width: 0px;
     preferred-width: 161px;
-    max-width: 161px;
     height: 64px;
     border-radius: Theme.r-md;
     background: Theme.bg-surface;
@@ -136,6 +135,49 @@ component MetricTile inherits Rectangle {
                 font-weight: 600;
                 overflow: elide;
             }
+        }
+    }
+}
+
+// The six readings under or beside the hero: three to a row, or two when the window is narrow.
+component HeroTiles inherits VerticalLayout {
+    in property <WeatherCurrent> current;
+    in property <int> columns: 3;
+    // One tile's width, mirrored out for the ui-preview check at snapped sizes (#505).
+    out property <length> tile-width: (self.width - (self.columns - 1) * 8px) / self.columns;
+    spacing: 8px;
+
+    if root.columns >= 3 : VerticalLayout {
+        spacing: 8px;
+        HorizontalLayout {
+            spacing: 8px;
+            MetricTile { icon-path: Icons.droplet; value: root.current.humidity; label: "HUMIDITY"; }
+            MetricTile { icon-path: Icons.wind; value: root.current.wind-speed; label: "WIND " + root.current.wind-direction; }
+            MetricTile { icon-path: Icons.sun; value: root.current.uv-index; label: "UV INDEX"; }
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            MetricTile { icon-path: Icons.eye; value: root.current.visibility; label: "VISIBILITY"; }
+            MetricTile { icon-path: Icons.compass; value: root.current.pressure; label: "PRESSURE"; }
+            MetricTile { icon-path: Icons.cloud; value: root.current.cloud-cover; label: "CLOUD COVER"; }
+        }
+    }
+    if root.columns < 3 : VerticalLayout {
+        spacing: 8px;
+        HorizontalLayout {
+            spacing: 8px;
+            MetricTile { icon-path: Icons.droplet; value: root.current.humidity; label: "HUMIDITY"; }
+            MetricTile { icon-path: Icons.wind; value: root.current.wind-speed; label: "WIND " + root.current.wind-direction; }
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            MetricTile { icon-path: Icons.sun; value: root.current.uv-index; label: "UV INDEX"; }
+            MetricTile { icon-path: Icons.eye; value: root.current.visibility; label: "VISIBILITY"; }
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            MetricTile { icon-path: Icons.compass; value: root.current.pressure; label: "PRESSURE"; }
+            MetricTile { icon-path: Icons.cloud; value: root.current.cloud-cover; label: "CLOUD COVER"; }
         }
     }
 }
@@ -273,6 +315,11 @@ export component WeatherDashboard inherits Rectangle {
     out property <length> hero-tiles-abs-right: content-flick.x + hero-card.x + hero-row.x
         + hero-tiles.x + hero-tiles.width;
     out property <length> content-space-right: content-flick.x + content-flick.width;
+    out property <length> hero-tile-width: hero-tiles.tile-width;
+    // The context rail steps aside below this width, so the forecast keeps the window: a
+    // window snapped to half the screen gave 280 of its 640px to the rail (#505).
+    property <bool> narrow: root.width < 900px;
+    out property <bool> rail-shown: !root.narrow;
     // The hourly timezone label's rendered width, mirrored out so a ui-preview check can pin
     // that "London time" actually appears when set and draws nothing when not (#220). An empty
     // label reads as zero rather than as the width of an empty text slot.
@@ -706,14 +753,8 @@ export component WeatherDashboard inherits Rectangle {
                         border-color: Theme.border-subtle;
                         height: hero-col.preferred-height;
 
-                        // Subtle accent glow at top
-                        Rectangle {
-                            height: 2px;
-                            width: parent.width;
-                            y: 0;
-                            background: Theme.accent-glow;
-                            border-radius: 1px;
-                        }
+                        // No strip across the top: a 2px accent line ran straight over the card's
+                        // rounded corners and read as a stray rule above the temperature.
 
                         hero-col := VerticalLayout {
                             padding: Theme.sp-6;
@@ -728,11 +769,24 @@ export component WeatherDashboard inherits Rectangle {
                             }
 
                             // ── The reading, then today's numbers beside it ──
-                            hero-row := HorizontalLayout {
-                                spacing: 24px;
+                            // The reading, then today's numbers: beside it when the card can hold both, under it
+                            // when it cannot — a window snapped to half or a quarter of the screen left the tiles
+                            // slivers a few pixels wide (#505). Placed by hand rather than by a layout so the one
+                            // row can become two stacked rows without changing what either of them is.
+                            hero-row := Rectangle {
+                                property <length> gap: 24px;
+                                // Side by side needs the reading's own width and at least three 120px tiles.
+                                property <bool> stacked: self.width < hero-reading.preferred-width + self.gap + 3 * 120px + 2 * 8px;
+                                property <length> tiles-w: self.stacked ? self.width : min(3 * 161px + 2 * 8px, self.width - hero-reading.preferred-width - self.gap);
+                                min-width: 0px;
+                                height: self.stacked ? hero-reading.preferred-height + 16px + hero-tiles.preferred-height
+                                                    : max(hero-reading.preferred-height, hero-tiles.preferred-height);
 
-                                VerticalLayout {
-                                    horizontal-stretch: 1;
+                                hero-reading := VerticalLayout {
+                                    x: 0px;
+                                    y: hero-row.stacked ? 0px : (hero-row.height - self.preferred-height) / 2;
+                                    width: hero-row.stacked ? hero-row.width : hero-row.width - hero-row.tiles-w - hero-row.gap;
+                                    height: self.preferred-height;
                                     alignment: center;
                                     spacing: 6px;
 
@@ -789,47 +843,14 @@ export component WeatherDashboard inherits Rectangle {
                                     }
                                 }
 
-                                hero-tiles := VerticalLayout {
-                                    alignment: center;
-                                    spacing: 8px;
-
-                                    HorizontalLayout {
-                                        spacing: 8px;
-                                        MetricTile {
-                                            icon-path: Icons.droplet;
-                                            value: root.current.humidity;
-                                            label: "HUMIDITY";
-                                        }
-                                        MetricTile {
-                                            icon-path: Icons.wind;
-                                            value: root.current.wind-speed;
-                                            label: "WIND " + root.current.wind-direction;
-                                        }
-                                        MetricTile {
-                                            icon-path: Icons.sun;
-                                            value: root.current.uv-index;
-                                            label: "UV INDEX";
-                                        }
-                                    }
-
-                                    HorizontalLayout {
-                                        spacing: 8px;
-                                        MetricTile {
-                                            icon-path: Icons.eye;
-                                            value: root.current.visibility;
-                                            label: "VISIBILITY";
-                                        }
-                                        MetricTile {
-                                            icon-path: Icons.compass;
-                                            value: root.current.pressure;
-                                            label: "PRESSURE";
-                                        }
-                                        MetricTile {
-                                            icon-path: Icons.cloud;
-                                            value: root.current.cloud-cover;
-                                            label: "CLOUD COVER";
-                                        }
-                                    }
+                                hero-tiles := HeroTiles {
+                                    x: hero-row.stacked ? 0px : hero-row.width - self.width;
+                                    y: hero-row.stacked ? hero-reading.preferred-height + 16px : (hero-row.height - self.preferred-height) / 2;
+                                    width: hero-row.tiles-w;
+                                    height: self.preferred-height;
+                                    // Three to a row while each can be 120px wide, two below that.
+                                    columns: self.width >= 3 * 120px + 2 * 8px ? 3 : 2;
+                                    current: root.current;
                                 }
                             }
                         }
@@ -1471,7 +1492,7 @@ export component WeatherDashboard inherits Rectangle {
                 // ── What Yantrik knows about this ──
                 //
                 // Full height beside the content. Collapses to nothing when there is nothing true to say.
-                AgentRail {
+                if !root.narrow : AgentRail {
                     context-items: root.agent-context;
                     suggestions: root.agent-suggestions;
                     unavailable: root.agent-unavailable;
