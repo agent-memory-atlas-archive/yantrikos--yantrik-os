@@ -62,6 +62,8 @@ pub struct ChatRouter {
     ai_callback: Option<AiCallback>,
     /// Brain integration callback.
     brain_callback: Option<BrainCallback>,
+    /// Who the person is on each channel: `(provider id, sender id)`. See [`ChatRouter::set_people`].
+    people: std::collections::HashSet<(String, String)>,
 }
 
 impl ChatRouter {
@@ -82,7 +84,16 @@ impl ChatRouter {
             event_tx: None,
             ai_callback: None,
             brain_callback: None,
+            people: std::collections::HashSet::new(),
         }
+    }
+
+    /// Who the person is on each channel. The AI is asked only about a direct message from one
+    /// of them: a stranger who finds the bot — on Signal, any number that writes to it — and
+    /// every group, where an answer would be read by others, get nothing. With no one named, no
+    /// message is ever answered.
+    pub fn set_people(&mut self, people: impl IntoIterator<Item = (String, String)>) {
+        self.people = people.into_iter().collect();
     }
 
     /// Get a sender for provider threads to push events into.
@@ -199,7 +210,17 @@ impl ChatRouter {
 
         // Check if AI should reply
         let current_hour = chrono::Local::now().hour() as u8;
-        let should_reply = policy::should_ai_reply(&msg, &policy, current_hour);
+        let from_person = self.people.contains(&(provider_id.to_string(), msg.sender.id.clone()));
+        let direct = msg.conversation.kind == crate::model::ConversationKind::Direct;
+        if !from_person || !direct {
+            tracing::debug!(
+                provider = provider_id,
+                from_person,
+                direct,
+                "Chat: not the person in a direct message; nothing is asked of the AI"
+            );
+        }
+        let should_reply = from_person && direct && policy::should_ai_reply(&msg, &policy, current_hour);
 
         if should_reply {
             if let Some(ai_cb) = &self.ai_callback {
@@ -316,3 +337,61 @@ fn truncate(s: &str, max: usize) -> String {
 
 // Needed for chrono::Local::now().hour()
 use chrono::Timelike;
+
+#[cfg(test)]
+mod people_tests {
+    use super::*;
+    use crate::model::{ActorRef, ConversationKind, ConversationRef, InboundMessage, MessageContent, MessageRef};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn message(provider: &str, sender: &str, kind: ConversationKind, n: u32) -> InboundEvent {
+        let mut conversation = ConversationRef::direct(provider, sender);
+        conversation.kind = kind;
+        InboundEvent::Message(InboundMessage {
+            event_id: format!("e{n}"),
+            conversation,
+            message: MessageRef { provider: provider.into(), id: format!("m{n}") },
+            sender: ActorRef { id: sender.into(), display_name: sender.into(), is_bot: false },
+            timestamp_ms: 0,
+            content: MessageContent::Text { text: "what is on my screen?".into() },
+            reply_to: None,
+            mentions_ai: true,
+            raw: None,
+        })
+    }
+
+    fn router(asked: Arc<AtomicUsize>) -> ChatRouter {
+        let db = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+        let mut router = ChatRouter::new(db);
+        router.set_ai_callback(Box::new(move |_, _, _| {
+            asked.fetch_add(1, Ordering::SeqCst);
+            None
+        }));
+        router
+    }
+
+    #[test]
+    fn only_the_person_in_a_direct_message_is_answered() {
+        let asked = Arc::new(AtomicUsize::new(0));
+        let mut r = router(asked.clone());
+        r.set_people([("signal".to_string(), "+15550001".to_string())]);
+        let tx = r.inbound_sender();
+        tx.send(("signal".into(), message("signal", "+15559999", ConversationKind::Direct, 1))).unwrap();
+        tx.send(("signal".into(), message("signal", "+15550001", ConversationKind::Group, 2))).unwrap();
+        tx.send(("telegram".into(), message("telegram", "+15550001", ConversationKind::Direct, 3))).unwrap();
+        r.process_pending();
+        assert_eq!(asked.load(Ordering::SeqCst), 0, "a stranger, a group, and the same id on another channel");
+        tx.send(("signal".into(), message("signal", "+15550001", ConversationKind::Direct, 4))).unwrap();
+        r.process_pending();
+        assert_eq!(asked.load(Ordering::SeqCst), 1, "the person, directly");
+    }
+
+    #[test]
+    fn with_no_one_named_no_one_is_answered() {
+        let asked = Arc::new(AtomicUsize::new(0));
+        let r = router(asked.clone());
+        r.inbound_sender().send(("signal".into(), message("signal", "+15550001", ConversationKind::Direct, 1))).unwrap();
+        r.process_pending();
+        assert_eq!(asked.load(Ordering::SeqCst), 0);
+    }
+}

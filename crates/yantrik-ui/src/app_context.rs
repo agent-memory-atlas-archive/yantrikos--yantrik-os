@@ -304,10 +304,10 @@ impl AppContext {
 
         // Start multi-provider chat system (Discord, Matrix, IRC, Slack, Signal, etc.)
         // This also handles Telegram if configured, replacing the legacy poller.
-        let chat_bridge_ref = bridge.clone();
         let _chat_handle = yantrik_companion::chat_bridge::start_chat(
             &chat_config_snapshot,
-            // AI callback: sends message through CompanionBridge, collects streaming response
+            // AI callback: the person's message to the mind answering, and its reply. The router
+            // asks only about a direct message from one of `chat.people` (`ChatRouter::set_people`).
             Box::new(move |text: &str, context: &[String], policy: &yantrik_chat::policy::ConversationPolicy| {
                 let prompt = if context.is_empty() {
                     text.to_string()
@@ -322,25 +322,24 @@ impl AppContext {
                     format!("[Chat context]\n{history}\n\n[Latest message]\n{text}")
                 };
 
-                // Send through bridge and collect all tokens
-                let token_rx = chat_bridge_ref.send_message(prompt);
+                // To whichever mind is answering, through the harness host — the Lens's own path
+                // (`wire::chat::dispatch`), so the active mind, the hand-over and Private mode hold
+                // for a message from a channel as for one typed at the desk. It used to go to the
+                // built-in companion whatever mind the person had chosen, past all three.
+                let Some(host) = crate::wire::harness::host() else {
+                    return Some("The desktop is still starting; ask again in a moment.".to_string());
+                };
+                let answer = host.send(yantrik_harness::Turn::new(prompt));
                 let mut full_response = String::new();
-                let mut replacing = false;
-                while let Ok(token) = token_rx.recv() {
-                    match token.as_str() {
-                        "__DONE__" => break,
-                        "__REPLACE__" => {
-                            full_response.clear();
-                            replacing = true;
+                while let Ok(chunk) = answer.recv() {
+                    match chunk {
+                        yantrik_harness::Chunk::Text(t) => full_response.push_str(&t),
+                        // Said, not swallowed: the person asked and should hear why nothing came.
+                        yantrik_harness::Chunk::Failed(why) => {
+                            full_response = why;
+                            break;
                         }
-                        _ => {
-                            if replacing {
-                                full_response = token;
-                                replacing = false;
-                            } else {
-                                full_response.push_str(&token);
-                            }
-                        }
+                        yantrik_harness::Chunk::Event(_) => {}
                     }
                 }
 
