@@ -148,18 +148,89 @@ pub fn dir_of(home: &Path, vendor: &Vendor, label: &str) -> PathBuf {
     }
 }
 
-/// Make an extra account's directory, the person's own at 0700, before its program is pointed at
-/// it. Never through a link: a directory that is there already must be a directory.
-pub fn make_dir(dir: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)?;
-    let meta = std::fs::symlink_metadata(dir)?;
-    if !meta.is_dir() {
-        return Err(std::io::Error::other("the account's directory is not a directory"));
+/// Make an extra account's directory before its program is pointed at it (`create`), or check one
+/// that is there (`!create`, before "Use" exports it). Walked from `home` one part at a time, each
+/// opened without following a link, and each required to be a directory this account owns that
+/// nobody else may write (its own group aside) — so no link or borrowed directory anywhere on the way can make a vendor's
+/// program load its settings, hooks or sign-in from a place the person did not choose. Made at
+/// 0700; the last part is set to 0700 when it is there already.
+#[cfg(unix)]
+pub fn own_dir(home: &Path, dir: &Path, create: bool) -> std::io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let bad = |why: String| std::io::Error::new(std::io::ErrorKind::PermissionDenied, why);
+    let rest = dir.strip_prefix(home).map_err(|_| bad(format!("{} is not under the home directory", dir.display())))?;
+    struct Fd(libc::c_int);
+    impl Drop for Fd {
+        fn drop(&mut self) {
+            // SAFETY: an fd this function opened, closed once.
+            unsafe { libc::close(self.0) };
+        }
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    // SAFETY: getuid cannot fail.
+    let me = unsafe { libc::getuid() };
+    let check = |fd: &Fd, what: &str| -> std::io::Result<()> {
+        // SAFETY: fstat on an open fd into a zeroed stat.
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(fd.0, &mut st) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // Group-writable only when the group is the person's own (a umask of 002 with a group per
+        // person makes every directory so); never writable by anyone else.
+        // SAFETY: getgid cannot fail.
+        let my_group = unsafe { libc::getgid() };
+        let group_writes = st.st_mode & 0o020 != 0 && st.st_gid != my_group;
+        if st.st_uid != me || st.st_mode & 0o002 != 0 || group_writes {
+            return Err(bad(format!("{what} is not this account's own, or others may write it")));
+        }
+        Ok(())
+    };
+    let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    let c = CString::new(home.as_os_str().as_bytes())?;
+    // SAFETY: a NUL-terminated path. The home directory itself may be reached through a link.
+    let raw = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC) };
+    if raw < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut fd = Fd(raw);
+    check(&fd, "the home directory")?;
+    let parts: Vec<_> = rest.components().collect();
+    for (i, part) in parts.iter().enumerate() {
+        let std::path::Component::Normal(name) = part else {
+            return Err(bad(format!("{} is not a plain path", dir.display())));
+        };
+        let name = CString::new(name.as_bytes())?;
+        // SAFETY: openat relative to the directory checked just before.
+        let mut raw = unsafe { libc::openat(fd.0, name.as_ptr(), flags) };
+        if raw < 0 && create && std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT) {
+            // SAFETY: mkdirat relative to the same directory.
+            if unsafe { libc::mkdirat(fd.0, name.as_ptr(), 0o700) } != 0
+                && std::io::Error::last_os_error().raw_os_error() != Some(libc::EEXIST)
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            // SAFETY: as above.
+            raw = unsafe { libc::openat(fd.0, name.as_ptr(), flags) };
+        }
+        if raw < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        fd = Fd(raw);
+        if i + 1 == parts.len() && create {
+            // SAFETY: fchmod on the directory just opened.
+            if unsafe { libc::fchmod(fd.0, 0o700) } != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+        check(&fd, &format!("{}", home.join(parts[..=i].iter().collect::<PathBuf>()).display()))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn own_dir(_home: &Path, dir: &Path, create: bool) -> std::io::Result<()> {
+    if create {
+        std::fs::create_dir_all(dir)?;
     }
     Ok(())
 }
@@ -252,16 +323,30 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn an_account_directory_is_never_made_through_a_link() {
-        let home = tmp("link");
-        let target = home.join("elsewhere");
-        std::fs::create_dir_all(&target).unwrap();
-        let link = home.join("acct");
-        std::os::unix::fs::symlink(&target, &link).unwrap();
-        assert!(make_dir(&link).is_err());
-        let real = home.join("real");
-        make_dir(&real).unwrap();
+    fn an_account_directory_is_never_made_or_used_through_a_link_anywhere_on_its_path() {
         use std::os::unix::fs::PermissionsExt;
-        assert_eq!(std::fs::metadata(&real).unwrap().permissions().mode() & 0o777, 0o700);
+        let home = tmp("link");
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let claude = by_id("claude").unwrap();
+        let dir = dir_of(&home, claude, "account-2");
+        assert!(own_dir(&home, &dir, false).is_err(), "not there yet");
+        own_dir(&home, &dir, true).unwrap();
+        assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+        own_dir(&home, &dir, false).unwrap();
+
+        // A parent swapped for a link to somewhere else: refused, made or used.
+        let elsewhere = home.join("elsewhere");
+        std::fs::create_dir_all(elsewhere.join("claude/account-2")).unwrap();
+        std::fs::remove_dir_all(home.join(".local/share/yantrik/accounts")).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, home.join(".local/share/yantrik/accounts")).unwrap();
+        assert!(own_dir(&home, &dir, false).is_err());
+        assert!(own_dir(&home, &dir, true).is_err());
+
+        // A directory others may write is not the person's alone.
+        std::fs::remove_file(home.join(".local/share/yantrik/accounts")).unwrap();
+        own_dir(&home, &dir, true).unwrap();
+        std::fs::set_permissions(home.join(".local/share/yantrik"), std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(own_dir(&home, &dir, false).is_err());
+        assert!(own_dir(&home, Path::new("/tmp/x"), true).is_err(), "only under home");
     }
 }

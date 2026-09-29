@@ -41,7 +41,22 @@ pub fn env_of(home: &Path, store: &Store) -> Vec<(&'static str, Option<String>)>
 
 /// Make the store's choices true for everything started from now on.
 pub fn apply(home: &Path, store: &Store) {
-    let env = env_of(home, store);
+    // An account whose directory is not the person's own all the way down is not exported: the
+    // vendor's program would load its settings and hooks from there. It answers with its first
+    // account instead, and says so.
+    let env: Vec<_> = env_of(home, store)
+        .into_iter()
+        .map(|(var, dir)| match dir {
+            Some(d) => match store::own_dir(home, Path::new(&d), false) {
+                Ok(()) => (var, Some(d)),
+                Err(e) => {
+                    tracing::error!(var, dir = %d, error = %e, "an account's directory is not the person's own; not using it");
+                    (var, None)
+                }
+            },
+            None => (var, None),
+        })
+        .collect();
     if let Ok(mut held) = LAUNCH_ENV.write() {
         *held = env.iter().filter_map(|(k, v)| v.clone().map(|v| (*k, v))).collect();
     }
@@ -91,7 +106,7 @@ pub fn sign_in(home: &Path, id: &str) -> Result<Opened, String> {
     }
     let dir = store::dir_of(home, vendor, label);
     if label != PRIMARY {
-        store::make_dir(&dir).map_err(|e| format!("the account's directory could not be made: {e}"))?;
+        store::own_dir(home, &dir, true).map_err(|e| format!("the account's directory could not be made: {e}"))?;
     }
     terminal(&format!("Sign in to {}", vendor.name), login, vendor, (label != PRIMARY).then_some(dir.as_path()))?;
     Ok(Opened::Terminal)

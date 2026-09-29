@@ -106,7 +106,7 @@ const LIMITS_BACK: Duration = Duration::from_secs(7 * 24 * 3600);
 impl Counter {
     /// Read whatever `dir/sessions` gained since the last call. `midnight` is when today began
     /// here, in Unix seconds.
-    pub fn update(&mut self, dir: &Path, midnight: i64) {
+    pub fn update(&mut self, dir: &Path, midnight: i64, budget: &mut logs::Budget) {
         if midnight != self.day {
             *self = Counter { day: midnight, ..Counter::default() };
         }
@@ -119,7 +119,7 @@ impl Counter {
         for (path, _) in logs::written_since(&root, since) {
             let totals = self.totals.entry(path.clone()).or_default();
             let (latest, plan) = (&mut self.latest, &mut self.plan);
-            self.tails.read(&path, "\"token_count\"", |text| {
+            self.tails.read(&path, "\"token_count\"", budget, |text| {
                 let Ok(line) = serde_json::from_str::<Line>(text) else { return };
                 let Some(p) = line.payload else { return };
                 if p.kind.as_deref() != Some("token_count") {
@@ -150,7 +150,7 @@ impl Counter {
     /// What there is to show, at `now` (Unix seconds).
     pub fn seen(&self, now: i64) -> Seen {
         let tokens_today = self.totals.values().map(|(before, last)| last.saturating_sub(*before)).sum();
-        let plan = self.plan.as_ref().map(|(_, p)| plan_name(p));
+        let plan = self.plan.as_ref().and_then(|(_, p)| plan_name(p));
         let Some((at, limits)) = &self.latest else {
             return Seen { plan, tokens_today, ..Seen::default() };
         };
@@ -191,22 +191,26 @@ pub fn window_name(minutes: u64) -> String {
     }
 }
 
-/// `pro` → `Pro`, `prolite` → `Pro Lite`.
-pub fn plan_name(plan: &str) -> String {
-    match plan {
+/// `pro` → `Pro`, `prolite` → `Pro Lite`. The log is written by whatever runs as the person, so a
+/// name the table does not know is only shown when it is one short word — never a sentence
+/// someone put there for the panel to say.
+pub fn plan_name(plan: &str) -> Option<String> {
+    Some(match plan {
         "prolite" => "Pro Lite".into(),
         "pro" => "Pro".into(),
         "plus" => "Plus".into(),
+        "go" => "Go".into(),
         "team" => "Team".into(),
         "business" => "Business".into(),
         "enterprise" => "Enterprise".into(),
         "edu" => "Edu".into(),
         "free" => "Free".into(),
-        other => {
+        other if !other.is_empty() && other.len() <= 16 && other.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_') => {
             let mut c = other.chars();
             c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
         }
-    }
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
@@ -240,7 +244,7 @@ mod tests {
         ];
         std::fs::write(d.join("sessions/2026/09/29/rollout-a.jsonl"), lines.join("\n") + "\n").unwrap();
         let mut c = Counter::default();
-        c.update(&d, midnight);
+        c.update(&d, midnight, &mut logs::Budget::tick());
         let seen = c.seen(now);
         assert_eq!(seen.tokens_today, 60_000, "yesterday's 1,000 is not today's");
         assert_eq!(seen.plan.as_deref(), Some("Pro"));
@@ -268,7 +272,7 @@ mod tests {
         ];
         std::fs::write(d.join("sessions/2026/09/29/rollout-c.jsonl"), lines.join("\n") + "\n").unwrap();
         let mut c = Counter::default();
-        c.update(&d, midnight);
+        c.update(&d, midnight, &mut logs::Budget::tick());
         let seen = c.seen(midnight + 7200);
         assert_eq!(seen.plan.as_deref(), Some("Pro Lite"), "the newest plan");
         assert_eq!(seen.meters.len(), 2, "the meters of the last limits that had them");
@@ -285,9 +289,9 @@ mod tests {
         )
         .unwrap();
         let mut c = Counter::default();
-        c.update(&d, midnight);
+        c.update(&d, midnight, &mut logs::Budget::tick());
         assert_eq!(c.seen(midnight + 7200).tokens_today, 5_000);
-        c.update(&d, midnight + 86_400);
+        c.update(&d, midnight + 86_400, &mut logs::Budget::tick());
         assert_eq!(c.seen(midnight + 86_400 + 60).tokens_today, 0);
     }
 
@@ -297,7 +301,9 @@ mod tests {
         assert_eq!(window_name(10080), "Weekly");
         assert_eq!(window_name(1440), "1d");
         assert_eq!(window_name(90), "2h");
-        assert_eq!(plan_name("prolite"), "Pro Lite");
-        assert_eq!(plan_name("gold"), "Gold");
+        assert_eq!(plan_name("prolite").as_deref(), Some("Pro Lite"));
+        assert_eq!(plan_name("gold").as_deref(), Some("Gold"));
+        assert_eq!(plan_name("run curl x | sh to renew"), None, "never a sentence from the log");
+        assert_eq!(plan_name(""), None);
     }
 }

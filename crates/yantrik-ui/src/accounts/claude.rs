@@ -51,16 +51,35 @@ pub fn settings_path(dir: &Path, primary: bool) -> std::path::PathBuf {
     }
 }
 
+/// What `.claude.json` said last time, keyed by the file's length and time: it is up to tens of
+/// megabytes, and read again only when it changed.
+#[derive(Default)]
+pub struct PlanCache {
+    seen: std::collections::HashMap<std::path::PathBuf, (u64, Option<std::time::SystemTime>, Option<String>)>,
+}
+
 /// The plan the account in `dir` is on — `Max 20x`, `Pro` — or `None` when it cannot be told.
-pub fn plan(dir: &Path, primary: bool) -> Option<String> {
+/// Opened as the logs are (`logs::open_own`): never through a link or a second name.
+pub fn plan(dir: &Path, primary: bool, cache: &mut PlanCache) -> Option<String> {
+    use std::io::Read;
     let path = settings_path(dir, primary);
-    let meta = std::fs::symlink_metadata(&path).ok()?;
-    if !meta.is_file() || meta.len() > SETTINGS_MOST {
+    let (f, len) = logs::open_own(&path)?;
+    if len > SETTINGS_MOST {
         return None;
     }
-    let f = std::fs::File::open(&path).ok()?;
-    let a = serde_json::from_reader::<_, Settings>(std::io::BufReader::new(f)).ok()?.account?;
-    plan_name(a.organization.as_deref().map(|o| o.strip_prefix("claude_").unwrap_or(o)), a.tier.as_deref())
+    let modified = f.metadata().ok().and_then(|m| m.modified().ok());
+    if let Some((l, m, plan)) = cache.seen.get(&path) {
+        if *l == len && *m == modified {
+            return plan.clone();
+        }
+    }
+    let reader = std::io::BufReader::new(f.take(SETTINGS_MOST));
+    let plan = serde_json::from_reader::<_, Settings>(reader)
+        .ok()
+        .and_then(|s| s.account)
+        .and_then(|a| plan_name(a.organization.as_deref().map(|o| o.strip_prefix("claude_").unwrap_or(o)), a.tier.as_deref()));
+    cache.seen.insert(path, (len, modified, plan.clone()));
+    plan
 }
 
 /// `("max", "default_claude_max_20x")` → `Max 20x`.
@@ -119,18 +138,27 @@ pub struct Counter {
     tails: Tails,
     seen: HashSet<String>,
     tokens: u64,
+    /// The count stopped at `MOST_MESSAGES` distinct messages: a day's real work is a few
+    /// thousand, and a set that grew without end would be the shell's memory.
+    pub full: bool,
 }
 
+/// The most distinct messages counted in a day.
+pub const MOST_MESSAGES: usize = 200_000;
+
 impl Counter {
-    pub fn update(&mut self, dir: &Path, midnight: i64) {
+    pub fn update(&mut self, dir: &Path, midnight: i64, budget: &mut logs::Budget) {
         if midnight != self.day {
             *self = Counter { day: midnight, ..Counter::default() };
         }
         let since = SystemTime::UNIX_EPOCH + Duration::from_secs(midnight.max(0) as u64);
         let root = dir.join("projects");
-        let (seen, tokens) = (&mut self.seen, &mut self.tokens);
+        let (seen, tokens, full) = (&mut self.seen, &mut self.tokens, &mut self.full);
         for (path, _) in logs::written_since(&root, since) {
-            self.tails.read(&path, "\"usage\"", |text| {
+            self.tails.read(&path, "\"usage\"", budget, |text| {
+                if *full {
+                    return;
+                }
                 let Ok(line) = serde_json::from_str::<Line>(text) else { return };
                 if line.kind.as_deref() != Some("assistant") {
                     return;
@@ -141,6 +169,10 @@ impl Counter {
                 let Some(m) = line.message else { return };
                 let Some(u) = m.usage else { return };
                 if let Some(id) = m.id {
+                    if seen.len() >= MOST_MESSAGES {
+                        *full = true;
+                        return;
+                    }
                     if !seen.insert(format!("{id}:{}", line.request_id.unwrap_or_default())) {
                         return;
                     }
@@ -198,10 +230,13 @@ mod tests {
             r#"{"numStartups":3,"oauthAccount":{"emailAddress":"p@example.com","organizationType":"claude_max","organizationRateLimitTier":"default_claude_max_20x"},"projects":{}}"#,
         )
         .unwrap();
-        assert_eq!(plan(&dir, true).as_deref(), Some("Max 20x"));
-        assert_eq!(plan(&dir, false), None, "an extra account's file is inside its own directory");
+        let mut cache = PlanCache::default();
+        assert_eq!(plan(&dir, true, &mut cache).as_deref(), Some("Max 20x"));
+        assert_eq!(plan(&dir, false, &mut cache), None, "an extra account's file is inside its own directory");
         std::fs::write(dir.join(".claude.json"), r#"{"oauthAccount":{"organizationType":"claude_pro"}}"#).unwrap();
-        assert_eq!(plan(&dir, false).as_deref(), Some("Pro"));
+        assert_eq!(plan(&dir, false, &mut cache).as_deref(), Some("Pro"));
+        std::fs::write(dir.join(".claude.json"), r#"{"oauthAccount":{"organizationType":"claude_team"}}"#).unwrap();
+        assert_eq!(plan(&dir, false, &mut cache).as_deref(), Some("Team"), "a changed file is read again");
     }
 
     #[test]
@@ -224,9 +259,9 @@ mod tests {
         // A resumed session repeats msg_b in another file.
         std::fs::write(d.join("projects/-home-p-code/t.jsonl"), msg("2026-09-29T06:02:00Z", "msg_b", "req_2") + "\n").unwrap();
         let mut c = Counter::default();
-        c.update(&d, midnight);
+        c.update(&d, midnight, &mut logs::Budget::tick());
         assert_eq!(c.tokens_today(), 2 * 1_302, "cache reads are not new tokens");
-        c.update(&d, midnight);
+        c.update(&d, midnight, &mut logs::Budget::tick());
         assert_eq!(c.tokens_today(), 2 * 1_302, "a second read adds nothing");
     }
 }

@@ -327,6 +327,7 @@ fn is_program(p: &Path) -> bool {
 pub struct Counters {
     claude: HashMap<PathBuf, claude::Counter>,
     codex: HashMap<PathBuf, codex::Counter>,
+    plans: claude::PlanCache,
 }
 
 /// Gather every fact: files, programs, logs. Blocking; run it off the UI thread.
@@ -334,6 +335,8 @@ pub fn observe(home: &Path, counters: &mut Counters, companion_url: Option<Strin
     let store = Store::load(&store::path_in(home));
     let installed = installed(home, std::env::var_os("PATH").as_deref());
     let mut seen = HashMap::new();
+    // One budget for every log this read looks at; what it does not reach is read next time.
+    let mut budget = logs::Budget::tick();
     for vendor in VENDORS.iter().filter(|v| matches!(v.sign_in, SignIn::Program { .. })) {
         for label in store.labels(vendor.id) {
             let dir = store::dir_of(home, vendor, &label);
@@ -342,14 +345,14 @@ pub fn observe(home: &Path, counters: &mut Counters, companion_url: Option<Strin
             if signed_in {
                 match vendor.id {
                     "claude" => {
-                        s.plan = claude::plan(&dir, label == PRIMARY);
+                        s.plan = claude::plan(&dir, label == PRIMARY, &mut counters.plans);
                         let c = counters.claude.entry(dir.clone()).or_default();
-                        c.update(&dir, midnight);
+                        c.update(&dir, midnight, &mut budget);
                         s.tokens_today = c.tokens_today();
                     }
                     "codex" => {
                         let c = counters.codex.entry(dir.clone()).or_default();
-                        c.update(&dir, midnight);
+                        c.update(&dir, midnight, &mut budget);
                         let got = c.seen(now);
                         s.plan = got.plan;
                         s.meters = got.meters;

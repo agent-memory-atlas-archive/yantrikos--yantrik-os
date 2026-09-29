@@ -121,7 +121,9 @@ impl Vendor {
 /// The host of an http(s) URL, lowercased.
 fn host_of(url: &str) -> Option<String> {
     let rest = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://"))?;
-    let authority = rest.split(['/', '?', '#']).next()?;
+    // `\` too: a browser and the `url` crate end the authority there, so `evil.example\@api.x.ai`
+    // is evil.example, not xAI.
+    let authority = rest.split(['/', '\\', '?', '#']).next()?;
     let host = authority.rsplit('@').next()?.split(':').next()?;
     (!host.is_empty()).then(|| host.to_ascii_lowercase())
 }
@@ -163,6 +165,7 @@ mod tests {
         assert!(xai.serves(Some("https://api.x.ai/v1")));
         assert!(!xai.serves(Some("https://api.x.ai.evil.example/v1")));
         assert!(!xai.serves(Some("https://evil.example/api.x.ai")));
+        assert!(!xai.serves(Some("https://evil.example\\@api.x.ai/v1")));
         assert!(!xai.serves(None));
         let qwen = by_id("qwen").unwrap();
         assert!(qwen.serves(Some("https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1")));

@@ -79,6 +79,13 @@ The mind chip in the status bar opens a panel, in the manner of Omarchy's agents
    scenarios." The desktop shows the key when it is the companion's provider. It must not hand
    such a key to an autonomous agent.
 
+7. **Everything the panel reads was written by something running as the person, so it is read defensively.**
+   - **Opening files:** every file is opened with `O_NOFOLLOW`, then checked on the open file itself: a regular file, one name, owned by the person. A link or a hard link to a sign-in file is never read (`logs::open_own`).
+   - **Budgets:** each refresh has a byte budget, 16 MB per file and 64 MB in all. A line that never ends is skipped once and never re-read. At most 20,000 directory entries are visited, and at most 200,000 messages are counted per day. `.claude.json` is read again only when it changes.
+   - **One refresh at a time:** at most one refresh is ever queued.
+   - **Account directories:** each is walked from HOME without following a link. Every part must be the person's own and writable by nobody else. This happens both before a directory is made and before "Use" exports it; one that fails is not exported.
+   - **Plan names:** a plan name from a log is shown only if it is one short word.
+
 ## Next
 
 - **Claude's Session and Weekly bars.** Claude Code's status line receives `rate_limits.five_hour`

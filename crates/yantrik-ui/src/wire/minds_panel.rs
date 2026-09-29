@@ -10,6 +10,7 @@
 //! the worker and Slint.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -18,6 +19,16 @@ use slint::{ComponentHandle, ModelRc, SharedString, Timer, TimerMode, VecModel};
 use crate::accounts::{self, act, Counters, Facts, Group};
 use crate::app_context::AppContext;
 use crate::{AccountMeter, AccountRow, AddChoice, App, ProviderGroup};
+
+/// A refresh is waiting on the worker. At most one is: the ticks never queue behind a slow read,
+/// and a press never waits behind a pile of them.
+static REFRESH_WAITING: AtomicBool = AtomicBool::new(false);
+
+fn refresh(tx: &mpsc::Sender<Job>) {
+    if !REFRESH_WAITING.swap(true, Ordering::SeqCst) {
+        let _ = tx.send(Job::Refresh);
+    }
+}
 
 /// How often the open panel is read again. Each read walks the vendors' log directories; a
 /// sign-in finished in the terminal shows up within this.
@@ -66,7 +77,10 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         let mut facts = Facts::default();
         while let Ok(job) = rx.recv() {
             let (status, after) = match job {
-                Job::Refresh => (None, After::Nothing),
+                Job::Refresh => {
+                    REFRESH_WAITING.store(false, Ordering::SeqCst);
+                    (None, After::Nothing)
+                }
                 Job::Use(id) => match act::use_account(&home, &id) {
                     Ok(()) => (Some(used_line(&id)), After::Nothing),
                     Err(e) => (Some(e), After::Nothing),
@@ -116,7 +130,7 @@ pub fn wire(ui: &App, ctx: &AppContext) {
 
     {
         let tx = tx.clone();
-        ui.on_minds_panel_opened(move || send(&tx, Job::Refresh));
+        ui.on_minds_panel_opened(move || refresh(&tx));
     }
     {
         let tx = tx.clone();
@@ -144,7 +158,7 @@ pub fn wire(ui: &App, ctx: &AppContext) {
     let weak = ui.as_weak();
     timer.start(TimerMode::Repeated, TICK, move || {
         if weak.upgrade().is_some_and(|ui| ui.get_minds_panel_open()) {
-            let _ = tx.send(Job::Refresh);
+            refresh(&tx);
         }
     });
 }
