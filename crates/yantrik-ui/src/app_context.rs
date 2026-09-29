@@ -308,7 +308,7 @@ impl AppContext {
             &chat_config_snapshot,
             // AI callback: the person's message to the mind answering, and its reply. The router
             // asks only about a direct message from one of `chat.people` (`ChatRouter::set_people`).
-            Box::new(move |text: &str, context: &[String], policy: &yantrik_chat::policy::ConversationPolicy| {
+            Box::new(move |text: &str, context: &[String], policy: &yantrik_chat::policy::ConversationPolicy, asker: &yantrik_chat::router::Asker| {
                 let prompt = if context.is_empty() {
                     text.to_string()
                 } else {
@@ -322,26 +322,9 @@ impl AppContext {
                     format!("[Chat context]\n{history}\n\n[Latest message]\n{text}")
                 };
 
-                // To whichever mind is answering, through the harness host — the Lens's own path
-                // (`wire::chat::dispatch`), so the active mind, the hand-over and Private mode hold
-                // for a message from a channel as for one typed at the desk. It used to go to the
-                // built-in companion whatever mind the person had chosen, past all three.
-                let Some(host) = crate::wire::harness::host() else {
-                    return Some("The desktop is still starting; ask again in a moment.".to_string());
-                };
-                let answer = host.send(yantrik_harness::Turn::new(prompt));
-                let mut full_response = String::new();
-                while let Ok(chunk) = answer.recv() {
-                    match chunk {
-                        yantrik_harness::Chunk::Text(t) => full_response.push_str(&t),
-                        // Said, not swallowed: the person asked and should hear why nothing came.
-                        yantrik_harness::Chunk::Failed(why) => {
-                            full_response = why;
-                            break;
-                        }
-                        yantrik_harness::Chunk::Event(_) => {}
-                    }
-                }
+                // To the mind answering, from the phone (design/channels-2026-09-29.md): see
+                // `channels::ask_from_phone` for which minds answer a phone and how it is held.
+                let mut full_response = crate::channels::ask_from_phone(prompt, asker);
 
                 if full_response.is_empty() {
                     return None;
@@ -368,6 +351,8 @@ impl AppContext {
                 // Brain integration happens via the CompanionBridge's RecordSystemEvent command
                 // The companion worker thread will process this and update brain state
             }),
+            // Private mode: the channels keep nothing while it is on.
+            Box::new(crate::private_mode::is_on),
         );
 
         // Set up UI models

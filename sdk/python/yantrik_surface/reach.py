@@ -150,9 +150,11 @@ def standing_of(token, ask=None):
 
 
 def covers(surfaces, app_id, action):
-    """Does one of `surfaces` cover `app_id.action`?"""
+    """Does one of `surfaces` cover `app_id.action`? `*` covers every app."""
     for surface in surfaces:
         surface = trim(surface)
+        if surface == "*":
+            return True
         if "." not in surface:
             if same_ascii_case(surface, app_id):
                 return True
@@ -171,7 +173,7 @@ def covers(surfaces, app_id, action):
 def names_app(surfaces, app):
     """Does one of `surfaces` name this app — as `app`, `app.action` or `app.prefix*`?"""
     app = trim(app)
-    return any(same_ascii_case(trim(s).split(".", 1)[0], app) for s in surfaces)
+    return any(trim(s) == "*" or same_ascii_case(trim(s).split(".", 1)[0], app) for s in surfaces)
 
 
 def opening(app_id, action, args):
@@ -186,6 +188,8 @@ def opening(app_id, action, args):
 
 def surfaces_text(surfaces):
     """The surfaces as a sentence reads them: "editor, documents and notes"."""
+    if len(surfaces) == 1 and trim(surfaces[0]) == "*":
+        return "every app"
     if not surfaces:
         return "nothing on this desktop beyond asking the person and reading its own session"
     if len(surfaces) == 1:

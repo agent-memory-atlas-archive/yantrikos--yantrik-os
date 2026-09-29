@@ -14,7 +14,7 @@ Seven methods on the `harness` socket, all spoken by the harness:
 
 ```text
 harness.attach   {id, name, detail?, tools?, memory?, conversations?}  → {session}
-harness.poll     {session}              → {turn_id, text, context, conversation, agent_token} | {}
+harness.poll     {session}              → {turn_id, text, context, conversation, agent_token, origin?} | {}
                                           … either may also carry cancelled: [turn_id], ended: [conversation],
                                             answers: [{turn_id, request_id, answer}]
 harness.chunk    {session, turn_id, delta}             → {}
@@ -27,8 +27,16 @@ harness.detach   {session}                             → {}
 Attach, then loop: ask for a turn, stream the answer back in pieces, say you are done.
 `crates/yantrik-harness/examples/echo_harness.rs` is a working one end to end, and the only part
 a real harness replaces is the function that produces the answer. `harness.event`,
-`conversations`, `conversation`, `agent_token`, `cancelled`, `ended` and `answers` are all optional to use:
-a harness that knows none of them works exactly as it always did.
+`conversations`, `conversation`, `agent_token`, `cancelled`, `ended`, `answers` and `origin` are all
+optional to use: a harness that knows none of them works exactly as it always did.
+
+A turn may carry `origin`, where the person asked it from (design/channels-2026-09-29.md):
+`{"channel": "lens"|"telegram"|"signal"|…, "remote": bool, "person", "carries": ["text","voice","photo"],
+"trust": "local"|"e2e"|"provider-readable"}`. Absent when the desktop does not say. Use it for register
+(terse on a phone) and for what to send back. While a turn is `remote`, the agent answering it is
+held to `safe` on every door, whatever the mode: it reads, and anything graded above is refused
+with a sentence saying so, and it hands no work to another agent. Only a mind running as its own
+account is sent a remote turn; one running as the person is not, since nothing could hold it.
 
 ## Why the harness dials in
 

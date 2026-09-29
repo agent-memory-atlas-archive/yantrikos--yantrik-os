@@ -234,10 +234,14 @@ pub fn reach_in_reply(reply: &Value) -> Result<Option<Reach>, String> {
     serde_json::from_value(reach.clone()).map(Some).map_err(|e| format!("the shell's answer about this agent token's reach does not read: {e}"))
 }
 
-/// Does one of `surfaces` cover `app_id.action`?
+/// Does one of `surfaces` cover `app_id.action`? `*` covers every app: a reach that holds an
+/// agent to a ceiling without fencing it to apps (a turn asked from a phone).
 pub fn covers(surfaces: &[String], app_id: &str, action: &str) -> bool {
     surfaces.iter().any(|surface| {
         let surface = surface.trim();
+        if surface == "*" {
+            return true;
+        }
         match surface.split_once('.') {
             None => surface.eq_ignore_ascii_case(app_id),
             Some((app, named)) if app.eq_ignore_ascii_case(app_id) => match named.strip_suffix('*') {
@@ -255,7 +259,7 @@ pub fn covers(surfaces: &[String], app_id: &str, action: &str) -> bool {
 /// refused — the direction a mistake in this rule has to go.
 fn names_app(surfaces: &[String], app: &str) -> bool {
     let app = app.trim();
-    surfaces.iter().any(|surface| {
+    surfaces.iter().any(|surface| surface.trim() == "*") || surfaces.iter().any(|surface| {
         let surface = surface.trim();
         surface.split_once('.').map_or(surface, |(named, _)| named).eq_ignore_ascii_case(app)
     })
@@ -277,6 +281,7 @@ fn opening<'a>(app_id: &str, action: &str, args: &'a Value) -> Option<&'a str> {
 pub fn surfaces_text(surfaces: &[String]) -> String {
     match surfaces {
         [] => "nothing on this desktop beyond asking the person and reading its own session".to_string(),
+        [every] if every.trim() == "*" => "every app".to_string(),
         [one] => one.clone(),
         [init @ .., last] => format!("{} and {last}", init.join(", ")),
     }
@@ -419,6 +424,23 @@ mod tests {
             surfaces: vec!["calendar".into(), "notes".into()],
             ceiling: "safe".into(),
         }
+    }
+
+    #[test]
+    fn a_reach_of_every_app_still_holds_its_ceiling() {
+        let phone = Reach {
+            agent: "pi:main".into(),
+            role: "remote".into(),
+            name: "turn asked from a phone".into(),
+            surfaces: vec!["*".into()],
+            ceiling: "standard".into(),
+        };
+        assert!(within(&phone, "files", "move", "standard", &json!({})).is_ok());
+        assert!(within(&phone, "shell", "open_app", "standard", &json!({"name": "notes"})).is_ok());
+        let err = within(&phone, "calendar", "delete_event", "sensitive", &json!({})).unwrap_err();
+        assert!(err.contains("above the turn asked from a phone's `standard` ceiling"), "{err}");
+        assert!(err.contains("which may touch every app, at most `standard`"), "{err}");
+        assert!(!covers(&["*x".into()], "files", "move"), "only `*` itself is every app");
     }
 
     #[test]

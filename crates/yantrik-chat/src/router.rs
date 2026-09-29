@@ -38,9 +38,20 @@ pub enum RouterEvent {
     },
 }
 
+/// Who asked, and on what channel: what a turn's origin is made from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Asker {
+    /// The provider's id: `telegram`, `signal`, `slack`, …
+    pub provider: String,
+    pub sender_name: String,
+    pub sender_id: String,
+    /// What an answer may carry there: `text`, `voice`, `photo`.
+    pub carries: Vec<String>,
+}
+
 /// Callback for AI processing. The router calls this when a message needs a response.
-/// Receives: (message_text, conversation_context, policy) → AI response text.
-pub type AiCallback = Box<dyn Fn(&str, &[String], &ConversationPolicy) -> Option<String> + Send + Sync>;
+/// Receives: (message_text, conversation_context, policy, asker) → AI response text.
+pub type AiCallback = Box<dyn Fn(&str, &[String], &ConversationPolicy, &Asker) -> Option<String> + Send + Sync>;
 
 /// Callback for brain integration. Called for every non-muted message.
 /// Receives: (sender_name, sender_id, provider, content_type).
@@ -64,6 +75,8 @@ pub struct ChatRouter {
     brain_callback: Option<BrainCallback>,
     /// Who the person is on each channel: `(provider id, sender id)`. See [`ChatRouter::set_people`].
     people: std::collections::HashSet<(String, String)>,
+    /// Whether nothing is to be kept right now: the person's Private mode. See [`ChatRouter::set_paused`].
+    paused: Option<Box<dyn Fn() -> bool + Send + Sync>>,
 }
 
 impl ChatRouter {
@@ -85,7 +98,18 @@ impl ChatRouter {
             ai_callback: None,
             brain_callback: None,
             people: std::collections::HashSet::new(),
+            paused: None,
         }
+    }
+
+    /// Ask `paused` before keeping anything: while it says yes (the person's Private mode), no
+    /// message and no answer is written to the transcript.
+    pub fn set_paused(&mut self, paused: Box<dyn Fn() -> bool + Send + Sync>) {
+        self.paused = Some(paused);
+    }
+
+    fn keeping(&self) -> bool {
+        !self.paused.as_ref().is_some_and(|p| p())
     }
 
     /// Who the person is on each channel. The AI is asked only about a direct message from one
@@ -182,6 +206,15 @@ impl ChatRouter {
         }
         store::mark_event_seen(&db, provider_id, &msg.event_id);
 
+        // Only the person's words are kept, and nothing at all while the person is private: a
+        // stranger who writes to the bot gets no reply and no row, and cannot grow the store.
+        let from_person = self.people.contains(&(provider_id.to_string(), msg.sender.id.clone()));
+        if !from_person {
+            tracing::debug!(provider = provider_id, "Chat: not the person; not answered, not kept");
+            return;
+        }
+        let keeping = self.keeping();
+
         // Resolve conversation + policy
         let (conv_rowid, policy) = match store::get_or_create_conversation(&db, &msg.conversation) {
             Ok(r) => r,
@@ -192,7 +225,9 @@ impl ChatRouter {
         };
 
         // Store message in transcript
-        store::store_message(&db, conv_rowid, &msg);
+        if keeping {
+            store::store_message(&db, conv_rowid, &msg);
+        }
 
         // Feed brain (for all non-muted conversations)
         if policy::should_feed_brain(&policy) {
@@ -210,17 +245,11 @@ impl ChatRouter {
 
         // Check if AI should reply
         let current_hour = chrono::Local::now().hour() as u8;
-        let from_person = self.people.contains(&(provider_id.to_string(), msg.sender.id.clone()));
         let direct = msg.conversation.kind == crate::model::ConversationKind::Direct;
-        if !from_person || !direct {
-            tracing::debug!(
-                provider = provider_id,
-                from_person,
-                direct,
-                "Chat: not the person in a direct message; nothing is asked of the AI"
-            );
+        if !direct {
+            tracing::debug!(provider = provider_id, "Chat: the person, but not in a direct message; nothing is asked of the AI");
         }
-        let should_reply = from_person && direct && policy::should_ai_reply(&msg, &policy, current_hour);
+        let should_reply = direct && policy::should_ai_reply(&msg, &policy, current_hour);
 
         if should_reply {
             if let Some(ai_cb) = &self.ai_callback {
@@ -239,8 +268,27 @@ impl ChatRouter {
                 // Drop db lock before calling AI (may take a while)
                 drop(db);
 
+                // Who asked, and what the channel can carry back.
+                let mut carries = vec!["text".to_string()];
+                if let Ok(providers) = self.providers.lock() {
+                    if let Some(caps) = providers.get(provider_id).map(|p| p.capabilities()) {
+                        if caps.voice {
+                            carries.push("voice".into());
+                        }
+                        if caps.media {
+                            carries.push("photo".into());
+                        }
+                    }
+                }
+                let asker = Asker {
+                    provider: provider_id.to_string(),
+                    sender_name: msg.sender.display_name.clone(),
+                    sender_id: msg.sender.id.clone(),
+                    carries,
+                };
+
                 // Get AI response
-                if let Some(response) = ai_cb(&content_text, &context, &policy) {
+                if let Some(response) = ai_cb(&content_text, &context, &policy, &asker) {
                     // Send response through provider
                     let out_msg = OutboundMessage::text(&response)
                         .with_reply(msg.message.clone());
@@ -253,7 +301,8 @@ impl ChatRouter {
                             match provider.send(&msg.conversation, &out_msg) {
                                 Ok(receipt) => {
                                     // Store AI response in transcript
-                                    if let Ok(db) = self.db.lock() {
+                                    let db = if keeping { self.db.lock().ok() } else { None };
+                                    if let Some(db) = db {
                                         store::store_ai_response(
                                             &db,
                                             conv_rowid,
@@ -363,7 +412,7 @@ mod people_tests {
     fn router(asked: Arc<AtomicUsize>) -> ChatRouter {
         let db = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
         let mut router = ChatRouter::new(db);
-        router.set_ai_callback(Box::new(move |_, _, _| {
+        router.set_ai_callback(Box::new(move |_, _, _, _| {
             asked.fetch_add(1, Ordering::SeqCst);
             None
         }));

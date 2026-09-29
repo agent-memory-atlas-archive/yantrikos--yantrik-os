@@ -360,12 +360,12 @@ fn parse_telegram_message(
     let timestamp = message.get("date").and_then(|v| v.as_i64()).unwrap_or(0) * 1000;
 
     // Determine conversation kind from chat type
-    let chat_type = chat.get("type").and_then(|v| v.as_str()).unwrap_or("private");
+    // Unknown or missing is not private: only a chat Telegram calls private is a direct message.
+    let chat_type = chat.get("type").and_then(|v| v.as_str()).unwrap_or("");
     let kind = match chat_type {
         "private" => ConversationKind::Direct,
-        "group" | "supergroup" => ConversationKind::Group,
         "channel" => ConversationKind::Channel,
-        _ => ConversationKind::Direct,
+        _ => ConversationKind::Group,
     };
     let title = chat.get("title").and_then(|v| v.as_str()).map(|s| s.to_string());
 
@@ -497,12 +497,12 @@ fn parse_telegram_edit(
     let text = edited.get("text").and_then(|v| v.as_str())?;
     let timestamp = edited.get("edit_date").and_then(|v| v.as_i64()).unwrap_or(0) * 1000;
 
-    let chat_type = chat.get("type").and_then(|v| v.as_str()).unwrap_or("private");
+    // Unknown or missing is not private: only a chat Telegram calls private is a direct message.
+    let chat_type = chat.get("type").and_then(|v| v.as_str()).unwrap_or("");
     let kind = match chat_type {
         "private" => ConversationKind::Direct,
-        "group" | "supergroup" => ConversationKind::Group,
         "channel" => ConversationKind::Channel,
-        _ => ConversationKind::Direct,
+        _ => ConversationKind::Group,
     };
 
     Some(InboundEvent::MessageEdited(MessageEditEvent {

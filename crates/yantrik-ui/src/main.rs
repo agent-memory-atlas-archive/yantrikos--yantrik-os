@@ -55,6 +55,8 @@ mod control_screen;
 mod control_decide;
 /// Private mode: the Mind off and nothing recorded, until the person turns it off.
 mod private_mode;
+/// What the desktop knows about each channel a person can reach it from.
+mod channels;
 /// What Private mode stops outright: the agents that run as the person, frozen.
 mod private_freeze;
 /// Where a mind may take the Files screen, and what it may do with the folder there (#443).

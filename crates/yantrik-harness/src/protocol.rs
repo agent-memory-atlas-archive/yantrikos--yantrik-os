@@ -191,6 +191,36 @@ pub struct Resume {
     pub prompt: String,
 }
 
+/// Where a turn came from (design/channels-2026-09-29.md). A mind reads it for register — terse
+/// on a phone — and for what to send back; a harness that ignores it is unaffected.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Origin {
+    /// `lens` for the desk, else the channel: `telegram`, `signal`, `slack`, `discord`, `matrix`,
+    /// `irc`, `whatsapp`, `native`.
+    pub channel: String,
+    /// Asked from away from the machine. While it is, the desktop holds the agent answering it to
+    /// `standard`: what a stolen phone could ask for is less than what the person at the keyboard
+    /// can.
+    pub remote: bool,
+    /// Who asked, as the person is named on that channel.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub person: String,
+    /// What an answer may carry there: `text`, `voice`, `photo`, `buttons`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub carries: Vec<String>,
+    /// Who else can read the channel: `local` (the desk), `e2e` (end-to-end to this box), or
+    /// `provider-readable` (the channel's operator can read it, as Telegram can a bot's chats).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub trust: String,
+}
+
+impl Origin {
+    /// The Lens, at the desk.
+    pub fn desk() -> Origin {
+        Origin { channel: "lens".into(), remote: false, person: String::new(), carries: vec!["text".into()], trust: "local".into() }
+    }
+}
+
 /// One turn handed to a harness.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Assignment {
@@ -230,6 +260,10 @@ pub struct Assignment {
     /// desktop knows of no server to dial. Not a secret, but never shown to the model either.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub memory_url: String,
+    /// Where the turn came from, when the desktop says ([`Origin`]). Absent otherwise, so the wire
+    /// is unchanged for a turn that does not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<Origin>,
 }
 
 /// What stands in for a secret when a struct holding one is printed: whether there is one, never
@@ -263,6 +297,7 @@ impl std::fmt::Debug for Assignment {
             .field("agent_token", &redacted(&self.agent_token))
             .field("memory_credential", &redacted(&self.memory_credential))
             .field("memory_url", &self.memory_url)
+            .field("origin", &self.origin)
             .finish()
     }
 }
@@ -314,6 +349,37 @@ mod tests {
     }
 
     #[test]
+    fn a_turn_that_says_no_origin_is_the_wire_it_was_and_one_that_does_carries_it() {
+        let mut turn = Assignment {
+            turn_id: 1,
+            text: "hi".into(),
+            context: None,
+            conversation: "main".into(),
+            agent_token: String::new(),
+            memory_credential: String::new(),
+            memory_url: String::new(),
+            origin: None,
+        };
+        let wire = serde_json::to_value(&turn).unwrap();
+        assert!(wire.get("origin").is_none(), "{wire}");
+        turn.origin = Some(Origin {
+            channel: "signal".into(),
+            remote: true,
+            person: "Pranab".into(),
+            carries: vec!["text".into(), "voice".into()],
+            trust: "e2e".into(),
+        });
+        let wire = serde_json::to_value(&turn).unwrap();
+        assert_eq!(wire["origin"]["channel"], "signal");
+        assert_eq!(wire["origin"]["remote"], true);
+        let back: Assignment = serde_json::from_value(wire).unwrap();
+        assert_eq!(back.origin, turn.origin);
+        let old: Assignment = serde_json::from_str(r#"{"turn_id":2,"text":"x"}"#).unwrap();
+        assert!(old.origin.is_none(), "a turn from an older desktop reads as saying nothing");
+        assert!(!Origin::desk().remote);
+    }
+
+    #[test]
     fn printing_a_turn_or_a_resume_never_prints_its_secrets() {
         let token = "0123456789abcdef0123456789abcdef";
         let credential = format!("mem-{}", "a".repeat(64));
@@ -325,6 +391,7 @@ mod tests {
             agent_token: token.into(),
             memory_credential: credential.clone(),
             memory_url: "unix:/run/yantrik-mind/1000/memory.sock".into(),
+            origin: None,
         };
         let resume = Resume { conversation: "main".into(), agent_token: token.into(), turn_id: Some(7), prompt: "hi".into() };
         for printed in [format!("{turn:?}"), format!("{resume:?}"), format!("{:#?}", Attach {
