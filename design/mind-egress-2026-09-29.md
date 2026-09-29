@@ -55,10 +55,24 @@ which the table lets out. The mind's unit sets `HTTPS_PROXY`, `HTTP_PROXY` and `
   which uid owns the connecting socket. Only `yantrik-mind` is served. Version 2 pins the program:
   the socket's inode leads to a pid and `/proc/<pid>/exe`, and a rule can be limited to a binary
   and its digest, as OpenShell pins on first use.
-- **DNS.** The mind resolves nothing itself; the proxy resolves the name in each `CONNECT`. So DNS
-  cannot carry anything out. Programs that honour proxy variables need no change: curl, Python
+- **DNS.** The mind resolves nothing itself; the proxy resolves the name in each `CONNECT`, and
+  only once the name may be reached. With Private mode on, or in enforce without a rule, the name
+  is refused unresolved: a lookup is itself a message to whoever serves the name, so DNS cannot
+  carry anything out. Programs that honour proxy variables need no change: curl, Python
   requests/httpx, Node's undici with a proxy agent, and Go all send `CONNECT` by name. A program
   that ignores them fails, which is default deny working.
+- **Never a destination.** Loopback, link-local (the cloud metadata address), unspecified,
+  multicast, IPv4 hidden in IPv6 forms that lead to those, and every address this machine has.
+  A service bound to 0.0.0.0 answers on the machine's LAN address too, and a name that resolves
+  to either must not be a way past the loopback guards.
+- **The local network.** In enforce, only a rule with `lan: true` reaches it. Audit lets it
+  through, marked, as it lets everything through: the mind reaches the LAN today anyway.
+- **What it cannot see.** Because it opens no TLS, it cannot see a request whose TLS names a
+  different site from the `CONNECT` (domain fronting) on a shared CDN. Host-level policy stops a
+  new destination; it does not make an allowed CDN a single site.
+- **Plain http** is forwarded one request per connection: strict CRLF, no folded headers, `Host`
+  replaced with the decided authority, only a `Content-Length` body (chunked is refused), and
+  nothing after it.
 - **Private mode.** The shell tells the proxy "private"; every `CONNECT` is then refused. This
   sits beside the freeze and the closed door.
 

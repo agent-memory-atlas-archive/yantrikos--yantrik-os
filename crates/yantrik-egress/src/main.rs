@@ -17,6 +17,7 @@
 
 mod control;
 mod ledger;
+mod local;
 mod peer;
 mod policy;
 mod proxy;

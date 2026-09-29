@@ -1,16 +1,24 @@
 //! The proxy: one connection, from its head to the tunnel.
 //!
-//! In order, each step able to end it with a sentence: the head read whole (bounded in size and
-//! time); the caller's account read from the kernel and required to be the mind's; the target
-//! parsed; the name resolved here — the mind resolves nothing itself — and every address it gave
-//! classed, so a name that resolves to this machine goes nowhere; the policy's verdict, counted
-//! either way; then the connection, and bytes copied both ways until either end closes.
+//! In order, each step able to end it with a sentence:
+//!
+//! 1. the caller's account, read from the kernel, must be the mind's;
+//! 2. the head, read whole (bounded in size and time), must be a request this proxy serves;
+//! 3. what can be decided without a lookup is (Private mode; in enforce, whether any rule covers
+//!    the name) — a lookup is a message to whoever serves the name, so nothing is resolved that
+//!    may not be reached;
+//! 4. the name is resolved here, the mind resolves nothing itself, and every address it gave is
+//!    classed: this machine's own, loopback and the like go nowhere;
+//! 5. the policy's verdict, counted either way;
+//! 6. the connection, then bytes both ways until either end closes or both are quiet for
+//!    [`IDLE`]. A plain-HTTP request forwards exactly the body its head declared, and no second
+//!    request after it.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
 
@@ -23,6 +31,9 @@ use crate::state::State;
 const HEAD_TIME: Duration = Duration::from_secs(10);
 const RESOLVE_TIME: Duration = Duration::from_secs(10);
 const CONNECT_TIME: Duration = Duration::from_secs(15);
+/// A tunnel with nothing through it either way for this long is closed: a pooled connection
+/// nobody uses, or one whose far end vanished, gives its place back.
+pub const IDLE: Duration = Duration::from_secs(600);
 /// The most connections at once.
 pub const MOST_OPEN: usize = 256;
 
@@ -37,7 +48,15 @@ pub struct Proxy {
 pub async fn serve(listener: TcpListener, proxy: Arc<Proxy>) {
     let open = Arc::new(Semaphore::new(MOST_OPEN));
     loop {
-        let Ok((mut stream, peer)) = listener.accept().await else { continue };
+        let (mut stream, peer) = match listener.accept().await {
+            Ok(c) => c,
+            Err(e) => {
+                // Out of file descriptors, say: back off rather than spin.
+                tracing::warn!(error = %e, "accept failed");
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                continue;
+            }
+        };
         let Ok(permit) = open.clone().try_acquire_owned() else {
             let _ = reply(&mut stream, 503, "the proxy is at its limit of open connections; try again").await;
             continue;
@@ -73,8 +92,35 @@ fn now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
+/// TCP keepalive, so a far end that vanished is noticed rather than held.
+fn keepalive(s: &TcpStream) {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        let on: libc::c_int = 1;
+        // SAFETY: setsockopt on a socket we own, with a pointer to an int that outlives the call.
+        unsafe {
+            libc::setsockopt(
+                s.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_KEEPALIVE,
+                &on as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+        }
+    }
+}
+
+impl Proxy {
+    fn record(&self, host: &str, port: u16, outcome: Outcome, lan: bool, http: bool, why: &str) {
+        if let Ok(mut s) = self.state.lock() {
+            s.ledger.record(host, port, outcome, lan, http, why, now());
+        }
+    }
+}
+
 async fn one(proxy: &Proxy, stream: &mut TcpStream, peer: SocketAddr) -> Result<(), &'static str> {
-    // Who, before anything is read: a caller that is not the mind is told so and nothing more.
+    // 1. Who, before anything is read: a caller that is not the mind is told so and nothing more.
     let local = stream.local_addr().unwrap_or(proxy.local);
     let uid = tokio::task::spawn_blocking(move || crate::peer::uid_of(peer, local)).await.ok().flatten();
     if uid != Some(proxy.serve_uid) {
@@ -82,6 +128,7 @@ async fn one(proxy: &Proxy, stream: &mut TcpStream, peer: SocketAddr) -> Result<
         return Err("not the mind");
     }
 
+    // 2. The head.
     let mut buf = Vec::with_capacity(2048);
     let head_len = tokio::time::timeout(HEAD_TIME, async {
         let mut chunk = [0u8; 4096];
@@ -122,48 +169,72 @@ async fn one(proxy: &Proxy, stream: &mut TcpStream, peer: SocketAddr) -> Result<
         Target::Http { host, port, .. } => (host.clone(), *port, true),
     };
 
-    // Resolved here, and every address classed. The ones that are never a destination are
-    // dropped; if nothing is left, the name was this machine (or the like) and goes nowhere.
-    let addrs: Vec<SocketAddr> = match tokio::time::timeout(RESOLVE_TIME, tokio::net::lookup_host((host.as_str(), port))).await {
-        Ok(Ok(a)) => a.collect(),
-        _ => Vec::new(),
+    // 3. What needs no lookup.
+    let early = {
+        let Ok(s) = proxy.state.lock() else { return Err("state poisoned") };
+        s.policy.before_resolve(&host, port, http, s.private)
+    };
+    if let Some(Verdict::Refuse(why)) = early {
+        proxy.record(&host, port, Outcome::Refused, false, http, &why);
+        let _ = reply(stream, 403, &why).await;
+        return Err("refused before resolving");
+    }
+
+    // 4. Resolved here — or not at all, for an address — and every address classed.
+    let addrs: Vec<SocketAddr> = match host.parse::<IpAddr>() {
+        Ok(ip) => vec![SocketAddr::new(ip, port)],
+        Err(_) => match tokio::time::timeout(RESOLVE_TIME, tokio::net::lookup_host((host.as_str(), port))).await {
+            Ok(Ok(a)) => a.collect(),
+            _ => Vec::new(),
+        },
     };
     if addrs.is_empty() {
-        let _ = reply(stream, 502, &format!("{host} did not resolve")).await;
+        let why = format!("{host} did not resolve");
+        proxy.record(&host, port, Outcome::Refused, false, http, &why);
+        let _ = reply(stream, 502, &why).await;
         return Err("did not resolve");
     }
-    let usable: Vec<SocketAddr> = addrs.iter().copied().filter(|a| place_of(a.ip()) != Place::Forbidden).collect();
+    let own = crate::local::addresses();
+    let class = |a: &SocketAddr| {
+        if crate::local::is_own(a.ip(), &own) {
+            Place::Forbidden
+        } else {
+            place_of(a.ip())
+        }
+    };
+    let usable: Vec<SocketAddr> = addrs.iter().copied().filter(|a| class(a) != Place::Forbidden).collect();
     let place = if usable.is_empty() {
         Place::Forbidden
-    } else if usable.iter().all(|a| place_of(a.ip()) == Place::Lan) {
+    } else if usable.iter().all(|a| class(a) == Place::Lan) {
         Place::Lan
     } else {
         Place::Internet
     };
-    // A name that gives both kinds is reached at its internet addresses only, unless the rule
-    // allows the local network: the verdict is for the place it is actually reached at.
+    // A name that gives both kinds is reached at its internet addresses only: the verdict is for
+    // the place it is actually reached at.
     let usable: Vec<SocketAddr> = match place {
-        Place::Internet => usable.into_iter().filter(|a| place_of(a.ip()) == Place::Internet).collect(),
+        Place::Internet => usable.into_iter().filter(|a| class(a) == Place::Internet).collect(),
         _ => usable,
     };
 
+    // 5. The verdict.
     let verdict = {
-        let Ok(mut s) = proxy.state.lock() else { return Err("state poisoned") };
-        let v = s.policy.decide(&host, port, http, place, s.private);
-        let (outcome, why) = match &v {
-            Verdict::Allow { audit: true } => (Outcome::Audited, ""),
-            Verdict::Allow { audit: false } => (Outcome::Allowed, ""),
-            Verdict::Refuse(why) => (Outcome::Refused, why.as_str()),
-        };
-        s.ledger.record(&host, port, outcome, place == Place::Lan, http, why, now());
-        v
+        let Ok(s) = proxy.state.lock() else { return Err("state poisoned") };
+        s.policy.decide(&host, port, http, place, s.private)
     };
+    let (outcome, why) = match &verdict {
+        Verdict::Allow { audit: true } => (Outcome::Audited, ""),
+        Verdict::Allow { audit: false } => (Outcome::Allowed, ""),
+        Verdict::Refuse(why) => (Outcome::Refused, why.as_str()),
+    };
+    proxy.record(&host, port, outcome, place == Place::Lan, http, why);
     if let Verdict::Refuse(why) = verdict {
         tracing::info!(host, port, why, "refused");
         let _ = reply(stream, 403, &why).await;
         return Err("refused");
     }
 
+    // 6. The connection.
     let mut upstream = None;
     for addr in &usable {
         if let Ok(Ok(s)) = tokio::time::timeout(CONNECT_TIME, TcpStream::connect(addr)).await {
@@ -175,18 +246,81 @@ async fn one(proxy: &Proxy, stream: &mut TcpStream, peer: SocketAddr) -> Result<
         let _ = reply(stream, 502, &format!("{host}:{port} did not answer")).await;
         return Err("upstream did not answer");
     };
+    keepalive(stream);
+    keepalive(&upstream);
 
     match target {
         Target::Connect { .. } => {
             stream.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").await.map_err(|_| "write failed")?;
+            if !rest.is_empty() {
+                upstream.write_all(&rest).await.map_err(|_| "write failed")?;
+            }
+            let (mut cr, mut cw) = stream.split();
+            let (mut ur, mut uw) = upstream.split();
+            splice(&mut cr, &mut cw, &mut ur, &mut uw).await;
         }
-        Target::Http { head, .. } => {
+        Target::Http { head, body, .. } => {
             upstream.write_all(&head).await.map_err(|_| "write failed")?;
+            // Exactly the declared body: what arrived with the head, then the rest from the
+            // caller — and nothing after it, which would be a second request.
+            let first = rest.len().min(body as usize);
+            upstream.write_all(&rest[..first]).await.map_err(|_| "write failed")?;
+            let mut left = body - first as u64;
+            let mut chunk = vec![0u8; 16 * 1024];
+            while left > 0 {
+                let want = chunk.len().min(left as usize);
+                let n = match tokio::time::timeout(IDLE, stream.read(&mut chunk[..want])).await {
+                    Ok(Ok(n)) if n > 0 => n,
+                    _ => return Err("the body did not arrive"),
+                };
+                upstream.write_all(&chunk[..n]).await.map_err(|_| "write failed")?;
+                left -= n as u64;
+            }
+            // Not half-closed: some servers drop a request whose sender closed its side before
+            // the answer (found live, with example.com). `Connection: close` ends it, and nothing
+            // more is read from the caller, so nothing more can follow. The answer, to its end.
+            loop {
+                let n = match tokio::time::timeout(IDLE, upstream.read(&mut chunk)).await {
+                    Ok(Ok(n)) if n > 0 => n,
+                    _ => break,
+                };
+                if stream.write_all(&chunk[..n]).await.is_err() {
+                    break;
+                }
+            }
         }
     }
-    if !rest.is_empty() {
-        upstream.write_all(&rest).await.map_err(|_| "write failed")?;
-    }
-    let _ = tokio::io::copy_bidirectional(stream, &mut upstream).await;
     Ok(())
+}
+
+/// Bytes both ways, until either side ends or nothing moves for [`IDLE`].
+async fn splice<A, B, C, D>(cr: &mut A, cw: &mut B, ur: &mut C, uw: &mut D)
+where
+    A: AsyncRead + Unpin,
+    B: AsyncWrite + Unpin,
+    C: AsyncRead + Unpin,
+    D: AsyncWrite + Unpin,
+{
+    let mut up = vec![0u8; 16 * 1024];
+    let mut down = vec![0u8; 16 * 1024];
+    loop {
+        let moved = tokio::time::timeout(IDLE, async {
+            tokio::select! {
+                r = cr.read(&mut up) => match r {
+                    Ok(n) if n > 0 => uw.write_all(&up[..n]).await.is_ok(),
+                    _ => false,
+                },
+                r = ur.read(&mut down) => match r {
+                    Ok(n) if n > 0 => cw.write_all(&down[..n]).await.is_ok(),
+                    _ => false,
+                },
+            }
+        })
+        .await;
+        if !matches!(moved, Ok(true)) {
+            break;
+        }
+    }
+    let _ = uw.shutdown().await;
+    let _ = cw.shutdown().await;
 }

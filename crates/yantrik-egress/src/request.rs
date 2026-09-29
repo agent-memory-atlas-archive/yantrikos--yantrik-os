@@ -16,9 +16,11 @@ pub enum Target {
     /// A tunnel to `host:port`.
     Connect { host: String, port: u16 },
     /// A plain HTTP request; `head` is the whole head rewritten for the origin: the path alone on
-    /// the request line, the proxy's own headers dropped, and `Connection: close`, so one tunnel
-    /// carries one request to the host that was decided on.
-    Http { host: String, port: u16, head: Vec<u8> },
+    /// the request line, `Host` the authority that was decided on, the proxy's own headers
+    /// dropped, and `Connection: close`. `body` is how many bytes follow it (`Content-Length`):
+    /// exactly that many are forwarded and no more, so one tunnel carries one request, to the
+    /// host that was decided on.
+    Http { host: String, port: u16, head: Vec<u8>, body: u64 },
 }
 
 /// Why a head was not a request this proxy serves.
@@ -32,6 +34,18 @@ pub fn head_end(buf: &[u8]) -> Option<usize> {
 
 /// Read what `head` asks for.
 pub fn parse(head: &[u8]) -> Result<Target, Bad> {
+    // Every line ends CRLF, and nothing else is a line end: a bare CR or LF, read one way here and
+    // another way upstream, is how a second request hides inside the first.
+    for (i, &b) in head.iter().enumerate() {
+        let ok = match b {
+            b'\r' => head.get(i + 1) == Some(&b'\n'),
+            b'\n' => i > 0 && head[i - 1] == b'\r',
+            _ => true,
+        };
+        if !ok {
+            return Err(Bad("a line in the head does not end CRLF"));
+        }
+    }
     let text = std::str::from_utf8(head).map_err(|_| Bad("the request is not text"))?;
     let mut lines = text.split("\r\n");
     let first = lines.next().unwrap_or_default();
@@ -57,17 +71,45 @@ pub fn parse(head: &[u8]) -> Result<Target, Bad> {
     };
     let path = if path.starts_with('?') { format!("/{path}") } else { path.to_string() };
     let (host, port) = host_port(authority, Some(80))?;
+    if path.bytes().any(|b| b <= b' ' || b == 0x7f) {
+        return Err(Bad("the path is not one word"));
+    }
     let mut out = format!("{method} {path} {version}\r\n");
+    // The authority that was decided on, and no other: a Host header naming another site on the
+    // same address would reach it.
+    let authority = if host.contains(':') { format!("[{host}]") } else { host.clone() };
+    out.push_str(&if port == 80 { format!("Host: {authority}\r\n") } else { format!("Host: {authority}:{port}\r\n") });
+    let mut body = 0u64;
+    let mut lengths = 0;
     for line in lines.take_while(|l| !l.is_empty()) {
-        let name = line.split(':').next().unwrap_or_default().trim().to_ascii_lowercase();
-        if name.starts_with("proxy-") || name == "connection" || name == "keep-alive" {
-            continue;
+        if line.starts_with([' ', '\t']) {
+            return Err(Bad("a folded header line"));
+        }
+        let (name, value) = line.split_once(':').ok_or(Bad("a header line without a colon"))?;
+        if name.is_empty() || name.bytes().any(|b| !(b.is_ascii_alphanumeric() || b"-_".contains(&b))) {
+            return Err(Bad("not a header name"));
+        }
+        let lower = name.to_ascii_lowercase();
+        match lower.as_str() {
+            "host" | "connection" | "keep-alive" | "upgrade" | "te" | "trailer" => continue,
+            _ if lower.starts_with("proxy-") => continue,
+            // Only a body whose length is said: a chunked one has its end where the upstream
+            // reads it, which is not always where this proxy would.
+            "transfer-encoding" => return Err(Bad("a chunked body; send it with Content-Length")),
+            "content-length" => {
+                body = value.trim().parse().map_err(|_| Bad("Content-Length is not a number"))?;
+                lengths += 1;
+            }
+            _ => {}
         }
         out.push_str(line);
         out.push_str("\r\n");
     }
+    if lengths > 1 {
+        return Err(Bad("more than one Content-Length"));
+    }
     out.push_str("Connection: close\r\n\r\n");
-    Ok(Target::Http { host, port, head: out.into_bytes() })
+    Ok(Target::Http { host, port, head: out.into_bytes(), body })
 }
 
 /// `host:port`, `[v6]:port`, or `host` with a default port. The host is lowercased, and must be a
@@ -125,16 +167,37 @@ mod tests {
             b"POST http://192.168.4.20:11434/api/chat?x=1 HTTP/1.1\r\nHost: 192.168.4.20:11434\r\nProxy-Authorization: Basic xyz\r\nConnection: keep-alive\r\nContent-Length: 2\r\n\r\n",
         )
         .unwrap();
-        let Target::Http { host, port, head } = t else { panic!() };
-        assert_eq!((host.as_str(), port), ("192.168.4.20", 11434));
+        let Target::Http { host, port, head, body } = t else { panic!() };
+        assert_eq!((host.as_str(), port, body), ("192.168.4.20", 11434, 2));
         let head = String::from_utf8(head).unwrap();
+        assert!(head.contains("Host: 192.168.4.20:11434\r\n"));
         assert!(head.starts_with("POST /api/chat?x=1 HTTP/1.1\r\n"), "{head}");
         assert!(!head.to_ascii_lowercase().contains("proxy-authorization"));
         assert!(!head.contains("keep-alive"));
         assert!(head.contains("Content-Length: 2\r\n"));
         assert!(head.ends_with("Connection: close\r\n\r\n"));
-        let Target::Http { port, .. } = parse(b"GET http://example.com HTTP/1.1\r\n\r\n").unwrap() else { panic!() };
-        assert_eq!(port, 80);
+        let Target::Http { port, body, .. } = parse(b"GET http://example.com HTTP/1.1\r\n\r\n").unwrap() else { panic!() };
+        assert_eq!((port, body), (80, 0));
+    }
+
+    /// Found by the security review: each of these reached the upstream as more than the one
+    /// request, or as a request to another site on the same address.
+    #[test]
+    fn no_request_hides_another_or_names_another_site() {
+        let Target::Http { head, .. } = parse(b"GET http://a.example/x HTTP/1.1\r\nHost: evil.example\r\n\r\n").unwrap() else { panic!() };
+        let head = String::from_utf8(head).unwrap();
+        assert!(head.contains("Host: a.example\r\n") && !head.contains("evil"), "{head}");
+        for bad in [
+            &b"GET http://a.example/ HTTP/1.1\r\nX-A: 1\nGET /smuggled HTTP/1.1\r\n\r\n"[..],
+            b"GET http://a.example/ HTTP/1.1\r\nX-A: 1\rX\r\n\r\n",
+            b"GET http://a.example/ HTTP/1.1\r\nX-A: 1\r\n folded\r\n\r\n",
+            b"POST http://a.example/ HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n",
+            b"POST http://a.example/ HTTP/1.1\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\n",
+            b"POST http://a.example/ HTTP/1.1\r\nContent-Length: -1\r\n\r\n",
+            b"GET http://a.example/ HTTP/1.1\r\nBad Name: 1\r\n\r\n",
+        ] {
+            assert!(parse(bad).is_err(), "{:?}", String::from_utf8_lossy(bad));
+        }
     }
 
     #[test]

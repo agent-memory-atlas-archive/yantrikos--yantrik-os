@@ -13,7 +13,13 @@
 //! Some addresses are never a destination, in any mode: loopback, link-local (the cloud metadata
 //! address is one), unspecified, multicast and broadcast. The mind reaches this machine through
 //! the mind door, and a name that resolves to 127.0.0.1 must not turn this proxy into a way past
-//! the loopback guards. Addresses on the local network are allowed only by a rule that says `lan`.
+//! the loopback guards; neither is any address of this machine's own (`crate::local`). In
+//! enforce, an address on the local network is reached only by a rule that says `lan`; audit lets
+//! it through, marked, as it lets everything through.
+//!
+//! Nothing is looked up before it may be reached ([`Policy::before_resolve`]): with Private mode
+//! on, or in enforce without a rule, the name is refused unresolved — a lookup is itself a message
+//! to whoever serves the name.
 
 use std::net::IpAddr;
 
@@ -100,6 +106,19 @@ pub fn place_of(ip: IpAddr) -> Place {
                 return place_of(IpAddr::V4(v4));
             }
             let seg = v6.segments();
+            let b = v6.octets();
+            // An IPv4 address carried inside an IPv6 one is where it leads: NAT64 (64:ff9b::/96)
+            // and 6to4 (2002::/16) are classed by the address inside. The old IPv4-compatible
+            // form (::a.b.c.d) is never a destination.
+            if seg[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+                return place_of(IpAddr::V4(std::net::Ipv4Addr::new(b[12], b[13], b[14], b[15])));
+            }
+            if seg[0] == 0x2002 {
+                return place_of(IpAddr::V4(std::net::Ipv4Addr::new(b[2], b[3], b[4], b[5])));
+            }
+            if seg[..6] == [0, 0, 0, 0, 0, 0] {
+                return Place::Forbidden;
+            }
             if v6.is_loopback() || v6.is_unspecified() || v6.is_multicast() || (seg[0] & 0xffc0) == 0xfe80 {
                 Place::Forbidden
             } else if (seg[0] & 0xfe00) == 0xfc00 {
@@ -112,6 +131,18 @@ pub fn place_of(ip: IpAddr) -> Place {
 }
 
 impl Policy {
+    /// What can be decided before the name is looked up: Private mode, and in enforce, whether any
+    /// rule covers it. `Some` is the answer; `None` is "resolve it, then [`Policy::decide`]".
+    pub fn before_resolve(&self, host: &str, port: u16, http: bool, private: bool) -> Option<Verdict> {
+        if private {
+            return Some(Verdict::Refuse("Private mode is on: the mind reaches nothing until the person turns it off.".into()));
+        }
+        if self.mode == Mode::Enforce && !self.rules.iter().any(|r| r.matches(host, port) && (!http || r.http)) {
+            return Some(self.decide(host, port, http, Place::Internet, false));
+        }
+        None
+    }
+
     /// The verdict for `host:port`, resolved to `place`. `http` is a plain-HTTP request rather
     /// than a tunnel. `private` is the person's Private mode.
     pub fn decide(&self, host: &str, port: u16, http: bool, place: Place, private: bool) -> Verdict {
@@ -154,6 +185,7 @@ impl Policy {
     }
 
     pub fn load(path: &std::path::Path) -> Policy {
+        let refuse_all = Policy { mode: Mode::Enforce, rules: Vec::new() };
         match std::fs::read_to_string(path) {
             Ok(text) => match serde_yaml::from_str::<Policy>(&text) {
                 Ok(p) if p.rules.iter().all(|r| valid(r).is_ok()) => p,
@@ -162,11 +194,16 @@ impl Policy {
                     // wide either — audit would let everything through. It refuses everything
                     // until the person writes it again; the shell says so.
                     tracing::error!(path = %path.display(), "the egress policy does not read; refusing everything until it is written again");
-                    Policy { mode: Mode::Enforce, rules: Vec::new() }
+                    refuse_all
                 }
             },
-            // No policy yet: a new machine, which starts by watching.
-            Err(_) => Policy::default(),
+            // No policy yet: a new machine, which starts by watching. Only that: a policy that is
+            // there and cannot be read (its mode, not text) is not taken for no policy.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Policy::default(),
+            Err(e) => {
+                tracing::error!(path = %path.display(), error = %e, "the egress policy cannot be read; refusing everything");
+                refuse_all
+            }
         }
     }
 }
@@ -245,6 +282,18 @@ mod tests {
     }
 
     #[test]
+    fn nothing_is_looked_up_that_may_not_be_reached() {
+        let mut p = Policy::default();
+        assert!(matches!(p.before_resolve("x.example", 443, false, true), Some(Verdict::Refuse(_))), "private: not even resolved");
+        assert_eq!(p.before_resolve("x.example", 443, false, false), None, "audit resolves everything");
+        p.mode = Mode::Enforce;
+        assert!(matches!(p.before_resolve("x.example", 443, false, false), Some(Verdict::Refuse(_))), "enforce, no rule: unresolved");
+        p.allow(rule("x.example", &[443])).unwrap();
+        assert_eq!(p.before_resolve("x.example", 443, false, false), None);
+        assert!(matches!(p.before_resolve("x.example", 443, true, false), Some(Verdict::Refuse(_))), "a tunnel rule is not an http one");
+    }
+
+    #[test]
     fn places() {
         for (ip, want) in [
             ("127.0.0.1", Place::Forbidden),
@@ -260,6 +309,11 @@ mod tests {
             ("fd00::1", Place::Lan),
             ("1.1.1.1", Place::Internet),
             ("2606:4700::1111", Place::Internet),
+            ("64:ff9b::7f00:1", Place::Forbidden),
+            ("64:ff9b::c0a8:414", Place::Lan),
+            ("2002:7f00:1::", Place::Forbidden),
+            ("::127.0.0.1", Place::Forbidden),
+            ("::8.8.8.8", Place::Forbidden),
         ] {
             assert_eq!(place_of(ip.parse().unwrap()), want, "{ip}");
         }
@@ -285,6 +339,8 @@ mod tests {
         std::fs::write(&p, "mode: enforce\nrules:\n  - host: '*'\n    ports: [443]\n    why: all\n").unwrap();
         assert_eq!(Policy::load(&p), Policy { mode: Mode::Enforce, rules: vec![] }, "never half-used, never wide open");
         assert_eq!(Policy::load(&d.join("none.yaml")), Policy::default(), "a new machine audits");
+        std::fs::write(&p, b"mode: enforce\n\xff\n").unwrap();
+        assert_eq!(Policy::load(&p), Policy { mode: Mode::Enforce, rules: vec![] }, "not text: refused, not audit");
         std::fs::write(&p, "mode: enforce\nrules:\n  - host: api.x.ai\n    ports: [443]\n    why: the model\n").unwrap();
         let got = Policy::load(&p);
         assert_eq!(got.mode, Mode::Enforce);

@@ -23,7 +23,8 @@ impl State {
         State {
             policy: Policy::load(&dir.join("policy.yaml")),
             ledger: Ledger::load(&dir.join("seen.json")),
-            private: dir.join("private").exists(),
+            // Can't tell (the directory unreadable): private. Only "it is not there" is off.
+            private: dir.join("private").try_exists().unwrap_or(true),
             dir: dir.to_path_buf(),
         }
     }
