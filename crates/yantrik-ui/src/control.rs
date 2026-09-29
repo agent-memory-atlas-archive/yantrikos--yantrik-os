@@ -1841,6 +1841,9 @@ pub fn publish(
     // A recipe's question answered, and a recipe paused, resumed or cancelled — answer_recipe,
     // pause_recipe, resume_recipe, cancel_recipe. See `control_recipes`.
     let surface = crate::control_recipes::actions(surface, ctx.bridge.handle());
+    // The decision model in use, for the person's own surfaces (the browser's commitment check).
+    // Never an agent's: see `control_decide`.
+    let surface = crate::control_decide::actions(surface, ctx.bridge.handle());
     // ── Agents glue: new_agent / send_to_agent / stop_agent / read_agent / show_agent / hand_off —
     // how a mind hands work to another agent, or to a role from the catalog. The caller's agent
     // comes from its token. See `control_agents` and design/agents-workspace-2026-09-23.md,

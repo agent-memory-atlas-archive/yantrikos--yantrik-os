@@ -15,7 +15,7 @@ import threading
 import time
 import urllib.parse
 
-from . import cdp, commit, hands
+from . import cdp, commit, hands, judgement
 
 NAVIGATE_LIMIT = 15.0     # seconds a navigation is given to settle
 ACT_LIMIT = 4.0           # seconds a click or a key is given
@@ -76,8 +76,11 @@ def commitment_of(element):
 
 
 class Driver:
-    def __init__(self, browser=None):
+    def __init__(self, browser=None, judge=None):
         self.browser = browser or cdp.Browser()
+        # The person's decision model, asked when the words say nothing (judgement.py). `False`
+        # turns it off (tests of the words alone); None is the shell's `decide`.
+        self.judge = None if judge is False else (judge or judgement.Judgement())
         self.lock = threading.RLock()
         self.last_status = {"open": False}
 
@@ -125,6 +128,18 @@ class Driver:
             raise Refused("the browser closed while this was being done") from None
         except cdp.CdpError as e:
             raise Refused(str(e)) from None
+
+    def _why_commitment(self, control, t):
+        """Why pressing `control` is a commitment, in a phrase, or None: the word list first, then
+        the decision model. A judge can only add a commitment, never remove one the words found."""
+        word = commitment_of(control)
+        if word:
+            return "reads as a commitment (\"%s\")" % word
+        if self.judge is not None:
+            judged = self.judge.commitment(control, t.url, t.title)
+            if judged:
+                return "was %s" % judged
+        return None
 
     def _target(self, tab, ref):
         t = self._run(tab, "target", ref)
@@ -351,21 +366,21 @@ class Driver:
                           "instead. Deal with it first — often a cookie or sign-in dialog — then try again."
                           % (ref, target["name"], cover.get("role"), cover.get("name"), cover.get("ref")))
         landing = target.get("lands_on")
-        if landing and commitment_of(landing):
+        why = self._why_commitment(landing, t) if landing else None
+        if why:
             # The press would land on a control inside this one, and that control is the
             # commitment: it is the one to name, and commit presses it by its own ref.
-            raise PageRefused("pressing %s would press %s \"%s\" (%s) inside it, which reads as a "
-                              "commitment (\"%s\"). It is pressed with commit ref=%s label=\"%s\" site=%s, "
-                              "which asks the person first. Nothing was pressed."
-                              % (ref, landing["role"], landing["name"], landing["ref"], commitment_of(landing),
+            raise PageRefused("pressing %s would press %s \"%s\" (%s) inside it, which %s. It is pressed "
+                              "with commit ref=%s label=\"%s\" site=%s, which asks the person first. Nothing "
+                              "was pressed."
+                              % (ref, landing["role"], landing["name"], landing["ref"], why,
                                  landing["ref"], landing["name"], fold_site(t.url)))
-        word = commitment_of(target)
-        if word and not allow_commitment:
-            raise PageRefused("%s (%s \"%s\") reads as a commitment (\"%s\"): pressing it may spend money, "
-                              "send something or remove something, and that cannot be taken back. It is "
-                              "pressed with commit ref=%s label=\"%s\" site=%s, which asks the person first. "
-                              "Nothing was pressed."
-                              % (ref, target["role"], target["name"], word, ref, target["name"], fold_site(t.url)))
+        why = None if allow_commitment else self._why_commitment(target, t)
+        if why:
+            raise PageRefused("%s (%s \"%s\") %s: pressing it may spend money, send something or remove "
+                              "something, and that cannot be taken back. It is pressed with commit ref=%s "
+                              "label=\"%s\" site=%s, which asks the person first. Nothing was pressed."
+                              % (ref, target["role"], target["name"], why, ref, target["name"], fold_site(t.url)))
         return target
 
     def click(self, ref, tab=None):
@@ -409,23 +424,24 @@ class Driver:
         focused = found.get("focused") or {}
         # A field's own label says nothing about what Enter does ("Order note" is a note): only a
         # focused control that a key presses is judged by its own name.
-        word = commitment_of(focused) if focused.get("role") in PRESSED_BY_KEYS else None
-        if word:
-            raise PageRefused("%s would press %s \"%s\" (%s), which reads as a commitment (\"%s\")%s. It "
-                              "is pressed with commit ref=%s label=\"%s\" site=%s, which asks the person first."
+        why = self._why_commitment(focused, t) if focused.get("role") in PRESSED_BY_KEYS else None
+        if why:
+            raise PageRefused("%s would press %s \"%s\" (%s), which %s%s. It is pressed with commit ref=%s "
+                              "label=\"%s\" site=%s, which asks the person first."
                               % ("Enter" if key == "Enter" else "Space", focused.get("role"), focused.get("name"),
-                                 focused.get("ref"), word, "; the text was typed and the key was not pressed"
+                                 focused.get("ref"), why, "; the text was typed and the key was not pressed"
                                  if typed else "; nothing was pressed", focused.get("ref"), focused.get("name"),
                                  fold_site(t.url)))
         if key != "Enter":
             return
-        for c in found.get("around") or []:
-            word = commitment_of(c)
-            if word:
-                raise PageRefused("Enter here could press %s \"%s\" (%s), which reads as a commitment "
-                                  "(\"%s\")%s. Press it with commit ref=%s label=\"%s\" site=%s, which asks "
-                                  "the person first."
-                                  % (c.get("role"), c.get("name"), c.get("ref"), word,
+        # The buttons Enter could press: the words for all of them, the model for the first few.
+        for i, c in enumerate(found.get("around") or []):
+            why = (self._why_commitment(c, t) if i < 4 else
+                   ("reads as a commitment (\"%s\")" % commitment_of(c) if commitment_of(c) else None))
+            if why:
+                raise PageRefused("Enter here could press %s \"%s\" (%s), which %s%s. Press it with commit "
+                                  "ref=%s label=\"%s\" site=%s, which asks the person first."
+                                  % (c.get("role"), c.get("name"), c.get("ref"), why,
                                      "; the text was typed and Enter was not pressed" if typed
                                      else "; nothing was pressed", c.get("ref"), c.get("name"), fold_site(t.url)))
 

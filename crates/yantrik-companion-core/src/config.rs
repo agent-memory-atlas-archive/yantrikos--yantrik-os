@@ -3,7 +3,7 @@
 //! Mirrors the Python `CompanionConfig` Pydantic model.
 //! Supports YAML deserialization.
 
-pub use crate::judge_config::{JudgeConfig, JudgeKind, PRESETS as JUDGE_PRESETS};
+pub use crate::judge_config::{judge_use, JudgeConfig, JudgeKind, JudgeUse, JUDGE_USES, PRESETS as JUDGE_PRESETS};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};

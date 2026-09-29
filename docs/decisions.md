@@ -102,9 +102,34 @@ judge:
   model: kev-latest
   api_key_env: ""          # the NAME of the variable holding a key, e.g. JEV_API_KEY
   timeout_ms: 2000
-  route_tools: true        # use it to choose which tool a request needs
-  browser_commitments: true  # use it to spot purchases, sends and deletes in the browser
+  uses:                    # each use's switch; a use not named is on
+    route_tools: true        # choose which tool a request needs
+    browser_commitment: true # spot purchases, sends and deletes in the browser
+    agent: true              # answer agents' quick questions (only a model in the house)
 ```
+
+The uses are listed, with what each sends, in `JUDGE_USES`
+(`crates/yantrik-companion-core/src/judge_config.rs`); Settings shows one switch for each. The
+older `route_tools:` and `browser_commitments:` keys are still read.
+
+## Asking from another process: `decide`
+
+The shell's `decide` action puts wire-form questions to the model in use, for one use with a
+door, and answers with the verdict above:
+
+```json
+{"action": "decide", "args": {"purpose": "agent",
+  "state": {"message": "Can we move the dentist to Friday?"},
+  "questions": {"reschedule": {"type": "noul", "instructions": "Is this asking to move an appointment?"}}}}
+```
+
+- The person's own surfaces (the browser service) ask for any use with a door.
+- An agent (a token, or the mind account) asks only for `agent`, and only a model on this machine
+  or the home network answers it; with a cloud model the call is refused and nothing is sent.
+- A use switched off, incognito, or no model answers with abstentions; the caller decides as it
+  would without a model.
+- `state` is at most 16 KB, questions as in the wire form; at most four decisions are made at
+  once. Decisions are answered on the caller's thread, never behind a chat turn.
 
 An older section without `provider` is read as a System One server when `endpoint` is set, and
 as off otherwise.

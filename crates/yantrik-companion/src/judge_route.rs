@@ -63,13 +63,26 @@ pub fn decide(r: &Routing, route_at: f64) -> Decision {
     }
 }
 
+/// Where the chat model runs, for a `chat_model` judge's locality: its address, the provider's
+/// default one, or, with none, this machine only for the backends that run in this process.
+/// Anything else without an address (the Claude CLI) is the cloud: saying what was judged stayed
+/// home when it did not is the mistake that matters.
+pub fn chat_locality(llm: &yantrik_companion_core::config::LLMConfig) -> yantrik_ml::judge::Locality {
+    use yantrik_ml::judge::Locality;
+    match llm.resolve_api_base_url() {
+        Some(url) => Locality::of_endpoint(&url),
+        None if matches!(llm.backend.as_str(), "candle" | "llamacpp") => Locality::ThisMachine,
+        None => Locality::Cloud,
+    }
+}
+
 /// The decision model a configuration names, built: a System One server, the chat model, or
-/// none. `llm` is the companion's chat model, for `chat_model`; `llm_endpoint` is where it runs,
-/// for the verdict's locality.
+/// none. `llm` is the companion's chat model, for `chat_model`; `chat_at` is where it runs
+/// (`chat_locality`), for the verdict's locality.
 pub fn build_judge(
     config: &JudgeConfig,
     llm: &std::sync::Arc<dyn yantrik_ml::LLMBackend>,
-    llm_endpoint: Option<&str>,
+    chat_at: yantrik_ml::judge::Locality,
 ) -> Option<std::sync::Arc<dyn Judge>> {
     match config.kind() {
         JudgeKind::Off => None,
@@ -82,14 +95,7 @@ pub fn build_judge(
             )
             .with_dialect(yantrik_ml::judge::Dialect::named(dialect)),
         )),
-        JudgeKind::ChatModel => {
-            let locality = match llm_endpoint {
-                Some(url) => yantrik_ml::judge::Locality::of_endpoint(url),
-                // A backend with no address (llama.cpp in process, candle) runs here.
-                None => yantrik_ml::judge::Locality::ThisMachine,
-            };
-            Some(std::sync::Arc::new(yantrik_ml::judge::ChatJudge::new(llm.clone(), locality)))
-        }
+        JudgeKind::ChatModel => Some(std::sync::Arc::new(yantrik_ml::judge::ChatJudge::new(llm.clone(), chat_at))),
     }
 }
 
@@ -175,7 +181,7 @@ pub fn select_tools(
     profile: &ModelCapabilityProfile,
 ) -> Vec<&'static str> {
     let ordinary = || select_tools_adaptive(query, db, profile);
-    let Some(judge) = judge.filter(|_| config.route_tools) else { return ordinary() };
+    let Some(judge) = judge.filter(|_| config.use_on("route_tools")) else { return ordinary() };
     let shortlist = ToolCache::select_ranked_with_scores(&db.conn(), db, query, config.shortlist);
     if shortlist.is_empty() {
         return ordinary();

@@ -11,6 +11,9 @@
 //! replies, with anything shaped like a credential redacted. A cloud judge therefore receives
 //! that text; in incognito the companion asks no judge at all.
 //!
+//! Choosing tools is one use of it. Every use is listed in `JUDGE_USES`, with what it sends,
+//! and has its own switch in Settings (`uses:`); a new use is a row there and its caller.
+//!
 //! Any server speaking `/v1/systemone` works:
 //!
 //! ```yaml
@@ -23,6 +26,8 @@
 //!   endpoint: "http://127.0.0.1:8009"
 //!   model: "kev-latest"
 //! ```
+
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -47,9 +52,6 @@ pub struct JudgeConfig {
     /// How long a decision may take before the companion goes on without it.
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
-    /// Let the judge choose the tool a request needs.
-    #[serde(default = "default_true")]
-    pub route_tools: bool,
     /// How sure the judge must be of its pick for the companion to follow it. At 0.7 Kev-4B was
     /// right 98% of the time on the 243-tool catalogue, and that sure for 69% of requests.
     #[serde(default = "default_route_at")]
@@ -57,10 +59,62 @@ pub struct JudgeConfig {
     /// How many tools, closest by meaning, the judge chooses among.
     #[serde(default = "default_shortlist")]
     pub shortlist: usize,
-    /// Let the judge check whether a browser press reads as a commitment (in addition to the word
-    /// list, never instead of it: a judge can only add a card).
-    #[serde(default = "default_true")]
-    pub browser_commitments: bool,
+    /// Which uses (`JUDGE_USES`) are on, by id. A use not named is on: the person turns uses off.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub uses: BTreeMap<String, bool>,
+    /// The older spelling of `uses.route_tools`: read, kept until that use is switched again.
+    #[serde(default, rename = "route_tools", skip_serializing_if = "Option::is_none")]
+    pub legacy_route_tools: Option<bool>,
+    /// The older spelling of `uses.browser_commitment`.
+    #[serde(default, rename = "browser_commitments", skip_serializing_if = "Option::is_none")]
+    pub legacy_browser_commitments: Option<bool>,
+}
+
+/// One use of the decision model: something in the OS that asks it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JudgeUse {
+    /// Its id in `uses:` and, for a use with a door, the `purpose` a caller names.
+    pub id: &'static str,
+    /// What Settings says it does.
+    pub label: &'static str,
+    /// What it sends the model, in the person's words: what a cloud model would receive.
+    pub sends: &'static str,
+    /// Whether the shell's `decide` serves it, for surfaces in other processes. Tool choice has
+    /// none: it is asked inside the companion.
+    pub door: bool,
+    /// Whether an agent may ask for it. Only `agent`, and only of a model on this machine or the
+    /// home network (`yantrik_companion::decisions`).
+    pub for_agents: bool,
+}
+
+/// Every use of the decision model.
+pub const JUDGE_USES: &[JudgeUse] = &[
+    JudgeUse {
+        id: "route_tools",
+        label: "Choose the tool a request needs",
+        sends: "your request and your last few messages (never the assistant's replies)",
+        door: false,
+        for_agents: false,
+    },
+    JudgeUse {
+        id: "browser_commitment",
+        label: "Spot purchases, sends and deletes in the browser (adds a card, never removes one)",
+        sends: "the button, its page's title and address, and the text around it",
+        door: true,
+        for_agents: false,
+    },
+    JudgeUse {
+        id: "agent",
+        label: "Answer agents' quick questions, such as the Mind's (only a model on this machine or your home network)",
+        sends: "what the agent asks about",
+        door: true,
+        for_agents: true,
+    },
+];
+
+/// The use named `id`.
+pub fn judge_use(id: &str) -> Option<&'static JudgeUse> {
+    JUDGE_USES.iter().find(|u| u.id == id)
 }
 
 /// What kind of decision model a configuration names.
@@ -97,11 +151,12 @@ impl Default for JudgeConfig {
             model: default_model(),
             api_key_env: String::new(),
             timeout_ms: default_timeout_ms(),
-            route_tools: default_true(),
             route_at: default_route_at(),
             shortlist: default_shortlist(),
             provider: String::new(),
-            browser_commitments: default_true(),
+            uses: BTreeMap::new(),
+            legacy_route_tools: None,
+            legacy_browser_commitments: None,
         }
     }
 }
@@ -124,6 +179,36 @@ impl JudgeConfig {
     /// Whether a judge is configured at all.
     pub fn enabled(&self) -> bool {
         self.kind() != JudgeKind::Off
+    }
+
+    /// Whether the use `id` is on. An unknown use is off: nothing asks the model for a use the
+    /// person was never shown.
+    pub fn use_on(&self, id: &str) -> bool {
+        if judge_use(id).is_none() {
+            return false;
+        }
+        if let Some(on) = self.uses.get(id) {
+            return *on;
+        }
+        let legacy = match id {
+            "route_tools" => self.legacy_route_tools,
+            "browser_commitment" => self.legacy_browser_commitments,
+            _ => None,
+        };
+        legacy.unwrap_or(true)
+    }
+
+    /// Switch the use `id`, from Settings; its older spelling goes.
+    pub fn set_use(&mut self, id: &str, on: bool) {
+        if judge_use(id).is_none() {
+            return;
+        }
+        match id {
+            "route_tools" => self.legacy_route_tools = None,
+            "browser_commitment" => self.legacy_browser_commitments = None,
+            _ => {}
+        }
+        self.uses.insert(id.to_string(), on);
     }
 
     /// A preset's configuration, keeping this one's policy fields (thresholds, which uses are on).
@@ -162,9 +247,39 @@ mod tests {
     fn a_preset_keeps_the_policy_it_was_chosen_under() {
         let mut c = JudgeConfig::default();
         c.route_at = 0.9;
-        c.browser_commitments = false;
+        c.set_use("browser_commitment", false);
         let laya = c.with_preset("laya");
-        assert_eq!((laya.route_at, laya.browser_commitments), (0.9, false));
+        assert_eq!((laya.route_at, laya.use_on("browser_commitment")), (0.9, false));
+    }
+
+    #[test]
+    fn every_use_is_on_until_the_person_turns_it_off() {
+        let mut c = JudgeConfig::default();
+        assert!(JUDGE_USES.iter().all(|u| c.use_on(u.id)));
+        assert!(!c.use_on("mail_everyone"), "a use nobody was shown is off");
+        c.set_use("mail_everyone", true);
+        assert!(!c.use_on("mail_everyone") && c.uses.is_empty(), "and cannot be switched on");
+        c.set_use("agent", false);
+        assert!(!c.use_on("agent") && c.use_on("route_tools"));
+    }
+
+    #[test]
+    fn the_older_switches_are_read_and_kept_until_switched_again() {
+        let c: JudgeConfig = serde_yaml::from_str("provider: kev\nroute_tools: false\nbrowser_commitments: false").unwrap();
+        assert!(!c.use_on("route_tools") && !c.use_on("browser_commitment") && c.use_on("agent"));
+        let again: JudgeConfig = serde_yaml::from_str(&serde_yaml::to_string(&c).unwrap()).unwrap();
+        assert!(!again.use_on("route_tools"), "saving does not turn an old switch back on");
+        let mut c = again;
+        c.set_use("route_tools", true);
+        let yaml = serde_yaml::to_string(&c).unwrap();
+        assert!(!yaml.contains("route_tools: false") && c.use_on("route_tools"), "{yaml}");
+    }
+
+    #[test]
+    fn only_agent_is_for_agents_and_tool_choice_has_no_door() {
+        assert_eq!(JUDGE_USES.iter().filter(|u| u.for_agents).map(|u| u.id).collect::<Vec<_>>(), ["agent"]);
+        assert!(!judge_use("route_tools").unwrap().door);
+        assert!(JUDGE_USES.iter().all(|u| !u.sends.is_empty() && !u.label.is_empty()));
     }
 
     #[test]
@@ -173,7 +288,7 @@ mod tests {
         let c: JudgeConfig = serde_yaml::from_str("endpoint: \"http://127.0.0.1:8009\"").unwrap();
         assert!(c.enabled());
         assert_eq!(c.model, "kev-latest");
-        assert!(c.route_tools);
+        assert!(c.use_on("route_tools"));
         assert_eq!(c.route_at, 0.7);
     }
 }

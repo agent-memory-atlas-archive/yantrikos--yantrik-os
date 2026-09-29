@@ -154,10 +154,6 @@ pub enum CompanionCommand {
     SetJudge {
         config: yantrik_companion::config::JudgeConfig,
     },
-    /// Put one known question to the decision model in use, and say what came back.
-    TestJudge {
-        reply: crossbeam_channel::Sender<Result<yantrik_ml::judge::Verdict, String>>,
-    },
     /// Run a background think cycle.
     Think {
         /// Current interruptibility from FocusFlow (0.0 = deep work, 1.0 = normal).
@@ -307,6 +303,8 @@ pub struct CompanionBridge {
     /// The decision model the companion is set to, as Settings shows it: kept here so the UI
     /// thread reads it without a round trip to the worker. The worker's copy is the one used.
     judge: Arc<std::sync::Mutex<yantrik_companion::config::JudgeConfig>>,
+    /// The decision model in use, asked on the caller's thread (`yantrik_companion::decisions`).
+    decisions: yantrik_companion::decisions::Decisions,
 }
 
 /// A companion you can use from another thread.
@@ -319,9 +317,16 @@ pub struct CompanionHandle {
     cmd_tx: Sender<CompanionCommand>,
     online: Arc<AtomicBool>,
     board: crate::jobs::Board,
+    decisions: yantrik_companion::decisions::Decisions,
 }
 
 impl CompanionHandle {
+    /// The decision model in use, asked on the caller's thread: a decision never waits behind a
+    /// chat turn on the companion's.
+    pub fn decisions(&self) -> &yantrik_companion::decisions::Decisions {
+        &self.decisions
+    }
+
     /// Ask the companion something and wait for the finished answer.
     ///
     /// The worker streams tokens for the chat UI; a caller over RPC wants one reply, so the
@@ -575,6 +580,7 @@ impl CompanionBridge {
             cmd_tx: self.cmd_tx.clone(),
             online: self.online.clone(),
             board: self.board.clone(),
+            decisions: self.decisions.clone(),
         }
     }
 
@@ -595,10 +601,12 @@ impl CompanionBridge {
         let bus_w = event_bus.clone();
 
         let judge = Arc::new(std::sync::Mutex::new(config.judge.clone()));
+        let decisions = yantrik_companion::decisions::Decisions::default();
+        let decisions_w = decisions.clone();
         let self_tx = cmd_tx.clone();
         let board_w = board.clone();
         let worker_handle = std::thread::spawn(move || {
-            worker_loop(config, cmd_rx, self_tx, ui_weak, online_w, bond_w, ambient_w, bus_w, board_w);
+            worker_loop(config, cmd_rx, self_tx, ui_weak, online_w, bond_w, ambient_w, bus_w, board_w, decisions_w);
         });
 
         Self {
@@ -610,6 +618,7 @@ impl CompanionBridge {
             ambient,
             event_bus,
             judge,
+            decisions,
         }
     }
 
@@ -738,12 +747,10 @@ impl CompanionBridge {
         let _ = self.cmd_tx.send(CompanionCommand::SetJudge { config });
     }
 
-    /// Test the decision model in use: one known question, answered off the UI thread. `None`
-    /// when the companion did not answer within `wait`.
-    pub fn test_judge(&self, wait: std::time::Duration) -> Option<Result<yantrik_ml::judge::Verdict, String>> {
-        let (tx, rx) = crossbeam_channel::bounded(1);
-        self.cmd_tx.send(CompanionCommand::TestJudge { reply: tx }).ok()?;
-        rx.recv_timeout(wait).ok()
+    /// Test the decision model in use with one known question, on the calling thread (never the
+    /// UI's: it waits for the model).
+    pub fn test_judge(&self) -> Result<yantrik_ml::judge::Verdict, String> {
+        self.decisions.test()
     }
 
     /// Toggle incognito mode (no data persistence while active).
@@ -872,6 +879,7 @@ fn worker_loop(
     ambient: AmbientState,
     event_bus: yantrik_os::EventBus,
     board: crate::jobs::Board,
+    decisions: yantrik_companion::decisions::Decisions,
 ) {
     // Save config services before moving config into build_companion
     let config_services = config.enabled_services.clone();
@@ -884,7 +892,10 @@ fn worker_loop(
     // the difference between an OS that tells you the embedder is absent and one that looks
     // broken in sixteen places at once.
     let mut companion = match build_companion(config) {
-        Ok(c) => c,
+        Ok(mut c) => {
+            c.share_decisions(decisions);
+            c
+        }
         Err(why) => {
             tracing::error!(reason = %why, "Companion unavailable — answering every request with this");
             online.store(false, Ordering::Relaxed);
@@ -1433,9 +1444,6 @@ fn worker_loop(
                 companion.set_judge_config(config);
                 companion.save_config();
             }
-            Ok(CompanionCommand::TestJudge { reply }) => {
-                let _ = reply.send(companion.test_judge());
-            }
             Ok(CompanionCommand::ScoreConversationTurn { text }) => {
                 companion.score_conversation_turn(&text);
                 cached_bond.store(companion.bond_level().as_u8(), Ordering::Relaxed);
@@ -1446,12 +1454,13 @@ fn worker_loop(
                 let new_llm: std::sync::Arc<dyn yantrik_ml::LLMBackend> = std::sync::Arc::new(
                     yantrik_ml::ApiLLM::new(base_url.clone(), api_key.clone(), &model)
                 );
-                companion.swap_llm(new_llm);
-                // Update config in memory so it persists for next restart
+                // Update config in memory so it persists for next restart. First: swap_llm
+                // rebuilds a chat-model decision model, whose locality is read from it.
                 companion.config.llm.backend = "api".into();
                 companion.config.llm.api_base_url = Some(base_url);
                 companion.config.llm.api_model = Some(model);
                 companion.config.llm.api_key = api_key;
+                companion.swap_llm(new_llm);
                 // Save config to disk
                 companion.save_config();
                 online.store(true, Ordering::Relaxed);
@@ -3196,6 +3205,7 @@ mod ask_tests {
             cmd_tx,
             online: Arc::new(AtomicBool::new(true)),
             board: crate::jobs::Board::new(),
+            decisions: yantrik_companion::decisions::Decisions::default(),
         }
     }
 

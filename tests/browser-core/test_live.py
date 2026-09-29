@@ -68,7 +68,7 @@ class Bench:
                 break
             except cdp.BrowserClosed:
                 time.sleep(0.2)
-        cls.d = drv.Driver(cdp.Browser(cls.cdp))
+        cls.d = drv.Driver(cdp.Browser(cls.cdp), judge=False)
 
     @classmethod
     def stop(cls):
@@ -280,7 +280,10 @@ class Tricks(unittest.TestCase):
         self.fail("no %r in %s" % (name, [e.get("name") for e in self.d.read(all=True)["elements"]]))
 
     def title(self):
-        return self.d.read()["title"]
+        """What the page's log says a press did: "untouched" when nothing was pressed. (The page's
+        own title cannot be set: its <img name="title"> shadows document.title, on purpose.)"""
+        text = self.d.text()["text"]
+        return "Tricky Page" if "untouched" in text else text
 
     def refused(self, fn, *args, **kwargs):
         with self.assertRaises(drv.PageRefused) as caught:
@@ -354,6 +357,72 @@ class Tricks(unittest.TestCase):
                   and e["name"] != "Buy now")
         self.assertIn("commitment", zw, "a zero-width space does not hide Buy")
         self.assertIn("Submit", by, "an input type=submit with no value is named as the browser names it")
+
+
+class ModelJudges(unittest.TestCase):
+    """The decision model, asked when the words say nothing (judgement.py). A stand-in answers
+    here: yes when the text around the control says the card will be charged, and an abstention
+    otherwise — the verdict's wire form, as the shell's `decide` gives it."""
+
+    @classmethod
+    def setUpClass(cls):
+        from yantrik_browser import judgement
+        cls.site = Bench.site
+        cls.asked = []
+
+        def fake(state):
+            cls.asked.append(state)
+            charged = "charged" in state.get("nearby_text", "")
+            answer = {"type": "noul", "yes": 0.92} if charged else {"type": "abstain", "reason": "could not tell"}
+            return {"result": {"result": {"answers": {"commit": answer},
+                                          "by": {"provider": "kev", "model": "kev-latest"}}}}
+        cls.d = drv.Driver(Bench.d.browser, judge=judgement.Judgement(ask=fake))
+
+    def ref(self, name):
+        for e in self.d.read(all=True)["elements"]:
+            if e.get("name") == name:
+                return e["ref"]
+        self.fail("no %r" % name)
+
+    def test_a_commitment_the_words_miss_is_caught_by_the_model(self):
+        self.d.go(self.site + "/pages/tricky.html")
+        with self.assertRaises(drv.PageRefused) as caught:
+            self.d.click(self.ref("Continue"))
+        self.assertIn("judged a commitment by kev kev-latest", str(caught.exception))
+        self.assertIn("untouched", self.d.text()["text"], "nothing was charged")
+        state = self.asked[-1]
+        self.assertEqual(state["control"]["label"], "Continue")
+        self.assertIn("Payment", state["page"]["heading"])
+
+    def test_an_abstention_leaves_the_press_to_the_words(self):
+        self.d.go(self.site + "/pages/tricky.html")
+        self.d.click(self.ref("Next chapter"))
+        self.assertIn("NEXT CHAPTER", self.d.text()["text"])
+
+    def test_the_model_cannot_take_away_a_card_the_words_raise(self):
+        from yantrik_browser import judgement
+        no = lambda state: {"result": {"result": {"answers": {"commit": {"type": "noul", "yes": 0.0}}, "by": {}}}}
+        d = drv.Driver(Bench.d.browser, judge=judgement.Judgement(ask=no))
+        d.go(self.site + "/pages/shop.html")
+        place = next(e["ref"] for e in d.read(all=True)["elements"] if e.get("name") == "Place order")
+        with self.assertRaises(drv.PageRefused):
+            d.click(place)
+
+    def test_a_link_that_navigates_is_not_put_to_the_model(self):
+        self.asked.clear()
+        self.d.go(self.site + "/pages/shop.html")
+        self.d.click(next(e["ref"] for e in self.d.read(all=True)["elements"] if e.get("name") == "Other page"))
+        self.assertEqual(self.asked, [])
+
+    def test_no_shell_to_ask_is_the_words_alone(self):
+        from yantrik_browser import judgement
+
+        def down(state):
+            raise ConnectionError("no shell")
+        d = drv.Driver(Bench.d.browser, judge=judgement.Judgement(ask=down))
+        d.go(self.site + "/pages/tricky.html")
+        d.click(next(e["ref"] for e in d.read(all=True)["elements"] if e.get("name") == "Next chapter"))
+        self.assertIn("NEXT CHAPTER", d.text()["text"])
 
 
 class OverTheSocket(unittest.TestCase):

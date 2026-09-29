@@ -8,17 +8,12 @@
 //! What this screen never takes is a key: only the name of the environment variable that holds
 //! one. A value that looks like a key is refused, so it is not written into a config file.
 
-use std::time::Duration;
-
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
-use yantrik_companion::config::{JudgeConfig, JudgeKind, JUDGE_PRESETS as PRESETS};
+use yantrik_companion::config::{JudgeConfig, JudgeKind, JUDGE_PRESETS as PRESETS, JUDGE_USES};
 use yantrik_ml::judge::{Answer, Locality};
 
 use crate::app_context::AppContext;
-use crate::{App, DecisionPreset};
-
-/// How long Test waits for the companion and the model together.
-const TEST_WAIT: Duration = Duration::from_secs(20);
+use crate::{App, DecisionPreset, DecisionUse};
 
 /// The provider id Settings shows as chosen for a configuration.
 fn provider_of(config: &JudgeConfig) -> &'static str {
@@ -62,8 +57,11 @@ fn push(ui: &App, config: &JudgeConfig) {
     ui.set_settings_decision_endpoint(config.endpoint.as_str().into());
     ui.set_settings_decision_model(config.model.as_str().into());
     ui.set_settings_decision_key_env(config.api_key_env.as_str().into());
-    ui.set_settings_decision_route_tools(config.route_tools);
-    ui.set_settings_decision_browser_commitments(config.browser_commitments);
+    let uses: Vec<DecisionUse> = JUDGE_USES
+        .iter()
+        .map(|u| DecisionUse { id: u.id.into(), label: u.label.into(), sends: u.sends.into(), on: config.use_on(u.id) })
+        .collect();
+    ui.set_settings_decision_uses(ModelRc::new(VecModel::from(uses)));
     let (note, leaves) = where_note(config);
     ui.set_settings_decision_where(note.into());
     ui.set_settings_decision_leaves_machine(leaves);
@@ -114,10 +112,9 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         let bridge = bridge.clone();
         let weak = weak.clone();
         std::thread::spawn(move || {
-            let (text, good) = match bridge.test_judge(TEST_WAIT) {
-                None => ("The companion did not answer in time.".to_string(), false),
-                Some(Err(why)) => (format!("No answer: {why}"), false),
-                Some(Ok(v)) => match v.get("commit") {
+            let (text, good) = match bridge.test_judge() {
+                Err(why) => (format!("No answer: {why}"), false),
+                Ok(v) => match v.get("commit") {
                     Some(Answer::Noul(p)) => (
                         format!("Answered in {} ms ({} {}): \"Place your order\" is a commitment, p = {:.2}{}",
                                 v.latency_ms, v.by.provider, v.by.model, p,
@@ -137,20 +134,10 @@ pub fn wire(ui: &App, ctx: &AppContext) {
 
     let bridge = ctx.bridge.clone();
     let weak = ui.as_weak();
-    ui.on_decision_toggle_route_tools(move || {
+    ui.on_decision_toggle_use(move |id| {
         let mut config = bridge.judge_config();
-        config.route_tools = !config.route_tools;
-        bridge.set_judge(config.clone());
-        if let Some(ui) = weak.upgrade() {
-            push(&ui, &config);
-        }
-    });
-
-    let bridge = ctx.bridge.clone();
-    let weak = ui.as_weak();
-    ui.on_decision_toggle_browser_commitments(move || {
-        let mut config = bridge.judge_config();
-        config.browser_commitments = !config.browser_commitments;
+        let on = config.use_on(&id);
+        config.set_use(&id, !on);
         bridge.set_judge(config.clone());
         if let Some(ui) = weak.upgrade() {
             push(&ui, &config);

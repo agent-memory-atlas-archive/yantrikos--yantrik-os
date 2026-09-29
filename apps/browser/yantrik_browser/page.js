@@ -260,9 +260,27 @@
     return null;
   };
 
+  // What is around a control, for a judge deciding what pressing it does: the heading it sits
+  // under and the text of the form, dialog or section that holds it.
+  const HEADINGS = 'h1,h2,h3,h4,[role="heading"]';
+  const contextOf = (el) => {
+    let heading = '';
+    for (let up = el, n = 0; up && !heading && n < 12; up = up.parentElement, n++) {
+      for (let sib = up.previousElementSibling, m = 0; sib && m < 20; sib = sib.previousElementSibling, m++) {
+        const h = sib.matches(HEADINGS) ? sib : Array.from(sib.querySelectorAll(HEADINGS)).pop();
+        if (h) { heading = textOf(h); break; }
+      }
+    }
+    const box = el.closest('form,[role="dialog"],dialog,fieldset,section,article,li') || el.parentElement;
+    return { heading: clean(heading, 160), nearby: clean(box ? (box.innerText || '') : '', 400) };
+  };
+
   const describeControl = (c) => {
     const role = roleOf(c) || 'clickable';
     const d = { ref: refOf(c), role, name: nameOf(c) };
+    const ctx = contextOf(c);
+    d.heading = ctx.heading;
+    d.nearby = ctx.nearby;
     if (c.tagName === 'A') {
       const link = linkOf(c);
       if (link.href) d.href = link.href;
@@ -445,6 +463,9 @@
     const role = roleOf(el) || 'clickable';
     const e = { ref, role, name: nameOf(el), x, y, box: [Math.round(r.left + f.ox), Math.round(r.top + f.oy), Math.round(r.width), Math.round(r.height)] };
     if (el.tagName === 'IFRAME' || el.tagName === 'FRAME') e.frame_element = true;
+    const ctx = contextOf(el);
+    e.heading = ctx.heading;
+    e.nearby = ctx.nearby;
     if (CONTEXT_ROLES.has(role)) e.not_a_control = true;
     if (el.tagName === 'A') {
       const link = linkOf(el);

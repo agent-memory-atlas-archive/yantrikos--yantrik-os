@@ -24,12 +24,14 @@
 
 mod adapters;
 mod verdict;
+mod wire;
 
 #[cfg(feature = "api-llm")]
 mod systemone;
 
 pub use adapters::{ChatJudge, OffJudge};
 pub use verdict::{JudgeInfo, Locality, Verdict};
+pub use wire::questions_from_json;
 
 #[cfg(feature = "api-llm")]
 pub use systemone::{Dialect, SystemOneJudge};

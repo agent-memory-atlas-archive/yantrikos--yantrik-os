@@ -594,6 +594,8 @@ pub struct CompanionService {
 
     // A System One model (Jev, Kev, ...) that picks the tool a request needs, when configured.
     judge: Option<std::sync::Arc<dyn yantrik_ml::judge::Judge>>,
+    // The same model, its uses and incognito, published for callers on other threads.
+    decisions: crate::decisions::Decisions,
 
     // Model family for family-aware chat templates (tool format, tool results).
     model_family: ModelFamily,
@@ -807,7 +809,9 @@ impl CompanionService {
         // Full tool set discoverable via discover_tools meta-tool.
         let max_perm = parse_permission(&config.tools.max_permission);
         let use_native_tools = llm.backend_name() == "api" && capability_profile.uses_native_tools();
-        let judge = crate::judge_route::build_judge(&config.judge, &llm, config.llm.api_base_url.as_deref());
+        let judge = crate::judge_route::build_judge(&config.judge, &llm, crate::judge_route::chat_locality(&config.llm));
+        let decisions = crate::decisions::Decisions::default();
+        decisions.publish(judge.clone(), &config.judge, false);
         if let Some(j) = &judge {
             let info = j.info();
             tracing::info!(adapter = info.adapter, provider = %info.provider, model = %info.model,
@@ -935,6 +939,7 @@ impl CompanionService {
             skill_extra_tools: Vec::new(),
             use_native_tools,
             judge,
+            decisions,
             model_family: capability_profile.family,
             task_manager: std::sync::Mutex::new(task_mgr),
             recent_events: Vec::new(),
@@ -1172,6 +1177,7 @@ impl CompanionService {
     /// Toggle incognito mode (no data persistence).
     pub fn set_incognito(&mut self, enabled: bool) {
         self.incognito = enabled;
+        self.publish_decisions();
         tracing::info!(enabled, "Incognito mode toggled");
     }
 
@@ -1189,7 +1195,8 @@ impl CompanionService {
         self.llm = new_llm;
         // A decision model that is the chat model follows it.
         if self.config.judge.kind() == yantrik_companion_core::judge_config::JudgeKind::ChatModel {
-            self.judge = crate::judge_route::build_judge(&self.config.judge, &self.llm, self.config.llm.api_base_url.as_deref());
+            self.judge = crate::judge_route::build_judge(&self.config.judge, &self.llm, crate::judge_route::chat_locality(&self.config.llm));
+            self.publish_decisions();
         }
         tracing::info!(model = %model_id, "LLM backend swapped");
     }
@@ -1197,8 +1204,9 @@ impl CompanionService {
     /// Switch the decision model at runtime, from Settings. `None` of a judge is Off: every
     /// caller decides as it would without one.
     pub fn set_judge_config(&mut self, config: yantrik_companion_core::judge_config::JudgeConfig) {
-        self.judge = crate::judge_route::build_judge(&config, &self.llm, self.config.llm.api_base_url.as_deref());
+        self.judge = crate::judge_route::build_judge(&config, &self.llm, crate::judge_route::chat_locality(&self.config.llm));
         self.config.judge = config;
+        self.publish_decisions();
         match &self.judge {
             Some(j) => {
                 let info = j.info();
@@ -1214,23 +1222,21 @@ impl CompanionService {
         self.judge.as_ref().map(|j| j.info())
     }
 
-    /// One known question to the decision model in use, for Settings' Test button. The answer
-    /// is known (pressing "Place order" on a checkout spends money), so a result far from yes says
-    /// the model is misconfigured, not only that it answered.
-    pub fn test_judge(&self) -> Result<yantrik_ml::judge::Verdict, String> {
-        let judge = self.judge.as_ref().ok_or("no decision model is set")?;
-        let state = serde_json::json!({
-            "control": {"role": "button", "label": "Place your order"},
-            "page": {"title": "Checkout", "heading": "Review your order"},
-            "nearby_text": "Order total: $42.17",
-        });
-        let verdict = judge.decide(&state, &[("commit", yantrik_ml::judge::Question::Noul {
-            instructions: "Would pressing this control spend money or place an order?".into(),
-        })]);
-        match verdict.get("commit") {
-            Some(yantrik_ml::judge::Answer::Abstain { reason }) => Err(reason.clone()),
-            _ => Ok(verdict),
-        }
+    /// The decision model, its uses and incognito, for callers on other threads: they ask there,
+    /// never waiting behind a chat turn here.
+    pub fn decisions(&self) -> crate::decisions::Decisions {
+        self.decisions.clone()
+    }
+
+    /// Publish decisions to `desk` from now on: the bridge's, made before this companion was
+    /// built on its worker thread, so it could hand the desk out already.
+    pub fn share_decisions(&mut self, desk: crate::decisions::Decisions) {
+        self.decisions = desk;
+        self.publish_decisions();
+    }
+
+    fn publish_decisions(&self) {
+        self.decisions.publish(self.judge.clone(), &self.config.judge, self.incognito);
     }
 
     /// Persist the current config to disk (config.yaml).
