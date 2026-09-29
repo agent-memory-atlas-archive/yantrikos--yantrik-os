@@ -1928,6 +1928,53 @@ private_config() {
   fi
 }
 
+# The egress proxy (design/mind-egress-2026-09-29.md): its own account, a drop-in naming the
+# desktop's owner (who may use its control socket beside root), and the unit on. It starts by
+# watching, so turning it on changes nothing the mind can do; it only counts where it goes. The
+# unit itself is shipped and installed with the mind's (reconcile_mind_units).
+EGRESS_UNIT=/etc/systemd/system/yantrik-egress.service
+reconcile_egress() {
+  [ "$(id -u)" = 0 ] || return 0
+  tree_is_roots || return 0
+  [ -f "$EGRESS_UNIT" ] && [ -x "$PREFIX/bin/yantrik-egress" ] || return 0
+  local owner owner_uid="" dropin want changed=0
+  # The account and the unit come first, whatever else is known: the mind's unit wants this one
+  # and points its proxy variables here, so a proxy that is not running is a mind with no network.
+  if ! getent passwd yantrik-egress >/dev/null 2>&1; then
+    useradd --system --user-group --home-dir /nonexistent --no-create-home \
+      --shell /usr/sbin/nologin --comment "Yantrik egress" yantrik-egress \
+      || { warn "could not create the account yantrik-egress; the egress proxy is not set up"; return 0; }
+    info "created the egress account yantrik-egress"
+  fi
+  # The owner may use the control socket beside root. Not known: root only, until it is.
+  owner="$(desktop_owner)"
+  case "$owner" in
+    ''|root|*[!a-z0-9_-]*) warn "cannot tell whose desktop this is; only root can change where the mind may connect" ;;
+    *) owner_uid="$(id -u "$owner" 2>/dev/null)" ;;
+  esac
+  case "$owner_uid" in *[!0-9]*) owner_uid="" ;; esac
+  dropin="$EGRESS_UNIT.d/owner.conf"
+  if [ -n "$owner_uid" ]; then
+    want="# Made by yantrik-update: the desktop's owner, who may use the control socket beside root.
+[Service]
+Environment=EGRESS_OWNER_UID=$owner_uid"
+    if [ "$(cat "$dropin" 2>/dev/null)" != "$want" ]; then
+      install -d -m 0755 -o root -g root "$EGRESS_UNIT.d"
+      printf '%s\n' "$want" > "$dropin" && chmod 0644 "$dropin" && changed=1
+    fi
+  elif [ -e "$dropin" ]; then
+    rm -f "$dropin" && changed=1
+  fi
+  [ "$changed" = 1 ] && systemctl daemon-reload >/dev/null 2>&1
+  systemctl enable yantrik-egress.service >/dev/null 2>&1 || warn "could not enable yantrik-egress.service"
+  if [ "$changed" = 1 ]; then
+    systemctl restart yantrik-egress.service >/dev/null 2>&1 || warn "yantrik-egress.service did not start"
+  else
+    systemctl start yantrik-egress.service >/dev/null 2>&1 || warn "yantrik-egress.service did not start"
+  fi
+  return 0
+}
+
 reconcile_private_dirs() {
   [ "$(id -u)" = 0 ] || return 0
   tree_is_roots || return 0
@@ -2189,6 +2236,7 @@ cmd_migrate_minds() {
   reconcile_minds
   reconcile_devtools_guard
   reconcile_mind_units
+  reconcile_egress
   # Before the mind runs as an account of its own: from then on a directory anyone can write is
   # one the mind can write.
   reconcile_private_dirs
@@ -2263,6 +2311,7 @@ cmd_reconcile() {
   reconcile_minds
   reconcile_devtools_guard
   reconcile_mind_units
+  reconcile_egress
   reconcile_private_dirs
   private_config
   reconcile_registries
