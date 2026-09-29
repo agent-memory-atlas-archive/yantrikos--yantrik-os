@@ -1825,16 +1825,18 @@ DEVTOOLS_UNIT=/etc/systemd/system/yantrik-devtools-guard.service
 
 devtools_guard_text() {
   cat <<EOF
-# Yantrik OS: the browsers' DevTools ports (9222-9322 on loopback) are opened and answered by
-# root and $1 only; minds use the browser's surface at the mind door. Made by yantrik-update;
-# edits here are put back at the next update.
+# Yantrik OS: the browsers' DevTools ports (9222-9322 on loopback) and the VNC ports (5900-5909,
+# wayvnc's, which ask no password on loopback) are opened and answered by root and $1 only: either
+# is the whole desktop to whoever reaches it, past the mind door, the cards and Private mode.
+# Minds use the browser's surface at the mind door. Made by yantrik-update; edits here are put
+# back at the next update.
 table inet yantrik_devtools
 delete table inet yantrik_devtools
 table inet yantrik_devtools {
 	chain output {
 		type filter hook output priority filter; policy accept;
-		oifname "lo" tcp dport 9222-9322 meta skuid != { $2 } reject with tcp reset
-		oifname "lo" tcp sport 9222-9322 meta skuid != { $3 } drop
+		oifname "lo" tcp dport { 5900-5909, 9222-9322 } meta skuid != { $2 } reject with tcp reset
+		oifname "lo" tcp sport { 5900-5909, 9222-9322 } meta skuid != { $3 } drop
 	}
 }
 EOF
