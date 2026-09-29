@@ -332,11 +332,14 @@ class Action:
     `settled: false`, and a caller watches for the result instead of mistaking the call for
     it); `expected_seconds` says how long it usually takes to settle, so a caller can size its
     wait. `timeout` is how long the app's thread gets before the caller hears it did not
-    answer; it is not published.
+    answer; it is not published. `open_ended=True` declares that the action runs whatever it is
+    given — a command line, a script, keystrokes into a shell — and says so at the end of the
+    description (`gate.OPEN_ENDED`, as the Rust `Action::open_ended()` does), which is what the
+    gate reads: asked about once per session, a session rule covering the rest.
     """
 
     def __init__(self, name, description, grade="standard", params=(), *, settles="on return",
-                 expected_seconds=None, timeout=None):
+                 expected_seconds=None, timeout=None, open_ended=False):
         if not isinstance(name, str) or not name.strip() or name != name.strip():
             raise ValueError("an action needs a name without surrounding spaces")
         if not isinstance(description, str):
@@ -363,7 +366,7 @@ class Action:
                 raise ValueError("`%s` declares `%s` twice" % (name, p.name))
             seen.add(p.name)
         self.name = name
-        self.description = description
+        self.description = gate.with_open_ended(description) if open_ended else description
         self.permission = grade
         self.params = params
         self.settles = settles
@@ -457,7 +460,8 @@ def _type_of(annotation, default, where):
 
 
 def action_from_function(fn, name=None, *, grade="standard", settles="on return",
-                         expected_seconds=None, description=None, params=None, timeout=None):
+                         expected_seconds=None, description=None, params=None, timeout=None,
+                         open_ended=False):
     """An `Action` read off a Python function: its parameters from the signature — types from
     the hints (str, int, float, bool, Literal[...] as an enum, list[...], dict; `Optional` is
     the type inside it), defaults published, `Annotated[T, "..."]` or `params={name: "..."}`
@@ -495,7 +499,7 @@ def action_from_function(fn, name=None, *, grade="standard", settles="on return"
         raise TypeError("`%s` describes %s, which it does not take"
                         % (name, ", ".join("`%s`" % n for n in sorted(notes))))
     return Action(name, description, grade, declared, settles=settles,
-                  expected_seconds=expected_seconds, timeout=timeout)
+                  expected_seconds=expected_seconds, timeout=timeout, open_ended=open_ended)
 
 
 # ── the surface ──────────────────────────────────────────────────────────────
@@ -559,14 +563,14 @@ class Surface:
         return fn
 
     def action(self, name=None, *, grade="standard", settles="on return", expected_seconds=None,
-               description=None, params=None, timeout=None):
+               description=None, params=None, timeout=None, open_ended=False):
         """Decorator: publish a function as an action. Its arguments come from the signature;
         it is called with them by name, and what it returns is the answer's `result`."""
         def register(fn):
             spec = action_from_function(
                 fn, name if isinstance(name, str) else None, grade=grade, settles=settles,
                 expected_seconds=expected_seconds, description=description, params=params,
-                timeout=timeout)
+                timeout=timeout, open_ended=open_ended)
             self.add_action(spec, lambda args: fn(**args))
             return fn
         if callable(name):

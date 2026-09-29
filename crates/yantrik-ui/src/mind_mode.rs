@@ -189,8 +189,8 @@ impl Mode {
         match self {
             Mode::Plan => "Look, don't touch. It can read anything and change nothing.",
             Mode::Ask => "It asks you before anything that could matter.",
-            Mode::Auto => "It gets on with things. You are still asked about the destructive ones.",
-            Mode::Bypass => "It does not ask, except before anything an app marks as impossible to undo, such as a purchase or a calendar delete.",
+            Mode::Auto => "It gets on with things. You are still asked about the destructive ones, and once per session before it runs commands.",
+            Mode::Bypass => "It does not ask, except before anything an app marks as impossible to undo, such as a purchase or a calendar delete, and once per session before running commands.",
             Mode::BypassAll => "It does not ask. Everything the machine allows, it does, including what an app marks as impossible to undo.",
         }
     }
@@ -288,6 +288,37 @@ fn unix_now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// What an action's own published description declares, as the two facts the table reads.
+///
+/// Worked out by the caller from the app's sentence — [`approvals::unrecoverable`] and
+/// [`approvals::open_ended`] — because this runs inside the mode lock and reading another app's
+/// surface does not belong there. A plain `bool` converts to "cannot be undone, and nothing
+/// else", which is what every caller passed before commands became a second input.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Declared {
+    /// Its description says it cannot be taken back. Always asks; no session rule answers it.
+    pub cannot_be_undone: bool,
+    /// Its description says it runs whatever it is given (`gate::OPEN_ENDED`). Asks once in ask,
+    /// auto and bypass, and a session rule answers the rest (Pranab's decision, 29 Sep 2026).
+    pub open_ended: bool,
+}
+
+impl From<bool> for Declared {
+    fn from(cannot_be_undone: bool) -> Self {
+        Declared { cannot_be_undone, open_ended: false }
+    }
+}
+
+impl Declared {
+    /// Both facts, read from one published sentence the one way the machine reads it.
+    pub fn from_purpose(purpose: &str) -> Self {
+        Declared {
+            cannot_be_undone: approvals::unrecoverable(purpose),
+            open_ended: approvals::open_ended(purpose),
+        }
+    }
 }
 
 /// What [`Modes::decide`] answers.
@@ -601,16 +632,19 @@ impl Modes {
     /// purpose, and it is a parameter rather than something this function looks up because the
     /// shell cannot read another app's surface from inside a lock. It is passed as the fact it
     /// is, not as the sentence it came from, so there is exactly one place on this machine that
-    /// turns a published sentence into a decision. See [`decide`], the one caller.
+    /// turns a published sentence into a decision. See [`decide`], the one caller. `declared`
+    /// carries it beside the app's other word, that the action runs whatever it is given; a
+    /// `bool` is the first fact alone.
     pub fn decide(
         &self,
         grade: &str,
         app: &str,
         action: &str,
-        unrecoverable: bool,
+        declared: impl Into<Declared>,
         ceiling: &str,
         now: Instant,
     ) -> Decision {
+        let declared = declared.into();
         let Some(rank) = grade_rank(grade) else {
             return Decision::Refuse {
                 why: format!(
@@ -649,12 +683,21 @@ impl Modes {
         // happens to match — a `safe` action describing something else as permanent — must not
         // be able to turn a look into a question. (Nothing published on this OS today is both
         // `safe` and matching; see the design note.)
-        let irreversible = unrecoverable && rank > 0;
+        let irreversible = declared.cannot_be_undone && rank > 0;
+
+        // The app's other word: the action runs whatever it is given — a terminal's command
+        // line, an agent's shell — so it can do anything the person can (Pranab's decision of 29
+        // September 2026). Asked about in ask, auto and bypass like what cannot be undone, but
+        // answered by a session rule, so a mind asks once per session to run commands and not
+        // once per command. Where an action says both, cannot-be-undone wins: every time, and
+        // no rule.
+        let open = declared.open_ended && rank > 0 && !irreversible;
 
         // What `ask` mode would have done. This is what the audit log records, and it is also
-        // the only place the phrase "unasked" means anything. It carries `irreversible` so that
-        // an action `ask` would now have stopped for is still logged when a looser mode runs it.
-        let would_ask = rank >= SENSITIVE || irreversible;
+        // the only place the phrase "unasked" means anything. It carries `irreversible` and
+        // `open` so that an action `ask` would now have stopped for is still logged when a
+        // looser mode runs it.
+        let would_ask = rank >= SENSITIVE || irreversible || open;
 
         match self.mode(now) {
             Mode::Plan => {
@@ -677,9 +720,11 @@ impl Modes {
             // one question its confirmation says it keeps ("still asks if an app says it cannot
             // be undone"). Pranab's decision of 28 September 2026: the act a person handing
             // over the keys for an hour most wants a say in is the one that cannot be taken
-            // back. No session rule answers it (`ask_or_rule`), as in every other mode.
+            // back. No session rule answers it (`ask_or_rule`), as in every other mode. And it
+            // asks once before running commands — the rule, when the person gives one, answers
+            // the rest of the session.
             Mode::Bypass => {
-                if irreversible {
+                if irreversible || open {
                     self.ask_or_rule(app, action, irreversible)
                 } else {
                     Decision::Run { unasked: would_ask }
@@ -692,7 +737,7 @@ impl Modes {
             // instead — `would_ask` is true here, so it lands in the audit.
             Mode::BypassAll => Decision::Run { unasked: would_ask },
             Mode::Auto => {
-                if rank >= DANGEROUS || irreversible {
+                if rank >= DANGEROUS || irreversible || open {
                     self.ask_or_rule(app, action, irreversible)
                 } else {
                     Decision::Run { unasked: would_ask }
@@ -831,9 +876,9 @@ fn unasked_phrase(count: usize) -> String {
 /// over a socket and this runs inside the mode lock. `control_approvals::request_approval` is
 /// the only caller; it reads the purpose the app itself publishes and does not take the
 /// requester's word for it.
-pub fn decide(grade: &str, app: &str, action: &str, unrecoverable: bool) -> Decision {
+pub fn decide(grade: &str, app: &str, action: &str, declared: impl Into<Declared>) -> Decision {
     let ceiling = crate::control_approvals::machine_ceiling();
-    locked().decide(grade, app, action, unrecoverable, &ceiling, Instant::now())
+    locked().decide(grade, app, action, declared, &ceiling, Instant::now())
 }
 
 /// Lower the mode from the socket. See [`Modes::lower_to`]; raising is refused.
@@ -1390,6 +1435,61 @@ mod mind_mode_tests {
             Decision::Ask,
             "and one the app says cannot be undone is what the menu already promised"
         );
+    }
+
+    /// Pranab's decision of 29 September 2026, as a table: an action that runs whatever it is
+    /// given asks once in ask, auto and bypass, full bypass runs it (written down), plan refuses
+    /// it — and a read is a read.
+    #[test]
+    fn mind_mode_a_command_that_can_do_anything_asks_once_per_session() {
+        let now = Instant::now();
+        let open = Declared { cannot_be_undone: false, open_ended: true };
+        for mode in Mode::ALL {
+            let mut modes = at(Mode::Ask);
+            modes.person_set_mode(mode, Bypass::Hour, now, 0);
+            assert_eq!(modes.decide("safe", "terminal", "read", open, "dangerous", now), Decision::Run { unasked: false }, "{mode:?}");
+            for grade in ["standard", "sensitive"] {
+                let got = modes.decide(grade, "terminal", "run", open, "dangerous", now);
+                match mode {
+                    Mode::Plan => assert!(matches!(got, Decision::Refuse { .. }), "{mode:?}/{grade}: {got:?}"),
+                    Mode::BypassAll => assert_eq!(got, Decision::Run { unasked: true }, "{mode:?}/{grade}"),
+                    _ => assert_eq!(got, Decision::Ask, "{mode:?}/{grade}"),
+                }
+            }
+            // With the person's "Allow for this session", the rest of the session runs — logged.
+            modes.rules = vec![Rule { app: "terminal".into(), action: "run".into() }];
+            let ruled = modes.decide("sensitive", "terminal", "run", open, "dangerous", now);
+            match mode {
+                Mode::Plan => assert!(matches!(ruled, Decision::Refuse { .. })),
+                _ => assert_eq!(ruled, Decision::Run { unasked: true }, "{mode:?}: the rule covers it"),
+            }
+        }
+        // The card offers the rule for it: an open-ended action is not one of the two exclusions.
+        let run = "Type a command line into the active shell. What it runs can do anything you can.";
+        assert!(approvals::open_ended(run) && approvals::may_offer_session_rule("sensitive", run));
+        let mut modes = at(Mode::Ask);
+        modes.person_add_rule("terminal", "run", "sensitive", run).expect("a person may allow it for the session");
+    }
+
+    /// Where an action says both, cannot-be-undone wins: it asks every time, and no rule — the
+    /// card would not offer one — answers it, in any mode but full bypass.
+    #[test]
+    fn mind_mode_what_cannot_be_undone_wins_over_a_command() {
+        let now = Instant::now();
+        let both = Declared { cannot_be_undone: true, open_ended: true };
+        for mode in [Mode::Ask, Mode::Auto, Mode::Bypass] {
+            let mut modes = at(Mode::Ask);
+            modes.rules = vec![Rule { app: "terminal".into(), action: "run_and_clean".into() }];
+            modes.person_set_mode(mode, Bypass::Hour, now, 0);
+            assert_eq!(modes.decide("sensitive", "terminal", "run_and_clean", both, "dangerous", now), Decision::Ask, "{mode:?}");
+        }
+        let mut full = at(Mode::Ask);
+        full.person_set_mode(Mode::BypassAll, Bypass::Hour, now, 0);
+        assert_eq!(full.decide("sensitive", "terminal", "run_and_clean", both, "dangerous", now), Decision::Run { unasked: true });
+        let said = "Run it, then delete what it made. It cannot be undone. What it runs can do anything you can.";
+        assert!(!approvals::may_offer_session_rule("sensitive", said));
+        assert_eq!(Declared::from_purpose(said), both);
+        assert_eq!(Declared::from(true), Declared { cannot_be_undone: true, open_ended: false });
     }
 
     /// Nothing above the machine ceiling is put in front of a person, this rule included.
@@ -2224,11 +2324,13 @@ mod mind_mode_tests {
     /// looks at what they mean — but a vector reading `calendar.delete_event` beside
     /// `"unrecoverable": true` is one a person can check against a real machine, and one
     /// reading `files.move` beside it is not.
-    fn subject(unrecoverable: bool) -> (&'static str, &'static str) {
-        if unrecoverable {
-            ("calendar", "delete_event")
-        } else {
-            ("files", "move")
+    fn subject(unrecoverable: bool, open: bool) -> (&'static str, &'static str) {
+        match (unrecoverable, open) {
+            (false, false) => ("files", "move"),
+            (true, false) => ("calendar", "delete_event"),
+            (false, true) => ("terminal", "run"),
+            // Says both, and cannot-be-undone must win: no real action on this OS does yet.
+            (true, true) => ("terminal", "run_and_clean"),
         }
     }
 
@@ -2248,7 +2350,10 @@ mod mind_mode_tests {
         // rather than a property of one named case, because it decides the table now (`auto`
         // asks about such an action exactly as it asks about a `dangerous` one) and a dimension
         // that only varies along one other dimension proves nothing about the corners.
-        let undoable = [false, true];
+        //
+        // And whether it says it runs whatever it is given (29 September 2026), crossed with the
+        // first so the corner where both are said — cannot-be-undone wins — is generated too.
+        let said = [(false, false), (true, false), (false, true), (true, true)];
 
         // (name, the rules the shell would be publishing for THIS subject)
         let rule_cases: &[(&str, fn(&str, &str) -> Vec<(String, String)>)] = &[
@@ -2260,8 +2365,8 @@ mod mind_mode_tests {
 
         for mode in modes_all {
             for grade in grades {
-                for cannot_undo in undoable {
-                    let (app, action) = subject(cannot_undo);
+                for (cannot_undo, open) in said {
+                    let (app, action) = subject(cannot_undo, open);
                     for ceiling in ceilings {
                         for (rule_name, make_rules) in rule_cases {
                             let rules = make_rules(app, action);
@@ -2269,14 +2374,14 @@ mod mind_mode_tests {
                                 rules.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
                             let modes = modes_for(mode, &borrowed, now);
                             let decision =
-                                modes.decide(grade, app, action, cannot_undo, ceiling, now);
+                                modes.decide(grade, app, action, Declared { cannot_be_undone: cannot_undo, open_ended: open }, ceiling, now);
                             // The id names every input, in the order the file's `_` note
                             // explains them, so a failing vector can be read without looking it
                             // up. `unrecoverable=` spells the field it comes from rather than
                             // an inverted word, because a file carrying both `undoable` and
                             // `unrecoverable` is one somebody reads the wrong way round once.
                             let id = format!(
-                                "act/{}/{grade}/unrecoverable={cannot_undo}/ceiling={ceiling}/rule={rule_name}",
+                                "act/{}/{grade}/unrecoverable={cannot_undo}/open_ended={open}/ceiling={ceiling}/rule={rule_name}",
                                 mode.as_str(),
                             );
                             out.push(serde_json::json!({
@@ -2293,6 +2398,7 @@ mod mind_mode_tests {
                                     .collect::<Vec<_>>(),
                                 "env_cap": serde_json::Value::Null,
                                 "unrecoverable": cannot_undo,
+                                "open_ended": open,
                                 "expect": outcome_of(&decision),
                             }));
                         }
@@ -2307,8 +2413,8 @@ mod mind_mode_tests {
         // happens when both do at once.
         for mode in modes_all {
             for grade in ["safe", "standard", "sensitive", "dangerous"] {
-                for cannot_undo in undoable {
-                    let (app, action) = subject(cannot_undo);
+                for (cannot_undo, open) in said {
+                    let (app, action) = subject(cannot_undo, open);
                     for cap in ["standard", "sensitive", "dangerous"] {
                         for (rule_name, make_rules) in &rule_cases[..2] {
                             let rules = make_rules(app, action);
@@ -2316,10 +2422,10 @@ mod mind_mode_tests {
                                 rules.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
                             let modes = modes_for(mode, &borrowed, now);
                             let decision =
-                                modes.decide(grade, app, action, cannot_undo, "dangerous", now);
+                                modes.decide(grade, app, action, Declared { cannot_be_undone: cannot_undo, open_ended: open }, "dangerous", now);
                             let decision = capped(decision, grade, Some(cap));
                             let id = format!(
-                                "cap/{}/{grade}/unrecoverable={cannot_undo}/cap={cap}/rule={rule_name}",
+                                "cap/{}/{grade}/unrecoverable={cannot_undo}/open_ended={open}/cap={cap}/rule={rule_name}",
                                 mode.as_str(),
                             );
                             out.push(serde_json::json!({
@@ -2336,6 +2442,7 @@ mod mind_mode_tests {
                                     .collect::<Vec<_>>(),
                                 "env_cap": cap,
                                 "unrecoverable": cannot_undo,
+                                "open_ended": open,
                                 "expect": outcome_of(&decision),
                             }));
                         }
@@ -2347,15 +2454,15 @@ mod mind_mode_tests {
         // A cap that is not on the ladder is not a permission to do anything, so it is treated
         // as unset rather than as whatever an index lookup would have done with it.
         for mode in modes_all {
-            for cannot_undo in undoable {
-                let (app, action) = subject(cannot_undo);
+            for (cannot_undo, open) in said {
+                let (app, action) = subject(cannot_undo, open);
                 let modes = modes_for(mode, &[], now);
                 let decision =
-                    modes.decide("sensitive", app, action, cannot_undo, "dangerous", now);
+                    modes.decide("sensitive", app, action, Declared { cannot_be_undone: cannot_undo, open_ended: open }, "dangerous", now);
                 let decision = capped(decision, "sensitive", Some("nonsense"));
                 out.push(serde_json::json!({
                     "id": format!(
-                        "cap/{}/sensitive/unrecoverable={cannot_undo}/cap=nonsense",
+                        "cap/{}/sensitive/unrecoverable={cannot_undo}/open_ended={open}/cap=nonsense",
                         mode.as_str(),
                     ),
                     "layer": "harness_cap",
@@ -2368,6 +2475,7 @@ mod mind_mode_tests {
                     "rules": Vec::<serde_json::Value>::new(),
                     "env_cap": "nonsense",
                     "unrecoverable": cannot_undo,
+                    "open_ended": open,
                     "expect": outcome_of(&decision),
                 }));
             }
@@ -2389,6 +2497,7 @@ mod mind_mode_tests {
                     "rules": Vec::<serde_json::Value>::new(),
                     "env_cap": serde_json::Value::Null,
                     "unrecoverable": false,
+                    "open_ended": false,
                     "expect": web_outcome(tool, mode),
                 }));
             }
@@ -2428,7 +2537,13 @@ mod mind_mode_tests {
              \x20   \"nothing, so matching wording cannot make one into a question.\",\n\
              \x20   \"\",\n\
              \x20   \"Since 28 September 2026 bypass asks about such an action too, and\",\n\
-             \x20   \"bypass_all (Full bypass) is the one mode that runs it unasked.\"\n\
+             \x20   \"bypass_all (Full bypass) is the one mode that runs it unasked.\",\n\
+             \x20   \"\",\n\
+             \x20   \"open_ended is approvals::open_ended over the same purpose: the action runs\",\n\
+             \x20   \"whatever it is given (gate::OPEN_ENDED, since 29 September 2026). Above\",\n\
+             \x20   \"safe it asks in ask, auto and bypass, and a session rule covers it;\",\n\
+             \x20   \"bypass_all runs it and plan refuses it. Where both are said,\",\n\
+             \x20   \"unrecoverable wins.\"\n\
              \x20 ],\n",
         );
         text.push_str(
@@ -2509,10 +2624,13 @@ mod mind_mode_tests {
             let mode = Mode::parse(&s("mode")).expect("a mode");
             let modes = modes_for(mode, &rules, now);
             let unrecoverable = v["unrecoverable"] == true;
+            let open_ended = v["open_ended"] == true;
             // The published sentence, read the way `request_approval` reads it, must agree with
-            // the fact the vector carries — one reading of the sentence on the machine.
+            // the facts the vector carries — one reading of the sentence on the machine.
             assert_eq!(approvals::unrecoverable(&s("purpose")), unrecoverable, "{}", s("id"));
-            let got = match modes.decide(&s("grade"), &app, &action, unrecoverable, &s("ceiling"), now) {
+            assert_eq!(approvals::open_ended(&s("purpose")), open_ended, "{}", s("id"));
+            let declared = Declared::from_purpose(&s("purpose"));
+            let got = match modes.decide(&s("grade"), &app, &action, declared, &s("ceiling"), now) {
                 Decision::Run { .. } => "run",
                 Decision::Ask => "ask",
                 Decision::Refuse { .. } => "refuse",

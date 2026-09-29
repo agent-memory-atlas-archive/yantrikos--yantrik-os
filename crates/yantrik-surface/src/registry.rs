@@ -159,6 +159,13 @@ impl<D: ?Sized, H: ?Sized> Registry<D, H> {
         self.grade_of(name).ok()
     }
 
+    /// The description this surface publishes for one of its own actions — the sentence the gate
+    /// reads for what cannot be undone and what runs whatever it is given — or `None` for an
+    /// action it does not have.
+    pub fn published_description(&self, name: &str) -> Option<String> {
+        self.actions.iter().find(|(a, _)| a.name == name).map(|(a, _)| a.description.clone())
+    }
+
     /// Re-declare the grade this surface publishes for one of its own actions, while it runs.
     ///
     /// A surface whose actions cost different amounts depending on how it is configured needs

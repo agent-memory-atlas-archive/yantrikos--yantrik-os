@@ -88,6 +88,32 @@ def unrecoverable(purpose):
     return any(phrase in lower for phrase in UNRECOVERABLE_PHRASES)
 
 
+# The sentence that declares an action open-ended — it runs whatever it is given, so it can do
+# anything the person can — as `control_surface::OPEN_ENDED` in the Rust contracts. `Action(...,
+# open_ended=True)` appends it; `open_ended()` looks for it; the gate asks about such an action
+# once, and a session rule covers the rest.
+OPEN_ENDED = "What it runs can do anything you can."
+
+
+def with_open_ended(description):
+    """`description` with the open-ended sentence said at its end, once — the Rust
+    `control_surface::with_open_ended`, character for character."""
+    description = description or ""
+    if OPEN_ENDED in description:
+        return description
+    said = description.rstrip()
+    if not said:
+        return OPEN_ENDED
+    stop = "" if said.endswith((".", "!", "?")) else "."
+    return "%s%s %s" % (said, stop, OPEN_ENDED)
+
+
+def open_ended(purpose):
+    """Does an action's own description declare that it runs whatever it is given? The one
+    sentence, case aside — `gate::open_ended`."""
+    return OPEN_ENDED.lower() in (purpose or "").lower()
+
+
 # ── the ceiling ──────────────────────────────────────────────────────────────
 
 
@@ -146,6 +172,11 @@ class Mode(NamedTuple):
     def asks_before_what_cannot_be_undone(self):
         """Whether this mode asks about an action whose own description says it cannot be
         undone. Every mode does but full bypass; an unknown name reads as `ask`, so it asks."""
+        return self.name != "bypass_all"
+
+    def asks_before_open_ended(self):
+        """Whether this mode asks about an action that runs whatever it is given. Every mode
+        does but full bypass — and, unlike what cannot be undone, a session rule answers it."""
         return self.name != "bypass_all"
 
     def covers(self, app, action):
@@ -511,7 +542,11 @@ def decide(authority, app_id, action, graded, purpose=""):
         return None
     mode = authority.mode
     irreversible = level > 0 and unrecoverable(purpose)
+    # Cannot-be-undone wins where an action says both: that one always asks, this one a
+    # session rule answers.
+    runs_anything = level > 0 and not irreversible and open_ended(purpose)
     asks = ((irreversible and mode.asks_before_what_cannot_be_undone())
+            or (runs_anything and mode.asks_before_open_ended())
             or level > max(mode.allows(), grade(SOCKET_FLOOR)))
     above = getattr(authority, "asks_above", None)
     held_above = above if above is not None and level > above else None
@@ -521,7 +556,8 @@ def decide(authority, app_id, action, graded, purpose=""):
     plan = mode.allows() == 0
     if not held and not plan and not irreversible and mode.covers(app_id, action):
         return None
-    return grant_refusal(app_id, action, graded, mode, irreversible, held_above)
+    return grant_refusal(app_id, action, graded, mode, irreversible, held_above,
+                         open_ended=runs_anything and mode.asks_before_open_ended())
 
 
 def permit(authority, app_id, action, graded, purpose, args, grant=None, spender=None):
@@ -541,27 +577,36 @@ _HOW = ("Ask the shell for approval first (`request_approval` with this app, act
 _PLAN = ("Say what you would do and let the person decide; they switch the mode from the chip "
          "in the status bar.")
 _FINAL_WORD = "its own description says it cannot be undone"
+_OPEN_WORD = "its own description says what it runs can do anything you can"
+_SESSION = (" Allowed for this session from the card, the calls after it run unasked until the "
+            "shell restarts.")
 
 
-def grant_refusal(app, action, graded, mode, irreversible=False, held=None):
+def grant_refusal(app, action, graded, mode, irreversible=False, held=None, open_ended=False):
     """The refusal for a call the mode will not run without a grant — `grant_refusal` in the
-    Rust gate, its five sentences to the punctuation: plan or not, whether the reason is the
-    grade or the action's own word that it cannot be undone, and — outside plan — a call held
-    from the person's phone (`held` is the level on the ladder it asks above, or None). `mode` is
-    a `Mode` or a name."""
+    Rust gate, its seven sentences to the punctuation: plan or not; whether the reason is the
+    grade, the action's own word that it cannot be undone (which wins), or its word that it runs
+    whatever it is given (`open_ended`); and — outside plan — a call held from the person's phone
+    (`held` is the level on the ladder it asks above, or None). `mode` is a `Mode` or a name."""
     mode = mode if isinstance(mode, Mode) else Mode(mode, frozenset())
     if held is not None and mode.name != "plan":
         return ("GRANT: %s.%s is graded `%s` and this call answers a turn from the person's "
                 "phone, which asks before anything above `%s` whatever the mode — so it was not "
                 "run. %s" % (app, action, graded, LADDER[min(held, len(LADDER) - 1)], _HOW))
-    if mode.name == "plan" and not irreversible:
+    why = _FINAL_WORD if irreversible else _OPEN_WORD if open_ended else None
+    if mode.name == "plan" and why is None:
         return ("GRANT: %s.%s is graded `%s` and this machine is in plan mode, which raises no "
                 "card for anything above `%s` — so it was not run. %s"
                 % (app, action, graded, SOCKET_FLOOR, _PLAN))
     if mode.name == "plan":
         return ("GRANT: %s.%s is graded `%s` and %s, and this machine is in plan mode, which "
                 "raises no card for that — so it was not run. %s"
-                % (app, action, graded, _FINAL_WORD, _PLAN))
+                % (app, action, graded, why, _PLAN))
+    if why == _OPEN_WORD:
+        return ("GRANT: %s.%s is graded `%s` and %s, and this machine is in %s mode, which asks "
+                "once before running anything like that — so it was not run. %s%s"
+                % (app, action, graded, _OPEN_WORD, mode.name, _HOW,
+                   "" if graded == "dangerous" else _SESSION))
     if not irreversible:
         allowed = LADDER[max(mode.allows(), grade(SOCKET_FLOOR))]
         return ("GRANT: %s.%s is graded `%s` and this machine is in %s mode, which runs nothing "

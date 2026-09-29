@@ -213,6 +213,8 @@ export component MindModeMenu inherits Rectangle {
             // enforces (`Mode::asks_before_what_cannot_be_undone`): an action whose own published
             // description says it cannot be undone still raises a card in bypass, and nothing
             // does in full bypass. Not "payments, sends and deletes" — only what an app marks.
+            // And an action that says it runs whatever it is given (`gate::open_ended`, a
+            // command) asks once, in bypass as in auto, a session rule answering the rest.
             //
             // First, and above the paragraph, for the pointer's sake: the menu's Bypass row is at
             // y 216…260, and a double-click there must land on nothing that acts. Here that is
@@ -220,7 +222,7 @@ export component MindModeMenu inherits Rectangle {
             // design/mind-modes-2026-09-21.md.
             ModeRow {
                 label: "Bypass";
-                means: "Still asks if an app says it cannot be undone.";
+                means: "Asks before what can't be undone; commands once.";
                 selected: root.bypass-kind == "bypass";
                 danger: true;
                 chosen => { root.bypass-kind = "bypass"; }
@@ -240,8 +242,8 @@ export component MindModeMenu inherits Rectangle {
             Text {
                 height: 96px;
                 text: "Bypass still asks before anything an app marks as impossible to undo, such "
-                    + "as a purchase or a calendar delete; Full bypass asks nothing. Anything else "
-                    + "the machine allows runs without a card. Your ceiling (" + root.ceiling
+                    + "as a purchase or a calendar delete, and once per session before running "
+                    + "commands. Full bypass asks nothing. Your ceiling (" + root.ceiling
                     + ") still holds.";
                 color: Theme.text-secondary;
                 font-size: Theme.fs-caption;

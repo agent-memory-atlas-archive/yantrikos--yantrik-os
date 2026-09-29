@@ -517,6 +517,17 @@ pub fn unrecoverable(purpose: &str) -> bool {
     yantrik_app_runtime::control::unrecoverable(purpose)
 }
 
+/// Does the app's own sentence declare that this action runs whatever it is given — a command
+/// line, keystrokes into a shell — so it can do anything the person can? The gate's reading of
+/// it (`gate::open_ended`), for the same reason [`unrecoverable`] is the gate's.
+///
+/// It is deliberately NOT one of [`may_offer_session_rule`]'s exclusions. Such an action asks
+/// once, and "Allow for this session" is the answer that makes asking once mean something: a
+/// mind asks to run commands once per session, not once per command.
+pub fn open_ended(purpose: &str) -> bool {
+    yantrik_app_runtime::control::open_ended(purpose)
+}
+
 /// May the card offer "Allow for this session" for this action?
 ///
 /// Two exclusions, both of them about what a standing yes would cost if it were wrong. A
@@ -1783,6 +1794,18 @@ mod approvals_tests {
             .id;
         let card = store.pending(now).into_iter().find(|c| c.id == none).expect("the card");
         assert_eq!(card.summary, "");
+    }
+
+    /// A command that can do anything is exactly what "Allow for this session" is for — unless
+    /// it also says it cannot be undone, or is graded `dangerous`, where the two exclusions stand.
+    #[test]
+    fn approvals_a_session_rule_is_offered_for_a_command_and_not_for_one_that_cannot_be_undone() {
+        let run = "Type a command line into the active shell. What it runs can do anything you can.";
+        assert!(open_ended(run));
+        assert!(may_offer_session_rule("sensitive", run));
+        assert!(!may_offer_session_rule("dangerous", run), "dangerous is always a card");
+        let both = "Run it, then delete what it made. It cannot be undone. What it runs can do anything you can.";
+        assert!(!may_offer_session_rule("sensitive", both), "cannot-be-undone wins");
     }
 
     #[test]

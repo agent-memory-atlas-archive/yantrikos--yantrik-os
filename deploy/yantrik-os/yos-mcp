@@ -1743,7 +1743,20 @@ def unrecoverable(purpose):
     return any(phrase in lower for phrase in UNRECOVERABLE_PHRASES)
 
 
-def decide(level, app, action, cannot_undo, mode, rules, machine, cap=None, tool="os_act"):
+# The one sentence an app puts at the end of an action's description to say it runs whatever it
+# is given (`gate::OPEN_ENDED`, published in surface-vectors.json as `open_ended`; the selftest
+# checks this copy against it).
+OPEN_ENDED = "What it runs can do anything you can."
+
+
+def open_ended(purpose):
+    """Does the app's own sentence declare that this action runs whatever it is given — so it
+    can do anything the person can? `gate::open_ended`: the one sentence, case aside."""
+    return OPEN_ENDED.lower() in (purpose or "").lower()
+
+
+def decide(level, app, action, cannot_undo, mode, rules, machine, cap=None, tool="os_act",
+           runs_anything=False):
     """Run it, ask about it, or refuse it — the whole table, as one pure function.
 
     Returns `(verdict, detail)`:
@@ -1816,11 +1829,15 @@ def decide(level, app, action, cannot_undo, mode, rules, machine, cap=None, tool
     # promised "You are still asked about the destructive ones". `safe` is excluded, because a
     # read destroys nothing and wording that happens to match must not turn a look into a card.
     irreversible = bool(cannot_undo) and rank > 0
+    # And its word that it runs whatever it is given (`runs_anything`, from `open_ended()`; 29
+    # September 2026). Asked about once in ask, auto and bypass — a session rule answers it,
+    # which is the difference from what cannot be undone. Where both are said, that one wins.
+    opened = bool(runs_anything) and rank > 0 and not irreversible
 
     # What `ask` mode would have done, which is what the audit exists to record. It carries
-    # `irreversible` so an action `ask` would now stop for is still written down when a looser
-    # mode runs it anyway.
-    would_ask = rank >= LADDER.index("sensitive") or irreversible
+    # `irreversible` and `opened` so an action `ask` would now stop for is still written down
+    # when a looser mode runs it anyway.
+    would_ask = rank >= LADDER.index("sensitive") or irreversible or opened
 
     # A session rule turns an ask into a run, and never covers what the app says cannot be
     # undone. The card refuses to OFFER one for such an action, which is checked once at the
@@ -1844,9 +1861,10 @@ def decide(level, app, action, cannot_undo, mode, rules, machine, cap=None, tool
     elif mode == "bypass":
         # Every grade runs unasked, and what the app says cannot be undone still asks — only
         # what an app marks, such as a purchase or a calendar delete (Pranab's decision, 28
-        # September 2026). `covered` is always
-        # False for such an action, so no session rule answers it here either.
-        if irreversible:
+        # September 2026). `covered` is always False for such an action, so no session rule
+        # answers it here either. What runs whatever it is given asks too, and a rule does
+        # answer that.
+        if irreversible or opened:
             verdict, detail = ("run", True) if covered else ("ask", None)
         else:
             verdict, detail = "run", would_ask
@@ -1857,7 +1875,7 @@ def decide(level, app, action, cannot_undo, mode, rules, machine, cap=None, tool
         # written down instead — `would_ask` is true here, so it lands in the audit.
         verdict, detail = "run", would_ask
     elif mode == "auto":
-        if rank >= LADDER.index("dangerous") or irreversible:
+        if rank >= LADDER.index("dangerous") or irreversible or opened:
             verdict, detail = ("run", True) if covered else ("ask", None)
         else:
             verdict, detail = "run", would_ask
@@ -1903,6 +1921,7 @@ def decide_outcome(vector):
         vector.get("ceiling"),
         cap=vector.get("env_cap"),
         tool=vector.get("tool") or "os_act",
+        runs_anything=vector.get("open_ended"),
     )
     if verdict == "run":
         return "run_logged" if detail else "run"
@@ -2179,11 +2198,13 @@ def guard_act(args):
     # asked about exactly as a `dangerous` action is. `action_detail` already returned it — it
     # has always been read for the card's own words — so this costs nothing new.
     cannot_undo = unrecoverable(purpose)
+    runs_anything = open_ended(purpose)
     cap = CEILING if CEILING_SET else None
 
     # One call, one table — the harness's own cap included, so there is nothing here that the
     # vectors do not cover. See `decide`; `CEILING` is only a cap when somebody set it.
-    verdict, detail = decide(level, app, action, cannot_undo, mode, rules, machine, cap=cap)
+    verdict, detail = decide(level, app, action, cannot_undo, mode, rules, machine, cap=cap,
+                             runs_anything=runs_anything)
     private = carries_private(app, action)
     if private and verdict == "run":
         verdict = "ask"

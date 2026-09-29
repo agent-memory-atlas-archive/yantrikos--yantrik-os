@@ -166,6 +166,15 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                 // shell surface publishes no description here to read.
                 let cannot_be_undone = approvals::unrecoverable(&published_purpose)
                     || approvals::unrecoverable(&purpose);
+                // And whether it runs whatever it is given (29 September 2026), read the same
+                // way: either sentence saying so asks — which can only tighten — and a session
+                // rule answers it, which `may_offer_session_rule` offers for it.
+                let runs_anything = approvals::open_ended(&published_purpose)
+                    || approvals::open_ended(&purpose);
+                let declared = crate::mind_mode::Declared {
+                    cannot_be_undone,
+                    open_ended: runs_anything,
+                };
                 // What the phone is shown of it: the app's own sentence, never the caller's, since
                 // a mind could describe a deletion as tidying (security review, 29 Sep 2026).
                 let published_summary = approvals::summary_of(&published_purpose);
@@ -186,7 +195,7 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                 // The mode and the machine's ceiling decide first: a refusal stands. Plan mode
                 // changes nothing from a phone either. Otherwise a held agent is always asked, where
                 // the mode or a desk session rule would have let it run.
-                let decision = match crate::mind_mode::decide(&grade, &app, &action, cannot_be_undone) {
+                let decision = match crate::mind_mode::decide(&grade, &app, &action, declared) {
                     refused @ crate::mind_mode::Decision::Refuse { .. } => refused,
                     _ if held_from_phone && crate::mind_mode::current().as_str() == "plan" => {
                         crate::mind_mode::Decision::Refuse {
@@ -707,11 +716,18 @@ fn published_detail_in(
 
     // The shell asking the shell. Over the socket this would be a call the shell's own UI thread
     // has to answer while it is blocked making it — so it is read straight out of the registry
-    // that thread already holds. The registry carries grades and nothing else: the shell's own
-    // actions take paths, prompts and names, no opaque handle that needs a naming index.
+    // that thread already holds: the grade, and the description beside it, which the gate reads
+    // for what cannot be undone and what runs whatever it is given. Without the description the
+    // card and the dispatch disagreed about the shell's own actions — `agent_run` asked at the
+    // socket and ran unasked here in auto. The shell's actions take paths, prompts and names, no
+    // opaque handle that needs a naming index.
     if surface == "shell" {
         return yantrik_app_runtime::control::published_grade(action)
-            .map(|grade| (grade.to_string(), String::new(), Naming::new(), String::new()))
+            .map(|grade| {
+                let purpose =
+                    yantrik_app_runtime::control::published_description(action).unwrap_or_default();
+                (grade.to_string(), purpose, Naming::new(), String::new())
+            })
             .ok_or_else(|| {
                 format!(
                     "`shell` publishes no action called `{action}`, so there is nothing to ask \

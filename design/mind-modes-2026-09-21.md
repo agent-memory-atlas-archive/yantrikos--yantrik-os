@@ -438,7 +438,7 @@ press away, then the paragraph, then the durations, which fire for whichever row
 | row | extent | **click at** |
 |---|---|---|
 | "Stop asking me, for a while" (18px) | 48…66 | — |
-| **Bypass** — "Still asks if an app says it cannot be undone." (44px) | 74…118 | **(1098, 96)** |
+| **Bypass** — "Asks before what can't be undone; commands once." (44px) | 74…118 | **(1098, 96)** |
 | **Full bypass** — "Asks nothing, not even those." (44px) | 126…170 | **(1098, 148)** |
 | the warning paragraph (96px) | 178…274 | — |
 | **15 minutes** (36px) | 282…318 | **(1098, 300)** |
@@ -1293,3 +1293,73 @@ destroying anything a person made, and is left as it is.
 | `crates/yantrik-ui/src/mind_mode.rs` | the two decision tables with a `bypass_all` row and bypass's writing cells asking; full bypass expires back and is announced; moving between the bypasses is one bypass; the socket enters neither bypass but may step full bypass down, keeping the deadline; neither is persisted or booted into; the chip names which bypass; the published file says `bypass_all` and the runtime's reader enforces it; the lapse count includes full bypass |
 | `sdk/python/tests/test_gate.py`, `tests/blender-core/test_dispatch.py`, templates | the Python gate mirrors the Rust table rule for rule; the templates' `remove` asks in bypass and runs in full bypass |
 | `deploy/yantrik-os/yos-mcp-selftest.py` | bypass asks about `calendar.delete_event` and `web_commit`, and full bypass runs them and writes them down as `bypass_all`; neither bypass passes the machine ceiling; the cap turns either bypass's run back into a question; neither switches off the taint rule; the vectors cover five modes |
+
+## Commands ask once (29 September 2026)
+
+Pranab's decision: **a command that can do anything asks once, then a session rule covers it.**
+The Terminal's `run` is `sensitive` and arbitrary — whatever the command does, it does as the
+person — and in `auto` and plain bypass it used to run with nobody asked. Asking about every
+command would be forty cards for a long job, which is the approval fatigue this whole design
+exists to avoid; asking about none of them is handing over the keyboard. So the gate gains a
+second input read from the app's own sentence: **open-ended**, the action runs whatever it is
+given.
+
+| mode | an open-ended action above `safe` |
+|---|---|
+| `plan` | refused, as plan refuses every write |
+| `ask`, `auto`, `bypass` | **asks**, even at `standard`; the card offers "Allow for this session", and with that rule the rest of the session's calls run unasked (logged as `rule`) |
+| `bypass_all` | runs unasked, written down |
+
+The difference from "cannot be undone" is the session rule: that one is never covered, this one
+is — a mind asks once per session to run commands, not once per command, and that is the whole
+point. **Where an action says both, cannot-be-undone wins**: it asks every time and no rule
+answers it (`approvals::may_offer_session_rule` does not offer one, and the table does not honour
+one). A `dangerous` open-ended action (Blender's `run_python`) is offered no standing yes either,
+as no `dangerous` action is. A call held from a phone asks as before, whatever the rules.
+
+**How an action says it.** Declared, not guessed: `Action::open_ended()` in Rust
+(`yantrik_ipc_contracts::control_surface`) and `open_ended=True` in the Python SDK append one exact
+sentence to the description — `OPEN_ENDED`, *"What it runs can do anything you can."* — and
+`gate::open_ended` looks for it (case aside). The reader of the description is told exactly what
+the gate enforces. `surface-vectors.json` publishes the sentence as `open_ended`, as it publishes
+`phrases`, and the bridge's copy is checked against it.
+
+**Where it is applied, and where not.**
+
+| action | grade | why |
+|---|---|---|
+| `terminal.run` | sensitive | a command line for the interactive shell |
+| `terminal.send_input` | sensitive | raw bytes to the shell; a line ending in `\n` at its prompt is a command |
+| `shell.agent_run` | sensitive | a command line in the agent's own terminal |
+| `shell.agent_input` | sensitive | typing into one of the agent's running commands, a shell among them |
+| `blender.run_python` | dangerous | arbitrary Python; it also says it is not recoverable, which wins |
+
+Not marked: `terminal.new_tab` and `terminal.open_directory` (they start a shell and run nothing
+they are given); `agent_job` and `agent_kill`; LibreOffice (no macro action is published);
+Container Manager (no exec is published); `run_recipe` and the agent-starting actions (they run a
+role or a recipe, not arbitrary input).
+
+**On every door.** `gate::decide` (every app's dispatch), the Python SDK's `gate.decide`, the
+shell's `Modes::decide` (through `mind_mode::Declared`, which `request_approval` fills from the
+published sentence or the caller's, either of which can only tighten) and the MCP bridge's `decide`
+draw the same line. The shell's own actions used to publish no description on the card's path
+(`published_detail` read the grade alone), so `agent_run` would have asked at the socket and run
+unasked on the card's path in `auto`; `control::published_description` closes that. The refusal
+says why and what to do: *"…its own description says what it runs can do anything you can, and
+this machine is in auto mode, which asks once before running anything like that — so it was not
+run. … Allowed for this session from the card, the calls after it run unasked until the shell
+restarts."*
+
+**The copy.** `Mode::meaning` for `auto` and `bypass` says "once per session before running
+commands"; the confirmation's Bypass row reads "Asks before what can't be undone; commands once."
+and its paragraph names both, inside the same fixed heights.
+
+### Tests
+
+| where | what |
+|---|---|
+| `crates/yantrik-ipc-contracts` | `.open_ended()` says the sentence once, at the end, and publishes it |
+| `crates/yantrik-ipc-transport/src/gate.rs` | an open-ended action asks in ask, auto and bypass at `standard` and `sensitive`, a rule covers it, full bypass runs it, plan refuses it, a read runs; cannot-be-undone wins; a held call asks whatever the rule; the vectors carry the axis (1600 decisions) and assert each of those cells |
+| `crates/yantrik-ui/src/mind_mode.rs`, `approvals.rs` | the same table through `Modes::decide`; the card offers the rule for a command and not for one that cannot be undone; `mind-mode-vectors.json` carries `open_ended` |
+| `sdk/python/tests/test_gate.py` | the Python gate rule for rule, and `Action(open_ended=True)` / `@surface.action(open_ended=True)` held to the Rust builder |
+| `deploy/yantrik-os/yos-mcp-selftest.py` | the bridge's table; `terminal.run` asks in bypass and runs in full bypass; `run_command` asks once in auto and runs under the session's rule; the sentence is the gate's |

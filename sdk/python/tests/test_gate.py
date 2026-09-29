@@ -11,7 +11,7 @@ import time
 import unittest
 
 import support
-from yantrik_surface import (Authority, GrantRefused, Mode, Surface, agent_token, decide,
+from yantrik_surface import (Action, Authority, GrantRefused, Mode, Surface, agent_token, decide,
                              gate, grant_refusal, mode_from, wire)
 
 G = support.RUST_GATE
@@ -231,6 +231,55 @@ class TestDecide(unittest.TestCase):
             self.assertIsNone(decide(held, "notes", "new_note", "standard", "Make a note"), mode)
         ruled = Authority("dangerous", Mode("auto", frozenset({("notes", "new_note")})), asks_above=0)
         self.assertIsNotNone(decide(ruled, "notes", "new_note", "standard", "Make a note"))
+
+    def test_an_open_ended_action_asks_once_and_a_session_rule_covers_it(self):
+        # Pranab's decision of 29 September 2026, as `gate.rs` holds it.
+        support.quoted(self, G, "fn an_open_ended_action_asks_once_and_a_session_rule_covers_it()")
+        support.quoted(self, support.RUST_CONTRACTS,
+                       'pub const OPEN_ENDED: &str = "What it runs can do anything you can.";')
+        self.assertEqual(gate.OPEN_ENDED, "What it runs can do anything you can.")
+        run = "Type a command line into the active shell and press Return. " + gate.OPEN_ENDED
+        for mode in ("ask", "auto", "bypass"):
+            for graded in ("standard", "sensitive"):
+                err = decide(at("sensitive", mode), "terminal", "run", graded, run)
+                self.assertTrue(err.startswith("GRANT: terminal.run is graded `%s`" % graded), err)
+                self.assertIn("%s mode, which asks once before running anything like that" % mode, err)
+                self.assertIn("Allowed for this session from the card", err)
+                ruled = Authority("sensitive", Mode(mode, frozenset({("terminal", "run")})))
+                self.assertIsNone(decide(ruled, "terminal", "run", graded, run), (mode, graded))
+        self.assertIsNone(decide(at("sensitive", "ask"), "terminal", "read", "safe", run))
+        self.assertIsNone(decide(at("sensitive", "bypass_all"), "terminal", "run", "sensitive", run))
+        self.assertIn("plan mode, which raises no card for that",
+                      decide(at("sensitive", "plan"), "terminal", "run", "standard", run))
+        self.assertNotIn("for this session",
+                         decide(at("dangerous", "bypass"), "blender", "run_python", "dangerous", run))
+        both = "Run a script, then delete what it made. It cannot be undone. " + gate.OPEN_ENDED
+        ruled = Authority("dangerous", Mode("bypass", frozenset({("terminal", "run_and_clean")})))
+        err = decide(ruled, "terminal", "run_and_clean", "sensitive", both)
+        self.assertIn(support.GATE_FINAL_WORD, err, "cannot-be-undone wins")
+        self.assertNotIn("for this session", err)
+        held = Authority("dangerous", Mode("auto", frozenset({("terminal", "run")})), asks_above=0)
+        self.assertIn("person's phone", decide(held, "terminal", "run", "sensitive", run))
+
+    def test_an_action_says_it_is_open_ended_the_way_the_rust_builder_does(self):
+        support.quoted(self, support.RUST_CONTRACTS, "fn with_open_ended(description: &str) -> String {")
+        a = Action("run", "Type a command line into the shell", "sensitive", open_ended=True)
+        self.assertEqual(a.description,
+                         "Type a command line into the shell. What it runs can do anything you can.")
+        self.assertEqual(gate.with_open_ended(a.description), a.description, "said once")
+        self.assertEqual(gate.with_open_ended("Run it.  "), "Run it. What it runs can do anything you can.")
+        self.assertEqual(gate.with_open_ended(""), gate.OPEN_ENDED)
+        self.assertEqual(a.schema()["description"], a.description)
+        self.assertTrue(gate.open_ended(a.description.upper()))
+        self.assertFalse(gate.open_ended("Type a command line into the shell"))
+        s = Surface("terminal-under-test")
+
+        @s.action(grade="sensitive", open_ended=True)
+        def run(command: str) -> dict:
+            """Type a command line into the active shell and press Return."""
+            return {}
+        described = {x["name"]: x for x in s.describe_json()["actions"]}
+        self.assertTrue(described["run"]["description"].endswith(gate.OPEN_ENDED))
 
     def test_a_held_call_is_refused_for_the_hold_in_the_holds_words(self):
         # In full bypass, on an action that cannot be undone, the hold is the only reason, and

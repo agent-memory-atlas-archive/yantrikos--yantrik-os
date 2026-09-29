@@ -189,7 +189,7 @@ SHELL_ACTIONS = """  act: open_app(name)  [standard, settles later]
   act: send_message(text)  [standard, settles later]
        Ask the desktop something, as if typed into the Lens.
   act: agent_run(command, cwd?, wait?)  [sensitive, settles later]
-       Run one command line in a fresh terminal of your own, in your pane.
+       Run one command line in a fresh terminal of your own, in your pane. What it runs can do anything you can.
          command: string - one command line, as it would be typed
          cwd?: string - where to run it
          wait?: number - seconds to wait before answering running
@@ -198,7 +198,7 @@ SHELL_ACTIONS = """  act: open_app(name)  [standard, settles later]
          job: string - the job id agent_run answered with
          wait?: number - seconds to wait
   act: agent_input(job, text)  [sensitive, settles later]
-       Type into one of your running commands.
+       Type into one of your running commands. What it runs can do anything you can.
          job: string - the job id agent_run answered with
          text: string - the exact characters to send
   act: agent_kill(job)  [standard, settles later]
@@ -269,7 +269,7 @@ revision: 7e57
   "tabs": 1
 }
   act: run(command)  [sensitive, settles later]
-       Type a command line into the active shell and press Return.
+       Type a command line into the active shell and press Return. What it runs can do anything you can.
          command: string - one command line
 """
 
@@ -1160,6 +1160,53 @@ with tempfile.TemporaryDirectory() as d:
           module.unrecoverable("Take an event off the calendar. It is not recoverable")
           and not module.unrecoverable("Move a file or folder to recoverable Trash"), None)
 
+    # 12c. A command that can do anything asks once (Pranab's decision, 29 September 2026): in
+    # ask, auto and bypass it puts a card up; a session rule for it covers the rest of the
+    # session; full bypass runs it; plan refuses it. And where it also cannot be undone, that
+    # wins: no rule answers it.
+    module, _ = case(tmp, "open-ended-table", ceiling=None)
+    rule = [("terminal", "run")]
+    table = {mode: (module.decide("sensitive", "terminal", "run", False, mode, [], "dangerous",
+                                  runs_anything=True)[0],
+                    module.decide("sensitive", "terminal", "run", False, mode, rule, "dangerous",
+                                  runs_anything=True))
+             for mode in module.MODES}
+    check("a command asks in ask, auto and bypass, and a session rule covers it",
+          all(table[m][0] == "ask" and table[m][1] == ("run", True) for m in ("ask", "auto", "bypass")),
+          table)
+    check("full bypass runs it, written down; plan refuses it, rule or not",
+          table["bypass_all"][0] == "run" and table["bypass_all"][1] == ("run", True)
+          and table["plan"][0] == "refuse_mode" and table["plan"][1][0] == "refuse_mode", table)
+    check("a standard command asks too, where the grade alone would not",
+          module.decide("standard", "terminal", "run", False, "auto", [], "dangerous",
+                        runs_anything=True) == ("ask", None), None)
+    check("where it also cannot be undone, no rule answers it",
+          all(module.decide("sensitive", "terminal", "run", True, m, rule, "dangerous",
+                            runs_anything=True) == ("ask", None) for m in ("ask", "auto", "bypass")),
+          None)
+    check("a read is a read, whatever it declares",
+          module.decide("safe", "terminal", "read", False, "auto", [], "dangerous",
+                        runs_anything=True) == ("run", False), None)
+    published = json.loads((HERE / "surface-vectors.json").read_text(encoding="utf-8"))
+    check("the bridge's sentence is the gate's, as the vectors publish it",
+          module.OPEN_ENDED == published.get("open_ended")
+          and module.open_ended("Type a line. " + published.get("open_ended", "?").upper())
+          and not module.open_ended("Type a line."), (module.OPEN_ENDED, published.get("open_ended")))
+    module, state = case(tmp, "open-ended-bypass", mode="bypass", answer="pending",
+                         machine_ceiling="dangerous", ceiling=None, terminal_open=True)
+    act(module, "terminal", "run", {"command": "ls"})
+    s = read(state)
+    check("in bypass, terminal.run puts a card up and types nothing",
+          [r.get("action") for r in s.get("requests", [])] == ["run"]
+          and not [a for a in s.get("acted", []) if a["action"] == "run"], s)
+    module, state = case(tmp, "open-ended-full-bypass", mode="bypass_all",
+                         machine_ceiling="dangerous", ceiling=None, terminal_open=True)
+    act(module, "terminal", "run", {"command": "ls"})
+    s = read(state)
+    check("in full bypass, terminal.run runs with nobody asked, and is written down",
+          not s.get("requests") and [a["action"] for a in s.get("acted", []) if a["action"] == "run"] == ["run"]
+          and [a.get("mode") for a in s.get("audited", [])] == ["bypass_all"], s)
+
     # 13. Bypass: a sensitive action that can be undone runs unasked — but only up to the
     # machine's own ceiling. And both bypasses stop there.
     module, state = case(tmp, "bypass", mode="bypass", machine_ceiling="dangerous", ceiling=None)
@@ -1539,7 +1586,8 @@ with tempfile.TemporaryDirectory() as d:
                       if v.get("layer") == "shell" and v.get("mode") == "auto"
                       and v.get("grade") == "sensitive" and v.get("ceiling") == "dangerous"
                       and not v.get("rules")]
-    by_undo = {bool(v.get("unrecoverable")): v.get("expect") for v in auto_sensitive}
+    by_undo = {bool(v.get("unrecoverable")): v.get("expect") for v in auto_sensitive
+               if not v.get("open_ended")}
     check("auto runs a recoverable sensitive action and asks about one that cannot be undone",
           by_undo == {False: "run_logged", True: "ask"}, by_undo)
 
@@ -1564,7 +1612,13 @@ with tempfile.TemporaryDirectory() as d:
         rules = [(v["app"], v["action"])] if v.get("session_rule") else []
         verdict, _ = module.decide(v["grade"], v["app"], v["action"],
                                    module.unrecoverable(v["purpose"]), v["mode"], rules,
-                                   v["ceiling"])
+                                   v["ceiling"],
+                                   # Read off the sentence, as `guard_act` reads it — and held
+                                   # to the fact the gate wrote beside it.
+                                   runs_anything=module.open_ended(v["purpose"]))
+        if module.open_ended(v["purpose"]) != bool(v.get("open_ended")):
+            drifted.append("%s: the gate reads open_ended=%s in %r, this bridge does not"
+                           % (v.get("id"), v.get("open_ended"), v["purpose"]))
         if as_door.get(verdict) != v.get("door"):
             drifted.append("%s: the dispatch says a door should %s, this bridge says %s"
                            % (v.get("id"), v.get("door"), verdict))
@@ -1781,15 +1835,25 @@ with tempfile.TemporaryDirectory() as d:
     check("and the token travels with all of them and leaks into none",
           all(c["env_token"] == TOKEN for c in s.get("carried", [])) and not leaks(state), leaks(state))
 
-    # 22d. In `auto` the command runs unasked and is written down — without the token.
-    module, state = case(tmp, "token-auto", mode="auto", ceiling=None, token=TOKEN)
+    # 22d. A command can do anything, so in `auto` it asks once (29 September 2026) — and once
+    # the person has allowed shell.agent_run for the session, it runs unasked and is written
+    # down as covered by that rule — without the token.
+    module, state = case(tmp, "token-auto-asks", mode="auto", ceiling=None, token=TOKEN,
+                         answer="pending")
+    module.call_tool(module.AGENT_BY_NAME["run_command"], {"command": "make", "cwd": "/tmp"})
+    s = read(state)
+    check("in auto, run_command asks once: it can do anything",
+          [r.get("action") for r in s.get("requests", [])] == ["agent_run"] and not s.get("acted"), s)
+    module, state = case(tmp, "token-auto", mode="auto", ceiling=None, token=TOKEN,
+                         rules=[{"app": "shell", "action": "agent_run"}])
     text, is_error, meta = module.call_tool(module.AGENT_BY_NAME["run_command"],
                                             {"command": "make", "cwd": "/tmp"})
     s = read(state)
     audited = (s.get("audited") or [{}])[0]
-    check("in auto, run_command runs unasked and lands in the record",
-          not s.get("requests") and (audited.get("app"), audited.get("action"), audited.get("args_json"))
-          == ("shell", "agent_run", {"command": "make", "cwd": "/tmp"}), s)
+    check("with the session's rule, run_command runs unasked and lands in the record as the rule",
+          not s.get("requests") and (audited.get("app"), audited.get("action"), audited.get("args_json"),
+                                     audited.get("mode"))
+          == ("shell", "agent_run", {"command": "make", "cwd": "/tmp"}, "rule"), s)
     check("and the record never holds the token", not leaks(state, text), leaks(state, text))
     check("the mind reads how it ended, and a client gets the shell's own answer",
           text.startswith("Nobody was asked") and "exit code 0 after 1.2 s, in /tmp." in text
