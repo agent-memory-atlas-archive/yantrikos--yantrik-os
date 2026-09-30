@@ -358,6 +358,8 @@ export component SettingsScreen inherits Rectangle {
     callback delete-provider(string);
     callback test-provider(string);
     callback connect-provider(string, string, string);              // preset, url, key: checks the key and lists models
+    callback provider-url-changed(string);                           // the URL field was edited: Rust says whether the host moved
+    in property <bool> provider-form-host-changed: false;           // editing, and the address is now on another host
     callback provider-model-search(string);                          // filters provider-form-models
     callback edit-provider(string);                                  // a row's Models: the panel on that provider
     in property <[string]> provider-form-models: [];                 // the listed model ids, search applied
@@ -2900,7 +2902,7 @@ export component SettingsScreen inherits Rectangle {
                                                 color: Theme.text-primary;
                                                 font-size: Theme.fs-body;
                                                 vertical-alignment: center;
-                                                edited => { root.provider-form-connected = false; root.provider-test-result = ""; }
+                                                edited => { root.provider-form-connected = false; root.provider-test-result = ""; root.provider-url-changed(self.text); }
                                             }
                                         }
                                     }
@@ -2928,11 +2930,15 @@ export component SettingsScreen inherits Rectangle {
                                                 edited => { root.provider-form-connected = false; root.provider-test-result = ""; }
                                             }
                                             if prov-key-input.text == "" && root.editing-provider-id != "" : Text {
-                                                text: "Saved key kept unless you type a new one";
-                                                color: Theme.text-dim;
+                                                // A saved key stays with the address it was saved for: a new
+                                                // host has to be given its key, never handed the old one.
+                                                text: root.provider-form-host-changed
+                                                    ? "New address: enter its key. The saved key stays with the old one."
+                                                    : "Saved key kept unless you type a new one";
+                                                color: root.provider-form-host-changed ? Theme.amber : Theme.text-dim;
                                                 font-size: Theme.fs-caption;
                                                 vertical-alignment: center;
-                                                opacity: 0.6;
+                                                opacity: root.provider-form-host-changed ? 1.0 : 0.6;
                                             }
                                         }
                                     }

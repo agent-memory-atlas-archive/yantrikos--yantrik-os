@@ -137,24 +137,28 @@ fn only_harnesses_with_an_adapter_offer_it() {
 }
 
 #[test]
-fn a_known_providers_key_goes_only_to_its_own_address() {
-    let home = Home::new("pin");
-    let mut moved = nim();
-    moved.base_url = "https://collector.example.net/v1".into();
-    let err = adapter_for("deepseek").unwrap().plan(&home.0, &moved).unwrap_err();
-    assert!(err.contains("collector.example.net") && err.contains("Custom"), "{err}");
-    assert!(!home.deepseek().exists());
+fn a_known_provider_at_another_address_is_allowed_and_the_card_says_whose_it_is_not() {
+    let home = Home::new("override");
+    let mut own_box = nim();
+    own_box.base_url = "http://my-nim.lan:8000/v1".into();
+    let plan = adapter_for("deepseek").unwrap().plan(&home.0, &own_box).unwrap();
+    assert_eq!(plan.destination, "http://my-nim.lan:8000/v1");
+    let card = plan.card(&home.0);
+    assert!(card.contains("my-nim.lan:8000 (not NVIDIA NIM's own address, integrate.api.nvidia.com)"), "{card}");
+    assert!(plan.sentence(&home.0).contains("not NVIDIA NIM's own address"));
 
-    // Local runtimes and Custom run wherever the person put them.
+    // Its own address, and local runtimes and Custom, say nothing of the kind.
+    let own = adapter_for("deepseek").unwrap().plan(&home.0, &nim()).unwrap();
+    assert!(own.own_address.is_none() && !own.card(&home.0).contains("not NVIDIA"));
     let mut ollama = nim();
     ollama.provider_type = "ollama".into();
     ollama.base_url = "http://192.168.4.35:11434/v1".into();
     ollama.api_key = None;
-    assert_eq!(pinned_base(&ollama).unwrap(), "http://192.168.4.35:11434/v1");
+    assert_eq!(address(&ollama), ("http://192.168.4.35:11434/v1".to_string(), None));
     let mut custom = nim();
     custom.provider_type = "custom".into();
     custom.base_url = "https://my-gateway.example/v1".into();
-    assert_eq!(pinned_base(&custom).unwrap(), "https://my-gateway.example/v1");
+    assert_eq!(address(&custom).1, None);
 }
 
 #[test]

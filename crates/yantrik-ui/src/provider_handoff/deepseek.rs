@@ -48,9 +48,9 @@ impl Handoff for DeepSeek {
             Err(_) => Map::new(),
         };
         // The harness speaks OpenAI chat completions, so a provider saved at a native address
-        // (Anthropic's, Gemini's) is given its OpenAI-compatible one — and a provider the
-        // catalogue knows is given only its own address (super::pinned_base).
-        let base = super::pinned_base(provider)?;
+        // (Anthropic's, Gemini's) is given its OpenAI-compatible one. Any other address is the
+        // person's to choose, and the card says when it is not the provider's own.
+        let (base, own_address) = super::address(provider);
         config.insert("base_url".into(), Value::String(base.clone()));
         config.insert("model".into(), Value::String(provider.model.clone()));
         config.remove("api_key_env");
@@ -70,6 +70,7 @@ impl Handoff for DeepSeek {
             provider_name: provider.name.clone(),
             model: provider.model.clone(),
             destination: base,
+            own_address,
             writes: vec![Write {
                 path,
                 content,

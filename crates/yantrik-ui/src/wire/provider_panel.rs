@@ -81,6 +81,20 @@ pub(crate) fn wire(ui: &App, ctx: &AppContext, providers: Arc<Mutex<ProviderStor
         ui.set_settings_provider_form_models(ModelRc::new(VecModel::from(ids)));
     });
 
+    // The URL field was edited: say, beside the key field, whether the saved key still goes with it.
+    let ui_weak = ui.as_weak();
+    let ps_url = providers.clone();
+    ui.on_provider_url_changed(move |url| {
+        let Some(ui) = ui_weak.upgrade() else { return };
+        let editing = ui.get_settings_editing_provider_id().to_string();
+        let moved = ps_url
+            .lock()
+            .ok()
+            .and_then(|s| s.entries.iter().find(|e| !editing.is_empty() && e.id == editing).cloned())
+            .is_some_and(|e| e.api_key.is_some() && !key_follows(&e.base_url, &url));
+        ui.set_settings_provider_form_host_changed(moved);
+    });
+
     // A row's Models action: the panel, on that provider, re-listing.
     let ui_weak = ui.as_weak();
     let l = listing.clone();
@@ -95,6 +109,7 @@ pub(crate) fn wire(ui: &App, ctx: &AppContext, providers: Arc<Mutex<ProviderStor
         ui.set_settings_selected_preset(entry.provider_type.clone().into());
         ui.set_settings_provider_form_name(entry.name.clone().into());
         ui.set_settings_provider_form_url(entry.base_url.clone().into());
+        ui.set_settings_provider_form_host_changed(false);
         ui.set_settings_provider_form_model(entry.model.clone().into());
         ui.set_settings_provider_panel_open(true);
         // The key field stays empty; an empty field means "keep the saved key".
@@ -155,16 +170,26 @@ struct Form {
     model: String,
 }
 
+/// Whether a saved key may go to `new_url`: only while it is on the host the key was saved for.
+/// Changing the path or the port's scheme on the same host keeps it; a new host does not, so an
+/// edited address is never handed a key its person did not type for it.
+pub(crate) fn key_follows(saved_url: &str, new_url: &str) -> bool {
+    crate::provider_handoff::host(saved_url).eq_ignore_ascii_case(&crate::provider_handoff::host(new_url))
+}
+
 /// Write the form into the store: over the entry being edited (keeping its
-/// saved key when the key field was left empty), or as a new entry, primary
-/// when it is the first. Returns the entry as saved.
+/// saved key when the key field was left empty and the host is the same one),
+/// or as a new entry, primary when it is the first. Returns the entry as saved.
 fn apply_form(store: &mut ProviderStore, editing: &str, form: Form) -> ProviderStoreEntry {
     if let Some(e) = store.entries.iter_mut().find(|e| !editing.is_empty() && e.id == editing) {
+        let follows = key_follows(&e.base_url, &form.base_url);
         e.name = form.name;
         e.provider_type = form.provider_type;
         e.base_url = form.base_url;
-        if form.api_key.is_some() {
-            e.api_key = form.api_key;
+        match form.api_key {
+            Some(k) => e.api_key = Some(k),
+            None if !follows => e.api_key = None,
+            None => {}
         }
         e.auth_type = form.auth_type;
         e.model = form.model;
@@ -230,7 +255,9 @@ fn start_connect(
         .lock()
         .ok()
         .and_then(|s| s.entries.iter().find(|e| !editing.is_empty() && e.id == editing).cloned());
-    let key = key.or_else(|| saved.as_ref().and_then(|e| e.api_key.clone()));
+    // The saved key only for the host it was saved for: Connect on an edited address with an
+    // empty key field asks without one rather than handing the old key to the new host.
+    let key = key.or_else(|| saved.as_ref().filter(|e| key_follows(&e.base_url, url)).and_then(|e| e.api_key.clone()));
     let auth = match (ProviderDescriptor::by_id(preset), &saved) {
         (Some(_), _) => auth_type_for(preset).to_string(),
         (None, Some(e)) => e.auth_type.clone(),
@@ -343,6 +370,26 @@ mod tests {
         assert_eq!(matching(&models, "SONNET"), ["anthropic/claude-sonnet-5-5"]);
         assert_eq!(matching(&models, "gpt"), ["openai/gpt-4o"]);
         assert_eq!(matching(&models, "").len(), 2);
+    }
+
+    #[test]
+    fn a_saved_key_never_follows_an_edited_address_to_a_new_host() {
+        let mut store = ProviderStore::default();
+        let first = apply_form(&mut store, "", form("openai/gpt-4o", Some("sk-or-1")));
+        // Same host, another path: the key stays.
+        let mut same = form("openai/gpt-4o", None);
+        same.base_url = "https://openrouter.ai/api/v2".into();
+        assert_eq!(apply_form(&mut store, &first.id, same).api_key.as_deref(), Some("sk-or-1"));
+        // Another host, key field left empty: the key is dropped, not carried over.
+        let mut moved = form("openai/gpt-4o", None);
+        moved.base_url = "https://collector.example.net/v1".into();
+        assert_eq!(apply_form(&mut store, &first.id, moved).api_key, None);
+        // Another host with a key typed for it: that key.
+        let mut typed = form("openai/gpt-4o", Some("sk-new"));
+        typed.base_url = "https://gateway.example/v1".into();
+        assert_eq!(apply_form(&mut store, &first.id, typed).api_key.as_deref(), Some("sk-new"));
+        assert!(key_follows("https://OpenRouter.ai/api/v1", "https://openrouter.ai/v2"));
+        assert!(!key_follows("https://openrouter.ai/api/v1", "https://openrouter.ai.evil.example/v1"));
     }
 
     #[test]
