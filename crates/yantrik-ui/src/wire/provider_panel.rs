@@ -1,8 +1,10 @@
 //! Settings' Add/Edit Provider panel: Connect, pick a model, Save.
 //!
-//! Connect is one request (`provider_models::list_models`) that checks the key
-//! and fetches the provider's own model list; the person picks from what the
-//! provider actually serves, and Save stores that model with the provider.
+//! Connect fetches the provider's own model list (`provider_models::list_models`);
+//! the person picks from what the provider actually serves, and Save stores
+//! that model with the provider. When the list is one anyone can read
+//! (NVIDIA's, OpenRouter's), the list proves nothing about the key, so Connect
+//! also sends one one-token request with it (`check_key`) before it says so.
 //! A provider row's Models action opens the same panel on that provider and
 //! re-lists, so a saved model can be changed later.
 
@@ -15,7 +17,7 @@ use yantrik_ml::ProviderDescriptor;
 use crate::app_context::AppContext;
 use crate::bridge::CompanionBridge;
 use crate::wire::provider_catalogue::{self, auth_type_for, default_model_for, provider_preset};
-use crate::wire::provider_models::{list_models, pick_model, ListedModel};
+use crate::wire::provider_models::{check_key, list_is_public, list_models, pick_model, KeyCheck, ListedModel};
 use crate::wire::settings::{
     push_providers_to_ui, uuid_short, ProviderStore, ProviderStoreEntry,
 };
@@ -245,6 +247,20 @@ fn start_connect(
     let listing = listing.clone();
     std::thread::spawn(move || {
         let result = list_models(&url, key.as_deref(), &auth);
+        let pick = result
+            .as_ref()
+            .ok()
+            .and_then(|models| pick_model(models, &[&chosen, catalogue_default]))
+            .unwrap_or("")
+            .to_string();
+        // A key typed in, and a list that came back: did the list need it? If anyone may read
+        // it, ask once with the key before saying the key works.
+        let key_check = match (&result, key.as_deref().filter(|k| !k.is_empty())) {
+            (Ok(_), Some(k)) if auth != "x-api-key" && !pick.is_empty() && list_is_public(&url, &auth) => {
+                Some(check_key(&url, k, &pick))
+            }
+            _ => None,
+        };
         let _ = slint::invoke_from_event_loop(move || {
             if GENERATION.load(Ordering::SeqCst) != generation {
                 return;
@@ -252,12 +268,14 @@ fn start_connect(
             let Some(ui) = weak.upgrade() else { return };
             match result {
                 Ok(models) => {
-                    let pick = pick_model(&models, &[&chosen, catalogue_default]).unwrap_or("").to_string();
                     ui.set_settings_provider_form_model_total(models.len() as i32);
                     ui.set_settings_provider_form_models(ModelRc::new(VecModel::from(matching(&models, ""))));
                     ui.set_settings_provider_form_model(pick.into());
-                    ui.set_settings_provider_form_connected(true);
-                    ui.set_settings_provider_test_result("success".into());
+                    // The list is shown either way — it is what the provider serves — but only a
+                    // key that was actually accepted is "connected".
+                    let (connected, result) = connect_outcome(key_check);
+                    ui.set_settings_provider_form_connected(connected);
+                    ui.set_settings_provider_test_result(result.into());
                     if let Ok(mut l) = listing.lock() {
                         l.models = models;
                     }
@@ -266,6 +284,19 @@ fn start_connect(
             }
         });
     });
+}
+
+/// What Connect says after a list came back, given what the key check (if any) found.
+fn connect_outcome(key_check: Option<KeyCheck>) -> (bool, String) {
+    match key_check {
+        None | Some(KeyCheck::Works) => (true, "success".to_string()),
+        Some(KeyCheck::Refused) => (
+            false,
+            "The key was refused. This provider shows its models to anyone, so the list above is not a sign the key works."
+                .to_string(),
+        ),
+        Some(KeyCheck::Unconfirmed(why)) => (false, why),
+    }
 }
 
 /// The ids whose id or name contains `query`, ignoring case.
@@ -295,6 +326,15 @@ mod tests {
             auth_type: "bearer".into(),
             model: model.into(),
         }
+    }
+
+    #[test]
+    fn a_public_list_with_a_refused_key_is_not_connected() {
+        assert_eq!(connect_outcome(None), (true, "success".to_string()), "a list that needed the key proves it");
+        assert_eq!(connect_outcome(Some(KeyCheck::Works)).0, true);
+        let (connected, said) = connect_outcome(Some(KeyCheck::Refused));
+        assert!(!connected);
+        assert!(said.starts_with("The key was refused"), "{said}");
     }
 
     #[test]
