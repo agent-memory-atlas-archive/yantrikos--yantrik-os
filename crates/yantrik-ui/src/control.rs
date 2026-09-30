@@ -1444,6 +1444,32 @@ pub fn publish(
             },
         )
         .action(
+            // Standard: it opens a window and nothing else. The harness's own setup runs in a
+            // terminal the person types into, and nothing changes on this machine unless they
+            // answer it — the agent cannot type there, and nothing here reads the window.
+            Action::new(
+                "configure_harness",
+                "Open a harness's own setup (choosing its model, signing in) in a terminal for the person",
+            )
+            .risk("standard")
+            .arg(
+                Param::text("id")
+                    .describe("Harness id, as `describe shell` lists under `harnesses`, with `configure` set"),
+            ),
+            move |args| {
+                let id = args["id"].as_str().unwrap_or_default().trim().to_string();
+                if id.is_empty() {
+                    return Err("`id` is empty".into());
+                }
+                let command = crate::wire::harness::configure(&id)?;
+                Ok(serde_json::json!({
+                    "opened": id,
+                    "command": command,
+                    "watch": "the person answers it in the terminal; describe the shell afterwards and read harnesses[] for what the row says now",
+                }))
+            },
+        )
+        .action(
             // Also sensitive: enabling a user unit is a decision about what this machine runs on
             // every login, not just now.
             Action::new(

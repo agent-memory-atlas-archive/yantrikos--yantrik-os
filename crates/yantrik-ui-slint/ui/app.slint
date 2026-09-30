@@ -586,6 +586,8 @@ export component App inherits Window {
     // Both change the machine, so both are jobs whose output lands back on the row.
     callback install-harness(string);
     callback start-harness(string);
+    // The harness's own setup in a terminal; opens a window, changes nothing itself.
+    callback configure-harness(string);
     callback settings-search(string);
     in-out property <string> settings-query;
     in-out property <string> settings-save-status:"Preferences are saved automatically";
@@ -1831,6 +1833,7 @@ export component App inherits Window {
                 use-harness(id) => { root.use-harness(id); }
                 install-harness(id) => { root.install-harness(id); }
                 start-harness(id) => { root.start-harness(id); }
+                configure-harness(id) => { root.configure-harness(id); }
                 settings-search(query) => { root.settings-search(query); }
                 add-provider => { root.add-provider(); }
                 save-provider(name, ptype, url, key, auth) => { root.save-provider(name, ptype, url, key, auth); }

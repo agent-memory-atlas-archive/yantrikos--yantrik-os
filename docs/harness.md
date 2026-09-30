@@ -80,8 +80,8 @@ requires:                                         # missing any → "Not install
     why: the harness script
 
 install:                                          # omit and the row names the docs instead
-  command: npm install -g --ignore-scripts @earendil-works/pi-coding-agent
-  doing: fetching @earendil-works/pi-coding-agent
+  command: sh {dir}/../lib/install/npm.sh @earendil-works/pi-coding-agent@0.99.1 pi 22.19 --ignore-scripts
+  doing: fetching Node from nodejs.org and @earendil-works/pi-coding-agent 0.99.1 from npm
 
 setup:                                            # missing any → "Needs setup"
   - config: pi.json                               # ~/.config/yantrik/pi.json
@@ -96,6 +96,13 @@ does `systemctl --user enable --now <unit>`, and *Use this* appears only once so
 actually attached. The same list is in `describe shell` under `harnesses`, and the same two jobs
 are `install_harness` and `start_harness`, both graded `sensitive` because they change the
 machine.
+
+An install command has to bring the harness's own program, not assume it: the image ships no
+Node, no npm and no Hermes, and every button that assumed one failed on a fresh machine with
+"command not found". The installers live in `harnesses/lib/install` — `npm.sh` fetches a pinned,
+checksummed Node when there is none new enough and installs a package into `~/.local`, and
+`hermes.sh` runs Hermes's own installer — and every one puts its command in `~/.local/bin`. The
+page looks there as well as on `PATH`, and each harness's unit puts it on its `PATH`.
 
 Two rules this page keeps:
 
@@ -390,7 +397,8 @@ It is the reference for a mind written in Rust that already has its own model an
 
 **Hermes Agent** attaches through a plugin this repo ships, `harnesses/hermes`, because Hermes
 is a gateway with its own platforms (Telegram, Slack, IRC) and this makes the desktop one more
-of them. To install it on a machine that already runs Hermes:
+of them. *Install* on its row installs Hermes itself when it is not there, then the plugin
+(`harnesses/lib/install/hermes.sh`). By hand, on a machine that already runs Hermes:
 
 ```sh
 cp -r harnesses/hermes ~/.hermes/plugins/yantrik
