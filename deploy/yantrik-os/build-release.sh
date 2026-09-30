@@ -182,6 +182,14 @@ find "$ROOT/share/browser" -name __pycache__ -type d -prune -exec rm -rf {} +
 [ -f "$ROOT/share/browser/yantrik_browser/page.js" ] || fail "the browser service's page reader (page.js) did not ship"
 echo "   + yantrik-browser (the browser's surface, with yantrik_surface vendored in share/browser)"
 
+# The harnesses, staged by the same script as the image. The updater installs share/ with
+# --delete, and before this the bundle had no share/harnesses: every update removed what the
+# image had put in /opt/yantrik/share/harnesses — the manifests Settings → Harnesses reads, the
+# installers its buttons run, and the scripts each harness unit starts.
+sh "$SCRIPT_DIR/stage-harnesses.sh" "$PROJECT_ROOT" "$ROOT/share/harnesses" >/dev/null \
+  || fail "the harnesses did not stage — an update would remove every harness from the machine"
+echo "   + harnesses (share/harnesses: manifests, harness scripts, installers)"
+
 # The updater ships in the image so a machine can update itself. It is a script, not a
 # compiled binary, so binary discovery does not find it either — and a machine that cannot
 # pull the next build is a machine that gets hand-patched over ssh forever.
