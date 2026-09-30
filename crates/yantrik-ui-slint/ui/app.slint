@@ -15,6 +15,8 @@ import { OnboardingScreen } from "onboarding.slint";
 import { InstallerScreen, InstallerDisk, KeyboardChoice } from "installer.slint";
 export { InstallerDisk, KeyboardChoice }
 export { DecisionPreset, DecisionUse } from "settings.slint";
+export { ProviderPresetData, ProviderPresetRow, ProviderPresetGroup } from "provider_presets.slint";
+import { ProviderPresetData, ProviderPresetGroup } from "provider_presets.slint";
 import { DesktopScreen } from "desktop.slint";
 import { BondScreen, BondData } from "bond.slint";
 import { PersonalityScreen, OpinionData, SharedRefData } from "personality.slint";
@@ -602,6 +604,7 @@ export component App inherits Window {
     in-out property <string> settings-provider-form-name: "";
     in-out property <string> settings-provider-form-url: "";
     in-out property <string> settings-selected-preset: "";
+    in property <[ProviderPresetGroup]> settings-provider-presets: [];
     callback set-primary-provider(string);
     callback set-fallback-provider(string);
     callback select-model(string);
@@ -1140,6 +1143,7 @@ export component App inherits Window {
     in property <int> onboard-ai-test-latency-ms: 0;
     in property <string> onboard-ai-test-privacy: "local";
     callback onboard-ai-mode-selected(string);
+    in property <[ProviderPresetData]> onboard-ai-cloud-presets: [];
     callback onboard-ai-provider-selected(string);
     callback onboard-ai-api-key-submitted(string, string);
     callback onboard-ai-test-connection();
@@ -1303,6 +1307,7 @@ export component App inherits Window {
             ai-test-model: root.onboard-ai-test-model;
             ai-test-latency-ms: root.onboard-ai-test-latency-ms;
             ai-test-privacy: root.onboard-ai-test-privacy;
+            ai-cloud-presets: root.onboard-ai-cloud-presets;
             set-names(user-name, comp-name) => {
                 if user-name != "" {
                     root.rename-user(user-name);
@@ -1841,6 +1846,7 @@ export component App inherits Window {
                 provider-form-name <=> root.settings-provider-form-name;
                 provider-form-url <=> root.settings-provider-form-url;
                 selected-preset <=> root.settings-selected-preset;
+                provider-presets: root.settings-provider-presets;
                 set-primary-provider(id) => { root.set-primary-provider(id); }
                 set-fallback-provider(id) => { root.set-fallback-provider(id); }
                 select-model(id) => { root.select-model(id); }

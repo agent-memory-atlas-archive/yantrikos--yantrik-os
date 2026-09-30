@@ -44,6 +44,7 @@ pub mod version;
 pub mod ai_assist;
 pub mod ai_onboarding;
 pub mod ai_provider;
+pub mod provider_catalogue;
 pub mod decision_model;
 pub mod boot;
 pub mod location;

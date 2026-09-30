@@ -10,6 +10,7 @@ import { YButton, YIconButton } from "components/y_button.slint";
 import { YInput } from "components/y_input.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { DecisionModelCard, DecisionPreset, DecisionUse } from "components/decision_model.slint";
+import { ProviderPresetGroup } from "provider_presets.slint";
 export { DecisionPreset, DecisionUse }
 
 // ── Settings sidebar category item ──
@@ -345,6 +346,7 @@ export component SettingsScreen inherits Rectangle {
     callback test-provider(string);
     callback test-new-provider(string, string, string);              // url, key, auth
     callback provider-preset-selected(string);                        // preset id → fills form
+    in property <[ProviderPresetGroup]> provider-presets: [];        // from the provider catalogue
     in-out property <string> provider-form-name: "";
     in-out property <string> provider-form-url: "";
     in-out property <string> selected-preset: "";  // tracks which preset button is highlighted
@@ -2670,163 +2672,36 @@ export component SettingsScreen inherits Rectangle {
                                 VerticalLayout {
                                     spacing: Theme.sp-3;
 
-                                    // ── CLOUD ──
-                                    Text {
-                                        text: "CLOUD";
-                                        color: Theme.text-dim;
-                                        font-size: Theme.fs-micro;
-                                        font-weight: 600;
-                                        letter-spacing: 2px;
-                                    }
-                                    HorizontalLayout {
-                                        spacing: Theme.sp-2;
-                                        for p in [
-                                            { label: "OpenAI",    value: "openai" },
-                                            { label: "Anthropic", value: "anthropic" },
-                                            { label: "Google",    value: "gemini" },
-                                            { label: "DeepSeek",  value: "deepseek" },
-                                            { label: "Groq",      value: "groq" }
-                                        ] : TouchArea {
-                                            horizontal-stretch: 1;
-                                            height: 32px;
-                                            clicked => { root.selected-preset = p.value; root.provider-preset-selected(p.value); }
-                                            Rectangle {
-                                                border-radius: Theme.r-md;
-                                                background: root.selected-preset == p.value ? Theme.accent-dim : Theme.hover-fill;
-                                                border-width: 1px;
-                                                border-color: root.selected-preset == p.value ? AppIdentity.accent : Theme.border-subtle;
-                                                Text {
-                                                    text: p.label;
-                                                    color: root.selected-preset == p.value ? AppIdentity.accent : Theme.text-primary;
-                                                    font-size: Theme.fs-caption;
-                                                    horizontal-alignment: center;
-                                                    vertical-alignment: center;
-                                                }
-                                            }
+                                    // Groups and rows come from the provider catalogue (Rust),
+                                    // five cells to a row, short rows padded with blank cells.
+                                    for group in root.provider-presets : VerticalLayout {
+                                        spacing: Theme.sp-3;
+                                        Text {
+                                            text: group.title;
+                                            color: Theme.text-dim;
+                                            font-size: Theme.fs-micro;
+                                            font-weight: 600;
+                                            letter-spacing: 2px;
                                         }
-                                    }
-                                    HorizontalLayout {
-                                        spacing: Theme.sp-2;
-                                        for p in [
-                                            { label: "Mistral",     value: "mistral" },
-                                            { label: "xAI Grok",    value: "xai" },
-                                            { label: "Perplexity",  value: "perplexity" },
-                                            { label: "Cerebras",    value: "cerebras" },
-                                            { label: "SambaNova",   value: "sambanova" }
-                                        ] : TouchArea {
-                                            horizontal-stretch: 1;
-                                            height: 32px;
-                                            clicked => { root.selected-preset = p.value; root.provider-preset-selected(p.value); }
-                                            Rectangle {
-                                                border-radius: Theme.r-md;
-                                                background: root.selected-preset == p.value ? Theme.accent-dim : Theme.hover-fill;
-                                                border-width: 1px;
-                                                border-color: root.selected-preset == p.value ? AppIdentity.accent : Theme.border-subtle;
-                                                Text {
-                                                    text: p.label;
-                                                    color: root.selected-preset == p.value ? AppIdentity.accent : Theme.text-primary;
-                                                    font-size: Theme.fs-caption;
-                                                    horizontal-alignment: center;
-                                                    vertical-alignment: center;
-                                                }
-                                            }
-                                        }
-                                    }
-                                    HorizontalLayout {
-                                        spacing: Theme.sp-2;
-                                        for p in [
-                                            { label: "Qwen",    value: "qwen" },
-                                            { label: "MiniMax", value: "minimax" },
-                                            { label: "Kimi",    value: "kimi" },
-                                            { label: "Baidu",   value: "baidu" },
-                                            { label: "Zhipu GLM", value: "zhipu" }
-                                        ] : TouchArea {
-                                            horizontal-stretch: 1;
-                                            height: 32px;
-                                            clicked => { root.selected-preset = p.value; root.provider-preset-selected(p.value); }
-                                            Rectangle {
-                                                border-radius: Theme.r-md;
-                                                background: root.selected-preset == p.value ? Theme.accent-dim : Theme.hover-fill;
-                                                border-width: 1px;
-                                                border-color: root.selected-preset == p.value ? AppIdentity.accent : Theme.border-subtle;
-                                                Text {
-                                                    text: p.label;
-                                                    color: root.selected-preset == p.value ? AppIdentity.accent : Theme.text-primary;
-                                                    font-size: Theme.fs-caption;
-                                                    horizontal-alignment: center;
-                                                    vertical-alignment: center;
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    // ── AGGREGATORS & BUDGET ──
-                                    Text {
-                                        text: "AGGREGATORS & BUDGET";
-                                        color: Theme.text-dim;
-                                        font-size: Theme.fs-micro;
-                                        font-weight: 600;
-                                        letter-spacing: 2px;
-                                    }
-                                    HorizontalLayout {
-                                        spacing: Theme.sp-2;
-                                        for p in [
-                                            { label: "OpenRouter",  value: "openrouter" },
-                                            { label: "Together",    value: "together" },
-                                            { label: "Fireworks",   value: "fireworks" },
-                                            { label: "HuggingFace", value: "huggingface" },
-                                            { label: "NanoGPT",     value: "nanogpt" }
-                                        ] : TouchArea {
-                                            horizontal-stretch: 1;
-                                            height: 32px;
-                                            clicked => { root.selected-preset = p.value; root.provider-preset-selected(p.value); }
-                                            Rectangle {
-                                                border-radius: Theme.r-md;
-                                                background: root.selected-preset == p.value ? Theme.accent-dim : Theme.hover-fill;
-                                                border-width: 1px;
-                                                border-color: root.selected-preset == p.value ? AppIdentity.accent : Theme.border-subtle;
-                                                Text {
-                                                    text: p.label;
-                                                    color: root.selected-preset == p.value ? AppIdentity.accent : Theme.text-primary;
-                                                    font-size: Theme.fs-caption;
-                                                    horizontal-alignment: center;
-                                                    vertical-alignment: center;
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    // ── LOCAL INFERENCE ──
-                                    Text {
-                                        text: "LOCAL INFERENCE";
-                                        color: Theme.text-dim;
-                                        font-size: Theme.fs-micro;
-                                        font-weight: 600;
-                                        letter-spacing: 2px;
-                                    }
-                                    HorizontalLayout {
-                                        spacing: Theme.sp-2;
-                                        for p in [
-                                            { label: "Ollama",       value: "ollama" },
-                                            { label: "Ollama Cloud", value: "ollama-cloud" },
-                                            { label: "llama.cpp",    value: "llamacpp" },
-                                            { label: "LM Studio",    value: "lmstudio" },
-                                            { label: "vLLM",         value: "vllm" }
-                                        ] : TouchArea {
-                                            horizontal-stretch: 1;
-                                            height: 32px;
-                                            clicked => { root.selected-preset = p.value; root.provider-preset-selected(p.value); }
-                                            Rectangle {
-                                                border-radius: Theme.r-md;
-                                                background: root.selected-preset == p.value ? Theme.accent-dim : Theme.hover-fill;
-                                                border-width: 1px;
-                                                border-color: root.selected-preset == p.value ? AppIdentity.accent : Theme.border-subtle;
-                                                Text {
-                                                    text: p.label;
-                                                    color: root.selected-preset == p.value ? AppIdentity.accent : Theme.text-primary;
-                                                    font-size: Theme.fs-caption;
-                                                    horizontal-alignment: center;
-                                                    vertical-alignment: center;
+                                        for row in group.rows : HorizontalLayout {
+                                            spacing: Theme.sp-2;
+                                            for p in row.items : TouchArea {
+                                                horizontal-stretch: 1;
+                                                height: 32px;
+                                                enabled: p.id != "";
+                                                clicked => { root.selected-preset = p.id; root.provider-preset-selected(p.id); }
+                                                if p.id != "" : Rectangle {
+                                                    border-radius: Theme.r-md;
+                                                    background: root.selected-preset == p.id ? Theme.accent-dim : Theme.hover-fill;
+                                                    border-width: 1px;
+                                                    border-color: root.selected-preset == p.id ? AppIdentity.accent : Theme.border-subtle;
+                                                    Text {
+                                                        text: p.label;
+                                                        color: root.selected-preset == p.id ? AppIdentity.accent : Theme.text-primary;
+                                                        font-size: Theme.fs-caption;
+                                                        horizontal-alignment: center;
+                                                        vertical-alignment: center;
+                                                    }
                                                 }
                                             }
                                         }

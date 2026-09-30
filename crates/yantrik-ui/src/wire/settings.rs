@@ -6,6 +6,7 @@ use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use std::sync::{Arc, Mutex};
 
 use crate::app_context::AppContext;
+use crate::wire::provider_catalogue::{self, default_model_for, provider_preset};
 use crate::{
     AIModelData, AIProviderData, AIStatusData, AccentPreset, App, SettingsCategoryItem, ThemeMode,
 };
@@ -797,6 +798,7 @@ pub fn wire(ui: &App, ctx: &AppContext) {
     });
 
     // Provider preset selected — fill form fields with known defaults
+    provider_catalogue::push_presets(ui);
     let ui_weak = ui.as_weak();
     ui.on_provider_preset_selected(move |preset| {
         let Some(ui) = ui_weak.upgrade() else { return };
@@ -811,45 +813,8 @@ pub fn wire(ui: &App, ctx: &AppContext) {
     wire_rest(ui, ctx, providers);
 }
 
-/// Known provider presets: id -> (display name, OpenAI-compatible base URL).
-///
-/// Shared with onboarding so first boot and Settings cannot drift apart.
-pub(crate) fn provider_preset(id: &str) -> (&'static str, &'static str) {
-    match id {
-        "openai" => ("OpenAI", "https://api.openai.com/v1"),
-        "anthropic" => ("Anthropic", "https://api.anthropic.com/v1"),
-        "gemini" => (
-            "Google Gemini",
-            "https://generativelanguage.googleapis.com/v1beta/openai",
-        ),
-        "deepseek" => ("DeepSeek", "https://api.deepseek.com/v1"),
-        "groq" => ("Groq", "https://api.groq.com/openai/v1"),
-        "mistral" => ("Mistral", "https://api.mistral.ai/v1"),
-        "xai" => ("xAI Grok", "https://api.x.ai/v1"),
-        "perplexity" => ("Perplexity", "https://api.perplexity.ai"),
-        "cerebras" => ("Cerebras", "https://api.cerebras.ai/v1"),
-        "sambanova" => ("SambaNova", "https://api.sambanova.ai/v1"),
-        "qwen" => ("Qwen", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
-        "minimax" => ("MiniMax", "https://api.minimax.chat/v1"),
-        "kimi" => ("Kimi", "https://api.moonshot.cn/v1"),
-        "baidu" => ("Baidu", "https://qianfan.baidubce.com/v2"),
-        "zhipu" => ("Zhipu GLM", "https://open.bigmodel.cn/api/paas/v4"),
-        "openrouter" => ("OpenRouter", "https://openrouter.ai/api/v1"),
-        "together" => ("Together", "https://api.together.xyz/v1"),
-        "fireworks" => ("Fireworks", "https://api.fireworks.ai/inference/v1"),
-        "huggingface" => ("HuggingFace", "https://api-inference.huggingface.co/v1"),
-        "nanogpt" => ("NanoGPT", "https://api.nano-gpt.com/v1"),
-        "ollama" => ("Ollama", "http://localhost:11434/v1"),
-        "ollama-cloud" => ("Ollama Cloud", ""),
-        "llamacpp" => ("llama.cpp", "http://localhost:8080/v1"),
-        "lmstudio" => ("LM Studio", "http://localhost:1234/v1"),
-        "vllm" => ("vLLM", "http://localhost:8000/v1"),
-        _ => ("Custom", ""),
-    }
-}
-
 /// Remainder of the settings wiring, split out when `provider_preset` was
-/// lifted to a shared function.
+/// lifted to a shared function (now in `wire::provider_catalogue`).
 fn wire_rest(ui: &App, ctx: &AppContext, providers: Arc<Mutex<ProviderStore>>) {
     // Save provider
     let ui_weak = ui.as_weak();
@@ -897,15 +862,8 @@ fn wire_rest(ui: &App, ctx: &AppContext, providers: Arc<Mutex<ProviderStore>>) {
 
         // Hot-reload the LLM backend if this is the primary provider
         if made_primary {
-            // Default model per provider type
-            let default_model = match entry.provider_type.as_str() {
-                "ollama" => "llama3.2:latest",
-                "openai" => "gpt-4o-mini",
-                "anthropic" => "claude-3-5-sonnet-latest",
-                "google" => "gemini-2.0-flash",
-                "deepseek" => "deepseek-chat",
-                _ => "default",
-            };
+            // Default model per provider type, from the provider catalogue
+            let default_model = default_model_for(&entry.provider_type);
             // Build base URL with /v1 suffix for OpenAI-compatible APIs
             let base_url = if entry.provider_type == "ollama" && !entry.base_url.contains("/v1") {
                 format!("{}/v1", entry.base_url.trim_end_matches('/'))

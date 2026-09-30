@@ -6,6 +6,7 @@
 
 mod registry;
 mod descriptor;
+mod catalogue;
 mod generic_openai;
 mod anthropic;
 mod gemini;

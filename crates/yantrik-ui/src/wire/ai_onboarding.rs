@@ -8,15 +8,14 @@
 //! landed on a desktop that could not think, with nothing on screen saying so.
 //!
 //! Detection and validation now share the same code paths Settings uses
-//! (`wire::settings::{provider_preset, test_provider_connection}`,
+//! (`wire::provider_catalogue`, `wire::settings::test_provider_connection`,
 //! `ProviderStore`) so the two screens cannot drift apart.
 
 use slint::ComponentHandle;
 
 use crate::app_context::AppContext;
-use crate::wire::settings::{
-    provider_preset, test_provider_connection, ProviderStore, ProviderStoreEntry,
-};
+use crate::wire::provider_catalogue::{auth_type_for, is_local_runtime, provider_preset};
+use crate::wire::settings::{test_provider_connection, ProviderStore, ProviderStoreEntry};
 use crate::App;
 
 /// The minimums. The README's hardware table carries the same numbers in its
@@ -365,23 +364,6 @@ fn probe_runtime(configured: Option<&str>) -> bool {
     }
     tracing::info!(tried = candidates.len(), "Onboarding: no LLM runtime reachable");
     false
-}
-
-/// Anthropic uses `x-api-key`; the rest of the presets are bearer-token.
-/// Shared with the installer, which rebuilds the wizard's provider entry for
-/// the installed user and must not guess the auth scheme differently.
-pub(crate) fn auth_type_for(provider: &str) -> &'static str {
-    match provider {
-        "anthropic" => "x-api-key",
-        _ if is_local_runtime(provider) => "none",
-        _ => "bearer",
-    }
-}
-
-/// Providers served by a runtime the user hosts, whose preset endpoint is a
-/// localhost guess rather than a fixed vendor URL.
-fn is_local_runtime(provider: &str) -> bool {
-    matches!(provider, "ollama" | "llamacpp" | "lmstudio" | "vllm")
 }
 
 /// Persist `provider` as the primary, replacing any existing primary.
