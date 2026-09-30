@@ -172,15 +172,21 @@ pub(crate) fn host(url: &str) -> String {
     rest.split(['/', '?', '#']).next().unwrap_or("").rsplit('@').next().unwrap_or("").to_string()
 }
 
+/// Whether an address is this machine or the local network: loopback, the private ranges
+/// (10/8, 172.16/12, 192.168/16), link-local, or a name that says so (`localhost`, `*.local`).
+/// Parsed, not matched by prefix: `10.example.com` is somebody else's host.
 fn is_local(url: &str) -> bool {
     let h = host(url);
-    let name = h.rsplit_once(':').map_or(h.as_str(), |(n, _)| n).trim_matches(['[', ']']);
-    name == "localhost"
-        || name.starts_with("127.")
-        || name == "::1"
-        || name.starts_with("192.168.")
-        || name.starts_with("10.")
-        || name.ends_with(".local")
+    let name = if h.starts_with('[') {
+        h.trim_start_matches('[').split(']').next().unwrap_or("").to_string()
+    } else {
+        h.rsplit_once(':').map_or(h.clone(), |(n, _)| n.to_string())
+    };
+    match name.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
+        Ok(std::net::IpAddr::V6(ip)) => ip.is_loopback() || (ip.segments()[0] & 0xfe00) == 0xfc00,
+        Err(_) => name == "localhost" || name.ends_with(".local"),
+    }
 }
 
 pub(crate) fn marker_path(home: &Path, harness: &str) -> PathBuf {

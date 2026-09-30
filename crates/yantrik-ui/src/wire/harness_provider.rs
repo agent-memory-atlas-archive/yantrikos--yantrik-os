@@ -3,9 +3,10 @@
 //!
 //! What the person answers is the plan's own card (`provider_handoff::Plan::card`). Between the
 //! two presses this holds only which harness, which provider and the card's text — not the plan,
-//! which carries the key. Apply plans again and refuses if the card would now say anything
-//! different (the provider was edited, the harness's file changed), so what was read is what is
-//! done. The rows pick up the change on the page's own refresh.
+//! which carries the key. Apply plans again and refuses if the card would now read differently
+//! (a changed provider, address or model), so what was read is what is done; an agent's call is
+//! held to its approval card's sentence the same way. The rows pick up the change on the page's
+//! own refresh.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -18,6 +19,11 @@ use crate::App;
 
 /// The card on screen: (harness, provider id, the card's text).
 static PENDING: Mutex<Option<(String, String, String)>> = Mutex::new(None);
+
+/// What an agent's approval card said, by (harness, provider), until the call it was for runs:
+/// if the provider is edited between the card and the call, the call is refused rather than
+/// sending the key somewhere the person was not shown.
+static EXPLAINED: Mutex<Vec<((String, String), String)>> = Mutex::new(Vec::new());
 
 fn home() -> PathBuf {
     std::env::var("HOME").map(PathBuf::from).unwrap_or_default()
@@ -52,10 +58,19 @@ pub(crate) fn plan(harness: &str, provider: &str) -> Result<Plan, String> {
 /// The approval card's sentence for `assign_provider`: where the key goes and which file, or
 /// what would stop it. Cheap: one small file read and one plan.
 pub(crate) fn explain_assign(harness: &str, provider: &str) -> String {
-    match plan(harness, provider) {
+    let sentence = match plan(harness, provider) {
         Ok(p) => p.sentence(&home()),
-        Err(e) => format!("This would not go ahead: {e}"),
+        Err(e) => return format!("This would not go ahead: {e}"),
+    };
+    let mut shown = EXPLAINED.lock().unwrap_or_else(|e| e.into_inner());
+    let key = (harness.to_string(), provider.to_string());
+    shown.retain(|(k, _)| *k != key);
+    shown.push((key, sentence.clone()));
+    // Bounded: a card no one answers leaves one line here, not a growing list.
+    if shown.len() > 16 {
+        shown.remove(0);
     }
+    sentence
 }
 
 pub(crate) fn explain_revert(harness: &str) -> String {
@@ -85,6 +100,17 @@ pub(crate) fn assign(harness: &str, provider: &str) -> Result<String, String> {
     }
     let plan = plan(harness, provider)?;
     let home = home();
+    let key = (harness.to_string(), provider.to_string());
+    let shown = {
+        let mut shown = EXPLAINED.lock().unwrap_or_else(|e| e.into_inner());
+        let at = shown.iter().position(|(k, _)| *k == key);
+        at.map(|i| shown.remove(i).1)
+    };
+    if let Some(shown) = shown {
+        if shown != plan.sentence(&home) {
+            return Err("The provider or the harness changed after the approval card was shown; nothing was written. Ask again to see what it would do now.".into());
+        }
+    }
     let card = plan.card(&home);
     provider_handoff::apply(&home, &plan)?;
     Ok(card)

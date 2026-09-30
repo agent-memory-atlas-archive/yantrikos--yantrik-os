@@ -202,3 +202,14 @@ fn the_persons_copy_survives_an_apply_that_failed_after_writing() {
     revert(&home.0, "deepseek").unwrap();
     assert_eq!(std::fs::read_to_string(home.deepseek()).unwrap(), original);
 }
+
+#[test]
+fn local_is_decided_by_the_address_not_its_first_characters() {
+    assert!(is_local("http://127.0.0.1:11434/v1"));
+    assert!(is_local("http://172.20.1.5:8000/v1"), "172.16/12 is private");
+    assert!(is_local("http://[::1]:11434"));
+    assert!(is_local("http://ollama-box.local:11434"));
+    assert!(!is_local("http://10.example.com/v1"), "a hostname beginning with 10. is not an address");
+    assert!(!is_local("http://127.attacker.net/v1"));
+    assert!(!is_local("http://8.8.8.8/v1"));
+}
