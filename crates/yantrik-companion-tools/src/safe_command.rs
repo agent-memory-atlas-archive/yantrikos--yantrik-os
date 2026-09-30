@@ -40,9 +40,10 @@ const ALSO_PROTECTED: &[&str] = &[
     ".claude/.credentials.json", ".codex/auth.json", ".gemini/oauth_creds.json", ".qwen/oauth_creds.json",
     ".grok/auth.json", ".local/share/yantrik/accounts", ".netrc", ".git-credentials", ".docker/config.json",
     ".aws/credentials", ".kube/config", "/proc/", "/etc/shadow", "/etc/gshadow", "/etc/sudoers",
-    ".config/gh", ".npmrc", ".cargo/credentials", ".pgpass", ".pypirc", ".local/share/keyrings",
-    ".password-store", ".mozilla", ".config/chromium", ".config/google-chrome", ".config/BraveSoftware",
-    "/sys/", "/dev/",
+    ".config/gh/", ".npmrc", ".cargo/credentials", ".pgpass", ".pypirc", ".local/share/keyrings/",
+    ".password-store/", ".mozilla/", ".config/chromium/", ".config/google-chrome/", ".config/BraveSoftware/",
+    ".var/app/com.google.Chrome/", ".var/app/org.chromium.Chromium/", ".var/app/com.brave.Browser/",
+    "snap/chromium/", "snap/firefox/", "/sys/", "/dev/",
 ];
 
 /// Whether `path` is, or leads into, a place no content may be read from — as written, and again
@@ -53,9 +54,19 @@ pub fn protected(path: &str) -> bool {
     if let Ok(c) = std::fs::canonicalize(&expanded) {
         forms.push(c.to_string_lossy().into_owned());
     }
+    // An entry that starts with `/` is a place on the system and matches only there (so `/dev/`
+    // is not `~/dev/project`); the others are names under a home directory and match as whole
+    // names wherever they are (a folder's entry ends in `/`, so `.config/gh/` is not
+    // `.config/ghostty`).
     forms.iter().any(|f| {
         let f = format!("{f}/");
-        crate::BLOCKED_SEGMENTS.iter().chain(ALSO_PROTECTED).any(|seg| f.contains(seg))
+        crate::BLOCKED_SEGMENTS.iter().chain(ALSO_PROTECTED).any(|seg| {
+            if seg.starts_with('/') {
+                f.starts_with(seg) || f.starts_with(&format!("{}/", seg.trim_end_matches('/')))
+            } else {
+                f.contains(seg)
+            }
+        })
     })
 }
 
@@ -344,6 +355,18 @@ mod tests {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/home/p".into());
         let w = expand(&words(line)?, &home);
         check(&w, &home)
+    }
+
+    /// Places on the system match only where they are, and folder names match whole.
+    #[test]
+    fn a_protected_place_is_matched_where_it_is_not_as_a_substring() {
+        assert!(protected("/dev/input/event0"));
+        assert!(protected("/sys/kernel/notes"));
+        assert!(protected("/etc/shadow"));
+        assert!(protected("/home/p/.config/gh/hosts.yml"));
+        assert!(!protected("/home/p/dev/project/README"), "a folder called dev is not /dev");
+        assert!(!protected("/home/p/.config/ghostty/config"), "ghostty is not gh");
+        assert!(!protected("/home/p/work/sys/notes.txt"));
     }
 
     /// With no shell, `~` is expanded here, so the program opens the path the check looked at.
