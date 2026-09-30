@@ -169,6 +169,67 @@ pub(crate) fn parse_models(body: &str) -> Result<Vec<ListedModel>, ListError> {
     Ok(models)
 }
 
+/// What a test request with the key found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum KeyCheck {
+    /// The provider accepted the key — it answered, or said the key's quota is spent (429),
+    /// which it only says to a key it knows.
+    Works,
+    /// 401 or 403.
+    Refused,
+    /// Anything else: the key could not be confirmed either way. A sentence for the person.
+    Unconfirmed(String),
+}
+
+/// Whether the provider's model list answers with no key at all. NVIDIA's and OpenRouter's do,
+/// and then a list fetched with a key says nothing about the key: Connect said "Connected: 81
+/// models" on VM 520 with `nvapi-not-a-real-key` in the field.
+pub(crate) fn list_is_public(base_url: &str, auth_type: &str) -> bool {
+    list_models(base_url, None, auth_type).is_ok()
+}
+
+/// Send the smallest request that needs the key: one chat completion of one token with
+/// `model`. Only for OpenAI-compatible providers — the ones whose lists can be public.
+pub(crate) fn check_key(base_url: &str, api_key: &str, model: &str) -> KeyCheck {
+    let base = listing_base(base_url);
+    let host = host_of(&base);
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(CONNECT_TIMEOUT)
+        .timeout(TOTAL_TIMEOUT)
+        .build();
+    let answer = agent
+        .post(&format!("{base}/chat/completions"))
+        .set("Authorization", &format!("Bearer {api_key}"))
+        .send_json(key_check_body(model));
+    match answer {
+        Ok(_) | Err(ureq::Error::Status(429, _)) => {
+            tracing::info!(host = %host, "Provider accepted the key on a test request");
+            KeyCheck::Works
+        }
+        Err(ureq::Error::Status(code, _)) if code == 401 || code == 403 => {
+            tracing::warn!(host = %host, status = code, "Provider refused the key on a test request");
+            KeyCheck::Refused
+        }
+        Err(ureq::Error::Status(code, _)) => {
+            tracing::warn!(host = %host, status = code, "A test request could not confirm the key");
+            KeyCheck::Unconfirmed(format!(
+                "The provider answered a test request with HTTP {code}, so the key could not be confirmed."
+            ))
+        }
+        Err(ureq::Error::Transport(t)) => KeyCheck::Unconfirmed(transport_error(&t, &host).to_string()),
+    }
+}
+
+/// The test request: one short message, one token back. It costs the person next to nothing,
+/// and it is the least a provider will answer that still needs the key.
+fn key_check_body(model: &str) -> serde_json::Value {
+    serde_json::json!({
+        "model": model,
+        "messages": [{ "role": "user", "content": "Reply with OK." }],
+        "max_tokens": 1,
+    })
+}
+
 /// A native base URL whose API has no OpenAI-style /models (Anthropic's bare
 /// host, Gemini's generateContent host) is listed at the provider's
 /// OpenAI-compatible endpoint instead.
@@ -342,6 +403,37 @@ mod tests {
             }
         });
         (base, rx)
+    }
+
+    #[test]
+    fn a_key_is_confirmed_by_a_one_token_request_and_a_refusal_is_named() {
+        let (base, sent) = serve(vec![(200, r#"{"choices":[{"message":{"content":"OK"}}]}"#)]);
+        assert_eq!(check_key(&format!("{base}/v1"), "nvapi-good", "m/x"), KeyCheck::Works);
+        let request = sent.recv().unwrap();
+        assert!(request.starts_with("POST /v1/chat/completions "), "{request}");
+        assert!(request.to_lowercase().contains("authorization: bearer nvapi-good"), "{request}");
+        assert_eq!(key_check_body("m/x")["max_tokens"], 1, "one token, not a conversation");
+        assert_eq!(key_check_body("m/x")["model"], "m/x");
+
+        let (base, _) = serve(vec![(401, r#"{"error":"bad key nvapi-not-a-real-key"}"#)]);
+        assert_eq!(check_key(&format!("{base}/v1"), "nvapi-not-a-real-key", "m/x"), KeyCheck::Refused);
+
+        let (base, _) = serve(vec![(429, r#"{"error":"quota"}"#)]);
+        assert_eq!(check_key(&format!("{base}/v1"), "k", "m"), KeyCheck::Works, "429 is said only to a key it knows");
+
+        let (base, _) = serve(vec![(404, r#"{"error":"no such model"}"#)]);
+        match check_key(&format!("{base}/v1"), "k", "m") {
+            KeyCheck::Unconfirmed(why) => assert!(why.contains("HTTP 404"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_list_anyone_can_read_is_told_apart_from_one_that_needs_the_key() {
+        let (base, _) = serve(vec![(200, OPENAI)]);
+        assert!(list_is_public(&format!("{base}/v1"), "bearer"));
+        let (base, _) = serve(vec![(401, r#"{"error":"auth"}"#)]);
+        assert!(!list_is_public(&format!("{base}/v1"), "bearer"));
     }
 
     #[test]
