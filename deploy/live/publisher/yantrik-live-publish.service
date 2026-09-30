@@ -1,0 +1,32 @@
+# Yantrik Live: push the live instance's desktop to the relay. Installed by setup-publisher.sh,
+# on the live instance only (VM 561), whose person is `yantrik`, uid 1000.
+[Unit]
+Description=Yantrik Live publisher (desktop to yantrikos.com)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=yantrik
+Environment=XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0
+ExecStart=/usr/local/lib/yantrik-live/publish
+# The relay, the network or the session coming back: try again, unhurried.
+Restart=always
+RestartSec=10
+Nice=10
+MemoryMax=400M
+CPUQuota=100%
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

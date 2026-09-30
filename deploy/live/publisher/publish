@@ -1,0 +1,25 @@
+#!/bin/sh
+# Yantrik Live publisher: push this desktop to the relay on yantrikos.com, a few frames a second,
+# over SRT (encrypted with the path's passphrase, and the publisher's password in its stream id).
+# Run by yantrik-live-publish.service as the person, the only account with the Wayland socket.
+#
+# The secrets live in $HOME/.config/yantrik-live/publish.env (600), as the relay made them:
+#   MTX_AUTHINTERNALUSERS_0_PASS=...
+#   MTX_PATHS_LIVE_SRTPUBLISHPASSPHRASE=...
+# They reach wf-recorder's command line, which only this account and root can read: the Mind's
+# unit runs with ProtectProc=invisible, so it cannot see this process at all.
+set -eu
+ENV="$HOME/.config/yantrik-live/publish.env"
+RELAY=${YANTRIK_LIVE_RELAY:-yantrikos.com:8890}
+FPS=${YANTRIK_LIVE_FPS:-3}
+
+value() { sed -n "s/^$1=\([A-Za-z0-9]*\)\$/\1/p" "$ENV" | head -n 1; }
+pass=$(value MTX_AUTHINTERNALUSERS_0_PASS)
+phrase=$(value MTX_PATHS_LIVE_SRTPUBLISHPASSPHRASE)
+[ -n "$pass" ] && [ ${#phrase} -ge 10 ] || { echo "no publisher secrets in $ENV" >&2; exit 1; }
+
+# A keyframe every two seconds, the relay's HLS segment length; tuned for a mostly still screen.
+exec wf-recorder -y -r "$FPS" -c libx264 -x yuv420p -b 0 \
+    -p preset=veryfast -p tune=stillimage -p crf=30 -p g=$((FPS * 2)) \
+    -m mpegts \
+    -f "srt://$RELAY?streamid=publish:live:yantrik-live:$pass&passphrase=$phrase&pkt_size=1316"
