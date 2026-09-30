@@ -743,3 +743,44 @@ export component RailProbe inherits Window {
         }
     }
 }
+
+// The Calendar screen at its real size with a full day: the month grid must keep six even rows
+// however many events the day holds or the rail lists.
+import { CalendarScreen, CalendarEvent, CalendarDay } from "calendar.slint";
+export { CalendarEvent, CalendarDay } from "calendar.slint";
+export component CalendarProbe inherits Window {
+    width: 1100px; height: 720px; background: Theme.bg-deep;
+    in property <[CalendarDay]> days;
+    in property <[CalendarEvent]> events;
+    in property <[AgentContextItem]> context;
+    in property <string> notice;
+    out property <length> screen-h: cal.height;
+    cal := CalendarScreen {
+        width: 100%;
+        height: 100%;
+        month-title: "September 2026";
+        days: root.days;
+        events-today: root.events;
+        selected-day: 30;
+        agent-context: root.context;
+        notice: root.notice;
+    }
+}
+
+// Settings → AI with the Add Provider panel open over the catalogue's full preset grid.
+import { ProviderPresetGroup, ProviderPresetRow, ProviderPresetData } from "provider_presets.slint";
+export { ProviderPresetGroup, ProviderPresetRow, ProviderPresetData } from "provider_presets.slint";
+export component ProviderPanelProbe inherits Window {
+    width: 1280px; height: 800px; background: Theme.bg-deep;
+    in property <[ProviderPresetGroup]> presets;
+    in-out property <string> preset;
+    in-out property <string> name;
+    SettingsScreen {
+        width: 100%; height: 100%;
+        active-category: 1;
+        provider-panel-open: true;
+        provider-presets: root.presets;
+        selected-preset <=> root.preset;
+        provider-form-name <=> root.name;
+    }
+}
