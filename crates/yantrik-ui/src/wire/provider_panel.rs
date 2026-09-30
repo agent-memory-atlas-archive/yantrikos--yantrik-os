@@ -17,7 +17,7 @@ use crate::bridge::CompanionBridge;
 use crate::wire::provider_catalogue::{self, auth_type_for, default_model_for, provider_preset};
 use crate::wire::provider_models::{list_models, pick_model, ListedModel};
 use crate::wire::settings::{
-    push_ai_status_to_ui, push_providers_to_ui, uuid_short, ProviderStore, ProviderStoreEntry,
+    push_providers_to_ui, uuid_short, ProviderStore, ProviderStoreEntry,
 };
 use crate::App;
 
@@ -133,7 +133,7 @@ pub(crate) fn wire(ui: &App, ctx: &AppContext, providers: Arc<Mutex<ProviderStor
         );
         ui.set_settings_editing_provider_id(SharedString::default());
         push_providers_to_ui(&ui, &store);
-        push_ai_status_to_ui(&ui, &store, bridge.is_online());
+        crate::wire::ai_status::refresh(&ui, &store);
         if saved.is_primary {
             if !saved.model.is_empty() {
                 ui.set_settings_llm_api_model(saved.model.clone().into());

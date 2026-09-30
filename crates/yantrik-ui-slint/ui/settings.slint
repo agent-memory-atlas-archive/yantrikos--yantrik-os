@@ -103,7 +103,12 @@ export struct AIStatusData {
     provider-type: string,
     model-name: string,
     model-tier: string,         // "Tiny", "Small", "Medium", "Large"
-    status: string,             // "connected", "disconnected", "fallback", "error"
+    // What asking the companion's endpoint found (crates/yantrik-ui/src/wire/ai_status.rs):
+    // "checking" | "connected" | "missing" (not one of the models it lists) | "refused"
+    // | "unreachable" | "error" (answered, not with a model list) | "unset" | "fallback"
+    status: string,
+    // The sentence under the name when the status is not "connected": what was found.
+    detail: string,
     latency-ms: int,
     tokens-per-sec: float,
     tokens-today: int,
@@ -963,7 +968,7 @@ export component SettingsScreen inherits Rectangle {
                                             spacing: 2px;
                                             horizontal-stretch: 1;
                                             Text {
-                                                text: root.ai-status.provider-name != "" ? root.ai-status.provider-name : "No provider";
+                                                text: root.ai-status.provider-name != "" ? root.ai-status.provider-name : "No model set up";
                                                 color: Theme.text-primary;
                                                 font-size: Theme.fs-headline;
                                                 font-weight: 600;
@@ -982,6 +987,12 @@ export component SettingsScreen inherits Rectangle {
                                                     font-weight: 500;
                                                 }
                                             }
+                                            if root.ai-status.detail != "" : Text {
+                                                text: root.ai-status.detail;
+                                                color: Theme.text-secondary;
+                                                font-size: Theme.fs-caption;
+                                                wrap: word-wrap;
+                                            }
                                         }
                                         // Status badge
                                         Rectangle {
@@ -989,19 +1000,26 @@ export component SettingsScreen inherits Rectangle {
                                             height: 24px;
                                             border-radius: Theme.r-lg;
                                             background: root.ai-status.status == "connected" ? Theme.color-success-dim
-                                                      : root.ai-status.status == "fallback" ? Theme.tint-amber
+                                                      : root.ai-status.status == "fallback" || root.ai-status.status == "checking" ? Theme.tint-amber
+                                                      : root.ai-status.status == "unset" ? Theme.hover-fill
                                                       : Theme.color-danger-dim;
                                             border-width: 1px;
                                             border-color: root.ai-status.status == "connected" ? Theme.color-success-dim
-                                                        : root.ai-status.status == "fallback" ? Theme.amber-dim
+                                                        : root.ai-status.status == "fallback" || root.ai-status.status == "checking" ? Theme.amber-dim
+                                                        : root.ai-status.status == "unset" ? Theme.border-subtle
                                                         : Theme.color-danger-dim;
                                             status-txt := Text {
                                                 text: root.ai-status.status == "connected" ? "Connected"
+                                                    : root.ai-status.status == "checking" ? "Checking…"
+                                                    : root.ai-status.status == "missing" ? "Model not found"
+                                                    : root.ai-status.status == "refused" ? "Key refused"
+                                                    : root.ai-status.status == "unreachable" ? "Can't reach it"
+                                                    : root.ai-status.status == "unset" ? "Not set up"
                                                     : root.ai-status.status == "fallback" ? "Fallback"
-                                                    : root.ai-status.status == "disconnected" ? "Offline"
-                                                    : "Error";
+                                                    : "Unverified";
                                                 color: root.ai-status.status == "connected" ? Theme.color-success
-                                                     : root.ai-status.status == "fallback" ? Theme.amber
+                                                     : root.ai-status.status == "fallback" || root.ai-status.status == "checking" ? Theme.amber
+                                                     : root.ai-status.status == "unset" ? Theme.text-secondary
                                                      : Theme.color-emotional;
                                                 font-size: Theme.fs-caption;
                                                 font-weight: 600;
