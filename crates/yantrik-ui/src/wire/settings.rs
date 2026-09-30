@@ -722,7 +722,7 @@ pub fn wire(ui: &App, ctx: &AppContext) {
     {
         let ps = providers.lock().unwrap();
         push_providers_to_ui(ui, &ps);
-        push_ai_status_to_ui(ui, &ps, ctx.bridge.is_online());
+        crate::wire::ai_status::refresh(ui, &ps);
     }
 
     // Settings search (sidebar category filtering)
@@ -817,7 +817,7 @@ fn wire_rest(ui: &App, ctx: &AppContext, providers: Arc<Mutex<ProviderStore>>) {
             }
             if let Some(ui) = ui_weak.upgrade() {
                 push_providers_to_ui(&ui, &store);
-                push_ai_status_to_ui(&ui, &store, bridge.is_online());
+                crate::wire::ai_status::refresh(&ui, &store);
             }
         }
     });
@@ -881,7 +881,7 @@ fn wire_rest(ui: &App, ctx: &AppContext, providers: Arc<Mutex<ProviderStore>>) {
             }
             if let Some(ui) = ui_weak.upgrade() {
                 push_providers_to_ui(&ui, &store);
-                push_ai_status_to_ui(&ui, &store, bridge.is_online());
+                crate::wire::ai_status::refresh(&ui, &store);
             }
         }
     });
@@ -904,7 +904,7 @@ fn wire_rest(ui: &App, ctx: &AppContext, providers: Arc<Mutex<ProviderStore>>) {
             }
             if let Some(ui) = ui_weak.upgrade() {
                 push_providers_to_ui(&ui, &store);
-                push_ai_status_to_ui(&ui, &store, bridge.is_online());
+                crate::wire::ai_status::refresh(&ui, &store);
             }
         }
     });
@@ -951,7 +951,7 @@ fn wire_rest(ui: &App, ctx: &AppContext, providers: Arc<Mutex<ProviderStore>>) {
             crate::wire::provider_panel::reload_primary(&bridge_sm, &provider);
             // Push fresh AI status with new online state
             if let (Some(ui), Ok(store)) = (ui_weak_sm.upgrade(), ps_sm.lock()) {
-                push_ai_status_to_ui(&ui, &store, true);
+                crate::wire::ai_status::refresh(&ui, &store);
                 push_providers_to_ui(&ui, &store);
             }
         } else {
@@ -1152,29 +1152,6 @@ fn push_providers_to_ui_with_test(ui: &App, store: &ProviderStore, result: &Test
 }
 
 /// Push AI status derived from provider store + bridge state.
-pub(crate) fn push_ai_status_to_ui(ui: &App, store: &ProviderStore, online: bool) {
-    let primary = store.primary();
-    let fallback = store.fallback();
-
-    let status = AIStatusData {
-        provider_name: primary.map_or(SharedString::default(), |p| p.name.clone().into()),
-        provider_type: primary.map_or(SharedString::default(), |p| p.provider_type.clone().into()),
-        model_name: ui.get_settings_llm_api_model(),
-        model_tier: SharedString::default(), // filled by capability profile later
-        status: if online {
-            "connected".into()
-        } else {
-            "disconnected".into()
-        },
-        latency_ms: -1,
-        tokens_per_sec: 0.0,
-        tokens_today: 0,
-        using_fallback: !online && fallback.is_some(),
-        fallback_provider: fallback.map_or(SharedString::default(), |f| f.name.clone().into()),
-        fallback_model: SharedString::default(),
-    };
-    ui.set_settings_ai_status(status);
-}
 
 // ──────────────────────────────────────────────────────────────
 // Provider testing + model fetching

@@ -185,6 +185,8 @@ impl AppContext {
         if let Some(ref model) = config.llm.api_model {
             ui.set_settings_llm_api_model(model.clone().into());
         }
+        // So Settings → AI can ask the companion's endpoint the way the companion does.
+        crate::wire::ai_status::set_config_key(config.llm.api_key.clone());
 
         // ── What is answering, in the status bar ──
         //
