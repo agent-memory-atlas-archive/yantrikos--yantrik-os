@@ -15,6 +15,8 @@ PAGE=/var/www/yantrikos-live
 INCLUDE="    include $SNIPPET;"
 
 [ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 1; }
+# Restarting MediaMTX drops the live stream for a few seconds: only when something it runs changed.
+changed=0
 
 # MediaMTX, the exact release this was written against.
 if ! /opt/mediamtx/mediamtx --version 2>/dev/null | grep -qx "$VERSION"; then
@@ -26,48 +28,57 @@ if ! /opt/mediamtx/mediamtx --version 2>/dev/null | grep -qx "$VERSION"; then
     install -d -m 755 /opt/mediamtx
     install -m 755 "$tmp/mediamtx" /opt/mediamtx/mediamtx.new
     mv /opt/mediamtx/mediamtx.new /opt/mediamtx/mediamtx
+    changed=1
 fi
 
 id mediamtx >/dev/null 2>&1 || useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin mediamtx
 
 install -d -m 755 /etc/mediamtx
-install -m 644 mediamtx.yml /etc/mediamtx/mediamtx.yml
+cmp -s mediamtx.yml /etc/mediamtx/mediamtx.yml || { install -m 644 mediamtx.yml /etc/mediamtx/mediamtx.yml; changed=1; }
 
-# The publisher's secrets: made once, then kept, so the instance's copy keeps working.
+# The publisher's secrets: made once, then kept, so the gate's copy (deploy/live/gate-forward)
+# keeps working. To rotate: shred this file, run this again, then run setup-forward.sh.
 if [ ! -s /etc/mediamtx/secrets.env ]; then
     ( umask 077
       pass=$(head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 32)
       phrase=$(head -c 64 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 40)
       printf 'MTX_AUTHINTERNALUSERS_0_PASS=%s\nMTX_PATHS_LIVE_SRTPUBLISHPASSPHRASE=%s\n' "$pass" "$phrase" > /etc/mediamtx/secrets.env.new
       mv /etc/mediamtx/secrets.env.new /etc/mediamtx/secrets.env )
+    changed=1
 fi
 chown root:root /etc/mediamtx/secrets.env
 chmod 600 /etc/mediamtx/secrets.env
 
-install -m 644 mediamtx.service /etc/systemd/system/mediamtx.service
+cmp -s mediamtx.service /etc/systemd/system/mediamtx.service || { install -m 644 mediamtx.service /etc/systemd/system/mediamtx.service; changed=1; }
 systemctl daemon-reload
 systemctl enable mediamtx.service >/dev/null 2>&1
-systemctl restart mediamtx.service
+if [ "$changed" = 1 ]; then systemctl restart mediamtx.service; else systemctl start mediamtx.service; fi
 
 # The page.
 install -d -m 755 "$PAGE"
 install -m 644 www/* "$PAGE"/
 
 # The site: the snippet, and one include line in its TLS server block (the one Certbot marked).
+# nginx is shared by every site on this host: a change it rejects is put back at once, snippet
+# and site file both, so the next restart (a reboot, a Certbot renewal) never meets it.
+[ -e "$SNIPPET" ] && cp -p "$SNIPPET" "$SNIPPET.previous"
 install -m 644 nginx-live.conf "$SNIPPET"
+added=0
 if ! grep -qF "$INCLUDE" "$SITE"; then
     cp -p "$SITE" "$SITE.before-live"
     awk -v inc="$INCLUDE" '!done && /listen 443 ssl; # managed by Certbot/ { print inc; done=1 } { print }' "$SITE.before-live" > "$SITE.new"
     grep -qF "$INCLUDE" "$SITE.new" || { rm -f "$SITE.new"; echo "no TLS server block found in $SITE" >&2; exit 1; }
     mv "$SITE.new" "$SITE"
-    if ! nginx -t 2>/dev/null; then
-        cp -p "$SITE.before-live" "$SITE"
-        nginx -t
-        echo "nginx rejected the change; $SITE is restored" >&2
-        exit 1
-    fi
+    added=1
 fi
-nginx -t 2>/dev/null
+if ! nginx -t 2>/dev/null; then
+    if [ -e "$SNIPPET.previous" ]; then cp -p "$SNIPPET.previous" "$SNIPPET"; else rm -f "$SNIPPET"; fi
+    [ "$added" = 1 ] && cp -p "$SITE.before-live" "$SITE"
+    nginx -t
+    echo "nginx rejected the change; the snippet and $SITE are as they were" >&2
+    exit 1
+fi
+rm -f "$SNIPPET.previous"
 systemctl reload nginx
 
 sleep 2

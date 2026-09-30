@@ -1,6 +1,7 @@
 // Yantrik Live: play the relay's HLS while it is really live, and say so plainly when it is not.
-// Never a frozen frame: when the picture stops moving, the video is hidden and the card says
-// since when the machine has been offline.
+// Never a frozen frame: when the picture stops moving, the video is hidden and the card says so.
+// It says "since" only for an outage this page saw begin; one already under way when it opened
+// has no start time the page could know.
 (function () {
   "use strict";
   var SRC = "/live/hls/index.m3u8";
@@ -13,7 +14,7 @@
   var title = document.getElementById("card-title");
   var detail = document.getElementById("card-detail");
 
-  var hls = null, retry = null, lastMove = 0, lastTime = -1, offlineSince = null;
+  var hls = null, retry = null, lastMove = 0, lastTime = -1, offlineSince = null, sawLive = false;
 
   function clock(d) {
     return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -30,9 +31,9 @@
   }
 
   function offline() {
-    if (!offlineSince) offlineSince = new Date();
-    show("offline", "Offline since " + clock(offlineSince),
-      "The machine is not streaming right now: an update, maintenance, or a fault. This page keeps looking.");
+    if (sawLive && !offlineSince) offlineSince = new Date();
+    show("offline", offlineSince ? "Offline since " + clock(offlineSince) : "Offline",
+      "The machine is not streaming right now: an update, maintenance, or a fault. This page looks again every 15 seconds.");
     stop();
     clearTimeout(retry);
     retry = setTimeout(start, RETRY_MS);
@@ -72,6 +73,7 @@
       lastTime = video.currentTime;
       lastMove = Date.now();
       offlineSince = null;
+      sawLive = true;
       if (status.dataset.state !== "live") show("live", "Live", "");
     } else if (Date.now() - lastMove > STALL_MS) {
       offline();
