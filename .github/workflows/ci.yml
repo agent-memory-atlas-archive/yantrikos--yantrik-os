@@ -151,6 +151,11 @@ jobs:
       - name: yos starts an on-demand service when something asks for it
         run: python3 deploy/yantrik-os/yos-selftest.py
 
+      # Without a name of its own, every Mind on this OS spoke as its engine's stock persona:
+      # "I am JARVIS, an extension of the user" was its first answer on the live instance.
+      - name: The Mind's launcher gives it its name and its person's
+        run: python3 deploy/yantrik-os/yantrik-mind-launch-selftest.py
+
       # The updater's own offline checks, against a scratch $YANTRIK_PREFIX. Same story as the
       # two above: it has existed for a while and only ever run on somebody's machine. It holds
       # where the update channel comes from, and that `.version` is written from the same string
