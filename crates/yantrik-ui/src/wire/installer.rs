@@ -75,9 +75,9 @@ pub fn wire(ui: &App, _ctx: &AppContext) {
             // and wire::ai_onboarding::save_primary keeps that choice in this store. Carried
             // over when present, so a key typed in the live session is not typed twice.
             let wizard = ProviderStore::load().primary().cloned();
-            let (ai_provider, ai_base_url, ai_api_key) = match wizard {
-                Some(p) => (p.provider_type, p.base_url, p.api_key.unwrap_or_default()),
-                None => (String::new(), String::new(), String::new()),
+            let (ai_provider, ai_base_url, ai_api_key, ai_model) = match wizard {
+                Some(p) => (p.provider_type, p.base_url, p.api_key.unwrap_or_default(), p.model),
+                None => (String::new(), String::new(), String::new(), String::new()),
             };
             // The endpoint is not a secret; the key is, so only its presence is logged.
             tracing::info!(
@@ -102,6 +102,7 @@ pub fn wire(ui: &App, _ctx: &AppContext) {
                 ai_provider,
                 ai_base_url,
                 ai_api_key,
+                ai_model,
             };
 
             let weak2 = weak.clone();
@@ -256,6 +257,9 @@ pub struct InstallerState {
     /// one, and the provider's well-known URL is used if a provider is set.
     pub ai_base_url: String,
     pub ai_api_key: String,
+    /// The model picked from the provider's own list in the live session.
+    /// Empty means none was picked, and the catalogue's default is used.
+    pub ai_model: String,
 }
 
 /// Progress callback: (percent 0-100, status message).
@@ -861,7 +865,11 @@ fn installed_config_yaml(content: &str, state: &InstallerState) -> String {
         // The wizard does not ask for a model — the AI pages pick a provider and
         // a key, and Settings offers the model list later — so the provider's
         // default is what the installed system starts on.
-        let model = default_model_for(&state.ai_provider);
+        let model = if state.ai_model.is_empty() {
+            default_model_for(&state.ai_provider)
+        } else {
+            state.ai_model.as_str()
+        };
         replace_yaml_line(&mut out, "api_base_url:", &format!("api_base_url: \"{base_url}\""));
         replace_yaml_line(&mut out, "api_model:", &format!("api_model: \"{model}\""));
     }
@@ -904,6 +912,7 @@ fn installed_providers_yaml(state: &InstallerState) -> Option<String> {
         auth_type: auth_type_for(&state.ai_provider).to_string(),
         is_primary: true,
         is_fallback: false,
+        model: state.ai_model.clone(),
     };
     let store = ProviderStore { entries: vec![entry] };
     serde_yaml::to_string(&store).ok()
@@ -1330,6 +1339,17 @@ llm:
         // the image's own endpoint rather than guessing one.
         let out = installed_config_yaml(IMAGE_CONFIG, &wizard_state("nonesuch", "", ""));
         assert!(out.contains("api_base_url: \"http://127.0.0.1:8341/v1\""), "{out}");
+    }
+
+    #[test]
+    fn a_model_picked_in_the_live_session_is_the_one_installed() {
+        let mut state = wizard_state("openrouter", "https://openrouter.ai/api/v1", "sk-or-1");
+        state.ai_model = "anthropic/claude-sonnet-5-5".into();
+        let out = installed_config_yaml(IMAGE_CONFIG, &state);
+        assert!(out.contains("api_model: \"anthropic/claude-sonnet-5-5\""), "{out}");
+        let yaml = installed_providers_yaml(&state).expect("a chosen provider produces a store");
+        let store: ProviderStore = serde_yaml::from_str(&yaml).expect("valid YAML");
+        assert_eq!(store.primary().expect("primary").model, "anthropic/claude-sonnet-5-5");
     }
 
     #[test]

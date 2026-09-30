@@ -8,6 +8,7 @@ import { AppIdentity } from "components/app_color.slint";
 import { SkillStore, SkillData } from "skill_store.slint";
 import { YButton, YIconButton } from "components/y_button.slint";
 import { YInput } from "components/y_input.slint";
+import { ListView } from "std-widgets.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { DecisionModelCard, DecisionPreset, DecisionUse } from "components/decision_model.slint";
 import { ProviderPresetGroup } from "provider_presets.slint";
@@ -322,7 +323,7 @@ export component SettingsScreen inherits Rectangle {
     in property <AIStatusData> ai-status;
     in property <[AIProviderData]> ai-providers: [];
     in property <[AIModelData]> available-models: [];
-    in property <string> provider-test-result: "";      // "success", "error: ...", "testing", ""
+    in-out property <string> provider-test-result: "";  // "success", "testing", "" or a sentence saying what failed
     // Decision model (components/decision_model.slint)
     in property <[DecisionPreset]> decision-presets: [];
     in property <string> decision-provider: "";
@@ -341,10 +342,16 @@ export component SettingsScreen inherits Rectangle {
     in-out property <bool> provider-panel-open: false;
     in-out property <string> editing-provider-id: "";   // empty = new provider
     callback add-provider();
-    callback save-provider(string, string, string, string, string);  // name, type, url, key, auth
+    callback save-provider(string, string, string, string, string, string);  // name, type, url, key, auth, model
     callback delete-provider(string);
     callback test-provider(string);
-    callback test-new-provider(string, string, string);              // url, key, auth
+    callback connect-provider(string, string, string);              // preset, url, key: checks the key and lists models
+    callback provider-model-search(string);                          // filters provider-form-models
+    callback edit-provider(string);                                  // a row's Models: the panel on that provider
+    in property <[string]> provider-form-models: [];                 // the listed model ids, search applied
+    in property <int> provider-form-model-total: 0;                  // how many the provider listed
+    in-out property <string> provider-form-model: "";                // the model Save stores
+    in-out property <bool> provider-form-connected: false;           // Connect succeeded for this URL and key
     callback provider-preset-selected(string);                        // preset id → fills form
     in property <[ProviderPresetGroup]> provider-presets: [];        // from the provider catalogue
     in-out property <string> provider-form-name: "";
@@ -1283,6 +1290,7 @@ export component SettingsScreen inherits Rectangle {
                                         root.selected-preset = "";
                                         root.provider-form-name = "";
                                         root.provider-form-url = "";
+                                        root.add-provider();
                                     }
                                     add-btn-row := HorizontalLayout {
                                         spacing: Theme.sp-1;
@@ -1427,6 +1435,26 @@ export component SettingsScreen inherits Rectangle {
                                     HorizontalLayout {
                                         spacing: Theme.sp-2;
                                         alignment: end;
+
+                                        // Models: re-list and change the saved model
+                                        TouchArea {
+                                            width: models-btn-txt.preferred-width + 16px;
+                                            height: 28px;
+                                            clicked => { root.edit-provider(provider.id); }
+                                            Rectangle {
+                                                border-radius: Theme.r-sm;
+                                                background: Theme.hover-fill;
+                                                border-width: 1px;
+                                                border-color: Theme.border-subtle;
+                                                models-btn-txt := Text {
+                                                    text: "Models";
+                                                    color: Theme.accent;
+                                                    font-size: Theme.fs-caption;
+                                                    horizontal-alignment: center;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                        }
 
                                         // Test
                                         TouchArea {
@@ -2627,7 +2655,7 @@ export component SettingsScreen inherits Rectangle {
                         background: Theme.overlay-backdrop;
 
                         TouchArea {
-                            clicked => { root.provider-panel-open = false; }
+                            clicked => { root.provider-panel-open = false; root.editing-provider-id = ""; }
                         }
 
                         Rectangle {
@@ -2776,6 +2804,7 @@ export component SettingsScreen inherits Rectangle {
                                                 color: Theme.text-primary;
                                                 font-size: Theme.fs-body;
                                                 vertical-alignment: center;
+                                                edited => { root.provider-form-connected = false; root.provider-test-result = ""; }
                                             }
                                         }
                                     }
@@ -2800,21 +2829,31 @@ export component SettingsScreen inherits Rectangle {
                                                 font-size: Theme.fs-body;
                                                 vertical-alignment: center;
                                                 input-type: password;
+                                                edited => { root.provider-form-connected = false; root.provider-test-result = ""; }
+                                            }
+                                            if prov-key-input.text == "" && root.editing-provider-id != "" : Text {
+                                                text: "Saved key kept unless you type a new one";
+                                                color: Theme.text-dim;
+                                                font-size: Theme.fs-caption;
+                                                vertical-alignment: center;
+                                                opacity: 0.6;
                                             }
                                         }
                                     }
                                 }
 
-                                // Test result
+                                // Connect's answer: how many models, or what went wrong
                                 if root.provider-test-result != "" : Rectangle {
-                                    height: 28px;
+                                    height: result-txt.preferred-height + 12px;
                                     border-radius: Theme.r-sm;
                                     background: root.provider-test-result == "success" ? Theme.color-success-dim
                                               : root.provider-test-result == "testing" ? Theme.tint-amber
                                               : Theme.color-danger-dim;
-                                    Text {
-                                        text: root.provider-test-result == "success" ? "Connection successful"
-                                            : root.provider-test-result == "testing" ? "Testing connection..."
+                                    result-txt := Text {
+                                        x: Theme.sp-3;
+                                        width: parent.width - Theme.sp-6;
+                                        text: root.provider-test-result == "success" ? "Connected: " + root.provider-form-model-total + " models"
+                                            : root.provider-test-result == "testing" ? "Connecting and listing models..."
                                             : root.provider-test-result;
                                         color: root.provider-test-result == "success" ? Theme.color-success
                                              : root.provider-test-result == "testing" ? Theme.amber
@@ -2822,7 +2861,80 @@ export component SettingsScreen inherits Rectangle {
                                         font-size: Theme.fs-caption;
                                         horizontal-alignment: center;
                                         vertical-alignment: center;
+                                        wrap: word-wrap;
                                     }
+                                }
+
+                                // Model: picked from what the provider listed
+                                if root.provider-form-model-total > 0 : VerticalLayout {
+                                    spacing: Theme.sp-2;
+                                    HorizontalLayout {
+                                        spacing: Theme.sp-2;
+                                        Text {
+                                            text: "Model";
+                                            color: Theme.text-secondary;
+                                            font-size: Theme.fs-caption;
+                                            vertical-alignment: center;
+                                        }
+                                        Text {
+                                            text: root.provider-form-model;
+                                            color: AppIdentity.accent;
+                                            font-size: Theme.fs-caption;
+                                            font-weight: 600;
+                                            overflow: elide;
+                                            horizontal-stretch: 1;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                    // Many models (OpenRouter lists hundreds): search them.
+                                    if root.provider-form-model-total > 8 : YInput {
+                                        mode: 1;
+                                        placeholder: "Search " + root.provider-form-model-total + " models";
+                                        edited(text) => { root.provider-model-search(text); }
+                                    }
+                                    if root.provider-form-models.length > 0 : Rectangle {
+                                        height: min(root.provider-form-models.length * 30px, 180px);
+                                        border-radius: Theme.r-md;
+                                        background: Theme.bg-input;
+                                        border-width: 1px;
+                                        border-color: Theme.border-subtle;
+                                        clip: true;
+                                        ListView {
+                                            for m in root.provider-form-models : TouchArea {
+                                                height: 30px;
+                                                clicked => { root.provider-form-model = m; }
+                                                Rectangle {
+                                                    background: root.provider-form-model == m ? Theme.accent-dim
+                                                              : parent.has-hover ? Theme.hover-fill : transparent;
+                                                    Text {
+                                                        x: Theme.sp-3;
+                                                        width: parent.width - Theme.sp-6;
+                                                        text: m;
+                                                        color: root.provider-form-model == m ? AppIdentity.accent : Theme.text-primary;
+                                                        font-size: Theme.fs-caption;
+                                                        vertical-alignment: center;
+                                                        overflow: elide;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if root.provider-form-models.length == 0 : Text {
+                                        text: "No listed model matches.";
+                                        color: Theme.text-dim;
+                                        font-size: Theme.fs-caption;
+                                    }
+                                }
+
+                                // Save works without Connect, but says what that means.
+                                if !root.provider-form-connected && root.provider-test-result == ""
+                                    && (prov-key-input.text != "" || root.provider-form-url != "") : Text {
+                                    text: prov-key-input.text != ""
+                                        ? "This key is untested. Connect checks it and lists the models to pick from."
+                                        : "Not connected yet. Connect lists the models to pick from.";
+                                    color: Theme.amber;
+                                    font-size: Theme.fs-caption;
+                                    wrap: word-wrap;
                                 }
 
                                 // Action buttons
@@ -2830,12 +2942,12 @@ export component SettingsScreen inherits Rectangle {
                                     spacing: Theme.sp-3;
                                     alignment: end;
 
-                                    // Test Connection
+                                    // Connect: check the key and list the models
                                     TouchArea {
                                         width: test-new-txt.preferred-width + 24px;
                                         height: 36px;
                                         clicked => {
-                                            root.test-new-provider(prov-url-input.text, prov-key-input.text, "bearer");
+                                            root.connect-provider(root.selected-preset, prov-url-input.text, prov-key-input.text);
                                         }
                                         Rectangle {
                                             border-radius: Theme.r-md;
@@ -2843,7 +2955,7 @@ export component SettingsScreen inherits Rectangle {
                                             border-width: 1px;
                                             border-color: Theme.border-subtle;
                                             test-new-txt := Text {
-                                                text: "Test Connection";
+                                                text: "Connect";
                                                 color: Theme.accent;
                                                 font-size: Theme.fs-body;
                                                 font-weight: 500;
@@ -2857,7 +2969,7 @@ export component SettingsScreen inherits Rectangle {
                                     TouchArea {
                                         width: cancel-txt.preferred-width + 24px;
                                         height: 36px;
-                                        clicked => { root.provider-panel-open = false; }
+                                        clicked => { root.provider-panel-open = false; root.editing-provider-id = ""; }
                                         Rectangle {
                                             border-radius: Theme.r-md;
                                             background: Theme.hover-fill;
@@ -2878,7 +2990,8 @@ export component SettingsScreen inherits Rectangle {
                                         width: save-txt.preferred-width + 24px;
                                         height: 36px;
                                         clicked => {
-                                            root.save-provider(prov-name-input.text, "custom", prov-url-input.text, prov-key-input.text, "bearer");
+                                            root.save-provider(prov-name-input.text, root.selected-preset == "" ? "custom" : root.selected-preset,
+                                                prov-url-input.text, prov-key-input.text, "bearer", root.provider-form-model);
                                             if(!root.save-error){root.provider-panel-open = false;}
                                         }
                                         Rectangle {
