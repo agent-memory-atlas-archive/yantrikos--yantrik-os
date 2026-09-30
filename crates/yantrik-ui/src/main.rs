@@ -121,6 +121,8 @@ mod system_context;
 mod telegram;
 mod terminal;
 mod terminal_window;
+mod provider_handoff;
+mod private_file;
 mod trail;
 // What protects the credential vault on this machine, and the honest answer when nothing does.
 mod vault_unlock;

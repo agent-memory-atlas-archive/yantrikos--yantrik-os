@@ -12,6 +12,7 @@ import { ListView } from "std-widgets.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { DecisionModelCard, DecisionPreset, DecisionUse } from "components/decision_model.slint";
 import { ProviderPresetGroup } from "provider_presets.slint";
+import { YDialog } from "components/y_dialog.slint";
 export { DecisionPreset, DecisionUse }
 
 // ── Settings sidebar category item ──
@@ -83,6 +84,10 @@ export struct HarnessRowData {
     can-start: bool,
     // The label of the harness's own setup — "Choose model" — or empty for none.
     configure-label: string,
+    // "Provider: NVIDIA NIM · model (from your saved providers)", or "its own settings".
+    provider-line: string,
+    can-assign-provider: bool,
+    can-revert-provider: bool,
     docs: string,
 }
 
@@ -415,6 +420,16 @@ export component SettingsScreen inherits Rectangle {
     callback install-harness(string);
     callback start-harness(string);
     callback configure-harness(string);
+    // Giving a harness one of the saved providers (crates/yantrik-ui/src/provider_handoff):
+    // choose → the card says what will be written → Apply. Revert puts its own file back.
+    in-out property <string> assigning-harness: "";      // the row whose provider choice is open
+    in-out property <bool> handoff-card-open: false;
+    in property <string> handoff-card-title: "";
+    in property <string> handoff-card-body: "";
+    callback plan-provider(string, string);              // harness id, provider id → the card
+    callback apply-provider();
+    callback cancel-provider();
+    callback revert-provider(string);
     // Whether any row has a job running. Computed in Rust because Slint cannot reduce over a
     // model, and it is what stops the sweep below from animating on an idle machine.
     in property <bool> harness-busy: false;
@@ -2670,6 +2685,16 @@ export component SettingsScreen inherits Rectangle {
                     }
 
                     // ── ADD/EDIT PROVIDER OVERLAY ──
+                    // The card before a harness is given a provider: every file by path, never the key.
+                    if root.handoff-card-open : YDialog {
+                        open: true;
+                        title: root.handoff-card-title;
+                        body: root.handoff-card-body;
+                        confirm-label: "Apply";
+                        confirmed => { root.apply-provider(); }
+                        cancelled => { root.cancel-provider(); }
+                    }
+
                     if root.provider-panel-open : Rectangle {
                         width: 100%;
                         height: 100%;
@@ -3289,6 +3314,42 @@ SettingRow{label:"AI providers";description:"Manage the model providers that are
                                     wrap: word-wrap;
                                 }
 
+                                if h.provider-line != "" : Text {
+                                    text: h.provider-line;
+                                    color: Theme.text-secondary;
+                                    font-size: Theme.fs-caption;
+                                }
+
+                                // Which saved provider: one button each. Nothing is written until
+                                // the card that follows is answered.
+                                if root.assigning-harness == h.id : VerticalLayout {
+                                    spacing: Theme.sp-2;
+                                    Text {
+                                        text: root.ai-providers.length == 0
+                                            ? "No saved providers yet. Add one under AI & Intelligence first."
+                                            : "Give " + h.name + " which provider?";
+                                        color: Theme.text-secondary;
+                                        font-size: Theme.fs-caption;
+                                        wrap: word-wrap;
+                                    }
+                                    HorizontalLayout {
+                                        spacing: Theme.sp-2;
+                                        alignment: start;
+                                        for p in root.ai-providers : YButton {
+                                            label: p.name;
+                                            size: 0;
+                                            variant: 1;
+                                            clicked => { root.plan-provider(h.id, p.id); }
+                                        }
+                                        YButton {
+                                            label: "Cancel";
+                                            size: 0;
+                                            variant: 2;
+                                            clicked => { root.assigning-harness = ""; }
+                                        }
+                                    }
+                                }
+
                                 // Indeterminate on purpose. There is no way to know how far
                                 // through an `npm install` is, and a bar that claimed a
                                 // percentage would be a lie with a number on it.
@@ -3362,6 +3423,18 @@ SettingRow{label:"AI providers";description:"Manage the model providers that are
                                         size: 0;
                                         variant: 1;
                                         clicked => { root.configure-harness(h.id); }
+                                    }
+                                    if h.can-assign-provider && root.assigning-harness != h.id : YButton {
+                                        label: "Use a provider";
+                                        size: 0;
+                                        variant: 1;
+                                        clicked => { root.assigning-harness = h.id; }
+                                    }
+                                    if h.can-revert-provider : YButton {
+                                        label: "Revert provider";
+                                        size: 0;
+                                        variant: 2;
+                                        clicked => { root.revert-provider(h.id); }
                                     }
                                     // Attachment is still the only thing that lets a mind answer.
                                     // A "Use this" on a row that is not attached would be a

@@ -1444,6 +1444,52 @@ pub fn publish(
             },
         )
         .action(
+            // Sensitive: it writes a provider's key into a harness's own settings file and restarts
+            // the harness, so the person answers the approval card first. The answer is the same
+            // text the Settings card shows — which files, which provider and model, never the key.
+            Action::new(
+                "assign_provider",
+                "Give a harness one of the person's saved providers, written into the harness's own settings",
+            )
+            .risk("sensitive")
+            // The card names where the key goes — provider, address, model, file — which the
+            // bare arguments (an id like `custom-3fa1b2`) do not. A per-call sentence also means
+            // "allow for this session" is never offered: each key moved is its own question.
+            .explain(|args| {
+                crate::wire::harness_provider::explain_assign(
+                    args["harness"].as_str().unwrap_or_default().trim(),
+                    args["provider"].as_str().unwrap_or_default().trim(),
+                )
+            })
+            .arg(Param::text("harness").describe("Harness id, as `describe shell` lists under `harnesses`, with can_assign_provider"))
+            .arg(Param::text("provider").describe("A saved provider's id or name, as Settings → AI lists it")),
+            move |args| {
+                let harness = args["harness"].as_str().unwrap_or_default().trim().to_string();
+                let provider = args["provider"].as_str().unwrap_or_default().trim().to_string();
+                if harness.is_empty() || provider.is_empty() {
+                    return Err("`harness` and `provider` are both needed".into());
+                }
+                let card = crate::wire::harness_provider::assign(&harness, &provider)?;
+                Ok(serde_json::json!({ "assigned": harness, "provider": provider, "did": card }))
+            },
+        )
+        .action(
+            // Sensitive for the same reason: it rewrites a harness's settings file (back to the
+            // person's own) and restarts it.
+            Action::new(
+                "revert_provider",
+                "Put back a harness's own settings, undoing assign_provider",
+            )
+            .risk("sensitive")
+            .explain(|args| crate::wire::harness_provider::explain_revert(args["harness"].as_str().unwrap_or_default().trim()))
+            .arg(Param::text("harness").describe("Harness id with can_revert_provider")),
+            move |args| {
+                let harness = args["harness"].as_str().unwrap_or_default().trim().to_string();
+                crate::wire::harness_provider::revert(&harness)?;
+                Ok(serde_json::json!({ "reverted": harness }))
+            },
+        )
+        .action(
             // Standard: it opens a window and nothing else. The harness's own setup runs in a
             // terminal the person types into, and nothing changes on this machine unless they
             // answer it — the agent cannot type there, and nothing here reads the window.

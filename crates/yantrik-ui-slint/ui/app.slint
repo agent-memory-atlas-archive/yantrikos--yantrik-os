@@ -590,6 +590,14 @@ export component App inherits Window {
     callback start-harness(string);
     // The harness's own setup in a terminal; opens a window, changes nothing itself.
     callback configure-harness(string);
+    in-out property <string> settings-assigning-harness: "";
+    in-out property <bool> settings-handoff-card-open: false;
+    in property <string> settings-handoff-card-title: "";
+    in property <string> settings-handoff-card-body: "";
+    callback plan-provider(string, string);
+    callback apply-provider();
+    callback cancel-provider();
+    callback revert-provider(string);
     callback settings-search(string);
     in-out property <string> settings-query;
     in-out property <string> settings-save-status:"Preferences are saved automatically";
@@ -1847,6 +1855,14 @@ export component App inherits Window {
                 install-harness(id) => { root.install-harness(id); }
                 start-harness(id) => { root.start-harness(id); }
                 configure-harness(id) => { root.configure-harness(id); }
+                assigning-harness <=> root.settings-assigning-harness;
+                handoff-card-open <=> root.settings-handoff-card-open;
+                handoff-card-title: root.settings-handoff-card-title;
+                handoff-card-body: root.settings-handoff-card-body;
+                plan-provider(h, p) => { root.plan-provider(h, p); }
+                apply-provider => { root.apply-provider(); }
+                cancel-provider => { root.cancel-provider(); }
+                revert-provider(h) => { root.revert-provider(h); }
                 settings-search(query) => { root.settings-search(query); }
                 add-provider => { root.add-provider(); }
                 save-provider(name, ptype, url, key, auth, model) => { root.save-provider(name, ptype, url, key, auth, model); }

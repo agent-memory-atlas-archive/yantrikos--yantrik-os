@@ -795,9 +795,21 @@ fn published_detail_in(
     // on arguments `describe` never sees (#137). It costs a second round trip — but only for an
     // action that just said on the first one that it can explain a call of itself, so no card
     // pays for a question its app cannot answer.
-    let explained =
-        if published.2 { explained_in(&address, action, args) } else { String::new() };
+    let explained = if published.2 { explained_or_unsaid(explained_in(&address, action, args)) } else { String::new() };
     Ok((published.0, published.1, naming_in(&reply), explained))
+}
+
+/// For an action that said it explains each call: its sentence, or — when the sentence did not
+/// arrive (a slow surface, a broken pipe) — a line saying so. Never empty: an empty sentence is
+/// what lets a card offer "allow for this session", and an action that explains itself does so
+/// because one call's meaning depends on its arguments (assign_provider: which key, to which
+/// host). A lookup that failed must not quietly turn that back into a standing yes.
+fn explained_or_unsaid(sentence: String) -> String {
+    if sentence.trim().is_empty() {
+        "The app could not say in time what this call does; judge it by its arguments below.".to_string()
+    } else {
+        sentence
+    }
 }
 
 /// The app's sentence about ONE call, with these arguments (#137) — or empty, and the card is
@@ -3017,7 +3029,7 @@ mod service_surface_approval_tests {
     /// back — same grade, same purpose, no sentence — and the shell does not even ask it the
     /// second question, because `describe` said no action of its could answer. And an app that
     /// claims the flag but then refuses (an old build still running, a handler that failed)
-    /// loses the line, never the card.
+    /// gets a line saying so in place of its own, never a missing card.
     #[test]
     fn an_app_that_does_not_explain_leaves_the_card_as_it_was() {
         let dir = scratch("no-explain");
@@ -3045,7 +3057,9 @@ mod service_surface_approval_tests {
             "a card for an app that cannot explain costs no second round trip"
         );
 
-        // The flag claimed, the question refused: today's card, not a failure.
+        // The flag claimed, the question refused: still a card, not a failure — but not a blank
+        // line either. An action that explains itself does so because one call's meaning turns
+        // on its arguments, and an empty sentence is what would offer "allow for this session".
         let dir2 = scratch("no-explain-refused");
         drop(std::os::unix::net::UnixListener::bind(dir2.join("app-system-monitor.sock")).unwrap());
         let mut describe = sysmon("dangerous", "End a running process by PID");
@@ -3060,7 +3074,11 @@ mod service_surface_approval_tests {
         )
         .unwrap();
         assert_eq!(grade, "dangerous", "the person still gets the card, with the grade behind it");
-        assert_eq!(explained, "", "a refusal to explain is an empty line, not a missing card");
+        assert_eq!(
+            explained,
+            "The app could not say in time what this call does; judge it by its arguments below.",
+            "a refusal to explain is a line saying so, never a missing card and never a blank that re-opens the session offer"
+        );
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dir2);
     }

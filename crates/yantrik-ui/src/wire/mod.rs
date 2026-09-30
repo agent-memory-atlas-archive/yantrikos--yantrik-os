@@ -45,6 +45,7 @@ pub mod ai_assist;
 pub mod ai_onboarding;
 pub mod ai_provider;
 pub mod ai_status;
+pub mod harness_provider;
 pub mod provider_catalogue;
 pub mod provider_models;
 pub mod provider_panel;
