@@ -676,4 +676,66 @@ mod tests {
         let b = GenericOpenAIBackend::new("http://x/v1", Some("k".into()), "m", "none", Default::default());
         assert_eq!(authorization(&b), None);
     }
+
+    /// The request head an Ollama backend with `key` actually puts on the wire, read by a
+    /// listener standing in for the server.
+    fn request_head_sent(key: Option<&str>) -> String {
+        use crate::traits::LLMBackend;
+        use crate::types::{ChatMessage, GenerationConfig};
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut got = Vec::new();
+            let mut buf = [0u8; 4096];
+            let head_end = loop {
+                let n = conn.read(&mut buf).unwrap();
+                assert!(n > 0, "the client hung up before sending a request");
+                got.extend_from_slice(&buf[..n]);
+                if let Some(i) = got.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break i;
+                }
+            };
+            let head = String::from_utf8_lossy(&got[..head_end]).to_string();
+            let body_len = head
+                .lines()
+                .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap()))
+                .unwrap_or(0);
+            while got.len() < head_end + 4 + body_len {
+                let n = conn.read(&mut buf).unwrap();
+                if n == 0 {
+                    break;
+                }
+                got.extend_from_slice(&buf[..n]);
+            }
+            let reply = r#"{"model":"m","message":{"role":"assistant","content":"ok"},"done":true,"done_reason":"stop","prompt_eval_count":1,"eval_count":1}"#;
+            write!(
+                conn,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                reply.len()
+            )
+            .unwrap();
+            head
+        });
+        let be = GenericOpenAIBackend::for_provider("ollama", format!("http://127.0.0.1:{port}"), key.map(String::from), "m");
+        // Only the request matters here; the reply is whatever the server stand-in could say.
+        let _ = be.chat(&[ChatMessage::user("hi")], &GenerationConfig::default(), None);
+        server.join().unwrap()
+    }
+
+    #[test]
+    fn on_the_wire_a_plain_ollama_sees_no_authorization_and_a_gated_one_sees_its_key() {
+        for key in [None, Some(""), Some("  ")] {
+            let head = request_head_sent(key).to_ascii_lowercase();
+            assert!(head.starts_with("post /api/chat "), "{head}");
+            assert!(!head.contains("\nauthorization:"), "{key:?} sent an Authorization header:\n{head}");
+        }
+        let head = request_head_sent(Some("gate-key"));
+        assert!(
+            head.lines().any(|l| l.eq_ignore_ascii_case("authorization: Bearer gate-key")),
+            "the gated request carries its key:\n{head}"
+        );
+    }
 }
