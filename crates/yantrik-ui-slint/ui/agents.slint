@@ -17,6 +17,7 @@ import { ToolCallData, ToolCallCard } from "components/tool_call.slint";
 import { ApprovalRequest, ApprovalCard } from "components/intent_lens.slint";
 import { QuestionCard } from "components/question_card.slint";
 import { RouteStopData, AgentsRoute } from "agents_route.slint";
+import { JumpToPresent } from "jump_to_present.slint";
 
 export struct AgentTabData {
     id: string,        // active | needs_you | complete | all
@@ -598,19 +599,11 @@ export component AgentSession inherits Rectangle {
     border-color: Theme.border-subtle;
     clip: true;
 
-    // Follow the newest line while the person is at the bottom; stay put once they scroll up.
-    property <length> content-h: items-col.preferred-height;
-    property <bool> follow: true;
+    // Follow the newest line while the person is at the bottom, stay put once they scroll up,
+    // and "Jump to present" to come back: the kit's JumpToPresent, over the transcript below.
+    // Another agent opened starts at its newest line.
     property <string> shown: AgentsState.header.id;
-    changed content-h => {
-        if (root.follow) {
-            flick.viewport-y = min(0px, flick.height - root.content-h);
-        }
-    }
-    changed shown => {
-        root.follow = true;
-        flick.viewport-y = min(0px, flick.height - root.content-h);
-    }
+    changed shown => { session-follow.jump(); }
 
     VerticalLayout {
         padding: Theme.sp-3;
@@ -656,26 +649,34 @@ export component AgentSession inherits Rectangle {
             background: Theme.separator;
         }
 
-        flick := Flickable {
+        Rectangle {
             vertical-stretch: 1;
-            viewport-width: self.width;
-            viewport-height: items-col.preferred-height;
-            flicked => {
-                root.follow = self.viewport-y <= self.height - self.viewport-height + 8px;
-            }
-            // A Rectangle between the Flickable and the layout, on purpose: a Flickable whose
-            // child is a layout takes that layout's max-height as its own, and a session of three
-            // cards would then cap the whole screen at the height of three cards.
-            Rectangle {
-                width: flick.width;
-                height: items-col.preferred-height;
-                items-col := VerticalLayout {
-                    spacing: 6px;
-                    padding-right: 6px;
-                    for item in AgentsState.items : ItemView {
-                        item: item;
+            flick := Flickable {
+                width: 100%;
+                height: 100%;
+                viewport-width: self.width;
+                viewport-height: items-col.preferred-height;
+                // A Rectangle between the Flickable and the layout, on purpose: a Flickable whose
+                // child is a layout takes that layout's max-height as its own, and a session of three
+                // cards would then cap the whole screen at the height of three cards.
+                Rectangle {
+                    width: flick.width;
+                    height: items-col.preferred-height;
+                    items-col := VerticalLayout {
+                        spacing: 6px;
+                        padding-right: 6px;
+                        for item in AgentsState.items : ItemView {
+                            item: item;
+                        }
                     }
                 }
+            }
+            session-follow := JumpToPresent {
+                width: 100%;
+                height: 100%;
+                viewport-y <=> flick.viewport-y;
+                viewport-height: flick.viewport-height;
+                visible-height: flick.height;
             }
         }
 
