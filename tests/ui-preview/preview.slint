@@ -784,3 +784,17 @@ export component ProviderPanelProbe inherits Window {
         provider-form-name <=> root.name;
     }
 }
+
+// Settings → Harnesses with the provider card open: the card must be drawn on the page it is
+// opened from. It was placed inside the AI page and never appeared on Harnesses (VM 520).
+export component HandoffCardProbe inherits Window {
+    width: 1280px; height: 800px; background: Theme.bg-deep;
+    in property <bool> open;
+    SettingsScreen {
+        width: 100%; height: 100%;
+        active-category: 8;
+        handoff-card-open: root.open;
+        handoff-card-title: "Give DeepSeek Ollama?";
+        handoff-card-body: "DeepSeek will use Ollama at 192.168.4.35:11434 with qwen3.5:9b.";
+    }
+}

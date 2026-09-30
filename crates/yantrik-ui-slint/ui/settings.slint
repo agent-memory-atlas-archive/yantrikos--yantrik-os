@@ -2685,16 +2685,6 @@ export component SettingsScreen inherits Rectangle {
                     }
 
                     // ── ADD/EDIT PROVIDER OVERLAY ──
-                    // The card before a harness is given a provider: every file by path, never the key.
-                    if root.handoff-card-open : YDialog {
-                        open: true;
-                        title: root.handoff-card-title;
-                        body: root.handoff-card-body;
-                        confirm-label: "Apply";
-                        confirmed => { root.apply-provider(); }
-                        cancelled => { root.cancel-provider(); }
-                    }
-
                     if root.provider-panel-open : Rectangle {
                         width: 100%;
                         height: 100%;
@@ -3483,6 +3473,17 @@ SettingRow{label:"AI providers";description:"Manage the model providers that are
                             }
                         }
                     }
+                }
+
+                // The card before a harness is given a provider: every file by path, never the key. After
+                // the pages, so it covers whichever one is showing (it is opened from Harnesses).
+                if root.handoff-card-open : YDialog {
+                    open: true;
+                    title: root.handoff-card-title;
+                    body: root.handoff-card-body;
+                    confirm-label: "Apply";
+                    confirmed => { root.apply-provider(); }
+                    cancelled => { root.cancel-provider(); }
                 }
 
                 if root.active-category == 7 : SkillStore {
