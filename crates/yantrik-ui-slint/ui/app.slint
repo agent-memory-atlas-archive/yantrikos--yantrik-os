@@ -15,6 +15,8 @@ import { OnboardingScreen } from "onboarding.slint";
 import { InstallerScreen, InstallerDisk, KeyboardChoice } from "installer.slint";
 export { InstallerDisk, KeyboardChoice }
 export { DecisionPreset, DecisionUse } from "settings.slint";
+export { ProviderPresetData, ProviderPresetRow, ProviderPresetGroup } from "provider_presets.slint";
+import { ProviderPresetData, ProviderPresetGroup } from "provider_presets.slint";
 import { DesktopScreen } from "desktop.slint";
 import { BondScreen, BondData } from "bond.slint";
 import { PersonalityScreen, OpinionData, SharedRefData } from "personality.slint";
@@ -547,7 +549,7 @@ export component App inherits Window {
     in property <AIStatusData> settings-ai-status;
     in property <[AIProviderData]> settings-ai-providers: [];
     in property <[AIModelData]> settings-available-models: [];
-    in property <string> settings-provider-test-result: "";
+    in-out property <string> settings-provider-test-result: "";
     // Decision model
     in property <[DecisionPreset]> settings-decision-presets: [];
     in property <string> settings-decision-provider: "";
@@ -596,14 +598,23 @@ export component App inherits Window {
     callback retry-settings-save();
     callback choose-accent(string);
     callback add-provider();
-    callback save-provider(string, string, string, string, string);
+    callback save-provider(string, string, string, string, string, string);
     callback delete-provider(string);
     callback test-provider(string);
-    callback test-new-provider(string, string, string);
+    callback connect-provider(string, string, string);
+    callback provider-model-search(string);
+    callback edit-provider(string);
+    in property <[string]> settings-provider-form-models: [];
+    in property <int> settings-provider-form-model-total: 0;
+    in-out property <string> settings-provider-form-model: "";
+    in-out property <bool> settings-provider-form-connected: false;
+    in-out property <bool> settings-provider-panel-open: false;
+    in-out property <string> settings-editing-provider-id: "";
     callback provider-preset-selected(string);
     in-out property <string> settings-provider-form-name: "";
     in-out property <string> settings-provider-form-url: "";
     in-out property <string> settings-selected-preset: "";
+    in property <[ProviderPresetGroup]> settings-provider-presets: [];
     callback set-primary-provider(string);
     callback set-fallback-provider(string);
     callback select-model(string);
@@ -1142,6 +1153,7 @@ export component App inherits Window {
     in property <int> onboard-ai-test-latency-ms: 0;
     in property <string> onboard-ai-test-privacy: "local";
     callback onboard-ai-mode-selected(string);
+    in property <[ProviderPresetData]> onboard-ai-cloud-presets: [];
     callback onboard-ai-provider-selected(string);
     callback onboard-ai-api-key-submitted(string, string);
     callback onboard-ai-test-connection();
@@ -1305,6 +1317,7 @@ export component App inherits Window {
             ai-test-model: root.onboard-ai-test-model;
             ai-test-latency-ms: root.onboard-ai-test-latency-ms;
             ai-test-privacy: root.onboard-ai-test-privacy;
+            ai-cloud-presets: root.onboard-ai-cloud-presets;
             set-names(user-name, comp-name) => {
                 if user-name != "" {
                     root.rename-user(user-name);
@@ -1804,7 +1817,7 @@ export component App inherits Window {
                 ai-status: root.settings-ai-status;
                 ai-providers: root.settings-ai-providers;
                 available-models: root.settings-available-models;
-                provider-test-result: root.settings-provider-test-result;
+                provider-test-result <=> root.settings-provider-test-result;
                 decision-presets: root.settings-decision-presets;
                 decision-provider: root.settings-decision-provider;
                 decision-endpoint: root.settings-decision-endpoint;
@@ -1836,14 +1849,23 @@ export component App inherits Window {
                 configure-harness(id) => { root.configure-harness(id); }
                 settings-search(query) => { root.settings-search(query); }
                 add-provider => { root.add-provider(); }
-                save-provider(name, ptype, url, key, auth) => { root.save-provider(name, ptype, url, key, auth); }
+                save-provider(name, ptype, url, key, auth, model) => { root.save-provider(name, ptype, url, key, auth, model); }
                 delete-provider(id) => { root.delete-provider(id); }
                 test-provider(id) => { root.test-provider(id); }
-                test-new-provider(url, key, auth) => { root.test-new-provider(url, key, auth); }
+                connect-provider(preset, url, key) => { root.connect-provider(preset, url, key); }
+                provider-model-search(q) => { root.provider-model-search(q); }
+                edit-provider(id) => { root.edit-provider(id); }
+                provider-form-models: root.settings-provider-form-models;
+                provider-form-model-total: root.settings-provider-form-model-total;
+                provider-form-model <=> root.settings-provider-form-model;
+                provider-form-connected <=> root.settings-provider-form-connected;
+                provider-panel-open <=> root.settings-provider-panel-open;
+                editing-provider-id <=> root.settings-editing-provider-id;
                 provider-preset-selected(preset) => { root.provider-preset-selected(preset); }
                 provider-form-name <=> root.settings-provider-form-name;
                 provider-form-url <=> root.settings-provider-form-url;
                 selected-preset <=> root.settings-selected-preset;
+                provider-presets: root.settings-provider-presets;
                 set-primary-provider(id) => { root.set-primary-provider(id); }
                 set-fallback-provider(id) => { root.set-fallback-provider(id); }
                 select-model(id) => { root.select-model(id); }

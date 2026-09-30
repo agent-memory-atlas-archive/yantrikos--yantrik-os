@@ -8,15 +8,15 @@
 //! landed on a desktop that could not think, with nothing on screen saying so.
 //!
 //! Detection and validation now share the same code paths Settings uses
-//! (`wire::settings::{provider_preset, test_provider_connection}`,
+//! (`wire::provider_catalogue`, `wire::settings::test_provider_connection`,
 //! `ProviderStore`) so the two screens cannot drift apart.
 
 use slint::ComponentHandle;
 
 use crate::app_context::AppContext;
-use crate::wire::settings::{
-    provider_preset, test_provider_connection, ProviderStore, ProviderStoreEntry,
-};
+use crate::wire::provider_catalogue::{auth_type_for, default_model_for, is_local_runtime, provider_preset};
+use crate::wire::provider_models::pick_model;
+use crate::wire::settings::{test_provider_connection, ProviderStore, ProviderStoreEntry};
 use crate::App;
 
 /// The minimums. The README's hardware table carries the same numbers in its
@@ -88,10 +88,18 @@ pub fn wire(ui: &App, ctx: &AppContext) {
             let _ = slint::invoke_from_event_loop(move || {
                 let Some(ui) = weak.upgrade() else { return };
                 if result.success {
+                    // The test listed the provider's models: start on the
+                    // catalogue's default when it is served, else the first.
+                    let model = pick_model(&result.models, &[default_model_for(&primary.provider_type)])
+                        .unwrap_or("")
+                        .to_string();
+                    remember_model(&primary.id, &model);
                     ui.set_onboard_ai_test_status("success".into());
                     ui.set_onboard_ai_test_latency_ms(result.latency_ms);
                     ui.set_onboard_ai_test_privacy(privacy_of(&primary.base_url).into());
-                    ui.set_onboard_ai_test_model(primary.name.clone().into());
+                    ui.set_onboard_ai_test_model(
+                        if model.is_empty() { primary.name.clone() } else { model }.into(),
+                    );
                     tracing::info!(
                         provider = %primary.provider_type,
                         latency_ms = result.latency_ms,
@@ -367,23 +375,6 @@ fn probe_runtime(configured: Option<&str>) -> bool {
     false
 }
 
-/// Anthropic uses `x-api-key`; the rest of the presets are bearer-token.
-/// Shared with the installer, which rebuilds the wizard's provider entry for
-/// the installed user and must not guess the auth scheme differently.
-pub(crate) fn auth_type_for(provider: &str) -> &'static str {
-    match provider {
-        "anthropic" => "x-api-key",
-        _ if is_local_runtime(provider) => "none",
-        _ => "bearer",
-    }
-}
-
-/// Providers served by a runtime the user hosts, whose preset endpoint is a
-/// localhost guess rather than a fixed vendor URL.
-fn is_local_runtime(provider: &str) -> bool {
-    matches!(provider, "ollama" | "llamacpp" | "lmstudio" | "vllm")
-}
-
 /// Persist `provider` as the primary, replacing any existing primary.
 /// Returns false when there is no endpoint to save.
 ///
@@ -416,6 +407,8 @@ fn save_primary(provider: &str, api_key: Option<String>, configured: Option<&str
         auth_type: auth_type_for(provider).to_string(),
         is_primary: true,
         is_fallback: false,
+        // Chosen from the provider's own list once the connection test runs.
+        model: String::new(),
     };
 
     let mut store = ProviderStore::load();
@@ -426,6 +419,20 @@ fn save_primary(provider: &str, api_key: Option<String>, configured: Option<&str
     // Log presence, never the key itself.
     tracing::info!(provider, endpoint = %url, has_key, "Onboarding: provider saved as primary");
     true
+}
+
+/// Keep `model` on the saved provider `id`, so the desktop starts on a model
+/// the provider actually serves.
+fn remember_model(id: &str, model: &str) {
+    if model.is_empty() {
+        return;
+    }
+    let mut store = ProviderStore::load();
+    let Some(entry) = store.entries.iter_mut().find(|e| e.id == id) else { return };
+    entry.model = model.to_string();
+    if store.save().is_ok() {
+        tracing::info!(model, "Onboarding: model chosen from the provider's list");
+    }
 }
 
 /// Whether requests to this endpoint leave the machine.

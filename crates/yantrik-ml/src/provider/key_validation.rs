@@ -133,7 +133,7 @@ impl KeyValidator {
         }
 
         match provider.id {
-            "anthropic" => self.validate_anthropic(api_key, url, start),
+            "anthropic" => self.validate_anthropic(api_key, url, provider.default_model, start),
             "gemini" => self.validate_gemini(api_key, url, start),
             _ if provider.openai_compatible => self.validate_openai_compatible(api_key, url, provider.auth_scheme, start),
             _ => self.validate_openai_compatible(api_key, url, provider.auth_scheme, start),
@@ -215,6 +215,7 @@ impl KeyValidator {
         &self,
         api_key: &str,
         base_url: &str,
+        model: &str,
         start: std::time::Instant,
     ) -> KeyValidationResult {
         // Anthropic doesn't have a /models endpoint in the standard API.
@@ -223,7 +224,7 @@ impl KeyValidator {
         let agent = self.build_agent();
 
         let body = serde_json::json!({
-            "model": "claude-3-5-haiku-20241022",
+            "model": model,
             "max_tokens": 1,
             "messages": [{"role": "user", "content": "hi"}],
         });
@@ -240,10 +241,7 @@ impl KeyValidator {
             Ok(_) => {
                 let latency = start.elapsed().as_millis() as u64;
                 // Key is valid — we don't get a model list from this endpoint
-                KeyValidationResult::success(latency, vec![
-                    "claude-3-5-haiku-20241022".to_string(),
-                    "claude-sonnet-4-20250514".to_string(),
-                ])
+                KeyValidationResult::success(latency, vec![model.to_string()])
             }
             Err(e) => {
                 let latency = start.elapsed().as_millis() as u64;

@@ -6,6 +6,7 @@ use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use std::sync::{Arc, Mutex};
 
 use crate::app_context::AppContext;
+use crate::wire::provider_models::{list_models, ListedModel};
 use crate::{
     AIModelData, AIProviderData, AIStatusData, AccentPreset, App, SettingsCategoryItem, ThemeMode,
 };
@@ -791,139 +792,14 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         ui.set_settings_categories(ModelRc::new(VecModel::from(filtered)));
     });
 
-    // Add provider (opens panel — UI-side only, but we log it)
-    ui.on_add_provider(move || {
-        tracing::info!("Add provider panel opened");
-    });
-
-    // Provider preset selected — fill form fields with known defaults
-    let ui_weak = ui.as_weak();
-    ui.on_provider_preset_selected(move |preset| {
-        let Some(ui) = ui_weak.upgrade() else { return };
-        let preset_str = preset.to_string();
-        let (name, url) = provider_preset(&preset_str);
-        tracing::info!(preset = %preset_str, name, url, "Provider preset selected");
-        ui.set_settings_provider_form_name(name.into());
-        ui.set_settings_provider_form_url(url.into());
-        ui.set_settings_provider_test_result("".into());
-    });
-
     wire_rest(ui, ctx, providers);
 }
 
-/// Known provider presets: id -> (display name, OpenAI-compatible base URL).
-///
-/// Shared with onboarding so first boot and Settings cannot drift apart.
-pub(crate) fn provider_preset(id: &str) -> (&'static str, &'static str) {
-    match id {
-        "openai" => ("OpenAI", "https://api.openai.com/v1"),
-        "anthropic" => ("Anthropic", "https://api.anthropic.com/v1"),
-        "gemini" => (
-            "Google Gemini",
-            "https://generativelanguage.googleapis.com/v1beta/openai",
-        ),
-        "deepseek" => ("DeepSeek", "https://api.deepseek.com/v1"),
-        "groq" => ("Groq", "https://api.groq.com/openai/v1"),
-        "mistral" => ("Mistral", "https://api.mistral.ai/v1"),
-        "xai" => ("xAI Grok", "https://api.x.ai/v1"),
-        "perplexity" => ("Perplexity", "https://api.perplexity.ai"),
-        "cerebras" => ("Cerebras", "https://api.cerebras.ai/v1"),
-        "sambanova" => ("SambaNova", "https://api.sambanova.ai/v1"),
-        "qwen" => ("Qwen", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
-        "minimax" => ("MiniMax", "https://api.minimax.chat/v1"),
-        "kimi" => ("Kimi", "https://api.moonshot.cn/v1"),
-        "baidu" => ("Baidu", "https://qianfan.baidubce.com/v2"),
-        "zhipu" => ("Zhipu GLM", "https://open.bigmodel.cn/api/paas/v4"),
-        "openrouter" => ("OpenRouter", "https://openrouter.ai/api/v1"),
-        "together" => ("Together", "https://api.together.xyz/v1"),
-        "fireworks" => ("Fireworks", "https://api.fireworks.ai/inference/v1"),
-        "huggingface" => ("HuggingFace", "https://api-inference.huggingface.co/v1"),
-        "nanogpt" => ("NanoGPT", "https://api.nano-gpt.com/v1"),
-        "ollama" => ("Ollama", "http://localhost:11434/v1"),
-        "ollama-cloud" => ("Ollama Cloud", ""),
-        "llamacpp" => ("llama.cpp", "http://localhost:8080/v1"),
-        "lmstudio" => ("LM Studio", "http://localhost:1234/v1"),
-        "vllm" => ("vLLM", "http://localhost:8000/v1"),
-        _ => ("Custom", ""),
-    }
-}
-
 /// Remainder of the settings wiring, split out when `provider_preset` was
-/// lifted to a shared function.
+/// lifted to a shared function (now in `wire::provider_catalogue`).
 fn wire_rest(ui: &App, ctx: &AppContext, providers: Arc<Mutex<ProviderStore>>) {
-    // Save provider
-    let ui_weak = ui.as_weak();
-    let ps = providers.clone();
-    let bridge = ctx.bridge.clone();
-    let bridge_for_save = ctx.bridge.clone();
-    ui.on_save_provider(move |name, ptype, url, key, auth| {
-        let entry = ProviderStoreEntry {
-            id: format!("{}-{}", ptype.to_string().to_lowercase(), uuid_short()),
-            name: name.to_string(),
-            provider_type: ptype.to_string(),
-            base_url: url.to_string(),
-            api_key: if key.is_empty() {
-                None
-            } else {
-                Some(key.to_string())
-            },
-            auth_type: auth.to_string(),
-            is_primary: false,
-            is_fallback: false,
-        };
-        tracing::info!(name = %entry.name, provider_type = %entry.provider_type, "Saving provider");
-        let made_primary = if let Ok(mut store) = ps.lock() {
-            let before = store.clone();
-            // If this is the first provider, make it primary
-            let make_primary = store.entries.is_empty();
-            store.entries.push(entry.clone());
-            if make_primary {
-                if let Some(e) = store.entries.last_mut() {
-                    e.is_primary = true;
-                }
-            }
-            if store.save().is_err() {
-                *store = before;
-                return;
-            }
-            if let Some(ui) = ui_weak.upgrade() {
-                push_providers_to_ui(&ui, &store);
-                push_ai_status_to_ui(&ui, &store, bridge.is_online());
-            }
-            make_primary
-        } else {
-            false
-        };
-
-        // Hot-reload the LLM backend if this is the primary provider
-        if made_primary {
-            // Default model per provider type
-            let default_model = match entry.provider_type.as_str() {
-                "ollama" => "llama3.2:latest",
-                "openai" => "gpt-4o-mini",
-                "anthropic" => "claude-3-5-sonnet-latest",
-                "google" => "gemini-2.0-flash",
-                "deepseek" => "deepseek-chat",
-                _ => "default",
-            };
-            // Build base URL with /v1 suffix for OpenAI-compatible APIs
-            let base_url = if entry.provider_type == "ollama" && !entry.base_url.contains("/v1") {
-                format!("{}/v1", entry.base_url.trim_end_matches('/'))
-            } else {
-                entry.base_url.clone()
-            };
-            tracing::info!(
-                model = default_model,
-                "Hot-reloading LLM with new primary provider"
-            );
-            bridge_for_save.reload_llm(
-                entry.provider_type.clone(),
-                base_url,
-                entry.api_key.clone(),
-                default_model.to_string(),
-            );
-        }
-    });
+    // Presets, Connect, the model picker and Save live in their own module.
+    crate::wire::provider_panel::wire(ui, ctx, providers.clone());
 
     // Delete provider
     let ui_weak = ui.as_weak();
@@ -979,46 +855,12 @@ fn wire_rest(ui: &App, ctx: &AppContext, providers: Arc<Mutex<ProviderStore>>) {
                         ui.set_settings_provider_test_result(if result.success {
                             "success".into()
                         } else {
-                            format!("error: {}", result.message).into()
+                            result.message.clone().into()
                         });
                     }
                 });
             });
         }
-    });
-
-    // Test new provider (from add panel)
-    let ui_weak = ui.as_weak();
-    ui.on_test_new_provider(move |url, key, auth| {
-        let url_str = url.to_string();
-        let key_str = if key.is_empty() {
-            None
-        } else {
-            Some(key.to_string())
-        };
-        let auth_str = auth.to_string();
-
-        tracing::info!(url = %url_str, "Testing new provider connection");
-
-        let weak = ui_weak.clone();
-        // Set testing state
-        if let Some(ui) = weak.upgrade() {
-            ui.set_settings_provider_test_result("testing".into());
-        }
-
-        let weak2 = weak.clone();
-        std::thread::spawn(move || {
-            let result = test_provider_connection(&url_str, key_str.as_deref(), &auth_str);
-            let _ = slint::invoke_from_event_loop(move || {
-                if let Some(ui) = weak2.upgrade() {
-                    ui.set_settings_provider_test_result(if result.success {
-                        "success".into()
-                    } else {
-                        format!("error: {}", result.message).into()
-                    });
-                }
-            });
-        });
     });
 
     // Set primary provider
@@ -1091,27 +933,22 @@ fn wire_rest(ui: &App, ctx: &AppContext, providers: Arc<Mutex<ProviderStore>>) {
             ui.set_settings_llm_api_model(id.clone().into());
         }
 
-        // Find the primary provider and hot-reload the LLM with the new model
-        let primary = if let Ok(store) = ps_sm.lock() {
-            store.entries.iter().find(|e| e.is_primary).cloned()
+        // Save the choice on the primary provider, then hot-reload onto it.
+        let primary = if let Ok(mut store) = ps_sm.lock() {
+            let before = store.clone();
+            if let Some(p) = store.entries.iter_mut().find(|e| e.is_primary) {
+                p.model = id.clone();
+            }
+            if store.save().is_err() {
+                *store = before;
+            }
+            store.primary().cloned()
         } else {
             None
         };
 
         if let Some(provider) = primary {
-            // Build base URL with /v1 suffix for OpenAI-compatible APIs
-            let base_url = if provider.provider_type == "ollama" && !provider.base_url.contains("/v1") {
-                format!("{}/v1", provider.base_url.trim_end_matches('/'))
-            } else {
-                provider.base_url.clone()
-            };
-            tracing::info!(model = %id, base_url = %base_url, "Hot-reloading LLM with selected model");
-            bridge_sm.reload_llm(
-                provider.provider_type.clone(),
-                base_url,
-                provider.api_key.clone(),
-                id,
-            );
+            crate::wire::provider_panel::reload_primary(&bridge_sm, &provider);
             // Push fresh AI status with new online state
             if let (Some(ui), Ok(store)) = (ui_weak_sm.upgrade(), ps_sm.lock()) {
                 push_ai_status_to_ui(&ui, &store, true);
@@ -1139,7 +976,7 @@ fn wire_rest(ui: &App, ctx: &AppContext, providers: Arc<Mutex<ProviderStore>>) {
                     &provider.base_url,
                     provider.api_key.as_deref(),
                     &provider.auth_type,
-                    &provider.provider_type,
+                    &provider.model,
                 );
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = weak.upgrade() {
@@ -1202,6 +1039,11 @@ pub struct ProviderStoreEntry {
     pub is_primary: bool,
     #[serde(default)]
     pub is_fallback: bool,
+    /// The model this provider runs, as the person picked it from the
+    /// provider's own list. Empty (and absent from older files) until then;
+    /// the companion falls back to the catalogue's default.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
 }
 
 fn default_provider_type() -> String {
@@ -1252,7 +1094,7 @@ impl ProviderStore {
 }
 
 /// Generate a short unique ID.
-fn uuid_short() -> String {
+pub(crate) fn uuid_short() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1262,7 +1104,7 @@ fn uuid_short() -> String {
 }
 
 /// Push provider list to UI.
-fn push_providers_to_ui(ui: &App, store: &ProviderStore) {
+pub(crate) fn push_providers_to_ui(ui: &App, store: &ProviderStore) {
     let items: Vec<AIProviderData> = store
         .entries
         .iter()
@@ -1310,7 +1152,7 @@ fn push_providers_to_ui_with_test(ui: &App, store: &ProviderStore, result: &Test
 }
 
 /// Push AI status derived from provider store + bridge state.
-fn push_ai_status_to_ui(ui: &App, store: &ProviderStore, online: bool) {
+pub(crate) fn push_ai_status_to_ui(ui: &App, store: &ProviderStore, online: bool) {
     let primary = store.primary();
     let fallback = store.fallback();
 
@@ -1342,9 +1184,13 @@ pub(crate) struct TestResult {
     pub success: bool,
     pub message: String,
     pub latency_ms: i32,
+    /// What the provider listed, when it answered.
+    pub models: Vec<ListedModel>,
 }
 
-/// Test a provider connection by hitting its models endpoint.
+/// Test a provider connection: list its models (`provider_models`), which
+/// checks the key on the way. The message is a sentence for the person,
+/// never carrying the key.
 ///
 /// Shared with onboarding (`wire::ai_onboarding`) so first boot validates a
 /// provider the same way Settings does, instead of simulating a result.
@@ -1353,54 +1199,17 @@ pub(crate) fn test_provider_connection(
     api_key: Option<&str>,
     auth_type: &str,
 ) -> TestResult {
-    let url = if base_url.contains("/v1") {
-        format!("{}/models", base_url.trim_end_matches('/'))
-    } else {
-        // Ollama-style: /api/tags
-        format!("{}/api/tags", base_url.trim_end_matches('/'))
-    };
-
     let start = std::time::Instant::now();
-
-    let agent = ureq::AgentBuilder::new()
-        .timeout(std::time::Duration::from_secs(10))
-        .build();
-
-    let mut request = agent.get(&url);
-    if let Some(key) = api_key {
-        match auth_type {
-            "x-api-key" => {
-                request = request.set("x-api-key", key);
-            }
-            "none" => {}
-            _ => {
-                request = request.set("Authorization", &format!("Bearer {}", key));
-            }
-        }
-    }
-
-    match request.call() {
-        Ok(response) => {
-            let latency = start.elapsed().as_millis() as i32;
-            TestResult {
-                success: true,
-                message: "OK".into(),
-                latency_ms: latency,
-            }
-        }
-        Err(ureq::Error::Status(code, _response)) => {
-            let latency = start.elapsed().as_millis() as i32;
-            TestResult {
-                success: false,
-                message: format!("HTTP {}", code),
-                latency_ms: latency,
-            }
-        }
-        Err(e) => TestResult {
-            success: false,
-            message: format!("{}", e),
-            latency_ms: -1,
+    let listed = list_models(base_url, api_key, auth_type);
+    let latency_ms = start.elapsed().as_millis() as i32;
+    match listed {
+        Ok(models) => TestResult {
+            success: true,
+            message: format!("{} models", models.len()),
+            latency_ms,
+            models,
         },
+        Err(e) => TestResult { success: false, message: e.to_string(), latency_ms: -1, models: Vec::new() },
     }
 }
 
@@ -1415,100 +1224,23 @@ struct FetchedModel {
     is_local: bool,
 }
 
-/// Fetch available models from a provider.
-fn fetch_models(
-    base_url: &str,
-    api_key: Option<&str>,
-    auth_type: &str,
-    provider_type: &str,
-) -> Vec<FetchedModel> {
-    let url =
-        if provider_type == "ollama" || (!base_url.contains("/v1") && !base_url.contains("api.")) {
-            format!("{}/api/tags", base_url.trim_end_matches('/'))
-        } else {
-            format!("{}/models", base_url.trim_end_matches('/'))
-        };
-
-    let agent = ureq::AgentBuilder::new()
-        .timeout(std::time::Duration::from_secs(15))
-        .build();
-
-    let mut request = agent.get(&url);
-    if let Some(key) = api_key {
-        match auth_type {
-            "x-api-key" => {
-                request = request.set("x-api-key", key);
-            }
-            "none" => {}
-            _ => {
-                request = request.set("Authorization", &format!("Bearer {}", key));
-            }
-        }
-    }
-
-    let response = match request.call() {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(error = %e, "Failed to fetch models");
-            return vec![];
-        }
-    };
-
-    let body: String = match response.into_string() {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::warn!(error = %e, "Failed to read model response body");
-            return vec![];
-        }
-    };
-
-    // Parse JSON — handle both Ollama and OpenAI formats
-    let json: serde_json::Value = match serde_json::from_str(&body) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!(error = %e, "Failed to parse model JSON");
-            return vec![];
-        }
-    };
-
-    let mut models = Vec::new();
-
-    // Ollama format: { "models": [ { "name": "...", "size": ... } ] }
-    if let Some(model_list) = json.get("models").and_then(|v| v.as_array()) {
-        for m in model_list {
-            let name = m.get("name").and_then(|v| v.as_str()).unwrap_or("unknown");
-            let size = m.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
-            let param_count = format_param_count(size);
-            let tier = detect_tier(name);
-            models.push(FetchedModel {
-                id: name.to_string(),
-                name: name.to_string(),
-                tier,
-                param_count,
-                context_length: String::new(),
-                is_active: false,
-                is_local: true,
-            });
-        }
-    }
-    // OpenAI format: { "data": [ { "id": "..." } ] }
-    else if let Some(data_list) = json.get("data").and_then(|v| v.as_array()) {
-        for m in data_list {
-            let id = m.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
-            let tier = detect_tier(id);
-            models.push(FetchedModel {
-                id: id.to_string(),
-                name: id.to_string(),
-                tier,
-                param_count: String::new(),
-                context_length: String::new(),
-                is_active: false,
-                is_local: false,
-            });
-        }
-    }
-
-    models
+/// The primary's models for the MODELS list, `active` marked. Empty when the
+/// provider cannot be listed; the reason is logged by `list_models`.
+fn fetch_models(base_url: &str, api_key: Option<&str>, auth_type: &str, active: &str) -> Vec<FetchedModel> {
+    let local = base_url.contains("localhost") || base_url.contains("127.0.0.1");
+    list_models(base_url, api_key, auth_type)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|m| FetchedModel {
+            tier: detect_tier(&m.id),
+            param_count: format_param_count(m.size_bytes),
+            context_length: String::new(),
+            is_active: m.id == active,
+            is_local: local || m.size_bytes > 0,
+            id: m.id,
+            name: m.name,
+        })
+        .collect()
 }
 
 /// Public wrapper for tier detection (used by system_monitor.rs).
@@ -1586,6 +1318,30 @@ fn format_param_count(size_bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_providers_file_from_before_models_still_loads() {
+        let old = "entries:\n- id: openai-1a2b\n  name: OpenAI\n  provider_type: openai\n  base_url: https://api.openai.com/v1\n  api_key: sk-1\n  auth_type: bearer\n  is_primary: true\n  is_fallback: false\n";
+        let store: ProviderStore = serde_yaml::from_str(old).expect("an old file loads");
+        let primary = store.primary().expect("primary");
+        assert_eq!(primary.model, "", "no model was ever chosen");
+        assert_eq!(primary.api_key.as_deref(), Some("sk-1"));
+    }
+
+    #[test]
+    fn a_chosen_model_survives_the_write_and_the_reload() {
+        let mut store: ProviderStore = serde_yaml::from_str(
+            "entries:\n- id: openrouter-1\n  name: OpenRouter\n  base_url: https://openrouter.ai/api/v1\n  is_primary: true\n",
+        )
+        .unwrap();
+        store.entries[0].model = "anthropic/claude-sonnet-5-5".into();
+        let yaml = serde_yaml::to_string(&store).unwrap();
+        let back: ProviderStore = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(back.entries[0].model, "anthropic/claude-sonnet-5-5");
+        // An entry with no model writes no model line, as older files had none.
+        store.entries[0].model.clear();
+        assert!(!serde_yaml::to_string(&store).unwrap().contains("model"));
+    }
 
     #[test]
     fn an_auto_lock_value_nobody_offered_is_the_default_and_every_offer_cycles() {

@@ -14,6 +14,7 @@ import { Orb } from "components/orb.slint";
 import { ParticleField } from "components/particle_field.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { PillButton, OnboardField } from "components/onboard_kit.slint";
+import { ProviderPresetData } from "provider_presets.slint";
 
 // ── Interest chip (toggleable) ────────────────────────────────────
 
@@ -123,7 +124,7 @@ export component OnboardingScreen inherits Rectangle {
 
     // AI setup callbacks
     callback ai-mode-selected(string);       // "local", "cloud", "later"
-    callback ai-provider-selected(string);   // provider type: "ollama", "openai", "anthropic", "google", "deepseek", "openrouter"
+    callback ai-provider-selected(string);   // a provider catalogue id: "ollama", "openai", "gemini", …
     callback ai-api-key-submitted(string, string);  // (provider_type, api_key)
     callback ai-test-connection();
     callback ai-skip-setup();
@@ -209,7 +210,10 @@ export component OnboardingScreen inherits Rectangle {
 
     // AI setup state
     property <string> ai-mode: "";               // "local", "cloud", "later"
-    property <string> ai-selected-provider: "";   // "ollama", "openai", "anthropic", "google", "deepseek", "openrouter"
+    property <string> ai-selected-provider: "";   // a provider catalogue id, as ai-provider-selected
+    property <string> ai-key-placeholder: "";     // the selected provider's key hint ("sk-…")
+    // The cloud cards: the catalogue's first-boot clouds, pushed from Rust (wire/provider_catalogue.rs).
+    in property <[ProviderPresetData]> ai-cloud-presets: [];
     property <string> ai-api-key-input: "";
     property <float> hw-scan-progress: 0;
     property <int> hw-scan-step: 0;
@@ -1087,31 +1091,26 @@ export component OnboardingScreen inherits Rectangle {
                         alignment: center;
                         spacing: Theme.sp-2;
 
-                        for prov-item in [
-                            { label: "OpenAI", value: "openai" },
-                            { label: "Anthropic", value: "anthropic" },
-                            { label: "Google", value: "google" },
-                            { label: "DeepSeek", value: "deepseek" },
-                            { label: "OpenRouter", value: "openrouter" }
-                        ] : TouchArea {
+                        for prov-item in root.ai-cloud-presets : TouchArea {
                             width: 100px;
                             height: 56px;
                             clicked => {
-                                root.ai-selected-provider = prov-item.value;
+                                root.ai-selected-provider = prov-item.id;
+                                root.ai-key-placeholder = prov-item.placeholder;
                             }
                             Rectangle {
                                 border-radius: Theme.r-md;
-                                background: root.ai-selected-provider == prov-item.value ? Theme.cyan-glow : Theme.hover-fill;
+                                background: root.ai-selected-provider == prov-item.id ? Theme.cyan-glow : Theme.hover-fill;
                                 border-width: 1px;
-                                border-color: root.ai-selected-provider == prov-item.value ? Theme.cyan : Theme.border-strong;
+                                border-color: root.ai-selected-provider == prov-item.id ? Theme.cyan : Theme.border-strong;
                                 animate background { duration: Theme.dur-fast; }
                                 animate border-color { duration: Theme.dur-fast; }
 
                                 Text {
                                     text: prov-item.label;
-                                    color: root.ai-selected-provider == prov-item.value ? Theme.cyan : Theme.text-secondary;
+                                    color: root.ai-selected-provider == prov-item.id ? Theme.cyan : Theme.text-secondary;
                                     font-size: Theme.fs-body;
-                                    font-weight: root.ai-selected-provider == prov-item.value ? 600 : 400;
+                                    font-weight: root.ai-selected-provider == prov-item.id ? 600 : 400;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
                                 }
@@ -1161,7 +1160,7 @@ export component OnboardingScreen inherits Rectangle {
 
                                     if onboard-key-input.text == "" : Text {
                                         x: Theme.sp-3;
-                                        text: "sk-... or your API key";
+                                        text: root.ai-key-placeholder;
                                         color: Theme.text-dim;
                                         font-size: Theme.fs-body;
                                         vertical-alignment: center;

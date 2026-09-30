@@ -9,10 +9,10 @@ use std::process::Command;
 use crate::app_context::AppContext;
 use crate::control_installer::step;
 use crate::installer_rules;
-use crate::wire::ai_onboarding::auth_type_for;
+use crate::wire::provider_catalogue::{auth_type_for, default_model_for, provider_preset};
 use crate::wire::installer_disk;
 use crate::wire::installer_locale;
-use crate::wire::settings::{provider_preset, ProviderStore, ProviderStoreEntry};
+use crate::wire::settings::{ProviderStore, ProviderStoreEntry};
 use crate::{App, InstallerDisk, KeyboardChoice};
 
 mod subids;
@@ -75,9 +75,9 @@ pub fn wire(ui: &App, _ctx: &AppContext) {
             // and wire::ai_onboarding::save_primary keeps that choice in this store. Carried
             // over when present, so a key typed in the live session is not typed twice.
             let wizard = ProviderStore::load().primary().cloned();
-            let (ai_provider, ai_base_url, ai_api_key) = match wizard {
-                Some(p) => (p.provider_type, p.base_url, p.api_key.unwrap_or_default()),
-                None => (String::new(), String::new(), String::new()),
+            let (ai_provider, ai_base_url, ai_api_key, ai_model) = match wizard {
+                Some(p) => (p.provider_type, p.base_url, p.api_key.unwrap_or_default(), p.model),
+                None => (String::new(), String::new(), String::new(), String::new()),
             };
             // The endpoint is not a secret; the key is, so only its presence is logged.
             tracing::info!(
@@ -102,6 +102,7 @@ pub fn wire(ui: &App, _ctx: &AppContext) {
                 ai_provider,
                 ai_base_url,
                 ai_api_key,
+                ai_model,
             };
 
             let weak2 = weak.clone();
@@ -256,6 +257,9 @@ pub struct InstallerState {
     /// one, and the provider's well-known URL is used if a provider is set.
     pub ai_base_url: String,
     pub ai_api_key: String,
+    /// The model picked from the provider's own list in the live session.
+    /// Empty means none was picked, and the catalogue's default is used.
+    pub ai_model: String,
 }
 
 /// Progress callback: (percent 0-100, status message).
@@ -850,16 +854,22 @@ fn installed_config_yaml(content: &str, state: &InstallerState) -> String {
         out.insert_str(0, &format!("user_name: \"{display_name}\"\n"));
     }
 
-    if !state.ai_provider.is_empty() {
-        let base_url = if !state.ai_base_url.is_empty() {
-            state.ai_base_url.as_str()
-        } else {
-            provider_base_url(&state.ai_provider)
-        };
+    let base_url = if !state.ai_base_url.is_empty() {
+        state.ai_base_url.as_str()
+    } else {
+        provider_preset(&state.ai_provider).1
+    };
+    // No endpoint (no provider chosen, or one the catalogue does not know
+    // with none saved) leaves the image's default in place.
+    if !state.ai_provider.is_empty() && !base_url.is_empty() {
         // The wizard does not ask for a model — the AI pages pick a provider and
         // a key, and Settings offers the model list later — so the provider's
         // default is what the installed system starts on.
-        let model = provider_default_model(&state.ai_provider);
+        let model = if state.ai_model.is_empty() {
+            default_model_for(&state.ai_provider)
+        } else {
+            state.ai_model.as_str()
+        };
         replace_yaml_line(&mut out, "api_base_url:", &format!("api_base_url: \"{base_url}\""));
         replace_yaml_line(&mut out, "api_model:", &format!("api_model: \"{model}\""));
     }
@@ -902,62 +912,10 @@ fn installed_providers_yaml(state: &InstallerState) -> Option<String> {
         auth_type: auth_type_for(&state.ai_provider).to_string(),
         is_primary: true,
         is_fallback: false,
+        model: state.ai_model.clone(),
     };
     let store = ProviderStore { entries: vec![entry] };
     serde_yaml::to_string(&store).ok()
-}
-
-/// Resolve provider name to default API base URL.
-fn provider_base_url(provider: &str) -> &'static str {
-    match provider {
-        "ollama" => "http://localhost:11434/v1",
-        "openai" => "https://api.openai.com/v1",
-        "anthropic" | "claude" => "https://api.anthropic.com/v1",
-        "google" | "gemini" => "https://generativelanguage.googleapis.com/v1beta/openai",
-        "deepseek" => "https://api.deepseek.com/v1",
-        "groq" => "https://api.groq.com/openai/v1",
-        "mistral" => "https://api.mistral.ai/v1",
-        "xai" | "grok" => "https://api.x.ai/v1",
-        "perplexity" => "https://api.perplexity.ai",
-        "cerebras" => "https://api.cerebras.ai/v1",
-        "sambanova" => "https://api.sambanova.ai/v1",
-        "openrouter" => "https://openrouter.ai/api/v1",
-        "together" => "https://api.together.xyz/v1",
-        "fireworks" => "https://api.fireworks.ai/inference/v1",
-        "huggingface" => "https://api-inference.huggingface.co/v1",
-        "nanogpt" => "https://api.nano-gpt.com/v1",
-        "qwen" => "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        "minimax" => "https://api.minimax.chat/v1",
-        "kimi" | "moonshot" => "https://api.moonshot.cn/v1",
-        "baidu" => "https://qianfan.baidubce.com/v2",
-        "zhipu" => "https://open.bigmodel.cn/api/paas/v4",
-        _ => "http://localhost:11434/v1",
-    }
-}
-
-/// Resolve provider name to a reasonable default model.
-fn provider_default_model(provider: &str) -> &'static str {
-    match provider {
-        "ollama" => "nemotron-3-nano:4b",
-        "openai" => "gpt-4o-mini",
-        "anthropic" | "claude" => "claude-sonnet-4-20250514",
-        "google" | "gemini" => "gemini-2.0-flash",
-        "deepseek" => "deepseek-chat",
-        "groq" => "llama-3.3-70b-versatile",
-        "mistral" => "mistral-small-latest",
-        "xai" | "grok" => "grok-2-latest",
-        "perplexity" => "sonar",
-        "cerebras" => "llama-3.3-70b",
-        "sambanova" => "Meta-Llama-3.3-70B-Instruct",
-        "openrouter" => "meta-llama/llama-3.3-70b-instruct",
-        "together" => "meta-llama/Llama-3.3-70B-Instruct-Turbo",
-        "fireworks" => "accounts/fireworks/models/llama-v3p3-70b-instruct",
-        "huggingface" => "meta-llama/Llama-3.3-70B-Instruct",
-        "qwen" => "qwen-plus",
-        "minimax" => "MiniMax-Text-01",
-        "kimi" | "moonshot" => "moonshot-v1-8k",
-        _ => "auto",
-    }
 }
 
 /// Auto-detect the installation target disk.
@@ -1370,6 +1328,28 @@ llm:
         // Only the primary endpoint is replaced; the fallback block is the
         // image's own and the wizard said nothing about it.
         assert!(out.contains("    api_base_url: \"http://127.0.0.1:8341/v1\""), "{out}");
+    }
+
+    #[test]
+    fn the_catalogue_supplies_url_and_model_when_none_was_saved() {
+        let out = installed_config_yaml(IMAGE_CONFIG, &wizard_state("nvidia-nim", "", "nvapi-1"));
+        assert!(out.contains("api_base_url: \"https://integrate.api.nvidia.com/v1\""), "{out}");
+        assert!(out.contains("api_model: \"nvidia/nemotron-3-super-120b-a12b\""), "{out}");
+        // A provider the catalogue does not know, with no endpoint saved, leaves
+        // the image's own endpoint rather than guessing one.
+        let out = installed_config_yaml(IMAGE_CONFIG, &wizard_state("nonesuch", "", ""));
+        assert!(out.contains("api_base_url: \"http://127.0.0.1:8341/v1\""), "{out}");
+    }
+
+    #[test]
+    fn a_model_picked_in_the_live_session_is_the_one_installed() {
+        let mut state = wizard_state("openrouter", "https://openrouter.ai/api/v1", "sk-or-1");
+        state.ai_model = "anthropic/claude-sonnet-5-5".into();
+        let out = installed_config_yaml(IMAGE_CONFIG, &state);
+        assert!(out.contains("api_model: \"anthropic/claude-sonnet-5-5\""), "{out}");
+        let yaml = installed_providers_yaml(&state).expect("a chosen provider produces a store");
+        let store: ProviderStore = serde_yaml::from_str(&yaml).expect("valid YAML");
+        assert_eq!(store.primary().expect("primary").model, "anthropic/claude-sonnet-5-5");
     }
 
     #[test]
