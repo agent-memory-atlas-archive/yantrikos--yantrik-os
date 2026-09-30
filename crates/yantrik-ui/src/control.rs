@@ -1452,6 +1452,15 @@ pub fn publish(
                 "Give a harness one of the person's saved providers, written into the harness's own settings",
             )
             .risk("sensitive")
+            // The card names where the key goes — provider, address, model, file — which the
+            // bare arguments (an id like `custom-3fa1b2`) do not. A per-call sentence also means
+            // "allow for this session" is never offered: each key moved is its own question.
+            .explain(|args| {
+                crate::wire::harness_provider::explain_assign(
+                    args["harness"].as_str().unwrap_or_default().trim(),
+                    args["provider"].as_str().unwrap_or_default().trim(),
+                )
+            })
             .arg(Param::text("harness").describe("Harness id, as `describe shell` lists under `harnesses`, with can_assign_provider"))
             .arg(Param::text("provider").describe("A saved provider's id or name, as Settings → AI lists it")),
             move |args| {
@@ -1472,6 +1481,7 @@ pub fn publish(
                 "Put back a harness's own settings, undoing assign_provider",
             )
             .risk("sensitive")
+            .explain(|args| crate::wire::harness_provider::explain_revert(args["harness"].as_str().unwrap_or_default().trim()))
             .arg(Param::text("harness").describe("Harness id with can_revert_provider")),
             move |args| {
                 let harness = args["harness"].as_str().unwrap_or_default().trim().to_string();

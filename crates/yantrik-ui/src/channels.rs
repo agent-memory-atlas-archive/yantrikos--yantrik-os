@@ -56,6 +56,10 @@ const NEVER_FROM_A_PHONE: &[(&str, &str)] = &[
     ("shell", "hand_off"),
     ("shell", "new_agent"),
     ("shell", "send_to_agent"),
+    // A provider's key moved into a harness's settings: never on a code sent back over a
+    // channel the provider itself may be able to read.
+    ("shell", "assign_provider"),
+    ("shell", "revert_provider"),
 ];
 
 fn never_from_a_phone(app: &str, action: &str) -> bool {

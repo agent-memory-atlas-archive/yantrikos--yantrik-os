@@ -4,7 +4,7 @@
 //! (the key is in the file now), and everything else the person put there — `decider`,
 //! `max_steps`, `temperature` — left as it was.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 
@@ -24,6 +24,14 @@ impl Handoff for DeepSeek {
         "DeepSeek"
     }
 
+    fn files(&self, home: &Path) -> Vec<PathBuf> {
+        vec![home.join(".config/yantrik/deepseek.json")]
+    }
+
+    fn unit(&self) -> Option<&'static str> {
+        Some(UNIT)
+    }
+
     fn plan(&self, home: &Path, provider: &ProviderStoreEntry) -> Result<Plan, String> {
         if provider.model.trim().is_empty() {
             return Err(format!(
@@ -40,8 +48,10 @@ impl Handoff for DeepSeek {
             Err(_) => Map::new(),
         };
         // The harness speaks OpenAI chat completions, so a provider saved at a native address
-        // (Anthropic's, Gemini's) is given its OpenAI-compatible one.
-        config.insert("base_url".into(), Value::String(crate::wire::provider_models::openai_base(&provider.base_url)));
+        // (Anthropic's, Gemini's) is given its OpenAI-compatible one — and a provider the
+        // catalogue knows is given only its own address (super::pinned_base).
+        let base = super::pinned_base(provider)?;
+        config.insert("base_url".into(), Value::String(base.clone()));
         config.insert("model".into(), Value::String(provider.model.clone()));
         config.remove("api_key_env");
         match provider.api_key.as_deref().filter(|k| !k.is_empty()) {
@@ -59,6 +69,7 @@ impl Handoff for DeepSeek {
             provider_id: provider.id.clone(),
             provider_name: provider.name.clone(),
             model: provider.model.clone(),
+            destination: base,
             writes: vec![Write {
                 path,
                 content,

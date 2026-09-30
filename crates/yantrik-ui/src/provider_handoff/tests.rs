@@ -87,6 +87,7 @@ fn revert_puts_back_the_persons_own_file_even_after_two_assignments() {
     // A second assignment must not keep the first assignment as "the original".
     let mut other = nim();
     other.name = "OpenRouter".into();
+    other.provider_type = "openrouter".into();
     other.base_url = "https://openrouter.ai/api/v1".into();
     other.model = "x/y".into();
     let plan = adapter_for("deepseek").unwrap().plan(&home.0, &other).unwrap();
@@ -133,4 +134,71 @@ fn only_harnesses_with_an_adapter_offer_it() {
     assert!(adapter_for("hermes").is_none(), "not yet");
     let home = Home::new("line");
     assert_eq!(row_line(&home.0, "hermes"), "");
+}
+
+#[test]
+fn a_known_providers_key_goes_only_to_its_own_address() {
+    let home = Home::new("pin");
+    let mut moved = nim();
+    moved.base_url = "https://collector.example.net/v1".into();
+    let err = adapter_for("deepseek").unwrap().plan(&home.0, &moved).unwrap_err();
+    assert!(err.contains("collector.example.net") && err.contains("Custom"), "{err}");
+    assert!(!home.deepseek().exists());
+
+    // Local runtimes and Custom run wherever the person put them.
+    let mut ollama = nim();
+    ollama.provider_type = "ollama".into();
+    ollama.base_url = "http://192.168.4.35:11434/v1".into();
+    ollama.api_key = None;
+    assert_eq!(pinned_base(&ollama).unwrap(), "http://192.168.4.35:11434/v1");
+    let mut custom = nim();
+    custom.provider_type = "custom".into();
+    custom.base_url = "https://my-gateway.example/v1".into();
+    assert_eq!(pinned_base(&custom).unwrap(), "https://my-gateway.example/v1");
+}
+
+#[test]
+fn the_approval_sentence_says_where_the_key_goes_and_never_the_key() {
+    let home = Home::new("sentence");
+    let plan = adapter_for("deepseek").unwrap().plan(&home.0, &nim()).unwrap();
+    let s = plan.sentence(&home.0);
+    assert!(s.contains("integrate.api.nvidia.com") && s.contains("~/.config/yantrik/deepseek.json"), "{s}");
+    assert!(!s.contains(KEY));
+    let mut plain = nim();
+    plain.provider_type = "custom".into();
+    plain.base_url = "http://gateway.example.com/v1".into();
+    let card = adapter_for("deepseek").unwrap().plan(&home.0, &plain).unwrap().card(&home.0);
+    assert!(card.contains("plain http"), "{card}");
+}
+
+#[test]
+fn revert_refuses_a_record_naming_files_it_never_writes_and_moves_nothing() {
+    let home = Home::new("tamper");
+    let plan = adapter_for("deepseek").unwrap().plan(&home.0, &nim()).unwrap();
+    apply(&home.0, &plan).unwrap();
+    let victim = home.0.join("important.txt");
+    std::fs::write(&victim, "keep me").unwrap();
+    let mut m = marker(&home.0, "deepseek").unwrap();
+    m.files.push(Touched { path: victim.clone(), backup: None });
+    std::fs::write(marker_path(&home.0, "deepseek"), serde_json::to_string(&m).unwrap()).unwrap();
+    let err = revert(&home.0, "deepseek").unwrap_err();
+    assert!(err.contains("never writes"), "{err}");
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep me");
+    assert!(home.deepseek().exists(), "nothing was undone");
+}
+
+#[test]
+fn the_persons_copy_survives_an_apply_that_failed_after_writing() {
+    let home = Home::new("partial");
+    let original = r#"{"api_key_env":"DEEPSEEK_API_KEY"}"#;
+    std::fs::write(home.deepseek(), original).unwrap();
+    let plan = adapter_for("deepseek").unwrap().plan(&home.0, &nim()).unwrap();
+    apply(&home.0, &plan).unwrap();
+    // As if the marker had never been written: the config holds the key, the copy the original.
+    std::fs::remove_file(marker_path(&home.0, "deepseek")).unwrap();
+    let plan = adapter_for("deepseek").unwrap().plan(&home.0, &nim()).unwrap();
+    apply(&home.0, &plan).unwrap();
+    assert_eq!(std::fs::read_to_string(backup_path(&home.deepseek())).unwrap(), original, "the copy was not replaced by the assigned file");
+    revert(&home.0, "deepseek").unwrap();
+    assert_eq!(std::fs::read_to_string(home.deepseek()).unwrap(), original);
 }
