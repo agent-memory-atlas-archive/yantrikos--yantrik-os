@@ -122,39 +122,46 @@ pub fn expand(argv: &[String], home: &str) -> Vec<String> {
 /// Programs that open no file and run nothing, whatever options they are given.
 const NO_FILES: &[&str] = &["echo", "pwd", "whoami", "uptime", "df", "free", "uname", "id", "which", "cal"];
 
-/// Long options no program here may be given, and every abbreviation of them: GNU programs take
-/// any unambiguous prefix (`--out` for `--output`), so a name is refused when it is a prefix of
-/// one of these or one of these is a prefix of it. Each reads a file named in its value, writes
-/// one, or runs a program. Being strict costs a few harmless spellings (`stat --file-system`;
-/// `stat -f` still works).
-const LONG_REFUSED: &[&str] = &[
-    "files0-from", "files-from", "file", "compress-program", "temporary-directory", "output",
-    "exec", "from-file", "to-file", "new-file", "unidirectional-new-file", "magic-file", "set",
-    "dereference-recursive",
-];
+/// What one program may be given, and nothing else. An allow-list rather than a list of what is
+/// refused: a refused list has to foresee every option, spelling and abbreviation GNU accepts
+/// (the security review of #510 found several it did not), while this one can be checked by
+/// reading it. Any option not named here, including an abbreviation of one that is, is refused.
+struct Allowed {
+    /// Single letters, which may be clustered (`-la`).
+    flags: &'static str,
+    /// Letters that take a value: attached (`-n5`) or the next word (`-n 5`). The value is never
+    /// a file.
+    valued: &'static str,
+    /// Long options, exactly as written.
+    long: &'static [&'static str],
+    /// Long options that take a value (`--lines=5` or `--lines 5`), never a file.
+    long_valued: &'static [&'static str],
+}
 
-/// Short options refused, program by program: the same letter is harmless in one program and a
-/// write in another (`grep -o` prints matches; `sort -o` writes a file).
-fn short_refused(program: &str) -> &'static str {
+fn allowed(program: &str) -> Option<Allowed> {
+    let a = |flags, valued, long, long_valued| Some(Allowed { flags, valued, long, long_valued });
     match program {
-        "sort" => "oT",
-        "date" => "fs",
-        "file" => "fmM",
-        "grep" => "fR",
-        "diff" => "N",
-        "hostname" => "Fb",
-        _ => "",
+        "ls" => a("alhrtSRdF1", "", &["--all", "--human-readable", "--reverse", "--recursive", "--directory", "--classify"], &[]),
+        "cat" => a("nbEsAT", "", &["--number", "--show-all"], &[]),
+        "head" | "tail" => a("q", "nc", &["--quiet"], &["--lines", "--bytes"]),
+        "wc" => a("lwcmL", "", &["--lines", "--words", "--bytes", "--chars"], &[]),
+        "grep" => a("inrvcwFElohHs", "e", &["--ignore-case", "--line-number", "--recursive", "--invert-match", "--count", "--word-regexp", "--fixed-strings", "--extended-regexp", "--files-with-matches", "--only-matching"], &["--regexp", "--include", "--exclude"]),
+        "sort" => a("rnufh", "k", &["--reverse", "--numeric-sort", "--unique", "--ignore-case", "--human-numeric-sort"], &["--key"]),
+        "diff" => a("uqbiwy", "", &["--unified", "--brief", "--ignore-case", "--ignore-all-space", "--side-by-side"], &[]),
+        "du" => a("hsac", "d", &["--human-readable", "--summarize", "--all", "--total"], &["--max-depth"]),
+        "stat" => a("Lt", "c", &["--dereference", "--terse"], &["--format"]),
+        "file" => a("biL", "", &["--brief", "--mime-type", "--dereference"], &[]),
+        "sha256sum" | "md5sum" => a("", "", &[], &[]),
+        "date" => a("uR", "d", &["--utc", "--rfc-3339", "--iso-8601"], &["--date"]),
+        "hostname" => a("", "", &[], &[]),
+        _ => None,
     }
 }
 
-/// `find`'s expression words that run, write, delete or read names from a file.
-const FIND_REFUSED: &[&str] = &[
-    "-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf", "-fls", "-files0-from",
-];
-
-fn long_refused(name: &str) -> bool {
-    !name.is_empty() && LONG_REFUSED.iter().any(|r| r.starts_with(name) || name.starts_with(r))
-}
+/// `find`: the paths to look in, then only these tests, each with its one value. Nothing that
+/// runs, writes, deletes or reads a list of names from a file is here to be given.
+const FIND_TESTS: &[&str] = &["-name", "-iname", "-type", "-maxdepth", "-mindepth", "-size", "-mtime", "-mmin"];
+const FIND_ACTIONS: &[&str] = &["-print", "-print0"];
 
 /// Whether `argv` (already [`expand`]ed) may run, and why not. `home` is the person's home.
 pub fn check(argv: &[String], home: &str) -> Result<(), String> {
@@ -166,69 +173,68 @@ pub fn check(argv: &[String], home: &str) -> Result<(), String> {
         return Ok(());
     }
     let args = &argv[1..];
-
-    // Split the words into options and operands; after `--` every word is an operand.
-    let mut options: Vec<&str> = Vec::new();
-    let mut operands: Vec<&str> = Vec::new();
-    let mut ended = false;
-    for a in args {
-        if ended || a == "-" || !a.starts_with('-') {
-            operands.push(a);
-        } else if a == "--" {
-            ended = true;
-        } else {
-            options.push(a);
-        }
-    }
-
     if program == "find" {
-        if let Some(a) = args.iter().find(|a| FIND_REFUSED.contains(&a.as_str())) {
-            return Err(format!("find {a} runs, writes or reads a file of names; only finding is safe"));
-        }
-        return Ok(());
+        return check_find(args);
     }
+    let rules = allowed(program).ok_or_else(|| format!("'{program}' has no rules here"))?;
 
-    let refused_letters = short_refused(program);
+    // Walk the words once: options (checked against the allow-list), their values, operands.
+    let mut operands: Vec<&str> = Vec::new();
     let mut recursive = false;
     let mut pattern_given = false;
-    for o in &options {
-        if let Some(long) = o.strip_prefix("--") {
-            let (name, value) = match long.split_once('=') {
+    let mut ended = false;
+    let mut i = 0;
+    while i < args.len() {
+        let w = args[i].as_str();
+        i += 1;
+        if ended || w == "-" || !w.starts_with('-') {
+            operands.push(w);
+            continue;
+        }
+        if w == "--" {
+            ended = true;
+            continue;
+        }
+        if w.starts_with("--") {
+            let (name, attached) = match w.split_once('=') {
                 Some((n, v)) => (n, Some(v)),
-                None => (long, None),
+                None => (w, None),
             };
-            if long_refused(name) {
-                return Err(format!("{program} --{name} reads, writes or runs something beyond what it is for"));
-            }
-            if "recursive".starts_with(name) || (name.len() > 2 && "directories".starts_with(name) && value == Some("recurse")) {
-                recursive = true;
-            }
-            if name.len() > 1 && "regexp".starts_with(name) {
-                pattern_given = true;
-            }
-            if let Some(v) = value {
-                if protected(v) {
-                    return Err(format!("{program} may not be pointed at {v}"));
+            if rules.long.contains(&name) && attached.is_none() {
+                recursive |= name == "--recursive";
+            } else if rules.long_valued.contains(&name) {
+                if attached.is_none() {
+                    if i >= args.len() {
+                        return Err(format!("{program} {name} needs a value"));
+                    }
+                    i += 1;
                 }
+                pattern_given |= name == "--regexp";
+            } else {
+                return Err(format!("{program} {name} is not one of the options it may be given here"));
             }
-        } else {
-            let letters = &o[1..];
-            if let Some(c) = letters.chars().find(|c| refused_letters.contains(*c)) {
-                return Err(format!("{program} -{c} reads, writes or runs something beyond what it is for"));
+            continue;
+        }
+        // A cluster of single letters; a valued letter takes the rest of the word, or the next.
+        let letters: Vec<char> = w[1..].chars().collect();
+        let mut k = 0;
+        while k < letters.len() {
+            let c = letters[k];
+            k += 1;
+            if rules.valued.contains(c) {
+                if k >= letters.len() {
+                    if i >= args.len() {
+                        return Err(format!("{program} -{c} needs a value"));
+                    }
+                    i += 1;
+                }
+                pattern_given |= program == "grep" && c == 'e';
+                break;
             }
-            if letters.contains('r') {
-                recursive = true;
+            if !rules.flags.contains(c) {
+                return Err(format!("{program} -{c} is not one of the options it may be given here"));
             }
-            if letters.starts_with('e') {
-                pattern_given = true;
-            }
-            if letters.starts_with('d') && operands.first() == Some(&"recurse") {
-                recursive = true;
-            }
-            // An attached value (`-o/x`, `-f/x`) is a path as much as a separate one.
-            if letters.len() > 1 && protected(&letters[1..]) {
-                return Err(format!("{program} may not be pointed at {}", &letters[1..]));
-            }
+            recursive |= c == 'r' || c == 'R';
         }
     }
 
@@ -236,29 +242,53 @@ pub fn check(argv: &[String], home: &str) -> Result<(), String> {
         return Err("hostname may only read the name".into());
     }
 
-    // A walk from home or above it would reach ~/.ssh and the desktop's own files.
-    if recursive && (program == "grep" || program == "diff") {
+    // A recursive grep may not start at home or above it, where it would walk into ~/.ssh.
+    if recursive && program == "grep" {
         let h = home.trim_end_matches('/');
-        for p in &operands {
+        let skip = usize::from(!pattern_given);
+        let dirs: Vec<&&str> = operands.iter().skip(skip).collect();
+        if dirs.is_empty() {
+            return Err("a recursive grep names the folder to search".into());
+        }
+        for p in dirs {
             let canon = std::fs::canonicalize(p).map(|c| c.to_string_lossy().into_owned()).unwrap_or_else(|_| p.to_string());
             let c = canon.trim_end_matches('/');
             if c.is_empty() || c == h || h.starts_with(&format!("{c}/")) {
-                return Err(format!("a recursive {program} from {p} would walk into ~/.ssh and the desktop's own files; start it in a folder under the home directory"));
+                return Err(format!("a recursive grep from {p} would walk into ~/.ssh and the desktop's own files; start it in a folder under the home directory"));
             }
-        }
-        if program == "grep" && operands.len() < if pattern_given { 1 } else { 2 } {
-            return Err("a recursive grep names the folder to search".into());
         }
     }
 
     // What prints file contents is never given a protected place. grep's first operand is its
-    // pattern unless one came with -e/--regexp; the rest are paths.
+    // pattern unless -e/--regexp gave one.
     if READS_CONTENT.contains(&program) {
         let skip = usize::from(program == "grep" && !pattern_given);
         for p in operands.iter().skip(skip) {
             if protected(p) {
                 return Err(format!("{program} may not read {p}: it is, or leads into, a place the AI never reads"));
             }
+        }
+    }
+    Ok(())
+}
+
+/// `find PATH... [TEST VALUE]... [-print|-print0]`, and nothing else.
+fn check_find(args: &[String]) -> Result<(), String> {
+    let mut i = 0;
+    while i < args.len() && !args[i].starts_with('-') {
+        i += 1;
+    }
+    while i < args.len() {
+        let w = args[i].as_str();
+        if FIND_TESTS.contains(&w) {
+            if i + 1 >= args.len() {
+                return Err(format!("find {w} needs a value"));
+            }
+            i += 2;
+        } else if FIND_ACTIONS.contains(&w) {
+            i += 1;
+        } else {
+            return Err(format!("find {w}: only the paths to look in and {} are allowed here", FIND_TESTS.join(", ")));
         }
     }
     Ok(())
@@ -394,7 +424,7 @@ mod tests {
 
     #[test]
     fn what_it_is_for_still_works() {
-        for good in ["ls -la /tmp", "date", "uptime", "df -h", "whoami", "wc -l /etc/hostname", "find /tmp -name '*.log'", "du -sh /tmp", "echo a | b ; c", "cat /etc/os-release", "tail -n 5 /etc/hostname", "grep -rn TODO /tmp", "grep -o foo /etc/hostname", "sort -r /etc/hostname", "head -n5 /etc/hostname", "stat -f /tmp", "wc -l /etc/hostname", "grep -e foo -r /tmp"] {
+        for good in ["ls -la /tmp", "date", "uptime", "df -h", "whoami", "wc -l /etc/hostname", "find /tmp -name '*.log'", "du -sh /tmp", "echo a | b ; c", "cat /etc/os-release", "tail -n 5 /etc/hostname", "grep -rn TODO /tmp", "grep -o foo /etc/hostname", "sort -r /etc/hostname", "head -n5 /etc/hostname", "stat /tmp", "wc -l /etc/hostname", "grep -e foo -r /tmp", "grep -rn TODO /tmp", "find /tmp -maxdepth 2 -type f -name '*.log'"] {
             assert!(ok(good).is_ok(), "{good}: {:?}", ok(good));
         }
     }
