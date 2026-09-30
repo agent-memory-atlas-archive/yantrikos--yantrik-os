@@ -725,3 +725,21 @@ export component JumpProbe inherits Window {
         visible-height: list.visible-height;
     }
 }
+
+// The context rail beside an app body, the way every app lays it out: a long context list must
+// scroll inside the rail, never make the window lay out taller than it is.
+import { AgentRail } from "components/agent_rail.slint";
+export component RailProbe inherits Window {
+    width: 900px; height: 500px; background: Theme.bg-deep;
+    in property <[AgentContextItem]> context: [];
+    in property <[AgentSuggestion]> next: [];
+    out property <length> body-h: body.height;
+    out property <length> rail-h: rail.height;
+    VerticalLayout {
+        Rectangle { height: 40px; background: Theme.bg-surface; }
+        HorizontalLayout {
+            body := Rectangle { horizontal-stretch: 1; background: Theme.bg-card; }
+            rail := AgentRail { context-items: root.context; suggestions: root.next; }
+        }
+    }
+}

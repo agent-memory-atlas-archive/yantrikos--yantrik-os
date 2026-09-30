@@ -831,6 +831,14 @@ fn delete_through_service(event_id: &str) -> Result<String, String> {
 /// drift — `delete_event` and `delete_own_event` must answer with the same event for the same
 /// words, and differ only in the rule that runs afterwards. The answer is the store's id and
 /// the name to use in a notice.
+/// The line the window shows when a caller was refused an event it did not create. The caller's
+/// own answer carries the rule, the ids and the door that asks first; this is for the person
+/// looking at the calendar, who needs to know which event and who asked — not an id and the name
+/// of an action.
+fn refused_notice(done: &str, title: &str, who: &str) -> String {
+    format!("“{title}” was not {done}: {who} asked, and it did not create it, so that needs your OK.")
+}
+
 fn named_event(args: &serde_json::Value) -> Result<(String, String), String> {
     let given = |key: &str| {
         args[key].as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
@@ -1572,7 +1580,9 @@ fn publish_control(app: &CalendarApp, state: Rc<RefCell<CalState>>) {
                     let why = format!(
                         "{why}. Any event comes off through `delete_event`, which asks first"
                     );
-                    ui.set_notice(format!("Could not delete {named}: {why}").into());
+                    // The caller gets the rule, with the ids and the other door; the person
+                    // gets which event and who asked, in one line.
+                    ui.set_notice(refused_notice("deleted", &event.title, &who).into());
                     return Err(why);
                 }
 
@@ -1649,7 +1659,7 @@ fn publish_control(app: &CalendarApp, state: Rc<RefCell<CalState>>) {
                     let why = format!(
                         "{why}. Any event changes through `update_event`, which asks first"
                     );
-                    ui.set_notice(format!("Could not change {}: {why}", ask.id).into());
+                    ui.set_notice(refused_notice("changed", &event.title, &who).into());
                     return Err(why);
                 }
                 change_and_answer(&ui, &own_update_state, &ask)
@@ -1884,6 +1894,16 @@ fn wire(app: &CalendarApp) -> slint::Timer {
         });
     }
 
+    // ── Dismiss the notice ──
+    {
+        let weak = app.as_weak();
+        app.on_dismiss_notice(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_notice(SharedString::new());
+            }
+        });
+    }
+
     // ── Cancel event form ──
     {
         let weak = app.as_weak();
@@ -2076,6 +2096,20 @@ fn wire(app: &CalendarApp) -> slint::Timer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_refused_delete_tells_the_person_which_event_and_who_asked_not_an_id() {
+        // What the window showed: "Could not delete 01a0e22b-9d34-…: 01a0e22b-… was created by
+        // node and this call is harness_arena.py: only the caller that created an event may
+        // delete it without a person being asked. Any event comes off through `delete_event`…"
+        let line = refused_notice("deleted", "Lunch with Sam", "harness_arena.py");
+        assert_eq!(
+            line,
+            "“Lunch with Sam” was not deleted: harness_arena.py asked, and it did not create it, \
+             so that needs your OK."
+        );
+        assert!(!line.contains("delete_event") && !line.contains('`'), "no action names for a person");
+    }
 
     #[test]
     fn a_date_or_an_events_start_names_the_day_to_show() {

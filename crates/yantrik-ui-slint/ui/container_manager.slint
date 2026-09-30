@@ -7,6 +7,7 @@ import { AgentRail, AgentContextItem, AgentSuggestion } from "components/agent_r
 import { AgentProposalCard, AgentProposal } from "components/agent_proposal.slint";
 import { AppColor, AppIdentity } from "components/app_color.slint";
 import { YEmptyState } from "components/y_empty_state.slint";
+import { YNoticeBar } from "components/notice_bar.slint";
 
 // ── Data structs ──
 
@@ -455,26 +456,9 @@ export component ContainerManagerScreen inherits Rectangle {
         // Above the tabs rather than inside one of them, because the failure is not about the
         // tab you happen to be on: a volume that could not be removed is worth reading while
         // you are looking at the container list.
-        if root.notice != "" : Rectangle {
-            height: notice-text.preferred-height + Theme.sp-4;
-            background: Theme.color-danger-dim;
-
-            Rectangle {
-                x: 0;
-                width: 2px;
-                height: 100%;
-                background: Theme.color-danger;
-            }
-
-            notice-text := Text {
-                x: Theme.sp-4;
-                width: parent.width - Theme.sp-4 * 2;
-                y: Theme.sp-2;
-                text: root.notice;
-                color: Theme.text-primary;
-                font-size: Theme.fs-caption;
-                wrap: word-wrap;
-            }
+        if root.notice != "" : YNoticeBar {
+            text: root.notice;
+            dismissible: false;
         }
 
         // The content, with the agent rail beside it. The header stays full

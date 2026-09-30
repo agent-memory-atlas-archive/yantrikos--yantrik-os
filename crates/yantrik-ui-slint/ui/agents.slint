@@ -13,6 +13,7 @@ import { Theme } from "theme.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { YButton } from "components/y_button.slint";
 import { YInput } from "components/y_input.slint";
+import { YNoticeBar } from "components/notice_bar.slint";
 import { ToolCallData, ToolCallCard } from "components/tool_call.slint";
 import { ApprovalRequest, ApprovalCard } from "components/intent_lens.slint";
 import { QuestionCard } from "components/question_card.slint";
@@ -914,33 +915,13 @@ export component AgentDetailsColumn inherits Rectangle {
     }
 }
 
-component NoticeBar inherits Rectangle {
-    height: 34px;
-    border-radius: 8px;
-    background: Theme.bg-elevated;
-    border-width: 1px;
-    border-color: Theme.border-subtle;
-    HorizontalLayout {
-        padding-left: 12px;
-        padding-right: 6px;
-        spacing: 8px;
-        Text {
-            text: AgentsState.notice;
-            color: Theme.text-primary;
-            font-size: Theme.fs-caption;
-            overflow: elide;
-            horizontal-stretch: 1;
-            vertical-alignment: center;
-        }
-        YButton {
-            label: "Dismiss";
-            icon-path: Icons.close;
-            icon-only: true;
-            variant: 2;
-            size: 0;
-            clicked => { AgentsState.dismiss-notice(); }
-        }
-    }
+// What could not be done, in the kit's one notice bar: neutral, because most of what lands here
+// is information about a run rather than a failure of this screen.
+component NoticeBar inherits YNoticeBar {
+    text: AgentsState.notice;
+    tone: 0;
+    max-lines: 2;
+    dismissed => { AgentsState.dismiss-notice(); }
 }
 
 component MindChip inherits Rectangle {

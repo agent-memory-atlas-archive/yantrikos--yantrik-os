@@ -1,0 +1,73 @@
+// YNoticeBar — what could not be done, said once, in the layout, until it is dismissed.
+//
+// One component for a line every app had drawn for itself: Calendar, the container manager and
+// Agents each had their own, and Calendar's was positioned at y: 0 over whatever its sidebar was
+// showing — a refused delete wrote itself across the day's header ("3 events", New) and spilled
+// past its own box. This one takes its own row in whatever layout holds it, so nothing sits
+// under it; wraps, up to `max-lines`, and elides the rest; and has a close button when the
+// owner handles `dismissed`.
+//
+//     VerticalLayout {
+//         if root.notice != "" : YNoticeBar { text: root.notice; dismissed => { root.dismiss-notice(); } }
+//         ... the content, below it ...
+//     }
+//
+// The text is for a person. A caller's refusal reason, with its ids and action names, belongs in
+// the answer to the caller; what goes here is the one sentence the person needs.
+import { Theme } from "theme.slint";
+import { YButton } from "y_button.slint";
+import { Icons } from "icon.slint";
+
+export component YNoticeBar inherits Rectangle {
+    in property <string> text;
+    // 1 = danger (something could not be done), 0 = plain information.
+    in property <int> tone: 1;
+    in property <bool> dismissible: true;
+    // Beyond this many lines the rest is elided rather than pushing the content off the screen.
+    in property <int> max-lines: 3;
+    callback dismissed();
+
+    // A line of caption text, measured once so the cap follows the theme's type size.
+    property <length> line: probe.preferred-height;
+
+    background: root.tone == 1 ? Theme.color-danger-dim : Theme.bg-elevated;
+    height: row.preferred-height;
+
+    probe := Text { visible: false; text: "X"; font-size: Theme.fs-caption; }
+
+    // The edge, in the notice's colour: the one mark that says which kind of line this is.
+    Rectangle {
+        x: 0;
+        width: 2px;
+        height: 100%;
+        background: root.tone == 1 ? Theme.color-danger : Theme.accent;
+    }
+
+    row := HorizontalLayout {
+        padding-left: Theme.sp-4;
+        padding-right: root.dismissible ? Theme.sp-1 : Theme.sp-4;
+        padding-top: Theme.sp-2;
+        padding-bottom: Theme.sp-2;
+        spacing: Theme.sp-2;
+
+        Text {
+            text: root.text;
+            color: Theme.text-primary;
+            font-size: Theme.fs-caption;
+            wrap: word-wrap;
+            overflow: elide;
+            horizontal-stretch: 1;
+            vertical-alignment: center;
+            max-height: root.line * root.max-lines;
+        }
+
+        if root.dismissible : YButton {
+            label: "Dismiss";
+            icon-path: Icons.close;
+            icon-only: true;
+            variant: 2;
+            size: 0;
+            clicked => { root.dismissed(); }
+        }
+    }
+}
