@@ -13,6 +13,7 @@ import { Icon, Icons } from "components/icon.slint";
 import { DecisionModelCard, DecisionPreset, DecisionUse } from "components/decision_model.slint";
 import { ProviderPresetGroup } from "provider_presets.slint";
 import { YDialog } from "components/y_dialog.slint";
+import { AccountList, ProviderGroup, AddChoice } from "components/minds_panel.slint";
 export { DecisionPreset, DecisionUse }
 
 // ── Settings sidebar category item ──
@@ -411,6 +412,16 @@ export component SettingsScreen inherits Rectangle {
     in property <bool> budget-warning: false;
     in-out property <string> budget-input: "";
     callback save-budget(string);
+
+    // ── Accounts (category 4): the same accounts, and the same list, as the Minds panel ──
+    in property <[ProviderGroup]> account-groups: [];
+    in property <[AddChoice]> account-choices: [];
+    in property <string> account-status: "";
+    in-out property <bool> accounts-adding: false;
+    callback accounts-shown();                  // the page opened: read the accounts again
+    callback account-use(string);               // an account id
+    callback account-sign-in(string);           // an account id
+    callback account-add(string);               // a vendor id
 
     // ── Harnesses (category 8) ──
     in property <[HarnessData]> harnesses: [];
@@ -3176,12 +3187,45 @@ SettingRow{label:"About this device";description:"Detailed information about thi
                 if root.active-category == 4 : Flickable {
                     width:100%;height:100%;viewport-width:self.width;viewport-height:page4.preferred-height;
                     page4:=VerticalLayout {padding:28px;spacing:18px;alignment:start;
-                        Text{text:"Accounts";color:Theme.text-primary;font-size:28px;font-weight:600;}
-                        Text{text:"Account integrations available in this build.";color:Theme.text-secondary;font-size:13px;wrap:word-wrap;}
-
-Text{text:"These connection adapters are not installed. No accounts are connected or synced from this page.";color:Theme.text-secondary;font-size:14px;wrap:word-wrap;}
-for account in ["Google","Spotify","Facebook","Instagram"] : SettingRow{label:account;description:"Account connection requires an integration adapter.";value:"Unavailable";interactive:false;}
-SettingRow{label:"AI providers";description:"Manage the model providers that are supported by this installation.";value:"Configure";activated=>{root.active-category=1;}}
+                        // Read again each time the page opens: a sign-in finished in a terminal
+                        // shows up without a restart.
+                        init => { root.accounts-shown(); }
+                        HorizontalLayout {
+                            spacing: Theme.sp-3;
+                            VerticalLayout {
+                                spacing: 6px;
+                                horizontal-stretch: 1;
+                                Text{text:"Accounts";color:Theme.text-primary;font-size:28px;font-weight:600;}
+                                Text{
+                                    text:"Subscriptions you sign in to with each vendor's own program: Claude Code, Codex, Gemini CLI. The vendor's program keeps the sign-in; this desktop never sees it. Harnesses that run those programs answer with the account chosen here. The same accounts are in the Minds panel on the status bar.";
+                                    color:Theme.text-secondary;font-size:13px;wrap:word-wrap;
+                                }
+                            }
+                            VerticalLayout {
+                                alignment: start;
+                                YButton {
+                                    label: root.accounts-adding ? "Done" : "Add account";
+                                    clicked => { root.accounts-adding = !root.accounts-adding; }
+                                }
+                            }
+                        }
+                        Rectangle {
+                            background:Theme.bg-card;border-radius:10px;border-width:1px;border-color:Theme.border-subtle;
+                            height: account-list.preferred-height + 32px;
+                            account-list := AccountList {
+                                x: 16px; y: 16px; width: parent.width - 32px;
+                                groups: root.account-groups;
+                                choices: root.account-choices;
+                                status: root.account-status;
+                                adding: root.accounts-adding;
+                                divided: root.accounts-adding;
+                                use-account(id) => { root.account-use(id); }
+                                sign-in(id) => { root.account-sign-in(id); }
+                                add(v) => { root.account-add(v); root.accounts-adding = false; }
+                            }
+                        }
+                        SettingRow{label:"AI providers";description:"API keys and endpoints (OpenAI, NVIDIA NIM, Nous, a local Ollama and more), used by the desktop and handed to harnesses. They are separate from these sign-ins.";value:"Configure";activated=>{root.active-category=1;}}
+                        SettingRow{label:"Harnesses";description:"The agent programs that use these accounts and providers, and which mind answers.";value:"Open";activated=>{root.active-category=8;}}
 
                         Rectangle{height:24px;}
                     }

@@ -205,6 +205,102 @@ component HeadButton inherits Rectangle {
     }
 }
 
+// The accounts themselves, with what the "+" can bring: one list, drawn by the Minds panel and by
+// Settings → Accounts, so the two can never disagree about what is signed in.
+export component AccountList inherits VerticalLayout {
+    in property <[ProviderGroup]> groups;
+    in property <[AddChoice]> choices;
+    in property <string> status;
+    in property <bool> adding: false;       // the "+" choices are showing
+    in property <bool> divided: true;       // a rule between the header above and the accounts
+    callback use-account(string);           // an account id
+    callback sign-in(string);               // an account id: signs in, or installs its program
+    callback add(string);                   // a vendor id, from the choices
+
+    spacing: Theme.sp-2;
+
+    // ── What the "+" can bring here ──
+    if root.adding : VerticalLayout {
+        spacing: 2px;
+        for c in root.choices : Rectangle {
+            height: 30px;
+            border-radius: Theme.r-sm;
+            background: choice-ta.has-hover ? Theme.hover-fill : transparent;
+            choice-ta := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.add(c.vendor); }
+            }
+            HorizontalLayout {
+                padding-left: Theme.sp-1;
+                padding-right: Theme.sp-2;
+                spacing: Theme.sp-2;
+                VerticalLayout { alignment: center; VendorGlyph { vendor: c.vendor; } }
+                Text {
+                    text: c.name;
+                    color: Theme.text-primary;
+                    font-size: Theme.fs-body;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+                Text {
+                    text: c.what;
+                    color: Theme.accent;
+                    font-size: Theme.fs-caption;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                }
+            }
+        }
+        if root.choices.length == 0 : Text {
+            height: 24px;
+            text: "Every vendor this desktop knows is here.";
+            color: Theme.text-dim;
+            font-size: Theme.fs-caption;
+            vertical-alignment: center;
+        }
+    }
+    if root.divided : Rectangle { height: 1px; background: Theme.border-subtle; }
+
+    // ── The vendors and their accounts ──
+    for g in root.groups : VerticalLayout {
+        spacing: 2px;
+        HorizontalLayout {
+            height: 26px;
+            spacing: Theme.sp-2;
+            VerticalLayout { alignment: center; VendorGlyph { vendor: g.id; } }
+            Text {
+                text: g.name;
+                color: Theme.text-primary;
+                font-size: Theme.fs-body-strong;
+                font-weight: 600;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+        }
+        for a in g.accounts : AccountBlock {
+            account: a;
+            use-account(id) => { root.use-account(id); }
+            sign-in(id) => { root.sign-in(id); }
+        }
+        Rectangle { height: 6px; }
+    }
+    if root.groups.length == 0 : Text {
+        height: 36px;
+        text: "No accounts yet. Press + to sign in to Claude, Codex or Gemini, or to add a Qwen or xAI key.";
+        color: Theme.text-secondary;
+        font-size: Theme.fs-caption;
+        wrap: word-wrap;
+    }
+    if root.status != "" : Text {
+        height: 18px;
+        text: root.status;
+        color: Theme.text-secondary;
+        font-size: Theme.fs-micro;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+}
+
 export component MindsPanel inherits Rectangle {
     in property <[ProviderGroup]> groups;
     in property <[AddChoice]> choices;
@@ -215,7 +311,7 @@ export component MindsPanel inherits Rectangle {
     callback sign-in(string);               // an account id: signs in, or installs its program
     callback add(string);                   // a vendor id, from the "+" list
     callback make(string);                  // "app" | "theme" | "recipe"
-    callback manage();                      // Settings → Minds
+    callback manage();                      // Settings → Accounts, where these accounts are managed
 
     width: 360px;
     height: body.preferred-height;
@@ -271,85 +367,14 @@ export component MindsPanel inherits Rectangle {
             }
         }
 
-        // ── What the "+" can bring here ──
-        if root.adding : VerticalLayout {
-            spacing: 2px;
-            for c in root.choices : Rectangle {
-                height: 30px;
-                border-radius: Theme.r-sm;
-                background: choice-ta.has-hover ? Theme.hover-fill : transparent;
-                choice-ta := TouchArea {
-                    mouse-cursor: pointer;
-                    clicked => { root.add(c.vendor); root.adding = false; }
-                }
-                HorizontalLayout {
-                    padding-left: Theme.sp-1;
-                    padding-right: Theme.sp-2;
-                    spacing: Theme.sp-2;
-                    VerticalLayout { alignment: center; VendorGlyph { vendor: c.vendor; } }
-                    Text {
-                        text: c.name;
-                        color: Theme.text-primary;
-                        font-size: Theme.fs-body;
-                        vertical-alignment: center;
-                        horizontal-stretch: 1;
-                    }
-                    Text {
-                        text: c.what;
-                        color: Theme.accent;
-                        font-size: Theme.fs-caption;
-                        font-weight: 600;
-                        vertical-alignment: center;
-                    }
-                }
-            }
-            if root.choices.length == 0 : Text {
-                height: 24px;
-                text: "Every vendor this desktop knows is here.";
-                color: Theme.text-dim;
-                font-size: Theme.fs-caption;
-                vertical-alignment: center;
-            }
-        }
-        Rectangle { height: 1px; background: Theme.border-subtle; }
-
-        // ── The vendors and their accounts ──
-        for g in root.groups : VerticalLayout {
-            spacing: 2px;
-            HorizontalLayout {
-                height: 26px;
-                spacing: Theme.sp-2;
-                VerticalLayout { alignment: center; VendorGlyph { vendor: g.id; } }
-                Text {
-                    text: g.name;
-                    color: Theme.text-primary;
-                    font-size: Theme.fs-body-strong;
-                    font-weight: 600;
-                    vertical-alignment: center;
-                    horizontal-stretch: 1;
-                }
-            }
-            for a in g.accounts : AccountBlock {
-                account: a;
-                use-account(id) => { root.use-account(id); }
-                sign-in(id) => { root.sign-in(id); }
-            }
-            Rectangle { height: 6px; }
-        }
-        if root.groups.length == 0 : Text {
-            height: 36px;
-            text: "No accounts yet. Press + to sign in to Claude, Codex or Gemini, or to add a Qwen or xAI key.";
-            color: Theme.text-secondary;
-            font-size: Theme.fs-caption;
-            wrap: word-wrap;
-        }
-        if root.status != "" : Text {
-            height: 18px;
-            text: root.status;
-            color: Theme.text-secondary;
-            font-size: Theme.fs-micro;
-            vertical-alignment: center;
-            overflow: elide;
+        list := AccountList {
+            groups: root.groups;
+            choices: root.choices;
+            status: root.status;
+            adding: root.adding;
+            use-account(id) => { root.use-account(id); }
+            sign-in(id) => { root.sign-in(id); }
+            add(v) => { root.add(v); root.adding = false; }
         }
 
         // ── Make something ──

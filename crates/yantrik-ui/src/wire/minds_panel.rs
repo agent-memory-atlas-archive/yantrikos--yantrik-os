@@ -152,15 +152,20 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         });
     }
 
-    // While the panel is open, read it again every few seconds: a sign-in finished in the
-    // terminal, or a turn that moved a meter, shows up on its own.
+    // While the panel or Settings → Accounts is open, read it again every few seconds: a sign-in
+    // finished in the terminal, or a turn that moved a meter, shows up on its own.
     let timer = Box::leak(Box::new(Timer::default()));
     let weak = ui.as_weak();
     timer.start(TimerMode::Repeated, TICK, move || {
-        if weak.upgrade().is_some_and(|ui| ui.get_minds_panel_open()) {
+        if weak.upgrade().is_some_and(|ui| ui.get_minds_panel_open() || accounts_page_open(&ui)) {
             refresh(&tx);
         }
     });
+}
+
+/// Settings → Accounts (screen 7, category 4), which draws the same list as the panel.
+fn accounts_page_open(ui: &App) -> bool {
+    ui.get_current_screen() == 7 && ui.get_settings_category() == 4
 }
 
 fn opened(done: Result<act::Opened, String>, installing: bool) -> (Option<String>, After) {

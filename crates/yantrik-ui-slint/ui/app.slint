@@ -1849,6 +1849,13 @@ export component App inherits Window {
                 retry-save=>{root.retry-settings-save();}
                 open-network=>{root.launch-app("network");}
                 choose-accent(name)=>{root.choose-accent(name);}
+                account-groups: root.minds-groups;
+                account-choices: root.minds-choices;
+                account-status: root.minds-status;
+                accounts-shown => { root.minds-panel-opened(); }
+                account-use(id) => { root.minds-use-account(id); }
+                account-sign-in(id) => { root.minds-sign-in(id); }
+                account-add(v) => { root.minds-add(v); }
                 harnesses: root.harnesses;
                 harness-rows: root.harness-rows;
                 harness-busy: root.harness-busy;
@@ -3178,7 +3185,7 @@ export component App inherits Window {
                 make(kind) => { root.minds-make(kind); root.minds-panel-open = false; }
                 manage => {
                     root.minds-panel-open = false;
-                    root.settings-category = 8;
+                    root.settings-category = 4;
                     root.current-screen = 7;
                     root.navigate(7);
                 }

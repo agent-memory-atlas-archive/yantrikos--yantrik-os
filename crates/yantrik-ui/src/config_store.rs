@@ -127,7 +127,7 @@ pub fn search_categories(query: &str) -> Vec<i32> {
         "ai intelligence provider model api endpoint routing budget usage privacy local cloud",
         "desktop workspace overview agent shortcuts keyboard windows",
         "network wifi wi-fi wireless ethernet wired ip address connection",
-        "accounts integrations google spotify facebook instagram connect sync",
+        "accounts sign in subscription claude codex gemini qwen xai plan login vendor",
         "privacy security incognito memory retention lock idle timeout notifications disturb dnd",
         "system about version devices packages updates monitor notifications",
         "skills extensions capabilities store installed",

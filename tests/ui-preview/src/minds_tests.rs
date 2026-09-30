@@ -4,11 +4,11 @@
 use super::*;
 use slint::{ModelRc, VecModel};
 
-fn meter(name: &str, used: Option<f32>, value: &str) -> AccountMeter {
+pub(crate) fn meter(name: &str, used: Option<f32>, value: &str) -> AccountMeter {
     AccountMeter { name: name.into(), used: used.unwrap_or(0.0), known: used.is_some(), value: value.into() }
 }
 
-fn account(id: &str, label: &str, plan: &str, state: &str, note: &str, meters: Vec<AccountMeter>) -> AccountRow {
+pub(crate) fn account(id: &str, label: &str, plan: &str, state: &str, note: &str, meters: Vec<AccountMeter>) -> AccountRow {
     AccountRow {
         id: id.into(),
         label: label.into(),
@@ -19,7 +19,7 @@ fn account(id: &str, label: &str, plan: &str, state: &str, note: &str, meters: V
     }
 }
 
-fn group(id: &str, name: &str, accounts: Vec<AccountRow>) -> ProviderGroup {
+pub(crate) fn group(id: &str, name: &str, accounts: Vec<AccountRow>) -> ProviderGroup {
     ProviderGroup { id: id.into(), name: name.into(), accounts: ModelRc::new(VecModel::from(accounts)) }
 }
 
