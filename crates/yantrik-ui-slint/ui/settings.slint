@@ -2677,10 +2677,15 @@ export component SettingsScreen inherits Rectangle {
                             // Block clicks from propagating to backdrop
                             TouchArea {}
 
+                            // Scrolls when the panel is taller than the window. It had no viewport
+                            // height, so it never did — and with the catalogue's 39 presets the
+                            // form under the grid was off the bottom with no way to reach it.
                             Flickable {
                                 width: 100%;
                                 height: 100%;
+                                viewport-height: provider-panel-layout.preferred-height;
                             provider-panel-layout := VerticalLayout {
+                                width: parent.width;
                                 padding: Theme.sp-6;
                                 spacing: Theme.sp-4;
 
@@ -2692,15 +2697,60 @@ export component SettingsScreen inherits Rectangle {
                                     font-weight: 700;
                                 }
 
-                                // Provider presets grid
-                                Text {
-                                    text: "Choose a preset or configure manually:";
+                                // Two steps. First the provider, from the grid; once one is
+                                // chosen the grid folds to a line naming it, with Change, and the
+                                // form takes its place — nothing to scroll past to reach Connect.
+                                // Editing a saved provider starts at the second step: its preset
+                                // is chosen already.
+                                if root.selected-preset == "" : Text {
+                                    text: "Choose a provider, or Custom for any OpenAI-compatible address:";
                                     color: Theme.text-secondary;
                                     font-size: Theme.fs-caption;
+                                    wrap: word-wrap;
+                                }
+
+                                if root.selected-preset != "" : HorizontalLayout {
+                                    spacing: Theme.sp-2;
+                                    Rectangle {
+                                        height: 32px;
+                                        width: chosen-label.preferred-width + Theme.sp-6;
+                                        border-radius: Theme.r-md;
+                                        background: Theme.accent-dim;
+                                        border-width: 1px;
+                                        border-color: AppIdentity.accent;
+                                        chosen-label := Text {
+                                            text: root.selected-preset == "custom" ? "Custom"
+                                                : root.provider-form-name != "" ? root.provider-form-name
+                                                : root.selected-preset;
+                                            // Primary text on the tint: the accent on its own dim
+                                            // tint read as teal on teal.
+                                            color: Theme.text-primary;
+                                            font-size: Theme.fs-caption;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                    if root.editing-provider-id == "" : TouchArea {
+                                        width: change-label.preferred-width + Theme.sp-4;
+                                        height: 32px;
+                                        mouse-cursor: pointer;
+                                        clicked => {
+                                            root.selected-preset = "";
+                                            root.provider-form-connected = false;
+                                            root.provider-test-result = "";
+                                        }
+                                        change-label := Text {
+                                            text: "Change";
+                                            color: parent.has-hover ? AppIdentity.accent : Theme.text-secondary;
+                                            font-size: Theme.fs-caption;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
                                 }
 
                                 // Preset buttons — categorized grid
-                                VerticalLayout {
+                                if root.selected-preset == "" : VerticalLayout {
                                     spacing: Theme.sp-3;
 
                                     // Groups and rows come from the provider catalogue (Rust),
@@ -2728,7 +2778,7 @@ export component SettingsScreen inherits Rectangle {
                                                     border-color: root.selected-preset == p.id ? AppIdentity.accent : Theme.border-subtle;
                                                     Text {
                                                         text: p.label;
-                                                        color: root.selected-preset == p.id ? AppIdentity.accent : Theme.text-primary;
+                                                        color: Theme.text-primary;
                                                         font-size: Theme.fs-caption;
                                                         horizontal-alignment: center;
                                                         vertical-alignment: center;
