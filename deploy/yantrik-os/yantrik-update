@@ -2345,14 +2345,24 @@ cmd_reconcile() {
 # Not while an arena run holds its lock (tests/arena/harness_arena.py): a restart mid-run would
 # grade a mind on a turn it never got to answer.
 # The last line says what happened, one way or the other:
-#   installed <commit> <sha16> attached|not-running    or    ROLLED BACK <commit>: <reason>
-MIND_DIR="${YANTRIK_MIND_DIR:-/opt/yantrik-mind}"
-MIND_UNIT="${YANTRIK_MIND_UNIT:-yantrik-mind.service}"
+#   installed <commit> <sha16> attached|not-running
+#   ROLLED BACK <commit>: <why>; the previous Mind is back and attached|back but did NOT attach
+#
+# The selftest drives this against a scratch directory with three stand-ins: YANTRIK_MIND_DIR,
+# YANTRIK_ARENA_LOCK and YANTRIK_MIND_HEALTH. They are honoured only in selftest mode
+# (YANTRIK_SELFTEST=1, set by the selftest) and never for root: an install run as root with any of
+# them in its environment (sudo -E, a root shell, a unit) gets the real directory, the real lock
+# and a real restart, and cannot print "attached" for a Mind nobody saw attach.
+MIND_UNIT=yantrik-mind.service
 MIND_FILES_INSTALLED="bin/yantrik-mind bin/yantrik-memory BUILD"
 
+install_mind_selftest() { [ "${YANTRIK_SELFTEST:-}" = 1 ] && [ "$(id -u)" != 0 ]; }
+
 arena_running() {
-  local owner uid lock="${YANTRIK_ARENA_LOCK:-}"
+  local owner uid lock=""
+  install_mind_selftest && lock="${YANTRIK_ARENA_LOCK:-}"
   if [ -z "$lock" ]; then
+    install_mind_selftest && return 1
     owner="$(desktop_owner)"
     uid="$(id -u "$owner" 2>/dev/null)" || return 1
     lock="/run/user/$uid/yantrik-arena.lock"
@@ -2372,9 +2382,14 @@ bundle_members_ok() { # <bundle>
     END { exit bad }'
 }
 
-# Wait for the Mind to attach, from the journal since <epoch>.
-mind_attached() { # <epoch>
+# Whether the Mind attached to the desktop since <epoch>: active, and "[harness] attached" in its
+# journal from then, within 30 s. The selftest's stand-in answers from YANTRIK_MIND_HEALTH instead,
+# one word per start: `ok`, `rollback-only` (the new Mind fails, the previous one attaches), `never`.
+mind_attached() { # <epoch> <first|again>
   local i
+  if install_mind_selftest && [ -n "${YANTRIK_MIND_HEALTH:-}" ]; then
+    case "$YANTRIK_MIND_HEALTH:$2" in ok:*|rollback-only:again) return 0 ;; *) return 1 ;; esac
+  fi
   for i in $(seq 1 30); do
     if systemctl is-active --quiet "$MIND_UNIT" \
       && journalctl -u "$MIND_UNIT" --since "@$1" --no-pager -o cat 2>/dev/null | grep -q '^\[harness\] attached'; then
@@ -2385,28 +2400,30 @@ mind_attached() { # <epoch>
   return 1
 }
 
+# Start the Mind again, unless this is the selftest's stand-in.
+restart_mind() {
+  install_mind_selftest && [ -n "${YANTRIK_MIND_HEALTH:-}" ] && return 0
+  systemctl restart "$MIND_UNIT" >/dev/null 2>&1 || true
+}
+
 cmd_install_mind() {
-  local bundle="${1:-}" want="${2:-}" have stage build commit sha16 f was_running=0 since
-  case "$want" in
-    [0-9a-f][0-9a-f]*) [ "${#want}" = 64 ] || want="" ;;
-    *) want="" ;;
-  esac
-  [ -n "$bundle" ] && [ -n "$want" ] || fail "usage: yantrik-update install-mind BUNDLE SHA256 (the bundle's full sha256, 64 hex digits)"
-  # A scratch YANTRIK_MIND_DIR is the selftest's; anywhere else, root and nothing less.
-  [ "$(id -u)" = 0 ] || [ -n "${YANTRIK_MIND_DIR:-}" ] || fail "install-mind runs as root (sudo yantrik-update install-mind ...); nothing was changed"
+  local bundle="${1:-}" want="${2:-}" have stage build commit sha16 f since restored=0
+  local mind_dir=/opt/yantrik-mind
+  install_mind_selftest && [ -n "${YANTRIK_MIND_DIR:-}" ] && mind_dir="$YANTRIK_MIND_DIR"
+  printf '%s' "$want" | grep -Eqx '[0-9a-f]{64}' || want=""
+  [ -n "$bundle" ] && [ -n "$want" ] || fail "usage: yantrik-update install-mind BUNDLE SHA256 (the bundle's full sha256, 64 lowercase hex digits)"
+  [ "$(id -u)" = 0 ] || install_mind_selftest || fail "install-mind runs as root (sudo yantrik-update install-mind ...); nothing was changed"
   need tar; need zstd; need sha256sum
   [ -f "$bundle" ] || fail "no bundle at $bundle; nothing was changed"
-  if [ -z "${YANTRIK_MIND_DIR:-}" ] || [ -n "${YANTRIK_ARENA_LOCK:-}" ]; then
-    arena_running && fail "an arena run is in progress (its lock is held); nothing was changed. Try again when it has finished."
-  fi
+  arena_running && fail "an arena run is in progress (its lock is held); nothing was changed. Try again when it has finished."
 
   have="$(sha256sum "$bundle" | cut -d' ' -f1)"
   [ "$have" = "$want" ] || fail "the bundle's sha256 is $have, not the $want given; nothing was changed"
   sha16="$(printf '%s' "$have" | cut -c1-16)"
   bundle_members_ok "$bundle" || fail "the bundle holds something other than plain files at plain paths; nothing was changed"
 
-  [ -d "$MIND_DIR" ] || install -d -m 755 "$MIND_DIR"
-  stage="$(mktemp -d "$MIND_DIR/.install.XXXXXX")" || fail "no staging directory in $MIND_DIR; nothing was changed"
+  [ -d "$mind_dir" ] || install -d -m 755 "$mind_dir"
+  stage="$(mktemp -d "$mind_dir/.install.XXXXXX")" || fail "no staging directory in $mind_dir; nothing was changed"
   # shellcheck disable=SC2064  # the path is fixed now, on purpose
   trap "rm -rf '$stage'" EXIT
   tar --zstd -xf "$bundle" -C "$stage" --strip-components=1 --no-same-owner --no-same-permissions \
@@ -2423,56 +2440,49 @@ cmd_install_mind() {
     || fail "BUILD says $commit, but the Mind binary does not carry that commit; nothing was changed"
 
   # The swap: each file renamed over its target, the previous one kept once.
-  install -d -m 755 "$MIND_DIR/bin"
+  install -d -m 755 "$mind_dir/bin"
   for f in $MIND_FILES_INSTALLED; do
-    if [ -e "$MIND_DIR/$f" ] && [ ! -e "$MIND_DIR/$f.before-$commit" ]; then
-      cp -p "$MIND_DIR/$f" "$MIND_DIR/$f.before-$commit"
+    if [ -e "$mind_dir/$f" ] && [ ! -e "$mind_dir/$f.before-$commit" ]; then
+      cp -p "$mind_dir/$f" "$mind_dir/$f.before-$commit"
     fi
   done
   for f in $MIND_FILES_INSTALLED; do
     case "$f" in BUILD) chmod 644 "$stage/$f" ;; *) chmod 755 "$stage/$f" ;; esac
     [ "$(id -u)" = 0 ] && chown root:root "$stage/$f"
-    mv -f "$stage/$f" "$MIND_DIR/$f"
+    mv -f "$stage/$f" "$mind_dir/$f"
   done
-  [ "$(id -u)" = 0 ] && chown root:root "$MIND_DIR" "$MIND_DIR/bin"
-  chmod 755 "$MIND_DIR" "$MIND_DIR/bin"
+  [ "$(id -u)" = 0 ] && chown root:root "$mind_dir" "$mind_dir/bin"
+  chmod 755 "$mind_dir" "$mind_dir/bin"
 
-  if [ -n "${YANTRIK_MIND_DIR:-}" ] && [ -z "${YANTRIK_MIND_HEALTH:-}" ]; then
-    printf 'installed %s %s not-restarted\n' "$commit" "$sha16"
+  # A Mind that was not running is left not running: installing is not starting.
+  if ! { install_mind_selftest && [ -n "${YANTRIK_MIND_HEALTH:-}" ]; } \
+    && ! systemctl is-active --quiet "$MIND_UNIT" 2>/dev/null; then
+    printf 'installed %s %s not-running\n' "$commit" "$sha16"
     return 0
   fi
-  if [ -n "${YANTRIK_MIND_HEALTH:-}" ]; then
-    # The selftest's stand-in for a restart: `ok` attaches, anything else does not.
-    was_running=1
-    [ "$YANTRIK_MIND_HEALTH" = ok ] && { printf 'installed %s %s attached\n' "$commit" "$sha16"; return 0; }
-  else
-    systemctl is-active --quiet "$MIND_UNIT" && was_running=1
-    if [ "$was_running" = 0 ]; then
-      printf 'installed %s %s not-running\n' "$commit" "$sha16"
-      return 0
-    fi
-    since="$(date +%s)"
-    systemctl restart "$MIND_UNIT" >/dev/null 2>&1 || true
-    if mind_attached "$since"; then
-      printf 'installed %s %s attached\n' "$commit" "$sha16"
-      return 0
-    fi
+  since="$(date +%s)"
+  restart_mind
+  if mind_attached "$since" first; then
+    printf 'installed %s %s attached\n' "$commit" "$sha16"
+    return 0
   fi
 
-  # Not attached: the previous files back, and the previous Mind started again.
-  local restored=0
+  # Not attached: the previous files back, the previous Mind started again, and proven or not.
   for f in $MIND_FILES_INSTALLED; do
-    if [ -e "$MIND_DIR/$f.before-$commit" ]; then
-      cp -p "$MIND_DIR/$f.before-$commit" "$MIND_DIR/$f.restore" && mv -f "$MIND_DIR/$f.restore" "$MIND_DIR/$f" && restored=1
+    if [ -e "$mind_dir/$f.before-$commit" ]; then
+      cp -p "$mind_dir/$f.before-$commit" "$mind_dir/$f.restore" && mv -f "$mind_dir/$f.restore" "$mind_dir/$f" && restored=1
     fi
   done
-  if [ -z "${YANTRIK_MIND_HEALTH:-}" ]; then
-    systemctl restart "$MIND_UNIT" >/dev/null 2>&1 || true
-  fi
-  if [ "$restored" = 1 ]; then
-    printf 'ROLLED BACK %s: it did not attach to the desktop within 30 s; the previous Mind is back\n' "$commit"
-  else
+  if [ "$restored" = 0 ]; then
     printf 'ROLLED BACK %s: it did not attach within 30 s, and there was no previous Mind to put back\n' "$commit"
+    return 1
+  fi
+  since="$(date +%s)"
+  restart_mind
+  if mind_attached "$since" again; then
+    printf 'ROLLED BACK %s: it did not attach within 30 s; the previous Mind is back and attached\n' "$commit"
+  else
+    printf 'ROLLED BACK %s: it did not attach within 30 s; the previous Mind is back but did NOT attach either\n' "$commit"
   fi
   return 1
 }
@@ -2757,8 +2767,11 @@ cmd_selftest() {
   fi
 
   # N. install-mind: a bundle is checked whole before anything moves, and a Mind that does not
-  #    attach is taken back out. Bundles built here, in the package.sh layout.
-  if command -v zstd >/dev/null 2>&1; then
+  #    attach is taken back out. Bundles built here, in the package.sh layout. Never as root: its
+  #    stand-ins are refused to root, so as root these checks would reach the real /opt/yantrik-mind.
+  if [ "$(id -u)" = 0 ]; then
+    printf '  skip install-mind checks: they run as an ordinary account, never as root\n'
+  elif command -v zstd >/dev/null 2>&1; then
     local im="$root/install-mind" md out sha
     mk_bundle() { # mk_bundle <name> <commit-in-BUILD> <commit-in-binary> <agent_token line>
       local d="$im/src-$1/yantrik-mind-$2-linux-amd64"
@@ -2770,7 +2783,7 @@ cmd_selftest() {
     }
     im_run() { # im_run <mind dir> <bundle> <sha> [env...]: the command's output and its exit
       local dir="$1" b="$2" s="$3"; shift 3
-      env YANTRIK_MIND_DIR="$dir" "$@" "$0" install-mind "$b" "$s" 2>&1; printf ' [exit %s]' "$?"
+      env YANTRIK_SELFTEST=1 YANTRIK_MIND_DIR="$dir" "$@" "$0" install-mind "$b" "$s" 2>&1; printf ' [exit %s]' "$?"
     }
     mkdir -p "$im"
     md="$im/opt"; mkdir -p "$md/bin"
@@ -2779,6 +2792,10 @@ cmd_selftest() {
 
     mk_bundle good abc1234 abc1234 agent_token=1
     sha="$(sha256sum "$im/good.tar.zst" | cut -d' ' -f1)"
+    out="$(env YANTRIK_MIND_DIR="$md" YANTRIK_MIND_HEALTH=ok "$0" install-mind "$im/good.tar.zst" "$sha" 2>&1; printf ' [exit %s]' "$?")"
+    t "install-mind: outside the selftest its stand-ins are ignored: an ordinary account is refused" "runs as root" "$out"
+    out="$(im_run "$md" "$im/good.tar.zst" "$(printf '%s' "$sha" | tr a-f A-F)")"
+    t "install-mind: a sha256 that is not 64 lowercase hex digits is refused" "usage: yantrik-update install-mind" "$out"
     out="$(im_run "$md" "$im/good.tar.zst" "$(printf '%064d' 0)")"
     t "install-mind: a bundle whose sha256 is not the one given is refused, both named" "is $sha, not the 0000" "$out"
     is "install-mind: ... and nothing changed" "old mind" "$(cat "$md/bin/yantrik-mind")"
@@ -2821,11 +2838,16 @@ with tarfile.open(sys.argv[1], "w") as t:
     is "install-mind: ... and no staging left behind" "" "$(find "$md" -maxdepth 1 -name '.install.*')"
 
     mk_bundle next def5678 def5678 agent_token=1
-    out="$(im_run "$md" "$im/next.tar.zst" "$(sha256sum "$im/next.tar.zst" | cut -d' ' -f1)" YANTRIK_MIND_HEALTH=never)"
-    t "install-mind: a Mind that does not attach is rolled back, and it says so" "ROLLED BACK def5678" "$out"
+    local next_sha; next_sha="$(sha256sum "$im/next.tar.zst" | cut -d' ' -f1)"
+    out="$(im_run "$md" "$im/next.tar.zst" "$next_sha" YANTRIK_MIND_HEALTH=rollback-only)"
+    t "install-mind: a Mind that does not attach is rolled back, and the previous one proven back" \
+      "ROLLED BACK def5678: it did not attach within 30 s; the previous Mind is back and attached" "$out"
     t "install-mind: ... with a failing exit" "[exit 1]" "$out"
     is "install-mind: ... the previous Mind back in place" "ELF...stamp abc1234..." "$(cat "$md/bin/yantrik-mind")"
     t "install-mind: ... and its BUILD" "commit=abc1234" "$(cat "$md/BUILD")"
+    out="$(im_run "$md" "$im/next.tar.zst" "$next_sha" YANTRIK_MIND_HEALTH=never)"
+    t "install-mind: when the previous Mind does not attach either, it says so" "the previous Mind is back but did NOT attach either" "$out"
+    t "install-mind: ... with a failing exit" "[exit 1]" "$out"
   else
     printf '  skip install-mind checks: no zstd here\n'
   fi
