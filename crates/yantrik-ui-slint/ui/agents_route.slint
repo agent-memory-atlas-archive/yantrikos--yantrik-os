@@ -11,6 +11,7 @@
 // a finished route asks for no redraw (#68).
 
 import { Theme } from "theme.slint";
+import { JumpToPresent } from "jump_to_present.slint";
 
 export struct RouteStopData {
     key: string,           // what pressing it opens: a session item (`t3.2`) or a branch's agent id
@@ -242,27 +243,34 @@ export component AgentsRoute inherits Rectangle {
             wrap: word-wrap;
         }
 
-        flick := Flickable {
+        // While it runs, the newest station stays in sight — unless the person has scrolled back
+        // to read, when "Jump to present" returns them (the kit's JumpToPresent).
+        Rectangle {
             vertical-stretch: 1;
-            viewport-height: line.preferred-height;
-            // While it runs, the newest station stays in sight.
-            property <int> count: root.stops.length;
-            changed count => {
-                if (root.live) {
-                    self.viewport-y = Math.min(0px, self.height - line.preferred-height);
-                }
-            }
-            Rectangle {
-                width: flick.width;
-                height: line.preferred-height;
-                line := VerticalLayout {
-                    for stop in root.stops : Station {
-                        stop: stop;
-                        live: root.live;
-                        beat: root.beat;
-                        pressed => { root.pick(stop.key, stop.kind); }
+            flick := Flickable {
+                width: 100%;
+                height: 100%;
+                viewport-height: line.preferred-height;
+                Rectangle {
+                    width: flick.width;
+                    height: line.preferred-height;
+                    line := VerticalLayout {
+                        for stop in root.stops : Station {
+                            stop: stop;
+                            live: root.live;
+                            beat: root.beat;
+                            pressed => { root.pick(stop.key, stop.kind); }
+                        }
                     }
                 }
+            }
+            route-follow := JumpToPresent {
+                width: 100%;
+                height: 100%;
+                live: root.live;
+                viewport-y <=> flick.viewport-y;
+                viewport-height: flick.viewport-height;
+                visible-height: flick.height;
             }
         }
     }

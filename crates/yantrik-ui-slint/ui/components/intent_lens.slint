@@ -13,6 +13,7 @@ import { QuestionRequest, QuestionCard } from "question_card.slint";
 import { Icon, Icons } from "icon.slint";
 import { MessageData, MessageBubble } from "message_bubble.slint";
 import { ListView } from "std-widgets.slint";
+import { JumpToPresent } from "jump_to_present.slint";
 
 // A single result in the Intent Feed.
 export struct LensResult {
@@ -2106,13 +2107,28 @@ export component IntentLens inherits Rectangle {
 
                 // Messages — fills available panel height, down to `transcript-min` while a
                 // card is waiting (see the property at the top of the component).
-                ListView {
+                //
+                // It follows the newest message while the person is at the bottom, and once they
+                // scroll up to read, "Jump to present" brings them back (JumpToPresent, the kit's
+                // one follower, shared with the Agents session and the route).
+                Rectangle {
                     vertical-stretch: 1;
                     min-height: root.transcript-min;
 
-                    for msg[idx] in root.messages : MessageBubble {
-                        open-run(run) => { root.open-run(run); }
-                        data: msg;
+                    chat-list := ListView {
+                        width: 100%;
+                        height: 100%;
+                        for msg[idx] in root.messages : MessageBubble {
+                            open-run(run) => { root.open-run(run); }
+                            data: msg;
+                        }
+                    }
+                    chat-follow := JumpToPresent {
+                        width: 100%;
+                        height: 100%;
+                        viewport-y <=> chat-list.viewport-y;
+                        viewport-height: chat-list.viewport-height;
+                        visible-height: chat-list.visible-height;
                     }
                 }
 
@@ -2295,6 +2311,7 @@ export component IntentLens inherits Rectangle {
                                     // was to reach for the mouse and press `>`.
                                     if (event.text == Key.Return && !event.modifiers.shift) {
                                         if (self.chat-text != "") {
+                                            chat-follow.jump();
                                             root.send-message(self.chat-text);
                                             self.chat-text = "";
                                         }
@@ -2304,6 +2321,7 @@ export component IntentLens inherits Rectangle {
                                 }
                                 accepted => {
                                     if chat-text != "" {
+                                        chat-follow.jump();
                                         root.send-message(chat-text);
                                         chat-text = "";
                                     }
@@ -2325,6 +2343,7 @@ export component IntentLens inherits Rectangle {
                             height: 32px;
                             clicked => {
                                 if chat-input.chat-text != "" {
+                                    chat-follow.jump();
                                     root.send-message(chat-input.chat-text);
                                     chat-input.chat-text = "";
                                 }

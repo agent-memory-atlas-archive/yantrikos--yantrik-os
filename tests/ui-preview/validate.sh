@@ -19,6 +19,7 @@ run target/ui-validation/decision.png 720 780 verify-decision
 run target/ui-validation/unused.png 1280 800 verify-apps
 run target/ui-validation/mind-panel.png 1280 800 verify-mind-panel
 run target/ui-validation/minds.png 1280 800 verify-minds
+run target/ui-validation/jump-to-present.png 480 400 verify-jump-to-present
 run target/ui-validation/unused.png 1280 800 verify-screen-controls
 run target/ui-validation/apps-button.png 1280 800 verify-apps-button
 run target/ui-validation/taskbar-menu.png 1280 800 verify-taskbar-menu
