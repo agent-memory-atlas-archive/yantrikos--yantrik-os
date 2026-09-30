@@ -115,7 +115,16 @@ class YantrikAdapter(BasePlatformAdapter):
 
     # ── Lifecycle ──────────────────────────────────────────────────────────────────────────────
 
-    async def connect(self) -> bool:
+    async def connect(self, *, is_reconnect: bool = False) -> bool:
+        # `is_reconnect` is Hermes's reconnect watcher re-establishing a platform it saw drop, so
+        # that a platform with a server-side queue (Telegram's) keeps what arrived meanwhile. The
+        # desktop holds no such queue for us — the poll loop simply attaches again — so a reconnect
+        # is a connect. Hermes started passing it to every connect, the first one included, and an
+        # adapter without the keyword never connected at all. What a reconnect must not do is leave
+        # the last connection's loops running beside the new ones: two pollers would each take
+        # turns and two heartbeats would keep one session alive twice over.
+        for task in self._tasks:
+            task.cancel()
         self._tasks = [
             asyncio.create_task(self._run(), name="yantrik-poll"),
             asyncio.create_task(self._heartbeat(), name="yantrik-heartbeat"),
