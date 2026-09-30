@@ -1307,6 +1307,27 @@ def end_process(proc: Optional[subprocess.Popen]) -> None:
 # ── Where an agent process runs ─────────────────────────────────────────────────────────
 
 
+USER_BIN = os.path.join("~", ".local", "bin")
+
+
+def program_path(extra: str = "", base: Optional[str] = None) -> str:
+    """The PATH a harness runs its own program with: `extra` first (the config's `path`), then
+    ~/.local/bin, then the service's own PATH.
+
+    ~/.local/bin is where the desktop's Install button puts every harness program and the Node it
+    runs on (harnesses/lib/install). A unit written before that knew nothing of it, and a user
+    service does not read ~/.profile, so without this a harness installed by the button could not
+    find the program it had just been given. Added here rather than in each unit, because a unit
+    file is only replaced by a fresh image, and this file is replaced by every update.
+    """
+    parts = [p for p in (extra or "").split(os.pathsep) if p]
+    user_bin = os.path.expanduser(USER_BIN)
+    rest = [p for p in (os.environ.get("PATH", "") if base is None else base).split(os.pathsep) if p]
+    if user_bin not in parts and user_bin not in rest:
+        parts.append(user_bin)
+    return os.pathsep.join(parts + rest)
+
+
 def mind_directory(harness_id: str, conversation: str = MAIN) -> str:
     """The working directory for one conversation's agent processes, made if it is missing.
 
