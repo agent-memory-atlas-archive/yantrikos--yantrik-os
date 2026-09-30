@@ -40,6 +40,9 @@ const ALSO_PROTECTED: &[&str] = &[
     ".claude/.credentials.json", ".codex/auth.json", ".gemini/oauth_creds.json", ".qwen/oauth_creds.json",
     ".grok/auth.json", ".local/share/yantrik/accounts", ".netrc", ".git-credentials", ".docker/config.json",
     ".aws/credentials", ".kube/config", "/proc/", "/etc/shadow", "/etc/gshadow", "/etc/sudoers",
+    ".config/gh", ".npmrc", ".cargo/credentials", ".pgpass", ".pypirc", ".local/share/keyrings",
+    ".password-store", ".mozilla", ".config/chromium", ".config/google-chrome", ".config/BraveSoftware",
+    "/sys/", "/dev/",
 ];
 
 /// Whether `path` is, or leads into, a place no content may be read from — as written, and again
@@ -145,14 +148,16 @@ fn allowed(program: &str) -> Option<Allowed> {
         "cat" => a("nbEsAT", "", &["--number", "--show-all"], &[]),
         "head" | "tail" => a("q", "nc", &["--quiet"], &["--lines", "--bytes"]),
         "wc" => a("lwcmL", "", &["--lines", "--words", "--bytes", "--chars"], &[]),
-        "grep" => a("inrvcwFElohHs", "e", &["--ignore-case", "--line-number", "--recursive", "--invert-match", "--count", "--word-regexp", "--fixed-strings", "--extended-regexp", "--files-with-matches", "--only-matching"], &["--regexp", "--include", "--exclude"]),
+        // No -r: a folder can hold what the file-level check never sees (a reading review of
+        // #510); the companion's own search tool walks folders with the path rules applied.
+        "grep" => a("invcwFElohHs", "e", &["--ignore-case", "--line-number", "--invert-match", "--count", "--word-regexp", "--fixed-strings", "--extended-regexp", "--files-with-matches", "--only-matching"], &["--regexp", "--include", "--exclude"]),
         "sort" => a("rnufh", "k", &["--reverse", "--numeric-sort", "--unique", "--ignore-case", "--human-numeric-sort"], &["--key"]),
         "diff" => a("uqbiwy", "", &["--unified", "--brief", "--ignore-case", "--ignore-all-space", "--side-by-side"], &[]),
         "du" => a("hsac", "d", &["--human-readable", "--summarize", "--all", "--total"], &["--max-depth"]),
         "stat" => a("Lt", "c", &["--dereference", "--terse"], &["--format"]),
         "file" => a("biL", "", &["--brief", "--mime-type", "--dereference"], &[]),
         "sha256sum" | "md5sum" => a("", "", &[], &[]),
-        "date" => a("uR", "d", &["--utc", "--rfc-3339", "--iso-8601"], &["--date"]),
+        "date" => a("uR", "d", &["--utc", "--iso-8601"], &["--date", "--rfc-3339"]),
         "hostname" => a("", "", &[], &[]),
         _ => None,
     }
@@ -169,10 +174,14 @@ pub fn check(argv: &[String], home: &str) -> Result<(), String> {
     if !PROGRAMS.contains(&program) {
         return Err(format!("'{program}' is not in the safe command list. Allowed: {}", PROGRAMS.join(", ")));
     }
+    let args = &argv[1..];
     if NO_FILES.contains(&program) {
+        // uptime reads a login-records file named as its operand.
+        if program == "uptime" && args.iter().any(|a| !a.starts_with('-')) {
+            return Err("uptime takes no file here".into());
+        }
         return Ok(());
     }
-    let args = &argv[1..];
     if program == "find" {
         return check_find(args);
     }
@@ -180,7 +189,6 @@ pub fn check(argv: &[String], home: &str) -> Result<(), String> {
 
     // Walk the words once: options (checked against the allow-list), their values, operands.
     let mut operands: Vec<&str> = Vec::new();
-    let mut recursive = false;
     let mut pattern_given = false;
     let mut ended = false;
     let mut i = 0;
@@ -201,7 +209,6 @@ pub fn check(argv: &[String], home: &str) -> Result<(), String> {
                 None => (w, None),
             };
             if rules.long.contains(&name) && attached.is_none() {
-                recursive |= name == "--recursive";
             } else if rules.long_valued.contains(&name) {
                 if attached.is_none() {
                     if i >= args.len() {
@@ -234,29 +241,15 @@ pub fn check(argv: &[String], home: &str) -> Result<(), String> {
             if !rules.flags.contains(c) {
                 return Err(format!("{program} -{c} is not one of the options it may be given here"));
             }
-            recursive |= c == 'r' || c == 'R';
         }
     }
 
     if program == "hostname" && !operands.is_empty() {
         return Err("hostname may only read the name".into());
     }
-
-    // A recursive grep may not start at home or above it, where it would walk into ~/.ssh.
-    if recursive && program == "grep" {
-        let h = home.trim_end_matches('/');
-        let skip = usize::from(!pattern_given);
-        let dirs: Vec<&&str> = operands.iter().skip(skip).collect();
-        if dirs.is_empty() {
-            return Err("a recursive grep names the folder to search".into());
-        }
-        for p in dirs {
-            let canon = std::fs::canonicalize(p).map(|c| c.to_string_lossy().into_owned()).unwrap_or_else(|_| p.to_string());
-            let c = canon.trim_end_matches('/');
-            if c.is_empty() || c == h || h.starts_with(&format!("{c}/")) {
-                return Err(format!("a recursive grep from {p} would walk into ~/.ssh and the desktop's own files; start it in a folder under the home directory"));
-            }
-        }
+    // `date MMDDhhmm` is the form that sets the clock; only a +FORMAT reads it.
+    if program == "date" && operands.iter().any(|o| !o.starts_with('+')) {
+        return Err("date takes only a +FORMAT here".into());
     }
 
     // What prints file contents is never given a protected place. grep's first operand is its
@@ -266,6 +259,11 @@ pub fn check(argv: &[String], home: &str) -> Result<(), String> {
         for p in operands.iter().skip(skip) {
             if protected(p) {
                 return Err(format!("{program} may not read {p}: it is, or leads into, a place the AI never reads"));
+            }
+            // A regular file, where its links lead: not a folder (diff reads the same-named file
+            // inside one), not a device (/dev/input is a keyboard), not /sys.
+            if *p != "-" && !std::fs::metadata(p).map(|m| m.is_file()).unwrap_or(false) {
+                return Err(format!("{program} reads regular files only here; {p} is not one"));
             }
         }
     }
@@ -414,6 +412,15 @@ mod tests {
             "date --se=2020-01-01",
             "hostname -Fx",
             "wc ~/.ssh/id_rsa",
+            // The reading review of the allow-list.
+            "grep -r token /tmp",
+            "grep -rn TODO /tmp",
+            "diff /tmp /etc/hostname",
+            "head -c 4096 /dev/zero",
+            "cat /sys/kernel/notes",
+            "date 0101000020",
+            "uptime /var/log/wtmp",
+            "cat ~/.npmrc",
             "sha256sum ~/.ssh/id_rsa",
             "sh -c id",
             "bash",
@@ -424,7 +431,7 @@ mod tests {
 
     #[test]
     fn what_it_is_for_still_works() {
-        for good in ["ls -la /tmp", "date", "uptime", "df -h", "whoami", "wc -l /etc/hostname", "find /tmp -name '*.log'", "du -sh /tmp", "echo a | b ; c", "cat /etc/os-release", "tail -n 5 /etc/hostname", "grep -rn TODO /tmp", "grep -o foo /etc/hostname", "sort -r /etc/hostname", "head -n5 /etc/hostname", "stat /tmp", "wc -l /etc/hostname", "grep -e foo -r /tmp", "grep -rn TODO /tmp", "find /tmp -maxdepth 2 -type f -name '*.log'"] {
+        for good in ["ls -la /tmp", "date", "uptime", "df -h", "whoami", "wc -l /etc/hostname", "find /tmp -name '*.log'", "du -sh /tmp", "echo a | b ; c", "cat /etc/os-release", "tail -n 5 /etc/hostname", "grep -o foo /etc/hostname", "sort -r /etc/hostname", "head -n5 /etc/hostname", "stat /tmp", "wc -l /etc/hostname", "find /tmp -maxdepth 2 -type f -name '*.log'", "date +%Y-%m-%d", "grep -n localhost /etc/hosts"] {
             assert!(ok(good).is_ok(), "{good}: {:?}", ok(good));
         }
     }
