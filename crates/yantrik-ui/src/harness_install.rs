@@ -15,9 +15,10 @@
 //!
 //! # Run as the person, with the person's own environment
 //!
-//! `sh -lc`, a login shell: `npm` and `node` on this kind of machine live in `~/.npm-global/bin`
-//! and `~/.local/node/bin`, and a shell started from a session manager does not have them. A
-//! command that works when the person types it and fails from a button is worse than no button.
+//! `sh -lc`, a login shell, with `~/.local/bin` put first on its PATH: that is where every
+//! installer in harnesses/lib/install puts what it installs (Node included), and a shell started
+//! from a session manager does not have it. A command that works when the person types it and
+//! fails from a button is worse than no button.
 //!
 //! # What is not here
 //!
@@ -176,6 +177,7 @@ fn spawn(id: &str, kind: JobKind, doing: &str, command: String) -> Result<(), St
     let child = Command::new("sh")
         .arg("-lc")
         .arg(&command)
+        .env("PATH", crate::harness_catalogue::job_path())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -230,6 +232,9 @@ fn spawn(id: &str, kind: JobKind, doing: &str, command: String) -> Result<(), St
 fn pump(id: &str, stream: impl std::io::Read) {
     for line in BufReader::new(stream).lines() {
         let Ok(line) = line else { break };
+        // Installers colour their output whether or not it is a terminal (Hermes's does), and
+        // redraw progress with carriage returns. The row is text, so it gets what was said.
+        let line = crate::agents::model::strip_escapes(&line);
         let line = line.trim_end().to_string();
         if line.is_empty() {
             continue;
@@ -342,6 +347,26 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(settled(id).log.contains("last"));
+    }
+
+    #[test]
+    fn a_coloured_installer_reaches_the_row_as_plain_text() {
+        // Hermes's installer colours every line even into a pipe; the row showed the escapes.
+        let _turn = taking_turns();
+        let id = "job-colour";
+        install(&manifest(id, r"printf '\033[0;32m✓\033[0m uv ready\n'")).unwrap();
+        let view = settled(id);
+        assert_eq!(view.log, "✓ uv ready");
+    }
+
+    #[test]
+    fn a_job_finds_what_an_earlier_job_put_in_the_per_user_bin() {
+        // Pi's install fetches Node into ~/.local/bin and then runs npm from there; a session
+        // PATH that lacks it was "npm: not found" on every fresh machine.
+        let _turn = taking_turns();
+        let id = "job-user-bin";
+        install(&manifest(id, r#"case ":$PATH:" in *":$HOME/.local/bin:"*) echo on-path ;; esac"#)).unwrap();
+        assert!(settled(id).log.contains("on-path"));
     }
 
     #[test]

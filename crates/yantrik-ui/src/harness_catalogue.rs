@@ -651,15 +651,51 @@ pub fn read_manifest(dir: &Path) -> Result<Option<Manifest>, String> {
     Ok(Some(manifest))
 }
 
-/// `PATH`, split. Empty entries mean the working directory, and a harness found "on PATH"
-/// because it happened to sit in whatever directory the shell was started from is not found.
+/// Where a harness's installer puts its command: `~/.local/bin`, the one directory every
+/// installer in harnesses/lib/install uses, and the one each harness's unit puts on its PATH.
+///
+/// Named here once because the desktop has to look in it too. A session manager does not read
+/// `~/.profile`, so the desktop's own PATH usually lacks it — and a row that went on saying
+/// "hermes is not here" after its Install button had just put hermes there is the bug this fixes.
+pub fn user_bin_dir(home: &Path) -> PathBuf {
+    home.join(".local/bin")
+}
+
+/// `PATH`, split, then [`user_bin_dir`] if PATH did not already name it. Empty entries mean the
+/// working directory, and a harness found "on PATH" because it happened to sit in whatever
+/// directory the shell was started from is not found.
 pub fn path_dirs() -> Vec<PathBuf> {
-    std::env::var("PATH")
-        .unwrap_or_default()
-        .split(':')
-        .filter(|p| !p.is_empty())
-        .map(PathBuf::from)
-        .collect()
+    with_user_bin(&std::env::var("PATH").unwrap_or_default(), &home())
+}
+
+fn with_user_bin(path: &str, home: &Path) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = path.split(':').filter(|p| !p.is_empty()).map(PathBuf::from).collect();
+    if !home.as_os_str().is_empty() {
+        let user_bin = user_bin_dir(home);
+        if !dirs.contains(&user_bin) {
+            dirs.push(user_bin);
+        }
+    }
+    dirs
+}
+
+/// The PATH an install or start job runs with: [`user_bin_dir`] first, so a job finds the
+/// commands an earlier job installed (the Node that Pi's install fetched, say) without a login
+/// shell having to have read the file that would have told it.
+pub fn job_path() -> String {
+    let home = home();
+    let path = std::env::var("PATH").unwrap_or_default();
+    if home.as_os_str().is_empty() {
+        return path;
+    }
+    let user_bin = user_bin_dir(&home).display().to_string();
+    if path.split(':').any(|p| p == user_bin) {
+        path
+    } else if path.is_empty() {
+        user_bin
+    } else {
+        format!("{user_bin}:{path}")
+    }
 }
 
 #[cfg(unix)]
@@ -1257,5 +1293,44 @@ setup:
         assert_eq!(manifests["pi"].unit, "yantrik-pi.service");
         assert_eq!(manifests["deepseek"].unit, "yantrik-deepseek.service");
         assert!(manifests["hermes"].unit.is_empty(), "Hermes is started by Hermes");
+    }
+
+    /// The Install button is only as good as the command behind it, and every one of them ran
+    /// straight into "command not found" on a fresh image: Hermes's needed `hermes`, Pi's needed
+    /// `npm`, and the image ships neither. So every harness that can be missing its own program
+    /// installs it through a script in harnesses/lib/install, which fetches what the image lacks —
+    /// and that script has to be one that exists.
+    #[test]
+    fn every_install_button_runs_a_script_that_ships_and_brings_its_own_program() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../harnesses");
+        if !repo.exists() {
+            return;
+        }
+        let manifests = read_manifests(&[repo]);
+        for id in ["hermes", "pi", "openclaw"] {
+            let manifest = &manifests[id];
+            let install = manifest
+                .install
+                .as_ref()
+                .unwrap_or_else(|| panic!("{id} is missing its own program and has no Install"));
+            let command = install.command_in(&manifest.dir);
+            let script = command
+                .split_whitespace()
+                .map(|w| w.trim_matches('"'))
+                .find(|w| w.ends_with(".sh"))
+                .unwrap_or_else(|| panic!("{id}: `{command}` runs no installer script"));
+            assert!(Path::new(script).is_file(), "{id}: {script} does not exist");
+            assert!(script.contains("lib/install/"), "{id}: installers live in harnesses/lib/install");
+        }
+    }
+
+    #[test]
+    fn the_per_user_bin_is_looked_in_even_when_path_does_not_name_it() {
+        let home = Path::new("/home/ada");
+        let dirs = with_user_bin("/usr/bin:/bin", home);
+        assert_eq!(dirs.last(), Some(&home.join(".local/bin")), "a session PATH lacks it");
+        let named = with_user_bin("/home/ada/.local/bin:/usr/bin", home);
+        assert_eq!(named.iter().filter(|d| **d == home.join(".local/bin")).count(), 1);
+        assert_eq!(with_user_bin(":/usr/bin", Path::new("")), vec![PathBuf::from("/usr/bin")]);
     }
 }
