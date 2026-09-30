@@ -72,8 +72,8 @@ pub struct GenericOpenAIBackend {
     api_key: Option<String>,
     /// Model name (e.g. "gpt-4o", "qwen3.5:27b-nothink").
     model: String,
-    /// Auth header style: "bearer" sends `Authorization: Bearer <key>`,
-    /// "none" sends no auth header.
+    /// Auth header style: "bearer" sends `Authorization: Bearer <key>` when a key is set,
+    /// "none" never sends one.
     auth_style: String,
     /// Provider-specific behavior presets.
     presets: ProviderPresets,
@@ -126,11 +126,10 @@ impl GenericOpenAIBackend {
             "openrouter" => ProviderPresets::openrouter(),
             _ => ProviderPresets::default(),
         };
-        let auth_style = match provider_type {
-            "ollama" => "none",
-            _ => "bearer",
-        };
-        Self::new(base_url, api_key, model, auth_style, presets)
+        // Every provider sends the key it was given for this address, and none without one. Ollama
+        // itself takes no key, but one behind an authenticating proxy (a gateway, a sealed gate)
+        // needs it, and a key is only ever set for the address it belongs to.
+        Self::new(base_url, api_key, model, "bearer", presets)
     }
 
     /// Serialize a ChatMessage to JSON.
@@ -205,7 +204,7 @@ impl GenericOpenAIBackend {
     /// Build auth and extra headers as a vec of (key, value) pairs.
     fn auth_headers(&self) -> Vec<(String, String)> {
         let mut headers = Vec::new();
-        if let Some(ref key) = self.api_key {
+        if let Some(key) = self.api_key.as_deref().filter(|k| !k.trim().is_empty()) {
             if self.auth_style != "none" {
                 headers.push(("Authorization".to_string(), format!("Bearer {key}")));
             }
@@ -645,5 +644,36 @@ impl LLMBackend for GenericOpenAIBackend {
 
     fn model_id(&self) -> &str {
         &self.model
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GenericOpenAIBackend;
+
+    fn authorization(b: &GenericOpenAIBackend) -> Option<String> {
+        b.auth_headers().into_iter().find(|(k, _)| k == "Authorization").map(|(_, v)| v)
+    }
+
+    #[test]
+    fn an_ollama_behind_a_gate_is_sent_the_key_it_was_given() {
+        let gated = GenericOpenAIBackend::for_provider("ollama", "http://10.99.0.1:8443", Some("k".into()), "m");
+        assert_eq!(authorization(&gated).as_deref(), Some("Bearer k"));
+    }
+
+    #[test]
+    fn no_key_or_a_blank_one_sends_no_header() {
+        for key in [None, Some(String::new()), Some("  ".to_string())] {
+            for provider in ["ollama", "openai", "nvidia-nim"] {
+                let b = GenericOpenAIBackend::for_provider(provider, "http://localhost:11434/v1", key.clone(), "m");
+                assert_eq!(authorization(&b), None, "{provider} {key:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn auth_style_none_never_sends_a_key() {
+        let b = GenericOpenAIBackend::new("http://x/v1", Some("k".into()), "m", "none", Default::default());
+        assert_eq!(authorization(&b), None);
     }
 }
