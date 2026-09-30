@@ -23,6 +23,7 @@ mod weather_tests;
 mod minds_tests;
 mod jump_tests;
 mod handoff_card_tests;
+mod accounts_page_tests;
 mod provider_panel_tests;
 mod rail_tests;
 mod calendar_tests;
@@ -59,6 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.iter().any(|a| a == "verify-minds") { return minds_tests::run(&window, output); }
     if args.iter().any(|a| a == "verify-jump-to-present") { return jump_tests::run(&window, output); }
     if args.iter().any(|a| a == "verify-handoff-card") { return handoff_card_tests::run(&window, output); }
+    if args.iter().any(|a| a == "verify-accounts-page") { return accounts_page_tests::run(&window, output); }
     if args.iter().any(|a| a == "verify-provider-panel") { return provider_panel_tests::run(&window, output); }
     if args.iter().any(|a| a == "verify-context-rail") { return rail_tests::run(&window, output); }
     if args.iter().any(|a| a == "verify-calendar") { return calendar_tests::run(&window, output); }

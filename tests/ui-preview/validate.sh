@@ -24,6 +24,7 @@ run target/ui-validation/context-rail.png 900 500 verify-context-rail
 run target/ui-validation/calendar.png 1100 720 verify-calendar
 run target/ui-validation/provider-panel.png 1280 800 verify-provider-panel
 run target/ui-validation/handoff-card.png 1280 800 verify-handoff-card
+run target/ui-validation/accounts-page.png 1280 800 verify-accounts-page
 run target/ui-validation/unused.png 1280 800 verify-screen-controls
 run target/ui-validation/apps-button.png 1280 800 verify-apps-button
 run target/ui-validation/taskbar-menu.png 1280 800 verify-taskbar-menu
