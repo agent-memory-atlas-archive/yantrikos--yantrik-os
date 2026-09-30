@@ -610,6 +610,8 @@ export component App inherits Window {
     callback delete-provider(string);
     callback test-provider(string);
     callback connect-provider(string, string, string);
+    callback provider-url-changed(string);
+    in property <bool> settings-provider-form-host-changed: false;
     callback provider-model-search(string);
     callback edit-provider(string);
     in property <[string]> settings-provider-form-models: [];
@@ -1869,6 +1871,8 @@ export component App inherits Window {
                 delete-provider(id) => { root.delete-provider(id); }
                 test-provider(id) => { root.test-provider(id); }
                 connect-provider(preset, url, key) => { root.connect-provider(preset, url, key); }
+                provider-url-changed(url) => { root.provider-url-changed(url); }
+                provider-form-host-changed: root.settings-provider-form-host-changed;
                 provider-model-search(q) => { root.provider-model-search(q); }
                 edit-provider(id) => { root.edit-provider(id); }
                 provider-form-models: root.settings-provider-form-models;

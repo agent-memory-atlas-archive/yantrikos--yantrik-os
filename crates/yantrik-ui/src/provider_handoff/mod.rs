@@ -11,9 +11,10 @@
 //! - **Nothing without a click.** No write at boot, on attach, or when a provider changes.
 //! - **Keys go only where the person pointed them**, in a file at mode 600 that the harness
 //!   already reads, written through `crate::private_file` (a fresh 600 temp file, no link
-//!   followed, published in one step). A provider the catalogue knows sends its key only to its
-//!   own address (`pinned_base`). The card, the marker and every log line carry the provider's
-//!   name, the address and the file's path, never the key.
+//!   followed, published in one step). Any address may be given, and the card names it — and
+//!   says when it is not the provider's own (`address`); a saved key does not follow an edited
+//!   address to a new host (`provider_panel::key_follows`). The card, the marker and every log
+//!   line carry the provider's name, the address and the file's path, never the key.
 //! - **The person's own file is kept.** The first time a file is written it is copied aside, and
 //!   that copy is never replaced — not by a second assignment, not after an attempt that failed
 //!   halfway. Revert puts it back, or removes the written file when there was none.
@@ -56,6 +57,8 @@ pub(crate) struct Plan {
     pub model: String,
     /// The address the harness will send requests — and the key — to.
     pub destination: String,
+    /// The provider's own address, when `destination` is another one.
+    pub own_address: Option<String>,
     pub writes: Vec<Write>,
     /// The user unit to restart so the harness reads its new settings, when it is running.
     pub restart: Option<String>,
@@ -69,7 +72,7 @@ impl Plan {
             "{} will use {} at {} with {}.",
             self.harness_name,
             self.provider_name,
-            host(&self.destination),
+            self.where_to(),
             self.model
         )];
         if self.destination.starts_with("http://") && !is_local(&self.destination) {
@@ -95,10 +98,18 @@ impl Plan {
             "{} will use {} at {} with {}: writes {} with the provider's key, and keeps your own copy for Revert.",
             self.harness_name,
             self.provider_name,
-            host(&self.destination),
+            self.where_to(),
             self.model,
             files.join(", ")
         )
+    }
+
+    /// The address, and when it is not the provider's own, whose it is not.
+    fn where_to(&self) -> String {
+        match &self.own_address {
+            Some(own) => format!("{} (not {}'s own address, {own})", host(&self.destination), self.provider_name),
+            None => host(&self.destination),
+        }
     }
 }
 
@@ -140,30 +151,20 @@ pub(crate) fn adapter_for(harness: &str) -> Option<&'static dyn Handoff> {
     }
 }
 
-/// Where a saved provider's key may be sent: its own address, for a provider the catalogue
-/// knows. A provider saved as NVIDIA NIM whose address was later edited to another host would
-/// otherwise carry an NVIDIA key there — the rule the Mind keeps too (a known provider never
-/// takes a caller's base URL). Local runtimes (Ollama, llama.cpp, …) and Custom providers run
-/// wherever the person put them, and the card names that address.
-pub(crate) fn pinned_base(provider: &ProviderStoreEntry) -> Result<String, String> {
+/// Where a harness given this provider will send its requests and key, and — when that is not
+/// the address the catalogue gives the provider — which address is the provider's own.
+///
+/// Any address may be used: a self-hosted NIM, a regional endpoint, a gateway in front of a cloud.
+/// What keeps a key from going somewhere its person did not mean is elsewhere: a saved key does
+/// not follow an edited address to a new host (`provider_panel::key_follows`), and the card names
+/// the address and says when it is not the provider's own.
+pub(crate) fn address(provider: &ProviderStoreEntry) -> (String, Option<String>) {
     let base = crate::wire::provider_models::openai_base(&provider.base_url);
-    let Some(known) = yantrik_ml::ProviderDescriptor::by_id(&provider.provider_type) else {
-        return Ok(base);
-    };
-    if known.kind == yantrik_ml::ProviderKind::Local || known.default_base_url.is_empty() {
-        return Ok(base);
-    }
-    let own = host(known.openai_base_url());
-    if host(&base) != own && host(&provider.base_url) != host(known.default_base_url) {
-        return Err(format!(
-            "{} is saved with the address {}, not {}'s own ({own}). Its key is only sent to its own \
-             address — save it as Custom to use another one.",
-            provider.name,
-            host(&provider.base_url),
-            known.display_name
-        ));
-    }
-    Ok(base)
+    let own = yantrik_ml::ProviderDescriptor::by_id(&provider.provider_type)
+        .filter(|known| known.kind != yantrik_ml::ProviderKind::Local && !known.default_base_url.is_empty())
+        .map(|known| host(known.openai_base_url()))
+        .filter(|own| !own.eq_ignore_ascii_case(&host(&base)));
+    (base, own)
 }
 
 /// The host (and port) of a URL, without scheme, userinfo or path.
