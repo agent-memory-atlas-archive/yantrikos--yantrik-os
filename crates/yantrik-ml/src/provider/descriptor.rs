@@ -82,6 +82,9 @@ pub struct ProviderDescriptor {
     /// What goes in the API key field before anything is typed ("sk-…").
     /// Empty exactly when the provider needs no key.
     pub key_placeholder: &'static str,
+    /// The environment variable the vendor's own tools read the key from
+    /// ("OPENAI_API_KEY"). Empty when there is no settled convention.
+    pub key_env: &'static str,
     /// Brief description for the UI.
     pub description: &'static str,
 }
@@ -97,6 +100,12 @@ impl ProviderDescriptor {
     /// The OpenAI-compatible base URL: what a chat-completions client uses.
     pub fn openai_base_url(&self) -> &'static str {
         self.openai_compat_base_url.unwrap_or(self.default_base_url)
+    }
+
+    /// Whether the URL carries a part only the person knows, such as
+    /// Cloudflare's `{account_id}`, to be filled in before it can work.
+    pub fn url_needs_filling(&self) -> bool {
+        self.openai_base_url().contains('{')
     }
 
     /// Whether requests need an API key.

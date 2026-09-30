@@ -26,6 +26,7 @@ const CLOUD: ProviderDescriptor = ProviderDescriptor {
     supports_tools: true,
     default_model: "",
     key_placeholder: "Your API key",
+    key_env: "",
     description: "",
 };
 
@@ -51,6 +52,7 @@ pub static KNOWN_PROVIDERS: &[ProviderDescriptor] = &[
         setup_tier: SetupTier::PrimaryOnboarding,
         default_model: "gpt-4o-mini",
         key_placeholder: "sk-…",
+        key_env: "OPENAI_API_KEY",
         description: "GPT-4o, o1, and more. Requires API key.",
         ..CLOUD
     },
@@ -66,6 +68,7 @@ pub static KNOWN_PROVIDERS: &[ProviderDescriptor] = &[
         openai_compatible: false,
         default_model: "claude-sonnet-5-5",
         key_placeholder: "sk-ant-…",
+        key_env: "ANTHROPIC_API_KEY",
         description: "Claude Haiku, Sonnet, and Opus. Requires API key.",
         ..CLOUD
     },
@@ -81,6 +84,7 @@ pub static KNOWN_PROVIDERS: &[ProviderDescriptor] = &[
         openai_compatible: false,
         default_model: "gemini-3.8-flash",
         key_placeholder: "AIza…",
+        key_env: "GEMINI_API_KEY",
         description: "Gemini Flash and Pro. Requires API key.",
         ..CLOUD
     },
@@ -90,7 +94,7 @@ pub static KNOWN_PROVIDERS: &[ProviderDescriptor] = &[
         short_name: "DeepSeek",
         default_base_url: "https://api.deepseek.com/v1",
         setup_tier: SetupTier::PrimaryOnboarding,
-        default_model: "deepseek-chat",
+        default_model: "deepseek-flash",
         key_placeholder: "sk-…",
         description: "DeepSeek V3 and R1. Affordable cloud inference.",
         ..CLOUD
@@ -110,7 +114,7 @@ pub static KNOWN_PROVIDERS: &[ProviderDescriptor] = &[
         display_name: "Mistral AI",
         short_name: "Mistral",
         default_base_url: "https://api.mistral.ai/v1",
-        default_model: "mistral-small-latest",
+        default_model: "mistral-small-2603",
         description: "Mistral, Mixtral, and Codestral models.",
         ..CLOUD
     },
@@ -140,7 +144,7 @@ pub static KNOWN_PROVIDERS: &[ProviderDescriptor] = &[
         display_name: "Cerebras",
         short_name: "Cerebras",
         default_base_url: "https://api.cerebras.ai/v1",
-        default_model: "llama-3.3-70b",
+        default_model: "gpt-oss-120b",
         key_placeholder: "csk-…",
         description: "Fast open-model inference on wafer-scale hardware.",
         ..CLOUD
@@ -168,8 +172,8 @@ pub static KNOWN_PROVIDERS: &[ProviderDescriptor] = &[
         id: "minimax",
         display_name: "MiniMax",
         short_name: "MiniMax",
-        default_base_url: "https://api.minimax.chat/v1",
-        default_model: "MiniMax-Text-01",
+        default_base_url: "https://api.minimax.io/v1",
+        default_model: "MiniMax-M3",
         description: "MiniMax long-context models.",
         ..CLOUD
     },
@@ -177,8 +181,9 @@ pub static KNOWN_PROVIDERS: &[ProviderDescriptor] = &[
         id: "kimi",
         display_name: "Kimi",
         short_name: "Kimi",
-        default_base_url: "https://api.moonshot.cn/v1",
-        default_model: "moonshot-v1-8k",
+        // International endpoint; mainland China is https://api.moonshot.cn/v1.
+        default_base_url: "https://api.moonshot.ai/v1",
+        default_model: "kimi-k3",
         key_placeholder: "sk-…",
         description: "Moonshot AI's Kimi models.",
         ..CLOUD
@@ -205,7 +210,7 @@ pub static KNOWN_PROVIDERS: &[ProviderDescriptor] = &[
         short_name: "NVIDIA NIM",
         default_base_url: "https://integrate.api.nvidia.com/v1",
         setup_tier: SetupTier::PrimaryOnboarding,
-        default_model: "meta/llama-3.3-70b-instruct",
+        default_model: "nvidia/nemotron-3-super-120b-a12b",
         key_placeholder: "nvapi-…",
         description: "NVIDIA-hosted open models. Self-hosted NIM: http://<host>:8000/v1, no key.",
         ..CLOUD
@@ -215,7 +220,30 @@ pub static KNOWN_PROVIDERS: &[ProviderDescriptor] = &[
         display_name: "Ollama Cloud",
         short_name: "Ollama Cloud",
         default_base_url: "https://ollama.com/v1",
+        key_env: "OLLAMA_API_KEY",
         description: "Ollama's hosted models, no local install. Requires API key.",
+        ..CLOUD
+    },
+    ProviderDescriptor {
+        id: "cohere",
+        display_name: "Cohere",
+        short_name: "Cohere",
+        // Cohere's Compatibility API; its native v2 API is not OpenAI-shaped.
+        default_base_url: "https://api.cohere.ai/compatibility/v1",
+        default_model: "command-a-plus-05-2026",
+        key_env: "COHERE_API_KEY",
+        description: "Cohere's Command models through its OpenAI compatibility API.",
+        ..CLOUD
+    },
+    ProviderDescriptor {
+        id: "cloudflare",
+        display_name: "Cloudflare Workers AI",
+        short_name: "Cloudflare",
+        // {account_id} is the person's own; Settings shows it to be filled in.
+        default_base_url: "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1",
+        default_model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+        key_placeholder: "Your API token",
+        description: "Open models on Cloudflare's network. Put your account ID in the URL.",
         ..CLOUD
     },
     // ── Aggregators ──
@@ -244,7 +272,6 @@ pub static KNOWN_PROVIDERS: &[ProviderDescriptor] = &[
         display_name: "Fireworks AI",
         short_name: "Fireworks",
         default_base_url: "https://api.fireworks.ai/inference/v1",
-        default_model: "accounts/fireworks/models/llama-v3p3-70b-instruct",
         description: "Fast inference for open and fine-tuned models.",
         ..AGGREGATOR
     },
@@ -252,7 +279,7 @@ pub static KNOWN_PROVIDERS: &[ProviderDescriptor] = &[
         id: "huggingface",
         display_name: "Hugging Face",
         short_name: "HuggingFace",
-        default_base_url: "https://api-inference.huggingface.co/v1",
+        default_base_url: "https://router.huggingface.co/v1",
         supports_tools: false,
         default_model: "meta-llama/Llama-3.3-70B-Instruct",
         key_placeholder: "hf_…",
@@ -265,6 +292,85 @@ pub static KNOWN_PROVIDERS: &[ProviderDescriptor] = &[
         short_name: "NanoGPT",
         default_base_url: "https://api.nano-gpt.com/v1",
         description: "Pay-as-you-go access to many vendors' models.",
+        ..AGGREGATOR
+    },
+    ProviderDescriptor {
+        id: "nous",
+        display_name: "Nous Portal",
+        short_name: "Nous",
+        default_base_url: "https://inference-api.nousresearch.com/v1",
+        key_env: "NOUS_API_KEY",
+        description: "Nous Research's Hermes and other models, with a Portal API key.",
+        ..AGGREGATOR
+    },
+    ProviderDescriptor {
+        id: "deepinfra",
+        display_name: "DeepInfra",
+        short_name: "DeepInfra",
+        default_base_url: "https://api.deepinfra.com/v1/openai",
+        default_model: "deepseek-ai/DeepSeek-V4-Flash-0731",
+        key_env: "DEEPINFRA_API_KEY",
+        description: "Hosted open models at low per-token prices.",
+        ..AGGREGATOR
+    },
+    ProviderDescriptor {
+        id: "vercel",
+        display_name: "Vercel AI Gateway",
+        short_name: "Vercel",
+        default_base_url: "https://ai-gateway.vercel.sh/v1",
+        default_model: "anthropic/claude-opus-5",
+        key_env: "AI_GATEWAY_API_KEY",
+        description: "Many vendors' models through Vercel's gateway and one key.",
+        ..AGGREGATOR
+    },
+    ProviderDescriptor {
+        id: "novita",
+        display_name: "Novita AI",
+        short_name: "Novita",
+        default_base_url: "https://api.novita.ai/openai",
+        default_model: "deepseek/deepseek-v4.1-flash",
+        description: "Hosted open models, pay as you go.",
+        ..AGGREGATOR
+    },
+    ProviderDescriptor {
+        id: "nebius",
+        display_name: "Nebius Token Factory",
+        short_name: "Nebius",
+        default_base_url: "https://api.tokenfactory.nebius.com/v1",
+        default_model: "deepseek-ai/DeepSeek-R1-0528",
+        key_env: "NEBIUS_API_KEY",
+        description: "Open models on Nebius (formerly AI Studio).",
+        ..AGGREGATOR
+    },
+    ProviderDescriptor {
+        id: "chutes",
+        display_name: "Chutes",
+        short_name: "Chutes",
+        default_base_url: "https://llm.chutes.ai/v1",
+        default_model: "zai-org/GLM-5.2-TEE",
+        key_placeholder: "cpk_…",
+        description: "Open models on a decentralized GPU network.",
+        ..AGGREGATOR
+    },
+    ProviderDescriptor {
+        id: "requesty",
+        display_name: "Requesty",
+        short_name: "Requesty",
+        default_base_url: "https://router.requesty.ai/v1",
+        default_model: "openai/gpt-4o",
+        key_placeholder: "sk-…",
+        key_env: "REQUESTY_API_KEY",
+        description: "A router across many vendors' models with one key.",
+        ..AGGREGATOR
+    },
+    ProviderDescriptor {
+        id: "venice",
+        display_name: "Venice",
+        short_name: "Venice",
+        default_base_url: "https://api.venice.ai/api/v1",
+        default_model: "zai-org-glm-5",
+        key_env: "VENICE_API_KEY",
+        description: "Privacy-focused hosting of open models.",
         ..AGGREGATOR
     },
     // ── Local ──
@@ -300,6 +406,33 @@ pub static KNOWN_PROVIDERS: &[ProviderDescriptor] = &[
         short_name: "vLLM",
         default_base_url: "http://localhost:8000/v1",
         description: "A vLLM server you host. No API key needed.",
+        ..LOCAL
+    },
+    ProviderDescriptor {
+        id: "localai",
+        display_name: "LocalAI",
+        short_name: "LocalAI",
+        default_base_url: "http://localhost:8080/v1",
+        description: "A LocalAI server you host. No API key unless you set one.",
+        ..LOCAL
+    },
+    ProviderDescriptor {
+        id: "jan",
+        display_name: "Jan",
+        short_name: "Jan",
+        default_base_url: "http://127.0.0.1:1337/v1",
+        description: "Jan's local API server. No API key unless you set one in Jan.",
+        ..LOCAL
+    },
+    ProviderDescriptor {
+        id: "litellm",
+        display_name: "LiteLLM Proxy",
+        short_name: "LiteLLM",
+        default_base_url: "http://localhost:4000/v1",
+        // The proxy will not start without a master key, so one is always sent.
+        auth_scheme: AuthScheme::Bearer,
+        key_placeholder: "sk-…",
+        description: "A LiteLLM proxy you host, in front of any providers. Needs its master or a virtual key.",
         ..LOCAL
     },
 ];
@@ -355,7 +488,10 @@ mod tests {
     fn a_placeholder_is_shown_exactly_when_a_key_is_needed() {
         for p in KNOWN_PROVIDERS {
             assert_eq!(p.key_placeholder.is_empty(), !p.needs_key(), "{}", p.id);
-            assert_eq!(p.kind == ProviderKind::Local, !p.needs_key(), "{}", p.id);
+            // Everything hosted needs a key; a local runtime may (LiteLLM does).
+            if p.kind != ProviderKind::Local {
+                assert!(p.needs_key(), "{}", p.id);
+            }
         }
     }
 
@@ -379,6 +515,30 @@ mod tests {
         let ids: Vec<&str> = ProviderDescriptor::onboarding_providers().iter().map(|p| p.id).collect();
         for id in ["openai", "anthropic", "gemini", "nvidia-nim", "ollama"] {
             assert!(ids.contains(&id), "{id} missing from onboarding: {ids:?}");
+        }
+    }
+
+    #[test]
+    fn nous_portal_is_an_aggregator_used_with_an_api_key() {
+        let nous = ProviderDescriptor::by_id("nous").expect("Nous Portal is in the catalogue");
+        assert_eq!(nous.display_name, "Nous Portal");
+        assert_eq!(nous.kind, ProviderKind::Aggregator);
+        assert_eq!(nous.openai_base_url(), "https://inference-api.nousresearch.com/v1");
+        assert_eq!(nous.auth_scheme, AuthScheme::Bearer);
+        assert_eq!(nous.key_env, "NOUS_API_KEY");
+    }
+
+    #[test]
+    fn only_a_url_the_person_must_complete_has_a_placeholder_in_it() {
+        let filled: Vec<&str> = KNOWN_PROVIDERS.iter().filter(|p| p.url_needs_filling()).map(|p| p.id).collect();
+        assert_eq!(filled, ["cloudflare"]);
+    }
+
+    #[test]
+    fn retired_services_are_not_offered() {
+        // GitHub Models retired 2026-07-30; Hyperbolic retired its serverless API.
+        for id in ["github", "github-models", "hyperbolic"] {
+            assert!(ProviderDescriptor::by_id(id).is_none(), "{id}");
         }
     }
 }

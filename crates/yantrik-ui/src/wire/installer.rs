@@ -1325,7 +1325,7 @@ llm:
     fn the_catalogue_supplies_url_and_model_when_none_was_saved() {
         let out = installed_config_yaml(IMAGE_CONFIG, &wizard_state("nvidia-nim", "", "nvapi-1"));
         assert!(out.contains("api_base_url: \"https://integrate.api.nvidia.com/v1\""), "{out}");
-        assert!(out.contains("api_model: \"meta/llama-3.3-70b-instruct\""), "{out}");
+        assert!(out.contains("api_model: \"nvidia/nemotron-3-super-120b-a12b\""), "{out}");
         // A provider the catalogue does not know, with no endpoint saved, leaves
         // the image's own endpoint rather than guessing one.
         let out = installed_config_yaml(IMAGE_CONFIG, &wizard_state("nonesuch", "", ""));
