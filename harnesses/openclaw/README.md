@@ -75,7 +75,7 @@ the standard library, and the HTTP route above reaches the same agent without an
 ## Install
 
 **Settings → Harnesses** lists OpenClaw whether or not it is installed. Its *Install* button
-runs OpenClaw's own documented route, `npm install -g openclaw@latest`, through
+runs OpenClaw's own documented route, `npm install -g openclaw` (pinned to a tested version), through
 `harnesses/lib/install/npm.sh`: a pinned Node 24 into `~/.local` first when there is none new
 enough (the image ships none), then OpenClaw into `~/.local/bin`. Onboarding asks questions, so
 it is yours to run: `openclaw onboard`. Once `openclaw` is there the *Start* button enables the

@@ -47,15 +47,26 @@ ensure_node() {
     esac
     name="node-v$NODE_VERSION-linux-$arch"
     dest="$HOME/.local/$name"
+    # ~/.local/node is a link this script owns. A real directory there is somebody's own Node,
+    # which `ln -sfn` would not replace but quietly put a link inside of.
+    if [ -e "$HOME/.local/node" ] && [ ! -L "$HOME/.local/node" ]; then
+        fail "~/.local/node is a directory of your own; move it aside and press Install again"
+    fi
     if [ ! -x "$dest/bin/node" ]; then
-        say "fetching Node $NODE_VERSION"
-        tmp=$(mktemp -d) || fail "no temporary directory"
+        say "fetching Node $NODE_VERSION from nodejs.org"
+        # In ~/.local, so the move below is a rename on one filesystem rather than a copy out of
+        # /tmp; removed however this ends, a killed job included.
+        tmp=$(mktemp -d "$HOME/.local/.node-XXXXXX") || fail "no temporary directory in ~/.local"
+        trap 'rm -rf "$tmp"' EXIT; trap 'exit 143' INT TERM
         curl -fsSL --retry 3 -o "$tmp/node.tar.gz" "https://nodejs.org/dist/v$NODE_VERSION/$name.tar.gz" \
-            || { rm -rf "$tmp"; fail "could not download Node $NODE_VERSION"; }
+            || fail "could not download Node $NODE_VERSION"
         got=$(sha256sum "$tmp/node.tar.gz" | cut -d' ' -f1)
-        [ "$got" = "$sum" ] || { rm -rf "$tmp"; fail "the Node download did not match its checksum"; }
-        tar -xzf "$tmp/node.tar.gz" -C "$HOME/.local" || { rm -rf "$tmp"; fail "could not unpack Node"; }
-        rm -rf "$tmp"
+        [ "$got" = "$sum" ] || fail "the Node download did not match its checksum"
+        # Unpacked beside the download and moved into place whole, so a job stopped halfway
+        # leaves no half a Node for the next run to take for a finished one.
+        tar -xzf "$tmp/node.tar.gz" -C "$tmp" || fail "could not unpack Node"
+        rm -rf "$dest"
+        mv "$tmp/$name" "$dest" || fail "could not put Node in ~/.local"
     fi
     ln -sfn "$dest" "$HOME/.local/node"
     for tool in node npm npx; do

@@ -14,7 +14,9 @@ missing, and has an *Install* button that does all of it with the output on the 
 `harnesses/lib/install/hermes.sh` installs Hermes itself when it is not there (Hermes's own
 installer, into `~/.hermes`, no root, browser and computer-use tools left out), copies and enables
 the plugin, and installs and starts Hermes's gateway as your user service. Hermes then needs a
-model, which is Hermes's own setting: run `hermes model` in a terminal. There is no *Start*
+model, which is Hermes's own setting, so the row opens Hermes's own picker (`hermes model`) in a
+terminal as soon as the install finishes, and keeps a *Choose model* button for changing it
+later. The gateway is restarted afterwards so the running Hermes uses it. There is no *Start*
 button and there should not be: Hermes starts Hermes, and this plugin runs inside its gateway.
 
 On a machine that already has Hermes, the same thing by hand:

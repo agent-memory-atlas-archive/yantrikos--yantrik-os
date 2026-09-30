@@ -25,6 +25,8 @@ plugin=$1
 # machine with no C++ compiler, which this image is.)
 HERMES_COMMIT=38d3dbce4adbb9074a34214eb330237a129e5904
 INSTALLER="https://raw.githubusercontent.com/NousResearch/hermes-agent/$HERMES_COMMIT/scripts/install.sh"
+# That commit's install.sh, hashed when the pin was moved. Both are bumped together, by hand.
+INSTALLER_SHA256=9ed50b51fe072df4ece6dc9a72c1ec8d78bc7907eec16a61d8a2a0ef4ec45884
 
 if ! command -v hermes >/dev/null 2>&1; then
     command -v git >/dev/null 2>&1 || fail "Hermes needs git"
@@ -34,6 +36,8 @@ if ! command -v hermes >/dev/null 2>&1; then
     trap 'rm -rf "$tmp"' EXIT
     curl -fsSL --retry 3 -o "$tmp/install.sh" "$INSTALLER" \
         || fail "could not download Hermes's installer"
+    [ "$(sha256sum "$tmp/install.sh" | cut -d' ' -f1)" = "$INSTALLER_SHA256" ] \
+        || fail "Hermes's installer did not match its checksum"
     bash "$tmp/install.sh" --commit "$HERMES_COMMIT" --non-interactive \
         --skip-browser --skip-computer-use </dev/null \
         || fail "Hermes's own installer stopped; its last lines are above"
@@ -52,4 +56,5 @@ hermes gateway install --if-missing --start-now --start-on-login </dev/null \
     || fail "Hermes would not install its gateway service"
 systemctl --user restart hermes-gateway || fail "Hermes's gateway would not start"
 
-say "Hermes is installed. It brings its own model: to choose one, open Terminal and run: hermes model"
+# The desktop opens `hermes model` next (the manifest's `configure`); by hand it is the same.
+say "Hermes is installed. Next, choose its model: Choose model on this row, or run: hermes model"

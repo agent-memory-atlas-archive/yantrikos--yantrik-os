@@ -80,8 +80,8 @@ requires:                                         # missing any → "Not install
     why: the harness script
 
 install:                                          # omit and the row names the docs instead
-  command: sh "{dir}/../lib/install/npm.sh" @earendil-works/pi-coding-agent pi 22.19 --ignore-scripts
-  doing: fetching Node and @earendil-works/pi-coding-agent
+  command: sh {dir}/../lib/install/npm.sh @earendil-works/pi-coding-agent@0.99.1 pi 22.19 --ignore-scripts
+  doing: fetching Node from nodejs.org and @earendil-works/pi-coding-agent 0.99.1 from npm
 
 setup:                                            # missing any → "Needs setup"
   - config: pi.json                               # ~/.config/yantrik/pi.json

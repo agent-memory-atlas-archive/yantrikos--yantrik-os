@@ -215,6 +215,17 @@ pub fn wire(ui: &App, ctx: &AppContext) {
             publish(&ui, &host);
         });
     }
+    // The harness's own setup, in a terminal the person types into. Not a job: the window is the
+    // progress, and when it closes the row reads the machine again as it always does.
+    {
+        let weak = ui.as_weak();
+        ui.on_configure_harness(move |id| {
+            let Some(ui) = weak.upgrade() else { return };
+            if let Err(e) = configure(&id) {
+                ui.set_harness_error(e.into());
+            }
+        });
+    }
 
     publish(ui, &host);
 
@@ -262,6 +273,9 @@ pub fn catalogue_for_describe() -> serde_json::Value {
                     "can_answer": row.state.can_answer(),
                     "can_install": row.can_install,
                     "can_start": row.can_start,
+                    // The harness's own setup (its model, its sign-in), offered by
+                    // `configure_harness`. Empty when there is none, or it is not installed yet.
+                    "configure": row.configure,
                     "builtin": row.builtin,
                     "docs": row.docs,
                 })
@@ -288,6 +302,10 @@ pub fn install(id: &str) -> Result<String, String> {
 
 pub fn start(id: &str) -> Result<String, String> {
     crate::harness_install::start(&manifest(id)?)
+}
+
+pub fn configure(id: &str) -> Result<String, String> {
+    crate::harness_install::configure(&manifest(id)?)
 }
 
 /// Choose which mind answers, refusing one its row says cannot take a turn.
@@ -462,6 +480,7 @@ fn publish_catalogue(ui: &App, entries: &[yantrik_harness::Entry]) {
             memory: row.memory,
             can_install: row.can_install,
             can_start: row.can_start,
+            configure_label: row.configure.into(),
             docs: row.docs.into(),
         })
         .collect();

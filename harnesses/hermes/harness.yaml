@@ -21,8 +21,17 @@ install:
   # then the plugin and Hermes's gateway. The image ships no Hermes, so a command that only
   # copied the plugin failed on every fresh machine with "hermes: not found". `{dir}` is
   # wherever this manifest was read from, so it works from the image and from a checkout.
-  command: sh "{dir}/../lib/install/hermes.sh" "{dir}"
-  doing: installing Hermes and its desktop plugin
+  command: sh {dir}/../lib/install/hermes.sh {dir}
+  doing: installing Hermes from github.com/NousResearch/hermes-agent, then its desktop plugin
+
+configure:
+  # Hermes's own model picker, in a terminal: every provider Hermes knows (NVIDIA NIM,
+  # OpenRouter, Anthropic, a local endpoint...) and its sign-in flows, none of which the desktop
+  # has to copy. Opened by itself when Install finishes, and from the row after that. The
+  # gateway is restarted afterwards so the running Hermes answers with what was chosen.
+  command: hermes model && systemctl --user restart hermes-gateway
+  label: Choose model
+  title: Choose Hermes's model
 
 # Hermes keeps its model, endpoint, keys and memory in ~/.hermes, as it always has, so there is
 # no file of ours for the person to write and nothing to check for.

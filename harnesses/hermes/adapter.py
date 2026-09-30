@@ -123,8 +123,11 @@ class YantrikAdapter(BasePlatformAdapter):
         # adapter without the keyword never connected at all. What a reconnect must not do is leave
         # the last connection's loops running beside the new ones: two pollers would each take
         # turns and two heartbeats would keep one session alive twice over.
-        for task in self._tasks:
+        stale, self._tasks = self._tasks, []
+        for task in stale:
             task.cancel()
+        if stale:
+            await asyncio.gather(*stale, return_exceptions=True)
         self._tasks = [
             asyncio.create_task(self._run(), name="yantrik-poll"),
             asyncio.create_task(self._heartbeat(), name="yantrik-heartbeat"),
@@ -135,8 +138,11 @@ class YantrikAdapter(BasePlatformAdapter):
         return True
 
     async def disconnect(self) -> None:
-        for task in self._tasks:
+        stale, self._tasks = self._tasks, []
+        for task in stale:
             task.cancel()
+        if stale:
+            await asyncio.gather(*stale, return_exceptions=True)
         self._tasks = []
         if self._address and self._session:
             try:

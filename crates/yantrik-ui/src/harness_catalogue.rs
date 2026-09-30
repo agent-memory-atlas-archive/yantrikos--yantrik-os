@@ -93,6 +93,11 @@ pub struct Manifest {
     pub setup: Vec<Need>,
     #[serde(default)]
     pub install: Option<Install>,
+    /// The harness's own interactive setup — choosing its model, signing in — run in a terminal
+    /// the person types into. Hermes's `hermes model`, OpenClaw's `openclaw onboard`: each
+    /// harness keeps its own settings, and this is its own way of asking for them.
+    #[serde(default)]
+    pub configure: Option<Configure>,
     /// The directory this was read from. Not in the file; filled in by [`read_manifest`] so
     /// `file:` needs and `{dir}` in an install command resolve without a second lookup.
     #[serde(skip)]
@@ -162,6 +167,7 @@ impl Need {
 pub struct Install {
     /// Run through `sh -lc`, as the person, with its output streamed into the row. `{dir}` is
     /// the manifest's own directory, so one command works from the image and from a checkout.
+    /// It is filled in already quoted, so a manifest writes `{dir}` bare, never inside quotes.
     pub command: String,
     /// The present participle for the row while it runs: "fetching …".
     #[serde(default)]
@@ -169,9 +175,30 @@ pub struct Install {
 }
 
 impl Install {
-    /// The command with `{dir}` filled in.
+    /// The command with `{dir}` filled in, single-quoted: a directory whose name had a `"`, a
+    /// `$` or a backtick in it would otherwise have been shell syntax in a command run as the
+    /// person.
     pub fn command_in(&self, dir: &Path) -> String {
-        self.command.replace("{dir}", &dir.display().to_string())
+        self.command.replace("{dir}", &shell_quote(&dir.display().to_string()))
+    }
+}
+
+/// A harness's own interactive setup, opened in a terminal.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+pub struct Configure {
+    /// Run through `sh -lc`, as the person, in a terminal they type into. `{dir}` as for
+    /// [`Install::command`].
+    pub command: String,
+    /// The button: "Choose model".
+    pub label: String,
+    /// The terminal window's title: "Choose Hermes's model".
+    #[serde(default)]
+    pub title: String,
+}
+
+impl Configure {
+    pub fn command_in(&self, dir: &Path) -> String {
+        self.command.replace("{dir}", &shell_quote(&dir.display().to_string()))
     }
 }
 
@@ -324,6 +351,10 @@ pub struct Row {
     pub memory: bool,
     pub can_install: bool,
     pub can_start: bool,
+    /// The label of the button that opens the harness's own setup, or empty for none. Offered
+    /// once it is installed, and after it attaches too: changing a model is as ordinary as
+    /// choosing the first one.
+    pub configure: String,
     pub unit: String,
     /// Where to read more. A path, because it is a file on this machine.
     pub docs: String,
@@ -358,6 +389,7 @@ pub fn rows(machine: &Machine, minds: &[Entry]) -> Vec<Row> {
             memory: entry.capabilities.memory,
             can_install: false,
             can_start: false,
+            configure: String::new(),
             unit: String::new(),
             docs: String::new(),
         });
@@ -393,6 +425,7 @@ pub fn rows(machine: &Machine, minds: &[Entry]) -> Vec<Row> {
             memory: entry.capabilities.memory,
             can_install: false,
             can_start: false,
+            configure: String::new(),
             unit: String::new(),
             docs: String::new(),
         });
@@ -510,6 +543,10 @@ fn from_manifest(machine: &Machine, manifest: &Manifest, attached: Option<&Entry
         can_start: !busy
             && !manifest.unit.is_empty()
             && matches!(state, State::Ready | State::Failed),
+        configure: match &manifest.configure {
+            Some(c) if !busy && !matches!(state, State::NotInstalled | State::Installing) => c.label.clone(),
+            _ => String::new(),
+        },
         unit: manifest.unit.clone(),
         docs: if manifest.docs.is_empty() {
             String::new()
@@ -587,8 +624,14 @@ pub fn roots() -> Vec<PathBuf> {
         }
     }
     out.push(PathBuf::from(SHARE));
-    // A checkout, run from its root.
-    out.push(PathBuf::from("harnesses"));
+    // A checkout, run from its root — in a debug build only. The shell's working directory on an
+    // installed machine is the person's home, where `harnesses/` is an ordinary folder anything
+    // with the person's file access can write. A manifest planted there named a harness, and an
+    // install command, that nobody shipped. A checkout that wants a release build to read it
+    // says so with YANTRIK_HARNESSES_DIR.
+    if cfg!(debug_assertions) {
+        out.push(PathBuf::from("harnesses"));
+    }
     out
 }
 
@@ -679,23 +722,15 @@ fn with_user_bin(path: &str, home: &Path) -> Vec<PathBuf> {
     dirs
 }
 
-/// The PATH an install or start job runs with: [`user_bin_dir`] first, so a job finds the
-/// commands an earlier job installed (the Node that Pi's install fetched, say) without a login
-/// shell having to have read the file that would have told it.
-pub fn job_path() -> String {
-    let home = home();
-    let path = std::env::var("PATH").unwrap_or_default();
-    if home.as_os_str().is_empty() {
-        return path;
-    }
-    let user_bin = user_bin_dir(&home).display().to_string();
-    if path.split(':').any(|p| p == user_bin) {
-        path
-    } else if path.is_empty() {
-        user_bin
-    } else {
-        format!("{user_bin}:{path}")
-    }
+/// [`user_bin_dir`] put first on PATH, as shell, for the front of every install or start job —
+/// so a job finds what an earlier job installed (the Node that Pi's install fetched, say). In
+/// the command rather than the environment, because the job is a login shell and Debian's
+/// /etc/profile sets PATH from scratch.
+pub const JOB_PATH_PRELUDE: &str = r#"PATH="$HOME/.local/bin:$PATH"; export PATH; "#;
+
+/// Minimal single-quoting, for paths and unit names that go into a shell line.
+pub fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 #[cfg(unix)]
@@ -948,6 +983,39 @@ setup:
         assert!(!pi.state.can_answer());
         // And the manifest's own line about itself, so the row is not just a complaint.
         assert_eq!(pi.detail, "The pi coding agent");
+    }
+
+    #[test]
+    fn a_harness_with_its_own_setup_offers_it_once_installed_and_not_before() {
+        // Hermes installed and attached, and still could not answer: a fresh Hermes has no model,
+        // and the only place to choose one was a terminal the person had to know to open.
+        let manifest = "id: hermes\nrequires:\n  - binary: hermes\n    why: Hermes itself\n\
+                        configure:\n  command: hermes model\n  label: Choose model\n";
+        let fixture = Fixture::new("configure");
+        fixture.harness("hermes", manifest);
+        let before = rows(&fixture.machine(), &[builtin()]);
+        assert_eq!(row(&before, "hermes").state, State::NotInstalled);
+        assert_eq!(row(&before, "hermes").configure, "", "there is no Hermes yet to set up");
+
+        fixture.program("hermes");
+        let after = rows(&fixture.machine(), &[builtin()]);
+        assert_eq!(row(&after, "hermes").configure, "Choose model");
+        // Still offered once it has attached: changing the model is as ordinary as choosing one.
+        let attached = rows(&fixture.machine(), &[builtin(), entry("hermes", false)]);
+        assert_eq!(row(&attached, "hermes").configure, "Choose model");
+    }
+
+    #[test]
+    fn the_harnesses_that_ask_their_own_questions_ship_a_setup_step() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../harnesses");
+        if !repo.exists() {
+            return;
+        }
+        let manifests = read_manifests(&[repo]);
+        let hermes = manifests["hermes"].configure.as_ref().expect("Hermes needs a model chosen");
+        assert!(hermes.command.starts_with("hermes model"), "{}", hermes.command);
+        assert!(hermes.command.contains("restart hermes-gateway"), "the running gateway must pick it up");
+        assert!(manifests["openclaw"].configure.as_ref().unwrap().command.contains("openclaw onboard"));
     }
 
     #[test]
@@ -1253,14 +1321,30 @@ setup:
         let fixture = Fixture::new("dir-substitution");
         let dir = fixture.harness(
             "hermes",
-            "id: hermes\ninstall:\n  command: cp -r \"{dir}/.\" ~/.hermes/plugins/yantrik/\n",
+            "id: hermes\ninstall:\n  command: cp -r {dir}/. ~/.hermes/plugins/yantrik/\n",
         );
         let manifests = read_manifests(&[fixture.share()]);
         let install = manifests["hermes"].install.clone().unwrap();
         assert_eq!(
             install.command_in(&manifests["hermes"].dir),
-            format!("cp -r \"{}/.\" ~/.hermes/plugins/yantrik/", dir.display())
+            format!("cp -r '{}'/. ~/.hermes/plugins/yantrik/", dir.display())
         );
+    }
+
+    #[test]
+    fn a_directory_name_with_shell_syntax_in_it_stays_a_name() {
+        // `{dir}` used to go in raw, inside the manifest's own double quotes, so a directory
+        // called `x";touch pwned;"` was a second command run as the person.
+        let install = Install { command: "sh {dir}/install.sh".into(), doing: String::new() };
+        let odd = Path::new("/tmp/it's $(here) `too`\"x");
+        let command = install.command_in(odd);
+        assert_eq!(command, r#"sh '/tmp/it'\''s $(here) `too`"x'/install.sh"#);
+        let out = std::process::Command::new("sh")
+            .args(["-c", &format!("printf %s {}", command.trim_start_matches("sh ").trim_end_matches("/install.sh"))])
+            .output();
+        if let Ok(out) = out {
+            assert_eq!(String::from_utf8_lossy(&out.stdout), odd.display().to_string());
+        }
     }
 
     #[test]
@@ -1316,10 +1400,10 @@ setup:
             let command = install.command_in(&manifest.dir);
             let script = command
                 .split_whitespace()
-                .map(|w| w.trim_matches('"'))
+                .map(|w| w.replace('\'', ""))
                 .find(|w| w.ends_with(".sh"))
                 .unwrap_or_else(|| panic!("{id}: `{command}` runs no installer script"));
-            assert!(Path::new(script).is_file(), "{id}: {script} does not exist");
+            assert!(Path::new(&script).is_file(), "{id}: {script} does not exist");
             assert!(script.contains("lib/install/"), "{id}: installers live in harnesses/lib/install");
         }
     }

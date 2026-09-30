@@ -32,7 +32,7 @@ use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::harness_catalogue::{Install, JobKind, JobView, Manifest, LOG_LINES};
+use crate::harness_catalogue::{shell_quote, Install, JobKind, JobView, Manifest, JOB_PATH_PRELUDE, LOG_LINES};
 
 struct Job {
     kind: JobKind,
@@ -91,9 +91,37 @@ pub fn install(manifest: &Manifest) -> Result<String, String> {
         .ok_or_else(|| format!("{} has no install command of its own — read its documentation", manifest.id))?;
     let command = install.command_in(&manifest.dir);
     let doing = if install.doing.is_empty() { command.clone() } else { install.doing.clone() };
-    spawn(&manifest.id, JobKind::Install, &doing, command.clone())?;
+    // An install that worked goes straight on to the harness's own setup, where it has one: a
+    // Hermes with no model is a Hermes that attaches and cannot answer, and a row that says "run
+    // hermes model in a terminal" is a step the person has to find for themselves.
+    let then: Option<Then> = manifest.configure.is_some().then(|| {
+        let manifest = manifest.clone();
+        Box::new(move || {
+            if let Err(e) = configure(&manifest) {
+                tracing::warn!(harness = %manifest.id, error = %e, "the setup after an install did not open");
+            }
+        }) as Then
+    });
+    spawn(&manifest.id, JobKind::Install, &doing, command.clone(), then)?;
     Ok(command)
 }
+
+/// Open the harness's own setup in a terminal: its model, its sign-in. The person types into it;
+/// nothing here reads what they type or what the harness writes.
+pub fn configure(manifest: &Manifest) -> Result<String, String> {
+    let configure = manifest
+        .configure
+        .as_ref()
+        .ok_or_else(|| format!("{} has no setup of its own to open", manifest.id))?;
+    let command = configure.command_in(&manifest.dir);
+    let title = if configure.title.is_empty() { configure.label.as_str() } else { configure.title.as_str() };
+    crate::terminal_window::open(title, &format!("{JOB_PATH_PRELUDE}{command}"), &[])?;
+    tracing::info!(harness = %manifest.id, "opened the harness's own setup");
+    Ok(command)
+}
+
+/// What to do once a job has finished well.
+type Then = Box<dyn FnOnce() + Send>;
 
 /// Enable and start a harness's unit.
 ///
@@ -131,7 +159,7 @@ pub fn start(manifest: &Manifest) -> Result<String, String> {
     }
     steps.push(format!("systemctl --user enable --now {}", shell_quote(&manifest.unit)));
     let command = steps.join(" && ");
-    spawn(&manifest.id, JobKind::Start, &format!("starting {}", manifest.unit), command.clone())?;
+    spawn(&manifest.id, JobKind::Start, &format!("starting {}", manifest.unit), command.clone(), None)?;
     Ok(command)
 }
 
@@ -144,12 +172,8 @@ fn unit_known(unit: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Minimal single-quoting, for paths and unit names that go into a shell line.
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
 
-fn spawn(id: &str, kind: JobKind, doing: &str, command: String) -> Result<(), String> {
+fn spawn(id: &str, kind: JobKind, doing: &str, command: String, then: Option<Then>) -> Result<(), String> {
     // One at a time per harness. Two `npm install -g` for the same package at once is a package
     // directory being written by two processes, and the second button press is never what was
     // meant anyway.
@@ -176,8 +200,7 @@ fn spawn(id: &str, kind: JobKind, doing: &str, command: String) -> Result<(), St
 
     let child = Command::new("sh")
         .arg("-lc")
-        .arg(&command)
-        .env("PATH", crate::harness_catalogue::job_path())
+        .arg(format!("{JOB_PATH_PRELUDE}{command}"))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -218,7 +241,11 @@ fn spawn(id: &str, kind: JobKind, doing: &str, command: String) -> Result<(), St
                 }),
                 Err(e) => Some(format!("could not wait for it: {e}")),
             };
+            let worked = outcome.is_none();
             finish(&owner, outcome);
+            if let Some(then) = then.filter(|_| worked) {
+                then();
+            }
         })
         .map_err(|e| {
             finish(id, Some(format!("no thread to watch it: {e}")));

@@ -79,6 +79,8 @@ export struct HarnessRowData {
     memory: bool,
     can-install: bool,
     can-start: bool,
+    // The label of the harness's own setup — "Choose model" — or empty for none.
+    configure-label: string,
     docs: string,
 }
 
@@ -398,6 +400,7 @@ export component SettingsScreen inherits Rectangle {
     callback use-harness(string);
     callback install-harness(string);
     callback start-harness(string);
+    callback configure-harness(string);
     // Whether any row has a job running. Computed in Rust because Slint cannot reduce over a
     // model, and it is what stops the sweep below from animating on an idle machine.
     in property <bool> harness-busy: false;
@@ -3295,6 +3298,14 @@ SettingRow{label:"AI providers";description:"Manage the model providers that are
                                         size: 0;
                                         variant: 1;
                                         clicked => { root.start-harness(h.id); }
+                                    }
+                                    // The harness's own setup — its model, its sign-in — in a
+                                    // terminal. Its settings stay its own; this only opens them.
+                                    if h.configure-label != "" : YButton {
+                                        label: h.configure-label;
+                                        size: 0;
+                                        variant: 1;
+                                        clicked => { root.configure-harness(h.id); }
                                     }
                                     // Attachment is still the only thing that lets a mind answer.
                                     // A "Use this" on a row that is not attached would be a
