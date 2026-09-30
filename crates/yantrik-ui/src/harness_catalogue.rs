@@ -355,6 +355,13 @@ pub struct Row {
     /// once it is installed, and after it attaches too: changing a model is as ordinary as
     /// choosing the first one.
     pub configure: String,
+    /// Which provider the harness was given from the person's saved ones, or that it keeps its
+    /// own settings. Empty for a harness that cannot be given one (crate::provider_handoff).
+    pub provider_line: String,
+    /// It can be given a saved provider: it has an adapter and it is installed.
+    pub can_assign_provider: bool,
+    /// It was given one here, and Revert would put its own file back.
+    pub can_revert_provider: bool,
     pub unit: String,
     /// Where to read more. A path, because it is a file on this machine.
     pub docs: String,
@@ -390,6 +397,9 @@ pub fn rows(machine: &Machine, minds: &[Entry]) -> Vec<Row> {
             can_install: false,
             can_start: false,
             configure: String::new(),
+            provider_line: String::new(),
+            can_assign_provider: false,
+            can_revert_provider: false,
             unit: String::new(),
             docs: String::new(),
         });
@@ -426,6 +436,9 @@ pub fn rows(machine: &Machine, minds: &[Entry]) -> Vec<Row> {
             can_install: false,
             can_start: false,
             configure: String::new(),
+            provider_line: String::new(),
+            can_assign_provider: false,
+            can_revert_provider: false,
             unit: String::new(),
             docs: String::new(),
         });
@@ -543,6 +556,11 @@ fn from_manifest(machine: &Machine, manifest: &Manifest, attached: Option<&Entry
         can_start: !busy
             && !manifest.unit.is_empty()
             && matches!(state, State::Ready | State::Failed),
+        provider_line: crate::provider_handoff::row_line(&machine.home, &manifest.id),
+        can_assign_provider: !busy
+            && crate::provider_handoff::adapter_for(&manifest.id).is_some()
+            && !matches!(state, State::NotInstalled | State::Installing),
+        can_revert_provider: crate::provider_handoff::marker(&machine.home, &manifest.id).is_some(),
         configure: match &manifest.configure {
             Some(c) if !busy && !matches!(state, State::NotInstalled | State::Installing) => c.label.clone(),
             _ => String::new(),

@@ -227,6 +227,8 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         });
     }
 
+    crate::wire::harness_provider::wire(ui);
+
     publish(ui, &host);
 
     let timer = Timer::default();
@@ -276,6 +278,10 @@ pub fn catalogue_for_describe() -> serde_json::Value {
                     // The harness's own setup (its model, its sign-in), offered by
                     // `configure_harness`. Empty when there is none, or it is not installed yet.
                     "configure": row.configure,
+                    // Which saved provider it was given (`assign_provider`), or its own settings.
+                    "provider": row.provider_line,
+                    "can_assign_provider": row.can_assign_provider,
+                    "can_revert_provider": row.can_revert_provider,
                     "builtin": row.builtin,
                     "docs": row.docs,
                 })
@@ -481,6 +487,9 @@ fn publish_catalogue(ui: &App, entries: &[yantrik_harness::Entry]) {
             can_install: row.can_install,
             can_start: row.can_start,
             configure_label: row.configure.into(),
+            provider_line: row.provider_line.into(),
+            can_assign_provider: row.can_assign_provider,
+            can_revert_provider: row.can_revert_provider,
             docs: row.docs.into(),
         })
         .collect();

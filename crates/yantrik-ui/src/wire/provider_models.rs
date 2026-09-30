@@ -230,6 +230,14 @@ fn key_check_body(model: &str) -> serde_json::Value {
     })
 }
 
+/// The OpenAI-compatible address for a saved base URL: a native one whose API has no
+/// OpenAI-style routes (Anthropic's bare host, Gemini's generateContent host) is given the
+/// provider's OpenAI-compatible endpoint. Listing uses it, and so does a harness that speaks
+/// chat completions (`provider_handoff`).
+pub(crate) fn openai_base(base_url: &str) -> String {
+    listing_base(base_url)
+}
+
 /// A native base URL whose API has no OpenAI-style /models (Anthropic's bare
 /// host, Gemini's generateContent host) is listed at the provider's
 /// OpenAI-compatible endpoint instead.
