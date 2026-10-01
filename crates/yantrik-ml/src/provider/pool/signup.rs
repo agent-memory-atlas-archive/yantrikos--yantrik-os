@@ -144,8 +144,11 @@ pub const SIGNUPS: &[Signup] = &[
             label: "API key",
             url: "https://aistudio.google.com/apikey",
             where_: "Create API key",
-            format: Format { prefixes: &["AIza"], min_len: 35, max_len: 60, extra: "-_" },
-            shape_words: "start with AIza and are 39 characters",
+            // `AIza…` (39 characters) was what AI Studio issued; by Oct 2026 it issues `AQ.…` keys,
+            // dots included (Pranab's key, 1 Oct 2026, refused by the old shape before anything was
+            // sent). Both are taken; the check with Google says whether one works.
+            format: Format { prefixes: &["AIza", "AQ."], min_len: 30, max_len: 200, extra: "-_." },
+            shape_words: "start with AIza or AQ.",
         }],
         needs: "a Google account, in a country where the Gemini API is offered",
         minutes: 3,
@@ -278,6 +281,11 @@ mod tests {
         let account = &signup("cloudflare").unwrap().values[0];
         assert!(shape(account, "0123456789abcdef0123456789abcdef").is_ok());
         assert!(shape(account, "0123456789abcdef0123456789abcdeg").is_err(), "not hex");
+        // Google's current keys begin `AQ.` and carry dots; its older ones `AIza`.
+        let gemini = &signup("gemini").unwrap().values[0];
+        assert!(shape(gemini, &format!("AQ.Ab8RN{}", "x_y-Z.9".repeat(8))).is_ok(), "the AQ. shape AI Studio issues now");
+        assert!(shape(gemini, &format!("AIza{}", "Sy_x".repeat(9))).is_ok(), "the older AIza shape");
+        assert!(shape(gemini, "AQ. my password").is_err());
         let zai = &signup("zai").unwrap().values[0];
         assert!(shape(zai, &format!("{}.{}", "a".repeat(32), "B".repeat(16))).is_ok());
         assert!(shape(zai, &"a".repeat(48)).is_err(), "no dot");

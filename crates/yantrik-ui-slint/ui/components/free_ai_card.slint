@@ -168,6 +168,16 @@ component ProviderRow inherits VerticalLayout {
             if root.item.state == "not-set-up" : YButton { label: "Start"; variant: 0; size: 0; clicked => { FreeAiState.start(root.item.id); } }
             if root.item.state == "not-set-up" : YButton { label: "I already have a key"; variant: 1; size: 0; clicked => { FreeAiState.have-key(root.item.id); } }
             if root.item.state == "sign-up-opened" : YButton { label: "Open key page"; variant: 0; size: 0; clicked => { FreeAiState.open-keys(root.item.id); } }
+            // A provider often shows the key right after sign-up: the paste is here too, not only
+            // after "Open key page" (Pranab, 1 Oct 2026: OpenRouter's row had no way to paste).
+            // A provider with two values (Cloudflare) takes them in order from its key page.
+            if root.item.state == "sign-up-opened" && root.item.values.length == 1 : YButton {
+                label: "Paste key from clipboard";
+                variant: 1;
+                size: 0;
+                disabled: FreeAiState.vault-locked;
+                clicked => { FreeAiState.paste(root.item.values[0].id); }
+            }
             if root.item.state == "waiting" || root.item.state == "rejected" : YButton { label: "Open key page again"; variant: 1; size: 0; clicked => { FreeAiState.open-keys(root.item.id); } }
             if root.item.state == "checking" : YButton { label: "Checking"; loading: true; variant: 1; size: 0; }
             if root.item.state == "ready" || root.item.state == "off" || root.item.state == "open" : HorizontalLayout {
