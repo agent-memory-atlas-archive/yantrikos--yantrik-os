@@ -182,9 +182,11 @@ pub const FREE_TIERS: &[FreeTier] = &[
         // Limited by concurrency, per user tier; no published numbers.
         limits: &[],
         headers: Headers::RetryAfterOnly,
-        trains_on_prompts: false,
+        // Its terms of use let it use what individuals send "for the purpose of developing and
+        // improving" its models; only the Team Plan is excluded (docs.z.ai, checked 2026-09-30).
+        trains_on_prompts: true,
         may_serve_public: false,
-        note: "GLM Flash models are free. One request at a time.",
+        note: "GLM Flash models are free. One request at a time. Its terms let it train on what is sent.",
     },
     FreeTier {
         id: "mistral",

@@ -47,6 +47,10 @@ fn a_private_turn_never_goes_where_prompts_may_be_trained_on() {
         let pick = p.pick(&private, NOON).unwrap();
         assert!(!pick.tier.trains_on_prompts, "{} trains on prompts", pick.tier.id);
     }
+    // Z.ai's terms let it train on what individuals send (rechecked 2026-09-30): never private.
+    let mut zai = pool(&["zai"], &["zai"]);
+    assert!(zai.pick(&private, NOON).is_err(), "a private turn went to Z.ai");
+    assert_eq!(zai.pick(&Need::default(), NOON).unwrap().tier.id, "zai");
     let mut only_trainers = pool(&["gemini", "kilo"], &["gemini"]);
     let none = only_trainers.pick(&private, NOON).unwrap_err();
     assert_eq!(none.reason, "No switched-on free provider has a model that can do this.");
