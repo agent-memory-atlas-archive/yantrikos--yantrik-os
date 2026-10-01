@@ -58,39 +58,6 @@ fn failed(message: impl Into<String>) -> ServiceError {
     ServiceError { code: -32000, message: message.into() }
 }
 
-/// The tools that read, write or use the vault: the companion's own, and no outside caller's.
-///
-/// `companion.tool` runs a tool for whoever can open this socket: any program running as the
-/// person, a third-party harness included. Only the permission ceiling stood in the way, and
-/// `vault_get` is graded `sensitive`, the default ceiling: with the vault open, one call read every
-/// secret in it, with no card even in Ask mode. Nothing outside the companion needs the vault over
-/// a socket. A person reaches it through the shell's own prompts; the companion through its own
-/// tool loop, where the taint rules and the approvals apply.
-const COMPANION_ONLY: &[&str] = &["vault_get", "vault_store", "vault_delete", "vault_list", "browser_login"];
-
-/// The refusal for a tool an outside caller may not run, or `None` when it may.
-fn refused_to_outside(tool: &str) -> Option<String> {
-    COMPANION_ONLY.contains(&tool).then(|| {
-        format!("`{tool}` uses the vault and is the companion's own: it is not run for a caller of this socket.")
-    })
-}
-
-/// The catalogue an outside caller is shown: everything but the companion's own vault tools.
-fn outside_catalogue(mut catalogue: serde_json::Value) -> serde_json::Value {
-    let named = |t: &serde_json::Value| {
-        t.get("name")
-            .or_else(|| t.get("function").and_then(|f| f.get("name")))
-            .and_then(|n| n.as_str())
-            .map(str::to_string)
-    };
-    if let Some(list) = catalogue.as_array_mut() {
-        list.retain(|t| named(t).is_none_or(|n| refused_to_outside(&n).is_none()));
-    } else if let Some(list) = catalogue.get_mut("tools").and_then(|t| t.as_array_mut()) {
-        list.retain(|t| named(t).is_none_or(|n| refused_to_outside(&n).is_none()));
-    }
-    catalogue
-}
-
 /// The wire shape of a failed ask.
 ///
 /// No-model gets its own code because it is not a transient failure and its fallback is not an
@@ -196,7 +163,7 @@ impl ServiceHandler for CompanionRpc {
                     .and_then(|v| v.as_u64())
                     .unwrap_or(DEFAULT_TIMEOUT_MS)
                     .min(MAX_TIMEOUT_MS);
-                self.handle.tools(Duration::from_millis(timeout_ms)).map(outside_catalogue).map_err(failed)
+                self.handle.tools(Duration::from_millis(timeout_ms)).map_err(failed)
             }
 
             "companion.tool" => {
@@ -208,10 +175,6 @@ impl ServiceHandler for CompanionRpc {
                     .to_string();
                 if name.is_empty() {
                     return Err(bad_request("tool needs a `name`; call companion.tools to see them"));
-                }
-                if let Some(why) = refused_to_outside(&name) {
-                    tracing::warn!(tool = %name, "companion.tool: a vault tool asked for from outside, refused");
-                    return Err(failed(why));
                 }
                 let args = params.get("args").cloned().unwrap_or(serde_json::json!({}));
                 // Tools shell out to real programs — a package install, a container build — so the
@@ -285,7 +248,7 @@ impl ServiceHandler for CompanionRpc {
                 // away. The board's own ceiling bounds the rest.
                 let wait =
                     Duration::from_millis(params.get("wait_ms").and_then(|v| v.as_u64()).unwrap_or(0));
-                self.handle.board().wait(&ticket, wait).ok_or_else(|| {
+                self.handle.board().wait_outside(&ticket, wait).ok_or_else(|| {
                     failed(format!(
                         "no job called `{ticket}`; it either never existed or finished long enough                          ago to have been forgotten"
                     ))
@@ -293,14 +256,14 @@ impl ServiceHandler for CompanionRpc {
             }
 
             // The whole board. Answers "is it worth asking right now" without submitting anything.
-            "companion.jobs" => Ok(self.handle.board().overview()),
+            "companion.jobs" => Ok(self.handle.board().overview_for_outside()),
 
             "companion.cancel" => {
                 let ticket = params.get("ticket").and_then(|v| v.as_str()).unwrap_or("").trim();
                 if ticket.is_empty() {
                     return Err(bad_request("cancel needs a `ticket`"));
                 }
-                match self.handle.board().cancel(ticket) {
+                match self.handle.board().cancel_outside(ticket) {
                     Some(was) => Ok(serde_json::json!({
                         "cancelled": ticket,
                         "was": was,
@@ -367,28 +330,6 @@ pub fn serve(handle: CompanionHandle) {
             });
         })
         .expect("spawn companion-rpc thread");
-}
-
-#[cfg(test)]
-mod vault_tests {
-    use super::{outside_catalogue, refused_to_outside};
-
-    /// One socket call read every vault secret while the vault was open (security review,
-    /// 30 Sep 2026): the vault's tools are refused to outside callers, and not shown to them.
-    #[test]
-    fn the_vault_tools_are_the_companions_own() {
-        for tool in ["vault_get", "vault_store", "vault_delete", "vault_list", "browser_login"] {
-            let why = refused_to_outside(tool).unwrap_or_else(|| panic!("{tool} ran for an outside caller"));
-            assert!(why.contains(tool) && why.contains("companion's own"), "{why}");
-        }
-        for tool in ["web_search", "browse", "recall", "run_recipe"] {
-            assert!(refused_to_outside(tool).is_none(), "{tool} is not a vault tool");
-        }
-        let flat = serde_json::json!([{"name": "vault_get"}, {"name": "web_search"}, {"function": {"name": "vault_list"}}]);
-        assert_eq!(outside_catalogue(flat), serde_json::json!([{"name": "web_search"}]));
-        let wrapped = serde_json::json!({"tools": [{"name": "browser_login"}, {"name": "recall"}]});
-        assert_eq!(outside_catalogue(wrapped), serde_json::json!({"tools": [{"name": "recall"}]}));
-    }
 }
 
 #[cfg(test)]

@@ -139,6 +139,15 @@ mod wire;
 pub use yantrik_ui_slint::*;
 
 fn main() {
+    // The open vault's key, the providers' keys and the person's conversation live in this
+    // process. Without this, any program of the person's could read them out of its memory
+    // (ptrace, /proc/<pid>/mem) wherever the kernel's Yama restriction is off, and a core dump
+    // would write them to disk.
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
+    }
+
     // Before anything else, because `--version` has to work on a machine whose shell will not
     // start. The first argument is otherwise a config path, so this also stops `--version`
     // being read as the name of a config file that does not exist.

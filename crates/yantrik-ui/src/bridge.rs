@@ -69,6 +69,9 @@ pub enum CompanionCommand {
         /// it reads, it changes nothing — and so is what the worker runs after it, until the
         /// person next speaks at the desk.
         remote: bool,
+        /// Asked by a program on the companion's socket, not by the person: the turn's words
+        /// count as untrusted, so a tool that would hand back a credential is refused.
+        outside: bool,
     },
     /// Count a conversation turn — one that began with the person's words and was answered.
     ///
@@ -356,6 +359,7 @@ impl CompanionHandle {
                 job: None,
                 model: Some(model_tx),
                 remote: false,
+                outside: true,
             })
             .map_err(|_| AskError::Failed("companion worker is not running".to_string()))?;
 
@@ -451,7 +455,7 @@ impl CompanionHandle {
     /// alternative — blocking — told the caller nothing for as long as fifty seconds and then
     /// gave it no way to have chosen differently.
     pub fn submit_ask(&self, text: String) -> Result<crate::jobs::Receipt, String> {
-        let receipt = self.board.submit("model", "ask");
+        let receipt = self.board.submit_outside("model", "ask");
         // Tokens go nowhere: the board is the subscriber for a submitted job, and the chat UI is
         // not watching this one.
         let (token_tx, _token_rx) = crossbeam_channel::unbounded();
@@ -462,6 +466,7 @@ impl CompanionHandle {
                 job: Some(receipt.ticket.clone()),
                 model: None,
                 remote: false,
+                outside: true,
             })
             .map_err(|_| "companion worker is not running".to_string())?;
         Ok(receipt)
@@ -473,7 +478,7 @@ impl CompanionHandle {
         name: String,
         args: serde_json::Value,
     ) -> Result<crate::jobs::Receipt, String> {
-        let receipt = self.board.submit("model", &format!("tool:{name}"));
+        let receipt = self.board.submit_outside("model", &format!("tool:{name}"));
         let (reply_tx, _reply_rx) = crossbeam_channel::unbounded();
         self.cmd_tx
             .send(CompanionCommand::RunTool {
@@ -671,6 +676,7 @@ impl CompanionBridge {
                 job: None,
                 model: None,
                 remote,
+                outside: false,
             })
             .is_err()
         {
@@ -1179,9 +1185,10 @@ fn worker_loop(
                 crate::recipes::record(&recipe_id, outcome.map(|a| a.message));
                 recipes_dirty = true;
             }
-            Ok(CompanionCommand::SendMessage { text, token_tx, job, model, remote }) => {
+            Ok(CompanionCommand::SendMessage { text, token_tx, job, model, remote, outside }) => {
                 // From a phone, the turn reads and changes nothing (channels, P1).
                 companion.set_turn_ceiling(remote.then_some(yantrik_companion::tools::PermissionLevel::Safe));
+                companion.set_turn_outside(outside);
                 // A turn can create, run or change a recipe through its tools.
                 recipes_dirty = true;
                 // Work that arrived without a ticket gets one here, and that is not bookkeeping:
@@ -1192,7 +1199,7 @@ fn worker_loop(
                 // board at all.
                 let job = job.or_else(|| {
                     let kind = if text.contains("You just started up") { "brief" } else { "ask" };
-                    Some(board.submit("model", kind).ticket)
+                    Some(if outside { board.submit_outside("model", kind) } else { board.submit("model", kind) }.ticket)
                 });
 
                 // The moment this arm runs is the moment the job is no longer waiting. Anything
@@ -1476,11 +1483,13 @@ fn worker_loop(
                 tracing::info!(tool = %name, "Running tool for an outside caller");
                 // As above: a blocking caller's tool still occupies the lane, so it still belongs
                 // on the board.
-                let job = job.or_else(|| Some(board.submit("model", &format!("tool:{name}")).ticket));
+                let job = job.or_else(|| Some(board.submit_outside("model", &format!("tool:{name}")).ticket));
                 if let Some(id) = &job {
                     board.start(id);
                 }
-                let output = companion.run_tool(&name, &args);
+                // Every RunTool is a program on the socket's (companion.tool / submit): the vault's
+                // tools and queue_task are refused to it, by what they are, not a list of names.
+                let output = companion.run_tool_for_outside(&name, &args);
                 if let Some(id) = &job {
                     // A tool that reports a permission denial or a bad argument has still *run*;
                     // it is `Done` with that answer, not `Failed`. Failure here is reserved for

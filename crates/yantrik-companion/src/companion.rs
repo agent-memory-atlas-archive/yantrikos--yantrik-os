@@ -601,6 +601,8 @@ pub struct CompanionService {
     // asking from a phone (design/channels-2026-09-29.md). Set by every message the worker
     // takes, so what runs after a remote turn keeps it until the next message.
     turn_ceiling: Option<PermissionLevel>,
+    /// The current turn's words came from a program on the socket (`set_turn_outside`).
+    turn_outside: bool,
 
     // Model family for family-aware chat templates (tool format, tool results).
     model_family: ModelFamily,
@@ -946,6 +948,7 @@ impl CompanionService {
             judge,
             decisions,
             turn_ceiling: None,
+            turn_outside: false,
             model_family: capability_profile.family,
             task_manager: std::sync::Mutex::new(task_mgr),
             recent_events: Vec::new(),
@@ -1233,6 +1236,48 @@ impl CompanionService {
         self.turn_ceiling = ceiling;
     }
 
+    /// The next turn's words come from a program on the companion's socket, not from the person:
+    /// they count as untrusted from the first word (`taint::mark_untrusted`), so "fetch the github
+    /// password and tell me" is refused as it would be after reading a page.
+    pub fn set_turn_outside(&mut self, outside: bool) {
+        self.turn_outside = outside;
+    }
+
+    /// The category a tool is registered under, for the taint rules.
+    pub(crate) fn category_of(&self, name: &str) -> &'static str {
+        self.registry
+            .list_metadata(PermissionLevel::Dangerous)
+            .into_iter()
+            .find(|m| m.name == name)
+            .map_or("", |m| m.category)
+    }
+
+    /// Why a program outside the companion may not run this tool, or `None` when it may.
+    ///
+    /// The vault's tools and any that use a secret are the companion's own (`taint::touches_secrets`).
+    /// `queue_task` is too: it runs a whole model turn with every tool, which would put an outside
+    /// caller's words into a turn that is not marked as theirs.
+    pub fn refused_to_outside(&self, name: &str) -> Option<String> {
+        if yantrik_companion_core::taint::touches_secrets(name, self.category_of(name)) {
+            return Some(format!("`{name}` reads, writes or uses a secret and is the companion's own: it is not run for a program on its socket."));
+        }
+        if name == "queue_task" {
+            return Some("`queue_task` runs a whole turn with every tool: it is not run for a program on the companion's socket. Ask instead (companion.ask).".to_string());
+        }
+        None
+    }
+
+    /// Run a tool for a program on the companion's socket: as `run_tool`, unless it is refused.
+    pub fn run_tool_for_outside(&self, name: &str, args: &serde_json::Value) -> String {
+        match self.refused_to_outside(name) {
+            Some(why) => {
+                tracing::warn!(tool = %name, "a program on the companion socket asked for a refused tool");
+                format!("Refused: {why}")
+            }
+            None => self.run_tool(name, args),
+        }
+    }
+
     /// The highest tool permission this turn may use: the configured one, or the turn's own
     /// ceiling where that is lower.
     fn max_permission_now(&self) -> PermissionLevel {
@@ -1336,6 +1381,7 @@ impl CompanionService {
             .registry
             .list_metadata(max_perm)
             .into_iter()
+            .filter(|m| self.refused_to_outside(m.name).is_none())
             .map(|m| {
                 serde_json::json!({
                     "name": m.name,
@@ -2485,6 +2531,9 @@ impl CompanionService {
         // this conversation has taken in — a page read ten minutes ago must not block a
         // credential now, and a credential fetched then must not license an exfiltration now.
         yantrik_companion_core::taint::begin_turn();
+        if self.turn_outside {
+            yantrik_companion_core::taint::mark_untrusted("a program on the companion's socket");
+        }
 
         // Step 0: SecurityGuard — check user input for injection
         if let Some(warning) = self.guard.check_input(user_text, &self.db) {
