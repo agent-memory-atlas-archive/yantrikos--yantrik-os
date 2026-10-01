@@ -97,12 +97,22 @@ pub struct GenericOpenAIBackend {
     presets: ProviderPresets,
     /// When set, each OpenAI-style answer's status and rate-limit headers are left here.
     meta: Option<MetaSink>,
+    /// HTTPS only, and no redirect followed (`strict_transport`).
+    strict: bool,
 }
 
 impl GenericOpenAIBackend {
     /// Leave each answer's status and rate-limit headers in `sink` (the free pool reads them).
     pub fn with_meta_sink(mut self, sink: MetaSink) -> Self {
         self.meta = Some(sink);
+        self
+    }
+
+    /// HTTPS only, and no redirect followed: the answer comes from the address the key was sent
+    /// to or not at all. For a provider reached with a key over the internet (the free pool). A
+    /// local server on plain http (Ollama) is not built this way.
+    pub fn strict_transport(mut self) -> Self {
+        self.strict = true;
         self
     }
 
@@ -138,6 +148,7 @@ impl GenericOpenAIBackend {
             auth_style: auth_style.into(),
             presets,
             meta: None,
+            strict: false,
         }
     }
 
@@ -470,20 +481,23 @@ impl GenericOpenAIBackend {
 
         // A refusal is read, not thrown: its status and rate-limit headers are what tells the
         // caller how long to wait, and ureq's error-on-status would drop them.
-        let agent = ureq::Agent::new_with_config(
-            ureq::config::Config::builder()
-                .timeout_global(Some(std::time::Duration::from_secs(300)))
-                .http_status_as_error(false)
-                .build(),
-        );
+        let mut config = ureq::config::Config::builder()
+            .timeout_global(Some(std::time::Duration::from_secs(300)))
+            .http_status_as_error(false);
+        if self.strict {
+            config = config.https_only(true).max_redirects(0);
+        }
+        let agent = ureq::Agent::new_with_config(config.build());
         let mut req = agent.post(&url).header("Content-Type", "application/json");
         for (k, v) in self.auth_headers() {
             req = req.header(&k, &v);
         }
 
+        // Errors name the host, not the address: a path can carry an account id, a query a key.
+        let host = url.split("://").nth(1).and_then(|r| r.split(['/', '?']).next()).unwrap_or("the provider").to_string();
         let resp = req
             .send(body_str.as_bytes())
-            .with_context(|| format!("OpenAI-compatible API request to {url} failed"))?;
+            .with_context(|| format!("OpenAI-compatible API request to {host} failed"))?;
         let status = resp.status().as_u16();
         if let Some(sink) = &self.meta {
             let headers = resp
@@ -500,8 +514,13 @@ impl GenericOpenAIBackend {
         if !(200..300).contains(&status) {
             let mut body = resp.into_body();
             let text = body.read_to_string().unwrap_or_default();
-            let short: String = text.chars().take(300).collect();
-            anyhow::bail!("HTTP {status} from {url}: {short}");
+            // A provider's error can echo what it was sent: the key is masked, and the rest is cut
+            // short enough to say what went wrong without carrying the conversation into a log.
+            let mut short: String = text.chars().take(200).collect();
+            if let Some(key) = self.api_key.as_deref().filter(|k| k.len() >= 8) {
+                short = short.replace(key, "<key>");
+            }
+            anyhow::bail!("HTTP {status} from {host}: {short}");
         }
 
         Ok(resp.into_body())

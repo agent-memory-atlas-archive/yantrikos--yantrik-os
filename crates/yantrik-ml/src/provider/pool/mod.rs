@@ -126,7 +126,7 @@ impl Pool {
         let mut capable = 0;
         let usable: Vec<&'static FreeTier> = FREE_TIERS.iter().filter(|t| self.usable(t)).collect();
         for t in usable {
-            if (need.private && t.trains_on_prompts) || (need.public && !t.may_serve_public) {
+            if (!need.shareable && t.trains_on_prompts) || (need.public && !t.may_serve_public) {
                 continue;
             }
             let limits = self.limits(t);

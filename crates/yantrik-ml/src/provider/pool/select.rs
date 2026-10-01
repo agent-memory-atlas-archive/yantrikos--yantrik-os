@@ -18,8 +18,10 @@ pub struct Need {
     pub min_context: u32,
     /// It is writing or reading code: prefer, and require, a good coder.
     pub coding: bool,
-    /// It carries the person's private context: never to a provider that may train on it.
-    pub private: bool,
+    /// It holds nothing of the person's, so it may go to a provider that may train on what it is
+    /// sent. Off unless a caller says so: a caller that forgets keeps the person's context away
+    /// from those providers (security review of #535, 1 Oct 2026), rather than sending it.
+    pub shareable: bool,
     /// The answer goes to the public (a visitor's question on the live stream).
     pub public: bool,
     /// The task it belongs to, to keep it on one model.

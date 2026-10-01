@@ -42,7 +42,8 @@ fn only_switched_on_providers_with_their_key_are_used() {
 #[test]
 fn a_private_turn_never_goes_where_prompts_may_be_trained_on() {
     let mut p = pool(&["gemini", "kilo", "groq"], &["gemini", "groq"]);
-    let private = Need { private: true, ..Need::default() };
+    // Not shareable is the default: a turn is private unless its caller says otherwise.
+    let private = Need::default();
     for _ in 0..20 {
         let pick = p.pick(&private, NOON).unwrap();
         assert!(!pick.tier.trains_on_prompts, "{} trains on prompts", pick.tier.id);
@@ -50,7 +51,7 @@ fn a_private_turn_never_goes_where_prompts_may_be_trained_on() {
     // Z.ai's terms let it train on what individuals send (rechecked 2026-09-30): never private.
     let mut zai = pool(&["zai"], &["zai"]);
     assert!(zai.pick(&private, NOON).is_err(), "a private turn went to Z.ai");
-    assert_eq!(zai.pick(&Need::default(), NOON).unwrap().tier.id, "zai");
+    assert_eq!(zai.pick(&Need { shareable: true, ..Need::default() }, NOON).unwrap().tier.id, "zai");
     let mut only_trainers = pool(&["gemini", "kilo"], &["gemini"]);
     let none = only_trainers.pick(&private, NOON).unwrap_err();
     assert_eq!(none.reason, "No switched-on free provider has a model that can do this.");
@@ -72,7 +73,8 @@ fn a_model_must_be_able_to_do_the_job() {
     for _ in 0..10 {
         assert_ne!(p.pick(&code, NOON).unwrap().model.id, "openai/gpt-oss-20b", "a light coder is not used for code");
     }
-    let huge = Need { min_context: 500_000, ..Need::default() };
+    // Gemini trains on what it is sent: only a shareable turn may go there.
+    let huge = Need { min_context: 500_000, shareable: true, ..Need::default() };
     assert!(p.pick(&huge, NOON).is_err(), "no Groq model holds 500K tokens");
     let mut p = pool(&["gemini"], &["gemini"]);
     assert_eq!(p.pick(&huge, NOON).unwrap().model.id, "gemini-3.8-flash");
@@ -117,7 +119,7 @@ fn a_refusal_rests_for_as_long_as_it_asked_and_no_longer() {
 #[test]
 fn a_refusal_that_does_not_say_for_how_long_backs_off_doubling() {
     let mut p = pool(&["zai"], &["zai"]);
-    let need = Need { coding: true, ..Need::default() };
+    let need = Need { coding: true, shareable: true, ..Need::default() };
     let pick = p.pick(&need, NOON).unwrap();
     p.record(pick, &need, NOON, &refused(None));
     assert!(p.pick(&need, NOON + 59).is_err());
@@ -262,4 +264,36 @@ fn the_ledger_counts_the_day_and_survives_a_restart() {
     assert_eq!(ledger::day_name(0), "1970-01-01");
     assert_eq!(ledger::day_name(NOON), "2026-09-30");
     let _ = std::fs::remove_file(&path);
+}
+
+/// A provider's header is believed only within reason (security review of #535, 1 Oct 2026):
+/// `inf` and `1e308` overflowed the clock into no wait at all, which is a hot loop against a
+/// provider asking us to wait; a billion seconds rested a model for thirty years.
+#[test]
+fn a_hostile_wait_header_is_bounded_and_never_overflows() {
+    for hostile in ["inf", "1e308", "NaN", "-5", "999999999", "99999999h"] {
+        if let Some(s) = duration(hostile) {
+            assert!(s.is_finite() && (0.0..=headers::MAX_WAIT_SECS).contains(&s), "{hostile} gave {s}");
+        }
+    }
+    let mut p = pool(&["groq"], &["groq"]);
+    let pick = p.pick(&Need::default(), NOON).unwrap();
+    let rested = pick.model.id;
+    // The worst a header can carry, straight into the quota: no panic, and a wait of at most a day.
+    p.record(pick, &Need::default(), NOON, &refused(Some(f64::MAX)));
+    for _ in 0..10 {
+        assert_ne!(p.pick(&Need::default(), NOON + 60).unwrap().model.id, rested, "it was told to wait, and must");
+    }
+    let back = (0..20).any(|_| p.pick(&Need::default(), NOON + 86_400 + 60).is_ok_and(|q| q.model.id == rested));
+    assert!(back, "no header rests a model for more than a day");
+}
+
+/// A caller that does not say a turn is shareable keeps it away from every provider that may
+/// train on it: privacy fails closed.
+#[test]
+fn a_turn_is_private_unless_its_caller_says_otherwise() {
+    let mut trainers = pool(&["gemini", "kilo", "zai"], &["gemini", "zai"]);
+    assert!(trainers.pick(&Need::default(), NOON).is_err());
+    let shareable = Need { shareable: true, ..Need::default() };
+    assert!(trainers.pick(&shareable, NOON).is_ok());
 }

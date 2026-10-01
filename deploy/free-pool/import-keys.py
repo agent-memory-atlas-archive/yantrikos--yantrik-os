@@ -90,32 +90,49 @@ def pick(found):
     return keys, report, others
 
 
-# Runs inside the VM, as root: merge the incoming `provider=key` lines (stdin) into the key file,
-# written beside it and renamed over it, 600 and owned by `owner`. Prints only the provider names.
+# Runs inside the VM: merge the incoming `provider=key` lines (stdin) into the key file, written
+# beside it and renamed over it, 600 and owned by `owner`. Prints only the provider names.
+#
+# It is started as root but does its work as `owner` (security review of #535, 1 Oct 2026): the
+# key file lives in a directory the owner can write, and root following a link the owner planted
+# there would have read or handed over any file on the machine (/etc/shadow included). As the
+# owner, a planted link reaches nothing the owner could not already reach. The key file itself is
+# never followed if it is a link, and its mode is set on the open file, not by name.
 MERGE = '''
-import os, pwd, sys, tempfile
+import os, pwd, stat, sys, tempfile
 path, owner = sys.argv[1], sys.argv[2]
+pw = pwd.getpwnam(owner)
+if os.getuid() == 0 and pw.pw_uid != 0:
+    os.setgroups([])
+    os.setgid(pw.pw_gid)
+    os.setuid(pw.pw_uid)
 keep = {}
 try:
-    with open(path, encoding="utf-8") as f:
-        for line in f.read().splitlines():
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+except FileNotFoundError:
+    fd = None
+except OSError as e:
+    sys.exit("refusing: the key file is a link or cannot be opened as a file (" + e.strerror + ")")
+if fd is not None:
+    with os.fdopen(fd, encoding="utf-8") as f:
+        if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+            sys.exit("refusing: the key file is not a regular file")
+        for line in f.read(1 << 20).splitlines():
             if "=" in line:
                 k, v = line.split("=", 1)
                 keep[k] = v
-except FileNotFoundError:
-    pass
-for line in sys.stdin.read().splitlines():
+for line in sys.stdin.read(1 << 20).splitlines():
     if "=" in line:
         k, v = line.split("=", 1)
         keep[k] = v
 d = os.path.dirname(path)
 os.makedirs(d, mode=0o700, exist_ok=True)
-pw = pwd.getpwnam(owner)
 fd, tmp = tempfile.mkstemp(dir=d, prefix=".free-pool.")
 with os.fdopen(fd, "w", encoding="utf-8") as f:
+    os.fchmod(f.fileno(), 0o600)
     f.write("".join(k + "=" + v + chr(10) for k, v in sorted(keep.items())))
-os.chmod(tmp, 0o600)
-os.chown(tmp, pw.pw_uid, pw.pw_gid)
+    f.flush()
+    os.fsync(f.fileno())
 os.rename(tmp, path)
 print(" ".join(sorted(keep)))
 '''

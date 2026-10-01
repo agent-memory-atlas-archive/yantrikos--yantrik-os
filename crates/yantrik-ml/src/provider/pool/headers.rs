@@ -35,6 +35,15 @@ pub fn observe(get: impl Fn(&str) -> Option<String>) -> Observed {
 /// A duration as providers write it: "7", "1.5", "6s", "120ms", "2m59.56s", "1h2m3s". `None`
 /// for anything else (an HTTP date in `retry-after` is not worth a calendar: the caller backs off).
 pub fn duration(text: &str) -> Option<f64> {
+    duration_unbounded(text).filter(|s| s.is_finite() && *s >= 0.0).map(|s| s.min(MAX_WAIT_SECS))
+}
+
+/// The longest wait a provider's header can impose: a day. Longer, or `inf`, or `1e308`, is a
+/// broken or hostile header, and believing it would rest a model for years or overflow the clock
+/// into no wait at all (security review of #535, 1 Oct 2026).
+pub const MAX_WAIT_SECS: f64 = 86_400.0;
+
+fn duration_unbounded(text: &str) -> Option<f64> {
     let t = text.trim();
     if t.is_empty() {
         return None;

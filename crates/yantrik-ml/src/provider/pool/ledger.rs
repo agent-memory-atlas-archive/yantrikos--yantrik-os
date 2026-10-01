@@ -26,18 +26,18 @@ pub struct Ledger {
 impl Ledger {
     /// The ledger at `path`, or an empty one when there is none yet or it cannot be read.
     pub fn open(path: &Path) -> Ledger {
-        let mut l: Ledger = std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        use std::io::Read;
+        // Fourteen days of a few providers is a few kilobytes; anything near a megabyte is not
+        // a ledger, and is not read whole into memory to find that out.
+        let mut bytes = Vec::new();
+        let read = std::fs::File::open(path).and_then(|f| f.take(1 << 20).read_to_end(&mut bytes));
+        let mut l: Ledger = read.ok().and_then(|_| serde_json::from_slice(&bytes).ok()).unwrap_or_default();
         l.path = Some(path.to_path_buf());
+        l.trim();
         l
     }
 
-    pub fn add(&mut self, day: &str, provider: &str, model: &str, ok: bool, tokens: u64) {
-        let t = self.days.entry(day.to_string()).or_default().entry(format!("{provider}|{model}")).or_default();
-        t.requests += 1;
-        t.tokens += tokens;
-        if !ok {
-            t.refused += 1;
-        }
+    fn trim(&mut self) {
         while self.days.len() > 14 {
             let oldest = self.days.keys().next().cloned();
             if let Some(k) = oldest {
@@ -46,25 +46,48 @@ impl Ledger {
         }
     }
 
+    pub fn add(&mut self, day: &str, provider: &str, model: &str, ok: bool, tokens: u64) {
+        let t = self.days.entry(day.to_string()).or_default().entry(format!("{provider}|{model}")).or_default();
+        t.requests = t.requests.saturating_add(1);
+        t.tokens = t.tokens.saturating_add(tokens);
+        if !ok {
+            t.refused = t.refused.saturating_add(1);
+        }
+        self.trim();
+    }
+
     /// One day's totals per provider (models summed).
     pub fn day(&self, day: &str) -> BTreeMap<String, Totals> {
         let mut out: BTreeMap<String, Totals> = BTreeMap::new();
         for (k, t) in self.days.get(day).into_iter().flatten() {
             let provider = k.split('|').next().unwrap_or(k).to_string();
             let o = out.entry(provider).or_default();
-            o.requests += t.requests;
-            o.tokens += t.tokens;
-            o.refused += t.refused;
+            o.requests = o.requests.saturating_add(t.requests);
+            o.tokens = o.tokens.saturating_add(t.tokens);
+            o.refused = o.refused.saturating_add(t.refused);
         }
         out
     }
 
-    /// Write it out: to a temporary file beside it, then renamed over it.
+    /// Write it out: to a new file beside it (created, never followed, readable by its owner
+    /// only, and synced), then renamed over it.
     pub fn save(&self) -> std::io::Result<()> {
+        use std::io::Write;
         let Some(path) = &self.path else { return Ok(()) };
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec(self).map_err(std::io::Error::other)?)?;
-        std::fs::rename(&tmp, path)
+        let tmp = path.with_extension(format!("json.{}.{:x}.tmp", std::process::id(), rand::random::<u64>()));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let mut file = options.open(&tmp)?;
+        let written = file
+            .write_all(&serde_json::to_vec(self).map_err(std::io::Error::other)?)
+            .and_then(|_| file.sync_all())
+            .and_then(|_| std::fs::rename(&tmp, path));
+        if written.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        written
     }
 }
 

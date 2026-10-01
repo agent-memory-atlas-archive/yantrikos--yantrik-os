@@ -145,8 +145,8 @@ impl Quota {
             }
         }
         if let Some(left) = out.observed.remaining_requests {
-            let holds = out.observed.reset_requests.map_or(60, |s| s.ceil() as i64).max(1);
-            self.told.insert(k.clone(), (left, now + holds));
+            let holds = out.observed.reset_requests.map_or(60, secs).max(1);
+            self.told.insert(k.clone(), (left, now.saturating_add(holds)));
         }
         match out.status {
             200..=299 => {
@@ -160,9 +160,9 @@ impl Quota {
                     .observed
                     .retry_after
                     .or(out.observed.reset_requests)
-                    .map(|s| s.ceil() as i64)
+                    .map(secs)
                     .unwrap_or_else(|| backoff(*strikes));
-                self.cooldown.insert(k, now + wait.max(1));
+                self.cooldown.insert(k, now.saturating_add(wait.max(1)));
             }
             401 | 403 => {
                 if !self.refused_keys.iter().any(|r| r == tier.id) {
@@ -178,7 +178,7 @@ impl Quota {
                 *strikes += 1;
                 if *strikes >= 3 {
                     let wait = (300_i64 << (*strikes - 3).min(4)).min(3_600);
-                    self.cooldown.insert(tier.id.to_string(), now + wait);
+                    self.cooldown.insert(tier.id.to_string(), now.saturating_add(wait));
                 }
             }
         }
@@ -265,4 +265,10 @@ pub(super) fn civil(days: i64) -> (i64, u32, u32) {
     let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
     let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     (yoe + era * 400 + i64::from(m <= 2), m, d)
+}
+
+/// A wait in whole seconds, never more than a day and never negative, whatever it was built from
+/// (a header is bounded when parsed; this holds for every other source too).
+fn secs(s: f64) -> i64 {
+    s.min(super::headers::MAX_WAIT_SECS).max(0.0).ceil() as i64
 }

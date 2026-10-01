@@ -33,7 +33,9 @@ impl PoolBackend {
         PoolBackend { pool, keys, need, addresses: Default::default() }
     }
 
-    /// Reach `provider` at `base_url` instead of its own address.
+    /// Reach `provider` at `base_url` instead of its own address: a test's stand-in only. A key
+    /// goes to its provider's own address and nowhere else.
+    #[cfg(test)]
     pub fn with_address(mut self, provider: &str, base_url: &str) -> PoolBackend {
         self.addresses.insert(provider.to_string(), base_url.to_string());
         self
@@ -54,8 +56,17 @@ impl PoolBackend {
 
     fn backend_for(&self, pick: &Pick, sink: &MetaSink) -> GenericOpenAIBackend {
         let key = if pick.tier.needs_key { self.keys.get(pick.tier.id).map(String::from) } else { None };
-        let base = self.addresses.get(pick.tier.id).cloned().unwrap_or_else(|| self.keys.base_url(pick.tier));
-        GenericOpenAIBackend::for_provider(pick.tier.id, base, key, pick.model.id).with_meta_sink(sink.clone())
+        let stand_in = self.addresses.get(pick.tier.id).cloned();
+        let backend = GenericOpenAIBackend::for_provider(
+            pick.tier.id,
+            stand_in.clone().unwrap_or_else(|| self.keys.base_url(pick.tier)),
+            key,
+            pick.model.id,
+        )
+        .with_meta_sink(sink.clone());
+        // The provider's own address: HTTPS, and no redirect followed. A test's local stand-in
+        // is plain http.
+        if stand_in.is_some() { backend } else { backend.strict_transport() }
     }
 
     /// Try providers in the pool's order until one answers.
