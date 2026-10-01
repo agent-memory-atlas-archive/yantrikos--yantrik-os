@@ -97,6 +97,14 @@ export global ThemeOverrides {
     in-out property <color> accent-override:       #38d8cd;
 }
 
+// The person's "reduce motion" choice. Components that move something across the screen (a
+// popover arriving, an OSD sliding) read `Theme.dur-pop` and friends, which collapse to 0ms
+// while this is on; hover and focus colour fades are not motion in that sense and stay.
+// The shell sets it from the system setting; nothing here animates on a timer either way.
+export global MotionPrefs {
+    in-out property <bool> reduced: false;
+}
+
 // ─── Bright and sharp (design/desk-and-mind-2026-09-23.md, section 1) ─────
 //
 // The desktop read muddy: grey text on grey cards on a grey ground, each step a few percent
@@ -363,6 +371,16 @@ export global Theme {
     out property <duration> dur-fast: 120ms;
     out property <duration> dur-normal: 200ms;
     out property <duration> dur-slow: 300ms;
+    // A popover or other moving surface arriving: dur-fast, or nothing under reduce-motion.
+    out property <duration> dur-pop: MotionPrefs.reduced ? 0ms : root.dur-fast;
+    // How long an on-screen display (volume, brightness, mic) stays up after the last change.
+    // One single-shot timer holds it; there is no repeating timer behind it.
+    out property <duration> dur-osd-hold: 1500ms;
+    // How long the pointer rests on a bar indicator before its tooltip appears.
+    out property <duration> dur-tooltip: 600ms;
+    // The one curve for things that arrive: quick out of the blocks, long soft landing. Use it
+    // as `easing: Theme.ease-standard;` on any animate that moves or reveals something.
+    out property <easing> ease-standard: cubic-bezier(0.2, 0.0, 0.0, 1.0);
 
     // ─── Control height tokens ────────────────────────────────────
     out property <length> h-compact: 28px;
@@ -396,6 +414,56 @@ export global Theme {
 
     // Chat side panel
     out property <length> chat-panel-width: 380px;
+
+    // ─── Kit controls: slider, popover, toggle tile, bar indicator ─
+    // Sizes. Each is the one number the control draws with, so a later screen that has to line
+    // something up with a slider's thumb or a tile's edge reads it here instead of guessing.
+    //
+    // The glyph size for every icon that lives on the top/bottom bar (YIndicator).
+    out property <length> bar-icon-size: 16px;
+    // The attention dot on a bar indicator (a thing here needs a look).
+    out property <length> bar-dot: 7px;
+    // A popover (Quick Settings, Sound, Network, Today) is this wide, and sits this far from
+    // what opened it and from the screen edge. The radius is the window/modal step of the scale.
+    out property <length> popover-width: 360px;
+    out property <length> popover-radius: root.r-xl;
+    out property <length> popover-gap: root.sp-2;
+    out property <length> popover-margin: root.sp-2;
+    // Slider: a 6px track under an 18px thumb. The halo is the soft ring that appears around the
+    // thumb on hover and while dragging; it is 5px proud of the thumb on every side.
+    out property <length> slider-track-h: 6px;
+    out property <length> slider-thumb: 18px;
+    out property <length> slider-halo: 28px;
+    // Toggle tile (Wi-Fi, Bluetooth, Night light ...).
+    out property <length> tile-h: 56px;
+    // On-screen display card (volume, brightness) and its width.
+    out property <length> osd-w: 280px;
+    // One-pixel edge of a control, and the stroke weights an icon is drawn with (regular beside
+    // text, a touch heavier on a filled tile where it sits on the accent).
+    out property <length> hairline: 1px;
+    out property <length> icon-stroke: 1.6px;
+    out property <length> icon-stroke-bold: 1.7px;
+    // Three drop-shadow depths for things that float: a thumb, a tooltip, a popover.
+    out property <length> shadow-sm-blur: 3px;
+    out property <length> shadow-sm-dy: 1px;
+    out property <length> shadow-md-blur: 8px;
+    out property <length> shadow-md-dy: 2px;
+    out property <length> shadow-lg-blur: 24px;
+    out property <length> shadow-lg-dy: 6px;
+    // The keyboard-focus ring on a control that has no border of its own to thicken.
+    out property <length> focus-ring-width: 2px;
+    out property <color> focus-ring: ThemeMode.dark ? #f4f6fa : #0e1116;
+    // The groove behind a slider fill. Stronger than border-strong so an empty track still reads
+    // on a popover (bg-elevated) in both themes.
+    out property <color> track-bg: ThemeMode.dark ? #ffffff26 : #00000026;
+    // The slider thumb: the one near-white surface in the kit, so it reads as a thing you hold.
+    out property <color> knob: ThemeMode.dark ? #f4f6fa : #ffffff;
+    out property <color> knob-border: ThemeMode.dark ? #00000040 : #00000030;
+    // A toggle tile that is off: a quiet fill that works on any surface because it is
+    // translucent, then a step stronger on hover and press.
+    out property <color> tile-off:         ThemeMode.dark ? #ffffff0f : #0000000d;
+    out property <color> tile-off-hover:   ThemeMode.dark ? #ffffff1a : #00000017;
+    out property <color> tile-off-pressed: ThemeMode.dark ? #ffffff26 : #00000024;
 
     // ─── Result type colors ───────────────────────────────────────
     out property <color> color-do:        ThemeMode.dark ? #d4a574 : #8a6030;
