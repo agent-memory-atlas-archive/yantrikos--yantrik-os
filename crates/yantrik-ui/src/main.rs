@@ -122,6 +122,7 @@ mod system_context;
 mod telegram;
 mod terminal;
 mod terminal_window;
+mod toplevel_watch;
 mod provider_handoff;
 mod private_file;
 mod programs;

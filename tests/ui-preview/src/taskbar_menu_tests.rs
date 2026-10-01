@@ -62,6 +62,10 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
         });
         let l = log.clone();
         ui.on_switch_window(move |title| l.borrow_mut().push(format!("switch:{title}")));
+        // A left click on an entry is the taskbar's own callback, not `switch-window`: the entry
+        // of the window in front puts it away, which nothing else that shows a window may do.
+        let l = log.clone();
+        ui.on_taskbar_window_clicked(move |title| l.borrow_mut().push(format!("click:{title}")));
     }
     ui.show()?;
     w.set_size(slint::PhysicalSize::new(width, height));
@@ -101,7 +105,7 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     );
     // A right press is not a left click: the window must not also be brought forward.
     assert!(
-        !log.borrow().iter().any(|e| e.starts_with("switch:")),
+        !log.borrow().iter().any(|e| e.starts_with("switch:") || e.starts_with("click:")),
         "opening the menu did not activate the window: {:?}",
         log.borrow()
     );
@@ -145,8 +149,9 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     click(w, entry_x, taskbar_y);
     draw();
     assert!(
-        log.borrow().iter().any(|e| e == "switch:Notes: Handover"),
-        "a left click still activates the window: {:?}",
+        log.borrow().iter().any(|e| e == "click:Notes: Handover")
+            && !log.borrow().iter().any(|e| e.starts_with("switch:")),
+        "a left click reaches the taskbar's own callback, for the window pressed: {:?}",
         log.borrow()
     );
     key(w, Key::Menu.into());
