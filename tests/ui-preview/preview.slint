@@ -682,6 +682,8 @@ export component MindsProbe inherits Window {
     in property <[ProviderGroup]> groups;
     in property <[AddChoice]> choices;
     in property <string> today;
+    in property <string> answering;
+    in property <int> more;
     in-out property <bool> adding;
     in-out property <string> action;
     out property <length> panel-height: panel.height;
@@ -689,6 +691,7 @@ export component MindsProbe inherits Window {
         x: parent.width - 372px;
         y: 44px;
         groups: root.groups; choices: root.choices; today: root.today; status: "";
+        answering: root.answering; more: root.more;
         adding <=> root.adding;
         use-account(id) => { root.action = "use:" + id; }
         sign-in(id) => { root.action = "signin:" + id; }

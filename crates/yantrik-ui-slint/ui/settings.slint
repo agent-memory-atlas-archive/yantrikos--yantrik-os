@@ -416,6 +416,8 @@ export component SettingsScreen inherits Rectangle {
     // ── Accounts (category 4): the same accounts, and the same list, as the Minds panel ──
     in property <[ProviderGroup]> account-groups: [];
     in property <[AddChoice]> account-choices: [];
+    in property <[AddChoice]> account-key-choices: [];   // coding plans paid for with a key
+    in property <string> account-keys-line: "";          // "Keys in use: xAI, for the companion"
     in property <string> account-status: "";
     in-out property <bool> accounts-adding: false;
     callback accounts-shown();                  // the page opened: read the accounts again
@@ -3224,7 +3226,31 @@ SettingRow{label:"About this device";description:"Detailed information about thi
                                 add(v) => { root.account-add(v); root.accounts-adding = false; }
                             }
                         }
-                        SettingRow{label:"AI providers";description:"API keys and endpoints (OpenAI, NVIDIA NIM, Nous, a local Ollama and more), used by the desktop and handed to harnesses. They are separate from these sign-ins.";value:"Configure";activated=>{root.active-category=1;}}
+                        // Coding plans paid for with a key are AI providers, not accounts: offered
+                        // here, set up there, and never drawn as an account row.
+                        if root.accounts-adding && root.account-key-choices.length > 0 : VerticalLayout {
+                            spacing: 8px;
+                            Text{text:"CODING PLANS BY KEY · set up in AI providers";color:Theme.text-dim;font-size:Theme.fs-micro;font-weight:600;letter-spacing:0.8px;}
+                            Rectangle {
+                                background:Theme.bg-card;border-radius:10px;border-width:1px;border-color:Theme.border-subtle;
+                                height: key-list.preferred-height + 24px;
+                                key-list := AccountList {
+                                    x: 16px; y: 12px; width: parent.width - 32px;
+                                    choices: root.account-key-choices;
+                                    adding: true;
+                                    divided: false;
+                                    say-empty: false;
+                                    add(v) => { root.account-add(v); root.accounts-adding = false; }
+                                }
+                            }
+                        }
+                        SettingRow{
+                            label:"AI providers";
+                            description: root.account-keys-line != ""
+                                ? root.account-keys-line + ". Keys are managed there, and handed to harnesses from there; they are separate from these sign-ins."
+                                : "API keys and endpoints (OpenAI, NVIDIA NIM, Nous, a local Ollama and more), used by the desktop and handed to harnesses. They are separate from these sign-ins.";
+                            value:"Configure";activated=>{root.active-category=1;}
+                        }
                         SettingRow{label:"Harnesses";description:"The agent programs that use these accounts and providers, and which mind answers.";value:"Open";activated=>{root.active-category=8;}}
 
                         Rectangle{height:24px;}

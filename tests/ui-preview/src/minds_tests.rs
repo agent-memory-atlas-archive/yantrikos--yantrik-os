@@ -60,7 +60,7 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     ])));
     ui.set_choices(ModelRc::new(VecModel::from(vec![
         AddChoice { vendor: "claude".into(), name: "Claude".into(), what: "Add account".into() },
-        AddChoice { vendor: "qwen".into(), name: "Qwen".into(), what: "Set up a key".into() },
+        AddChoice { vendor: "gemini".into(), name: "Gemini".into(), what: "Sign in".into() },
     ])));
     ui.set_today("1.9M tokens today".into());
     ui.show()?;
@@ -119,6 +119,38 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     }
     assert_eq!(ui.get_action().as_str(), "add:claude");
     assert!(!ui.get_adding(), "choosing puts the list away");
-    println!("PASS minds panel: rows, buttons, tiles and the + list");
+
+    // At its fullest: what the shell's panel view (wire/minds_panel.rs) makes of many vendors of
+    // two accounts each, three vendors, the answering account with its tightest meter, the
+    // other on one line, and "N more". It must stay on a 1280x800 screen with room to spare.
+    let two = |v: &str, plan: &str| {
+        vec![
+            account(&format!("{v}:primary"), "Main", plan, "active", "", vec![meter("Weekly", Some(0.6), "4d 12h")]),
+            account(&format!("{v}:account-2"), "Account 2", plan, "ready", "", vec![]),
+        ]
+    };
+    ui.set_groups(ModelRc::new(VecModel::from(vec![
+        group("claude", "Claude", two("claude", "Max 20x")),
+        group("codex", "Codex", two("codex", "Pro")),
+        group("gemini", "Gemini", two("gemini", "Pro")),
+    ])));
+    ui.set_answering("Yantrik Mind".into());
+    ui.set_more(2);
+    let full = draw();
+    save(&full, &output.replace(".png", "-full.png"))?;
+    let fh = ui.get_panel_height();
+    assert!(fh <= 600.0, "three vendors of two accounts, answering and more: {fh}px, over 600");
+    // "2 more on the Accounts page" takes the person there, as the gear does.
+    let mut went = false;
+    for y in ((44 + fh as i32 - 160)..(44 + fh as i32 - 90)).step_by(3) {
+        ui.set_action("".into());
+        click(w, 1280.0 - 300.0, y as f32);
+        if ui.get_action() == "manage" {
+            went = true;
+            break;
+        }
+    }
+    assert!(went, "\"more\" does not open the Accounts page");
+    println!("PASS minds panel: rows, buttons, tiles, the + list, and at its fullest {fh}px with more →");
     Ok(())
 }
