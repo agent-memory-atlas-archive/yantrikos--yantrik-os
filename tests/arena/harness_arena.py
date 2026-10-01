@@ -276,6 +276,22 @@ def close_editor():
         os.replace(drafts, drafts + ".arena-previous")
 
 
+# What reset_world ends, by the same patterns it ends them with. It cannot tell a window the arena
+# opened from one the person did: `pkill` takes every Notes and every editor. So a run refuses to
+# start while either is open, rather than closing something with unsaved work in it. A gate on
+# 520 on 1 Oct 2026 closed a Notes window it had not opened.
+RESET_ENDS = {
+    "Notes": ["pgrep", "-x", "yantrik-notes"],
+    "the editor": ["pgrep", "-f", "/opt/yantrik/bin/yantrik-text-editor"],
+}
+
+
+def open_before_run():
+    """The apps reset_world would close that are open now, before the arena has opened anything."""
+    return [name for name, probe in RESET_ENDS.items()
+            if subprocess.run(probe, capture_output=True).returncode == 0]
+
+
 def reset_world(tag):
     """Remove everything a run could have made. The arena does this, never a mind."""
     for p in os.listdir(HOME):
@@ -934,6 +950,12 @@ def main():
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         raise SystemExit("an arena run is already in progress (yantrik-arena.lock is held); not starting another")
+    # Before control and preflight too: both reset the world, so both would close them.
+    already = open_before_run()
+    if already:
+        raise SystemExit(f"{' and '.join(already)} {'is' if len(already) == 1 else 'are'} open, and a run "
+                         f"closes {'it' if len(already) == 1 else 'them'} without asking. Save and close "
+                         f"{'it' if len(already) == 1 else 'them'}, or run when nobody is using this machine.")
     if a.control:
         broken = control(task_list(a.tasks))
         print("CONTROL", "FAILED -- %s" % broken if broken else "OK")
