@@ -2031,6 +2031,23 @@ reconcile_mind_units() {
     runuser -u yantrik-mind -- rm -f /var/lib/yantrik-mind/web-pairing.code \
       && info "removed the Mind's browser pairing code; its browser chat is off"
   fi
+  # The Mind's desktop hands (yos-mcp) come only from the MCP config its unit names
+  # (YM_MCP_CONFIG). Nothing laid that file down on a fresh machine: on VM 520 it existed only
+  # because migrate-minds moved a hand-made copy out of the person's home, so the live instance's
+  # Mind started with no tools at all and told its viewers "my Notes tool isn't wired to this
+  # session" (1 Oct 2026). Written when missing, never over one that exists, and written by the
+  # mind itself in its own home, so root never writes through a path that account controls.
+  if [ -d /var/lib/yantrik-mind ] && getent passwd yantrik-mind >/dev/null 2>&1 \
+     && [ ! -e /var/lib/yantrik-mind/.config/yantrik-mind/mcp.json ]; then
+    if runuser -u yantrik-mind -- sh -c 'umask 077; mkdir -p /var/lib/yantrik-mind/.config/yantrik-mind &&
+         printf "%s\n" "{\"mcpServers\": {\"yantrik-os\": {\"command\": \"/opt/yantrik/bin/yos-mcp\"}}}" \
+           > /var/lib/yantrik-mind/.config/yantrik-mind/mcp.json'; then
+      info "gave the Mind its desktop tools: /var/lib/yantrik-mind/.config/yantrik-mind/mcp.json"
+      changed=1
+    else
+      warn "could not write the Mind's MCP config; it will start without desktop tools"
+    fi
+  fi
   if [ "$changed" = 1 ]; then
     systemctl daemon-reload >/dev/null 2>&1
     # A running unit keeps the sandbox it started with until it restarts: the proxy first, so
