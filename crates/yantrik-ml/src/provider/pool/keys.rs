@@ -38,6 +38,11 @@ impl Keys {
         Keys(map)
     }
 
+    /// Keys from wherever they are kept (the vault, `provider_keys::load_all`), by provider id.
+    pub fn from_map(map: BTreeMap<String, String>) -> Keys {
+        Keys(map.into_iter().filter(|(k, v)| !k.is_empty() && !v.is_empty()).collect())
+    }
+
     pub fn get(&self, provider: &str) -> Option<&str> {
         self.0.get(provider).map(String::as_str)
     }

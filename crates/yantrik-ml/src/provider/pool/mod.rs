@@ -11,10 +11,12 @@
 
 pub mod backend;
 pub mod headers;
+pub mod keycheck;
 pub mod keys;
 pub mod ledger;
 pub mod quota;
 pub mod select;
+pub mod signup;
 pub mod tiers;
 
 #[cfg(test)]
