@@ -87,8 +87,10 @@ impl Wiring {
     fn render(&self) {
         let card = rows::card(&lock(&CHOICES), &lock(&KEPT), &lock(&SESSION));
         // The clipboard is held (history paused, the model's clipboard tools refused) while a key
-        // is awaited, being checked, or was just refused and may still be on it.
-        let held = card.rows.iter().any(|r| matches!(r.state, "waiting" | "checking" | "rejected"));
+        // is awaited or being checked. Not after a refusal: a refused key that was key-shaped has
+        // already been cleared from the clipboard, and holding on would keep history paused and
+        // the clipboard tools refused for as long as the row is left (seen on VM 520, 1 Oct 2026).
+        let held = card.rows.iter().any(|r| matches!(r.state, "waiting" | "checking"));
         crate::clipboard::hold_for_a_key(held);
         let status = crate::vault_unlock::cached_status();
         let Some(ui) = self.ui.upgrade() else { return };
