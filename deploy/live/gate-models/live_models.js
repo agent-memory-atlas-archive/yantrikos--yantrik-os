@@ -67,7 +67,9 @@ async function chat(r) {
         max_tokens: wanted > 0 ? Math.min(wanted, MAX_TOKENS) : MAX_TOKENS,
     };
     if (sent.stream) sent.stream_options = { include_usage: true };
-    for (const field of PASSED) {
+    // An index loop: the njs engine on the gate does not take for...of.
+    for (let i = 0; i < PASSED.length; i++) {
+        const field = PASSED[i];
         if (Object.prototype.hasOwnProperty.call(asked, field)) sent[field] = asked[field];
     }
 

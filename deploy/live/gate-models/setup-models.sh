@@ -28,6 +28,10 @@ nano=$(value NANOGPT_KEY)
 guest 'set -e
 test -s /etc/live-gate/instance-key
 test -f /etc/nginx/conf.d/live-model.conf
+# A gate whose configuration nginx already refuses is not this script to fix, and its refusal
+# would otherwise be reported as the new routes being refused. (2026-10-01: the LAN router
+# answered NXDOMAIN for aig.mycluster.cyou, so the AIG route itself would not load.)
+if ! nginx -t 2>/dev/null; then nginx -t 2>&1 | tail -2; echo "the gate is refused as it stands; nothing changed" >&2; exit 1; fi
 DEBIAN_FRONTEND=noninteractive apt-get -qq install -y libnginx-mod-http-js >/dev/null
 umask 077
 rm -rf /etc/live-gate/before-cloud
