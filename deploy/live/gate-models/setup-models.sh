@@ -4,10 +4,11 @@
 # the two keys on stdin as KEY=value lines; they go straight into the gate (root, 600) and are
 # never written on node2 or printed:
 #   grep -E '^(OLLAMA_CLOUD_KEY|NANOGPT_KEY)=' keys.env | ssh root@node2 'cd …/gate-models && sh setup-models.sh'
-# VM defaults to 560. Needs gate-setup.sh's model proxy in place. Run it again to change a key.
+# VM defaults to 560. Needs gate-setup.sh's model proxy in place, and must be run again after
+# gate-setup.sh, which rewrites live-model.conf without this directory's include. Run it again
+# to change a key; a run nginx refuses puts back everything it touched.
 #
-# Then the instance's Mind is pointed at these routes (see README.md): its own settings name the
-# gate as each provider's address and carry the instance key where a provider's key would be.
+# Then the instance's Mind is pointed at these routes (point-mind.sh; see README.md).
 set -eu
 cd "$(dirname "$0")"
 VM=${VM:-560}
@@ -22,35 +23,57 @@ nano=$(value NANOGPT_KEY)
 [ -n "$ollama" ] && [ -n "$nano" ] \
     || { echo "stdin needs OLLAMA_CLOUD_KEY= and NANOGPT_KEY= lines, each 20-200 of [A-Za-z0-9._-]" >&2; exit 1; }
 
-# One root-only file per provider, holding the one header nginx adds for it.
+# Everything this run may change, kept first, so a refused configuration goes back to exactly
+# what was there, the previous working routes and keys included.
+guest 'set -e
+test -s /etc/live-gate/instance-key
+test -f /etc/nginx/conf.d/live-model.conf
+DEBIAN_FRONTEND=noninteractive apt-get -qq install -y libnginx-mod-http-js >/dev/null
+umask 077
+rm -rf /etc/live-gate/before-cloud
+install -d -m 700 /etc/live-gate/before-cloud /etc/nginx/live-routes /etc/nginx/njs
+for f in /etc/nginx/conf.d/live-model.conf /etc/nginx/conf.d/live-cloud.conf /etc/nginx/live-routes/cloud.conf \
+         /etc/nginx/njs/live_models.js /etc/live-gate/ollama-cloud.auth /etc/live-gate/nanogpt.auth; do
+  if [ -e "$f" ]; then cp -p "$f" "/etc/live-gate/before-cloud/$(echo "$f" | tr / _)"; fi
+done
+echo kept' < /dev/null
+
+# One root-only file per provider, holding the one header nginx adds for it. printf is the
+# shell's own, so a key is never on a command line.
 auth() { printf 'proxy_set_header Authorization "Bearer %s";\n' "$1"; }
 auth "$ollama" | guest 'set -e; umask 077; cat > /etc/live-gate/ollama-cloud.auth.new; mv /etc/live-gate/ollama-cloud.auth.new /etc/live-gate/ollama-cloud.auth'
 auth "$nano" | guest 'set -e; umask 077; cat > /etc/live-gate/nanogpt.auth.new; mv /etc/live-gate/nanogpt.auth.new /etc/live-gate/nanogpt.auth'
+guest 'set -e; umask 077; cat > /etc/nginx/njs/live_models.js.new; mv /etc/nginx/njs/live_models.js.new /etc/nginx/njs/live_models.js' < live_models.js
 
-# The routes, with the instance key filled in on the gate itself, and the server block made to
-# include them. A configuration nginx refuses is rolled back, so the AIG route keeps working.
+# The routes, with the instance key filled in on the gate itself (by awk reading the key file,
+# so it is on no command line), and the server block made to include them.
 guest 'set -e
-test -s /etc/live-gate/instance-key
 umask 077
-install -d -m 700 /etc/nginx/live-routes
-key=$(cat /etc/live-gate/instance-key)
-case "$key" in *[!0-9a-f]*|"") echo "the instance key is not hex" >&2; exit 1;; esac
-sed "s/@INSTANCE_KEY@/$key/" > /etc/nginx/live-routes/cloud.conf.new
-cp -p /etc/nginx/conf.d/live-model.conf /etc/live-gate/live-model.conf.before-cloud
-cat > /etc/nginx/conf.d/live-cloud-zones.conf <<EOF
-# live-gate (deploy/live/gate-models): request rates for the cloud routes, per instance address.
-limit_req_zone \$binary_remote_addr zone=live_ollama_cloud:1m rate=30r/m;
-limit_req_zone \$binary_remote_addr zone=live_nanogpt:1m rate=10r/m;
+case "$(cat /etc/live-gate/instance-key)" in *[!0-9a-f]*|"") echo "the instance key is not hex" >&2; exit 1;; esac
+awk "BEGIN { getline k < \"/etc/live-gate/instance-key\" } { gsub(/@INSTANCE_KEY@/, k); print }" \
+  > /etc/nginx/live-routes/cloud.conf.new
+mv /etc/nginx/live-routes/cloud.conf.new /etc/nginx/live-routes/cloud.conf
+# Keyed on the gate address, not the caller address: the instance could add addresses of its own on
+# the segment, and each would get a limit of its own. There is one instance; there is one limit.
+cat > /etc/nginx/conf.d/live-cloud.conf <<EOF
+# live-gate (deploy/live/gate-models): rates, daily counts and the filter of the cloud routes.
+limit_req_zone \$server_addr zone=live_ollama_cloud:1m rate=30r/m;
+limit_req_zone \$server_addr zone=live_nanogpt:1m rate=10r/m;
+js_shared_dict_zone zone=live_budget:64k type=number timeout=3d;
+js_import live from /etc/nginx/njs/live_models.js;
 EOF
 grep -q "include /etc/nginx/live-routes/" /etc/nginx/conf.d/live-model.conf \
   || sed -i "s|^    location / { return 404; }|    include /etc/nginx/live-routes/*.conf;\n    location / { return 404; }|" /etc/nginx/conf.d/live-model.conf
-grep -q "include /etc/nginx/live-routes/" /etc/nginx/conf.d/live-model.conf
-mv /etc/nginx/live-routes/cloud.conf.new /etc/nginx/live-routes/cloud.conf
-if ! nginx -t 2>/dev/null; then
-  cp -p /etc/live-gate/live-model.conf.before-cloud /etc/nginx/conf.d/live-model.conf
-  rm -f /etc/nginx/live-routes/cloud.conf /etc/nginx/conf.d/live-cloud-zones.conf
-  nginx -t 2>&1 | tail -2
-  echo "nginx refused the cloud routes; put back as it was" >&2
+chmod 600 /etc/nginx/conf.d/live-model.conf
+if ! grep -q "include /etc/nginx/live-routes/" /etc/nginx/conf.d/live-model.conf || ! nginx -t 2>/dev/null; then
+  nginx -t 2>&1 | tail -3 || true
+  for f in /etc/nginx/conf.d/live-model.conf /etc/nginx/conf.d/live-cloud.conf /etc/nginx/live-routes/cloud.conf \
+           /etc/nginx/njs/live_models.js /etc/live-gate/ollama-cloud.auth /etc/live-gate/nanogpt.auth; do
+    kept="/etc/live-gate/before-cloud/$(echo "$f" | tr / _)"
+    if [ -e "$kept" ]; then cp -p "$kept" "$f"; else rm -f "$f"; fi
+  done
+  nginx -t 2>/dev/null && systemctl reload nginx
+  echo "nginx refused the cloud routes; everything is as it was" >&2
   exit 1
 fi
 systemctl reload nginx

@@ -4,17 +4,26 @@ The live instance (VM 561) is a public machine: its screen is streamed, and its 
 into showing anything it has. So it holds no provider key. Its only way to a model is the gate
 (VM 560), which checks the instance's own key and adds the real one on the way out.
 
-| Route on the gate (`10.99.0.1:8443`)      | Goes to                      | Rate per instance  | Key added by the gate |
-|-------------------------------------------|------------------------------|--------------------|-----------------------|
-| `/api/chat`, `/v1/chat/completions`, …    | AIG (`aig.mycluster.cyou`)   | 2 a second         | none needed           |
-| `/ollama-cloud/v1/chat/completions`       | `ollama.com`                 | 30 a minute        | Ollama Cloud's        |
-| `/nanogpt/api/v1/chat/completions`        | `nano-gpt.com`               | 10 a minute        | NanoGPT's             |
+| Route on the gate (`10.99.0.1:8443`)      | Goes to                      | Rate          | Requests a day | Model allowed                    |
+|-------------------------------------------|------------------------------|---------------|----------------|----------------------------------|
+| `/api/chat`, `/v1/chat/completions`, …    | AIG (`aig.mycluster.cyou`)   | 2 a second    | no cap         | whatever AIG serves              |
+| `/ollama-cloud/v1/chat/completions`       | `ollama.com`                 | 30 a minute   | 1,500          | `deepseek-v4.1-flash`            |
+| `/nanogpt/api/v1/chat/completions`        | `nano-gpt.com`               | 10 a minute   | 100            | `deepseek/deepseek-v4-pro-cheaper` |
 
-The AIG route is `gate-setup.sh`'s. The two cloud routes are this directory's. They verify the
-provider's certificate, which nginx does not do by default.
+The AIG route is `gate-setup.sh`'s. The two cloud routes are this directory's. On those:
+- The request isn't forwarded as sent. `live_models.js` refuses a model that isn't on its list,
+  caps `max_tokens` at 8,192, counts the day's requests, and sends the provider a new body built
+  from known fields only.
+- No headers cross in either direction. The instance can't set a provider option, and it never
+  sees the account's usage headers.
+- When a provider refuses the gate's key, the instance gets a 502 and a one-line reason, never the
+  provider's reply.
+- The provider's certificate is verified. nginx doesn't do that by default.
+- The rates and daily counts are per gate, not per caller address. Otherwise the instance could add
+  addresses of its own on the segment and get a limit for each.
 
-NanoGPT gets the lowest rate on purpose. It is the subscription Pranab's own Mind calls first, and
-a live machine stuck in a loop must not spend that week's tokens.
+NanoGPT gets the lowest numbers on purpose. It is the subscription Pranab's own Mind calls first,
+and a live machine stuck in a loop must not spend that week's tokens.
 
 ## Setting it up
 
@@ -29,8 +38,10 @@ grep -E '^(OLLAMA_CLOUD_KEY|NANOGPT_KEY)=' keys.env | ssh root@node2 'cd /root/l
 ssh root@node2 'cd /root/live-setup/gate-models && sh point-mind.sh'
 ```
 
-Run step 1 again to change a key. Both steps keep the file they change, as `*.before-cloud`,
-beside it.
+Run step 1 again to change a key, and again after any run of `gate-setup.sh`, which rewrites
+the server block without this directory's include. If nginx refuses a run, step 1 puts back
+everything it touched. Step 2 keeps the Mind's previous settings as
+`yantrik-mind.env.before-cloud`. It edits them as the Mind's own account, never as root.
 
 ## What the Mind ends up with
 
