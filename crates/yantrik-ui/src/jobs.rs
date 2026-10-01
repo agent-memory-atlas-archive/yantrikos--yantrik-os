@@ -395,8 +395,9 @@ impl Board {
         Some(job.report(ahead, eta, &basis))
     }
 
-    /// The overview a program on the socket sees: how busy each lane is, and tickets only for its
-    /// own kind of job (the shell's own turns are counted, never named).
+    /// The overview a program on the socket sees: how busy each lane is, with no tickets. A ticket
+    /// is its holder's alone (it is how a job's text is read), and every program on the socket
+    /// sees this same overview.
     pub fn overview_for_outside(&self) -> serde_json::Value {
         self.overview_as(true)
     }
@@ -429,7 +430,7 @@ impl Board {
                 "queued": queued,
                 "active": running.len(),
                 "working_on": running.iter().map(|j| serde_json::json!({
-                    "ticket": if outside_view && !j.outside { serde_json::Value::Null } else { serde_json::json!(j.id) },
+                    "ticket": if outside_view { serde_json::Value::Null } else { serde_json::json!(j.id) },
                     "kind": j.kind,
                     "ran_for_seconds": j.started_at.map(|s| now() - s),
                 })).collect::<Vec<_>>(),
@@ -552,8 +553,10 @@ mod tests {
         assert!(board.wait(&persons.ticket, Duration::ZERO).is_some(), "the shell still sees its own");
 
         board.start(&persons.ticket);
+        board.start(&theirs.ticket);
         let seen = board.overview_for_outside().to_string();
         assert!(!seen.contains(&persons.ticket), "the overview named the person's ticket: {seen}");
+        assert!(!seen.contains(&theirs.ticket), "the overview named another program's ticket: {seen}");
         assert!(board.overview().to_string().contains(&persons.ticket));
 
         // Not the next number: a ticket carries 64 unpredictable bits.

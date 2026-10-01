@@ -78,6 +78,7 @@ impl Tool for SpawnAgentsTool {
             embedding_dim: spawner.embedding_dim,
             companion_config: spawner.config.clone(),
             ceiling: ctx.max_permission,
+            incognito: ctx.incognito,
         };
 
         tracing::info!(

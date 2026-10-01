@@ -25,6 +25,8 @@ pub struct SubAgentConfig {
     /// The grade the turn that started it may reach: a sub-agent never reaches higher than the
     /// turn it works for (a phone's turn reads only, and so do its sub-agents).
     pub ceiling: PermissionLevel,
+    /// The turn it works for keeps nothing (incognito, or asked for from outside): nor does it.
+    pub incognito: bool,
 }
 
 /// Result from a completed sub-agent.
@@ -187,7 +189,7 @@ impl SubAgent {
                 max_permission: max_perm,
                 registry_metadata: None,
                 task_manager: Some(&task_manager),
-                incognito: false,
+                incognito: self.config.incognito,
                 agent_spawner: None, // Sub-agents cannot spawn further sub-agents
             };
 

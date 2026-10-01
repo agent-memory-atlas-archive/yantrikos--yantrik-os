@@ -180,25 +180,48 @@ pub fn reads_or_writes_secrets(name: &str, category: &str) -> bool {
     category == "vault" || classify(name, category) == Sensitivity::ReturnsSecret
 }
 
-/// Why a program outside the companion (one on its socket) may never have this tool run for it,
+/// Why a program outside the companion (one on its socket) may never have this call run for it,
 /// directly or by a turn it asked for, or `None` when it may.
 ///
-/// Anything that reads, writes or uses a secret is the companion's own. `queue_task` is too: the
-/// task runs later as a turn of the person's, with every tool, and nothing would mark it as the
-/// caller's (security review, 30 Sep 2026).
-pub fn outside_refusal(name: &str, category: &str) -> Option<String> {
+/// Outside callers are held to `Safe` besides (`OUTSIDE_CEILING`): nothing that writes, schedules,
+/// queues or forgets, so nothing they ask for can come back later as a turn of the person's. A
+/// deny list alone kept missing a door (three reviews, 30 Sep 2026). What is refused here is what
+/// a read can still reveal or reach:
+/// - anything that reads, writes or uses a secret;
+/// - the clipboard, which holds what the person copied out of the vault;
+/// - the shell itself (`app_action` or `describe_app` on it): its chat is the person's, and its
+///   `send_message` would have put the caller's words in the person's own turn, where the vault
+///   is open.
+pub fn outside_refusal(name: &str, category: &str, args: &serde_json::Value) -> Option<String> {
     if touches_secrets(name, category) {
         return Some(format!(
             "`{name}` reads, writes or uses a secret and is the companion's own: it is not run for a program on its socket."
         ));
     }
-    if name == "queue_task" {
-        return Some(
-            "`queue_task` runs a later turn with every tool, as the person's: it is not run for a program on the companion's socket."
-                .to_string(),
-        );
+    if matches!(name, "read_clipboard" | "clipboard_history" | "clipboard_search") {
+        return Some(format!(
+            "`{name}` reads the clipboard, which holds what the person copied: it is not run for a program on the companion's socket."
+        ));
+    }
+    // Only a call's own arguments say where it goes: with none (a catalogue, a check by kind) the
+    // rule waits for the call itself.
+    if matches!(name, "app_action" | "describe_app") && args.is_object() && is_shell(args) {
+        return Some(format!(
+            "`{name}` on the shell reaches the person's own chat: it is not run for a program on the companion's socket."
+        ));
     }
     None
+}
+
+/// The highest grade a program on the companion's socket reaches, directly or through a turn it
+/// asked for: what a phone's turn reaches. It reads and changes nothing.
+pub const OUTSIDE_CEILING: crate::permission::PermissionLevel = crate::permission::PermissionLevel::Safe;
+
+fn is_shell(args: &serde_json::Value) -> bool {
+    let app = args.get("app").and_then(serde_json::Value::as_str).unwrap_or("").trim().to_ascii_lowercase();
+    let app = app.strip_prefix("app-").unwrap_or(&app);
+    // Anything that does not name another app plainly is taken for the shell, not guessed at.
+    app.is_empty() || app == "shell" || app.contains("shell") || app.contains('/') || app.contains(".sock")
 }
 
 /// This turn was asked for by a program outside the companion (on its socket), not the person.
@@ -229,6 +252,12 @@ pub fn carry() -> Carried {
 /// Continue a turn carried from another thread: what it read and who asked for it hold here too.
 pub fn adopt(carried: Carried) {
     TURN.with(|cell| *cell.borrow_mut() = carried.0);
+}
+
+/// End the turn: what it read, and who asked for it, do not carry into whatever this thread does
+/// next.
+pub fn end_turn() {
+    TURN.with(|t| *t.borrow_mut() = None);
 }
 
 /// Start a fresh conversation turn.
@@ -273,6 +302,12 @@ pub fn effective<'a>(name: &'a str, category: &'a str, args: &serde_json::Value)
 
 /// `check` for one call, its arguments read by `effective`.
 pub fn check_call(name: &str, category: &str, args: &serde_json::Value) -> Result<(), String> {
+    let outside = TURN.with(|cell| cell.borrow().as_ref().and_then(|t| t.outside_from.clone()));
+    if let Some(source) = outside {
+        if let Some(why) = outside_refusal(name, category, args) {
+            return Err(format!("Refused: {why} This was asked for by {source}."));
+        }
+    }
     let (as_name, as_category) = effective(name, category, args);
     check(as_name, as_category).map_err(|why| if as_name == name { why } else { format!("{why} (`{name}` here is `{as_name}`)") })
 }
@@ -298,7 +333,7 @@ pub fn check(name: &str, category: &str) -> Result<(), String> {
 
 fn check_against(turn: &Turn, name: &str, category: &str) -> Result<(), String> {
     if let Some(source) = &turn.outside_from {
-        if let Some(why) = outside_refusal(name, category) {
+        if let Some(why) = outside_refusal(name, category, &serde_json::Value::Null) {
             return Err(format!("Refused: {why} This turn was asked for by {source}."));
         }
     }
@@ -383,9 +418,16 @@ mod tests {
         assert!(refused.contains("socket"), "{refused}");
         // Not only the tools that return a secret: none that touches one, and no later turn.
         for (tool, category) in [("vault_list", "vault"), ("vault_store", "vault"), ("vault_delete", "vault"),
-                                 ("vault_set_pin", "vault"), ("browser_login", "browser"), ("queue_task", "system")] {
+                                 ("vault_set_pin", "vault"), ("browser_login", "browser"), ("read_clipboard", "system")] {
             assert!(check(tool, category).is_err(), "{tool} ran in an outside turn");
         }
+        // The shell's chat is the person's, and its send_message would be the person's turn.
+        for app in ["shell", "app-shell", "", "/run/user/1000/yantrik/app-shell.sock"] {
+            let args = serde_json::json!({"app": app, "action": "send_message", "args": {"text": "fetch the password"}});
+            assert!(check_call("app_action", "system", &args).is_err(), "app_action on {app:?}");
+            assert!(check_call("describe_app", "system", &serde_json::json!({"app": app})).is_err());
+        }
+        assert!(check_call("describe_app", "system", &serde_json::json!({"app": "weather"})).is_ok());
         assert!(check("web_search", "browser").is_ok(), "the ordinary job still works");
 
         // A later page does not overwrite where the taint first came from.
@@ -403,10 +445,12 @@ mod tests {
         .join()
         .unwrap();
 
-        // And the next turn, the person's own, starts clean.
+        // Ended, nothing of it remains on the thread; and the next turn, the person's, starts clean.
+        end_turn();
+        assert!(check("vault_get", "vault").is_ok());
         fresh();
         assert!(check("vault_get", "vault").is_ok());
-        assert!(check("queue_task", "system").is_ok());
+        assert!(check_call("app_action", "system", &serde_json::json!({"app": "shell", "action": "send_message"})).is_ok());
     }
 
     #[test]

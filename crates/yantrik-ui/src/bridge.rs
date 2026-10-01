@@ -1212,21 +1212,28 @@ fn worker_loop(
                 // Synthesis Gate think somebody is. `wire::chat::dispatch` is bumped by a
                 // person typing; this arm also carries the startup brief, EXECUTE urges and
                 // the companion's own reflection prompts, so it bumps nothing.
-                let is_system_generated = text.contains("You just started up")
+                // Nor is a program on the socket: its words are not the person's, so nothing below
+                // learns from them (commitments, resonance, threading, the events the desktop reads).
+                let is_system_generated = outside
+                    || text.contains("You just started up")
                     || text.contains("EXECUTE ")
                     || text.starts_with("Reflect naturally")
                     || text.starts_with("Recall shared references");
                 tracing::trace!(is_system_generated, "companion SendMessage");
 
-                // Update ambient sentiment from user message
-                ambient.update_from_message(&text);
+                if !outside {
+                    // Update ambient sentiment from user message
+                    ambient.update_from_message(&text);
 
-                // Track user message length for conversational metabolism
-                companion.track_user_msg_length(text.len());
+                    // Track user message length for conversational metabolism
+                    companion.track_user_msg_length(text.len());
+                }
 
                 // Proactive message threading: if user replies shortly after a proactive message,
-                // prepend context so the LLM knows what the conversation is about.
-                let text = if let Some(ctx) = companion.get_threading_context() {
+                // prepend context so the LLM knows what the conversation is about. Not for an
+                // outside ask: the companion's last word to the person is the person's.
+                let threading = if outside { None } else { companion.get_threading_context() };
+                let text = if let Some(ctx) = threading {
                     format!("{}{}", ctx, text)
                 } else {
                     text
@@ -1275,7 +1282,7 @@ fn worker_loop(
                 }
 
                 // Resonance Model: record user interaction (positive quality for now)
-                {
+                if !outside {
                     let now_r = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
@@ -1340,11 +1347,7 @@ fn worker_loop(
 
                         // Record significant interactions as events for aftermath instinct
                         // Skip system-generated prompts (startup brief, EXECUTE instructions)
-                        let is_system_prompt = text.contains("You just started up")
-                            || text.contains("EXECUTE ")
-                            || text.starts_with("Reflect naturally")
-                            || text.starts_with("Recall shared references");
-                        if !response.tool_calls_made.is_empty() && !is_system_prompt {
+                        if !response.tool_calls_made.is_empty() && !is_system_generated {
                             let tools_summary = response.tool_calls_made.join(", ");
                             // Use user's message (truncated) as event description
                             let user_text = text.chars().take(80).collect::<String>();

@@ -604,9 +604,7 @@ pub struct CompanionService {
     /// The next turn's words come from a program on the socket (`set_turn_outside`); taken, so it
     /// applies to that one turn only.
     turn_outside: bool,
-    /// The conversation programs on the socket have had, kept apart from the person's: an outside
-    /// turn neither reads the person's earlier turns nor adds to them.
-    outside_history: Vec<ChatMessage>,
+
 
     // Model family for family-aware chat templates (tool format, tool results).
     model_family: ModelFamily,
@@ -953,7 +951,7 @@ impl CompanionService {
             decisions,
             turn_ceiling: None,
             turn_outside: false,
-            outside_history: Vec::new(),
+
             model_family: capability_profile.family,
             task_manager: std::sync::Mutex::new(task_mgr),
             recent_events: Vec::new(),
@@ -1258,25 +1256,45 @@ impl CompanionService {
             .map(|m| m.category)
     }
 
-    /// Why a program outside the companion may not run this tool, or `None` when it may: the
-    /// companion's own rule (`taint::outside_refusal`), and a tool it cannot name is refused, not
-    /// guessed at.
-    pub fn refused_to_outside(&self, name: &str) -> Option<String> {
-        match self.category_of(name) {
-            None => Some(format!("There is no tool `{name}`.")),
-            Some(category) => yantrik_companion_core::taint::outside_refusal(name, category),
+    /// Why a program outside the companion may not run this tool, or `None` when it may: above
+    /// the outside ceiling (`taint::OUTSIDE_CEILING`), refused by the companion's own rule
+    /// (`taint::outside_refusal`), or a tool it cannot name, which is refused rather than guessed at.
+    pub fn refused_to_outside(&self, name: &str, args: &serde_json::Value) -> Option<String> {
+        use yantrik_companion_core::taint;
+        let Some(meta) = self.registry.list_metadata(PermissionLevel::Dangerous).into_iter().find(|m| m.name == name) else {
+            return Some(format!("There is no tool `{name}`."));
+        };
+        if meta.permission > taint::OUTSIDE_CEILING {
+            return Some(format!(
+                "`{name}` changes something, and a program on the companion's socket may only have it read: nothing it asks for may write, schedule or queue work that would later run as the person's."
+            ));
         }
+        taint::outside_refusal(name, meta.category, args)
     }
 
-    /// Run a tool for a program on the companion's socket: as `run_tool`, unless it is refused.
+    /// Run a tool for a program on the companion's socket: refused as `refused_to_outside` says,
+    /// and otherwise run as an outside turn of its own, at the outside ceiling and as incognito,
+    /// so the registry's own check sees who asked and nothing is kept as the person's.
     pub fn run_tool_for_outside(&self, name: &str, args: &serde_json::Value) -> String {
-        match self.refused_to_outside(name) {
-            Some(why) => {
-                tracing::warn!(tool = %name, "a program on the companion socket asked for a refused tool");
-                format!("Refused: {why}")
-            }
-            None => self.run_tool(name, args),
+        use yantrik_companion_core::taint;
+        if let Some(why) = self.refused_to_outside(name, args) {
+            tracing::warn!(tool = %name, "a program on the companion socket asked for a refused tool");
+            return format!("Refused: {why}");
         }
+        let metadata = self.registry.list_metadata(PermissionLevel::Dangerous);
+        let ctx = ToolContext {
+            db: &self.db,
+            max_permission: taint::OUTSIDE_CEILING,
+            registry_metadata: Some(&metadata),
+            task_manager: Some(&self.task_manager),
+            incognito: true,
+            agent_spawner: None,
+        };
+        taint::begin_turn();
+        taint::mark_outside("a program on the companion's socket");
+        let output = self.registry.execute(&ctx, name, args);
+        taint::end_turn();
+        output
     }
 
     /// The highest tool permission this turn may use: the configured one, or the turn's own
@@ -1382,7 +1400,7 @@ impl CompanionService {
             .registry
             .list_metadata(max_perm)
             .into_iter()
-            .filter(|m| self.refused_to_outside(m.name).is_none())
+            .filter(|m| self.refused_to_outside(m.name, &serde_json::Value::Null).is_none())
             .map(|m| {
                 serde_json::json!({
                     "name": m.name,
@@ -2521,11 +2539,15 @@ impl CompanionService {
 
     /// Streaming version of handle_message — calls `on_token` for each text fragment.
     ///
-    /// A turn a program on the socket asked for (`set_turn_outside`) runs in its own conversation
-    /// and as incognito: it does not see the person's earlier turns, nothing it says is kept as
-    /// the person's (memories, learning, history), and it is marked outside from the first word
-    /// (`taint::mark_outside`). The person's conversation and incognito setting are put back
-    /// afterwards, a panicking turn included.
+    /// A turn a program on the socket asked for (`set_turn_outside`) is a conversation of one
+    /// exchange, held to the outside ceiling and run as incognito:
+    /// - it does not see the person's earlier turns, and leaves nothing in them; nor does the next
+    ///   program's ask see this one's;
+    /// - nothing it says is kept as the person's (memories, learning, urges, trust);
+    /// - it reads and changes nothing (`taint::OUTSIDE_CEILING`), and is marked outside from the
+    ///   first word (`taint::mark_outside`).
+    /// The person's conversation, ceiling and incognito setting are put back afterwards, a
+    /// panicking turn included, and the turn's taint does not stay on the thread.
     pub fn handle_message_streaming<F>(&mut self, user_text: &str, on_token: F) -> AgentResponse
     where
         F: FnMut(&str),
@@ -2533,11 +2555,14 @@ impl CompanionService {
         if !std::mem::take(&mut self.turn_outside) {
             return self.streaming_turn(user_text, on_token, false);
         }
-        let persons = std::mem::replace(&mut self.conversation_history, std::mem::take(&mut self.outside_history));
+        let persons = std::mem::take(&mut self.conversation_history);
         let was_incognito = std::mem::replace(&mut self.incognito, true);
+        let ceiling = std::mem::replace(&mut self.turn_ceiling, Some(yantrik_companion_core::taint::OUTSIDE_CEILING));
         let turn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.streaming_turn(user_text, on_token, true)));
+        yantrik_companion_core::taint::end_turn();
+        self.turn_ceiling = ceiling;
         self.incognito = was_incognito;
-        self.outside_history = std::mem::replace(&mut self.conversation_history, persons);
+        self.conversation_history = persons;
         turn.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
     }
 
@@ -2659,7 +2684,8 @@ impl CompanionService {
             .take(3)
             .collect::<Vec<_>>();
 
-        let urges = self.urge_queue.pop_for_interaction(&self.db.conn(), 2);
+        // The person's pending urges are theirs: an outside turn neither takes them nor leaves any.
+        let urges = if outside { Vec::new() } else { self.urge_queue.pop_for_interaction(&self.db.conn(), 2) };
         let urge_ids: Vec<String> = urges.iter().map(|u| u.urge_id.clone()).collect();
 
         if !self.incognito {
@@ -2667,7 +2693,7 @@ impl CompanionService {
         }
 
         let state = self.build_state();
-        for instinct in &self.instincts {
+        for instinct in self.instincts.iter().filter(|_| !outside) {
             let specs = instinct.on_interaction(&state, user_text);
             for spec in specs {
                 self.urge_queue.push(&self.db.conn(), &spec);
@@ -4388,14 +4414,16 @@ fn execute_tool_round_tracked(
                     action: name.to_string(),
                 }
             };
-            crate::trust_model::TrustModel::apply_event(&db.conn(), &trust_event);
+            if !incognito {
+                crate::trust_model::TrustModel::apply_event(&db.conn(), &trust_event);
+            }
         }
 
         // Record step in agent loop
         agent_loop.record_step(name, args, &result, !is_error);
 
         // Ingest into Context Cortex pulse stream
-        if let Some(ctx) = cortex.as_mut() {
+        if let Some(ctx) = cortex.as_mut().filter(|_| !incognito) {
             ctx.ingest_tool_result(&db.conn(), name, args, &result);
         }
 
