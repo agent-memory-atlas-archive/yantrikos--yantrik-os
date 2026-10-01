@@ -108,7 +108,7 @@ if os.getuid() == 0 and pw.pw_uid != 0:
     os.setuid(pw.pw_uid)
 keep = {}
 try:
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
 except FileNotFoundError:
     fd = None
 except OSError as e:
@@ -141,7 +141,7 @@ print(" ".join(sorted(keep)))
 def push(keys, node, vm, path, owner):
     code = "import base64;exec(base64.b64decode(" + repr(base64.b64encode(MERGE.encode()).decode()) + "))"
     remote = " ".join(["qm", "guest", "exec", vm, "--timeout", "60", "--pass-stdin", "1", "--",
-                       "python3", "-c", shlex.quote(code), shlex.quote(path), shlex.quote(owner)])
+                       "python3", "-I", "-c", shlex.quote(code), shlex.quote(path), shlex.quote(owner)])
     ssh = ["ssh", "-o", "BatchMode=yes"]
     deploy_key = os.path.expanduser("~/.ssh/id_deploy")
     if os.path.exists(deploy_key):

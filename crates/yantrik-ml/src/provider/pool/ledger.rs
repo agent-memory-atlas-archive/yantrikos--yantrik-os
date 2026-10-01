@@ -69,25 +69,24 @@ impl Ledger {
         out
     }
 
-    /// Write it out: to a new file beside it (created, never followed, readable by its owner
-    /// only, and synced), then renamed over it.
+    /// Write it out: to a file beside it (never followed if it is a link, readable by its owner
+    /// only), then renamed over it. Not synced: it is a count of use, written on every call with
+    /// the pool's lock held, and losing the last few on a power cut costs nothing.
     pub fn save(&self) -> std::io::Result<()> {
         use std::io::Write;
         let Some(path) = &self.path else { return Ok(()) };
-        let tmp = path.with_extension(format!("json.{}.{:x}.tmp", std::process::id(), rand::random::<u64>()));
+        let tmp = path.with_extension("json.tmp");
         let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
+        options.write(true).create(true).truncate(true);
         #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-        let mut file = options.open(&tmp)?;
-        let written = file
-            .write_all(&serde_json::to_vec(self).map_err(std::io::Error::other)?)
-            .and_then(|_| file.sync_all())
-            .and_then(|_| std::fs::rename(&tmp, path));
-        if written.is_err() {
-            let _ = std::fs::remove_file(&tmp);
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
         }
-        written
+        let mut file = options.open(&tmp)?;
+        file.write_all(&serde_json::to_vec(self).map_err(std::io::Error::other)?)?;
+        drop(file);
+        std::fs::rename(&tmp, path)
     }
 }
 

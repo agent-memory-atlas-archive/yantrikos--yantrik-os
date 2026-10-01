@@ -47,7 +47,7 @@ impl Window {
                 while self.events.front().is_some_and(|(t, _)| now - t >= secs as i64) {
                     self.events.pop_front();
                 }
-                self.events.iter().map(|(_, n)| n).sum()
+                self.events.iter().fold(0u64, |sum, (_, n)| sum.saturating_add(*n))
             }
             _ => {
                 let today = day_of(reset, now);
@@ -64,7 +64,7 @@ impl Window {
         self.used(reset, now);
         match reset {
             Reset::Rolling(_) => self.events.push_back((now, n)),
-            _ => self.used += n,
+            _ => self.used = self.used.saturating_add(n),
         }
     }
 

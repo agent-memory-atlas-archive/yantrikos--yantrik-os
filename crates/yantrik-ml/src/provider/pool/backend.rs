@@ -24,7 +24,7 @@ pub struct PoolBackend {
     keys: Keys,
     /// What every call through this backend needs (its task, whether it is private, code…).
     need: Need,
-    /// A provider reached at another address than its own (a mirror, or a test's stand-in).
+    /// A provider reached at another address than its own: a test's stand-in, never in a build.
     addresses: std::collections::HashMap<String, String>,
 }
 
@@ -92,7 +92,8 @@ impl PoolBackend {
             let (result, started) = call(&self.backend_for(&pick, &sink));
             let meta = sink.lock().unwrap_or_else(|e| e.into_inner()).take();
             let status = meta.as_ref().map_or(if result.is_ok() { 200 } else { 0 }, |m| m.status);
-            let tokens = result.as_ref().map_or(0, |r| (r.prompt_tokens + r.completion_tokens) as u64);
+            // A provider reports these: saturating, so a hostile `usage` cannot overflow the count.
+            let tokens = result.as_ref().map_or(0, |r| (r.prompt_tokens as u64).saturating_add(r.completion_tokens as u64));
             let observed = meta.as_ref().map(|m| observe(|n| m.header(n))).unwrap_or_default();
             let outcome = Outcome { status, observed, tokens };
             self.pool.lock().unwrap_or_else(|e| e.into_inner()).record(pick, &need, Self::now(), &outcome);

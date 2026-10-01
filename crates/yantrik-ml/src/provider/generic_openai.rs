@@ -101,6 +101,24 @@ pub struct GenericOpenAIBackend {
     strict: bool,
 }
 
+/// The host an error names: never a path (Cloudflare's carries the account id), a query (a key, at
+/// some providers) or `user:pass@`.
+fn error_host(url: &str) -> String {
+    let authority = url.split("://").nth(1).and_then(|r| r.split(['/', '?', '#']).next()).unwrap_or("");
+    let host = authority.rsplit('@').next().unwrap_or("");
+    if host.is_empty() { "the provider".to_string() } else { host.to_string() }
+}
+
+/// A provider's error body, short enough to say what went wrong: the key masked first, then cut,
+/// so a key echoed across the cut cannot leave its head behind.
+fn error_excerpt(body: &str, key: Option<&str>) -> String {
+    let masked = match key.filter(|k| k.len() >= 8) {
+        Some(k) => body.replace(k, "<key>"),
+        None => body.to_string(),
+    };
+    masked.chars().take(200).collect()
+}
+
 impl GenericOpenAIBackend {
     /// Leave each answer's status and rate-limit headers in `sink` (the free pool reads them).
     pub fn with_meta_sink(mut self, sink: MetaSink) -> Self {
@@ -494,7 +512,7 @@ impl GenericOpenAIBackend {
         }
 
         // Errors name the host, not the address: a path can carry an account id, a query a key.
-        let host = url.split("://").nth(1).and_then(|r| r.split(['/', '?']).next()).unwrap_or("the provider").to_string();
+        let host = error_host(&url);
         let resp = req
             .send(body_str.as_bytes())
             .with_context(|| format!("OpenAI-compatible API request to {host} failed"))?;
@@ -516,11 +534,7 @@ impl GenericOpenAIBackend {
             let text = body.read_to_string().unwrap_or_default();
             // A provider's error can echo what it was sent: the key is masked, and the rest is cut
             // short enough to say what went wrong without carrying the conversation into a log.
-            let mut short: String = text.chars().take(200).collect();
-            if let Some(key) = self.api_key.as_deref().filter(|k| k.len() >= 8) {
-                short = short.replace(key, "<key>");
-            }
-            anyhow::bail!("HTTP {status} from {host}: {short}");
+            anyhow::bail!("HTTP {status} from {host}: {}", error_excerpt(&text, self.api_key.as_deref()));
         }
 
         Ok(resp.into_body())
@@ -824,5 +838,24 @@ mod tests {
             head.lines().any(|l| l.eq_ignore_ascii_case("authorization: Bearer gate-key")),
             "the gated request carries its key:\n{head}"
         );
+    }
+}
+
+#[cfg(test)]
+mod error_text_tests {
+    use super::{error_excerpt, error_host};
+
+    #[test]
+    fn an_error_names_the_host_and_never_the_key() {
+        assert_eq!(error_host("https://api.cloudflare.com/client/v4/accounts/0123abcd/ai/v1/chat/completions"), "api.cloudflare.com");
+        assert_eq!(error_host("https://user:secret@llm.example.com:8443/v1/chat?key=abc"), "llm.example.com:8443");
+        assert_eq!(error_host("not a url"), "the provider");
+        let key = "gsk_0123456789abcdefghijklmnopqrstuvwxyz";
+        // Echoed so that it straddles the 200th character: masked before the cut, none of it stays.
+        let body = format!("{}{key}{}", "x".repeat(190), "y".repeat(50));
+        let excerpt = error_excerpt(&body, Some(key));
+        assert!(!excerpt.contains("gsk_0123"), "{excerpt}");
+        assert!(excerpt.contains("<key>"));
+        assert!(excerpt.chars().count() <= 200);
     }
 }
