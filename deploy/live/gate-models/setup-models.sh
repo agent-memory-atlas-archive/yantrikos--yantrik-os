@@ -20,8 +20,17 @@ ollama=$(value OLLAMA_CLOUD_KEY)
 nano=$(value NANOGPT_KEY)
 # The keys are written into nginx's configuration, so anything outside that character set (a
 # quote, a semicolon, a newline) is refused here rather than allowed to become a directive.
-[ -n "$ollama" ] && [ -n "$nano" ] \
-    || { echo "stdin needs OLLAMA_CLOUD_KEY= and NANOGPT_KEY= lines, each 20-200 of [A-Za-z0-9._-]" >&2; exit 1; }
+[ -n "$ollama" ] || [ -n "$nano" ] \
+    || { echo "stdin needs OLLAMA_CLOUD_KEY= and/or NANOGPT_KEY= lines, each 20-200 of [A-Za-z0-9._-]" >&2; exit 1; }
+# A provider left out keeps the key the gate already has (pick-keys.py sends only what it finds),
+# but one the gate has never had cannot be left out.
+keep() {
+  guest "test -s /etc/live-gate/$1.auth" < /dev/null \
+    || { echo "no $1 key on stdin, and the gate has none to keep" >&2; exit 1; }
+  echo "$1: keeping the key the gate has"
+}
+[ -n "$ollama" ] || keep ollama-cloud
+[ -n "$nano" ] || keep nanogpt
 
 # Everything this run may change, kept first, so a refused configuration goes back to exactly
 # what was there, the previous working routes and keys included.
@@ -45,8 +54,8 @@ echo kept' < /dev/null
 # One root-only file per provider, holding the one header nginx adds for it. printf is the
 # shell's own, so a key is never on a command line.
 auth() { printf 'proxy_set_header Authorization "Bearer %s";\n' "$1"; }
-auth "$ollama" | guest 'set -e; umask 077; cat > /etc/live-gate/ollama-cloud.auth.new; mv /etc/live-gate/ollama-cloud.auth.new /etc/live-gate/ollama-cloud.auth'
-auth "$nano" | guest 'set -e; umask 077; cat > /etc/live-gate/nanogpt.auth.new; mv /etc/live-gate/nanogpt.auth.new /etc/live-gate/nanogpt.auth'
+[ -z "$ollama" ] || auth "$ollama" | guest 'set -e; umask 077; cat > /etc/live-gate/ollama-cloud.auth.new; mv /etc/live-gate/ollama-cloud.auth.new /etc/live-gate/ollama-cloud.auth'
+[ -z "$nano" ] || auth "$nano" | guest 'set -e; umask 077; cat > /etc/live-gate/nanogpt.auth.new; mv /etc/live-gate/nanogpt.auth.new /etc/live-gate/nanogpt.auth'
 guest 'set -e; umask 077; cat > /etc/nginx/njs/live_models.js.new; mv /etc/nginx/njs/live_models.js.new /etc/nginx/njs/live_models.js' < live_models.js
 
 # The routes, with the instance key filled in on the gate itself (by awk reading the key file,
