@@ -14,7 +14,8 @@ cd "$(dirname "$0")"
 VM=${VM:-560}
 . ../guest.sh
 
-keys=$(cat)
+# Carriage returns dropped: a key file or pipe from Windows ends its lines in \r\n.
+keys=$(tr -d '\r')
 value() { printf '%s\n' "$keys" | sed -n "s/^$1=\([A-Za-z0-9._-]\{20,200\}\)\$/\1/p" | head -n 1; }
 ollama=$(value OLLAMA_CLOUD_KEY)
 nano=$(value NANOGPT_KEY)

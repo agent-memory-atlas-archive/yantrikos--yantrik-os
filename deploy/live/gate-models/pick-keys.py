@@ -46,7 +46,9 @@ def main(argv):
             print(f"{out}: not in the file; the gate keeps the one it has", file=sys.stderr)
     if not lines:
         sys.exit("neither provider's key is in the file")
-    sys.stdout.write("\n".join(lines) + "\n")
+    # Bytes, not text: on Windows a text stdout turns each "\n" into "\r\n", and a key ending in
+    # "\r" is refused by setup-models.sh's format check.
+    sys.stdout.buffer.write(("\n".join(lines) + "\n").encode())
 
 
 if __name__ == "__main__":
