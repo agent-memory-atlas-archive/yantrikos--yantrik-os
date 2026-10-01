@@ -951,7 +951,9 @@ export component SettingsScreen inherits Rectangle {
                                                      : Theme.color-danger-dim;
                                 }
                                 Text {
-                                    text: "ACTIVE AI";
+                                    // What this card is about: the desktop's own AI. The minds that
+                                    // answer in the chat say what they run on in Harnesses.
+                                    text: "BUILT-IN COMPANION";
                                     color: Theme.text-secondary;
                                     font-size: Theme.fs-caption;
                                     font-weight: 600;
@@ -3199,7 +3201,7 @@ SettingRow{label:"About this device";description:"Detailed information about thi
                                 horizontal-stretch: 1;
                                 Text{text:"Accounts";color:Theme.text-primary;font-size:28px;font-weight:600;}
                                 Text{
-                                    text:"Subscriptions you sign in to with each vendor's own program: Claude Code, Codex, Gemini CLI. The vendor's program keeps the sign-in; this desktop never sees it. Harnesses that run those programs answer with the account chosen here. The same accounts are in the Minds panel on the status bar.";
+                                    text:"Subscriptions you sign in to with each vendor's own program: Claude Code, Codex, Gemini CLI. The vendor's program keeps the sign-in; this desktop never sees it. The account chosen here is the one that program starts with. The minds that answer in the chat do not run on these: they run on AI providers (keys and endpoints), set in each mind's own settings or under AI & Intelligence.";
                                     color:Theme.text-secondary;font-size:13px;wrap:word-wrap;
                                 }
                             }
@@ -3218,6 +3220,7 @@ SettingRow{label:"About this device";description:"Detailed information about thi
                                 x: 16px; y: 16px; width: parent.width - 32px;
                                 groups: root.account-groups;
                                 choices: root.account-choices;
+                                detailed: true;
                                 status: root.account-status;
                                 adding: root.accounts-adding;
                                 divided: root.accounts-adding;
@@ -3251,7 +3254,7 @@ SettingRow{label:"About this device";description:"Detailed information about thi
                                 : "API keys and endpoints (OpenAI, NVIDIA NIM, Nous, a local Ollama and more), used by the desktop and handed to harnesses. They are separate from these sign-ins.";
                             value:"Configure";activated=>{root.active-category=1;}
                         }
-                        SettingRow{label:"Harnesses";description:"The agent programs that use these accounts and providers, and which mind answers.";value:"Open";activated=>{root.active-category=8;}}
+                        SettingRow{label:"Harnesses";description:"The minds that can answer in the chat, which one does, and what each runs on.";value:"Open";activated=>{root.active-category=8;}}
 
                         Rectangle{height:24px;}
                     }

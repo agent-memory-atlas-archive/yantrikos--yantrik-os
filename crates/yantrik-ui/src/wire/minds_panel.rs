@@ -225,6 +225,8 @@ fn slint_groups(groups: &[Group]) -> Vec<ProviderGroup> {
                         label: r.label.as_str().into(),
                         plan: r.plan.as_str().into(),
                         state: r.state.word().into(),
+                        program: g.vendor.program.into(),
+                        used_by: r.used_by.as_str().into(),
                         note: r.note.as_str().into(),
                         meters: ModelRc::new(VecModel::from(
                             r.meters
@@ -313,7 +315,7 @@ mod tests {
     use super::*;
 
     fn row(state: accounts::State, meters: Vec<accounts::Meter>) -> accounts::Row {
-        accounts::Row { id: "claude:primary".into(), label: "Main".into(), plan: String::new(), state, note: "a note".into(), meters, tokens_today: 0 }
+        accounts::Row { id: "claude:primary".into(), label: "Main".into(), plan: String::new(), state, note: "a note".into(), meters, tokens_today: 0, used_by: String::new() }
     }
 
     #[test]

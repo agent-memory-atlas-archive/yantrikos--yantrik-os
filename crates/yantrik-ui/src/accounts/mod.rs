@@ -104,6 +104,8 @@ pub struct Row {
     pub note: String,
     pub meters: Vec<Meter>,
     pub tokens_today: u64,
+    /// What uses this account, for the Accounts page: true by construction, never a guess.
+    pub used_by: String,
 }
 
 /// One vendor and its accounts.
@@ -223,6 +225,7 @@ pub fn rows(f: &Facts) -> Vec<Group> {
                 note,
                 meters,
                 tokens_today: seen.tokens_today,
+                used_by: used_by(vendor, state),
             });
         }
         if !rows_here.is_empty() {
@@ -230,6 +233,18 @@ pub fn rows(f: &Facts) -> Vec<Group> {
         }
     }
     out
+}
+
+/// What uses an account. A vendor's sign-in is for the vendor's own program, and no mind on this
+/// desktop runs on one yet (none of the shipped harnesses takes a sign-in), so that is said in so
+/// many words: an account must never look like it is what the desktop's minds run on. When a
+/// harness that runs on a sign-in exists, this names it instead.
+fn used_by(vendor: &Vendor, state: State) -> String {
+    match state {
+        State::Active => format!("Used by {} in a terminal. No mind here runs on it.", vendor.program),
+        State::Ready => format!("{} uses it once chosen. No mind here runs on it.", vendor.program),
+        State::SignIn | State::Missing => String::new(),
+    }
 }
 
 /// "Weekly is used up" when a window is full.
@@ -428,6 +443,30 @@ mod tests {
         let keys: Vec<_> = c.iter().filter(|c| c.by_key()).map(|c| c.vendor.id).collect();
         assert_eq!(keys, ["qwen"], "xAI's key is already the companion's");
         assert!(c.iter().any(|c| c.vendor.id == "codex" && c.what == "Install" && !c.in_panel()));
+    }
+
+    #[test]
+    fn a_signed_in_account_says_what_uses_it_and_that_no_mind_does() {
+        let g = rows(&facts());
+        let claude = &g[0].rows;
+        assert_eq!(claude[1].used_by, "Used by Claude Code in a terminal. No mind here runs on it.");
+        assert_eq!(claude[0].used_by, "Claude Code uses it once chosen. No mind here runs on it.");
+        assert_eq!(g[2].rows[0].used_by, "", "gemini is not signed in: nothing uses it");
+    }
+
+    /// "ACTIVE" on an account read as "the desktop runs on this" (VM 520: Claude Max showed ACTIVE
+    /// while no mind used it). It may not come back on any surface that draws accounts or the AI.
+    #[test]
+    fn no_account_or_ai_surface_says_active() {
+        for (name, text) in [
+            ("minds_panel.slint", include_str!("../../../yantrik-ui-slint/ui/components/minds_panel.slint")),
+            ("settings.slint", include_str!("../../../yantrik-ui-slint/ui/settings.slint")),
+        ] {
+            for (n, line) in text.lines().enumerate() {
+                let code = line.split("//").next().unwrap_or("");
+                assert!(!code.contains("\"ACTIVE") && !code.contains("\"Active"), "{name}:{}: {line}", n + 1);
+            }
+        }
     }
 
     #[test]

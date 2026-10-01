@@ -16,6 +16,8 @@ pub(crate) fn account(id: &str, label: &str, plan: &str, state: &str, note: &str
         state: state.into(),
         note: note.into(),
         meters: ModelRc::new(VecModel::from(meters)),
+        program: if id.starts_with("claude") { "Claude Code".into() } else { "".into() },
+        used_by: if state == "active" && id.starts_with("claude") { "Used by Claude Code in a terminal. No mind here runs on it.".into() } else { "".into() },
     }
 }
 

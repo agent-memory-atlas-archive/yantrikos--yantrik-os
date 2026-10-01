@@ -29,7 +29,9 @@ export struct AccountRow {
     id: string,         // "claude:account-2", for the callbacks
     label: string,      // "Main", "Account 2"
     plan: string,       // "Max 20x", "Pro"; empty when the vendor does not say
-    state: string,      // "active" | "ready" | "signin" | "missing"
+    state: string,      // "active" (chosen) | "ready" | "signin" | "missing"; drawn as Chosen / Choose / Sign in / Install
+    program: string,    // "Claude Code": the vendor's program, which a sign-in is for
+    used-by: string,    // "Used by Claude Code in a terminal. No mind here runs on it."
     note: string,       // one line under it when there is something to say
     meters: [AccountMeter],
 }
@@ -118,10 +120,12 @@ component MeterRow inherits Rectangle {
 
 component AccountBlock inherits Rectangle {
     in property <AccountRow> account;
+    in property <bool> detailed: false;     // the Accounts page: "Signed in", whose it is, what uses it
     callback use-account(string);
     callback sign-in(string);
 
-    height: 24px + root.account.meters.length * 22px + (root.account.note != "" ? 18px : 0px);
+    height: 24px + root.account.meters.length * 22px + (root.account.note != "" ? 18px : 0px)
+        + (root.detailed && root.account.used-by != "" ? 18px : 0px);
     VerticalLayout {
         spacing: 2px;
         HorizontalLayout {
@@ -135,7 +139,8 @@ component AccountBlock inherits Rectangle {
                 vertical-alignment: center;
             }
             Text {
-                text: root.account.plan != "" ? "· " + root.account.plan : "";
+                text: (root.account.plan != "" ? "· " + root.account.plan : "")
+                    + (root.detailed && (root.account.state == "active" || root.account.state == "ready") ? " · Signed in" : "");
                 color: Theme.text-dim;
                 font-size: Theme.fs-caption;
                 vertical-alignment: center;
@@ -160,19 +165,29 @@ component AccountBlock inherits Rectangle {
                 action-text := Text {
                     x: 6px;
                     height: parent.height;
-                    text: root.account.state == "active" ? "ACTIVE"
+                    // "Chosen": the account its program starts with. Never "active": that read as
+                    // "the desktop runs on this", which a sign-in for a vendor's program is not.
+                    text: root.account.state == "active" ? (root.detailed && root.account.program != "" ? "Chosen for " + root.account.program : "Chosen")
                         : root.account.state == "signin" ? "Sign in"
-                        : root.account.state == "missing" ? "Install" : "Use";
+                        : root.account.state == "missing" ? "Install" : "Choose";
                     color: root.account.state == "active" ? Theme.accent
                         : root.account.state == "signin" ? Theme.color-danger
                         : Theme.text-secondary;
                     font-size: Theme.fs-caption;
-                    font-weight: root.account.state == "active" ? 700 : 500;
+                    font-weight: root.account.state == "active" ? 600 : 500;
                     vertical-alignment: center;
                 }
             }
         }
         for m in root.account.meters : MeterRow { meter: m; }
+        if root.detailed && root.account.used-by != "" : Text {
+            height: 16px;
+            text: root.account.used-by;
+            color: Theme.text-secondary;
+            font-size: Theme.fs-caption;
+            vertical-alignment: center;
+            overflow: elide;
+        }
         if root.account.note != "" : Text {
             height: 16px;
             text: root.account.note;
@@ -214,6 +229,7 @@ export component AccountList inherits VerticalLayout {
     in property <bool> adding: false;       // the "+" choices are showing
     in property <bool> divided: true;       // a rule between the header above and the accounts
     in property <bool> say-empty: true;     // say so when there are no accounts
+    in property <bool> detailed: false;     // the Accounts page's rows, with what uses each account
     callback use-account(string);           // an account id
     callback sign-in(string);               // an account id: signs in, or installs its program
     callback add(string);                   // a vendor id, from the choices
@@ -280,6 +296,7 @@ export component AccountList inherits VerticalLayout {
         }
         for a in g.accounts : AccountBlock {
             account: a;
+            detailed: root.detailed;
             use-account(id) => { root.use-account(id); }
             sign-in(id) => { root.sign-in(id); }
         }
@@ -349,7 +366,7 @@ export component MindsPanel inherits Rectangle {
                     font-size: Theme.fs-headline;
                     font-weight: 600;
                 }
-                // Which mind answers, so an ACTIVE account below is never read as "the one
+                // Which mind answers, so a chosen account below is never read as "the one
                 // talking"; and today's tokens.
                 if root.answering != "" : Text {
                     text: "Answering: " + root.answering;
