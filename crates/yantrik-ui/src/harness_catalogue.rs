@@ -155,7 +155,7 @@ impl Need {
 
     fn met(&self, machine: &Machine, dir: &Path) -> bool {
         if !self.binary.is_empty() {
-            return machine.path_dirs.iter().any(|d| is_program(&d.join(&self.binary)));
+            return crate::programs::found(&machine.path_dirs, &self.binary);
         }
         let path = self.resolve(machine, dir);
         !path.as_os_str().is_empty() && path.exists()
@@ -722,22 +722,10 @@ pub fn user_bin_dir(home: &Path) -> PathBuf {
     home.join(".local/bin")
 }
 
-/// `PATH`, split, then [`user_bin_dir`] if PATH did not already name it. Empty entries mean the
-/// working directory, and a harness found "on PATH" because it happened to sit in whatever
-/// directory the shell was started from is not found.
+/// Where to look for a harness's program: the shell's one answer ([`crate::programs`]), which the
+/// accounts use too, so a program is installed for both or for neither.
 pub fn path_dirs() -> Vec<PathBuf> {
-    with_user_bin(&std::env::var("PATH").unwrap_or_default(), &home())
-}
-
-fn with_user_bin(path: &str, home: &Path) -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> = path.split(':').filter(|p| !p.is_empty()).map(PathBuf::from).collect();
-    if !home.as_os_str().is_empty() {
-        let user_bin = user_bin_dir(home);
-        if !dirs.contains(&user_bin) {
-            dirs.push(user_bin);
-        }
-    }
-    dirs
+    crate::programs::search_dirs(&std::env::var("PATH").unwrap_or_default(), &home())
 }
 
 /// [`user_bin_dir`] put first on PATH, as shell, for the front of every install or start job —
@@ -751,18 +739,6 @@ pub fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-#[cfg(unix)]
-fn is_program(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path)
-        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
-}
-
-#[cfg(not(unix))]
-fn is_program(path: &Path) -> bool {
-    path.is_file()
-}
 
 /// Ask systemd about every unit the manifests name, in one call.
 ///
@@ -1429,10 +1405,10 @@ setup:
     #[test]
     fn the_per_user_bin_is_looked_in_even_when_path_does_not_name_it() {
         let home = Path::new("/home/ada");
-        let dirs = with_user_bin("/usr/bin:/bin", home);
-        assert_eq!(dirs.last(), Some(&home.join(".local/bin")), "a session PATH lacks it");
-        let named = with_user_bin("/home/ada/.local/bin:/usr/bin", home);
-        assert_eq!(named.iter().filter(|d| **d == home.join(".local/bin")).count(), 1);
-        assert_eq!(with_user_bin(":/usr/bin", Path::new("")), vec![PathBuf::from("/usr/bin")]);
+        let dirs = crate::programs::search_dirs("/usr/bin:/bin", home);
+        assert_eq!(dirs.last(), Some(&user_bin_dir(home)), "a session PATH lacks it");
+        let named = crate::programs::search_dirs("/home/ada/.local/bin:/usr/bin", home);
+        assert_eq!(named.iter().filter(|d| **d == user_bin_dir(home)).count(), 1);
+        assert_eq!(crate::programs::search_dirs(":/usr/bin", Path::new("")), vec![PathBuf::from("/usr/bin")]);
     }
 }

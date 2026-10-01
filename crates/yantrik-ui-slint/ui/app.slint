@@ -213,7 +213,12 @@ export component App inherits Window {
     in-out property <bool> minds-panel-open: false;
     in-out property <bool> minds-panel-adding: false;
     in property <[ProviderGroup]> minds-groups: [];
-    in property <[AddChoice]> minds-choices: [];
+    in property <[AddChoice]> minds-choices: [];            // the page's: every program choice
+    in property <[ProviderGroup]> minds-panel-groups: [];   // the panel's: the first four vendors
+    in property <int> minds-panel-more: 0;                  // vendors past those four
+    in property <[AddChoice]> minds-panel-choices: [];      // the panel's "+": sign in, add account
+    in property <[AddChoice]> minds-key-choices: [];        // coding plans by key, for the page
+    in property <string> minds-keys-line: "";
     in property <string> minds-today: "";
     in property <string> minds-status: "";
     callback minds-panel-opened();
@@ -1851,6 +1856,8 @@ export component App inherits Window {
                 choose-accent(name)=>{root.choose-accent(name);}
                 account-groups: root.minds-groups;
                 account-choices: root.minds-choices;
+                account-key-choices: root.minds-key-choices;
+                account-keys-line: root.minds-keys-line;
                 account-status: root.minds-status;
                 accounts-shown => { root.minds-panel-opened(); }
                 account-use(id) => { root.minds-use-account(id); }
@@ -3174,8 +3181,10 @@ export component App inherits Window {
             MindsPanel {
                 x: parent.width - 372px;
                 y: Theme.status-bar-height + Theme.sp-1;
-                groups: root.minds-groups;
-                choices: root.minds-choices;
+                groups: root.minds-panel-groups;
+                more: root.minds-panel-more;
+                answering: root.active-harness-name;
+                choices: root.minds-panel-choices;
                 today: root.minds-today;
                 status: root.minds-status;
                 adding <=> root.minds-panel-adding;
