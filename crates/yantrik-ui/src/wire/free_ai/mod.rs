@@ -136,7 +136,7 @@ impl Wiring {
         let Some(s) = yantrik_ml::provider::pool::signup::signup(id) else { return };
         // Where the sign-up page is the key page too (Google's), there is nothing between them.
         let same = s.values.first().is_some_and(|v| v.url == s.signup_url);
-        if let Err(e) = crate::open_url::open(s.signup_url) {
+        if let Err(e) = crate::open_url::open_apart(s.signup_url) {
             tracing::warn!(provider = id, error = %e, "the sign-up page could not be opened");
         }
         let stage = if same { "waiting" } else { "sign-up-opened" };
@@ -149,7 +149,7 @@ impl Wiring {
         let pending = lock(&SESSION).pending_account.is_some();
         let next = s.values.iter().find(|v| !kept.contains_key(v.id) && !(v.id == "cloudflare_account" && pending)).or(s.values.last());
         if let Some(v) = next {
-            if let Err(e) = crate::open_url::open(v.url) {
+            if let Err(e) = crate::open_url::open_apart(v.url) {
                 tracing::warn!(provider = id, error = %e, "the key page could not be opened");
             }
         }
