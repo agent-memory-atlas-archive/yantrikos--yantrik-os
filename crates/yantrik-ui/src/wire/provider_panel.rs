@@ -179,7 +179,9 @@ pub(crate) fn key_follows(saved_url: &str, new_url: &str) -> bool {
 
 /// Write the form into the store: over the entry being edited (keeping its
 /// saved key when the key field was left empty and the host is the same one),
-/// or as a new entry, primary when it is the first. Returns the entry as saved.
+/// or as a new entry. A new entry is never the companion's by being the first one
+/// saved (#524): adding a provider is adding an option, and "Use for the companion"
+/// is the person's own choice. Returns the entry as saved.
 fn apply_form(store: &mut ProviderStore, editing: &str, form: Form) -> ProviderStoreEntry {
     if let Some(e) = store.entries.iter_mut().find(|e| !editing.is_empty() && e.id == editing) {
         let follows = key_follows(&e.base_url, &form.base_url);
@@ -202,7 +204,7 @@ fn apply_form(store: &mut ProviderStore, editing: &str, form: Form) -> ProviderS
         base_url: form.base_url,
         api_key: form.api_key,
         auth_type: form.auth_type,
-        is_primary: store.entries.is_empty(),
+        is_primary: false,
         is_fallback: false,
         model: form.model,
     };
@@ -393,10 +395,10 @@ mod tests {
     }
 
     #[test]
-    fn a_new_provider_is_saved_with_its_model_and_the_first_is_primary() {
+    fn a_new_provider_is_saved_with_its_model_and_not_made_the_companions() {
         let mut store = ProviderStore::default();
         let saved = apply_form(&mut store, "", form("openai/gpt-4o", Some("sk-or-1")));
-        assert!(saved.is_primary);
+        assert!(!saved.is_primary, "the first provider saved is not the companion's until chosen (#524)");
         assert_eq!(saved.model, "openai/gpt-4o");
         let second = apply_form(&mut store, "", form("x", None));
         assert!(!second.is_primary);
@@ -411,6 +413,6 @@ mod tests {
         assert_eq!(store.entries.len(), 1, "an edit is not a second provider");
         assert_eq!(edited.model, "anthropic/claude-sonnet-5-5");
         assert_eq!(edited.api_key.as_deref(), Some("sk-or-1"));
-        assert!(edited.is_primary);
+        assert!(!edited.is_primary, "an edit does not choose it for the companion either");
     }
 }

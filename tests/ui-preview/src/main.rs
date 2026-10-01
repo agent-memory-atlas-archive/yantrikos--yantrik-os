@@ -63,6 +63,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.iter().any(|a| a == "verify-handoff-card") { return handoff_card_tests::run(&window, output); }
     if args.iter().any(|a| a == "verify-accounts-page") { return accounts_page_tests::run(&window, output); }
     if args.iter().any(|a| a == "verify-ai-map") { return ai_map_tests::run(&window, output); }
+    if args.iter().any(|a| a == "verify-providers-in-use") { return ai_map_tests::run_providers(&window, output); }
     if args.iter().any(|a| a == "verify-provider-panel") { return provider_panel_tests::run(&window, output); }
     if args.iter().any(|a| a == "verify-context-rail") { return rail_tests::run(&window, output); }
     if args.iter().any(|a| a == "verify-calendar") { return calendar_tests::run(&window, output); }

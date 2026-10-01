@@ -114,6 +114,19 @@ export struct RunsOnRow {
     source: string,     // "its own settings · as it reported" | "set in /opt/yantrik/config.yaml"
 }
 
+// A provider the minds run on that is not saved here (runs_on::in_use_not_saved): listed so the
+// Providers section never says "none" while minds run on some. Add as provider fills the form;
+// the key is typed by the person, never copied from a mind's settings.
+export struct InUseRow {
+    label: string,      // "Ollama Cloud", "Custom endpoint · aig.mycluster.cyou"
+    used-by: string,    // "Used by Yantrik Mind, DeepSeek, OpenClaw, Pi"
+    where-set: string,  // "each mind keeps its own key in its own settings"
+    models: string,     // "deepseek-v4.1-flash, kimi-k3"
+    preset: string,     // the Add form's preset: "ollama-cloud", "custom"
+    base-url: string,   // known address, or empty
+    model: string,      // first model, for the form
+}
+
 export struct AIStatusData {
     provider-name: string,
     provider-type: string,
@@ -426,6 +439,7 @@ export component SettingsScreen inherits Rectangle {
     // ── What runs on what (top of category 1) ──
     in property <[RunsOnRow]> runs-on-rows: [];
     in property <string> runs-on-summary: "";
+    in property <[InUseRow]> in-use-providers: [];
 
     // ── Accounts (category 4): the same accounts, and the same list, as the Minds panel ──
     in property <[ProviderGroup]> account-groups: [];
@@ -1461,6 +1475,59 @@ export component SettingsScreen inherits Rectangle {
                                 }
                             }
 
+                            // In use, not saved here: what the minds run on that Settings does not hold.
+                            if root.in-use-providers.length > 0 : Text {
+                                text: "IN USE, NOT SAVED HERE";
+                                color: Theme.text-dim;
+                                font-size: Theme.fs-micro;
+                                font-weight: 600;
+                                letter-spacing: 0.8px;
+                            }
+                            for u in root.in-use-providers : Rectangle {
+                                background: Theme.bg-card;
+                                border-radius: Theme.r-lg;
+                                border-width: 1px;
+                                border-color: Theme.border-subtle;
+                                height: in-use-layout.preferred-height;
+                                in-use-layout := HorizontalLayout {
+                                    padding: Theme.sp-4;
+                                    spacing: Theme.sp-3;
+                                    VerticalLayout {
+                                        horizontal-stretch: 1;
+                                        spacing: 2px;
+                                        Text { text: u.label; color: Theme.text-primary; font-size: Theme.fs-body; font-weight: 600; wrap: word-wrap; }
+                                        Text { text: u.used-by; color: Theme.text-secondary; font-size: Theme.fs-caption; wrap: word-wrap; }
+                                        Text { text: u.where-set; color: Theme.text-dim; font-size: Theme.fs-caption; wrap: word-wrap; }
+                                        if u.models != "" : Text { text: "Models: " + u.models; color: Theme.text-dim; font-size: Theme.fs-caption; wrap: word-wrap; }
+                                    }
+                                    VerticalLayout {
+                                        alignment: center;
+                                        YButton {
+                                            label: "Add as provider";
+                                            variant: 1;
+                                            clicked => {
+                                                root.provider-panel-open = true;
+                                                root.editing-provider-id = "";
+                                                root.selected-preset = u.preset;
+                                                root.provider-preset-selected(u.preset);
+                                                if u.base-url != "" { root.provider-form-url = u.base-url; }
+                                                root.provider-form-model = u.model;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if root.in-use-providers.length > 0 : Text {
+                                text: root.ai-providers.length == 0
+                                    ? "SAVED HERE · nothing yet. A saved provider can be used for the built-in companion and handed to harnesses."
+                                    : "SAVED HERE";
+                                color: Theme.text-dim;
+                                font-size: Theme.fs-micro;
+                                font-weight: 600;
+                                letter-spacing: 0.8px;
+                                wrap: word-wrap;
+                            }
+
                             // Provider list — data-driven
                             for provider[idx] in root.ai-providers : Rectangle {
                                 background: Theme.bg-card;
@@ -1519,7 +1586,7 @@ export component SettingsScreen inherits Rectangle {
                                             border-radius: 10px;
                                             background: Theme.tint-accent;
                                             pri-txt := Text {
-                                                text: "Primary";
+                                                text: "Companion uses this";
                                                 color: Theme.accent;
                                                 font-size: Theme.fs-micro;
                                                 font-weight: 600;
@@ -1616,7 +1683,7 @@ export component SettingsScreen inherits Rectangle {
                                             }
                                         }
 
-                                        // Set Primary (if not already)
+                                        // Use for the companion (if not already)
                                         if !provider.is-primary : TouchArea {
                                             width: set-pri-txt.preferred-width + 16px;
                                             height: 28px;
@@ -1627,8 +1694,29 @@ export component SettingsScreen inherits Rectangle {
                                                 border-width: 1px;
                                                 border-color: Theme.border-subtle;
                                                 set-pri-txt := Text {
-                                                    text: "Set Primary";
+                                                    text: "Use for the companion";
                                                     color: Theme.accent;
+                                                    font-size: Theme.fs-caption;
+                                                    horizontal-alignment: center;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                        }
+
+                                        // The chosen one hands the companion back to the machine's own
+                                        // address (config.yaml), which nothing here ever rewrites.
+                                        if provider.is-primary : TouchArea {
+                                            width: stop-txt.preferred-width + 16px;
+                                            height: 28px;
+                                            clicked => { root.set-primary-provider(""); }
+                                            Rectangle {
+                                                border-radius: Theme.r-sm;
+                                                background: Theme.hover-fill;
+                                                border-width: 1px;
+                                                border-color: Theme.border-subtle;
+                                                stop-txt := Text {
+                                                    text: "Stop using for the companion";
+                                                    color: Theme.text-secondary;
                                                     font-size: Theme.fs-caption;
                                                     horizontal-alignment: center;
                                                     vertical-alignment: center;
@@ -1679,8 +1767,9 @@ export component SettingsScreen inherits Rectangle {
                                 }
                             }
 
-                            // Empty state when no providers
-                            if root.ai-providers.length == 0 : Rectangle {
+                            // Empty state: only when nothing is saved AND nothing is in use. On VM 520 it
+                            // said "No AI providers configured" under the companion's own endpoint.
+                            if root.ai-providers.length == 0 && root.in-use-providers.length == 0 : Rectangle {
                                 background: Theme.bg-card;
                                 border-radius: Theme.r-lg;
                                 border-width: 1px;
@@ -1844,7 +1933,12 @@ export component SettingsScreen inherits Rectangle {
                                     padding-left: Theme.sp-4;
                                     padding-right: Theme.sp-4;
                                     Text {
-                                        text: "No models available. Add a provider and refresh.";
+                                        // This lists a saved provider's models. With none chosen for the
+                                        // companion, its model comes from config.yaml: say which, never "none".
+                                        text: root.ai-status.model-name != "" && root.ai-status.provider-type == "from config.yaml"
+                                            ? "The built-in companion uses " + root.ai-status.model-name + ", set in /opt/yantrik/config.yaml. Models are listed here for a provider you save and use for the companion."
+                                            : "No models listed yet. Save a provider, use it for the companion, and refresh.";
+                                        wrap: word-wrap;
                                         color: Theme.text-dim;
                                         font-size: Theme.fs-caption;
                                         horizontal-stretch: 1;
@@ -1916,7 +2010,7 @@ export component SettingsScreen inherits Rectangle {
                                     }
 
                                     Text {
-                                        text: "When the primary provider fails 3 times, automatically switch to the fallback provider.";
+                                        text: "When the provider the companion uses fails 3 times, switch the companion to the fallback provider.";
                                         color: Theme.text-dim;
                                         font-size: Theme.fs-caption;
                                         wrap: word-wrap;

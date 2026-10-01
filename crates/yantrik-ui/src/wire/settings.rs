@@ -698,6 +698,12 @@ pub fn wire(ui: &App, ctx: &AppContext) {
     // ── AI Provider Management ──
 
     let providers = Arc::new(Mutex::new(ProviderStore::load()));
+    // A provider chosen for the companion in Settings is the companion's from the start, every
+    // start: it lives in providers.yaml, not in config.yaml, which is never rewritten (#524).
+    if let Some(chosen) = providers.lock().ok().and_then(|s| s.primary().cloned()) {
+        tracing::info!(provider = %chosen.provider_type, "The companion starts on the provider chosen in Settings");
+        crate::wire::provider_panel::reload_primary(&ctx.bridge, &chosen);
+    }
     let s = settings.clone();
     ui.on_retry_settings_save(move || {
         let _ = persist(&s);
@@ -867,23 +873,40 @@ fn wire_rest(ui: &App, ctx: &AppContext, providers: Arc<Mutex<ProviderStore>>) {
     let ui_weak = ui.as_weak();
     let ps = providers.clone();
     let bridge = ctx.bridge.clone();
+    // "Use for the companion": chosen in providers.yaml, and the companion switched to it now.
+    // Before this, the choice only changed the list and the card, and the companion went on
+    // answering from what it had: a card naming a provider nothing used. An empty id returns the
+    // companion to the machine's own address in config.yaml.
     ui.on_set_primary_provider(move |id| {
         let id = id.to_string();
-        tracing::info!(id = %id, "Setting primary provider");
-        if let Ok(mut store) = ps.lock() {
-            let before = store.clone();
-            for e in &mut store.entries {
-                e.is_primary = e.id == id;
+        tracing::info!(id = %id, "Choosing the companion's provider");
+        let Ok(mut store) = ps.lock() else { return };
+        let before = store.clone();
+        for e in &mut store.entries {
+            e.is_primary = !id.is_empty() && e.id == id;
+        }
+        if store.save().is_err() {
+            *store = before;
+            return;
+        }
+        let Some(ui) = ui_weak.upgrade() else { return };
+        match store.primary().cloned() {
+            Some(chosen) => {
+                if !chosen.model.is_empty() {
+                    ui.set_settings_llm_api_model(chosen.model.clone().into());
+                }
+                crate::wire::provider_panel::reload_primary(&bridge, &chosen);
             }
-            if store.save().is_err() {
-                *store = before;
-                return;
-            }
-            if let Some(ui) = ui_weak.upgrade() {
-                push_providers_to_ui(&ui, &store);
-                crate::wire::ai_status::refresh(&ui, &store);
+            None => {
+                let url = ui.get_settings_llm_api_url().to_string();
+                let model = ui.get_settings_llm_api_model().to_string();
+                if !url.trim().is_empty() {
+                    bridge.reload_llm("api".into(), url, crate::wire::ai_status::config_key(), model);
+                }
             }
         }
+        push_providers_to_ui(&ui, &store);
+        crate::wire::ai_status::refresh(&ui, &store);
     });
 
     // Set fallback provider
@@ -1105,6 +1128,7 @@ pub(crate) fn uuid_short() -> String {
 
 /// Push provider list to UI.
 pub(crate) fn push_providers_to_ui(ui: &App, store: &ProviderStore) {
+    crate::wire::runs_on_card::set_saved(ui, store.entries.iter().map(|e| e.base_url.clone()).collect());
     let items: Vec<AIProviderData> = store
         .entries
         .iter()

@@ -180,3 +180,86 @@ pub fn summary(rows: &[RunsOn]) -> String {
     parts.push("No mind here runs on a signed-in account.".to_string());
     parts.join(" ")
 }
+
+/// A provider the minds run on that is not saved in Settings, for the Providers list: so the list
+/// never says "No AI providers configured" while minds plainly run on some.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InUse {
+    /// "Ollama Cloud", "Custom endpoint · aig.mycluster.cyou".
+    pub label: String,
+    /// The models the minds named, in order.
+    pub models: Vec<String>,
+    /// The minds that run on it.
+    pub used_by: Vec<String>,
+    /// Where it is set: "set in /opt/yantrik/config.yaml · used by the built-in companion", or
+    /// "each mind keeps its own key in its own settings".
+    pub where_set: String,
+    /// What Add as provider fills in: the catalogue preset ("custom" for an address it does not
+    /// know), the address when the desktop knows it, and the first model. Never a key.
+    pub preset: String,
+    pub base_url: String,
+    pub model: String,
+}
+
+/// The providers in use that are not saved in Settings: everything `rows` names except what a
+/// saved provider (by its address) already covers. The most-used first.
+pub fn in_use_not_saved(rows: &[RunsOn], companion: Option<&CompanionFact>, saved_urls: &[String]) -> Vec<InUse> {
+    let saved: Vec<String> = saved_urls.iter().filter_map(|u| identity::from_url(u).key()).collect();
+    // key, entry, whether the companion's config.yaml address is one of its uses
+    let mut out: Vec<(String, InUse, bool)> = Vec::new();
+    for r in rows {
+        let Some(key) = r.provider.key() else { continue };
+        if saved.contains(&key) || matches!(r.set_in, SetIn::SavedProvider(_) | SetIn::Nowhere) {
+            continue;
+        }
+        let i = match out.iter().position(|(k, _, _)| *k == key) {
+            Some(i) => i,
+            None => {
+                let (preset, base_url) = match &r.provider {
+                    ProviderRef::Known(p) => (p.id.to_string(), p.default_base_url.to_string()),
+                    _ => ("custom".to_string(), String::new()),
+                };
+                let entry = InUse {
+                    label: r.provider.label(),
+                    models: Vec::new(),
+                    used_by: Vec::new(),
+                    where_set: String::new(),
+                    preset,
+                    base_url,
+                    model: String::new(),
+                };
+                out.push((key, entry, false));
+                out.len() - 1
+            }
+        };
+        let (_, e, has_config) = &mut out[i];
+        e.used_by.push(r.name.clone());
+        if let Some(m) = r.model.as_ref().filter(|m| !m.is_empty()) {
+            if !e.models.contains(m) {
+                e.models.push(m.clone());
+            }
+        }
+        if r.set_in == SetIn::ConfigYaml {
+            *has_config = true;
+            if let Some(c) = companion {
+                e.base_url = c.base_url.clone();
+            }
+        }
+    }
+    let mut list: Vec<InUse> = out
+        .into_iter()
+        .map(|(_, mut e, has_config)| {
+            e.model = e.models.first().cloned().unwrap_or_default();
+            let others = e.used_by.len() - usize::from(has_config);
+            e.where_set = match (has_config, others) {
+                (true, 0) => "set in /opt/yantrik/config.yaml \u{b7} used by the built-in companion".to_string(),
+                (true, _) => "set in /opt/yantrik/config.yaml for the built-in companion; the other minds keep their own key in their own settings".to_string(),
+                (false, 1) => "kept in that mind's own settings, with its own key".to_string(),
+                (false, _) => "each mind keeps its own key in its own settings".to_string(),
+            };
+            e
+        })
+        .collect();
+    list.sort_by(|a, b| b.used_by.len().cmp(&a.used_by.len()).then(a.label.cmp(&b.label)));
+    list
+}

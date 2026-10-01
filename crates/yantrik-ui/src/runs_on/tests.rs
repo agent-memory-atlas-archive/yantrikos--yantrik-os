@@ -105,3 +105,39 @@ fn a_mind_that_says_nothing_is_not_given_a_provider() {
     assert_eq!(rows[0].runs_on(), "provider not reported");
     assert_eq!(rows[0].source(), "its own settings \u{b7} as it reported");
 }
+
+#[test]
+fn vm_520_the_providers_in_use_are_listed_though_none_is_saved() {
+    let (minds, companion) = vm_520();
+    let rows = resolve(&minds, Some(&companion));
+    let in_use = in_use_not_saved(&rows, Some(&companion), &[]);
+    assert_eq!(in_use.len(), 2, "{in_use:#?}");
+    let ollama = &in_use[0];
+    assert_eq!(ollama.label, "Ollama Cloud");
+    assert_eq!(ollama.used_by, ["Yantrik Mind", "DeepSeek", "OpenClaw", "Pi"]);
+    assert_eq!(ollama.models, ["deepseek-v4.1-flash", "kimi-k3"]);
+    assert_eq!(ollama.where_set, "each mind keeps its own key in its own settings");
+    assert_eq!(
+        (ollama.preset.as_str(), ollama.base_url.as_str(), ollama.model.as_str()),
+        ("ollama-cloud", "https://ollama.com/v1", "deepseek-v4.1-flash")
+    );
+    let aig = &in_use[1];
+    assert_eq!(aig.label, "Custom endpoint \u{b7} aig.mycluster.cyou");
+    assert_eq!(aig.used_by, ["Yantrik Companion"]);
+    assert_eq!(aig.where_set, "set in /opt/yantrik/config.yaml \u{b7} used by the built-in companion");
+    assert_eq!(
+        (aig.preset.as_str(), aig.base_url.as_str(), aig.model.as_str()),
+        ("custom", "https://aig.mycluster.cyou/v1", "qwen3.8:27b")
+    );
+    // Hermes names no provider: it is in no row rather than guessed into one.
+    assert!(!in_use.iter().any(|u| u.used_by.iter().any(|n| n == "Hermes Agent")));
+}
+
+#[test]
+fn a_saved_provider_is_not_listed_again_as_in_use() {
+    let (minds, companion) = vm_520();
+    let rows = resolve(&minds, Some(&companion));
+    let in_use = in_use_not_saved(&rows, Some(&companion), &["https://ollama.com/v1".to_string()]);
+    let labels: Vec<&str> = in_use.iter().map(|u| u.label.as_str()).collect();
+    assert_eq!(labels, ["Custom endpoint \u{b7} aig.mycluster.cyou"]);
+}

@@ -44,7 +44,7 @@ pub(crate) fn set_config_key(key: Option<String>) {
     *slot.lock().unwrap_or_else(|e| e.into_inner()) = key.filter(|k| !k.is_empty());
 }
 
-fn config_key() -> Option<String> {
+pub(crate) fn config_key() -> Option<String> {
     CONFIG_KEY.get().and_then(|m| m.lock().ok().and_then(|k| k.clone()))
 }
 
