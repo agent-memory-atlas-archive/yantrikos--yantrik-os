@@ -1385,7 +1385,7 @@ impl RecipeHost for CompanionService {
     /// to the model: a recipe can be written by a program on the companion's socket, and a step
     /// that lists, overwrites or deletes vault entries is not something such a program may do.
     fn run_tool(&mut self, name: &str, args: &serde_json::Value) -> String {
-        let category = self.category_of(name);
+        let category = self.category_of(name).unwrap_or("");
         if yantrik_companion_core::taint::reads_or_writes_secrets(name, category) {
             return format!("Refused: a recipe step may not use `{name}`: it reads or changes the vault.");
         }

@@ -601,8 +601,12 @@ pub struct CompanionService {
     // asking from a phone (design/channels-2026-09-29.md). Set by every message the worker
     // takes, so what runs after a remote turn keeps it until the next message.
     turn_ceiling: Option<PermissionLevel>,
-    /// The current turn's words came from a program on the socket (`set_turn_outside`).
+    /// The next turn's words come from a program on the socket (`set_turn_outside`); taken, so it
+    /// applies to that one turn only.
     turn_outside: bool,
+    /// The conversation programs on the socket have had, kept apart from the person's: an outside
+    /// turn neither reads the person's earlier turns nor adds to them.
+    outside_history: Vec<ChatMessage>,
 
     // Model family for family-aware chat templates (tool format, tool results).
     model_family: ModelFamily,
@@ -949,6 +953,7 @@ impl CompanionService {
             decisions,
             turn_ceiling: None,
             turn_outside: false,
+            outside_history: Vec::new(),
             model_family: capability_profile.family,
             task_manager: std::sync::Mutex::new(task_mgr),
             recent_events: Vec::new(),
@@ -1243,28 +1248,24 @@ impl CompanionService {
         self.turn_outside = outside;
     }
 
-    /// The category a tool is registered under, for the taint rules.
-    pub(crate) fn category_of(&self, name: &str) -> &'static str {
+    /// The category a tool is registered under, for the taint rules; `None` for no such tool.
+    /// `Dangerous` is the top grade, so every registered tool is listed.
+    pub(crate) fn category_of(&self, name: &str) -> Option<&'static str> {
         self.registry
             .list_metadata(PermissionLevel::Dangerous)
             .into_iter()
             .find(|m| m.name == name)
-            .map_or("", |m| m.category)
+            .map(|m| m.category)
     }
 
-    /// Why a program outside the companion may not run this tool, or `None` when it may.
-    ///
-    /// The vault's tools and any that use a secret are the companion's own (`taint::touches_secrets`).
-    /// `queue_task` is too: it runs a whole model turn with every tool, which would put an outside
-    /// caller's words into a turn that is not marked as theirs.
+    /// Why a program outside the companion may not run this tool, or `None` when it may: the
+    /// companion's own rule (`taint::outside_refusal`), and a tool it cannot name is refused, not
+    /// guessed at.
     pub fn refused_to_outside(&self, name: &str) -> Option<String> {
-        if yantrik_companion_core::taint::touches_secrets(name, self.category_of(name)) {
-            return Some(format!("`{name}` reads, writes or uses a secret and is the companion's own: it is not run for a program on its socket."));
+        match self.category_of(name) {
+            None => Some(format!("There is no tool `{name}`.")),
+            Some(category) => yantrik_companion_core::taint::outside_refusal(name, category),
         }
-        if name == "queue_task" {
-            return Some("`queue_task` runs a whole turn with every tool: it is not run for a program on the companion's socket. Ask instead (companion.ask).".to_string());
-        }
-        None
     }
 
     /// Run a tool for a program on the companion's socket: as `run_tool`, unless it is refused.
@@ -2519,11 +2520,28 @@ impl CompanionService {
     }
 
     /// Streaming version of handle_message — calls `on_token` for each text fragment.
-    pub fn handle_message_streaming<F>(
-        &mut self,
-        user_text: &str,
-        mut on_token: F,
-    ) -> AgentResponse
+    ///
+    /// A turn a program on the socket asked for (`set_turn_outside`) runs in its own conversation
+    /// and as incognito: it does not see the person's earlier turns, nothing it says is kept as
+    /// the person's (memories, learning, history), and it is marked outside from the first word
+    /// (`taint::mark_outside`). The person's conversation and incognito setting are put back
+    /// afterwards, a panicking turn included.
+    pub fn handle_message_streaming<F>(&mut self, user_text: &str, on_token: F) -> AgentResponse
+    where
+        F: FnMut(&str),
+    {
+        if !std::mem::take(&mut self.turn_outside) {
+            return self.streaming_turn(user_text, on_token, false);
+        }
+        let persons = std::mem::replace(&mut self.conversation_history, std::mem::take(&mut self.outside_history));
+        let was_incognito = std::mem::replace(&mut self.incognito, true);
+        let turn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.streaming_turn(user_text, on_token, true)));
+        self.incognito = was_incognito;
+        self.outside_history = std::mem::replace(&mut self.conversation_history, persons);
+        turn.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    }
+
+    fn streaming_turn<F>(&mut self, user_text: &str, mut on_token: F, outside: bool) -> AgentResponse
     where
         F: FnMut(&str),
     {
@@ -2531,8 +2549,8 @@ impl CompanionService {
         // this conversation has taken in — a page read ten minutes ago must not block a
         // credential now, and a credential fetched then must not license an exfiltration now.
         yantrik_companion_core::taint::begin_turn();
-        if self.turn_outside {
-            yantrik_companion_core::taint::mark_untrusted("a program on the companion's socket");
+        if outside {
+            yantrik_companion_core::taint::mark_outside("a program on the companion's socket");
         }
 
         // Step 0: SecurityGuard — check user input for injection

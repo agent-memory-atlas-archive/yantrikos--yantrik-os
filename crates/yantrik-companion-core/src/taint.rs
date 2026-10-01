@@ -141,12 +141,14 @@ pub fn returns_secret(name: &str, category: &str) -> bool {
     classify(name, category) == Sensitivity::ReturnsSecret
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Turn {
     /// The tool that first brought untrusted content in, kept so a refusal can name it. A refusal
     /// that does not say what caused it is indistinguishable from a bug, and gets worked around.
     untrusted_from: Option<String>,
     secret_from: Option<String>,
+    /// The turn was asked for by a program on the companion's socket (`mark_outside`).
+    outside_from: Option<String>,
 }
 
 thread_local! {
@@ -178,17 +180,55 @@ pub fn reads_or_writes_secrets(name: &str, category: &str) -> bool {
     category == "vault" || classify(name, category) == Sensitivity::ReturnsSecret
 }
 
-/// This turn's words came from outside the companion (a program on its socket), and count as
-/// untrusted from the first one: a tool that would hand back a credential is then refused, as it
-/// is after reading a web page. Call after `begin_turn`.
-pub fn mark_untrusted(source: &str) {
+/// Why a program outside the companion (one on its socket) may never have this tool run for it,
+/// directly or by a turn it asked for, or `None` when it may.
+///
+/// Anything that reads, writes or uses a secret is the companion's own. `queue_task` is too: the
+/// task runs later as a turn of the person's, with every tool, and nothing would mark it as the
+/// caller's (security review, 30 Sep 2026).
+pub fn outside_refusal(name: &str, category: &str) -> Option<String> {
+    if touches_secrets(name, category) {
+        return Some(format!(
+            "`{name}` reads, writes or uses a secret and is the companion's own: it is not run for a program on its socket."
+        ));
+    }
+    if name == "queue_task" {
+        return Some(
+            "`queue_task` runs a later turn with every tool, as the person's: it is not run for a program on the companion's socket."
+                .to_string(),
+        );
+    }
+    None
+}
+
+/// This turn was asked for by a program outside the companion (on its socket), not the person.
+/// Its words count as untrusted from the first one, and nothing in `outside_refusal` runs in it,
+/// whatever the words say. Call after `begin_turn`.
+pub fn mark_outside(source: &str) {
     TURN.with(|cell| {
         if let Some(turn) = cell.borrow_mut().as_mut() {
+            turn.outside_from = Some(source.to_string());
             if turn.untrusted_from.is_none() {
                 turn.untrusted_from = Some(source.to_string());
             }
         }
     });
+}
+
+/// This thread's turn, to be carried onto a thread that works for it (`adopt`). The rule is per
+/// thread, so a sub-agent started without it would begin with nothing read and nothing refused:
+/// an outside turn's sub-agent could have read the vault (security review, 30 Sep 2026).
+#[derive(Clone, Default)]
+pub struct Carried(Option<Turn>);
+
+/// What this thread's turn has taken in, for `adopt` on another thread.
+pub fn carry() -> Carried {
+    TURN.with(|cell| Carried(cell.borrow().clone()))
+}
+
+/// Continue a turn carried from another thread: what it read and who asked for it hold here too.
+pub fn adopt(carried: Carried) {
+    TURN.with(|cell| *cell.borrow_mut() = carried.0);
 }
 
 /// Start a fresh conversation turn.
@@ -257,6 +297,11 @@ pub fn check(name: &str, category: &str) -> Result<(), String> {
 }
 
 fn check_against(turn: &Turn, name: &str, category: &str) -> Result<(), String> {
+    if let Some(source) = &turn.outside_from {
+        if let Some(why) = outside_refusal(name, category) {
+            return Err(format!("Refused: {why} This turn was asked for by {source}."));
+        }
+    }
     match classify(name, category) {
         Sensitivity::ReturnsSecret => {
             if let Some(source) = &turn.untrusted_from {
@@ -333,18 +378,35 @@ mod tests {
     #[test]
     fn words_from_the_socket_are_untrusted_from_the_first() {
         fresh();
-        mark_untrusted("a program on the companion's socket");
+        mark_outside("a program on the companion's socket");
         let refused = check("vault_get", "vault").expect_err("an outside ask must not read the vault");
         assert!(refused.contains("socket"), "{refused}");
+        // Not only the tools that return a secret: none that touches one, and no later turn.
+        for (tool, category) in [("vault_list", "vault"), ("vault_store", "vault"), ("vault_delete", "vault"),
+                                 ("vault_set_pin", "vault"), ("browser_login", "browser"), ("queue_task", "system")] {
+            assert!(check(tool, category).is_err(), "{tool} ran in an outside turn");
+        }
         assert!(check("web_search", "browser").is_ok(), "the ordinary job still works");
 
         // A later page does not overwrite where the taint first came from.
         note("browse", "browser");
         assert!(check("vault_get", "vault").unwrap_err().contains("socket"));
 
+        // A sub-agent's thread carries the turn, refusals and all.
+        let carried = carry();
+        std::thread::spawn(move || {
+            assert!(check("vault_get", "vault").is_ok(), "a fresh thread has no turn");
+            adopt(carried);
+            assert!(check("vault_get", "vault").is_err(), "the sub-agent escaped the outside turn");
+            assert!(check("vault_store", "vault").is_err());
+        })
+        .join()
+        .unwrap();
+
         // And the next turn, the person's own, starts clean.
         fresh();
         assert!(check("vault_get", "vault").is_ok());
+        assert!(check("queue_task", "system").is_ok());
     }
 
     #[test]
