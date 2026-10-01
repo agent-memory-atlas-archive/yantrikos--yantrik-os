@@ -87,8 +87,10 @@ impl Wiring {
     fn render(&self) {
         let card = rows::card(&lock(&CHOICES), &lock(&KEPT), &lock(&SESSION));
         // The clipboard is held (history paused, the model's clipboard tools refused) while a key
-        // is awaited, being checked, or was just refused and may still be on it.
-        let held = card.rows.iter().any(|r| matches!(r.state, "waiting" | "checking" | "rejected"));
+        // is awaited or being checked. Not after a refusal: a refused key that was key-shaped has
+        // already been cleared from the clipboard, and holding on would keep history paused and
+        // the clipboard tools refused for as long as the row is left (seen on VM 520, 1 Oct 2026).
+        let held = card.rows.iter().any(|r| matches!(r.state, "waiting" | "checking"));
         crate::clipboard::hold_for_a_key(held);
         let status = crate::vault_unlock::cached_status();
         let Some(ui) = self.ui.upgrade() else { return };
@@ -134,7 +136,7 @@ impl Wiring {
         let Some(s) = yantrik_ml::provider::pool::signup::signup(id) else { return };
         // Where the sign-up page is the key page too (Google's), there is nothing between them.
         let same = s.values.first().is_some_and(|v| v.url == s.signup_url);
-        if let Err(e) = crate::open_url::open(s.signup_url) {
+        if let Err(e) = crate::open_url::open_apart(s.signup_url) {
             tracing::warn!(provider = id, error = %e, "the sign-up page could not be opened");
         }
         let stage = if same { "waiting" } else { "sign-up-opened" };
@@ -147,7 +149,7 @@ impl Wiring {
         let pending = lock(&SESSION).pending_account.is_some();
         let next = s.values.iter().find(|v| !kept.contains_key(v.id) && !(v.id == "cloudflare_account" && pending)).or(s.values.last());
         if let Some(v) = next {
-            if let Err(e) = crate::open_url::open(v.url) {
+            if let Err(e) = crate::open_url::open_apart(v.url) {
                 tracing::warn!(provider = id, error = %e, "the key page could not be opened");
             }
         }
