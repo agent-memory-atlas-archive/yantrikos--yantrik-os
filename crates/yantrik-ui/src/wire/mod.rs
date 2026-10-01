@@ -70,6 +70,7 @@ pub mod login;
 pub mod minds_panel;
 pub mod services;
 pub mod vault;
+pub mod free_ai;
 
 use crate::app_context::AppContext;
 use crate::App;
@@ -115,6 +116,7 @@ pub fn wire_all(ui: &App, ctx: &AppContext) {
     ai_onboarding::wire(ui, ctx);
     ai_provider::wire(ui, ctx);
     decision_model::wire(ui, ctx);
+    free_ai::wire(ui, ctx);
     installer::wire(ui, ctx);
     login::wire(ui, ctx);
     // After `login`, which is the other place a secret reaches the vault, and before `callbacks`,

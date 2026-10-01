@@ -112,6 +112,11 @@ pub enum CompanionCommand {
     /// one. This variant takes a typed `vault_unlock::Op` that nothing deserialises, so the only
     /// way a passphrase gets onto this channel is Rust code the shell compiled, and there are two
     /// such places: the login wiring, and the callback behind the shell's own unlock prompt.
+    /// The free AI keys (wire::free_ai::store): reached only from the UI's own bridge.
+    ProviderKeys {
+        op: crate::wire::free_ai::store::Op,
+        reply_tx: crossbeam_channel::Sender<crate::wire::free_ai::store::Reply>,
+    },
     Vault {
         op: crate::vault_unlock::Op,
         reply_tx: Sender<crate::vault_unlock::Reply>,
@@ -577,6 +582,23 @@ impl CompanionBridge {
         let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
         self.cmd_tx
             .send(CompanionCommand::Vault { op, reply_tx })
+            .map_err(|_| "companion worker is not running".to_string())?;
+        reply_rx
+            .recv_timeout(timeout)
+            .map_err(|_| "the vault did not answer in time".to_string())
+    }
+
+    /// Keep, remove or list the free AI keys (wire::free_ai). Like [`Self::vault`], on the UI's
+    /// own bridge and not on the handle the companion socket serves: nothing on a socket can
+    /// store, read or remove a key. Blocking; every caller is off the UI thread.
+    pub fn provider_keys(
+        &self,
+        op: crate::wire::free_ai::store::Op,
+        timeout: std::time::Duration,
+    ) -> Result<crate::wire::free_ai::store::Reply, String> {
+        let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+        self.cmd_tx
+            .send(CompanionCommand::ProviderKeys { op, reply_tx })
             .map_err(|_| "companion worker is not running".to_string())?;
         reply_rx
             .recv_timeout(timeout)
@@ -1508,6 +1530,10 @@ fn worker_loop(
                 // An Argon2id unwrap is a fraction of a second, which is why it can sit in the
                 // worker's queue like anything else instead of blocking the UI thread.
                 let _ = reply_tx.send(crate::vault_unlock::run(&companion.db.conn(), op));
+            }
+            Ok(CompanionCommand::ProviderKeys { op, reply_tx }) => {
+                // Not on the job board and not logged, as the vault's own command is not.
+                let _ = reply_tx.send(crate::wire::free_ai::store::run(&companion.db.conn(), op));
             }
             Ok(CompanionCommand::GetBondLevel { reply_tx }) => {
                 let _ = reply_tx.send(companion.bond_level());

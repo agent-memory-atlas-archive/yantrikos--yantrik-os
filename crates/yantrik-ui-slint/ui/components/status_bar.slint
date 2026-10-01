@@ -16,6 +16,7 @@
 import { Theme } from "theme.slint";
 import { Icon, Icons } from "icon.slint";
 import { YantrikMark } from "yantrik_mark.slint";
+import { FreeAiState } from "free_ai_card.slint";
 
 export component StatusBar inherits Rectangle {
     in property <string> clock-text: "00:00";
@@ -349,6 +350,40 @@ export component StatusBar inherits Rectangle {
             }
 
             Rectangle { width: 1px; height: 14px; y: (parent.height - 14px) / 2; background: Theme.separator; }
+
+            // ── A free AI key is awaited ──
+            //
+            // The person is on a provider's page in the browser, which covers Settings; the bar is
+            // the one part of the shell still in view. One press reads the clipboard into the
+            // card (clipboard history is paused meanwhile).
+            if FreeAiState.chip-label != "" : TouchArea {
+                width: paste-row.preferred-width + Theme.sp-3;
+                height: Theme.status-bar-height;
+                mouse-cursor: pointer;
+                clicked => { FreeAiState.chip-pressed(); }
+                Rectangle {
+                    width: parent.width;
+                    height: 20px;
+                    y: (parent.height - 20px) / 2;
+                    border-radius: Theme.r-sm;
+                    background: Theme.tint-amber;
+                    border-width: 1px;
+                    border-color: Theme.amber;
+                    paste-row := HorizontalLayout {
+                        padding-left: 7px;
+                        padding-right: 7px;
+                        alignment: center;
+                        Text {
+                            text: FreeAiState.chip-label + " · clipboard history paused";
+                            max-width: 320px; overflow: elide;
+                            color: Theme.amber;
+                            font-size: Theme.fs-micro;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
 
             // ── What the mind may do without asking ──
             //
