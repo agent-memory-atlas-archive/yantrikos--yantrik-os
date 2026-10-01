@@ -1248,6 +1248,31 @@ def call_tool(tool, args):
 # anything above it is refused HERE, in the process that would otherwise make the call.
 # A caller cannot argue with it, because the refusal is not advice passed upstream — it is
 # the absence of an invocation.
+def bare_value_refusal(app, action, names, value):
+    """The refusal for a bare value an action with several parameters cannot place.
+
+    Naming the parameters was not enough: on the live instance a 27B model sent the note's body
+    as a bare string to notes.new_note three times running, reading "takes parameters title,
+    text" each time and changing nothing (1 Oct 2026). A small model copies an example far more
+    reliably than it applies a description, so the refusal now carries the exact call that would
+    work, with the caller's own value already where it most likely belongs (`text`, `content` or
+    `body` when the action has one) and the other parameters left as placeholders to fill. The
+    value is never guessed into a parameter and run: the caller sends the corrected call itself.
+    """
+    if not names:
+        return "args arrived as a bare value but %s.%s takes no parameters: send no args." % (app, action)
+    home = next((n for n in ("text", "content", "body") if n in names), None)
+    shaped = {n: (value if n == home else "<%s>" % n) for n in names}
+    example = json.dumps({"app": app, "action": action, "args": shaped}, ensure_ascii=False)
+    if len(example) > 600:
+        shaped = {n: ("<the text you sent>" if n == home else "<%s>" % n) for n in names}
+        example = json.dumps({"app": app, "action": action, "args": shaped}, ensure_ascii=False)
+    return (
+        "args arrived as a bare value, but %s.%s takes named parameters: %s. Nothing was run. "
+        "Send this, with each <placeholder> filled in: %s" % (app, action, ", ".join(names), example)
+    )
+
+
 def act_pairs(a):
     """Turn an os_act call's arguments into the key=value pairs `yos act` expects.
 
@@ -1274,12 +1299,7 @@ def act_pairs(a):
             if len(names) == 1:
                 args = {names[0]: args}
             else:
-                raise ValueError(
-                    "args arrived as a bare value but %s.%s takes %s. Send an object, e.g. "
-                    '{"%s": ...}.' % (a.get("app"), a.get("action"),
-                                      ("no parameters" if not names else "parameters " + ", ".join(names)),
-                                      names[0] if names else "param")
-                )
+                raise ValueError(bare_value_refusal(a.get("app"), a.get("action"), names, args))
 
     if not isinstance(args, dict):
         raise ValueError("args must be an object of parameter names to values, got %s"
