@@ -22,7 +22,7 @@ import { BondScreen, BondData } from "bond.slint";
 import { PersonalityScreen, OpinionData, SharedRefData } from "personality.slint";
 import { LockScreen } from "lock.slint";
 import { LoginScreen } from "login.slint";
-import { SettingsScreen, SettingsCategoryItem, AIProviderData, AIModelData, AIStatusData, HarnessData, HarnessRowData, DecisionPreset, DecisionUse, RunsOnRow } from "settings.slint";
+import { SettingsScreen, SettingsCategoryItem, AIProviderData, AIModelData, AIStatusData, HarnessData, HarnessRowData, DecisionPreset, DecisionUse, RunsOnRow, InUseRow } from "settings.slint";
 import { SkillData } from "skill_store.slint";
 import { MemoryBrowser, MemoryItem } from "memory_browser.slint";
 import { FileBrowser, FileEntry, BreadcrumbSegment, FileDetailData, FileTabData, FileOpItem, FilePlaceData, FileRecentData, OpenWithItem } from "file_browser.slint";
@@ -223,6 +223,7 @@ export component App inherits Window {
     in property <[RunsOnRow]> runs-on-rows: [];
     in property <string> runs-on-summary: "";
     in property <string> runs-on-answering: "";
+    in property <[InUseRow]> in-use-providers: [];
     in property <string> minds-today: "";
     in property <string> minds-status: "";
     callback minds-panel-opened();
@@ -1860,6 +1861,7 @@ export component App inherits Window {
                 choose-accent(name)=>{root.choose-accent(name);}
                 runs-on-rows: root.runs-on-rows;
                 runs-on-summary: root.runs-on-summary;
+                in-use-providers: root.in-use-providers;
                 account-groups: root.minds-groups;
                 account-choices: root.minds-choices;
                 account-key-choices: root.minds-key-choices;

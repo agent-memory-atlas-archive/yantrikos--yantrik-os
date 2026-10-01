@@ -1545,15 +1545,16 @@ fn worker_loop(
                 let new_llm: std::sync::Arc<dyn yantrik_ml::LLMBackend> = std::sync::Arc::new(
                     yantrik_ml::ApiLLM::new(base_url.clone(), api_key.clone(), &model)
                 );
-                // Update config in memory so it persists for next restart. First: swap_llm
-                // rebuilds a chat-model decision model, whose locality is read from it.
+                // In memory, because swap_llm rebuilds a chat-model decision model whose
+                // locality is read from it. Never written to /opt/yantrik/config.yaml: that is
+                // the machine's file, with its comments and its own default, and a re-serialised
+                // copy silently replaced both (#524). A provider chosen in Settings lives in
+                // providers.yaml and is applied from there at every start (wire::settings).
                 companion.config.llm.backend = "api".into();
                 companion.config.llm.api_base_url = Some(base_url);
                 companion.config.llm.api_model = Some(model);
                 companion.config.llm.api_key = api_key;
                 companion.swap_llm(new_llm);
-                // Save config to disk
-                companion.save_config();
                 online.store(true, Ordering::Relaxed);
                 execute_suppression_logged = false;
                 tracing::info!("LLM reloaded successfully");

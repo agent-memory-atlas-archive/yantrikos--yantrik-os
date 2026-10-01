@@ -26,6 +26,7 @@ run target/ui-validation/provider-panel.png 1280 800 verify-provider-panel
 run target/ui-validation/handoff-card.png 1280 800 verify-handoff-card
 run target/ui-validation/accounts-page.png 1280 800 verify-accounts-page
 run target/ui-validation/ai-map.png 1280 800 verify-ai-map
+run target/ui-validation/providers-in-use.png 1280 2400 verify-providers-in-use
 run target/ui-validation/unused.png 1280 800 verify-screen-controls
 run target/ui-validation/apps-button.png 1280 800 verify-apps-button
 run target/ui-validation/taskbar-menu.png 1280 800 verify-taskbar-menu

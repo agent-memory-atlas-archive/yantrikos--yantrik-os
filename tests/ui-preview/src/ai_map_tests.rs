@@ -50,3 +50,55 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     println!("PASS ai map: six minds, what each runs on and where it is set, first on the AI page ({changed} pixels)");
     Ok(())
 }
+
+/// The Providers section on VM 520's facts: nothing saved, two providers in use. It drew "No AI
+/// providers configured" there; now it lists what is in use, each with Add as provider. Drawn on
+/// a tall window, because the section is far down the page.
+pub fn run_providers(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::error::Error>> {
+    const W: usize = 1280;
+    const H: usize = 2400;
+    let ui = AiMapProbe::new()?;
+    ui.set_tall(H as f32);
+    ui.show()?;
+    w.set_size(slint::PhysicalSize::new(W as u32, H as u32));
+    let draw = || {
+        let mut p = slint::SharedPixelBuffer::<slint::Rgb8Pixel>::new(W as u32, H as u32);
+        for _ in 0..3 {
+            slint::platform::update_timers_and_animations();
+            w.request_redraw();
+            w.draw_if_needed(|r| { r.render(p.make_mut_slice(), W); });
+        }
+        p
+    };
+    let empty = draw();
+    ui.set_in_use(ModelRc::new(VecModel::from(vec![
+        InUseRow {
+            label: "Ollama Cloud".into(),
+            used_by: "Used by Yantrik Mind, DeepSeek, OpenClaw, Pi".into(),
+            where_set: "each mind keeps its own key in its own settings".into(),
+            models: "deepseek-v4.1-flash, kimi-k3".into(),
+            preset: "ollama-cloud".into(),
+            base_url: "https://ollama.com/v1".into(),
+            model: "deepseek-v4.1-flash".into(),
+        },
+        InUseRow {
+            label: "Custom endpoint \u{b7} aig.mycluster.cyou".into(),
+            used_by: "Used by Yantrik Companion".into(),
+            where_set: "set in /opt/yantrik/config.yaml \u{b7} used by the built-in companion".into(),
+            models: "qwen3.8:27b".into(),
+            preset: "custom".into(),
+            base_url: "https://aig.mycluster.cyou/v1".into(),
+            model: "qwen3.8:27b".into(),
+        },
+    ])));
+    let listed = draw();
+    let changed = (0..W * H).filter(|&i| empty.as_slice()[i] != listed.as_slice()[i]).count();
+    let f = BufWriter::new(File::create(output)?);
+    let mut e = png::Encoder::new(f, W as u32, H as u32);
+    e.set_color(png::ColorType::Rgb);
+    e.set_depth(png::BitDepth::Eight);
+    e.write_header()?.write_image_data(listed.as_bytes())?;
+    assert!(changed > 20_000, "the providers in use did not replace the empty state ({changed} pixels changed)");
+    println!("PASS providers in use: listed with Add as provider instead of \"No AI providers configured\" ({changed} pixels)");
+    Ok(())
+}
