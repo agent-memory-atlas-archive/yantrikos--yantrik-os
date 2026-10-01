@@ -1,0 +1,10 @@
+[
+  {
+    "id": "starfall",
+    "title": "Starfall, a browser game built from scratch",
+    "max_turns": 40,
+    "max_hours": 3,
+    "brief": "Build a small browser game from scratch, in the folder ~/Projects/starfall. The game: you steer a little ship along the bottom of the screen, dodge falling stars and catch energy orbs; the stars fall faster as the score climbs. Plain HTML, CSS and JavaScript only, in that one folder: no libraries and no internet. First make a short plan as a note in Notes called 'Starfall plan': a checklist of about eight steps, from an empty page to a finished game with a start screen, score, levels, keyboard and touch controls, and sound that is off until the player turns it on. Then work through the plan one step at a time: write the files with run_command, open ~/Projects/starfall/index.html in the browser to check what you made, fix what you see, and tick the step off in the note. People are watching the screen, so keep each step small and visible. When every step is done and the game plays well, say FINISHED on its own line.",
+    "keep_going": "Keep going on Starfall. Open the 'Starfall plan' note, take the next step that is not ticked, do it, check it in the browser, then tick it off. If every step is ticked and the game plays well from the start screen to game over, say FINISHED on its own line."
+  }
+]
