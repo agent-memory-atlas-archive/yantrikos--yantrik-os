@@ -342,6 +342,14 @@ component FileTile inherits Rectangle {
 }
 
 export component FileBrowser inherits Rectangle {
+    // The window's own buttons, carried in this screen's AppHeader when the shell's WindowFrame
+    // hosts it maximized (the frame then drops its own bar: content-has-controls). Without them
+    // the screen wore two bars, the frame's "Files"/"Settings" row above the header's own.
+    in property <bool> show-window-controls: false;
+    in property <bool> maximized: true;
+    callback minimize();
+    callback toggle-maximize();
+    callback close-window();
     // This screen draws its own header rather than AppHeader, so it has to say what
     // it is: AppIdentity is otherwise left holding whichever app was opened before it.
 
@@ -614,6 +622,11 @@ export component FileBrowser inherits Rectangle {
         VerticalLayout {
             spacing: 0px;
             AppHeader {
+                show-window-controls: root.show-window-controls;
+                maximized: root.maximized;
+                minimize => { root.minimize(); }
+                toggle-maximize => { root.toggle-maximize(); }
+                close-window => { root.close-window(); }
                 app-id: "files"; title: "Files"; icon: Icons.files;
                 subtitle: root.file-trash-mode ? "Recover deleted items" : root.dir-type-badge != "" ? root.dir-type-badge : "Your files, in place";
                 actions: [
