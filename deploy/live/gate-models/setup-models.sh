@@ -59,9 +59,11 @@ cat > /etc/nginx/conf.d/live-cloud.conf <<EOF
 # live-gate (deploy/live/gate-models): rates, daily counts and the filter of the cloud routes.
 limit_req_zone \$server_addr zone=live_ollama_cloud:1m rate=30r/m;
 limit_req_zone \$server_addr zone=live_nanogpt:1m rate=10r/m;
-js_shared_dict_zone zone=live_budget:64k type=number timeout=3d;
+js_shared_dict_zone zone=live_budget:64k type=number timeout=3d state=/var/lib/nginx/live_budget.json;
 js_import live from /etc/nginx/njs/live_models.js;
 EOF
+# The zones file of the first version named the same zones; left beside this one, nginx refuses both.
+rm -f /etc/nginx/conf.d/live-cloud-zones.conf
 grep -q "include /etc/nginx/live-routes/" /etc/nginx/conf.d/live-model.conf \
   || sed -i "s|^    location / { return 404; }|    include /etc/nginx/live-routes/*.conf;\n    location / { return 404; }|" /etc/nginx/conf.d/live-model.conf
 chmod 600 /etc/nginx/conf.d/live-model.conf

@@ -46,6 +46,12 @@ async function chat(r) {
     if (!Array.isArray(asked.messages) || asked.messages.length === 0) {
         return refuse(r, 400, 'messages must be a non-empty list');
     }
+    // Functions the Mind defines, and nothing else: a provider-side tool (a web search, a code
+    // runner) is one the provider bills for on top.
+    if (asked.tools !== undefined && (!Array.isArray(asked.tools)
+        || !asked.tools.every((t) => t && typeof t === 'object' && t.type === 'function'))) {
+        return refuse(r, 400, 'tools must be a list of functions');
+    }
 
     const day = new Date().toISOString().slice(0, 10);
     const used = ngx.shared.live_budget.incr(provider + ':' + day, 1, 0);
@@ -73,8 +79,13 @@ async function chat(r) {
     if (reply.status === 401 || reply.status === 403) {
         return refuse(r, 502, provider + ' refused the gate (status ' + reply.status + ')');
     }
-    if (reply.status >= 400) {
+    if (reply.status === 429 || reply.status >= 500) {
         return refuse(r, reply.status, provider + ' answered ' + reply.status);
+    }
+    // Anything else that is not an answer (a redirect, a 4xx about the body) is the gate's 502:
+    // r.return with a 3xx would read the text as a Location.
+    if (reply.status < 200 || reply.status > 299) {
+        return refuse(r, 502, provider + ' answered ' + reply.status);
     }
     const type = String(reply.headersOut['Content-Type'] || '');
     r.headersOut['Content-Type'] = type.startsWith('text/event-stream')
