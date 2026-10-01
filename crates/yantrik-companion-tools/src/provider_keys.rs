@@ -9,8 +9,43 @@
 //! turns run under that account, where its owner can read them.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use rusqlite::Connection;
+
+// ── The clipboard, while a key is on its way ──
+//
+// The person copies a key on a provider's page and presses Paste on the card. Between the two
+// the key is on the clipboard, and every tool a model can call that reads or writes the
+// clipboard is refused: a turn a web page steered could otherwise read the key, or put a key of
+// its own there for the person to paste (security review of #544, 1 Oct 2026). Same process as
+// the shell, so one flag serves both.
+static CLIPBOARD_HELD: AtomicBool = AtomicBool::new(false);
+
+/// Hold, or release, the clipboard for a key on its way (the shell's free AI card).
+pub fn hold_clipboard(on: bool) {
+    CLIPBOARD_HELD.store(on, Ordering::SeqCst);
+}
+
+/// Whether a key is on its way.
+pub fn clipboard_held() -> bool {
+    CLIPBOARD_HELD.load(Ordering::SeqCst)
+}
+
+/// The refusal a clipboard tool answers with while a key is on its way, or `None`.
+pub fn clipboard_refusal() -> Option<String> {
+    clipboard_held().then(|| {
+        "Refused: the person is copying an API key into Settings right now, and the clipboard is not read or written until they are done.".to_string()
+    })
+}
+
+/// The clipboard's text, bounded and with a deadline (`clipboard::read_text_bounded`).
+pub use crate::clipboard::read_text_bounded as read_clipboard;
+
+/// Whether text looks like a provider's API key (the shapes the free AI card accepts).
+pub fn looks_like_a_key(text: &str) -> bool {
+    yantrik_ml::provider::pool::signup::looks_like_a_provider_key(text)
+}
 
 /// The vault category of the OS's own provider keys.
 pub const CATEGORY: &str = "os:provider-key";
@@ -51,16 +86,26 @@ pub fn store(conn: &Connection, id: &str, value: &str) -> Result<(), Failure> {
         .map_err(|_| Failure::Store)
 }
 
-/// Every provider value kept, by id: what the pool calls with.
+/// Every provider value kept, by id: what the pool calls with. Selected by the category alone,
+/// with no limit: a search on the name (LIMIT 20) let twenty look-alike entries a model made
+/// push the real ones out of the answer (security review of #544).
 pub fn load_all(conn: &Connection) -> Result<BTreeMap<String, String>, Failure> {
     let enc = open(conn)?;
     let prefix = format!("{CATEGORY}:");
-    let entries = yantrikdb_core::vault::search(conn, &enc, &prefix).map_err(|_| Failure::Store)?;
-    Ok(entries
-        .into_iter()
-        .filter(|e| e.category == CATEGORY)
-        .filter_map(|e| e.service.strip_prefix(&prefix).map(|id| (id.to_string(), e.password)))
-        .collect())
+    let rows: Vec<(String, String)> = {
+        let mut stmt = conn
+            .prepare("SELECT service, password_enc FROM vault_entries WHERE category = ?1")
+            .map_err(|_| Failure::Store)?;
+        let mapped = stmt.query_map([CATEGORY], |r| Ok((r.get(0)?, r.get(1)?))).map_err(|_| Failure::Store)?;
+        mapped.collect::<Result<_, _>>().map_err(|_| Failure::Store)?
+    };
+    let mut out = BTreeMap::new();
+    for (service, sealed) in rows {
+        let Some(id) = service.strip_prefix(&prefix) else { continue };
+        let value = enc.decrypt_string(&sealed).map_err(|_| Failure::Store)?;
+        out.insert(id.to_string(), value);
+    }
+    Ok(out)
 }
 
 /// Which provider values are kept, without opening any: for a card that says "ready".
@@ -99,5 +144,18 @@ mod tests {
         assert!(!is_os_entry("github.com", "general"));
         assert_eq!(tail("gsk_abcdef7f3k"), "7f3k");
         assert_eq!(tail("ab"), "ab");
+    }
+
+    /// While a key is on its way the model's clipboard tools are refused, and a key-shaped
+    /// clipboard is never handed to one (security review of #544).
+    #[test]
+    fn the_clipboard_is_out_of_reach_while_a_key_is_on_its_way() {
+        hold_clipboard(true);
+        let refused = clipboard_refusal().expect("a refusal while held");
+        assert!(refused.starts_with("Refused"), "{refused}");
+        hold_clipboard(false);
+        assert!(clipboard_refusal().is_none());
+        assert!(looks_like_a_key(&format!("gsk_{}", "Zz9y".repeat(13))));
+        assert!(!looks_like_a_key("an ordinary line of text"));
     }
 }

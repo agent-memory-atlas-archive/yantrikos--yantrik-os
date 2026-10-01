@@ -8,8 +8,8 @@ use yantrik_ml::provider::pool::tiers::FREE_TIERS;
 
 use super::store::Reply;
 
-/// What a paste came to.
-#[derive(Debug, PartialEq, Eq)]
+/// What a paste came to. Its Debug withholds the account id.
+#[derive(PartialEq, Eq)]
 pub enum Step {
     /// Kept in the vault; `resting` when the provider is at its limit right now.
     Kept { resting: bool },
@@ -91,6 +91,9 @@ pub fn decide(
     let mut keep = |id: &str, value: &str| match store(id, value) {
         Reply::Done => Ok(()),
         Reply::Locked => Err("The vault is locked: unlock it, then press Paste again. Nothing was saved.".to_string()),
+        Reply::NoAnswer => Err(format!(
+            "{name} accepted the key, and the vault did not answer in time: it may still be saved. This row will say Ready if it was."
+        )),
         _ => Err("The vault would not keep the key. Nothing was saved.".to_string()),
     };
     if let Some(a) = account {
@@ -104,15 +107,20 @@ pub fn decide(
     }
 }
 
-/// The clipboard's text, read once, at most a few kilobytes: no key is longer.
-pub fn read_clipboard() -> String {
-    std::process::Command::new("wl-paste")
-        .arg("--no-newline")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout[..o.stdout.len().min(4096)]).into_owned())
-        .unwrap_or_default()
+impl std::fmt::Debug for Step {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Step::Kept { resting } => write!(f, "Kept {{ resting: {resting} }}"),
+            Step::AccountHeld(_) => write!(f, "AccountHeld(<withheld>)"),
+            Step::NotKept(why) => write!(f, "NotKept({why:?})"),
+        }
+    }
+}
+
+/// The clipboard's text, read once: at most 4 KiB (no key is longer), text only, within three
+/// seconds. `None` when there is more, or nothing came in time.
+pub fn read_clipboard() -> Option<String> {
+    yantrik_companion::tools::provider_keys::read_clipboard(4096, std::time::Duration::from_secs(3))
 }
 
 /// Empty the clipboard, once its key is in the vault.

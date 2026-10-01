@@ -25,6 +25,9 @@ pub enum Reply {
     /// The vault has a passphrase and is shut.
     Locked,
     Failed,
+    /// The worker did not answer in time (made by the caller, never by `run`): the operation is
+    /// still queued and may yet happen.
+    NoAnswer,
 }
 
 pub fn run(conn: &Connection, op: Op) -> Reply {

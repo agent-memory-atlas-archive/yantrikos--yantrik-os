@@ -10,8 +10,9 @@ use yantrik_ml::provider::pool::tiers::{FreeTier, FREE_TIERS};
 
 use super::choices::Choices;
 
-/// What is happening right now, not kept across a restart.
-#[derive(Clone, Debug, Default)]
+/// What is happening right now, not kept across a restart. No Debug: it holds Cloudflare's
+/// pasted account id.
+#[derive(Clone, Default)]
 pub struct Session {
     /// A key being checked, by provider id.
     pub checking: Option<String>,

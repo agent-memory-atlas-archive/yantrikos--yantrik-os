@@ -25,13 +25,21 @@ pub fn path() -> PathBuf {
 
 /// The saved choices; a missing or unreadable file is none, which is logged and left alone.
 pub fn load(path: &Path) -> Choices {
-    match std::fs::read_to_string(path) {
+    let mut c: Choices = match std::fs::read_to_string(path) {
         Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
             tracing::warn!(path = %path.display(), error = %e, "the free AI card's choices could not be read; starting from none");
             Choices::default()
         }),
         Err(_) => Choices::default(),
+    };
+    // Waiting for a key is a moment, not a setting: a restart goes back to the key page, so the
+    // clipboard is not held, and its history not paused, for a key nobody is copying any more.
+    for stage in c.stage.values_mut() {
+        if stage == "waiting" {
+            *stage = "sign-up-opened".to_string();
+        }
     }
+    c
 }
 
 /// Write them: a temporary file, then a rename.

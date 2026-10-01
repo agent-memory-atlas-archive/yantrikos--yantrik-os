@@ -4,17 +4,14 @@
 //! Provides search and time-based retrieval for Intent Lens integration.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// History records nothing while a key is on its way from a provider's page to the vault (the
-/// free AI setup is waiting for one): the person copies it in the browser, and it must not be
-/// kept here before, or after, they press Paste.
-static HELD_FOR_A_KEY: AtomicBool = AtomicBool::new(false);
-
-/// Pause, or resume, history while a key is expected (`HELD_FOR_A_KEY`).
+/// Pause, or resume, history while a key is on its way from a provider's page to the vault (the
+/// free AI card): the person copies it in the browser, and it must not be kept here before, or
+/// after, they press Paste. The flag is the companion tools' own, so the model's clipboard tools
+/// are held by the same switch (`provider_keys::hold_clipboard`).
 pub fn hold_for_a_key(on: bool) {
-    HELD_FOR_A_KEY.store(on, Ordering::SeqCst);
+    yantrik_companion::tools::provider_keys::hold_clipboard(on);
 }
 
 /// What history never keeps, held or not: anything shaped like a provider's API key. The same
@@ -107,11 +104,12 @@ impl ClipHistory {
         }
     }
 
-    /// Drop every entry holding `content`: a key taken into the vault leaves no copy here.
+    /// Drop the entries that are exactly `content`: a key taken into the vault leaves no copy
+    /// here. Exact, so a paste of something short cannot empty the history.
     pub fn forget(&mut self, content: &str) {
         let content = content.trim();
         if !content.is_empty() {
-            self.entries.retain(|e| !e.content.contains(content));
+            self.entries.retain(|e| e.content.trim() != content);
         }
     }
 
@@ -167,7 +165,7 @@ fn run_watcher(history: SharedHistory) {
     let mut was_private = false;
 
     loop {
-        let private = crate::private_mode::is_on() || HELD_FOR_A_KEY.load(Ordering::SeqCst);
+        let private = crate::private_mode::is_on() || yantrik_companion::tools::provider_keys::clipboard_held();
         if private {
             was_private = true;
             std::thread::sleep(std::time::Duration::from_secs(1));
@@ -218,9 +216,11 @@ mod key_tests {
         h.push(format!("sk-or-v1-{}", "cd34".repeat(16)));
         assert_eq!(h.len(), 0, "a key went into history");
         h.push("an ordinary line".to_string());
-        h.push("token is mistralsecretabcdef0123456789xyz in a sentence".to_string());
-        h.forget("mistralsecretabcdef0123456789xyz");
+        h.push("mistralsecretabcdef0123456789xyz".to_string());
+        h.forget(" mistralsecretabcdef0123456789xyz\n");
         assert_eq!(h.len(), 1, "a key taken into the vault is dropped from history");
         assert_eq!(h.get(0).unwrap().content, "an ordinary line");
+        h.forget("a");
+        assert_eq!(h.len(), 1, "forgetting is exact: a short paste does not empty the history");
     }
 }

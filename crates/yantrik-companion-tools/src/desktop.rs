@@ -77,24 +77,16 @@ impl Tool for ReadClipboardTool {
     }
 
     fn execute(&self, _ctx: &ToolContext, _args: &serde_json::Value) -> String {
-        match std::process::Command::new("wl-paste")
-            .arg("--no-newline")
-            .output()
-        {
-            Ok(output) if output.status.success() => {
-                let text = String::from_utf8_lossy(&output.stdout);
-                if text.is_empty() {
-                    "Clipboard is empty.".to_string()
-                } else {
-                    let truncated = if text.len() > 1000 { &text[..text.floor_char_boundary(1000)] } else { &text };
-                    format!("Clipboard contents:\n{truncated}")
-                }
-            }
-            Ok(output) => {
-                let err = String::from_utf8_lossy(&output.stderr);
-                format!("Clipboard read failed: {err}")
-            }
-            Err(e) => format!("Failed to read clipboard (wl-paste not available?): {e}"),
+        if let Some(refused) = crate::provider_keys::clipboard_refusal() {
+            return refused;
+        }
+        // The one bounded reader, which never hands back a provider's key.
+        let text = crate::clipboard::read_clipboard_text();
+        if text.is_empty() {
+            "Clipboard is empty.".to_string()
+        } else {
+            let truncated = if text.len() > 1000 { &text[..text.floor_char_boundary(1000)] } else { &text };
+            format!("Clipboard contents:\n{truncated}")
         }
     }
 }
@@ -126,6 +118,10 @@ impl Tool for WriteClipboardTool {
     }
 
     fn execute(&self, _ctx: &ToolContext, args: &serde_json::Value) -> String {
+        // Not while a key is on its way: a model's text there could be pasted as a key.
+        if let Some(refused) = crate::provider_keys::clipboard_refusal() {
+            return refused;
+        }
         let text = args.get("text").and_then(|v| v.as_str()).unwrap_or_default();
         if text.is_empty() {
             return "Error: text is required".to_string();

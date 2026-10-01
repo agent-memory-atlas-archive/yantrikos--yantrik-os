@@ -115,14 +115,15 @@ pub enum CompanionCommand {
     /// one. This variant takes a typed `vault_unlock::Op` that nothing deserialises, so the only
     /// way a passphrase gets onto this channel is Rust code the shell compiled, and there are two
     /// such places: the login wiring, and the callback behind the shell's own unlock prompt.
-    /// The free AI keys (wire::free_ai::store): reached only from the UI's own bridge.
-    ProviderKeys {
-        op: crate::wire::free_ai::store::Op,
-        reply_tx: crossbeam_channel::Sender<crate::wire::free_ai::store::Reply>,
-    },
     Vault {
         op: crate::vault_unlock::Op,
         reply_tx: Sender<crate::vault_unlock::Reply>,
+    },
+    /// The free AI keys (wire::free_ai::store). Typed, like `Vault`, and reached only from the
+    /// UI's own bridge.
+    ProviderKeys {
+        op: crate::wire::free_ai::store::Op,
+        reply_tx: crossbeam_channel::Sender<crate::wire::free_ai::store::Reply>,
     },
     /// Search memories.
     RecallMemories {

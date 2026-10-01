@@ -86,8 +86,10 @@ impl Wiring {
     /// Draw from what is known now.
     fn render(&self) {
         let card = rows::card(&lock(&CHOICES), &lock(&KEPT), &lock(&SESSION));
-        // History holds nothing while a key is on its way (clipboard::hold_for_a_key).
-        crate::clipboard::hold_for_a_key(!card.chip_label.is_empty());
+        // The clipboard is held (history paused, the model's clipboard tools refused) while a key
+        // is awaited, being checked, or was just refused and may still be on it.
+        let held = card.rows.iter().any(|r| matches!(r.state, "waiting" | "checking" | "rejected"));
+        crate::clipboard::hold_for_a_key(held);
         let status = crate::vault_unlock::cached_status();
         let Some(ui) = self.ui.upgrade() else { return };
         let g = ui.global::<FreeAiState>();
@@ -154,7 +156,7 @@ impl Wiring {
     }
 
     fn paste(&self, value_id: String) {
-        let Some((s, _)) = intake::value_of(&value_id) else { return };
+        let Some((s, value)) = intake::value_of(&value_id) else { return };
         let provider = s.id.to_string();
         {
             let mut session = lock(&SESSION);
@@ -167,21 +169,35 @@ impl Wiring {
         self.render();
         let x = self.clone();
         let spawned = std::thread::Builder::new().name("free-ai-paste".into()).spawn(move || {
-            let pasted = intake::read_clipboard();
+            // However this ends, a panic included, the row stops saying "checking".
+            let _done = Checking(x.clone());
+            let Some(pasted) = intake::read_clipboard() else {
+                lock(&SESSION).rejected.insert(
+                    provider.clone(),
+                    "The clipboard holds more than a key, or did not answer in time. Copy the key again, then press Paste. Nothing was sent or saved.".into(),
+                );
+                return;
+            };
             let pending = lock(&SESSION).pending_account.clone();
             let step = intake::decide(&value_id, &pasted, pending.as_deref(), intake::check, |id, value| {
                 x.bridge
                     .provider_keys(Op::Store { id: id.to_string(), value: value.to_string() }, WORKER_TIMEOUT)
-                    .unwrap_or(Reply::Failed)
+                    .unwrap_or(Reply::NoAnswer)
             });
-            // Whatever came of it, history keeps no copy; a kept key leaves the clipboard too.
-            if let Ok(mut h) = x.history.lock() {
-                h.forget(&pasted);
+            // What was a key, kept or not, leaves history and the clipboard: history exactly, and
+            // the clipboard only if it still holds that key (the person may have copied since).
+            let was_a_key = yantrik_ml::provider::pool::signup::shape(value, &pasted).is_ok();
+            if was_a_key {
+                if let Ok(mut h) = x.history.lock() {
+                    h.forget(&pasted);
+                }
+                if intake::read_clipboard().is_some_and(|now| now.trim() == pasted.trim()) {
+                    intake::clear_clipboard();
+                }
             }
             drop(pasted);
             {
                 let mut session = lock(&SESSION);
-                session.checking = None;
                 match &step {
                     Step::Kept { resting } => {
                         session.pending_account = None;
@@ -196,12 +212,10 @@ impl Wiring {
                 }
             }
             if matches!(step, Step::Kept { .. }) {
-                intake::clear_clipboard();
                 lock(&CHOICES).stage.remove(&provider);
                 let _ = choices::save(&choices::path(), &lock(&CHOICES));
                 tracing::info!(provider = %provider, "a free AI key was checked with its provider and kept in the vault");
             }
-            x.refresh();
         });
         if spawned.is_err() {
             lock(&SESSION).checking = None;
@@ -214,10 +228,21 @@ impl Wiring {
         let x = self.clone();
         let _ = std::thread::Builder::new().name("free-ai-remove".into()).spawn(move || {
             let ids: Vec<&str> = yantrik_ml::provider::pool::signup::signup(&id).map(|s| s.values.iter().map(|v| v.id).collect()).unwrap_or_default();
+            let mut failed = None;
             for value_id in ids {
-                let _ = x.bridge.provider_keys(Op::Remove { id: value_id.to_string() }, WORKER_TIMEOUT);
+                match x.bridge.provider_keys(Op::Remove { id: value_id.to_string() }, WORKER_TIMEOUT) {
+                    Ok(Reply::Done) => {}
+                    Ok(Reply::Locked) => failed = Some("The key was not removed: the vault is locked. Unlock it, then remove it again."),
+                    _ => failed = Some("The key may not have been removed: the vault did not answer. This row says Ready while it is still kept."),
+                }
             }
-            tracing::info!(provider = %id, "a free AI key was removed from the vault");
+            match failed {
+                None => tracing::info!(provider = %id, "a free AI key was removed from the vault"),
+                Some(why) => {
+                    tracing::warn!(provider = %id, "a free AI key could not be removed");
+                    lock(&SESSION).rejected.insert(id.clone(), why.to_string());
+                }
+            }
             x.refresh();
         });
         self.render();
@@ -236,6 +261,16 @@ impl Wiring {
         if !value_id.is_empty() {
             self.paste(value_id);
         }
+    }
+}
+
+/// Clears "checking" when a paste ends, however it ends, and redraws.
+struct Checking(Wiring);
+
+impl Drop for Checking {
+    fn drop(&mut self) {
+        lock(&SESSION).checking = None;
+        self.0.refresh();
     }
 }
 
