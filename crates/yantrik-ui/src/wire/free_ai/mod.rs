@@ -92,6 +92,9 @@ impl Wiring {
         let Some(ui) = self.ui.upgrade() else { return };
         let g = ui.global::<FreeAiState>();
         let rows: Vec<FreeAiRow> = card.rows.iter().map(to_slint).collect();
+        let (trains, clean): (Vec<FreeAiRow>, Vec<FreeAiRow>) = rows.iter().cloned().partition(|r| r.trains);
+        g.set_clean_rows(ModelRc::new(VecModel::from(clean)));
+        g.set_trains_rows(ModelRc::new(VecModel::from(trains)));
         g.set_rows(ModelRc::new(VecModel::from(rows)));
         g.set_summary(card.summary.into());
         g.set_next_line(card.next_line.into());
@@ -255,3 +258,25 @@ fn to_slint(r: &rows::Row) -> FreeAiRow {
     }
 }
 
+
+#[cfg(test)]
+mod card_source_tests {
+    const CARD: &str = include_str!("../../../../yantrik-ui-slint/ui/components/free_ai_card.slint");
+
+    /// A key never enters the card: every callback carries one id (or a bool) and nothing else,
+    /// and no row field is a key.
+    #[test]
+    fn no_callback_on_the_card_can_carry_a_key() {
+        let callbacks: Vec<&str> = CARD.lines().map(str::trim).filter(|l| l.starts_with("callback ")).collect();
+        assert!(callbacks.len() >= 12, "{callbacks:?}");
+        for c in callbacks {
+            let args = c.split_once('(').and_then(|(_, rest)| rest.split_once(')')).map_or("", |(a, _)| a);
+            assert!(matches!(args, "" | "string" | "bool"), "{c} carries more than an id");
+        }
+        let row = CARD.split("export struct FreeAiRow").nth(1).and_then(|s| s.split('}').next()).unwrap();
+        for line in row.lines().map(str::trim).filter(|l| !l.starts_with("//") && l.contains(':')) {
+            let field = line.split(':').next().unwrap().trim();
+            assert!(!field.contains("key") && !field.contains("secret") && !field.contains("token"), "FreeAiRow has a field {field}");
+        }
+    }
+}

@@ -259,6 +259,8 @@ export component FilesProbe inherits Window {
 }
 
 import { SettingsScreen, SettingsCategoryItem, RunsOnRow, InUseRow } from "settings.slint";
+import { FreeAiCard } from "components/free_ai_card.slint";
+export { FreeAiState, FreeAiRow, FreeAiValue } from "components/free_ai_card.slint";
 export { RunsOnRow, InUseRow }
 export component SettingsProbe inherits Window {
     in property <length> canvas-width:800px;in property <length> canvas-height:600px;
@@ -834,5 +836,18 @@ export component HandoffCardProbe inherits Window {
         handoff-card-open: root.open;
         handoff-card-title: "Give DeepSeek Ollama?";
         handoff-card-body: "DeepSeek will use Ollama at 192.168.4.35:11434 with qwen3.5:9b.";
+    }
+}
+
+// Settings → AI → Free AI accounts, the card alone at its widest, for verify-free-ai. The rows
+// come from the test through FreeAiState, as they come from wire/free_ai in the shell.
+export component FreeAiProbe inherits Window {
+    in property <length> tall: 1800px;
+    width: 600px; height: root.tall; background: Theme.bg-deep;
+    out property <length> card-height: card.height;
+    out property <length> card-width: card.width;
+    VerticalLayout {
+        alignment: start;
+        card := FreeAiCard { }
     }
 }

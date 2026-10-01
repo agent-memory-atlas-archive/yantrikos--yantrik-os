@@ -8,6 +8,7 @@ mod installer_tests;
 mod files_tests;
 mod settings_tests;
 mod decision_tests;
+mod free_ai_tests;
 mod agents_tests;
 mod mind_panel_tests;
 mod recipes_tests;
@@ -54,6 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     slint::platform::set_platform(Box::new(Headless(window.clone())))?;
     if args.iter().any(|a| a == "verify-settings") { return settings_tests::run(&window, output, width, height); }
     if args.iter().any(|a| a == "verify-decision") { return decision_tests::run(&window, output, width, height); }
+    if args.iter().any(|a| a == "verify-free-ai") { return free_ai_tests::run(&window, output); }
     if args.iter().any(|a| a == "verify-files") { return files_tests::run(&window); }
     if args.iter().any(|a| a == "verify-agents") { return agents_tests::run(&window, output); }
     if args.iter().any(|a| a == "verify-agents-catalog") { return agents_tests::run_catalog(&window, output); }

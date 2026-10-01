@@ -37,6 +37,9 @@ export struct FreeAiRow {
 
 export global FreeAiState {
     in-out property <[FreeAiRow]> rows;
+    // The same rows, split: those that never train on prompts, and those that may.
+    in-out property <[FreeAiRow]> clean-rows;
+    in-out property <[FreeAiRow]> trains-rows;
     in-out property <string> summary;       // "3 of 8 ready · 3 to set up · 2 skipped"
     in-out property <string> next-line;     // "Next: Groq · needs an account · about 3 min", or ""
     in-out property <string> next-id;
@@ -147,6 +150,7 @@ component ProviderRow inherits VerticalLayout {
             spacing: Theme.sp-1;
             for v[i] in root.item.values : HorizontalLayout {
                 spacing: Theme.sp-2;
+                alignment: root.item.values.length > 1 ? stretch : start;
                 if root.item.values.length > 1 : Line { text: (i + 1) + ". " + v.label + ": " + v.where; horizontal-stretch: 1; }
                 YButton {
                     label: v.done ? v.label + " is in" : (root.item.values.length > 1 ? "Paste " + v.label : "Paste key from clipboard");
@@ -207,12 +211,16 @@ component Group inherits VerticalLayout {
             Text { text: root.warning; color: Theme.amber; font-size: Theme.fs-caption; wrap: word-wrap; }
         }
     }
-    for r in FreeAiState.rows : VerticalLayout {
-        if (root.group == "trains") == r.trains : ProviderRow { item: r; vault-locked: FreeAiState.vault-locked; }
+    for r in root.group == "trains" ? FreeAiState.trains-rows : FreeAiState.clean-rows : ProviderRow {
+        item: r;
+        vault-locked: FreeAiState.vault-locked;
     }
 }
 
 export component FreeAiCard inherits Rectangle {
+    // At most 600px: with a provider's page snapped to one half of the screen, the whole card
+    // fits in the other.
+    max-width: 600px;
     background: Theme.bg-card;
     border-radius: Theme.r-lg;
     border-width: 1px;
