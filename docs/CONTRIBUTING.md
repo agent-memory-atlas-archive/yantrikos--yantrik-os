@@ -1,56 +1,138 @@
 # Contributing to Yantrik OS
 
-## Architecture
+Yantrik OS is a Debian-based Linux desktop built so that AI agents can work on it beside a person,
+safely: every app publishes what it holds and what it can be asked to do, and a permission gate
+decides what runs without asking. It is GPL-3.0, written mostly in Rust with a Slint UI, and small
+enough that the people who wrote the code read every pull request.
 
-The runtime is still organized around **three cooperating roles** (same mental model as the README):
+You do not need to understand all of it to help. Most of the useful work below touches one app,
+one harness or one doc.
 
-1. **Main thread** — Slint UI (event loop, rendering)
-2. **SystemObserver** — D-Bus, inotify, sysinfo polling (battery, WiFi, processes, idle)
-3. **Companion worker** — LLM inference, memory search, tool execution
+## Where to start
 
-The **Cargo workspace** is larger than the classic “five crates” diagram. The authoritative list of packages is **`[workspace].members` in the repo root `Cargo.toml`**.
+Pick whichever fits what you know:
 
-### Layout (summary)
+- **A starter issue.** The ones labelled
+  [`good first issue`](https://github.com/yantrikos/yantrik-os/issues?q=is%3Aopen+label%3A%22good+first+issue%22)
+  are scoped, real and unassigned. Comment with the one you want and it is yours.
+- **Make an app agent-ready.** An app becomes something a mind can use by publishing a *surface*:
+  `describe` (what it holds) and `act` (what it can be asked to do, each action graded). Start
+  with [`docs/sdk/python-quickstart.md`](sdk/python-quickstart.md) or
+  [`docs/sdk/rust-quickstart.md`](sdk/rust-quickstart.md), then
+  [`docs/sdk/wrap-an-app.md`](sdk/wrap-an-app.md) for an existing program.
+- **Improve a harness.** Minds attach through [`harnesses/`](../harnesses): Hermes, Pi, DeepSeek and
+  OpenClaw, each a small Python adapter. If you use one of those agents day to day, you know it
+  better than we do. The protocol is in [`docs/harness.md`](harness.md); the shared tests are in
+  `harnesses/tests`.
+- **Add a tool to the built-in companion** (Rust), or a **YAML plugin / theme** (no Rust): see
+  [Recipes](#recipes) below.
+- **Run it on real hardware.** Every image is boot-tested in QEMU, and real machines and UEFI are
+  untested ([`docs/hardware-requirements.md`](hardware-requirements.md)). A report of what worked
+  and what did not on your laptop is a real contribution: open an issue with the machine, the
+  image version and what you saw.
+- **Docs.** If something here or in `docs/` was wrong or unclear when you tried it, a fix to the
+  doc is as welcome as a fix to the code.
 
-**Crates (`crates/`):**
+## Setting up
 
-| Crate | Role |
-|-------|------|
-| `yantrik` | Main binary / composition |
-| `yantrik-ui` | Desktop shell, Slint, `wire/` callbacks |
-| `yantrik-os` | System observer, platform integration |
-| `yantrik-companion` | Agent loop, wiring to tools and ML |
-| `yantrik-companion-core` | `Tool` trait, `ToolContext`, shared types |
-| `yantrik-companion-tools` | **Tool implementations** (one module per domain) |
-| `yantrik-companion-instincts` | Proactive instincts |
-| `yantrik-companion-cortex` | Cortex / pattern logic |
-| `yantrik-chat` | Chat-side plumbing |
-| `yantrik-ml` | LLM backends (also pulled in via workspace dependencies / path patches) |
-| `yantrikdb-core`, `yantrikdb-server` | Memory DB and server |
-| `yantrik-app-runtime` | App host / runtime |
-| `yantrik-ui-slint`, `yantrik-ui-kit`, `yantrik-shell-core` | UI layers and shell primitives |
-| `yantrik-ipc-contracts`, `yantrik-ipc-transport` | IPC |
-| `yantrik-service-sdk`, `yantrik-manifest`, `yantrik-design-tokens` | Shared infrastructure |
+You need Linux (Debian or Ubuntu; WSL2 on Windows works) and stable Rust 1.92 or newer (Slint 1.17
+requires it). The system libraries are the ones CI installs:
 
-**Apps (`apps/`)** — One package per built-in app (e.g. `spreadsheet`, `email`, `terminal`).
-
-**Services (`services/`)** — Background services (e.g. `email-service`, `calendar-service`).
-
-### Wire Pattern
-
-Each UI feature lives in `crates/yantrik-ui/src/wire/<name>.rs` with:
-
-```rust
-pub fn wire(ui: &App, ctx: &AppContext) {
-    // Register Slint callbacks here
-}
+```bash
+sudo apt-get install -y --no-install-recommends \
+  pkg-config libasound2-dev libudev-dev libssl-dev libspeechd-dev libwayland-dev \
+  libxkbcommon-dev libfontconfig1-dev libfreetype6-dev libinput-dev libgbm-dev libegl1-mesa-dev
 ```
 
-Registered once in [`crates/yantrik-ui/src/wire/mod.rs`](../crates/yantrik-ui/src/wire/mod.rs). This keeps entrypoints thin when adding features.
+Build and test the way CI does:
 
-### Tool Pattern
+```bash
+cargo build --workspace --locked
+cargo test --workspace --locked
+```
 
-Each tool category lives in **`crates/yantrik-companion-tools/src/<name>.rs`**. The crate re-exports the `Tool` trait from `yantrik-companion-core` (see [`lib.rs`](../crates/yantrik-companion-tools/src/lib.rs)).
+The whole workspace takes a while the first time. While working on one part, test just that part,
+for example `cargo test -p yantrik-ui --bin yantrik-ui` for the shell or
+`cargo test -p yantrik-companion-tools` for the companion's tools.
+
+The memory engine, YantrikDB, is a git dependency pinned to an exact revision in the root
+`Cargo.toml`. Leave that pin as it is unless you are changing the engine too; the comment beside it
+says how to point the build at a local checkout of it.
+
+### Seeing it run
+
+The quickest way to see a change is to boot the published image in QEMU and work against it,
+rather than to build an image (a full ISO build takes about an hour):
+
+```bash
+sh install.sh --download                       # the current nightly image, with its checksum
+qemu-system-x86_64 -enable-kvm -m 4096 -smp 4 \
+  -cdrom yantrik-os-<version>.iso -boot d -device virtio-vga -display gtk
+```
+
+4 GB and 4 CPUs is what CI boots every published image with. To build an image from your own
+tree, `deploy/yantrik-os/build-debian-iso.sh` is what CI runs, and
+`deploy/yantrik-os/boottest.py <iso> <outdir>` is the boot check it has to pass. (The Alpine-era
+scripts beside them, `setup-alpine-vm.sh`, `build-iso.sh`, the `*vbox*` ones and
+`deploy-stack.sh`, are history and no current path uses them.)
+
+For UI work, `tests/ui-preview/validate.sh` draws the real Slint screens headlessly, presses
+buttons and writes screenshots under `target/ui-validation/`. On a running machine,
+`scripts/screen-survey.sh` photographs every screen. Look at the pixels: most UI defects in this
+project were found by looking at a running machine, not by reading the source.
+
+## What CI checks
+
+Every pull request runs two jobs, and both must pass:
+
+- **test**: `cargo build --workspace --locked` and `cargo test --workspace --locked`.
+- **shell scripts**: every script with a `#!` line is executable and parses, and the tools written
+  in Python and shell run their own selftests:
+
+  ```bash
+  python3 deploy/yantrik-os/yos-mcp-selftest.py
+  python3 deploy/yantrik-os/yos-selftest.py
+  python3 deploy/yantrik-os/yantrik-mind-launch-selftest.py
+  python3 deploy/yantrik-os/server/publish_selftest.py
+  bash deploy/yantrik-os/yantrik-update selftest
+  sh deploy/yantrik-os/yantrik-shell selftest
+  bash deploy/yantrik-os/service-bins.sh selftest
+  python3 -m unittest discover -s harnesses/tests -v
+  ```
+
+  A new script needs its executable bit in git, or CI fails:
+  `git update-index --chmod=+x path/to/script`.
+
+## Making a change
+
+- **One concern per pull request**, on a branch. A small PR is reviewed the same day; a large one
+  waits.
+- **A bug fix comes with the test that would have caught it.** Many tests here exist to stop one
+  specific mistake coming back, and say so in their names.
+- **Comments say why.** The code around you will show the style: a comment explains the reason for
+  a choice, often with what went wrong without it, not what the next line does.
+- **Small modules.** Prefer a new focused file to growing a large one, and reuse a shared component
+  rather than writing a second copy of it.
+- **Words a person reads are true and plain.** UI text and docs state what the software does,
+  with its limits beside the claim. No marketing words, and no number that is not measured.
+- **Commit messages** say what changed and why, in sentences.
+
+Some areas are security boundaries, and a change to them gets a careful review: the control surface
+and the permission gate (`crates/yantrik-ui/src/control*.rs`, `crates/yantrik-ipc-transport`), the
+companion's tools and taint rules (`crates/yantrik-companion-core`), the MCP bridge
+(`deploy/yantrik-os/yos-mcp`), the vault, and the updater (`deploy/yantrik-os/yantrik-update`).
+Changes there are welcome; expect questions.
+
+## Reporting a security problem
+
+Please do not open a public issue for a vulnerability. Use GitHub's private report: the
+**Security** tab of the repository, then **Report a vulnerability**. See [`SECURITY.md`](../SECURITY.md).
+
+## Recipes
+
+### A companion tool (Rust)
+
+Each tool category lives in `crates/yantrik-companion-tools/src/<name>.rs`:
 
 ```rust
 pub fn register(reg: &mut ToolRegistry) {
@@ -63,36 +145,27 @@ impl Tool for MyTool {
     fn name(&self) -> &'static str { "my_tool" }
     fn permission(&self) -> PermissionLevel { PermissionLevel::Safe }
     fn category(&self) -> &'static str { "my_category" }
-    fn definition(&self) -> serde_json::Value { /* OpenAI function schema */ }
+    fn definition(&self) -> serde_json::Value { /* the function schema the model sees */ }
     fn execute(&self, ctx: &ToolContext, args: &serde_json::Value) -> String { /* ... */ }
 }
 ```
 
-Permission levels: `Safe` (read-only) < `Standard` (reversible writes) < `Sensitive` (system changes) < `Dangerous` (destructive).
+Grades: `Safe` (reads only) < `Standard` (reversible writes) < `Sensitive` (system changes) <
+`Dangerous` (destructive). Add `pub mod mytool;` to `lib.rs` and call `mytool::register(reg)` from
+`register_all()`; [`git.rs`](../crates/yantrik-companion-tools/src/git.rs) is a full example. Use
+`validate_path()` for any file access, keep output short enough for a model to read, and grade
+honestly: the grade decides whether a person is asked first.
 
----
+### A UI feature in the shell
 
-## Adding a New Tool
+Each feature's wiring lives in `crates/yantrik-ui/src/wire/<name>.rs` as a
+`pub fn wire(ui: &App, ctx: &AppContext)` registering its Slint callbacks, called once from
+[`wire/mod.rs`](../crates/yantrik-ui/src/wire/mod.rs). Its markup is in
+`crates/yantrik-ui-slint/ui/`, built from the shared components in `crates/yantrik-ui-kit/slint/`.
 
-1. Create `crates/yantrik-companion-tools/src/mytool.rs`
-2. Implement `Tool` for each tool (see [`git.rs`](../crates/yantrik-companion-tools/src/git.rs) for a full example with `register()`)
-3. Add `pub mod mytool;` to [`lib.rs`](../crates/yantrik-companion-tools/src/lib.rs) and call `mytool::register(reg)` from `register_all()`
-4. Run `cargo check -p yantrik-companion-tools` (and `cargo check -p yantrik-companion` if you change how tools are wired in the main agent)
+### A YAML plugin (no Rust)
 
-Some tools need config from the running app (e.g. canvas, vision, github) and are **registered from `yantrik-companion`** instead of inside `register_all()`—follow existing patterns in `lib.rs` comments when adding similar tools.
-
-**Tips:**
-- Shell out to system CLIs when possible (no extra Rust deps)
-- Truncate output to ~3000 chars for LLM-friendly responses
-- Use `validate_path()` for file access (blocks `.ssh`, `.gnupg`, etc.)
-- Use `expand_home()` for `~/` path expansion
-- Store audit memories via `ctx.db.record_text()` for important operations
-
----
-
-## Creating a YAML Plugin
-
-Plugins add tools without writing Rust. Place `.yaml` files in `~/.config/yantrik/plugins/`:
+Plugins add tools from `~/.config/yantrik/plugins/*.yaml`:
 
 ```yaml
 name: "my-tools"
@@ -104,30 +177,15 @@ tools:
     category: "network"
     parameters: {}
     command: "mullvad status"
-
-  - name: "deploy_staging"
-    description: "Deploy branch to staging"
-    permission: "sensitive"
-    category: "devops"
-    parameters:
-      branch:
-        type: "string"
-        description: "Branch name"
-        required: true
-    command: "cd ~/projects && ./deploy.sh {branch}"
 ```
 
-**Rules:**
-- Parameters substitute into the command as `{param_name}`
-- Parameter values are sanitized (no `;`, `&`, `|`, `` ` ``, `$`, `>`, `<`)
-- Command templates are trusted (written by plugin author)
-- Permission ceiling from config's `max_permission` still applies
+Parameters substitute into the command as `{param_name}`, and their values are sanitized (no `;`,
+`&`, `|`, `` ` ``, `$`, `>`, `<`). The command template itself is trusted, so a plugin is only as
+safe as its author; the machine's permission ceiling still applies to every tool.
 
----
+### A theme (no Rust)
 
-## Creating a Community Theme
-
-Place a `theme-override.yaml` in `~/.config/yantrik/`:
+`~/.config/yantrik/theme-override.yaml` overrides the default theme's (Calm Graphite) key colours:
 
 ```yaml
 name: "Nord"
@@ -136,71 +194,26 @@ bg_deep: "#2e3440"
 bg_surface: "#3b4252"
 bg_card: "#434c5e"
 bg_elevated: "#4c566a"
-amber: "#ebcb8b"
-cyan: "#88c0d0"
+accent: "#81a1c1"
 text_primary: "#eceff4"
 text_secondary: "#d8dee9"
 text_dim: "#4c566a"
-accent: "#81a1c1"
+amber: "#ebcb8b"
+cyan: "#88c0d0"
 ```
 
-**Available tokens:** `bg_deep`, `bg_surface`, `bg_card`, `bg_elevated`, `amber`, `cyan`, `text_primary`, `text_secondary`, `text_dim`, `accent`.
+Set `enabled: false`, or delete the file, to go back to the default.
 
-Set `enabled: false` or delete the file to revert to the default Firelight theme.
+## Known issues
 
----
+- **rustc 1.93.x internal compiler error around dead-code lints.** A compiler bug, not this code.
+  `yantrik-ui` carries mitigations (`#![allow(unused)]` at the crate root and `#[allow(dead_code)]`
+  on the `mod` lines its comments name). If another crate hits it, add `#[allow(dead_code)]` to the
+  `mod` in the stack trace, or update to a newer stable toolchain.
 
-## Dev Environment Setup
+## Talking to us
 
-### Prerequisites
-
-- Windows 11 with WSL2 (Ubuntu 24.04)
-- Rust 1.93+ in WSL2
-- QEMU with KVM acceleration
-
-### Build
-
-```bash
-# From WSL2
-cd /mnt/c/Users/<you>/path/to/yantrik-os
-CARGO_TARGET_DIR=/home/<user>/target-yantrik cargo check
-
-# Check specific workspace members (non-exhaustive)
-cargo check -p yantrik-ui
-cargo check -p yantrik-companion
-cargo check -p yantrik-companion-tools
-cargo check -p yantrik-os
-cargo check -p yantrik
-```
-
-### Run it in QEMU
-
-The quickest way to see a change running is to boot the published image and deploy your
-binaries onto it, rather than to build an image yourself — a full ISO build is about an hour.
-
-```bash
-# The current nightly image, with its checksum
-sh install.sh --download
-
-# Boot it live. 4 GB and 4 CPUs is what CI boots every published image with.
-qemu-system-x86_64 -enable-kvm -m 4096 -smp 4 \
-  -cdrom yantrik-os-<version>.iso -boot d \
-  -device virtio-vga -display gtk
-```
-
-To build an image from your own tree, `deploy/yantrik-os/build-debian-iso.sh` is what CI
-runs; `deploy/yantrik-os/boottest.py <iso> <outdir>` is the boot check it has to pass.
-
-`deploy/yantrik-os/setup-alpine-vm.sh`, `build-iso.sh`, `setup-vbox.sh`,
-`build-vbox-image.sh`, `deploy-vbox.sh` and `deploy-stack.sh` still target Alpine Linux, which
-this OS has not been built on since spring. They are left in place as history and none of them
-is part of any current path — do not start from one.
-
-### Known Issues
-
-- **rustc 1.93.x internal compiler error (ICE) around dead-code / early lints**  
-  This is a **compiler bug**, not bad code in Yantrik. The `yantrik-ui` crate already carries mitigations: see **`crates/yantrik-ui/src/main.rs`** (`#![allow(unused)]` at crate root and `#[allow(dead_code)]` on the `mod` lines called out in comments there).  
-  If you still hit an ICE on **`cargo check`** with another crate, use the stack trace to find the **`mod`** involved and add `#[allow(dead_code)]` on that declaration, or try **`rustup update`** to a newer stable toolchain where the bug may already be fixed.
-
-- **`[patch]` in the root `Cargo.toml`**  
-  The workspace may patch `yantrik-ml` / `yantrikdb-core` to **path dependencies** for in-tree builds. That is intentional for this repo. Only edit `[patch]` when you are deliberately developing those libraries from separate local checkouts alongside `yantrik-os`; otherwise leave it as committed.
+The Discord, [discord.gg/7cDw3jd3Xf](https://discord.gg/7cDw3jd3Xf), is read by the people who
+wrote the code: `#apps-and-surfaces` for the control protocol, `#minds` for harnesses, and the
+**help** forum for anything that broke. Issues are at
+[github.com/yantrikos/yantrik-os/issues](https://github.com/yantrikos/yantrik-os/issues).

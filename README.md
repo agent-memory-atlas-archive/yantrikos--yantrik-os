@@ -442,6 +442,10 @@ wrote the code.
 | **help** forum | say what broke; the audits under `design/` mean nothing here needs defending |
 | `#showcase` | what you made with it |
 
+**Want to contribute?** Start with [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md): where to begin, how
+to build and test it the way CI does, and what a pull request needs. Security problems go to
+[SECURITY.md](SECURITY.md), not to a public issue.
+
 Issues are at [github.com/yantrikos/yantrik-os/issues](https://github.com/yantrikos/yantrik-os/issues).
 The ones labelled [`good first issue`](https://github.com/yantrikos/yantrik-os/issues?q=is%3Aopen+label%3A%22good+first+issue%22)
 are real and unassigned — say which one you want and it is yours.
