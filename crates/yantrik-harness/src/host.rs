@@ -1994,8 +1994,9 @@ fn issue_conversation(issued: &mut HashSet<String>) -> Result<String, String> {
 }
 
 /// Bytes from the operating system's random source, as hex. Never a clock, a counter or a
-/// seeded generator: a token that could be guessed would name somebody else's agent.
-fn random_hex(bytes: usize) -> Result<String, String> {
+/// seeded generator: a token that could be guessed would name somebody else's agent. The one
+/// source of secrets the desktop issues (agent tokens, job tickets, pairing codes).
+pub fn random_hex(bytes: usize) -> Result<String, String> {
     let mut buf = vec![0u8; bytes];
     getrandom::getrandom(&mut buf)
         .map_err(|e| format!("this machine would not give the desktop random bytes: {e}"))?;

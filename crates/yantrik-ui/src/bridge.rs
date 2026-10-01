@@ -69,6 +69,9 @@ pub enum CompanionCommand {
         /// it reads, it changes nothing — and so is what the worker runs after it, until the
         /// person next speaks at the desk.
         remote: bool,
+        /// Asked by a program on the companion's socket, not by the person: the turn's words
+        /// count as untrusted, so a tool that would hand back a credential is refused.
+        outside: bool,
     },
     /// Count a conversation turn — one that began with the person's words and was answered.
     ///
@@ -266,6 +269,9 @@ pub struct MemoryResult {
     pub valence: f64,
     pub score: f64,
     pub created_at: f64,
+    /// The memory's domain: `audit/tools` lines are the companion's record of what its tools
+    /// did, and are not handed to a program on its socket.
+    pub domain: String,
 }
 
 /// Urge data for the UI.
@@ -361,6 +367,7 @@ impl CompanionHandle {
                 job: None,
                 model: Some(model_tx),
                 remote: false,
+                outside: true,
             })
             .map_err(|_| AskError::Failed("companion worker is not running".to_string()))?;
 
@@ -456,7 +463,7 @@ impl CompanionHandle {
     /// alternative — blocking — told the caller nothing for as long as fifty seconds and then
     /// gave it no way to have chosen differently.
     pub fn submit_ask(&self, text: String) -> Result<crate::jobs::Receipt, String> {
-        let receipt = self.board.submit("model", "ask");
+        let receipt = self.board.submit_outside("model", "ask");
         // Tokens go nowhere: the board is the subscriber for a submitted job, and the chat UI is
         // not watching this one.
         let (token_tx, _token_rx) = crossbeam_channel::unbounded();
@@ -467,6 +474,7 @@ impl CompanionHandle {
                 job: Some(receipt.ticket.clone()),
                 model: None,
                 remote: false,
+                outside: true,
             })
             .map_err(|_| "companion worker is not running".to_string())?;
         Ok(receipt)
@@ -478,7 +486,7 @@ impl CompanionHandle {
         name: String,
         args: serde_json::Value,
     ) -> Result<crate::jobs::Receipt, String> {
-        let receipt = self.board.submit("model", &format!("tool:{name}"));
+        let receipt = self.board.submit_outside("model", &format!("tool:{name}"));
         let (reply_tx, _reply_rx) = crossbeam_channel::unbounded();
         self.cmd_tx
             .send(CompanionCommand::RunTool {
@@ -693,6 +701,7 @@ impl CompanionBridge {
                 job: None,
                 model: None,
                 remote,
+                outside: false,
             })
             .is_err()
         {
@@ -1201,9 +1210,10 @@ fn worker_loop(
                 crate::recipes::record(&recipe_id, outcome.map(|a| a.message));
                 recipes_dirty = true;
             }
-            Ok(CompanionCommand::SendMessage { text, token_tx, job, model, remote }) => {
+            Ok(CompanionCommand::SendMessage { text, token_tx, job, model, remote, outside }) => {
                 // From a phone, the turn reads and changes nothing (channels, P1).
                 companion.set_turn_ceiling(remote.then_some(yantrik_companion::tools::PermissionLevel::Safe));
+                companion.set_turn_outside(outside);
                 // A turn can create, run or change a recipe through its tools.
                 recipes_dirty = true;
                 // Work that arrived without a ticket gets one here, and that is not bookkeeping:
@@ -1214,7 +1224,7 @@ fn worker_loop(
                 // board at all.
                 let job = job.or_else(|| {
                     let kind = if text.contains("You just started up") { "brief" } else { "ask" };
-                    Some(board.submit("model", kind).ticket)
+                    Some(if outside { board.submit_outside("model", kind) } else { board.submit("model", kind) }.ticket)
                 });
 
                 // The moment this arm runs is the moment the job is no longer waiting. Anything
@@ -1227,21 +1237,28 @@ fn worker_loop(
                 // Synthesis Gate think somebody is. `wire::chat::dispatch` is bumped by a
                 // person typing; this arm also carries the startup brief, EXECUTE urges and
                 // the companion's own reflection prompts, so it bumps nothing.
-                let is_system_generated = text.contains("You just started up")
+                // Nor is a program on the socket: its words are not the person's, so nothing below
+                // learns from them (commitments, resonance, threading, the events the desktop reads).
+                let is_system_generated = outside
+                    || text.contains("You just started up")
                     || text.contains("EXECUTE ")
                     || text.starts_with("Reflect naturally")
                     || text.starts_with("Recall shared references");
                 tracing::trace!(is_system_generated, "companion SendMessage");
 
-                // Update ambient sentiment from user message
-                ambient.update_from_message(&text);
+                if !outside {
+                    // Update ambient sentiment from user message
+                    ambient.update_from_message(&text);
 
-                // Track user message length for conversational metabolism
-                companion.track_user_msg_length(text.len());
+                    // Track user message length for conversational metabolism
+                    companion.track_user_msg_length(text.len());
+                }
 
                 // Proactive message threading: if user replies shortly after a proactive message,
-                // prepend context so the LLM knows what the conversation is about.
-                let text = if let Some(ctx) = companion.get_threading_context() {
+                // prepend context so the LLM knows what the conversation is about. Not for an
+                // outside ask: the companion's last word to the person is the person's.
+                let threading = if outside { None } else { companion.get_threading_context() };
+                let text = if let Some(ctx) = threading {
                     format!("{}{}", ctx, text)
                 } else {
                     text
@@ -1290,7 +1307,7 @@ fn worker_loop(
                 }
 
                 // Resonance Model: record user interaction (positive quality for now)
-                {
+                if !outside {
                     let now_r = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
@@ -1355,11 +1372,7 @@ fn worker_loop(
 
                         // Record significant interactions as events for aftermath instinct
                         // Skip system-generated prompts (startup brief, EXECUTE instructions)
-                        let is_system_prompt = text.contains("You just started up")
-                            || text.contains("EXECUTE ")
-                            || text.starts_with("Reflect naturally")
-                            || text.starts_with("Recall shared references");
-                        if !response.tool_calls_made.is_empty() && !is_system_prompt {
+                        if !response.tool_calls_made.is_empty() && !is_system_generated {
                             let tools_summary = response.tool_calls_made.join(", ");
                             // Use user's message (truncated) as event description
                             let user_text = text.chars().take(80).collect::<String>();
@@ -1484,6 +1497,7 @@ fn worker_loop(
                                 valence: r.valence,
                                 score: r.score,
                                 created_at: r.created_at,
+                                domain: r.domain,
                             })
                             .collect();
                         let _ = reply_tx.send(items);
@@ -1498,11 +1512,13 @@ fn worker_loop(
                 tracing::info!(tool = %name, "Running tool for an outside caller");
                 // As above: a blocking caller's tool still occupies the lane, so it still belongs
                 // on the board.
-                let job = job.or_else(|| Some(board.submit("model", &format!("tool:{name}")).ticket));
+                let job = job.or_else(|| Some(board.submit_outside("model", &format!("tool:{name}")).ticket));
                 if let Some(id) = &job {
                     board.start(id);
                 }
-                let output = companion.run_tool(&name, &args);
+                // Every RunTool is a program on the socket's (companion.tool / submit): the vault's
+                // tools and queue_task are refused to it, by what they are, not a list of names.
+                let output = companion.run_tool_for_outside(&name, &args);
                 if let Some(id) = &job {
                     // A tool that reports a permission denial or a bad argument has still *run*;
                     // it is `Done` with that answer, not `Failed`. Failure here is reserved for
@@ -3135,7 +3151,10 @@ fn build_companion(config: CompanionConfig) -> Result<CompanionService, String> 
         "Companion initialized"
     );
 
-    Ok(CompanionService::new(db, llm, config))
+    let companion = CompanionService::new(db, llm, config);
+    // Passwords the vault's tools filed in the audit log before it withheld them (#536).
+    companion.purge_vault_audit_lines();
+    Ok(companion)
 }
 
 /// V15: Pick a random older memory for serendipity connections.
