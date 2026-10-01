@@ -264,6 +264,9 @@ pub struct MemoryResult {
     pub valence: f64,
     pub score: f64,
     pub created_at: f64,
+    /// The memory's domain: `audit/tools` lines are the companion's record of what its tools
+    /// did, and are not handed to a program on its socket.
+    pub domain: String,
 }
 
 /// Urge data for the UI.
@@ -1472,6 +1475,7 @@ fn worker_loop(
                                 valence: r.valence,
                                 score: r.score,
                                 created_at: r.created_at,
+                                domain: r.domain,
                             })
                             .collect();
                         let _ = reply_tx.send(items);
@@ -3121,7 +3125,10 @@ fn build_companion(config: CompanionConfig) -> Result<CompanionService, String> 
         "Companion initialized"
     );
 
-    Ok(CompanionService::new(db, llm, config))
+    let companion = CompanionService::new(db, llm, config);
+    // Passwords the vault's tools filed in the audit log before it withheld them (#536).
+    companion.purge_vault_audit_lines();
+    Ok(companion)
 }
 
 /// V15: Pick a random older memory for serendipity connections.

@@ -137,6 +137,9 @@ impl ServiceHandler for CompanionRpc {
                     .handle
                     .recall(query, Duration::from_secs(20))
                     .map_err(failed)?;
+                // The companion's record of what its tools did is its own, not a program's on the
+                // socket: it holds the arguments and results of every call.
+                results.retain(|m| !m.domain.starts_with("audit"));
                 results.truncate(limit);
 
                 let results: Vec<serde_json::Value> = results

@@ -180,49 +180,34 @@ pub fn reads_or_writes_secrets(name: &str, category: &str) -> bool {
     category == "vault" || classify(name, category) == Sensitivity::ReturnsSecret
 }
 
-/// Why a program outside the companion (one on its socket) may never have this call run for it,
-/// directly or by a turn it asked for, or `None` when it may.
+/// The tools a program outside the companion (one on its socket) may have run for it, directly
+/// or in a turn it asked for: those that hold nothing of the person's and reach nothing of theirs.
+/// Arithmetic, encodings, dates, the weather and a web search.
 ///
-/// Outside callers are held to `Safe` besides (`OUTSIDE_CEILING`): nothing that writes, schedules,
-/// queues or forgets, so nothing they ask for can come back later as a turn of the person's. A
-/// deny list alone kept missing a door (three reviews, 30 Sep 2026). What is refused here is what
-/// a read can still reveal or reach:
-/// - anything that reads, writes or uses a secret;
-/// - the clipboard, which holds what the person copied out of the vault;
-/// - the shell itself (`app_action` or `describe_app` on it): its chat is the person's, and its
-///   `send_message` would have put the caller's words in the person's own turn, where the vault
-///   is open.
-pub fn outside_refusal(name: &str, category: &str, args: &serde_json::Value) -> Option<String> {
-    if touches_secrets(name, category) {
-        return Some(format!(
-            "`{name}` reads, writes or uses a secret and is the companion's own: it is not run for a program on its socket."
-        ));
+/// An allow-list, because four reviews of a deny-list (30 Sep - 1 Oct 2026) each found another
+/// door: the vault, the clipboard, the shell's chat, then the screen, terminals, email, files and
+/// memory. Everything not named here is the person's until it is shown not to be.
+pub const OUTSIDE_CATEGORIES: &[&str] = &["calculator", "encoding", "time", "weather"];
+/// Single tools allowed beside `OUTSIDE_CATEGORIES`, whose category also holds the person's
+/// things (`web_search` sits with the browser, which holds their logged-in pages).
+pub const OUTSIDE_TOOLS: &[&str] = &["web_search"];
+
+/// Why a program outside the companion may never have this tool run for it, or `None` when it
+/// may (`OUTSIDE_CATEGORIES`, `OUTSIDE_TOOLS`). Outside callers are held to `OUTSIDE_CEILING` too.
+pub fn outside_refusal(name: &str, category: &str) -> Option<String> {
+    if OUTSIDE_TOOLS.contains(&name) || (OUTSIDE_CATEGORIES.contains(&category) && !touches_secrets(name, category)) {
+        return None;
     }
-    if matches!(name, "read_clipboard" | "clipboard_history" | "clipboard_search") {
-        return Some(format!(
-            "`{name}` reads the clipboard, which holds what the person copied: it is not run for a program on the companion's socket."
-        ));
-    }
-    // Only a call's own arguments say where it goes: with none (a catalogue, a check by kind) the
-    // rule waits for the call itself.
-    if matches!(name, "app_action" | "describe_app") && args.is_object() && is_shell(args) {
-        return Some(format!(
-            "`{name}` on the shell reaches the person's own chat: it is not run for a program on the companion's socket."
-        ));
-    }
-    None
+    Some(format!(
+        "`{name}` is not run for a program on the companion's socket: it may only use what holds nothing of the person's ({}, {}).",
+        OUTSIDE_CATEGORIES.join(", "),
+        OUTSIDE_TOOLS.join(", ")
+    ))
 }
 
 /// The highest grade a program on the companion's socket reaches, directly or through a turn it
 /// asked for: what a phone's turn reaches. It reads and changes nothing.
 pub const OUTSIDE_CEILING: crate::permission::PermissionLevel = crate::permission::PermissionLevel::Safe;
-
-fn is_shell(args: &serde_json::Value) -> bool {
-    let app = args.get("app").and_then(serde_json::Value::as_str).unwrap_or("").trim().to_ascii_lowercase();
-    let app = app.strip_prefix("app-").unwrap_or(&app);
-    // Anything that does not name another app plainly is taken for the shell, not guessed at.
-    app.is_empty() || app == "shell" || app.contains("shell") || app.contains('/') || app.contains(".sock")
-}
 
 /// This turn was asked for by a program outside the companion (on its socket), not the person.
 /// Its words count as untrusted from the first one, and nothing in `outside_refusal` runs in it,
@@ -304,7 +289,7 @@ pub fn effective<'a>(name: &'a str, category: &'a str, args: &serde_json::Value)
 pub fn check_call(name: &str, category: &str, args: &serde_json::Value) -> Result<(), String> {
     let outside = TURN.with(|cell| cell.borrow().as_ref().and_then(|t| t.outside_from.clone()));
     if let Some(source) = outside {
-        if let Some(why) = outside_refusal(name, category, args) {
+        if let Some(why) = outside_refusal(name, category) {
             return Err(format!("Refused: {why} This was asked for by {source}."));
         }
     }
@@ -333,7 +318,7 @@ pub fn check(name: &str, category: &str) -> Result<(), String> {
 
 fn check_against(turn: &Turn, name: &str, category: &str) -> Result<(), String> {
     if let Some(source) = &turn.outside_from {
-        if let Some(why) = outside_refusal(name, category, &serde_json::Value::Null) {
+        if let Some(why) = outside_refusal(name, category) {
             return Err(format!("Refused: {why} This turn was asked for by {source}."));
         }
     }
@@ -427,8 +412,18 @@ mod tests {
             assert!(check_call("app_action", "system", &args).is_err(), "app_action on {app:?}");
             assert!(check_call("describe_app", "system", &serde_json::json!({"app": app})).is_err());
         }
-        assert!(check_call("describe_app", "system", &serde_json::json!({"app": "weather"})).is_ok());
+        // Only what holds nothing of the person's runs: not their screen, terminals, mail or memory.
+        for (tool, category) in [("analyze_screen", "vision"), ("read_terminal_buffer", "terminal"), ("email_read", "email"),
+                                 ("recall", "memory"), ("read_file", "files"), ("clipboard_analyze", "clipboard"),
+                                 ("search_by_timeframe", "knowledge"), ("word_count", "text")] {
+            assert!(check(tool, category).is_err(), "{tool} ran in an outside turn");
+        }
+        for (tool, category) in [("calculate", "calculator"), ("base64_encode", "encoding"), ("get_weather", "weather"),
+                                 ("date_calc", "time"), ("web_search", "browser")] {
+            assert!(check(tool, category).is_ok(), "{tool} is the person's nothing, and may run");
+        }
         assert!(check("web_search", "browser").is_ok(), "the ordinary job still works");
+        assert!(check("browser_read", "browser").is_err(), "the person's logged-in pages are theirs");
 
         // A later page does not overwrite where the taint first came from.
         note("browse", "browser");

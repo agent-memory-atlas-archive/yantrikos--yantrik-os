@@ -1246,6 +1246,18 @@ impl CompanionService {
         self.turn_outside = outside;
     }
 
+    /// Remove what the vault's tools left in the audit log before it withheld them: until 1 Oct
+    /// 2026 `vault_generate_password` was filed with the password it made, in plain text, where
+    /// any recall could read it. The text is overwritten (the full-text index follows it) and the
+    /// memory tombstoned. Idempotent; returns how many were cleared.
+    pub fn purge_vault_audit_lines(&self) -> usize {
+        let cleared = purge_vault_audit_lines_in(&self.db.conn());
+        if cleared > 0 {
+            tracing::warn!(cleared, "cleared vault tool results from the audit log");
+        }
+        cleared
+    }
+
     /// The category a tool is registered under, for the taint rules; `None` for no such tool.
     /// `Dangerous` is the top grade, so every registered tool is listed.
     pub(crate) fn category_of(&self, name: &str) -> Option<&'static str> {
@@ -1259,7 +1271,7 @@ impl CompanionService {
     /// Why a program outside the companion may not run this tool, or `None` when it may: above
     /// the outside ceiling (`taint::OUTSIDE_CEILING`), refused by the companion's own rule
     /// (`taint::outside_refusal`), or a tool it cannot name, which is refused rather than guessed at.
-    pub fn refused_to_outside(&self, name: &str, args: &serde_json::Value) -> Option<String> {
+    pub fn refused_to_outside(&self, name: &str) -> Option<String> {
         use yantrik_companion_core::taint;
         let Some(meta) = self.registry.list_metadata(PermissionLevel::Dangerous).into_iter().find(|m| m.name == name) else {
             return Some(format!("There is no tool `{name}`."));
@@ -1269,7 +1281,7 @@ impl CompanionService {
                 "`{name}` changes something, and a program on the companion's socket may only have it read: nothing it asks for may write, schedule or queue work that would later run as the person's."
             ));
         }
-        taint::outside_refusal(name, meta.category, args)
+        taint::outside_refusal(name, meta.category)
     }
 
     /// Run a tool for a program on the companion's socket: refused as `refused_to_outside` says,
@@ -1277,7 +1289,7 @@ impl CompanionService {
     /// so the registry's own check sees who asked and nothing is kept as the person's.
     pub fn run_tool_for_outside(&self, name: &str, args: &serde_json::Value) -> String {
         use yantrik_companion_core::taint;
-        if let Some(why) = self.refused_to_outside(name, args) {
+        if let Some(why) = self.refused_to_outside(name) {
             tracing::warn!(tool = %name, "a program on the companion socket asked for a refused tool");
             return format!("Refused: {why}");
         }
@@ -1353,11 +1365,13 @@ impl CompanionService {
         std::mem::take(&mut self.recent_events)
     }
 
-    /// Execute a tool directly (bypassing LLM). Used by the recipe engine for Tool steps.
+    /// Execute a tool directly (bypassing LLM). Used by the recipe engine for Tool steps. At most
+    /// Standard, and never above the turn's own ceiling: a recipe a phone's or an outside caller's
+    /// words chose reaches no further than they do.
     pub fn execute_tool_direct(&self, tool_name: &str, args: &serde_json::Value) -> String {
         let ctx = ToolContext {
             db: &self.db,
-            max_permission: PermissionLevel::Standard,
+            max_permission: self.max_permission_now().min(PermissionLevel::Standard),
             registry_metadata: None,
             task_manager: Some(&self.task_manager),
             incognito: self.incognito,
@@ -1400,7 +1414,7 @@ impl CompanionService {
             .registry
             .list_metadata(max_perm)
             .into_iter()
-            .filter(|m| self.refused_to_outside(m.name, &serde_json::Value::Null).is_none())
+            .filter(|m| self.refused_to_outside(m.name).is_none())
             .map(|m| {
                 serde_json::json!({
                     "name": m.name,
@@ -2648,11 +2662,16 @@ impl CompanionService {
             }
         }
 
-        // Steps 1-6 are identical to handle_message
-        self.check_session_timeout();
+        // Steps 1-6 are identical to handle_message. An outside ask's prompt holds nothing of the
+        // person's: no memories, identity, self-reflection, personality, trace hints or day context.
+        if !outside {
+            self.check_session_timeout();
+        }
 
         // Step 2: Smart multi-signal recall (Gap 1+2)
-        let smart = if self.config.memory_evolution.smart_recall_enabled {
+        let smart = if outside {
+            memory_evolution::SmartRecallResult::from_primary(Vec::new())
+        } else if self.config.memory_evolution.smart_recall_enabled {
             memory_evolution::smart_recall(&self.db, user_text, &self.config.memory_evolution)
         } else {
             let mems = self.db.recall_text(user_text, 5).unwrap_or_default();
@@ -2665,7 +2684,7 @@ impl CompanionService {
         {
             let existing_rids: std::collections::HashSet<String> =
                 memories.iter().map(|m| m.rid.clone()).collect();
-            let identity_facts = self.recall_identity_facts();
+            let identity_facts = if outside { Vec::new() } else { self.recall_identity_facts() };
             for fact in identity_facts {
                 if !existing_rids.contains(&fact.rid) {
                     memories.push(fact);
@@ -2679,7 +2698,7 @@ impl CompanionService {
             .unwrap_or_default()
             .into_iter()
             .filter(|r| {
-                r.source == "self" || r.domain == "self-reflection"
+                !outside && (r.source == "self" || r.domain == "self-reflection")
             })
             .take(3)
             .collect::<Vec<_>>();
@@ -2706,7 +2725,7 @@ impl CompanionService {
             tracing::info!("LLM degraded (streaming) — lightweight prompt and minimal tools");
         }
 
-        let context_messages = if degraded {
+        let context_messages = if degraded || outside {
             context::build_messages_lightweight(
                 user_text, &self.config, &memories, &self.conversation_history,
             )
@@ -2865,7 +2884,9 @@ impl CompanionService {
                 self.conversation_history.push(ChatMessage::user(user_text));
                 self.conversation_history.push(ChatMessage::assistant(&response_text));
                 self.compress_history_if_needed();
-                self.session_turn_count += 1;
+                if !outside {
+            self.session_turn_count += 1;
+        }
 
                 if !self.incognito {
                     let tool_calls_made = vec![tool_name.clone()];
@@ -2944,7 +2965,8 @@ impl CompanionService {
         }
 
         // Tool chain learning: inject trace hints (skip in degraded mode)
-        if !degraded && self.config.agent.trace_learning && self.config.tools.enabled {
+        // Not for an outside ask: the hints are the person's past requests.
+        if !degraded && !outside && self.config.agent.trace_learning && self.config.tools.enabled {
             let hints = ToolTraces::find_similar(
                 &self.db.conn(), &self.db, user_text, 3,
                 self.config.agent.trace_min_similarity,
@@ -2961,7 +2983,7 @@ impl CompanionService {
         }
 
         // Inject Active Day Context into system prompt (budget from capability profile)
-        if active_profile.ambient_context_budget > 0 {
+        if !outside && active_profile.ambient_context_budget > 0 {
             self.active_context.prune_stale();
             if let Some(context_block) = self.active_context.build_context_block(
                 active_profile.ambient_context_budget,
@@ -3008,7 +3030,8 @@ impl CompanionService {
         });
 
         // Emit UserMessage event and capture trace for tool call linking
-        let msg_trace = self.event_bus.as_ref().map(|bus| {
+        // Not for an outside ask: the desktop reads these as the person speaking.
+        let msg_trace = self.event_bus.as_ref().filter(|_| !outside).map(|bus| {
             bus.emit(
                 yantrik_os::EventKind::UserMessage {
                     text: user_text.chars().take(500).collect(),
@@ -3385,7 +3408,9 @@ impl CompanionService {
         // Compress conversation history when it grows too long
         self.compress_history_if_needed();
 
-        self.session_turn_count += 1;
+        if !outside {
+            self.session_turn_count += 1;
+        }
 
         // Steps 8-9: Skip all persistence in incognito mode
         if !self.incognito {
@@ -5980,5 +6005,52 @@ mod recipe_placeholder_tests {
             memories_containing(&c, "rust programming") > 0,
             "and the runnable step ran — its audit line is in the store"
         );
+    }
+}
+
+/// `CompanionService::purge_vault_audit_lines` on a connection to the memory store. `!` escapes
+/// the LIKE wildcards, so `vault_` matches the underscore and not any character.
+fn purge_vault_audit_lines_in(conn: &rusqlite::Connection) -> usize {
+    conn.execute(
+        "UPDATE memories SET text = 'Tool: (a vault tool; what it returned is withheld)', \
+         consolidation_status = 'tombstoned' \
+         WHERE domain = 'audit/tools' \
+         AND (text LIKE 'Tool: vault!_%' ESCAPE '!' OR text LIKE 'Tool: browser!_login%' ESCAPE '!')",
+        [],
+    )
+    .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod vault_audit_tests {
+    /// `vault_generate_password` was filed in the audit log with the password it made (security
+    /// review, 1 Oct 2026). Those lines are cleared, and nothing else is touched.
+    #[test]
+    fn the_vaults_old_audit_lines_are_cleared_and_nothing_else() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE memories (rid TEXT, text TEXT, domain TEXT, consolidation_status TEXT);
+             INSERT INTO memories VALUES ('a', 'Tool: vault_generate_password(length=20) → Generated password: hunter2hunter2', 'audit/tools', 'active');
+             INSERT INTO memories VALUES ('b', 'Tool: browser_login(site=github.com) → logged in', 'audit/tools', 'active');
+             INSERT INTO memories VALUES ('c', 'Tool: web_search(q=vault) → results', 'audit/tools', 'active');
+             INSERT INTO memories VALUES ('d', 'Tool: vault_generate_password is a thing I can do', 'self', 'active');
+             INSERT INTO memories VALUES ('e', 'Tool: vaultish(x) → y', 'audit/tools', 'active');",
+        )
+        .unwrap();
+        let row = |rid: &str| -> (String, String) {
+            conn.query_row("SELECT text, consolidation_status FROM memories WHERE rid = ?1", [rid], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+        };
+        assert_eq!(super::purge_vault_audit_lines_in(&conn), 2);
+        assert!(!row("a").0.contains("hunter2"), "the password is still there");
+        assert_eq!(row("a").1, "tombstoned");
+        assert_eq!(row("b").1, "tombstoned");
+        for rid in ["c", "d", "e"] {
+            assert_eq!(row(rid).1, "active", "{rid} was not the vault's");
+        }
+        // Run at every start: harmless the second time.
+        super::purge_vault_audit_lines_in(&conn);
+        assert!(!row("a").0.contains("hunter2"));
+        assert_eq!(row("c").1, "active");
     }
 }
