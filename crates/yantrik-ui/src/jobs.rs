@@ -205,9 +205,16 @@ impl Board {
         };
 
         inner.next_id += 1;
-        // Unguessable: the person's own turns stream their text onto this board, and a ticket a
-        // program could count its way to would have been a way to read them.
-        let id = format!("j{}-{:016x}", inner.next_id, unguessable(inner.next_id));
+        // A secret: the ticket is the only thing between one program's job and another's (and,
+        // before, the person's turns). 128 bits from the operating system; without them the
+        // ticket has no secret part, and no program on the socket can wait on or cancel it.
+        let id = match yantrik_harness::random_hex(16) {
+            Ok(secret) => format!("j{}-{secret}", inner.next_id),
+            Err(why) => {
+                tracing::error!(%why, "no random bytes for a job ticket: it is not reachable from the socket");
+                format!("j{}", inner.next_id)
+            }
+        };
         let cancel = Arc::new(AtomicBool::new(false));
 
         let ahead = inner.queued.get(lane).map(|q| q.len()).unwrap_or(0);
@@ -357,7 +364,8 @@ impl Board {
     fn is_outside(&self, id: &str) -> bool {
         let (lock, _) = &*self.inner;
         let inner = lock.lock().unwrap_or_else(|e| e.into_inner());
-        inner.jobs.get(id).is_some_and(|j| j.outside)
+        // A ticket without its secret part is never a program's to reach.
+        id.contains('-') && inner.jobs.get(id).is_some_and(|j| j.outside)
     }
 
     /// Where a job stands, waiting up to `wait` for it to change.
@@ -561,8 +569,13 @@ mod tests {
 
         // Not the next number: a ticket carries 64 unpredictable bits.
         let next = board.submit("model", "ask").ticket;
-        assert!(next.len() > 18 && next.starts_with('j') && next.contains('-'), "{next}");
+        let secret = next.split_once('-').map(|(_, s)| s).unwrap_or("");
+        assert_eq!(secret.len(), 32, "128 bits, as hex: {next}");
+        assert!(secret.bytes().all(|c| c.is_ascii_hexdigit()));
         assert_ne!(next.split('-').nth(1), theirs.ticket.split('-').nth(1));
+        // Without its secret part a ticket is no program's, whatever job it names.
+        let bare = theirs.ticket.split('-').next().unwrap().to_string();
+        assert!(board.wait_outside(&bare, Duration::ZERO).is_none());
     }
 
     #[test]
@@ -749,14 +762,4 @@ mod tests {
         let view = board.overview();
         assert!(view["remembered"].as_u64().unwrap() <= REMEMBERED as u64 + 1);
     }
-}
-
-/// 64 bits a program on the socket cannot predict: SipHash under the process's random keys.
-fn unguessable(n: u64) -> u64 {
-    use std::hash::{BuildHasher, Hash, Hasher};
-    static KEYS: std::sync::OnceLock<std::collections::hash_map::RandomState> = std::sync::OnceLock::new();
-    let mut h = KEYS.get_or_init(std::collections::hash_map::RandomState::new).build_hasher();
-    n.hash(&mut h);
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos()).hash(&mut h);
-    h.finish()
 }
