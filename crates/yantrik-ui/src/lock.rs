@@ -100,9 +100,16 @@ pub const START_OPEN_MARKER: &str = "/etc/yantrik/start-open";
 /// account's password would have opened the desktop too, and with it a passwordless `su` to the
 /// person's account and their sudo (PAM's `nullok`); this keeps the password.
 ///
-/// It decides only the lock at boot. The password, the vault (which stays shut until the password
-/// is given), the idle lock and a lock pressed by hand are all unchanged.
+/// It counts only in the first [`BOOT_WINDOW_SECS`] after the machine booted, by the kernel's own
+/// uptime. `lock_at_start` runs at every start of the shell, and the session restarts a shell that
+/// dies, so without that a process running as the person could end the lock client and the shell
+/// and have the new one come up open: a lock pressed by hand would be a screen saver (security
+/// review of #547). After the window a restarted shell locks as any other does. The password, the
+/// vault (shut until the password is given), the idle lock and a lock pressed by hand are unchanged.
 pub fn declared_open_at_boot() -> bool {
+    if !just_booted() {
+        return false;
+    }
     use std::os::unix::fs::MetadataExt;
     let marker = std::path::Path::new(START_OPEN_MARKER);
     let (Ok(file), Some(Ok(dir))) = (marker.symlink_metadata(), marker.parent().map(|d| d.symlink_metadata())) else {
@@ -116,6 +123,23 @@ pub fn declared_open_at_boot() -> bool {
         dir.uid(),
         dir.mode(),
     )
+}
+
+/// How long after boot a declared-open machine's shell may start open: long enough for an
+/// autologin session to start its shell, too short to be a way past a lock pressed later.
+pub const BOOT_WINDOW_SECS: f64 = 180.0;
+
+/// Whether the machine booted less than [`BOOT_WINDOW_SECS`] ago, by `/proc/uptime`, which the
+/// kernel keeps and no process can set. Not knowing is not booted.
+fn just_booted() -> bool {
+    std::fs::read_to_string("/proc/uptime")
+        .ok()
+        .and_then(|t| t.split_whitespace().next().and_then(|u| u.parse::<f64>().ok()))
+        .is_some_and(|up| within_boot_window(up))
+}
+
+fn within_boot_window(uptime_secs: f64) -> bool {
+    uptime_secs.is_finite() && (0.0..BOOT_WINDOW_SECS).contains(&uptime_secs)
 }
 
 /// The rule [`declared_open_at_boot`] applies, on what the filesystem said.
@@ -300,6 +324,16 @@ mod start_open_tests {
         assert!(!marker_counts(true, 0, 0o100644, true, 0, 0o40777), "in a directory anyone may write");
         assert!(!marker_counts(false, 0, 0o120777, true, 0, 0o40755), "a link");
         assert!(!marker_counts(true, 0, 0o100644, false, 0, 0o40755), "a parent that is not a directory");
+    }
+
+    /// Only the shell a boot starts may start open: one restarted later locks as any other does.
+    #[test]
+    fn only_the_first_minutes_of_a_boot_count() {
+        assert!(super::within_boot_window(12.0));
+        assert!(super::within_boot_window(179.0));
+        assert!(!super::within_boot_window(180.0));
+        assert!(!super::within_boot_window(86_400.0), "a shell restarted a day later");
+        assert!(!super::within_boot_window(f64::NAN) && !super::within_boot_window(-1.0));
     }
 }
 

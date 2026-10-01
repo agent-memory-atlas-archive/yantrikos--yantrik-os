@@ -100,7 +100,8 @@ pub fn take_over_orphans(ui: &App) {
 /// behind the same session lock as every other lock, asking for the account's password, and the
 /// vault opens with that password when it is given. Not on the live image (its password is
 /// published), not on a machine its administrator declared open at boot (a root-owned
-/// /etc/yantrik/start-open, for an unattended machine meant to be watched), and not on an account
+/// /etc/yantrik/start-open, for an unattended machine meant to be watched, and only in the first
+/// minutes after boot: a shell restarted later locks), and not on an account
 /// with no password (there is nothing to ask for); and not when a start screen is named (the GUI
 /// installer's login screen, a developer's override).
 pub fn lock_at_start(ui: &App) {
