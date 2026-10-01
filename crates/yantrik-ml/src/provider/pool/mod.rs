@@ -9,7 +9,9 @@
 //! One account per provider, inside its free limits. Several accounts to stretch a free tier is
 //! against nearly every provider's terms, and the pool's reach comes from breadth instead.
 
+pub mod backend;
 pub mod headers;
+pub mod keys;
 pub mod ledger;
 pub mod quota;
 pub mod select;
@@ -17,6 +19,8 @@ pub mod tiers;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod backend_tests;
 
 use std::collections::HashMap;
 

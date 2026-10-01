@@ -18,7 +18,7 @@ pub mod pool;
 
 pub use registry::{ProviderRegistry, ProviderEntry as RegisteredProvider, ProviderId, UsageStats};
 pub use descriptor::{ProviderDescriptor, ProviderKind, AuthScheme, SetupTier, KNOWN_PROVIDERS};
-pub use generic_openai::GenericOpenAIBackend;
+pub use generic_openai::{GenericOpenAIBackend, MetaSink, ResponseMeta};
 pub use anthropic::AnthropicBackend;
 pub use gemini::GoogleGeminiBackend;
 pub use health::{ProviderHealth, HealthStatus};

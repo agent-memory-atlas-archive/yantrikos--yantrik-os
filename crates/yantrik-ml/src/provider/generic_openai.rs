@@ -61,6 +61,24 @@ impl ProviderPresets {
     }
 }
 
+/// What a provider's last answer was: its status, and only the headers that say how much is
+/// left (`x-ratelimit-*`, `ratelimit-*`, `retry-after`). Never an authorization header.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ResponseMeta {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+}
+
+impl ResponseMeta {
+    /// A header by name, case-insensitively.
+    pub fn header(&self, name: &str) -> Option<String> {
+        self.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.clone())
+    }
+}
+
+/// Where a backend leaves each answer's `ResponseMeta`, for the caller to read after the call.
+pub type MetaSink = std::sync::Arc<std::sync::Mutex<Option<ResponseMeta>>>;
+
 /// A generic OpenAI-compatible LLM backend.
 ///
 /// Supports both standard OpenAI `/v1/chat/completions` and Ollama native
@@ -77,9 +95,17 @@ pub struct GenericOpenAIBackend {
     auth_style: String,
     /// Provider-specific behavior presets.
     presets: ProviderPresets,
+    /// When set, each OpenAI-style answer's status and rate-limit headers are left here.
+    meta: Option<MetaSink>,
 }
 
 impl GenericOpenAIBackend {
+    /// Leave each answer's status and rate-limit headers in `sink` (the free pool reads them).
+    pub fn with_meta_sink(mut self, sink: MetaSink) -> Self {
+        self.meta = Some(sink);
+        self
+    }
+
     /// Create a new GenericOpenAIBackend.
     ///
     /// # Arguments
@@ -111,6 +137,7 @@ impl GenericOpenAIBackend {
             model: model.into(),
             auth_style: auth_style.into(),
             presets,
+            meta: None,
         }
     }
 
@@ -441,7 +468,14 @@ impl GenericOpenAIBackend {
         let url = self.openai_endpoint_url();
         let body_str = serde_json::to_string(body)?;
 
-        let agent = self.build_agent();
+        // A refusal is read, not thrown: its status and rate-limit headers are what tells the
+        // caller how long to wait, and ureq's error-on-status would drop them.
+        let agent = ureq::Agent::new_with_config(
+            ureq::config::Config::builder()
+                .timeout_global(Some(std::time::Duration::from_secs(300)))
+                .http_status_as_error(false)
+                .build(),
+        );
         let mut req = agent.post(&url).header("Content-Type", "application/json");
         for (k, v) in self.auth_headers() {
             req = req.header(&k, &v);
@@ -449,7 +483,26 @@ impl GenericOpenAIBackend {
 
         let resp = req
             .send(body_str.as_bytes())
-            .context("OpenAI-compatible API request failed")?;
+            .with_context(|| format!("OpenAI-compatible API request to {url} failed"))?;
+        let status = resp.status().as_u16();
+        if let Some(sink) = &self.meta {
+            let headers = resp
+                .headers()
+                .iter()
+                .filter(|(k, _)| {
+                    let k = k.as_str();
+                    k.starts_with("x-ratelimit") || k.starts_with("ratelimit") || k == "retry-after"
+                })
+                .filter_map(|(k, v)| v.to_str().ok().map(|v| (k.as_str().to_string(), v.to_string())))
+                .collect();
+            *sink.lock().unwrap_or_else(|e| e.into_inner()) = Some(ResponseMeta { status, headers });
+        }
+        if !(200..300).contains(&status) {
+            let mut body = resp.into_body();
+            let text = body.read_to_string().unwrap_or_default();
+            let short: String = text.chars().take(300).collect();
+            anyhow::bail!("HTTP {status} from {url}: {short}");
+        }
 
         Ok(resp.into_body())
     }
