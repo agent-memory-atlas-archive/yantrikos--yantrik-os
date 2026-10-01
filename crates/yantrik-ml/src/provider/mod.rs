@@ -14,6 +14,7 @@ mod health;
 mod routing;
 pub mod secret_store;
 pub mod key_validation;
+pub mod pool;
 
 pub use registry::{ProviderRegistry, ProviderEntry as RegisteredProvider, ProviderId, UsageStats};
 pub use descriptor::{ProviderDescriptor, ProviderKind, AuthScheme, SetupTier, KNOWN_PROVIDERS};
