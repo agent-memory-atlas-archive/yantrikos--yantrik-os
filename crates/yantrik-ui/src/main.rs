@@ -124,6 +124,7 @@ mod terminal_window;
 mod provider_handoff;
 mod private_file;
 mod programs;
+mod runs_on;
 mod trail;
 // What protects the credential vault on this machine, and the honest answer when nothing does.
 mod vault_unlock;

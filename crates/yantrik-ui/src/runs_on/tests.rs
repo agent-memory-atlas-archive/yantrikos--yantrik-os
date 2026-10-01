@@ -1,0 +1,107 @@
+use super::identity::{from_reported, from_url, ProviderRef};
+use super::*;
+
+fn mind(id: &str, name: &str, detail: Option<&str>, answering: bool) -> MindFact {
+    MindFact { id: id.into(), name: name.into(), detail: detail.map(String::from), answering, builtin: false }
+}
+
+/// VM 520 on 30 Sep 2026, verbatim: every mind's own line, and the companion from config.yaml
+/// with nothing saved in Settings.
+fn vm_520() -> (Vec<MindFact>, CompanionFact) {
+    let minds = vec![
+        MindFact { id: "companion".into(), name: "Yantrik Companion".into(), detail: None, answering: false, builtin: true },
+        mind("deepseek", "DeepSeek", Some("deepseek-v4.1-flash \u{b7} ollama.com"), false),
+        mind("hermes", "Hermes Agent", Some("Hermes 0.14.0 \u{b7} deepseek-v4.1-flash"), false),
+        mind("mind", "Yantrik Mind", Some("ollama-cloud:deepseek-v4.1-flash"), true),
+        mind("openclaw", "OpenClaw", Some("ollama-cloud/kimi-k3 \u{b7} OpenClaw 2026.9.1"), false),
+        mind("pi", "Pi", Some("ollamacloud/deepseek-v4.1-flash \u{b7} pi 0.87.0"), false),
+    ];
+    let companion = CompanionFact {
+        base_url: "https://aig.mycluster.cyou/v1".into(),
+        model: "qwen3.8:27b".into(),
+        source: "config.yaml".into(),
+        provider_name: String::new(),
+    };
+    (minds, companion)
+}
+
+#[test]
+fn vm_520_every_mind_says_what_it_runs_on_and_where_that_is_set() {
+    let (minds, companion) = vm_520();
+    let rows = resolve(&minds, Some(&companion));
+    let got: Vec<(String, &str, String, String)> = rows.iter().map(|r| (r.name.clone(), r.state(), r.runs_on(), r.source())).collect();
+    let want = [
+        ("Yantrik Mind", "Answering", "Ollama Cloud \u{b7} deepseek-v4.1-flash", "its own settings \u{b7} as it reported"),
+        ("Yantrik Companion", "Built in", "Custom endpoint \u{b7} aig.mycluster.cyou \u{b7} qwen3.8:27b", "set in /opt/yantrik/config.yaml"),
+        ("DeepSeek", "Attached", "Ollama Cloud \u{b7} deepseek-v4.1-flash", "its own settings \u{b7} as it reported"),
+        ("Hermes Agent", "Attached", "provider not reported \u{b7} deepseek-v4.1-flash", "its own settings \u{b7} as it reported"),
+        ("OpenClaw", "Attached", "Ollama Cloud \u{b7} kimi-k3", "its own settings \u{b7} as it reported"),
+        ("Pi", "Attached", "Ollama Cloud \u{b7} deepseek-v4.1-flash", "its own settings \u{b7} as it reported"),
+    ];
+    let want: Vec<(String, &str, String, String)> = want.iter().map(|(a, b, c, d)| (a.to_string(), *b, c.to_string(), d.to_string())).collect();
+    assert_eq!(got, want);
+    assert_eq!(
+        summary(&rows),
+        "Ollama Cloud runs 4 minds. Custom endpoint \u{b7} aig.mycluster.cyou runs 1 mind. 1 mind does not say what it runs on. No mind here runs on a signed-in account."
+    );
+    // The thing that started this: nothing here may name Claude, whose sign-in no mind uses.
+    for r in &rows {
+        assert!(!r.runs_on().contains("Claude") && !r.source().contains("Claude"), "{r:?}");
+    }
+}
+
+#[test]
+fn a_provider_is_never_read_from_a_model_name() {
+    // "deepseek-v4.1-flash" holds the catalogue id `deepseek`; DeepSeek does not run these minds.
+    assert_eq!(from_reported("deepseek-v4.1-flash"), (ProviderRef::NotReported, Some("deepseek-v4.1-flash".into())));
+    assert_eq!(from_reported("qwen3.5:9b").0, ProviderRef::NotReported, "a model with a tag is not provider:model");
+    assert_eq!(from_reported("qwen3.5:9b").1.as_deref(), Some("qwen3.5:9b"));
+    assert_eq!(from_reported("qwen2.5 on node1").0, ProviderRef::NotReported);
+    // An explicit prefix that IS a provider does name it.
+    assert_eq!(from_reported("deepseek:deepseek-chat").0.label(), "DeepSeek");
+}
+
+#[test]
+fn four_spellings_are_one_provider() {
+    for text in [
+        "ollama-cloud:deepseek-v4.1-flash",
+        "deepseek-v4.1-flash \u{b7} ollama.com",
+        "ollamacloud/deepseek-v4.1-flash \u{b7} pi 0.87.0",
+        "ollama-cloud/kimi-k3 \u{b7} OpenClaw 2026.9.1",
+        "ollama_cloud/x",
+        "https://ollama.com/v1",
+    ] {
+        let (p, _) = from_reported(text);
+        assert_eq!(p.label(), "Ollama Cloud", "{text}");
+        assert_eq!(p.key().as_deref(), Some("ollama-cloud"), "{text}");
+    }
+}
+
+#[test]
+fn addresses_are_named_by_the_catalogue_or_by_their_host() {
+    assert_eq!(from_url("https://integrate.api.nvidia.com/v1").label(), "NVIDIA NIM");
+    assert_eq!(from_url("http://localhost:11434/v1").label(), "Ollama");
+    assert_eq!(from_url("http://192.168.4.35:11434/v1"), ProviderRef::Local("192.168.4.35:11434".into()), "another machine's port is not \"Ollama\"");
+    assert_eq!(from_url("https://aig.mycluster.cyou/v1"), ProviderRef::Custom("aig.mycluster.cyou".into()));
+    assert_eq!(from_reported("192.168.4.35:11434").0, ProviderRef::Local("192.168.4.35:11434".into()));
+    assert_eq!(from_url(""), ProviderRef::NotReported);
+}
+
+#[test]
+fn a_companion_with_no_address_says_nothing_is_set_up_and_a_saved_one_is_named() {
+    let minds = [MindFact { id: "companion".into(), name: "Yantrik Companion".into(), detail: None, answering: true, builtin: true }];
+    let rows = resolve(&minds, None);
+    assert_eq!((rows[0].runs_on().as_str(), rows[0].source().as_str()), ("Nothing set up", "add a provider under Providers"));
+    let saved = CompanionFact { base_url: "https://integrate.api.nvidia.com/v1".into(), model: "nvidia/x".into(), source: "saved provider".into(), provider_name: "NIM work".into() };
+    let rows = resolve(&minds, Some(&saved));
+    assert_eq!(rows[0].runs_on(), "NVIDIA NIM \u{b7} nvidia/x");
+    assert_eq!(rows[0].source(), "your saved provider \u{201c}NIM work\u{201d}");
+    assert!(!summary(&rows).contains("does not say"), "the companion with an address is not silent");
+}
+
+#[test]
+fn a_mind_that_says_nothing_is_not_given_a_provider() {
+    let rows = resolve(&[mind("x", "X", None, false)], None);
+    assert_eq!(rows[0].runs_on(), "provider not reported");
+    assert_eq!(rows[0].source(), "its own settings \u{b7} as it reported");
+}

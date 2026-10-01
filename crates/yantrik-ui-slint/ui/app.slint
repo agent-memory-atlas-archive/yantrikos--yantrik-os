@@ -22,7 +22,7 @@ import { BondScreen, BondData } from "bond.slint";
 import { PersonalityScreen, OpinionData, SharedRefData } from "personality.slint";
 import { LockScreen } from "lock.slint";
 import { LoginScreen } from "login.slint";
-import { SettingsScreen, SettingsCategoryItem, AIProviderData, AIModelData, AIStatusData, HarnessData, HarnessRowData, DecisionPreset, DecisionUse } from "settings.slint";
+import { SettingsScreen, SettingsCategoryItem, AIProviderData, AIModelData, AIStatusData, HarnessData, HarnessRowData, DecisionPreset, DecisionUse, RunsOnRow } from "settings.slint";
 import { SkillData } from "skill_store.slint";
 import { MemoryBrowser, MemoryItem } from "memory_browser.slint";
 import { FileBrowser, FileEntry, BreadcrumbSegment, FileDetailData, FileTabData, FileOpItem, FilePlaceData, FileRecentData, OpenWithItem } from "file_browser.slint";
@@ -219,6 +219,10 @@ export component App inherits Window {
     in property <[AddChoice]> minds-panel-choices: [];      // the panel's "+": sign in, add account
     in property <[AddChoice]> minds-key-choices: [];        // coding plans by key, for the page
     in property <string> minds-keys-line: "";
+    // What runs on what (crates/yantrik-ui/src/wire/runs_on_card.rs): one resolver, three places.
+    in property <[RunsOnRow]> runs-on-rows: [];
+    in property <string> runs-on-summary: "";
+    in property <string> runs-on-answering: "";
     in property <string> minds-today: "";
     in property <string> minds-status: "";
     callback minds-panel-opened();
@@ -1854,6 +1858,8 @@ export component App inherits Window {
                 retry-save=>{root.retry-settings-save();}
                 open-network=>{root.launch-app("network");}
                 choose-accent(name)=>{root.choose-accent(name);}
+                runs-on-rows: root.runs-on-rows;
+                runs-on-summary: root.runs-on-summary;
                 account-groups: root.minds-groups;
                 account-choices: root.minds-choices;
                 account-key-choices: root.minds-key-choices;
@@ -3184,6 +3190,7 @@ export component App inherits Window {
                 groups: root.minds-panel-groups;
                 more: root.minds-panel-more;
                 answering: root.active-harness-name;
+                answering-runs-on: root.runs-on-answering;
                 choices: root.minds-panel-choices;
                 today: root.minds-today;
                 status: root.minds-status;

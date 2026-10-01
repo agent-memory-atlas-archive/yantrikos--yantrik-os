@@ -258,7 +258,8 @@ export component FilesProbe inherits Window {
     }
 }
 
-import { SettingsScreen, SettingsCategoryItem } from "settings.slint";
+import { SettingsScreen, SettingsCategoryItem, RunsOnRow } from "settings.slint";
+export { RunsOnRow }
 export component SettingsProbe inherits Window {
     in property <length> canvas-width:800px;in property <length> canvas-height:600px;
     width:root.canvas-width;height:root.canvas-height;background:Theme.bg-deep;
@@ -790,6 +791,19 @@ export component ProviderPanelProbe inherits Window {
 
 // Settings → Harnesses with the provider card open: the card must be drawn on the page it is
 // opened from. It was placed inside the AI page and never appeared on Harnesses (VM 520).
+// Settings → AI & Intelligence with its "What runs on what" map, for verify-ai-map.
+export component AiMapProbe inherits Window {
+    width: 1280px; height: 800px; background: Theme.bg-deep;
+    in property <[RunsOnRow]> rows;
+    in property <string> summary;
+    SettingsScreen {
+        width: 100%; height: 100%;
+        active-category: 1;
+        runs-on-rows: root.rows;
+        runs-on-summary: root.summary;
+    }
+}
+
 // Settings → Accounts, drawing the Minds panel's own AccountList, for verify-accounts-page.
 export component AccountsPageProbe inherits Window {
     width: 1280px; height: 800px; background: Theme.bg-deep;

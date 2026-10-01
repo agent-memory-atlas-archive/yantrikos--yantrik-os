@@ -444,6 +444,7 @@ fn publish(ui: &App, host: &Host) {
     // in order to stop advertising the shell's own provider as the thing doing the work.
     ui.set_harness_driving(driving.is_some());
 
+    super::runs_on_card::publish(ui);
     publish_catalogue(ui, &entries);
 }
 
@@ -469,8 +470,21 @@ fn publish_catalogue(ui: &App, entries: &[yantrik_harness::Entry]) {
     crate::harness_install::clear_settled(&attached);
 
     let machine = harness_catalogue::machine(crate::harness_install::views());
+    let runs_on = super::runs_on_card::current();
     let rows: Vec<HarnessRowData> = harness_catalogue::rows(&machine, entries)
         .into_iter()
+        .map(|mut row| {
+            // What it runs on, from the one resolver, in the map's own words. A provider handed
+            // to it from Settings keeps saying so; otherwise its own report, or nothing when it
+            // is not attached and so has said nothing.
+            if !row.provider_line.starts_with("Provider: ") || row.provider_line == "Provider: its own settings" {
+                let line = super::runs_on_card::row_line(&runs_on, &row.id);
+                if !line.is_empty() {
+                    row.provider_line = line;
+                }
+            }
+            row
+        })
         .map(|row| HarnessRowData {
             id: row.id.into(),
             name: row.name.into(),
