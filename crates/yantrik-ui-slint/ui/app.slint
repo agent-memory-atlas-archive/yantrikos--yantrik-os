@@ -403,6 +403,10 @@ export component App inherits Window {
     in-out property <bool> window-switcher-open: false;
     in property <[WindowItem]> window-list: [];
     callback switch-window(string);
+    // A taskbar entry pressed. Not `switch-window`: the entry of the window in front puts it
+    // away, and nothing else that shows a window (the switcher, `yos act shell focus_window`)
+    // may ever hide one instead.
+    callback taskbar-window-clicked(string);
 
     // The taskbar entry's own right-click menu (#232). Rust builds the rows — which ones there
     // are depends on whether the window's app is pinned — and every row's id is the name of the
@@ -2738,7 +2742,7 @@ export component App inherits Window {
                     }
                     root.app-grid-open = !root.app-grid-open;
                 }
-                activate-window(title) => { root.switch-window(title); }
+                activate-window(title) => { root.taskbar-window-clicked(title); }
                 // The entry's right-click menu (#232). Straight to Rust, which knows whether
                 // the window's app is pinned and answers with the rows; the menu itself is
                 // drawn at the end of this file, over everything.
