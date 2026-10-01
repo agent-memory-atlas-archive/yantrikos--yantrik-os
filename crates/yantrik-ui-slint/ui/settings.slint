@@ -104,6 +104,16 @@ export struct AIModelData {
 }
 
 // ── Live AI status data ──
+// One mind and what it runs on (crates/yantrik-ui/src/runs_on): the same words the Minds panel and
+// the Harnesses rows use, from the same resolver.
+export struct RunsOnRow {
+    name: string,       // "Yantrik Mind"
+    state: string,      // "Answering" | "Built in" | "Attached"
+    answering: bool,
+    runs-on: string,    // "Ollama Cloud · deepseek-v4.1-flash"
+    source: string,     // "its own settings · as it reported" | "set in /opt/yantrik/config.yaml"
+}
+
 export struct AIStatusData {
     provider-name: string,
     provider-type: string,
@@ -412,6 +422,10 @@ export component SettingsScreen inherits Rectangle {
     in property <bool> budget-warning: false;
     in-out property <string> budget-input: "";
     callback save-budget(string);
+
+    // ── What runs on what (top of category 1) ──
+    in property <[RunsOnRow]> runs-on-rows: [];
+    in property <string> runs-on-summary: "";
 
     // ── Accounts (category 4): the same accounts, and the same list, as the Minds panel ──
     in property <[ProviderGroup]> account-groups: [];
@@ -936,7 +950,80 @@ export component SettingsScreen inherits Rectangle {
                                 font-size: Theme.fs-body;
                             }
 
-                            // ── ACTIVE AI STATUS ──
+                            // ── WHAT RUNS ON WHAT ──
+                            // Every mind, what it runs on, and where that is set: the first thing
+                            // on this page, so nothing below can be read as the whole story.
+                            if root.runs-on-rows.length > 0 : VerticalLayout {
+                                spacing: Theme.sp-2;
+                                HorizontalLayout {
+                                    spacing: Theme.sp-2;
+                                    Rectangle { width: 3px; height: 14px; border-radius: 1.5px; background: Theme.accent; }
+                                    Text {
+                                        text: "WHAT RUNS ON WHAT";
+                                        color: Theme.text-secondary;
+                                        font-size: Theme.fs-caption;
+                                        font-weight: 600;
+                                        letter-spacing: 3px;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                Rectangle {
+                                    background: Theme.bg-card;
+                                    border-radius: Theme.r-lg;
+                                    border-width: 1px;
+                                    border-color: Theme.border-subtle;
+                                    height: map-layout.preferred-height;
+                                    map-layout := VerticalLayout {
+                                        padding: Theme.sp-4;
+                                        spacing: Theme.sp-3;
+                                        for r in root.runs-on-rows : HorizontalLayout {
+                                            spacing: Theme.sp-3;
+                                            VerticalLayout {
+                                                width: 200px;
+                                                spacing: 2px;
+                                                Text {
+                                                    text: r.name;
+                                                    color: Theme.text-primary;
+                                                    font-size: Theme.fs-body;
+                                                    font-weight: r.answering ? 700 : 600;
+                                                    overflow: elide;
+                                                }
+                                                Text {
+                                                    text: r.state;
+                                                    color: r.answering ? Theme.accent : Theme.text-dim;
+                                                    font-size: Theme.fs-caption;
+                                                    font-weight: r.answering ? 600 : 400;
+                                                }
+                                            }
+                                            VerticalLayout {
+                                                horizontal-stretch: 1;
+                                                spacing: 2px;
+                                                Text {
+                                                    text: r.runs-on;
+                                                    color: Theme.text-primary;
+                                                    font-size: Theme.fs-body;
+                                                    wrap: word-wrap;
+                                                }
+                                                Text {
+                                                    text: r.source;
+                                                    color: Theme.text-secondary;
+                                                    font-size: Theme.fs-caption;
+                                                    wrap: word-wrap;
+                                                }
+                                            }
+                                        }
+                                        Rectangle { height: 1px; background: Theme.border-subtle; }
+                                        Text {
+                                            text: root.runs-on-summary;
+                                            color: Theme.text-secondary;
+                                            font-size: Theme.fs-caption;
+                                            wrap: word-wrap;
+                                        }
+                                    }
+                                }
+                            }
+
+                            // ── THE BUILT-IN COMPANION'S STATUS ──
                             HorizontalLayout {
                                 spacing: Theme.sp-2;
                                 Rectangle {

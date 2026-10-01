@@ -325,6 +325,7 @@ export component MindsPanel inherits Rectangle {
     in property <string> today;             // "2.4M tokens today", or "" when nothing is counted
     in property <string> status;            // one line after an action: "Opened a terminal to sign in"
     in property <string> answering;         // the mind that answers in the chat: "Yantrik Mind"
+    in property <string> answering-runs-on; // what it runs on: "Ollama Cloud · deepseek-v4.1-flash · as it reported"
     in property <int> more;                 // accounts' vendors past the ones shown, on the page
     in-out property <bool> adding: false;   // the "+" list is showing
     callback use-account(string);           // an account id
@@ -351,7 +352,7 @@ export component MindsPanel inherits Rectangle {
 
         // ── Header ──
         HorizontalLayout {
-            height: root.answering != "" && root.today != "" ? 48px : 40px;
+            height: 40px + (root.answering != "" && root.today != "" ? 8px : 0px) + (root.answering-runs-on != "" ? 14px : 0px);
             spacing: Theme.sp-2;
             VerticalLayout {
                 alignment: center;
@@ -372,6 +373,13 @@ export component MindsPanel inherits Rectangle {
                     text: "Answering: " + root.answering;
                     overflow: elide;
                     color: Theme.text-secondary;
+                    font-size: Theme.fs-micro;
+                    letter-spacing: 0.5px;
+                }
+                if root.answering-runs-on != "" : Text {
+                    text: root.answering-runs-on;
+                    overflow: elide;
+                    color: Theme.text-dim;
                     font-size: Theme.fs-micro;
                     letter-spacing: 0.5px;
                 }

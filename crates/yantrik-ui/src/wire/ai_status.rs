@@ -30,6 +30,15 @@ static CONFIG_KEY: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 /// Each refresh's number; an answer that arrives after a newer question was asked is dropped.
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 
+/// What the companion was last resolved to, for the "what runs on what" map: the same answer the
+/// card shows, never worked out a second way. No key in it.
+static COMPANION: Mutex<Option<crate::runs_on::CompanionFact>> = Mutex::new(None);
+
+/// The companion's address, model and where they are set, as last resolved.
+pub(crate) fn companion() -> Option<crate::runs_on::CompanionFact> {
+    COMPANION.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
 pub(crate) fn set_config_key(key: Option<String>) {
     let slot = CONFIG_KEY.get_or_init(|| Mutex::new(None));
     *slot.lock().unwrap_or_else(|e| e.into_inner()) = key.filter(|k| !k.is_empty());
@@ -79,18 +88,15 @@ pub(crate) fn target(store: &ProviderStore, config_url: &str, config_model: &str
 }
 
 /// A provider's own name when the address is one the catalogue knows, else the address itself.
+/// What an address is called: the catalogue's name for it, or its host. The same answer every
+/// other surface gives (runs_on::identity).
 fn name_for(url: &str) -> String {
-    let host = host_port(url);
-    yantrik_ml::KNOWN_PROVIDERS
-        .iter()
-        .find(|p| !p.default_base_url.is_empty() && host_port(p.default_base_url) == host)
-        .map(|p| p.display_name.to_string())
-        .unwrap_or(host)
-}
-
-fn host_port(url: &str) -> String {
-    let rest = url.split("://").nth(1).unwrap_or(url);
-    rest.split('/').next().unwrap_or(rest).to_string()
+    use crate::runs_on::identity::{from_url, host, ProviderRef};
+    match from_url(url) {
+        ProviderRef::Known(p) => p.display_name.to_string(),
+        ProviderRef::Custom(h) | ProviderRef::Local(h) => h,
+        ProviderRef::NotReported => host(url),
+    }
 }
 
 /// What asking the target found.
@@ -175,6 +181,13 @@ pub(crate) fn refresh(ui: &App, store: &ProviderStore) {
     );
     let fallback = store.fallback().map(|f| f.name.clone());
     let generation = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    *COMPANION.lock().unwrap_or_else(|e| e.into_inner()) = target.as_ref().map(|t| crate::runs_on::CompanionFact {
+        base_url: t.base_url.clone(),
+        model: t.model.clone(),
+        source: t.source.clone(),
+        provider_name: t.name.clone(),
+    });
+    super::runs_on_card::publish(ui);
     let Some(target) = target else {
         ui.set_settings_ai_status(card(None, &Health::NotSetUp, fallback.as_deref()));
         return;

@@ -9,6 +9,7 @@
 mod about;
 // The Agents screen and every agent popped out into its own window.
 pub mod agents;
+pub mod runs_on_card;
 // The Recipes screen: every recipe as its stages, live.
 pub mod recipes;
 mod app_grid;
