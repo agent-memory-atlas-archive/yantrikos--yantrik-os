@@ -1248,14 +1248,21 @@ impl CompanionService {
 
     /// Remove what the vault's tools left in the audit log before it withheld them: until 1 Oct
     /// 2026 `vault_generate_password` was filed with the password it made, in plain text, where
-    /// any recall could read it. The text is overwritten (the full-text index follows it) and the
-    /// memory tombstoned. Idempotent; returns how many were cleared.
+    /// any recall could read it. Every copy in the store goes (`purge_vault_audit_lines_in`).
+    /// Run at every start; after the first it finds nothing and rewrites nothing. A failure is
+    /// logged as one, never read as "nothing to clear". Backups taken before it keep the lines.
     pub fn purge_vault_audit_lines(&self) -> usize {
-        let cleared = purge_vault_audit_lines_in(&self.db.conn());
-        if cleared > 0 {
-            tracing::warn!(cleared, "cleared vault tool results from the audit log");
+        match purge_vault_audit_lines_in(&self.db.conn()) {
+            Ok(0) => 0,
+            Ok(cleared) => {
+                tracing::warn!(cleared, "cleared vault tool results from the audit log, the oplog and the file");
+                cleared
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "could not clear vault tool results from the audit log: they remain in the store");
+                0
+            }
         }
-        cleared
     }
 
     /// The category a tool is registered under, for the taint rules; `None` for no such tool.
@@ -5405,7 +5412,7 @@ mod bond_scoring_tests {
     use yantrik_ml::LLMResponse;
 
     /// A mind that answers every prompt the same way and never fails.
-    struct Echo;
+    pub(super) struct Echo;
 
     impl LLMBackend for Echo {
         fn chat(
@@ -6008,49 +6015,148 @@ mod recipe_placeholder_tests {
     }
 }
 
-/// `CompanionService::purge_vault_audit_lines` on a connection to the memory store. `!` escapes
-/// the LIKE wildcards, so `vault_` matches the underscore and not any character.
-fn purge_vault_audit_lines_in(conn: &rusqlite::Connection) -> usize {
-    conn.execute(
-        "UPDATE memories SET text = 'Tool: (a vault tool; what it returned is withheld)', \
-         consolidation_status = 'tombstoned' \
-         WHERE domain = 'audit/tools' \
-         AND (text LIKE 'Tool: vault!_%' ESCAPE '!' OR text LIKE 'Tool: browser!_login%' ESCAPE '!')",
-        [],
-    )
-    .unwrap_or(0)
+/// What a cleared audit line says in place of what the vault tool returned.
+const WITHHELD_AUDIT_LINE: &str = "Tool: (a vault tool; what it returned is withheld)";
+
+/// `CompanionService::purge_vault_audit_lines` on a connection to the memory store.
+///
+/// Every copy goes, not only the row: the text is overwritten in `memories` (the full-text index
+/// follows it by trigger) and in the `record` op of the oplog that wrote it, and the file is then
+/// rewritten, VACUUM and then a WAL truncate in that order, as yantrikdb's own payload-sealing
+/// migration does, because an UPDATE frees the page that held the old text without erasing it.
+/// `!` escapes the LIKE wildcards, so `vault_` matches the underscore, not any character.
+fn purge_vault_audit_lines_in(conn: &rusqlite::Connection) -> rusqlite::Result<usize> {
+    let rids: Vec<String> = {
+        let mut stmt = conn.prepare(
+            "SELECT rid FROM memories WHERE domain = 'audit/tools' \
+             AND (text LIKE 'Tool: vault!_%' ESCAPE '!' OR text LIKE 'Tool: browser!_login%' ESCAPE '!')",
+        )?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    if rids.is_empty() {
+        return Ok(0);
+    }
+    let tx = conn.unchecked_transaction()?;
+    for rid in &rids {
+        tx.execute(
+            "UPDATE memories SET text = ?1, consolidation_status = 'tombstoned' WHERE rid = ?2",
+            rusqlite::params![WITHHELD_AUDIT_LINE, rid],
+        )?;
+        let ops: Vec<(String, String)> = {
+            let mut stmt = tx.prepare("SELECT op_id, payload FROM oplog WHERE target_rid = ?1")?;
+            let rows = stmt.query_map([rid], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        for (op_id, payload) in ops {
+            if payload.starts_with("ENCv1:") {
+                // Sealed: only the engine's key reads it, and the shell opens its store unsealed,
+                // so this does not arise; if it ever does, the row is said, not silently kept.
+                tracing::warn!(%op_id, "a sealed oplog payload of a vault audit line was left as it is");
+                continue;
+            }
+            let scrubbed = match serde_json::from_str::<serde_json::Value>(&payload) {
+                Ok(mut value) => {
+                    withhold_text(&mut value);
+                    value.to_string()
+                }
+                Err(_) => "{}".to_string(),
+            };
+            tx.execute("UPDATE oplog SET payload = ?1 WHERE op_id = ?2", rusqlite::params![scrubbed, op_id])?;
+        }
+    }
+    tx.commit()?;
+    conn.execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")?;
+    Ok(rids.len())
+}
+
+/// Every `text` in an op's payload, at any depth, replaced by the withheld line.
+fn withhold_text(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, v) in map.iter_mut() {
+                if key == "text" && v.is_string() {
+                    *v = serde_json::Value::String(WITHHELD_AUDIT_LINE.to_string());
+                } else {
+                    withhold_text(v);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(withhold_text),
+        _ => {}
+    }
 }
 
 #[cfg(test)]
 mod vault_audit_tests {
+    use super::*;
+
     /// `vault_generate_password` was filed in the audit log with the password it made (security
-    /// review, 1 Oct 2026). Those lines are cleared, and nothing else is touched.
+    /// reviews, 1 Oct 2026). Every copy is cleared: the row, the full-text index and the op that
+    /// recorded it. Nothing else is touched.
     #[test]
-    fn the_vaults_old_audit_lines_are_cleared_and_nothing_else() {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE memories (rid TEXT, text TEXT, domain TEXT, consolidation_status TEXT);
-             INSERT INTO memories VALUES ('a', 'Tool: vault_generate_password(length=20) → Generated password: hunter2hunter2', 'audit/tools', 'active');
-             INSERT INTO memories VALUES ('b', 'Tool: browser_login(site=github.com) → logged in', 'audit/tools', 'active');
-             INSERT INTO memories VALUES ('c', 'Tool: web_search(q=vault) → results', 'audit/tools', 'active');
-             INSERT INTO memories VALUES ('d', 'Tool: vault_generate_password is a thing I can do', 'self', 'active');
-             INSERT INTO memories VALUES ('e', 'Tool: vaultish(x) → y', 'audit/tools', 'active');",
-        )
-        .unwrap();
+    fn the_vaults_old_audit_lines_are_cleared_everywhere_and_nothing_else() {
+        let db = YantrikDB::new(":memory:", 384).expect("in-memory database");
+        let embedding = vec![0.1f32; 384];
+        let mut put = |text: &str, domain: &str| {
+            db.record(text, "semantic", 0.3, 0.0, 604800.0, &serde_json::json!({}), &embedding, "default", 0.9, domain, "self", None)
+                .expect("record")
+        };
+        let leaked = put("Tool: vault_generate_password(length=20) → Generated password: hunter2hunter2", "audit/tools");
+        let login = put("Tool: browser_login(site=github.com) → logged in", "audit/tools");
+        let search = put("Tool: web_search(q=vault) → results", "audit/tools");
+        let note = put("Tool: vault_generate_password is something I can do", "self");
+        let near = put("Tool: vaultish(x) → y", "audit/tools");
+
+        let conn = db.conn();
+        let in_oplog = |needle: &str| -> i64 {
+            conn.query_row("SELECT COUNT(*) FROM oplog WHERE payload LIKE ?1", [format!("%{needle}%")], |r| r.get(0)).unwrap()
+        };
+        assert!(in_oplog("hunter2") > 0, "the op that recorded the line carries its text: the test would prove nothing");
+
+        assert_eq!(purge_vault_audit_lines_in(&conn).unwrap(), 2);
         let row = |rid: &str| -> (String, String) {
             conn.query_row("SELECT text, consolidation_status FROM memories WHERE rid = ?1", [rid], |r| Ok((r.get(0)?, r.get(1)?)))
                 .unwrap()
         };
-        assert_eq!(super::purge_vault_audit_lines_in(&conn), 2);
-        assert!(!row("a").0.contains("hunter2"), "the password is still there");
-        assert_eq!(row("a").1, "tombstoned");
-        assert_eq!(row("b").1, "tombstoned");
-        for rid in ["c", "d", "e"] {
+        assert_eq!(row(&leaked), (WITHHELD_AUDIT_LINE.to_string(), "tombstoned".to_string()));
+        assert_eq!(row(&login).1, "tombstoned");
+        assert_eq!(in_oplog("hunter2"), 0, "the password is still in the oplog");
+        let fts: i64 = conn.query_row("SELECT COUNT(*) FROM memories_fts WHERE memories_fts MATCH 'hunter2hunter2'", [], |r| r.get(0)).unwrap();
+        assert_eq!(fts, 0, "the password is still in the full-text index");
+        for rid in [&search, &note, &near] {
             assert_eq!(row(rid).1, "active", "{rid} was not the vault's");
         }
-        // Run at every start: harmless the second time.
-        super::purge_vault_audit_lines_in(&conn);
-        assert!(!row("a").0.contains("hunter2"));
-        assert_eq!(row("c").1, "active");
+        assert!(in_oplog("vaultish") > 0, "an op that was not the vault's was rewritten");
+        // Run at every start: nothing to do the second time, and no rewrite of the file.
+        assert_eq!(purge_vault_audit_lines_in(&conn).unwrap(), 0);
+    }
+
+    /// What a program on the companion's socket may have run: the allow-list, and under it the
+    /// Safe ceiling. `timer` is in an allowed category (time) and is refused by its grade alone.
+    #[test]
+    fn an_outside_caller_reaches_only_what_holds_nothing_of_the_persons() {
+        let db = YantrikDB::new(":memory:", 384).expect("in-memory database");
+        let mut config = CompanionConfig::default();
+        config.tools.enabled = true;
+        let c = CompanionService::new(db, std::sync::Arc::new(super::bond_scoring_tests::Echo), config);
+        let registered = |name: &str| assert!(c.category_of(name).is_some(), "{name} is not registered: the check would prove nothing");
+
+        for tool in ["timer", "vault_get", "vault_generate_password", "read_file", "read_clipboard", "app_action", "describe_app", "recall", "queue_task"] {
+            registered(tool);
+            assert!(c.refused_to_outside(tool).is_some(), "{tool} would run for a program on the socket");
+        }
+        for tool in ["calculate", "base64_encode", "date_calc", "get_weather", "web_search"] {
+            registered(tool);
+            assert_eq!(c.refused_to_outside(tool), None, "{tool} holds nothing of the person's");
+        }
+        assert!(c.refused_to_outside("no_such_tool").is_some());
+
+        // The catalogue an outside caller is shown is the same allow-list.
+        let catalog = c.tool_catalog().to_string();
+        for hidden in ["vault_get", "read_file", "\"timer\"", "recall"] {
+            assert!(!catalog.contains(hidden), "the outside catalogue shows {hidden}");
+        }
+        assert!(catalog.contains("calculate"));
     }
 }
