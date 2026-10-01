@@ -2460,6 +2460,18 @@ with tempfile.TemporaryDirectory() as t:
           refusal is not None and refusal.group(1) == module.PRIVACY_REFUSAL,
           refusal.group(1) if refusal else "no REFUSAL in privacy.rs")
 
+# A bare value an action with several parameters cannot place is refused with the exact call that
+# would work, the caller's own value already in the content parameter (a 27B model on the live
+# instance repeated the same bare string three times against a refusal that only named them).
+sample = module.bare_value_refusal("notes", "new_note", ["title", "text"], "- Water\n- Snacks")
+shown = json.loads(sample[sample.index("{"):])
+check("a bare value's refusal says nothing ran", "Nothing was run" in sample, sample)
+check("and shows the call that would work, with the value placed",
+      shown == {"app": "notes", "action": "new_note", "args": {"title": "<title>", "text": "- Water\n- Snacks"}}, sample)
+check("a long value is not echoed whole", len(module.bare_value_refusal("notes", "new_note", ["title", "text"], "x" * 5000)) < 800)
+check("an action with no parameters says so",
+      "takes no parameters" in module.bare_value_refusal("shell", "lock", [], "now"))
+
 print()
 if failures:
     print("%d failed: %s" % (len(failures), ", ".join(failures)))
