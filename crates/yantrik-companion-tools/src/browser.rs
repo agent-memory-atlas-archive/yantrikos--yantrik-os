@@ -2544,7 +2544,7 @@ impl Tool for BrowserLoginTool {
             Ok(e) => e,
             Err(e) => return format!("Error reading the vault: {e}"),
         };
-        let Some(entry) = entries.into_iter().next() else {
+        let Some(entry) = entries.into_iter().find(|e| !crate::provider_keys::is_os_entry(&e.service, &e.category)) else {
             return format!("No vault entry for '{service}'. Store one first with vault_store.");
         };
 

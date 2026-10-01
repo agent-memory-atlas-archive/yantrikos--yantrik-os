@@ -14,6 +14,7 @@ import { DecisionModelCard, DecisionPreset, DecisionUse } from "components/decis
 import { ProviderPresetGroup } from "provider_presets.slint";
 import { YDialog } from "components/y_dialog.slint";
 import { AccountList, ProviderGroup, AddChoice } from "components/minds_panel.slint";
+import { FreeAiCard } from "components/free_ai_card.slint";
 export { DecisionPreset, DecisionUse }
 
 // ── Settings sidebar category item ──
@@ -1035,6 +1036,26 @@ export component SettingsScreen inherits Rectangle {
                                         }
                                     }
                                 }
+                            }
+
+                            // ── FREE AI ACCOUNTS ──
+                            // The free tiers and the way to each, under the map that says what
+                            // runs now, so the card is never read as the whole story.
+                            VerticalLayout {
+                                spacing: Theme.sp-2;
+                                HorizontalLayout {
+                                    spacing: Theme.sp-2;
+                                    Rectangle { width: 3px; height: 14px; border-radius: 1.5px; background: Theme.accent; }
+                                    Text {
+                                        text: "FREE AI ACCOUNTS";
+                                        color: Theme.text-secondary;
+                                        font-size: Theme.fs-caption;
+                                        font-weight: 600;
+                                        letter-spacing: 3px;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                FreeAiCard { }
                             }
 
                             // ── THE BUILT-IN COMPANION'S STATUS ──

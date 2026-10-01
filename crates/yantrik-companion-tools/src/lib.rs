@@ -48,6 +48,7 @@ pub mod pipe;
 pub mod safe_command;
 pub mod plugin;
 pub mod process;
+pub mod provider_keys;
 pub mod project;
 pub mod service;
 pub mod ssh;
