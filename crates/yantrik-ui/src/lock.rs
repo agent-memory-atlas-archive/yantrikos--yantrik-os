@@ -85,6 +85,45 @@ pub fn live_session() -> bool {
         || std::fs::read_to_string("/proc/cmdline").is_ok_and(|c| c.split_whitespace().any(|w| w == "boot=live"))
 }
 
+/// Where a machine's administrator declares it starts open at boot: a public, unattended machine
+/// whose screen is meant to be watched (the live instance), where a lock at boot shows the world a
+/// password prompt and keeps nobody out who matters. Not the account's to set: see
+/// [`declared_open_at_boot`].
+pub const START_OPEN_MARKER: &str = "/etc/yantrik/start-open";
+
+/// Whether this machine's administrator declared that it starts open at boot.
+///
+/// Only a regular file (not a link), owned by root and writable by nobody else, in a directory
+/// owned by root and writable by nobody else, counts. So neither the person's account nor a mind's
+/// can make one: a marker in a place the account could write would let anything running as it
+/// grant itself an open desktop at the next restart, which is the hole #415 closed. Removing the
+/// account's password would have opened the desktop too, and with it a passwordless `su` to the
+/// person's account and their sudo (PAM's `nullok`); this keeps the password.
+///
+/// It decides only the lock at boot. The password, the vault (which stays shut until the password
+/// is given), the idle lock and a lock pressed by hand are all unchanged.
+pub fn declared_open_at_boot() -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let marker = std::path::Path::new(START_OPEN_MARKER);
+    let (Ok(file), Some(Ok(dir))) = (marker.symlink_metadata(), marker.parent().map(|d| d.symlink_metadata())) else {
+        return false;
+    };
+    marker_counts(
+        file.file_type().is_file(),
+        file.uid(),
+        file.mode(),
+        dir.file_type().is_dir(),
+        dir.uid(),
+        dir.mode(),
+    )
+}
+
+/// The rule [`declared_open_at_boot`] applies, on what the filesystem said.
+fn marker_counts(is_file: bool, uid: u32, mode: u32, dir_is_dir: bool, dir_uid: u32, dir_mode: u32) -> bool {
+    let not_writable_by_others = |m: u32| m & 0o022 == 0;
+    is_file && uid == 0 && not_writable_by_others(mode) && dir_is_dir && dir_uid == 0 && not_writable_by_others(dir_mode)
+}
+
 /// Which secret unlocks this account's screen. Asked at every lock and every attempt: an
 /// installer or a person may set the password while the desktop runs.
 pub fn secret_for_this_account() -> Secret {
@@ -242,6 +281,25 @@ pub fn check_pin(input: &str) -> bool {
             tracing::warn!(error = %e, "Cannot read the lock PIN file — refusing to unlock");
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod start_open_tests {
+    use super::marker_counts;
+
+    /// Only an administrator's marker opens the desktop at boot: one the account (or a mind) could
+    /// write, or a link to elsewhere, counts for nothing.
+    #[test]
+    fn only_roots_own_marker_starts_the_desktop_open() {
+        assert!(marker_counts(true, 0, 0o100644, true, 0, 0o40755), "root's file in root's directory");
+        assert!(!marker_counts(true, 1000, 0o100644, true, 0, 0o40755), "the person's own file");
+        assert!(!marker_counts(true, 0, 0o100666, true, 0, 0o40755), "a file anyone may rewrite");
+        assert!(!marker_counts(true, 0, 0o100664, true, 0, 0o40755), "a file its group may rewrite");
+        assert!(!marker_counts(true, 0, 0o100644, true, 1000, 0o40755), "in a directory the person owns");
+        assert!(!marker_counts(true, 0, 0o100644, true, 0, 0o40777), "in a directory anyone may write");
+        assert!(!marker_counts(false, 0, 0o120777, true, 0, 0o40755), "a link");
+        assert!(!marker_counts(true, 0, 0o100644, false, 0, 0o40755), "a parent that is not a directory");
     }
 }
 

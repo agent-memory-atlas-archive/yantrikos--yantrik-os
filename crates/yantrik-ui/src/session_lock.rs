@@ -99,8 +99,10 @@ pub fn take_over_orphans(ui: &App) {
 /// every lock a screen saver: restart the machine, or kill the shell, and it was open. It starts
 /// behind the same session lock as every other lock, asking for the account's password, and the
 /// vault opens with that password when it is given. Not on the live image (its password is
-/// published) and not on an account with no password (there is nothing to ask for); and not when
-/// a start screen is named (the GUI installer's login screen, a developer's override).
+/// published), not on a machine its administrator declared open at boot (a root-owned
+/// /etc/yantrik/start-open, for an unattended machine meant to be watched), and not on an account
+/// with no password (there is nothing to ask for); and not when a start screen is named (the GUI
+/// installer's login screen, a developer's override).
 pub fn lock_at_start(ui: &App) {
     // A developer's start screen, in a debug build only. In a shipped one the file that names it
     // (~/.config/labwc/environment) is the user's, so a mind could write "start on the desktop".
@@ -108,6 +110,12 @@ pub fn lock_at_start(ui: &App) {
         return;
     }
     if crate::lock::live_session() {
+        return;
+    }
+    // A machine its administrator declared open at boot (the live instance: a screen meant to be
+    // watched). Only a root-owned marker counts; see lock::declared_open_at_boot.
+    if crate::lock::declared_open_at_boot() {
+        tracing::warn!(marker = crate::lock::START_OPEN_MARKER, "This machine is declared open at boot; the desktop starts unlocked");
         return;
     }
     if crate::lock::account_says_no_password() {
