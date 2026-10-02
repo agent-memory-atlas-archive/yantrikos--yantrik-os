@@ -70,6 +70,14 @@ def mind_idle(state):
         and not last.get("streaming")
 
 
+def show_mind_view():
+    """Put Mind View in front, so the stream shows the Mind's work. A person can minimise it or
+    open something over it between turns; the person watching should not see an idle desktop
+    while the Mind builds. Best effort: Mind View may not exist yet before the Mind opens an app."""
+    subprocess.run([YOS, "act", "shell", "focus_window", "title=Mind View"],
+                   capture_output=True, text=True, timeout=30)
+
+
 def send(text):
     done = subprocess.run([YOS, "act", "shell", "send_message", f"text={text}"],
                           capture_output=True, text=True, timeout=60)
@@ -126,6 +134,7 @@ def run_mission(m):
             if state is not None and not state.get("thinking"):
                 break
             time.sleep(POLL_SECS)
+        show_mind_view()
         ok, said = send(prompt)
         if not ok:
             log(mission=m["id"], event="send failed", turn=turn, said=said)
