@@ -1459,7 +1459,7 @@ and this is running as $(id -un). Run: sudo yantrik-update set-channel $new"
 # it, and this updater downloads nothing but its own bundle, so it comes with the image.
 # flatpak: the Package Manager installs Flathub apps with it, per-user and without root (#399);
 # a machine installed before the image carried it could search Flathub for nothing.
-REQUIRED_PACKAGES="iproute2 iputils-ping grim curl python3 nano htop swaybg xdg-desktop-portal-gtk flatpak git bash-completion podman uidmap passt fuse-overlayfs nftables"
+REQUIRED_PACKAGES="iproute2 iputils-ping grim curl python3 nano htop swaybg xdg-desktop-portal-gtk flatpak git bash-completion podman uidmap passt fuse-overlayfs nftables upower power-profiles-daemon"
 
 # Is this package installed, per dpkg? Prints dpkg's own status word, or nothing.
 pkg_installed() {
@@ -1473,6 +1473,9 @@ pkg_installed() {
 missing_packages() { # <status-command>
   local pkg missing=""
   for pkg in $REQUIRED_PACKAGES; do
+    # power-profiles-daemon conflicts with tlp on Debian: apt would remove tlp to install it, and
+    # someone who installed tlp chose it. Their machine is left as it is.
+    if [ "$pkg" = power-profiles-daemon ] && [ "$("$1" tlp)" = "installed" ]; then continue; fi
     [ "$("$1" "$pkg")" = "installed" ] || missing="$missing $pkg"
   done
   printf '%s' "${missing# }"
@@ -1489,6 +1492,9 @@ reconcile_packages() {
     return 0
   }
   local missing; missing="$(missing_packages pkg_installed)"
+  if [ "$(pkg_installed tlp)" = "installed" ] && [ "$(pkg_installed power-profiles-daemon)" != "installed" ]; then
+    info "tlp is installed, so power-profiles-daemon is left out: they conflict and apt would remove tlp"
+  fi
   [ -n "$missing" ] || return 0
   say "this machine is missing packages the image ships: $missing"
   # shellcheck disable=SC2086  # a package list, split on purpose
@@ -2687,7 +2693,7 @@ cmd_selftest() {
   printf '#!/bin/sh\ncase "$1" in iproute2|curl|python3|grim) echo installed ;; esac\n' > "$old"
   chmod +x "$old"
   out="$(missing_packages "$old")"
-  want="iputils-ping nano htop swaybg xdg-desktop-portal-gtk flatpak git bash-completion podman uidmap passt fuse-overlayfs nftables"
+  want="iputils-ping nano htop swaybg xdg-desktop-portal-gtk flatpak git bash-completion podman uidmap passt fuse-overlayfs nftables upower power-profiles-daemon"
   if [ "$out" = "$want" ]; then
     printf '  %sok%s   a 520-style machine is named package by package\n' "$c_grn" "$c_off"
   else
@@ -2702,12 +2708,49 @@ cmd_selftest() {
   printf '#!/bin/sh\ncase "$1" in iproute2|iputils-ping|grim|curl|python3|nano|htop|swaybg|xdg-desktop-portal-gtk|flatpak) echo installed ;; esac\n' > "$pre401"
   chmod +x "$pre401"
   out="$(missing_packages "$pre401")"
-  want="git bash-completion podman uidmap passt fuse-overlayfs nftables"
+  want="git bash-completion podman uidmap passt fuse-overlayfs nftables upower power-profiles-daemon"
   if [ "$out" = "$want" ]; then
     printf '  %sok%s   a machine from before #401 is given git, completion and rootless podman\n' "$c_grn" "$c_off"
   else
     printf '  %sFAIL%s a machine from before #401: wanted %s, got %s\n' \
       "$c_red" "$c_off" "$want" "${out:-nothing}"
+    fails=$((fails + 1))
+  fi
+
+  # The battery and the power profile (story 1.4): a machine that has everything else but not
+  # UPower or power-profiles-daemon is told those two. Without them a laptop has no battery
+  # reading over D-Bus and no profile choice.
+  local pre14; pre14="$root/dpkg-pre14"
+  printf '#!/bin/sh
+case "$1" in upower|power-profiles-daemon|tlp) ;; *) echo installed ;; esac
+' > "$pre14"
+  chmod +x "$pre14"
+  out="$(missing_packages "$pre14")"
+  want="upower power-profiles-daemon"
+  if [ "$out" = "$want" ]; then
+    printf '  %sok%s   a machine without UPower or power-profiles-daemon is given both
+' "$c_grn" "$c_off"
+  else
+    printf '  %sFAIL%s a machine without UPower: wanted %s, got %s
+'       "$c_red" "$c_off" "$want" "${out:-nothing}"
+    fails=$((fails + 1))
+  fi
+
+  # The same machine with tlp on it: power-profiles-daemon is skipped, because installing it
+  # would make apt remove tlp. UPower is still given.
+  local withtlp; withtlp="$root/dpkg-withtlp"
+  printf '#!/bin/sh
+case "$1" in upower|power-profiles-daemon) ;; *) echo installed ;; esac
+' > "$withtlp"
+  chmod +x "$withtlp"
+  out="$(missing_packages "$withtlp")"
+  want="upower"
+  if [ "$out" = "$want" ]; then
+    printf '  %sok%s   a machine with tlp is not given power-profiles-daemon, which would remove it
+' "$c_grn" "$c_off"
+  else
+    printf '  %sFAIL%s a machine with tlp: wanted %s, got %s
+'       "$c_red" "$c_off" "$want" "${out:-nothing}"
     fails=$((fails + 1))
   fi
 

@@ -227,9 +227,10 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         // 4. Update status bar from snapshot
         let snap = snapshot.borrow();
         if let Some(ui) = ui_weak.upgrade() {
-            ui.set_battery_available(snap.battery_available);
-            ui.set_battery_level(snap.battery_level as i32);
-            ui.set_battery_charging(snap.battery_charging);
+            // The battery and the profile come from the snapshot the events built: UPower's
+            // signals (or the sysfs fallback) and power-profiles-daemon's, not a poll here.
+            crate::power_status::apply_battery(&ui, &snap);
+            crate::power_status::apply_profile(&ui, snap.power_profile.as_ref());
             // The network properties are set in step 0b, above every early
             // return, because the status bar carries them on every screen —
             // the address among them, when the service reports one. This is

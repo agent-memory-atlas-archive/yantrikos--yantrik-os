@@ -17,6 +17,8 @@ pub mod backlight;
 pub mod latest;
 
 mod battery;
+mod battery_sysfs;
+pub mod power_profile;
 mod files;
 #[cfg(target_os = "linux")]
 mod idle;
@@ -24,7 +26,7 @@ mod mock;
 mod network;
 mod processes;
 
-pub use events::{FileChangeKind, ProcessInfo, SystemEvent, SystemSnapshot};
+pub use events::{BatteryState, FileChangeKind, PowerProfileInfo, ProcessInfo, SystemEvent, SystemSnapshot};
 pub use event_bus::{
     CardAction, CommitmentAlertType, EventBus, EventKind, EventLog, EventLogEntry,
     EventSource, EventStats, ToolOutcome, TraceId, YantrikEvent,

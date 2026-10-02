@@ -35,6 +35,7 @@ run target/ui-validation/cards-waiting.png 1280 800 verify-cards-waiting
 run target/ui-validation/kit-controls.png 880 460 verify-kit-controls
 run target/ui-validation/bar-overlays.png 1280 800 verify-bar-overlays
 run target/ui-validation/qs-levels.png 1280 800 verify-qs-levels
+run target/ui-validation/battery.png 1280 800 verify-battery
 run target/ui-validation/lens-answers.png 640 800 verify-lens-answers
 run target/ui-validation/approval-card.png 1280 800 verify-approval-card
 run target/ui-validation/agents-route.png 1280 800 verify-agents-route

@@ -901,6 +901,7 @@ fn now_ts() -> f64 {
 fn system_event_tag(event: &SystemEvent) -> &'static str {
     match event {
         SystemEvent::BatteryChanged { .. } => "battery",
+        SystemEvent::PowerProfileChanged { .. } => "power_profile",
         SystemEvent::NetworkChanged { .. } => "network",
         SystemEvent::AudioChanged { .. } => "audio",
         SystemEvent::NotificationReceived { .. } => "notification",
@@ -1016,6 +1017,8 @@ mod tests {
             level: 42,
             charging: true,
             time_to_empty_mins: None,
+            time_to_full_mins: None,
+            state: crate::events::BatteryState::Charging,
         });
 
         let event = rx.try_recv().unwrap();

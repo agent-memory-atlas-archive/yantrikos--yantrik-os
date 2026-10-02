@@ -48,6 +48,12 @@ pub fn run_mock_observer(tx: Sender<SystemEvent>) {
                 } else {
                     Some(battery_level as u32 * 3) // rough estimate
                 },
+                time_to_full_mins: None,
+                state: if battery_charging {
+                    crate::events::BatteryState::Charging
+                } else {
+                    crate::events::BatteryState::Discharging
+                },
             });
         }
 

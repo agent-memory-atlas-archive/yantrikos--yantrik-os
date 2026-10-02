@@ -913,16 +913,27 @@ pub fn publish(
                         "connection": ui.get_network_detail().to_string(),
                     }),
                 )
+                // `null` with no battery. State, the times and the profile come from
+                // `power_status`, which also composes the bar's words, so the two cannot drift.
                 .with(
                     "battery",
-                    if ui.get_battery_available() {
-                        serde_json::json!({
-                            "percent": ui.get_battery_level(),
-                            "charging": ui.get_battery_charging(),
-                        })
-                    } else {
-                        serde_json::Value::Null
-                    },
+                    crate::power_status::battery_for_describe(
+                        ui.get_battery_available(),
+                        ui.get_battery_level(),
+                        crate::power_status::state_from_key(ui.get_battery_state().as_str()),
+                        ui.get_battery_time_to_empty_mins(),
+                        ui.get_battery_time_to_full_mins(),
+                        ui.get_power_profile().as_str(),
+                    ),
+                )
+                // Desktops have profiles too, so this stands whether or not there is a battery.
+                // `null` when there is no power-profiles-daemon.
+                .with(
+                    "power_profile",
+                    crate::power_status::profile_for_describe(
+                        ui.get_power_profile().as_str(),
+                        ui.get_power_performance_offered(),
+                    ),
                 )
                 .with("do_not_disturb", ui.get_dnd_mode())
                 // What the machine is trying to tell the person, so that "is anything waiting
@@ -977,6 +988,7 @@ pub fn publish(
     let screen_ui = ui_for.clone();
     let focus_ui = ui_for.clone();
     let dnd_ui = ui_for.clone();
+    let profile_ui = ui_for.clone();
     let ask_ui = ui_for.clone();
     let lens_ui = ui_for.clone();
     let pin_ui = ui_for.clone();
@@ -1960,6 +1972,43 @@ pub fn publish(
                         now
                     },
                 )
+            },
+        )
+        .action(
+            // The battery popover's profile choice, for a caller. `standard`: it changes how
+            // the machine trades speed for battery, which the person can undo with the same
+            // choice and which the daemon itself resets (it drops to power-saver on its own
+            // when the battery runs low). Nothing is written to a file here; the daemon holds
+            // it. The answer is read back from the daemon, so a profile it did not take is
+            // not reported as taken, and one it does not offer is refused before it is asked.
+            Action::new(
+                "set_power_profile",
+                "Set the power profile: power-saver, balanced or performance. Performance is only on hardware that has it; `describe shell` lists what is offered under `power_profile`. Answers with the profile in effect afterwards.",
+            )
+            .risk("standard")
+            .arg(Param::text("profile").describe("power-saver, balanced or performance")),
+            move |args| {
+                let weak = profile_ui()?.as_weak();
+                let profile = args["profile"]
+                    .as_str()
+                    .ok_or("`profile` must be power-saver, balanced or performance")?
+                    .to_string();
+                // The bus calls are off the UI thread: a power-profiles-daemon that hangs, or a
+                // polkit prompt nobody answers, must not freeze the shell. The answer is what
+                // the daemon reports afterwards, finished on the socket's side; each call has a
+                // 2 s timeout, so a stuck daemon is an error here and not a wait.
+                let work = move || {
+                    let now = yantrik_os::power_profile::set(&profile)?;
+                    crate::power_status::apply_profile_later(weak, Some(now.clone()));
+                    tracing::info!(profile = %now.active, "Power profile set");
+                    Ok(serde_json::json!({
+                        "power_profile": now.active,
+                        "offered": now.offered,
+                    }))
+                };
+                yantrik_app_runtime::control::answer_later(work)
+                    .map(|()| serde_json::json!({ "answering": "off the UI thread" }))
+                    .or_else(|work| work())
             },
         )
         .action(
@@ -3312,5 +3361,70 @@ mod lasting_settings_grade_tests {
                  Declaration as written:\n{declaration}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod power_profile_tests {
+    //! `set_power_profile` and the battery's `describe` fields (story 1.4). The handler needs a
+    //! live shell and a system bus to run, so these pin its shape against the source, as
+    //! `lock_grade_tests` does for `lock`; what the answers contain is tested on the pure
+    //! functions in `power_status`.
+    use std::path::Path;
+
+    fn source() -> String {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/control.rs");
+        let whole = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        whole.split("#[cfg(test)]").next().unwrap_or_default().to_string()
+    }
+
+    fn declaration() -> String {
+        let src = source();
+        let from = src.find("\"set_power_profile\"").expect("the shell publishes set_power_profile");
+        let rest = &src[from..];
+        rest[..rest.find(".action(").unwrap_or(rest.len())].to_string()
+    }
+
+    /// It changes how the machine trades speed for battery, nothing is written, and the person
+    /// can undo it with the same choice: `standard`, not `safe` and not `sensitive`.
+    #[test]
+    fn setting_a_profile_is_standard() {
+        let d = declaration();
+        assert!(d.contains(".risk(\"standard\")"), "set_power_profile is graded standard. As written:\n{d}");
+    }
+
+    /// The answer is what the daemon reports afterwards, and a profile it does not offer is
+    /// refused: both come from `power_profile::set`, so the handler must go through it and hand
+    /// its error on with `?`, not report the profile it was given.
+    #[test]
+    fn the_answer_is_read_back_and_a_profile_not_offered_is_refused() {
+        let d = declaration();
+        assert!(d.contains("yantrik_os::power_profile::set(&profile)?"), "the handler calls the daemon and propagates a refusal. As written:\n{d}");
+        assert!(d.contains("now.active"), "the answer is the daemon's read-back. As written:\n{d}");
+        assert!(!d.contains("\"power_profile\": profile"), "never echo the request as the answer. As written:\n{d}");
+    }
+
+    /// A hung daemon froze the shell when the call was made in the handler itself, which runs on
+    /// the UI thread. The call belongs inside the closure handed to `answer_later`, which runs
+    /// on the socket's side.
+    #[test]
+    fn the_daemon_is_not_called_on_the_ui_thread() {
+        let d = declaration();
+        let later = d.find("answer_later(").expect("the answer is finished off the UI thread");
+        let work = d.find("let work = move ||").expect("the bus work is a closure");
+        let call = d.find("power_profile::set(").expect("the handler sets the profile");
+        assert!(work < call && call < later, "`power_profile::set` must be inside the `answer_later` closure, not in the handler body. As written:
+{d}");
+        assert!(!d[..work].contains("power_profile::set("), "no bus call before the closure. As written:
+{d}");
+    }
+
+    /// `describe shell` carries the battery's state and times, and the profile at the top level
+    /// so a machine without a battery still reports it.
+    #[test]
+    fn describe_reports_the_battery_object_and_the_profile() {
+        let src = source();
+        assert!(src.contains("crate::power_status::battery_for_describe("), "describe's `battery` comes from power_status");
+        assert!(src.contains("\"power_profile\","), "describe has a top-level `power_profile`, battery or not");
     }
 }

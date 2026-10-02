@@ -148,6 +148,9 @@ impl ActivityAccumulator {
                     self.current.was_discharging = true;
                 }
             }
+            // A profile change is the person's own choice, not something that happened to the
+            // machine, so the activity summary has nothing to say about it.
+            SystemEvent::PowerProfileChanged { .. } => {}
             SystemEvent::CpuPressure { usage_percent } => {
                 self.current.cpu_samples.push(*usage_percent);
                 if *usage_percent >= 90.0 {
@@ -274,6 +277,7 @@ impl ActivityAccumulator {
                 level,
                 charging: false,
                 time_to_empty_mins,
+                ..
             } if *level <= 15 => {
                 let detail = time_to_empty_mins
                     .map(|m| format!(", ~{}min left", m))

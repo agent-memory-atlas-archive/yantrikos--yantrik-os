@@ -48,6 +48,7 @@ mod companion_rpc;
 mod control;
 mod control_approvals;
 mod control_overlays;
+mod power_status;
 mod control_installer;
 mod control_levels;
 mod installer_rules;
