@@ -1088,8 +1088,15 @@ pub fn publish(
                 }
                 // An app's window would come up over a waiting card (card_watch).
                 crate::card_watch::hold_windows("open_app")?;
+                // The id the window will be known by, and a past failure of it cleared, so what
+                // the wait below reads back is this launch's and not an earlier one's.
+                let window_id = crate::wire::dock::launcher_id_in(&name, &catalogue);
+                crate::running::clear_launch_failure(&window_id);
                 // The launcher's own path: it resolves the binary, enforces one window per app,
                 // and focuses the running one instead of starting a second.
+                // Asked here too, where the caller is in scope, so the answer can say when the
+                // dock will not start a second copy for a mind (`mind_view::route`, B2).
+                let already_open_for_mind = !crate::mind_view::route_now(&window_id).spawn;
                 ui.invoke_launch_app(name.clone().into());
                 // Which of the two that did. A program opens a window; a name that is part of the
                 // desktop switches one of its screens, and no window exists or ever will. The
@@ -1108,6 +1115,30 @@ pub fn publish(
                 // was opened by (`sysmonitor` opens what answers as `system-monitor`).
                 if let Some(surface) = crate::wire::dock::surface_for(&name, &catalogue) {
                     answer["describe_as"] = surface.into();
+                }
+                if already_open_for_mind {
+                    answer["note"] = "already open on the person's desktop: not launched again, and not \
+                                      raised over their work. Drive it through its surface."
+                        .into();
+                }
+                // A program is not a window until one is seen. The dock spawns it on a worker and
+                // `launching` told a mind "done" for a terminal that never drew anywhere (2 Oct
+                // 2026), so the answer waits, off the UI thread, for the window to be listed —
+                // in Mind View's compositor for a mind's launch, on the desktop for a person's —
+                // and says where it is, or that it is not.
+                if answer.get("launching").is_some() {
+                    let wait = move || {
+                        let mut probe = crate::mind_landing::probe_for(window_id);
+                        let seen = crate::mind_landing::wait_for_window(
+                            &mut probe,
+                            crate::mind_landing::BUDGET,
+                            crate::mind_landing::STEP,
+                        );
+                        crate::mind_landing::answer(answer, &name, seen)
+                    };
+                    return yantrik_app_runtime::control::answer_later(wait)
+                        .map(|()| serde_json::json!({ "answering": "off the UI thread" }))
+                        .or_else(|wait| wait());
                 }
                 Ok(answer)
             },
@@ -2396,6 +2427,23 @@ mod window_action_tests {
             "when the raise fails, the answer has to say so in words: the screen DID change, so \
              this is not an error, but it is not visible either. Handler as written:\n{handler}"
         );
+    }
+
+    /// S10: `open_app` and `files_open` wait for the window off the UI thread, and no process
+    /// call or wait sits in the handler body. Source scans, like the neighbours.
+    #[test]
+    fn open_app_and_files_open_wait_for_the_window_off_the_ui_thread() {
+        let open_app = action("open_app");
+        let later = open_app.find("answer_later(").expect("open_app answers off the UI thread");
+        let wait = open_app.find("wait_for_window(").expect("open_app waits for the window");
+        assert!(wait < later, "the wait must be inside the closure handed to answer_later:\n{open_app}");
+        assert!(open_app.contains("route_now("), "open_app must say when nothing is launched again");
+        assert!(!open_app.contains("Command::new"), "no process call in the handler");
+        let files = include_str!("control_files.rs");
+        let files_open = &files[files.find("\"files_open\"").unwrap()..];
+        let files_open = &files_open[..files_open.find("\"files_up\"").unwrap()];
+        assert!(files_open.contains("answer_later(") && files_open.contains("wait_for_window("), "{files_open}");
+        assert!(files_open.contains(".defers()"));
     }
 
     /// The launcher opened every time, and nobody could see it.
