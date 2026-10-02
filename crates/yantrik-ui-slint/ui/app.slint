@@ -1757,6 +1757,7 @@ export component App inherits Window {
 
         // Settings screen
         if current-screen == 7 : WindowFrame {
+            content-has-controls: true;
             x: root.window-maximized ? 0px : root.window-x;
             y: root.window-maximized ? Theme.status-bar-height : root.window-y;
             width: root.window-maximized ? parent.width - root.mind-panel-reserve : root.window-w;
@@ -1782,6 +1783,19 @@ export component App inherits Window {
             animate x, y, width, height { duration: 200ms; easing: ease-out; }
 
             SettingsScreen {
+                show-window-controls: root.window-maximized;
+                maximized: root.window-maximized;
+                minimize => {
+                    root.minimized-screen = 7;
+                    root.minimized-title = Tr.title-settings;
+                    root.minimized-app-id = "settings";
+                    root.current-screen = 1; root.navigate(1);
+                }
+                toggle-maximize => { root.window-maximized = !root.window-maximized; }
+                close-window => {
+                    if (root.minimized-screen == 7) { root.minimized-screen = 0; }
+                    root.current-screen = 1; root.navigate(1);
+                }
                 width: 100%; height: 100%;
                 user-name <=> root.settings-user-name;
                 companion-name <=> root.settings-companion-name;
@@ -1967,6 +1981,7 @@ export component App inherits Window {
 
         // File browser
         if current-screen == 8 : WindowFrame {
+            content-has-controls: true;
             x: root.window-maximized ? 0px : root.window-x;
             y: root.window-maximized ? Theme.status-bar-height : root.window-y;
             width: root.window-maximized ? parent.width - root.mind-panel-reserve : root.window-w;
@@ -1992,6 +2007,19 @@ export component App inherits Window {
             animate x, y, width, height { duration: 200ms; easing: ease-out; }
 
             FileBrowser {
+                show-window-controls: root.window-maximized;
+                maximized: root.window-maximized;
+                minimize => {
+                    root.minimized-screen = 8;
+                    root.minimized-title = Tr.title-files;
+                    root.minimized-app-id = "files";
+                    root.current-screen = 1; root.navigate(1);
+                }
+                toggle-maximize => { root.window-maximized = !root.window-maximized; }
+                close-window => {
+                    if (root.minimized-screen == 8) { root.minimized-screen = 0; }
+                    root.current-screen = 1; root.navigate(1);
+                }
                 width: 100%; height: 100%;
                 notice: root.file-notice;
                 notice-created: root.file-notice-created;
