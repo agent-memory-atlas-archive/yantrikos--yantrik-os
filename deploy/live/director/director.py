@@ -8,8 +8,13 @@ the same path a person's typing takes, waits until the Mind has finished its tur
 mission's turn or time limit is reached, or something needs a person.
 
 It never answers an approval card and never changes the Mind's mode. A card waiting means a
-person is needed; the Director logs that, leaves the card up for whoever is watching, and stops
-the mission rather than talking past it.
+person is needed; the Director logs that, leaves the card up for whoever is watching, and waits.
+
+It does check the work. A mission may name a page (`check_page`), and after every turn the
+Director loads it with `check-page`, the same check the Mind is told to run. A page that throws
+puts its errors at the head of the next prompt, and a FINISHED is not taken while it throws. On
+561 the Mind ticked all eight Starfall steps, and said every feature was in, over a game.js that
+did not parse (2 Oct 2026). A tick is the Mind's word; the page loading is the evidence.
 
 Runs on the live instance (VM 561) as the desktop's account, from yantrik-live-director.service.
 Missions are in missions.json beside it. Progress goes to ~/director/log.jsonl, one line a turn.
@@ -26,6 +31,7 @@ YOS = "/opt/yantrik/bin/yos"
 STATE_DIR = os.path.expanduser("~/director")
 LOG = os.path.join(STATE_DIR, "log.jsonl")
 DONE = os.path.join(STATE_DIR, "done.json")
+CHECK_PAGE = os.path.join(HERE, "check-page")
 
 POLL_SECS = 5
 # A beat between turns, so someone watching sees the result of one step before the next begins.
@@ -122,6 +128,24 @@ def wait_for_turn(sent_at):
             return state, "turn too long"
 
 
+def check_page(m):
+    """Load the mission's page and return (clean, errors). clean is None when there is no page to
+    check or it could not be checked (no chromium, a hang), which neither holds up nor passes."""
+    page = m.get("check_page")
+    if not page:
+        return None, ""
+    try:
+        done = subprocess.run([CHECK_PAGE, os.path.expanduser(page)], capture_output=True, text=True, timeout=90)
+    except (OSError, subprocess.TimeoutExpired) as why:
+        return None, str(why)[:200]
+    said = done.stdout.strip()[:1500]
+    if done.returncode == 0:
+        return True, ""
+    if done.returncode == 1:
+        return False, said
+    return None, said
+
+
 def finished_missions():
     try:
         with open(DONE, encoding="utf-8") as f:
@@ -157,16 +181,23 @@ def run_mission(m):
             return
         state, why = wait_for_turn(time.time())
         reply = (last_reply(state) or {}).get("text", "") if state else ""
-        log(mission=m["id"], event="turn", turn=turn, outcome=why, reply=reply[:400])
+        clean, errors = check_page(m)
+        log(mission=m["id"], event="turn", turn=turn, outcome=why, reply=reply[:400],
+            page={True: "loads clean", False: "throws", None: "not checked"}[clean], errors=errors or None)
         if why != "answered":
             log(mission=m["id"], event="stopped", why=why, turns=turn)
             return
         if FINISHED in reply.split():
-            mark_finished(m["id"])
-            log(mission=m["id"], event="finished", turns=turn, minutes=round((time.time() - started) / 60))
-            return
+            if clean is False:
+                # The Mind's word against the page's: the page wins, and the mission goes on.
+                log(mission=m["id"], event="finished refused", turn=turn, why="the page throws")
+            else:
+                mark_finished(m["id"])
+                log(mission=m["id"], event="finished", turns=turn, page_checked=clean is True,
+                    minutes=round((time.time() - started) / 60))
+                return
         time.sleep(BETWEEN_TURNS_SECS)
-        prompt = m["keep_going"]
+        prompt = m["fix_first"].format(errors=errors) if clean is False else m["keep_going"]
     log(mission=m["id"], event="stopped", why="turn limit")
 
 
