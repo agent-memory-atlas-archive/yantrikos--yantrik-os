@@ -17,7 +17,7 @@ sed '/^# The cloud providers, through the gate/d; /^YM_LOCAL_ROLE=/d; /^YM_PRIMA
 cat >> "$f.new" <<EOF
 # The cloud providers, through the gate (deploy/live/gate-models/point-mind.sh).
 YM_LOCAL_ROLE=fallback
-YM_PRIMARY_BRAIN=ollama-cloud:deepseek-v4.1-flash
+YM_PRIMARY_BRAIN=ollama-cloud:kimi-k3
 YM_PROVIDER_BASE_URL_OLLAMA_CLOUD=$url/ollama-cloud/v1
 YM_PROVIDER_BASE_URL_NANOGPT=$url/nanogpt/api/v1
 OLLAMA_CLOUD_KEY=$key
