@@ -15,9 +15,12 @@ import importlib.util
 import os
 import sys
 
+# NGC_API_KEY is deliberately not an alias: an NGC personal key can carry scopes beyond the NIM API
+# (registry, org), and a key installed on the gate should be one made for build.nvidia.com only.
 NAMES = {
     "OLLAMA_CLOUD_KEY": ["OLLAMA_CLOUD_KEY", "OLLAMA_API_KEY", "OLLAMA_CLOUD_API_KEY"],
     "NANOGPT_KEY": ["NANOGPT_KEY", "NANOGPT_API_KEY", "NANO_GPT_API_KEY", "NANO_GPT_KEY"],
+    "NIM_KEY": ["NIM_KEY", "NVIDIA_API_KEY", "NVIDIA_NIM_API_KEY"],
 }
 
 
@@ -45,7 +48,7 @@ def main(argv):
         else:
             print(f"{out}: not in the file; the gate keeps the one it has", file=sys.stderr)
     if not lines:
-        sys.exit("neither provider's key is in the file")
+        sys.exit("none of the providers' keys is in the file")
     # Bytes, not text: on Windows a text stdout turns each "\n" into "\r\n", and a key ending in
     # "\r" is refused by setup-models.sh's format check.
     sys.stdout.buffer.write(("\n".join(lines) + "\n").encode())
