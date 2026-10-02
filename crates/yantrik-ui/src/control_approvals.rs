@@ -1740,6 +1740,9 @@ pub(crate) fn row_for(card: Card) -> crate::ApprovalRequest {
 
 fn publish(ui: &App, cards: Vec<Card>, pane: &str) {
     let waiting = cards.iter().filter(|c| c.status == Status::Pending).count();
+    // While anything waits, a window that takes focus over the shell is answered by bringing the
+    // shell back (card_watch): a card behind Mind View is a decision nobody can make.
+    crate::card_watch::set_waiting(waiting > 0);
 
     // The same answers, in the pane of the agent each request was for: one request id, so
     // answering in either place settles both, and an expiry or a withdrawal reaches the pane on

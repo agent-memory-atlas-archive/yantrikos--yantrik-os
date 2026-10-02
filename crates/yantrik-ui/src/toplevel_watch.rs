@@ -101,16 +101,21 @@ impl<K: PartialEq> FocusLog<K> {
     /// `None` is not recorded. When focus moves, labwc sends the old window's deactivation and
     /// the new one's activation as two separate updates, and between them nothing is activated;
     /// recording that gap would push the window that really had focus out of `previous`.
-    fn observe(&mut self, front: Option<(K, String)>, now: Instant) {
-        let Some((key, title)) = front else { return };
+    /// Returns whether focus moved to another window (a retitle is not a move).
+    fn observe(&mut self, front: Option<(K, String)>, now: Instant) -> bool {
+        let Some((key, title)) = front else { return false };
         match &mut self.current {
             // The same window under a new title (Chromium retitles on every tab): not a change
             // of focus, so `previous` and `since` stay as they are.
-            Some((k, t)) if *k == key => *t = title,
+            Some((k, t)) if *k == key => {
+                *t = title;
+                false
+            }
             _ => {
                 self.previous = self.current.take();
                 self.current = Some((key, title));
                 self.since = Some(now);
+                true
             }
         }
     }
@@ -254,8 +259,13 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for Watch {
                     w.activated = activated;
                 }
                 let front = watch.front();
-                if let Ok(mut log) = LOG.lock() {
-                    log.observe(front, Instant::now());
+                let title = front.as_ref().map(|(_, t)| t.clone());
+                let moved = LOG.lock().is_ok_and(|mut log| log.observe(front, Instant::now()));
+                // A card waiting in the shell must not stay behind whatever just took focus.
+                if moved {
+                    if let Some(title) = title {
+                        crate::card_watch::front_changed(&title);
+                    }
                 }
             }
             handle::Event::Closed => {

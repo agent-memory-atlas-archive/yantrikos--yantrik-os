@@ -2818,6 +2818,7 @@ export component App inherits Window {
                 // desktop first, as Apps does (#219, #241). The shell's handler for the Lens
                 // opening brings the window forward over whatever app is in front.
                 chat-with: root.active-harness-name;
+                cards-waiting: root.pending-approvals.length;
                 open-companion => {
                     if (!root.lens-open) {
                         if (root.current-screen != 1) {
