@@ -255,6 +255,29 @@ fn every_yos_action_rc_xml_runs_is_published_by_the_shell() {
     assert!(seen >= 8, "found only {seen} `yos act shell` bindings; the scan is reading the wrong thing");
 }
 
+/// `focus_window title=Mind View` that matched no window would do nothing and say nothing. Every
+/// title an rc.xml command asks for must be one the shell actually gives a window.
+#[test]
+fn every_window_title_rc_xml_asks_for_is_one_the_shell_gives_a_window() {
+    let rc = rc_xml();
+    let known = [crate::windows::SHELL_WINDOW_TITLE, crate::mind_view::TITLE];
+    let mut seen = 0;
+    for command in rc.split("<command>").skip(1) {
+        let command = command.split("</command>").next().unwrap_or_default();
+        let Some(after) = command.split(" title=").nth(1) else { continue };
+        let title = match after.strip_prefix('"') {
+            Some(quoted) => quoted.split('"').next().unwrap_or_default(),
+            None => after.split_whitespace().next().unwrap_or_default(),
+        };
+        seen += 1;
+        assert!(
+            known.contains(&title),
+            "rc.xml asks for the window titled {title:?}, which the shell never gives a window              (known: {known:?}): {command}"
+        );
+    }
+    assert!(seen >= 1, "found no `title=` binding; the scan is reading the wrong thing");
+}
+
 #[test]
 fn the_scan_reads_shortcuts_the_way_screens_write_them() {
     assert_eq!(shortcuts_in("Super K"), ["super+k"]);

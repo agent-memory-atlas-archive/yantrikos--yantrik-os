@@ -337,9 +337,10 @@
                                               person's
         Super+Shift+V    Mind View forward   (focus_window)
 
-      Mind View's window carries the title its nested compositor gives itself, "wlroots - WL-1"
-      or "labwc - WL-1" depending on the version, never the words "Mind View", so the title is
-      matched on the "WL-1" both share.
+      Mind View's window is titled "Mind View" (mind_view::TITLE, set through the title library
+      the nested compositor preloads). Labwc splits an Execute command the way a shell does, so
+      the quotes keep the two words one argument. The `rc_keys` test checks every `title=` here
+      against the titles the shell gives a window.
 
       Super+D stays "show desktop" above, the convention on GNOME and Windows. Do Not Disturb
       has no key: it is in Quick Settings and the Today popover.
@@ -366,7 +367,7 @@
     </keybind>
     <keybind key="W-S-v">
       <action name="Execute">
-        <command>/opt/yantrik/bin/yos act shell focus_window title=WL-1</command>
+        <command>/opt/yantrik/bin/yos act shell focus_window title="Mind View"</command>
       </action>
     </keybind>
   </keyboard>

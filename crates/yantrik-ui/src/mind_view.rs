@@ -44,7 +44,7 @@ fn title_preload() -> Vec<(&'static str, String)> {
     match lib {
         Some(lib) => vec![
             ("LD_PRELOAD", lib.display().to_string()),
-            ("YANTRIK_MIND_VIEW_TITLE", "Mind View".to_string()),
+            ("YANTRIK_MIND_VIEW_TITLE", TITLE.to_string()),
         ],
         None => Vec::new(),
     }
@@ -86,6 +86,11 @@ pub fn is_nested_window(declared_id: &str, title: &str) -> bool {
         .split_once(" - ")
         .is_some_and(|(name, output)| COMPOSITORS.contains(&name) && output.starts_with("WL-"))
 }
+
+/// The title Mind View's window carries on the person's desktop. The one place the words are
+/// spelled for code that finds the window by title: the title library is handed it, and
+/// rc.xml's Super+Shift+V binding is tested against it.
+pub const TITLE: &str = "Mind View";
 
 /// The shell's own id for the Mind View window, as the window list and `show_app` spell it.
 pub const APP_ID: &str = "mind-view";
