@@ -250,7 +250,7 @@ apt-get install -y -qq \
 # build, and the parity check after this step names anything user-data.yaml gains later.
 # mpv: Files opens sound and video in mpv's own window (#255); the image shipped no player.
 # flatpak: the Package Manager installs Flathub apps with it, per-user and without root (#399).
-apt-get install -y -qq     seatd     libcap2-bin     chromium     pipewire-pulse wireplumber pulseaudio-utils     python3-websocket     fontconfig     grim slurp     qemu-guest-agent     libnotify-bin     xdg-desktop-portal xdg-desktop-portal-wlr xdg-desktop-portal-gtk     lxpolkit     udisks2     brightnessctl     bluez alsa-utils     mpv     flatpak     nftables
+apt-get install -y -qq     seatd     libcap2-bin     chromium     pipewire-pulse wireplumber pulseaudio-utils     python3-websocket     fontconfig     grim slurp     qemu-guest-agent     libnotify-bin     xdg-desktop-portal xdg-desktop-portal-wlr xdg-desktop-portal-gtk     lxpolkit     udisks2     brightnessctl     upower power-profiles-daemon     bluez alsa-utils     mpv     flatpak     nftables
 
 # Three programs the shell shells out to by name, and did not have.
 #   swaybg     — yantrik-companion-tools/src/wallpaper.rs: setting a wallpaper did nothing

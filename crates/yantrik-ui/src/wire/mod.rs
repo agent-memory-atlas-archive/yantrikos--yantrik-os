@@ -89,6 +89,7 @@ pub fn wire_all(ui: &App, ctx: &AppContext) {
     harness::wire(ui, ctx);
     clipboard::wire(ui, ctx);
     shell_overlays::wire(ui, ctx);
+    crate::power_status::wire(ui);
     lens::wire(ui, ctx);
     navigate::wire(ui, ctx);
     dock::wire(ui, ctx);

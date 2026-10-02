@@ -27,6 +27,9 @@
 //             (`tooltip-above: false` for a bar along the top). It is drawn where it is; a
 //             tooltip that would cross the screen edge is the owner's to avoid.
 //
+// A glyph that is more than a path (the battery's fill follows the level) puts its extra
+// shapes inside the indicator as children; they are drawn in the glyph's own box.
+//
 // States: rest, hover, pressed, active (popover open), keyboard focus, attention dot, disabled
 // (dimmed, inert). Accessible role button; `active` is reported as expanded.
 import { Theme } from "theme.slint";
@@ -146,6 +149,15 @@ export component YIndicator inherits Rectangle {
                 height: Theme.bar-dot;
                 border-radius: self.height / 2;
                 background: Theme.color-warning;
+            }
+            // Drawn over the glyph, in exactly its square (the glyph is centred in the row, so
+            // this is too): the battery's fill and bolt. Anything placed here is decoration for
+            // the glyph and takes no input.
+            Rectangle {
+                y: (parent.height - Theme.bar-icon-size) / 2;
+                width: Theme.bar-icon-size;
+                height: Theme.bar-icon-size;
+                @children
             }
         }
 

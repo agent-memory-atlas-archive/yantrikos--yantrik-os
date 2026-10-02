@@ -9,9 +9,11 @@
 // Nothing here owns state: every flag and value is the app's, bound through, so the desktop's
 // own keybinds, the control surface and the bar all open the same panels.
 
+import { Theme } from "theme.slint";
 import { QuickSettings } from "quick_settings.slint";
 import { PowerMenu } from "power_menu.slint";
 import { ClipboardPanel, ClipboardEntryData } from "clipboard_panel.slint";
+import { BatteryPopover } from "bar/battery_popover.slint";
 
 export component ShellOverlays inherits Rectangle {
     // Quick Settings
@@ -34,6 +36,15 @@ export component ShellOverlays inherits Rectangle {
     callback brightness-changed(int);
     callback volume-changed(int);
     callback volume-mute-toggled();
+
+    // Battery popover: level, state, time and the power profile, under the bar's battery.
+    in-out property <bool> battery-popover-open: false;
+    in property <length> battery-anchor-x: 0;
+    in property <string> battery-status-text: "";
+    in property <string> battery-time-text: "";
+    in property <string> power-profile: "";
+    in property <bool> power-performance-offered: false;
+    callback set-power-profile(string);
 
     // Power menu
     in-out property <bool> power-menu-open: false;
@@ -68,6 +79,19 @@ export component ShellOverlays inherits Rectangle {
         volume-changed(val) => { root.volume-changed(val); }
         volume-mute-toggled => { root.volume-mute-toggled(); }
         close => { root.quick-settings-open = false; }
+    }
+
+    BatteryPopover {
+        open: root.battery-popover-open;
+        anchor-x: root.battery-anchor-x;
+        anchor-y: Theme.status-bar-height;
+        level: root.battery-level;
+        status-text: root.battery-status-text;
+        time-text: root.battery-time-text;
+        power-profile: root.power-profile;
+        performance-offered: root.power-performance-offered;
+        profile-chosen(p) => { root.set-power-profile(p); }
+        close-requested => { root.battery-popover-open = false; }
     }
 
     PowerMenu {

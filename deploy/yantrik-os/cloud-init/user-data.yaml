@@ -112,6 +112,12 @@ packages:
   - udisks2
   # Screen brightness, bound to the brightness keys in rc.xml.
   - brightnessctl
+  # The battery and the power profile. The shell reads UPower over D-Bus (crates/yantrik-os/
+  # src/battery.rs) and sets profiles through power-profiles-daemon; neither was on the image,
+  # so a laptop could show no battery and no profile choice. power-profiles-daemon conflicts
+  # with tlp on Debian, and nothing here installs tlp.
+  - upower
+  - power-profiles-daemon
   # Bluetooth, and the mixer fallback for when wpctl is not the right answer.
   - bluez
   - alsa-utils

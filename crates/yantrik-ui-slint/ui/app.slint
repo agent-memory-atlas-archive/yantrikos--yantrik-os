@@ -294,7 +294,7 @@ export component App inherits Window {
     // nothing underneath moves.
     // The bar's three panels are the shell's and open over any screen, so they cover it on any
     // screen; the rest are the desktop's.
-    property <bool> mind-panel-covered: root.quick-settings-open || root.power-menu-open || root.clip-panel-open
+    property <bool> mind-panel-covered: root.quick-settings-open || root.power-menu-open || root.clip-panel-open || root.battery-popover-open
         || (root.current-screen == 1
             && (root.lens-open || root.app-grid-open || root.window-switcher-open || root.command-palette-open));
 
@@ -305,6 +305,25 @@ export component App inherits Window {
     in property <bool> battery-available: false;
     in property <int> battery-level: 100;
     in property <bool> battery-charging: false;
+    // What the battery is doing: charging | discharging | full | plugged-not-charging | unknown.
+    // `battery-charging` is true only for "charging", so a battery held at a charge limit is not
+    // reported as charging anywhere.
+    in property <string> battery-state: "unknown";
+    // The state and the time in words, composed in Rust where they are tested; "" when unknown.
+    in property <string> battery-status-text: "";
+    in property <string> battery-time-text: "";
+    // The estimates themselves, in minutes, for the control surface; -1 when nobody measured one.
+    in property <int> battery-time-to-empty-mins: -1;
+    in property <int> battery-time-to-full-mins: -1;
+    // power-profiles-daemon: the profile in effect, or "" when there is no daemon (the choice is
+    // then not drawn). Performance is offered only on hardware that has it.
+    in property <string> power-profile: "";
+    in property <bool> power-performance-offered: false;
+    callback set-power-profile(string);
+    // The battery popover under the bar. `battery-anchor-x` is where the indicator was when it
+    // was pressed.
+    in-out property <bool> battery-popover-open: false;
+    in-out property <length> battery-anchor-x: 0;
     /// Wireless specifically — the Quick Settings tile, which is a radio.
     /// It is false on a wired machine, which is why nothing that means "am I
     /// online" may be drawn from it. See the four below.
@@ -385,6 +404,9 @@ export component App inherits Window {
     callback shell-overlay-opened(string);
     changed quick-settings-open => {
         if (self.quick-settings-open) { self.shell-overlay-opened("quick-settings"); }
+    }
+    changed battery-popover-open => {
+        if (self.battery-popover-open) { self.shell-overlay-opened("battery"); }
     }
     changed power-menu-open => {
         if (self.power-menu-open) { self.shell-overlay-opened("power-menu"); }
@@ -2663,6 +2685,13 @@ export component App inherits Window {
             battery-available: root.battery-available;
             battery-level: root.battery-level;
             battery-charging: root.battery-charging;
+            battery-popover-open <=> root.battery-popover-open;
+            battery-anchor-x: root.battery-anchor-x;
+            battery-status-text: root.battery-status-text;
+            battery-time-text: root.battery-time-text;
+            power-profile: root.power-profile;
+            power-performance-offered: root.power-performance-offered;
+            set-power-profile(p) => { root.set-power-profile(p); }
             wifi-connected: root.wifi-connected;
             wifi-ssid: root.sys-wifi-ssid;
             brightness-available: root.brightness-available;
@@ -2696,7 +2725,17 @@ export component App inherits Window {
             minds-notice: root.minds-notice;
             battery-available: root.battery-available;
             battery-level: root.battery-level;
-            battery-charging: root.battery-charging;
+            battery-state: root.battery-state;
+            battery-status-text: root.battery-status-text;
+            battery-time-text: root.battery-time-text;
+            battery-popover-open: root.battery-popover-open;
+            battery-clicked(x) => {
+                root.battery-anchor-x = x;
+                // One panel at a time: the others hang from the same bar.
+                root.quick-settings-open = false;
+                root.power-menu-open = false;
+                root.battery-popover-open = !root.battery-popover-open;
+            }
             network-online: root.network-online;
             network-medium: root.network-medium;
             pending-count: root.pending-count;
@@ -2727,8 +2766,8 @@ export component App inherits Window {
             anchor-clicked => { root.lens-open = !root.lens-open; root.open-lens(); }
             queue-clicked => { root.lens-open = true; root.open-lens(); }
             whisper-hint-clicked => { root.whisper-hint-clicked(); }
-            settings-tapped => { root.quick-settings-open = !root.quick-settings-open; }
-            power-pressed => { root.power-menu-open = !root.power-menu-open; }
+            settings-tapped => { root.battery-popover-open = false; root.quick-settings-open = !root.quick-settings-open; }
+            power-pressed => { root.battery-popover-open = false; root.power-menu-open = !root.power-menu-open; }
             // Handled here, the same way the desktop's own instance handles them. They are not
             // callbacks on this component -- `ai-privacy-clicked` and `active-mind-clicked` are
             // declared on DesktopScreen, and forwarding to a root callback of the same name was

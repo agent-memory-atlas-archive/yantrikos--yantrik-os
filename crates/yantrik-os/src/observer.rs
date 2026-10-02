@@ -114,6 +114,16 @@ impl SystemObserver {
                 .expect("failed to spawn battery monitor");
             handles.push(h);
 
+            // Power profiles (D-Bus power-profiles-daemon). Ends at once without the daemon.
+            let tx = event_tx.clone();
+            let h = std::thread::Builder::new()
+                .name("yos-power-profile".into())
+                .spawn(move || {
+                    crate::power_profile::run_power_profile_monitor(tx);
+                })
+                .expect("failed to spawn power profile monitor");
+            handles.push(h);
+
             // Network monitor (D-Bus NetworkManager)
             let tx = event_tx.clone();
             let h = std::thread::Builder::new()
