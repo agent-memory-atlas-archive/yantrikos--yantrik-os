@@ -47,6 +47,7 @@ mod caller_identity;
 mod companion_rpc;
 mod control;
 mod control_approvals;
+mod control_overlays;
 mod control_installer;
 mod installer_rules;
 mod control_update;
