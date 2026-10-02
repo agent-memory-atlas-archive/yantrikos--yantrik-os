@@ -1,10 +1,6 @@
 //! Screenshot wire module — captures screen via grim/slurp and shows a notification.
 //!
-//! Called from the keybind handler in `system_poll.rs`:
-//! - Print         -> `take_screenshot(FullScreen)`       (save to file)
-//! - Shift+Print   -> `take_screenshot(Region)`           (save to file)
-//! - Ctrl+Print    -> `take_screenshot(ClipboardFull)`    (copy to clipboard)
-//! - Ctrl+S+Print  -> `take_screenshot(ClipboardRegion)`  (copy to clipboard)
+//! Called from the command palette. The Print keys are bound in `config/labwc/rc.xml`.
 
 use crate::app_context::AppContext;
 use crate::App;
@@ -13,15 +9,14 @@ use crate::App;
 /// but follows the wire module pattern for future UI integration
 /// (e.g. a screenshot button in quick settings).
 pub fn wire(_ui: &App, _ctx: &AppContext) {
-    // Keybind-driven — capture is triggered from handle_keybind() in system_poll.rs
-    // via the public `take_screenshot()` function below.
+    // Palette-driven — capture is triggered through the public `take_screenshot()` below.
     //
     // If a Slint callback is added later (e.g. `on_take_screenshot`), wire it here.
 }
 
 /// Take a screenshot and show a toast notification in the UI.
 ///
-/// This is called from the keybind handler (`system_poll::handle_keybind`).
+/// This is called from the command palette.
 /// Runs grim/slurp on a background thread to avoid blocking the UI event loop.
 ///
 /// For file modes, the toast shows the saved filename.

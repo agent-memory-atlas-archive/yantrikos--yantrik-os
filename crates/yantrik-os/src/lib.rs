@@ -20,7 +20,6 @@ mod battery;
 mod files;
 #[cfg(target_os = "linux")]
 mod idle;
-pub mod keybinds;
 mod mock;
 mod network;
 mod processes;

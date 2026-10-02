@@ -243,7 +243,7 @@ fn shell_screen_answer(
 /// reach this process and the desktop (#203). Locked is therefore a STATE of the shell, read
 /// off the screen it is showing — nothing persists it, so a restart during the login screen
 /// comes back locked — and every door has to hold to it: the socket's dispatch (the state rule
-/// `publish` installs), the keybinds any process can trigger over D-Bus, the toasts that draw
+/// `publish` installs), the toasts that draw
 /// over every screen, the command palette and the morning brief's boot timer.
 pub(crate) fn locked_screen(screen: i32) -> bool {
     screen == 3 || screen == 32
@@ -2934,7 +2934,7 @@ mod open_app_answer_tests {
 }
 
 #[cfg(test)]
-mod locked_state_tests {
+pub(crate) mod locked_state_tests {
     //! The installed machine autologins on tty1, so the login screen is the only thing between
     //! anybody who can reach this process and the desktop — and `yos act shell open_lens` walked
     //! straight past it: `accepted: True, settled: True`, Lens open, conversation on screen (#203).
@@ -2961,7 +2961,7 @@ mod locked_state_tests {
     /// Every action name the shell's control modules publish, read off their declarations
     /// rather than a list kept beside them — the scan `control_approvals` uses, minus its test
     /// halves so a test's own quoting of `Action::new` cannot feed it.
-    fn published_actions() -> Vec<String> {
+    pub(crate) fn published_actions() -> Vec<String> {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut files: Vec<_> = std::fs::read_dir(&dir)
             .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()))
@@ -3163,8 +3163,7 @@ mod locked_state_tests {
         );
     }
 
-    /// The socket's dispatch is the main door, but not the only one: keybinds any process can
-    /// trigger over D-Bus, toasts that draw over every screen, the palette, the morning brief's
+    /// The socket's dispatch is the main door, but not the only one: toasts that draw over every screen, the palette, the morning brief's
     /// boot timer and Ctrl+K in the markup all move the shell on their own, and #203 names
     /// them. Each holds to the state through the same pure predicate; these handlers need a
     /// live window to run, so the placement is pinned against the source.
@@ -3179,7 +3178,6 @@ mod locked_state_tests {
         // (file, how many of its own doors the predicate must hold) — notifications has two:
         // the toast body and a toast button's action, which reaches an app's own surface.
         for (file, doors) in [
-            ("src/wire/system_poll.rs", 1),
             ("src/wire/command_palette.rs", 1),
             ("src/wire/notifications.rs", 2),
             ("src/wire/morning_brief.rs", 1),

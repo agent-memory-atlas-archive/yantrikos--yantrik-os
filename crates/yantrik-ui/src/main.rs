@@ -109,6 +109,9 @@ mod open_url;
 mod session_lock;
 // The snap layouts: rc.xml's regions and keys, and the window menu, kept in step (tests only).
 mod snap_layouts;
+// Every key the screens advertise is bound in rc.xml, and every binding names a real action (tests only).
+#[cfg(test)]
+mod rc_keys;
 mod notifications;
 mod onboarding;
 mod perception;

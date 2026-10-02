@@ -94,13 +94,6 @@ pub enum SystemEvent {
         idle_seconds: u64,
     },
     UserResumed,
-
-    // ── Keybind ──
-    /// A global keybind was triggered via D-Bus (from labwc).
-    KeybindTriggered {
-        /// Action identifier, e.g. "open-lens", "lock-screen", "open-terminal".
-        action: String,
-    },
 }
 
 /// What kind of file system change occurred.

@@ -321,6 +321,54 @@
         <command>/opt/yantrik/bin/yos act shell show_screen screen=launchpad</command>
       </action>
     </keybind>
+
+    <!--
+      ── The shell's panels and Mind View, from anywhere ──────────────────────────────────
+      This file is the ONE source of the desktop's keys. A second generator used to live in
+      yantrik-os (keybinds.rs) and write its own list into ~/.config/labwc/rc.xml, but only
+      when that file did not exist, and the session copies THIS file over it at every login, so
+      Super+V, Super+A and the rest were declared and never bound. It is gone. A key that a
+      screen advertises must be bound here: the `rc_keys` tests in yantrik-ui fail if one is
+      not, and fail if a binding names a `yos` action the shell does not publish.
+
+        Super+V          clipboard history   (open_clipboard)
+        Super+A          Quick Settings      (open_quick_settings)
+        Super+Escape     power menu          (open_power_menu); it only shows it, choosing is the
+                                              person's
+        Super+Shift+V    Mind View forward   (focus_window)
+
+      Mind View's window carries the title its nested compositor gives itself, "wlroots - WL-1"
+      or "labwc - WL-1" depending on the version, never the words "Mind View", so the title is
+      matched on the "WL-1" both share.
+
+      Super+D stays "show desktop" above, the convention on GNOME and Windows. Do Not Disturb
+      has no key: it is in Quick Settings and the Today popover.
+
+      RESERVED, not bound yet, because nothing exists for them to open:
+        Super+N   Today        (UI/UX overhaul story 3.1)
+        Super+/   key cheat sheet (story 4.2)
+      Leave both free for those stories.
+    -->
+    <keybind key="W-v">
+      <action name="Execute">
+        <command>/opt/yantrik/bin/yos act shell open_clipboard</command>
+      </action>
+    </keybind>
+    <keybind key="W-a">
+      <action name="Execute">
+        <command>/opt/yantrik/bin/yos act shell open_quick_settings</command>
+      </action>
+    </keybind>
+    <keybind key="W-Escape">
+      <action name="Execute">
+        <command>/opt/yantrik/bin/yos act shell open_power_menu</command>
+      </action>
+    </keybind>
+    <keybind key="W-S-v">
+      <action name="Execute">
+        <command>/opt/yantrik/bin/yos act shell focus_window title=WL-1</command>
+      </action>
+    </keybind>
   </keyboard>
 
   <!--

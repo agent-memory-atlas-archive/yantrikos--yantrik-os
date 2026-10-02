@@ -158,16 +158,6 @@ impl SystemObserver {
                     .expect("failed to spawn idle monitor");
                 handles.push(h);
             }
-
-            // Keybind daemon (session D-Bus — org.yantrik.Keybinds)
-            let tx = event_tx.clone();
-            let h = std::thread::Builder::new()
-                .name("yos-keybinds".into())
-                .spawn(move || {
-                    crate::keybinds::run_keybind_daemon(tx);
-                })
-                .expect("failed to spawn keybind daemon");
-            handles.push(h);
         }
 
         Self {
