@@ -31,6 +31,7 @@ run target/ui-validation/providers-in-use.png 1280 2400 verify-providers-in-use
 run target/ui-validation/unused.png 1280 800 verify-screen-controls
 run target/ui-validation/apps-button.png 1280 800 verify-apps-button
 run target/ui-validation/taskbar-menu.png 1280 800 verify-taskbar-menu
+run target/ui-validation/kit-controls.png 880 460 verify-kit-controls
 run target/ui-validation/lens-answers.png 640 800 verify-lens-answers
 run target/ui-validation/approval-card.png 1280 800 verify-approval-card
 run target/ui-validation/agents-route.png 1280 800 verify-agents-route
