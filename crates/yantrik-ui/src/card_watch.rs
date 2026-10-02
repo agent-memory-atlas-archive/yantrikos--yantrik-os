@@ -13,11 +13,15 @@
 //! here polls. What two security reviews asked for shapes it:
 //!
 //! - **A mind cannot move windows while a card waits.** `focus_window`, `show_app`, `open_app`,
-//!   `minimise_window` and `maximise_window` are refused on the control surface until the card is
-//!   answered ([`hold_windows`]); bringing the shell itself forward is still allowed. Without
+//!   `minimise_window`, `maximise_window`, `files_open`, `configure_harness`, the second press
+//!   of `show_desktop` and `show_mind_audit` are refused on the control surface until the card
+//!   is answered ([`hold_windows`]); bringing the shell itself forward is still allowed. Without
 //!   that, a mind could spend the raises below by focusing an ordinary window six times, and the
 //!   card would stay behind the sixth (second review, 2 Oct 2026). Any focus change still left is
-//!   the person's own, or Mind View's, which the rules below answer.
+//!   the person's own, or Mind View's, which the rules below answer. A call carrying a person's
+//!   Allow is never held: that card has just been answered for exactly this act (final review).
+//!   The surface cannot tell the person's own keybindings from a mind, so Ctrl+Alt+T and the
+//!   second Super+D, which go through `yos`, wait for the card too.
 //! - **It cannot be beaten by timing.** A window that takes focus back inside [`MIN_GAP`] is not
 //!   ignored: a single recheck runs when the gap ends and raises if something other than the
 //!   shell is still in front.
@@ -28,8 +32,9 @@
 //! - **A raise cannot answer the card.** When the shell comes forward, the keyboard goes to a
 //!   neutral scope, never the Lens's text field (the rest of whatever the person was typing
 //!   would land there, and Enter would send it to the mind). For [`PRESS_GUARD`] after the shell
-//!   comes forward, by whatever path, or after a new card appears, a press on Allow is ignored:
-//!   a click meant for the window that was just covered can land on it.
+//!   comes forward, by whatever path, or after a different card is drawn where the person is
+//!   looking ([`card_on_screen`]), a press on Allow is ignored: a click meant for the window that
+//!   was just covered, or for the card that was just answered, can land on it.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -61,6 +66,8 @@ static LAST: Mutex<Option<Instant>> = Mutex::new(None);
 static RAISED_AT: Mutex<Option<Instant>> = Mutex::new(None);
 /// The ids of the cards waiting now: a new id is a new card, whose count and guard start again.
 static WAITING_IDS: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+/// Which card is drawn where a person would press, and for which pane: see [`card_on_screen`].
+static ON_SCREEN: Mutex<Option<Drawn>> = Mutex::new(None);
 static SHELL_UI: OnceLock<slint::Weak<App>> = OnceLock::new();
 
 /// Give this module the shell's window, so a raise can put the keyboard somewhere neutral.
@@ -93,17 +100,68 @@ pub fn set_waiting<'a>(ids: impl IntoIterator<Item = &'a str>) {
 }
 
 /// Refuse an action that would move a window over the shell while a card waits. The shell's
-/// handlers for those actions call this before anything else.
+/// handlers for those actions call this before they move anything.
+///
+/// Except a call that carries a person's Allow. The runtime spends the grant before the handler
+/// runs, so with a second card waiting, refusing here used up the Allow on an act that then never
+/// ran, and the person had said yes for nothing (final review of the card fix). They have just
+/// answered a card for exactly this act: it runs, and if its window covers the card still
+/// waiting, the raise below brings the shell back over it.
 pub fn hold_windows(action: &str) -> Result<(), String> {
-    if !WAITING.load(Ordering::Relaxed) {
+    held(WAITING.load(Ordering::Relaxed), yantrik_app_runtime::control::call_was_granted(), action)
+}
+
+/// Pure, for the tests. The refusal is read by a mind and, when a keybinding of the person's
+/// went through `yos`, by nobody at all unless it says plainly what happened and what to do:
+/// the surface cannot tell those two callers apart (final review).
+fn held(waiting: bool, granted: bool, action: &str) -> Result<(), String> {
+    if !waiting || granted {
         return Ok(());
     }
     Err(format!(
-        "a card is waiting for the person at this machine, so `{action}` was not run: windows \
-         stay where they are until it is answered, because a card behind a window is a decision \
-         nobody can make. Read `pending_approvals` in `describe shell`, and ask again once it is \
-         answered."
+        "`{action}` was not run: an approval card is waiting for the person at this machine, and \
+         no window is opened, moved or brought forward until it is answered, because a card \
+         behind a window is a decision nobody can make. The card is on the desktop, and the \
+         taskbar's Chat button counts it; answer it with Allow or Deny and `{action}` works \
+         again. A mind reads it under `pending_approvals` in `describe shell` and asks again once \
+         it is answered."
     ))
+}
+
+/// What a person pressing Allow would be pressing: the card drawn in front, the one drawn in the
+/// agent pane on screen, and which pane that is.
+#[derive(Debug, Clone, PartialEq)]
+struct Drawn {
+    front: Option<String>,
+    in_pane: Option<String>,
+    pane: String,
+}
+
+/// The approvals store's word on which card is drawn where, every time it repaints. Another card
+/// in the same place starts the press guard, as a card coming up does.
+///
+/// [`set_waiting`] starts it only for an id never seen before. When the front card is answered or
+/// withdrawn, the next one, already waiting, is drawn in the same corner under the same pointer,
+/// and a double click meant for the first card's Allow allowed the second, unread (final review
+/// of the card fix). The same when the pane on screen changes and another card takes its place.
+pub fn card_on_screen(front: Option<&str>, in_pane: Option<&str>, pane: &str) {
+    let now = (front.is_some() || in_pane.is_some()).then(|| Drawn {
+        front: front.map(str::to_string),
+        in_pane: in_pane.map(str::to_string),
+        pane: pane.to_string(),
+    });
+    let changed = match ON_SCREEN.lock() {
+        Ok(mut shown) => {
+            let changed = *shown != now;
+            *shown = now.clone();
+            changed
+        }
+        Err(_) => false,
+    };
+    // Nothing drawn is nothing to press by mistake.
+    if changed && now.is_some() {
+        start_press_guard();
+    }
 }
 
 /// The shell has just come forward, by any path: card_watch's own raise, a card going up, the
@@ -111,13 +169,17 @@ pub fn hold_windows(action: &str) -> Result<(), String> {
 /// front can land on Allow, so each starts the press guard (second review: only card_watch's own
 /// raises did, and a mind could choose the moment with any of the others).
 pub fn shell_came_forward() {
+    start_press_guard();
+}
+
+fn start_press_guard() {
     if let Ok(mut at) = RAISED_AT.lock() {
         *at = Some(Instant::now());
     }
 }
 
-/// Whether the shell came forward, or a new card appeared, less than [`PRESS_GUARD`] ago, so
-/// that a press on Allow now may be a click that was aimed somewhere else.
+/// Whether the shell came forward, or another card was drawn where a person presses, less than
+/// [`PRESS_GUARD`] ago, so that a press on Allow now may be a click that was aimed somewhere else.
 pub fn just_raised() -> bool {
     RAISED_AT
         .lock()
@@ -306,6 +368,65 @@ mod tests {
         *RAISED_AT.lock().unwrap() = None;
     }
 
+    /// Final review: with two cards waiting, the act a person allowed on one was refused for the
+    /// other, after the runtime had spent the Allow. A call that carries a grant is never held.
+    #[test]
+    fn an_act_the_person_allowed_is_not_held_for_another_card() {
+        let _turn = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        set_waiting(["the-other-card"]);
+        assert!(hold_windows("open_app").is_err(), "unallowed, it waits for the card");
+        {
+            let _allowed = yantrik_app_runtime::control::GrantedScope::enter(true);
+            assert!(hold_windows("open_app").is_ok(), "the Allow was spent for this act, so it runs");
+        }
+        assert!(hold_windows("open_app").is_err(), "and the next call, unallowed, waits again");
+        set_waiting([]);
+        *RAISED_AT.lock().unwrap() = None;
+    }
+
+    /// Final review: Ctrl+Alt+T goes through `yos open_app` and is held like a mind's call. The
+    /// refusal is the only thing anyone is told, so it has to say what to do, to a person too.
+    #[test]
+    fn a_held_window_says_where_the_card_is_and_how_to_go_on() {
+        let why = held(true, false, "open_app").unwrap_err();
+        for words in ["`open_app` was not run", "approval card is waiting", "Chat button", "Allow or Deny"] {
+            assert!(why.contains(words), "missing {words:?}: {why}");
+        }
+        assert!(held(false, false, "open_app").is_ok());
+        assert!(held(true, true, "open_app").is_ok());
+    }
+
+    /// Final review: answering the card in front drew the next one in the same corner, under the
+    /// same pointer, with no guard, so a double click allowed a card nobody had read. Another card
+    /// where the person presses starts the guard; the same card repainted does not.
+    #[test]
+    fn the_next_card_drawn_in_the_same_place_is_not_answered_by_the_last_click() {
+        let _turn = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        card_on_screen(None, None, "");
+        *RAISED_AT.lock().unwrap() = None;
+
+        card_on_screen(Some("first"), None, "");
+        assert!(just_raised(), "a card drawn is not answered by a press already on its way");
+        *RAISED_AT.lock().unwrap() = None;
+        card_on_screen(Some("first"), None, "");
+        assert!(!just_raised(), "the same card repainted is not another card");
+
+        card_on_screen(Some("second"), None, "");
+        assert!(just_raised(), "the first answered, the second in its place");
+        *RAISED_AT.lock().unwrap() = None;
+
+        card_on_screen(Some("second"), Some("pane-card"), "agent-7");
+        assert!(just_raised(), "a card drawn in the pane on screen");
+        *RAISED_AT.lock().unwrap() = None;
+        card_on_screen(Some("second"), Some("pane-card"), "agent-8");
+        assert!(just_raised(), "another pane, another place to press");
+        *RAISED_AT.lock().unwrap() = None;
+
+        card_on_screen(None, None, "agent-8");
+        assert!(!just_raised(), "nothing drawn is nothing to press");
+        *RAISED_AT.lock().unwrap() = None;
+    }
+
     /// The fifth raise is claimed once, however many focus changes decide at the same moment.
     #[test]
     fn the_cap_is_claimed_not_counted_after() {
@@ -318,15 +439,27 @@ mod tests {
 
     /// The handlers that move windows are the ones that ask first. Read from the source, the way
     /// `published_actions_cannot_grant` reads it, so that a new window verb added without the
-    /// hold fails here rather than in front of a person.
+    /// hold fails here rather than in front of a person. The final review found four the second
+    /// one missed: a file opened into its viewer, a harness's setup terminal, Show desktop's
+    /// second press bringing every window back, and the mode menu drawn over the card.
     #[test]
     fn every_window_moving_action_asks_hold_windows_first() {
-        let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/control.rs")).unwrap();
-        for action in ["focus_window", "show_app", "open_app", "minimise_window", "maximise_window"] {
-            assert!(
-                src.contains(&format!("crate::card_watch::hold_windows(\"{action}\")")),
-                "`{action}` moves a window and does not call hold_windows; a card could be covered"
-            );
+        let held: [(&str, &[&str]); 3] = [
+            (
+                "control.rs",
+                &["focus_window", "show_app", "open_app", "minimise_window", "maximise_window", "configure_harness", "show_desktop"],
+            ),
+            ("control_files.rs", &["files_open"]),
+            ("control_approvals.rs", &["show_mind_audit"]),
+        ];
+        for (file, actions) in held {
+            let src = std::fs::read_to_string(format!("{}/src/{file}", env!("CARGO_MANIFEST_DIR"))).unwrap();
+            for action in actions {
+                assert!(
+                    src.contains(&format!("crate::card_watch::hold_windows(\"{action}\")")),
+                    "`{action}` in {file} moves a window and does not call hold_windows; a card could be covered"
+                );
+            }
         }
     }
 

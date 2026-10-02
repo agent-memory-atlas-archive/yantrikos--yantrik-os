@@ -1535,6 +1535,9 @@ pub fn publish(
                 if id.is_empty() {
                     return Err("`id` is empty".into());
                 }
+                // The terminal comes up over a waiting card (card_watch). The person's own button
+                // on the Harnesses page calls `configure` directly and is not held.
+                crate::card_watch::hold_windows("configure_harness")?;
                 let command = crate::wire::harness::configure(&id)?;
                 Ok(serde_json::json!({
                     "opened": id,
@@ -1582,7 +1585,11 @@ pub fn publish(
             .risk("safe"),
             move |_args| {
                 let ui = desk_ui()?;
-                Ok(crate::wire::show_desktop::press(&ui))
+                // Putting everything away uncovers a card, so it is never held. The second press
+                // brings every window back over the shell, and with it over a waiting card
+                // (final review of the card fix), so that press waits for the card. Super+D
+                // comes through here too, by `yos`, and waits with it.
+                crate::wire::show_desktop::press(&ui, || crate::card_watch::hold_windows("show_desktop"))
             },
         )
         .action(
