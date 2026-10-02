@@ -72,6 +72,22 @@ pub fn start() {
     });
 }
 
+/// How many toplevels carry the shell's title. More than one means a window is wearing it, and a
+/// title alone can no longer say the shell is in front (card_watch).
+static SHELL_TITLED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+pub fn shell_titled_count() -> usize {
+    SHELL_TITLED.load(Ordering::Relaxed)
+}
+
+/// The title of the window in front now, or `None` when the stream is not being followed.
+pub fn front_title() -> Option<String> {
+    if !LIVE.load(Ordering::Relaxed) {
+        return None;
+    }
+    LOG.lock().ok().and_then(|log| log.current.as_ref().map(|(_, t)| t.clone()))
+}
+
 /// Whether the window called `title` was the one in front when the person pressed its taskbar
 /// entry. `false` whenever that is not known, because the cost of a wrong `true` is a window put
 /// away that the person asked to see.
@@ -258,6 +274,10 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for Watch {
                 if let Some(activated) = w.pending_activated.take() {
                     w.activated = activated;
                 }
+                SHELL_TITLED.store(
+                    watch.windows.iter().filter(|(_, w)| w.title == SHELL_WINDOW_TITLE).count(),
+                    Ordering::Relaxed,
+                );
                 let front = watch.front();
                 let title = front.as_ref().map(|(_, t)| t.clone());
                 let moved = LOG.lock().is_ok_and(|mut log| log.observe(front, Instant::now()));
