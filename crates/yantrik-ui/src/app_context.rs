@@ -255,9 +255,6 @@ impl AppContext {
             }
         }
 
-        // Generate labwc keybind config
-        yantrik_os::keybinds::ensure_labwc_config();
-
         // Scan installed apps
         let installed_apps = crate::apps::Catalogue::shared();
 

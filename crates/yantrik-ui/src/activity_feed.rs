@@ -234,7 +234,7 @@ impl ActivityAccumulator {
                 }
             }
             // The volume is not something the person did or the machine suffered.
-            SystemEvent::KeybindTriggered { .. } | SystemEvent::AudioChanged { .. } => {}
+            SystemEvent::AudioChanged { .. } => {}
         }
     }
 

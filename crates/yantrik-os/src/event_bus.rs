@@ -912,7 +912,6 @@ fn system_event_tag(event: &SystemEvent) -> &'static str {
         SystemEvent::DiskPressure { .. } => "disk",
         SystemEvent::UserIdle { .. } => "idle",
         SystemEvent::UserResumed => "resumed",
-        SystemEvent::KeybindTriggered { .. } => "keybind",
     }
 }
 

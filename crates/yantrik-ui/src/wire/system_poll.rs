@@ -1,5 +1,5 @@
 //! System poll wiring — 3-second timer that drains system events,
-//! runs proactive features, handles keybinds, updates status bar,
+//! runs proactive features, updates status bar,
 //! and injects system context into the LLM prompt.
 
 use std::cell::RefCell;
@@ -140,16 +140,7 @@ pub fn wire(ui: &App, ctx: &AppContext) {
             event_bus.emit_system_event(event.clone());
         }
 
-        // 1b. Handle keybind events (UI actions, not features)
-        for event in &events {
-            if let yantrik_os::SystemEvent::KeybindTriggered { action } = event {
-                if let Some(ui) = ui_weak.upgrade() {
-                    handle_keybind(&ui, action);
-                }
-            }
-        }
-
-        // 1c. Notifications are not captured here any more.
+        // 1b. Notifications are not captured here any more.
         //
         // This block used to write every `NotificationReceived` into the shell's own private
         // store and raise its own toast — a second store and a second toast path beside the
@@ -442,114 +433,6 @@ fn wire_chart_history(ui: &App, ctx: &AppContext) {
     std::mem::forget(chart_timer);
 }
 
-/// Handle a keybind action.
-fn handle_keybind(ui: &App, action: &str) {
-    // A keybind is not a keystroke: it arrives over the session D-Bus, which any process
-    // running as this user can send to, so this is a door onto the desktop like the socket and
-    // is held to the same rule (#203). While the login or lock screen is up, nothing here
-    // launches, navigates, screenshots or toggles — the arms below that check `screen == 1`
-    // only ever guarded the lens and the overlays, and the rest ran on the lock screen.
-    // Unlocking goes through the lock screen's own callbacks, never through a keybind.
-    if crate::control::locked_screen(ui.get_current_screen()) {
-        tracing::debug!(action, "Keybind dropped — the desktop is waiting for the person to sign in");
-        return;
-    }
-    match action {
-        "open-lens" => {
-            if ui.get_current_screen() == 1 {
-                ui.set_lens_open(true);
-            }
-        }
-        "lock-screen" => {
-            // The one lock path: the shell's screen and the compositor's session lock (#313).
-            ui.invoke_lock_screen();
-            tracing::info!("Screen locked via hotkey");
-        }
-        "open-terminal" => {
-            let _ = std::process::Command::new("foot").spawn();
-        }
-        "open-files" => {
-            ui.set_current_screen(8);
-            ui.invoke_navigate(8);
-        }
-        "open-settings" => {
-            ui.set_current_screen(7);
-            ui.invoke_navigate(7);
-        }
-        "screenshot" => {
-            super::screenshot::take_screenshot(
-                ui.as_weak(),
-                yantrik_os::screenshot::CaptureMode::FullScreen,
-            );
-        }
-        "screenshot-region" => {
-            super::screenshot::take_screenshot(
-                ui.as_weak(),
-                yantrik_os::screenshot::CaptureMode::Region,
-            );
-        }
-        "screenshot-clipboard" => {
-            super::screenshot::take_screenshot(
-                ui.as_weak(),
-                yantrik_os::screenshot::CaptureMode::ClipboardFull,
-            );
-        }
-        "screenshot-clipboard-region" => {
-            super::screenshot::take_screenshot(
-                ui.as_weak(),
-                yantrik_os::screenshot::CaptureMode::ClipboardRegion,
-            );
-        }
-        // The clipboard and the power menu are the shell's panels (`ShellOverlays`), drawn over
-        // every screen the bar is on, so these two no longer wait for the desktop. They still
-        // stand down on boot and onboarding, where the bar is not drawn: a flag set there would
-        // show the panel the moment onboarding ended. Opening raises the shell by the
-        // `shell-overlay-opened` hook, so a keybind pressed inside an app shows it.
-        "clipboard-history" => {
-            if crate::control_overlays::bar_is_drawn(ui.get_current_screen()) {
-                ui.set_clip_panel_open(!ui.get_clip_panel_open());
-            }
-        }
-        "toggle-dnd" => {
-            let will_enable = !ui.get_dnd_mode();
-            // Invoke the callback so settings persistence fires too
-            ui.invoke_toggle_dnd_mode();
-            let msg = if will_enable { "Do Not Disturb: ON" } else { "Do Not Disturb: OFF" };
-            // The one toast that is deliberately not stored: it acknowledges a key the person
-            // just pressed, and it has to appear while notifications are being silenced. See
-            // `toast::local`.
-            super::toast::local(&ui.as_weak(), "System", msg, "", 0);
-            tracing::info!(dnd = will_enable, "Do Not Disturb toggled via hotkey");
-        }
-        "power-menu" => {
-            if crate::control_overlays::bar_is_drawn(ui.get_current_screen()) {
-                ui.set_power_menu_open(!ui.get_power_menu_open());
-            }
-        }
-        // The guards on the next three stay: the launcher, the window switcher and the lens are
-        // drawn by DesktopScreen, so on another screen the flag would draw nothing and would
-        // be found open on return.
-        "app-grid" => {
-            if ui.get_current_screen() == 1 {
-                ui.set_app_grid_open(!ui.get_app_grid_open());
-            }
-        }
-        "window-switcher" => {
-            if ui.get_current_screen() == 1 {
-                // Refresh window list immediately before showing
-                let wins = windows::list_windows();
-                let items = window_items(ui.get_current_screen(), &wins, windows::shell_in_front());
-                ui.set_window_list(ModelRc::new(VecModel::from(items)));
-                ui.set_window_switcher_open(!ui.get_window_switcher_open());
-            }
-        }
-        other => {
-            tracing::debug!(action = other, "Unknown keybind action");
-        }
-    }
-}
-
-/// Format a byte count as a human-readable string (KB / MB / GB).
 /// The taskbar's entries: the screen the shell is on, when it is one a person reads as a window
 /// (`control::screen_entry` — Files, Settings, Agents …), among every window.
 ///
