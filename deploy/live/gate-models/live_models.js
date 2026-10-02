@@ -8,7 +8,9 @@
 // provider also has a daily count of requests.
 
 const RULES = {
-    'ollama-cloud': { models: ['deepseek-v4.1-flash'], daily: 1500 },
+    // kimi-k3 leads on the live machine: deepseek-v4.1-flash lost its way on a long build there
+    // (2 Oct 2026). Flash stays allowed as the chain's fallback on the same provider.
+    'ollama-cloud': { models: ['kimi-k3', 'deepseek-v4.1-flash'], daily: 1500 },
     // The subscription Pranab's own Mind calls first: the instance's fallback, and kept small.
     'nanogpt': { models: ['deepseek/deepseek-v4-pro-cheaper'], daily: 100 },
 };
