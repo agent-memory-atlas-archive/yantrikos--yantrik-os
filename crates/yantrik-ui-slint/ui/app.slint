@@ -157,6 +157,9 @@ export component App inherits Window {
     /// time because Slint has no way to skip a row inside a `for`, and a stack of zero-height
     /// rows would leave the card floating below a gap the size of the session's history.
     in property <[ApprovalRequest]> pending-approvals: [];
+    // How many cards wait in all, the Agents pane's included (pending-approvals holds only the one
+    // on screen). The taskbar's Chat button says it (card_watch.rs).
+    in property <int> cards-pending: 0;
     /// Questions the Lens's mind is waiting on (#25): `wire::agents` fills it every tick.
     in property <[QuestionRequest]> lens-questions: [];
     /// How many further requests are queued behind it. See `approvals-waiting` in intent_lens.
@@ -2818,6 +2821,7 @@ export component App inherits Window {
                 // desktop first, as Apps does (#219, #241). The shell's handler for the Lens
                 // opening brings the window forward over whatever app is in front.
                 chat-with: root.active-harness-name;
+                cards-waiting: root.cards-pending;
                 open-companion => {
                     if (!root.lens-open) {
                         if (root.current-screen != 1) {

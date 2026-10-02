@@ -317,6 +317,50 @@ pub fn agent_is_calling() -> bool {
     agent_token().is_some() || caller().is_some_and(|c| yantrik_ipc_transport::mind_door::is_mind(c.uid))
 }
 
+// ── Whether a person allowed this call ──────────────────────────────
+//
+// A grant is spent on the RPC thread before the handler runs (`ControlRpc::dispatch`), so a
+// handler that refuses afterwards for a reason of its own uses up a person's Allow on an act that
+// never runs. The shell has one such reason: while one card waits, a mind may not move windows
+// over it (`card_watch::hold_windows`). With a second card waiting, the act the person had just
+// allowed on the first was refused by it, and the Allow was gone for nothing (final review of
+// the card fix, 2 Oct 2026). The handler has to be able to see that this call is the one the
+// person said yes to.
+//
+// Carried as the caller and the token are: installed on the UI thread for exactly the one
+// dispatch. Not moved into `check_call` instead: the hold depends on which window an action
+// would move (focusing the shell is free, the second Show desktop press is not), which only the
+// handler knows, and a refusal before the spend would still leave the approved act unrun.
+
+thread_local! {
+    /// Whether the `app.act` being dispatched on THIS thread spent a grant.
+    static GRANTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether the call being handled on this thread carries a person's Allow, already spent for
+/// exactly this action and these arguments. `false` outside a dispatch, and for every call that
+/// carried no grant: it is a fact the dispatch establishes, never one a caller can claim.
+pub fn call_was_granted() -> bool {
+    GRANTED.with(|g| g.get())
+}
+
+/// Installs [`call_was_granted`] for one dispatch and puts back what was there, panic or not.
+/// The dispatch enters it; so do tests, which have no socket to spend a grant through.
+#[must_use = "the grant is forgotten when this guard is dropped"]
+pub struct GrantedScope(bool);
+
+impl GrantedScope {
+    pub fn enter(granted: bool) -> GrantedScope {
+        GrantedScope(GRANTED.with(|g| g.replace(granted)))
+    }
+}
+
+impl Drop for GrantedScope {
+    fn drop(&mut self) {
+        GRANTED.with(|g| g.set(self.0));
+    }
+}
+
 /// The grade THIS app publishes for one of its own actions.
 ///
 /// Reads the registry installed by [`App::serve`], so it answers only on the thread that owns
@@ -591,6 +635,9 @@ impl ControlRpc {
                 let ActCall { action, args, agent_token, expect_revision, .. } = call;
                 on_ui_thread(who, move |reg| {
                     let _agent = AgentTokenScope::enter(agent_token);
+                    // So a handler can tell the act a person just allowed from any other: see
+                    // `call_was_granted`.
+                    let _granted = GrantedScope::enter(authority.granted);
                     // The reach, on the grade this surface publishes now — the one `act` decides on.
                     reg.within_reach(reach.as_ref(), &action, &args).and_then(|()| {
                         reg.act(&action, &args, expect_revision.as_deref(), &action_id, &authority)
@@ -1508,7 +1555,11 @@ mod tests {
                                 .arg(Param::text("command").optional())
                                 .explain(|args| format!("this call echoes {args}")),
                             Box::new(|args| {
-                                Ok(serde_json::json!({ "args": args, "agent_token": agent_token() }))
+                                Ok(serde_json::json!({
+                                    "args": args,
+                                    "agent_token": agent_token(),
+                                    "granted": call_was_granted(),
+                                }))
                             }),
                         ),
                         (
@@ -1920,5 +1971,46 @@ mod tests {
         let reply = act("spend-182-person", None);
         assert!(reply["result"].is_object(), "the same act with no token still runs: {reply}");
         assert_eq!(spend_caller("spend-182-person"), Some(None), "no token, no agent claimed");
+    }
+
+    /// Final review of the card fix: the shell refused an act a person had just allowed, because
+    /// another card was waiting, and the Allow was spent for nothing. A handler can now see that
+    /// its call is the allowed one, over the real socket, and only that call: the next one on the
+    /// same thread, with no grant, is not.
+    #[cfg(unix)]
+    #[test]
+    fn a_handler_sees_the_call_a_person_allowed_and_no_other() {
+        spend_through_a_stand_in_shell();
+        let args = serde_json::json!({"command": "open"});
+        allow("granted-seen", "caller-test", "echo", args.clone());
+        let act = |grant: Option<&str>| {
+            let mut params = serde_json::json!({ "action": "echo", "args": args });
+            if let Some(grant) = grant {
+                params["grant"] = serde_json::json!(grant);
+            }
+            call(&serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "app.act", "params": params}).to_string())
+        };
+
+        let reply = act(Some("granted-seen"));
+        assert_eq!(reply["result"]["result"]["granted"], true, "the allowed act knows it: {reply}");
+        let reply = act(None);
+        assert_eq!(reply["result"]["result"]["granted"], false, "nothing left over for the next call: {reply}");
+    }
+
+    /// The guard puts back what was there, so a nested or panicking dispatch cannot leave the
+    /// next call on this thread reading as allowed.
+    #[test]
+    fn a_grant_is_seen_for_its_own_call_only() {
+        assert!(!call_was_granted(), "outside a dispatch nothing was allowed");
+        {
+            let _allowed = GrantedScope::enter(true);
+            assert!(call_was_granted());
+            {
+                let _inner = GrantedScope::enter(false);
+                assert!(!call_was_granted());
+            }
+            assert!(call_was_granted(), "the inner call's end restores the outer one's");
+        }
+        assert!(!call_was_granted(), "and the grant goes with its call");
     }
 }

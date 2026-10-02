@@ -45,6 +45,9 @@ export component Taskbar inherits Rectangle {
     in property <string> companion-status: "idle";
     // The mind the chat talks to, named on the Chat button: "Chat · Hermes". Empty: just "Chat".
     in property <string> chat-with: "";
+    // Cards waiting for the person. The Chat button turns amber and says how many, so a card is
+    // findable even when a window covers the panel it is drawn in (card_watch.rs).
+    in property <int> cards-waiting: 0;
 
     callback open-launcher();
     callback activate-window(string);
@@ -272,8 +275,10 @@ export component Taskbar inherits Rectangle {
                 width: 100%; height: 100%;
                 border-radius: Theme.r-sm;
                 border-width: 1px;
-                border-color: comp.has-hover ? Theme.border-strong : Theme.border-default;
-                background: comp.has-hover ? Theme.hover-fill : transparent;
+                border-color: root.cards-waiting > 0 ? Theme.amber
+                            : comp.has-hover ? Theme.border-strong : Theme.border-default;
+                background: root.cards-waiting > 0 ? Theme.amber-glow
+                          : comp.has-hover ? Theme.hover-fill : transparent;
 
                 comp-row := HorizontalLayout {
                     alignment: center;
@@ -282,7 +287,8 @@ export component Taskbar inherits Rectangle {
                         width: 6px; height: 6px;
                         y: (parent.height - 6px) / 2;
                         border-radius: 3px;
-                        background: !root.companion-online ? Theme.color-danger
+                        background: root.cards-waiting > 0 ? Theme.amber
+                                  : !root.companion-online ? Theme.color-danger
                                   : root.companion-status == "thinking" ? Theme.accent-light
                                   : Theme.accent;
                     }
@@ -294,7 +300,14 @@ export component Taskbar inherits Rectangle {
                         font-size: Theme.fs-caption;
                         vertical-alignment: center;
                     }
-                    if root.companion-count > 0 : Text {
+                    if root.cards-waiting > 0 : Text {
+                        text: root.cards-waiting == 1 ? "1 card waiting" : root.cards-waiting + " cards waiting";
+                        color: Theme.amber-light;
+                        font-size: Theme.fs-micro;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                    if root.cards-waiting == 0 && root.companion-count > 0 : Text {
                         text: root.companion-count;
                         color: Theme.accent;
                         font-size: Theme.fs-micro;

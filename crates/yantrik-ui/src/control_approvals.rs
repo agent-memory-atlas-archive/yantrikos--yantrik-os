@@ -555,6 +555,10 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                             .to_string(),
                     );
                 }
+                // The mode menu is drawn over the approval card (app.slint draws it after), so
+                // opening it while a card waits covers the decision with a list (final review of
+                // the card fix). The record is still in `describe shell`.
+                crate::card_watch::hold_windows("show_mind_audit")?;
                 ui.set_mind_menu_confirming(false);
                 ui.set_mind_menu_audit_open(true);
                 ui.set_mind_menu_open(true);
@@ -1309,9 +1313,17 @@ pub fn wire(ui: &App, bridge: std::sync::Arc<crate::bridge::CompanionBridge>) {
     // Still not a way to grant: `consume` burns what a click created and refuses everything else.
     yantrik_app_runtime::control::spend_grants_with(spend_in_process);
 
+    crate::card_watch::attach(ui.as_weak());
+
     let allow_ui = ui.as_weak();
     ui.on_approval_allow(move |id| {
         let id = id.to_string();
+        // A press this soon after the shell came forward over another window may be a click
+        // meant for that window landing on Allow (card_watch). The card stays up to be answered.
+        if crate::card_watch::just_raised() {
+            tracing::info!(request = %id, "ignored Allow pressed right after the shell came forward");
+            return;
+        }
         match approvals::grant(&id) {
             Ok(()) => tracing::info!(request = %id, "a person allowed one action, once"),
             // Not fatal and not silent: the usual cause is a double click, or a card that
@@ -1333,6 +1345,10 @@ pub fn wire(ui: &App, bridge: std::sync::Arc<crate::bridge::CompanionBridge>) {
     let session_ui = ui.as_weak();
     ui.on_approval_allow_session(move |id| {
         let id = id.to_string();
+        if crate::card_watch::just_raised() {
+            tracing::info!(request = %id, "ignored Allow for this session pressed right after the shell came forward");
+            return;
+        }
         let card = approvals::card(&id);
         // The press can only come from a card that offered the rule, but the press and the paint
         // are not the same moment. A card that offers no standing yes (an explained one, #137)
@@ -1740,6 +1756,24 @@ pub(crate) fn row_for(card: Card) -> crate::ApprovalRequest {
 
 fn publish(ui: &App, cards: Vec<Card>, pane: &str) {
     let waiting = cards.iter().filter(|c| c.status == Status::Pending).count();
+    // While anything waits, a window that takes focus over the shell is answered by bringing the
+    // shell back (card_watch): a card behind Mind View is a decision nobody can make.
+    crate::card_watch::set_waiting(
+        cards.iter().filter(|c| c.status == Status::Pending).map(|c| c.id.as_str()),
+    );
+    // And which card a press would land on: the one in front, the one the pane on screen draws,
+    // and that pane. The next card drawn where the last was answered starts the press guard
+    // again, which a new id alone missed (final review of the card fix).
+    let front = cards_for_screen(&cards, pane).into_iter().find(|c| c.status == Status::Pending);
+    let in_pane = cards.iter().find(|c| c.status == Status::Pending && in_the_pane(c, pane));
+    crate::card_watch::card_on_screen(
+        front.map(|c| c.id.as_str()),
+        in_pane.map(|c| c.id.as_str()),
+        pane,
+    );
+    // Every waiting card, wherever it is drawn: the taskbar's count. `pending_approvals` below
+    // holds only the one card on screen.
+    ui.set_cards_pending(waiting as i32);
 
     // The same answers, in the pane of the agent each request was for: one request id, so
     // answering in either place settles both, and an expiry or a withdrawal reaches the pane on

@@ -1076,6 +1076,8 @@ pub fn publish(
                     answer["launching"] = name.into();
                     return Ok(answer);
                 }
+                // An app's window would come up over a waiting card (card_watch).
+                crate::card_watch::hold_windows("open_app")?;
                 // The launcher's own path: it resolves the binary, enforces one window per app,
                 // and focuses the running one instead of starting a second.
                 ui.invoke_launch_app(name.clone().into());
@@ -1533,6 +1535,9 @@ pub fn publish(
                 if id.is_empty() {
                     return Err("`id` is empty".into());
                 }
+                // The terminal comes up over a waiting card (card_watch). The person's own button
+                // on the Harnesses page calls `configure` directly and is not held.
+                crate::card_watch::hold_windows("configure_harness")?;
                 let command = crate::wire::harness::configure(&id)?;
                 Ok(serde_json::json!({
                     "opened": id,
@@ -1580,7 +1585,11 @@ pub fn publish(
             .risk("safe"),
             move |_args| {
                 let ui = desk_ui()?;
-                Ok(crate::wire::show_desktop::press(&ui))
+                // Putting everything away uncovers a card, so it is never held. The second press
+                // brings every window back over the shell, and with it over a waiting card
+                // (final review of the card fix), so that press waits for the card. Super+D
+                // comes through here too, by `yos`, and waits with it.
+                crate::wire::show_desktop::press(&ui, || crate::card_watch::hold_windows("show_desktop"))
             },
         )
         .action(
@@ -1699,6 +1708,7 @@ pub fn publish(
                 if name.is_empty() {
                     return Err("`name` is empty".into());
                 }
+                crate::card_watch::hold_windows("show_app")?;
                 let id = crate::wire::dock::launcher_id(&name);
                 let _ = std::thread::Builder::new().name("yos-show-app".into()).spawn({
                     let id = id.clone();
@@ -1733,6 +1743,10 @@ pub fn publish(
                 // plainly running is what that cost.
                 let open = crate::windows::addressable_titles();
                 let title = crate::windows::window_named(want, &open)?;
+                // Bringing the desktop itself forward never covers a card; anything else would.
+                if title != crate::windows::SHELL_WINDOW_TITLE {
+                    crate::card_watch::hold_windows("focus_window")?;
+                }
                 ui.invoke_switch_window(title.clone().into());
                 Ok(serde_json::json!({ "focused": title }))
             },
@@ -1802,6 +1816,17 @@ pub fn publish(
                 let want = args["title"].as_str().unwrap_or_default();
                 let open = crate::windows::addressable_titles();
                 let title = crate::windows::window_named(want, &open)?;
+                // The shell minimised takes every card, the taskbar's count of them and the way
+                // back with it, and focusing it does not bring a minimised window back (second
+                // review of the card fix). The person minimises nothing of the desktop by a click
+                // either: it has no minimise button.
+                if title == crate::windows::SHELL_WINDOW_TITLE {
+                    return Err(format!(
+                        "`{title}` is the desktop itself, with the status bar, the taskbar and any \
+                         card waiting for the person; it is not minimised"
+                    ));
+                }
+                crate::card_watch::hold_windows("minimise_window")?;
                 crate::windows::minimise(&title)?;
                 Ok(serde_json::json!({
                     "minimised": title,
@@ -1835,6 +1860,7 @@ pub fn publish(
                 let want = args["title"].as_str().unwrap_or_default();
                 let open = crate::windows::addressable_titles();
                 let title = crate::windows::window_named(want, &open)?;
+                crate::card_watch::hold_windows("maximise_window")?;
                 crate::windows::maximise(&title)?;
                 Ok(serde_json::json!({
                     "maximised": title,

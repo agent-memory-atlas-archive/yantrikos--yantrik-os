@@ -522,7 +522,14 @@ pub fn present_app(app_id: &str) -> bool {
 /// under Wayland. Every surface that puts something in front of a person needs this:
 /// `control_approvals` already asks for it when a card goes up, `open_lens` when the ask bar
 /// opens, and `show_screen` because a screen nobody can see has not been shown.
+///
+/// Restored first, as [`present`] does, because a minimised window cannot take focus: a shell
+/// minimised by anything would otherwise stay down with every card in it (second review of the
+/// card fix). Not finding a minimised shell is the usual case and not an error.
 pub fn raise_shell() -> Result<(), String> {
+    if let Err(why) = ask_compositor(vec![restore_args(SHELL_WINDOW_TITLE)]) {
+        tracing::debug!(reason = %why, "nothing to un-minimize before raising the shell");
+    }
     ask_compositor(vec![toplevel_args("focus", SHELL_WINDOW_TITLE)])
 }
 

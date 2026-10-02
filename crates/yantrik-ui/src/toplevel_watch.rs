@@ -72,6 +72,22 @@ pub fn start() {
     });
 }
 
+/// How many toplevels carry the shell's title. More than one means a window is wearing it, and a
+/// title alone can no longer say the shell is in front (card_watch).
+static SHELL_TITLED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+pub fn shell_titled_count() -> usize {
+    SHELL_TITLED.load(Ordering::Relaxed)
+}
+
+/// The title of the window in front now, or `None` when the stream is not being followed.
+pub fn front_title() -> Option<String> {
+    if !LIVE.load(Ordering::Relaxed) {
+        return None;
+    }
+    LOG.lock().ok().and_then(|log| log.current.as_ref().map(|(_, t)| t.clone()))
+}
+
 /// Whether the window called `title` was the one in front when the person pressed its taskbar
 /// entry. `false` whenever that is not known, because the cost of a wrong `true` is a window put
 /// away that the person asked to see.
@@ -101,16 +117,21 @@ impl<K: PartialEq> FocusLog<K> {
     /// `None` is not recorded. When focus moves, labwc sends the old window's deactivation and
     /// the new one's activation as two separate updates, and between them nothing is activated;
     /// recording that gap would push the window that really had focus out of `previous`.
-    fn observe(&mut self, front: Option<(K, String)>, now: Instant) {
-        let Some((key, title)) = front else { return };
+    /// Returns whether focus moved to another window (a retitle is not a move).
+    fn observe(&mut self, front: Option<(K, String)>, now: Instant) -> bool {
+        let Some((key, title)) = front else { return false };
         match &mut self.current {
             // The same window under a new title (Chromium retitles on every tab): not a change
             // of focus, so `previous` and `since` stay as they are.
-            Some((k, t)) if *k == key => *t = title,
+            Some((k, t)) if *k == key => {
+                *t = title;
+                false
+            }
             _ => {
                 self.previous = self.current.take();
                 self.current = Some((key, title));
                 self.since = Some(now);
+                true
             }
         }
     }
@@ -155,6 +176,15 @@ struct Watch {
 }
 
 impl Watch {
+    /// How many toplevels carry the shell's title, for card_watch. Taken from the whole list on
+    /// every change and every close, so it can never be left over from a window that went.
+    fn count_shell_titled(&self) {
+        SHELL_TITLED.store(
+            self.windows.iter().filter(|(_, w)| w.title == SHELL_WINDOW_TITLE).count(),
+            Ordering::Relaxed,
+        );
+    }
+
     fn window(&mut self, id: ObjectId) -> &mut Toplevel {
         if let Some(i) = self.windows.iter().position(|(k, _)| *k == id) {
             return &mut self.windows[i].1;
@@ -253,13 +283,27 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for Watch {
                 if let Some(activated) = w.pending_activated.take() {
                     w.activated = activated;
                 }
+                watch.count_shell_titled();
                 let front = watch.front();
-                if let Ok(mut log) = LOG.lock() {
-                    log.observe(front, Instant::now());
+                let title = front.as_ref().map(|(_, t)| t.clone());
+                let moved = LOG.lock().is_ok_and(|mut log| log.observe(front, Instant::now()));
+                // A card waiting in the shell must not stay behind whatever just took focus, and
+                // the shell coming forward, by whatever path, starts the press guard.
+                if moved {
+                    if let Some(title) = title {
+                        if title == SHELL_WINDOW_TITLE {
+                            crate::card_watch::shell_came_forward();
+                        }
+                        crate::card_watch::front_changed(&title);
+                    }
                 }
             }
             handle::Event::Closed => {
                 watch.windows.retain(|(k, _)| *k != id);
+                // Counted again on a close too: a window that wore the shell's title and went
+                // left the count at two, and the real shell coming forward then read as a cover
+                // and spent the raises (second review).
+                watch.count_shell_titled();
                 if let Ok(mut log) = LOG.lock() {
                     log.closed(&id);
                 }

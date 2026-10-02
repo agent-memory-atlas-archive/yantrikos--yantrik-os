@@ -134,6 +134,10 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                 .arg(Param::text("name").describe("A file name shown in the current listing")),
             move |args| {
                 let ui = up(&for_open)?;
+                // The file opens in a window of its own (editor, viewer, mpv, the browser), which
+                // comes up over a waiting card (card_watch). First, so a refusal leaves even the
+                // screen where it was.
+                crate::card_watch::hold_windows("files_open")?;
                 let name = args["name"].as_str().unwrap_or_default().to_string();
                 ensure_files_screen(&ui);
                 mind::here(&ui.get_file_browser_path())?;

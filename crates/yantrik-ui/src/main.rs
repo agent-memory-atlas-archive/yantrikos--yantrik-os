@@ -76,6 +76,7 @@ mod control_agents;
 mod control_chat;
 mod jobs;
 mod cards;
+mod card_watch;
 mod clipboard;
 // NOTE: #[allow(dead_code)] required to avoid rustc 1.93.1 ICE in check_mod_deathness.
 // Remove once rustc is updated past the fix.
