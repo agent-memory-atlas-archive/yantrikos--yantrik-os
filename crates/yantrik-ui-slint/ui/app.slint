@@ -8,7 +8,7 @@
 // The AI IS the shell — Intent Lens is the primary interaction.
 
 import { Theme, ThemeMode, ThemeOverrides, AccentPreset } from "theme.slint";
-import { Taskbar } from "components/taskbar.slint";
+import { GroundedDock, DockButton, DockWindow } from "components/grounded_dock.slint";
 import { StatusBar } from "components/status_bar.slint";
 import { ShellOverlays } from "components/shell_overlays.slint";
 import { NetworkState, NetworkRow } from "components/bar/network_state.slint";
@@ -43,8 +43,7 @@ import { WorkCardData } from "components/work_card.slint";
 // Agents (screen 34), and the window one agent pops out into. The window and the global it reads
 // are exported so the shell can create a window per agent and fill each one.
 import { AgentsScreen, AgentsState } from "agents.slint";
-export { AgentWindow, AgentsState, AgentTabData, AgentRowData, AgentRunData, AgentItemData, AgentHeaderData, AgentDetailsData, AgentMindData, AgentRoleData } from "agents.slint";
-export { RouteStopData } from "agents_route.slint";
+export { AgentWindow, AgentsState, AgentRunData, AgentItemData, AgentHeaderData, AgentDetailsData, AgentMindData, AgentRoleData, WorkNavData, DeskCardData, DecisionData, ResultData, ChangeRowData, ChildRunData, RunFactData } from "agents.slint";
 // Recipes (screen 35): every recipe as its stages. The global is exported so the shell can fill it.
 import { RecipesScreen, RecipesState } from "recipes.slint";
 export { RecipesState, RecipeTabData, RecipeRowData, RecipeStageData, RecipeStepData } from "recipes.slint";
@@ -62,7 +61,8 @@ import { BriefSection } from "components/morning_brief.slint";
 import { ClipboardEntryData } from "components/clipboard_panel.slint";
 import { CheatRowData } from "components/cheat_sheet.slint";
 import { AppGridItem } from "components/app_grid.slint";
-import { WindowItem } from "components/window_switcher.slint";
+import { WindowItem } from "components/window_item.slint";
+import { AltTab, SwitcherCell } from "components/alt_tab.slint";
 import { DockItem } from "components/app_dock.slint";
 import { CategoryItem } from "components/app_grid.slint";
 // The mind panel: shell furniture at the right edge, instantiated below beside the taskbar.
@@ -77,7 +77,7 @@ import { YMenuAction, YContextMenu } from "components/y_context_menu.slint";
 import { Icons } from "components/icon.slint";
 import { Tr } from "translations.slint";
 
-export { HarnessData, HarnessRowData, Tr, ThemeMode, ThemeOverrides, AccentPreset, ContentBlock, MessageData, ToolCallData, UrgeCardData, BondData, OpinionData, SharedRefData, MemoryItem, LensResult, ApprovalRequest, QuestionRequest, MindRule, MindAuditEntry, WhisperCardItem, FileEntry, BreadcrumbSegment, FileDetailData, NotificationData, NotifActionData, ProcessData, ClipboardEntryData, CheatRowData, AppGridItem, CategoryItem, ServiceItem, WindowItem, DockItem, ToastData, ToastActionData, PackageData, PendingAction, UsbDeviceData, PciDeviceData, InputDeviceData, StorageDeviceData, DisplayDeviceData, UserData, GroupData, PermFileData, ComponentVersionData, BriefSection, CommandItem, YSidebarItem, YSidebarSection, YTabItem, YMenuAction, ProblemRow, WorkCardData }
+export { HarnessData, HarnessRowData, Tr, ThemeMode, ThemeOverrides, AccentPreset, ContentBlock, MessageData, ToolCallData, UrgeCardData, BondData, OpinionData, SharedRefData, MemoryItem, LensResult, ApprovalRequest, QuestionRequest, MindRule, MindAuditEntry, WhisperCardItem, FileEntry, BreadcrumbSegment, FileDetailData, NotificationData, NotifActionData, ProcessData, ClipboardEntryData, CheatRowData, AppGridItem, CategoryItem, ServiceItem, WindowItem, SwitcherCell, DockItem, DockButton, DockWindow, ToastData, ToastActionData, PackageData, PendingAction, UsbDeviceData, PciDeviceData, InputDeviceData, StorageDeviceData, DisplayDeviceData, UserData, GroupData, PermFileData, ComponentVersionData, BriefSection, CommandItem, YSidebarItem, YSidebarSection, YTabItem, YMenuAction, ProblemRow, WorkCardData }
 
 export component App inherits Window {
     default-font-family: Theme.font-ui;
@@ -302,9 +302,9 @@ export component App inherits Window {
     // nothing underneath moves.
     // The bar's three panels are the shell's and open over any screen, so they cover it on any
     // screen; the rest are the desktop's.
-    property <bool> mind-panel-covered: root.quick-settings-open || root.power-menu-open || root.clip-panel-open || root.cheat-sheet-open || root.battery-popover-open || root.network-open
+    property <bool> mind-panel-covered: root.quick-settings-open || root.power-menu-open || root.clip-panel-open || root.cheat-sheet-open || root.battery-popover-open || root.network-open || root.alt-tab-open
         || (root.current-screen == 1
-            && (root.lens-open || root.app-grid-open || root.window-switcher-open || root.command-palette-open));
+            && (root.lens-open || root.app-grid-open || root.command-palette-open));
 
     // Desktop state
     in property <[UrgeCardData]> urges: [];
@@ -461,8 +461,20 @@ export component App inherits Window {
     callback grid-toggle-pin(string);
     callback grid-search-apps(string);
 
-    // Window switcher state
-    in-out property <bool> window-switcher-open: false;
+    // Window overview (Super+Tab; Alt+Tab is labwc's own): Rust owns the order, the selection and the paging (alt_tab.rs) and hands
+    // over the page being shown.
+    in-out property <bool> alt-tab-open: false;
+    in property <[SwitcherCell]> alt-tab-cells: [];
+    in property <int> alt-tab-selected: -1;
+    in property <string> alt-tab-status: "";
+    in property <string> alt-tab-plate: "";
+    in property <int> alt-tab-page: 0;
+    in property <int> alt-tab-pages: 1;
+    callback alt-tab-navigate(string, int);
+    callback alt-tab-hover(int);
+    callback alt-tab-activate(int);
+    callback alt-tab-cancel();
+
     in property <[WindowItem]> window-list: [];
     callback switch-window(string);
     // A taskbar entry pressed. Not `switch-window`: the entry of the window in front puts it
@@ -470,11 +482,19 @@ export component App inherits Window {
     // may ever hide one instead.
     callback taskbar-window-clicked(string);
 
+    // The grounded dock's model (dock_model.rs): this page's worth of buttons is the dock's own
+    // business, so Rust hands over ALL of them and the windows of every app in them.
+    in property <[DockButton]> dock-buttons: [];
+    in property <[DockWindow]> dock-windows: [];
+    in property <int> dock-reveal-index: -1;
+
     // The taskbar entry's own right-click menu (#232). Rust builds the rows — which ones there
     // are depends on whether the window's app is pinned — and every row's id is the name of the
     // `shell` control action that runs it, so the menu is a second VIEW of one surface and not
     // a second path. Drawn at the end of this file, over everything, like the desktop's own
     // menu is over its screen.
+    in-out property <int> dock-first: 0;
+    in-out property <int> dock-capacity: 0;
     in-out property <bool> taskbar-menu-open: false;
     in-out property <[YMenuAction]> taskbar-menu-actions: [];
     in-out property <string> taskbar-menu-title: "";
@@ -1631,10 +1651,7 @@ export component App inherits Window {
             grid-launch-app(app-id) => { root.grid-launch-app(app-id); }
             grid-toggle-pin(app-id) => { root.grid-toggle-pin(app-id); }
             grid-search-apps(query) => { root.grid-search-apps(query); }
-            // Window switcher
-            window-switcher-open <=> root.window-switcher-open;
             window-list: root.window-list;
-            switch-window(title) => { root.switch-window(title); }
             // Command Palette
             command-palette-open <=> root.command-palette-open;
             command-palette-filtered: root.command-palette-filtered;
@@ -2867,20 +2884,25 @@ export component App inherits Window {
             // bottom edge that slid up a row of square tiles bearing LETTERS — ">_", "W", "F",
             // "@", "N" — from a hardcoded list that had drifted out of step with the real pinned
             // apps. It was the old design, and it was at the APP level, so it appeared on every
-            // screen. The real Taskbar lived inside DesktopScreen, so it appeared on exactly one.
+            // screen. The old taskbar lived inside DesktopScreen, so it appeared on exactly one.
             //
             // The result is what you saw: on the desktop, the designed taskbar; the moment you
             // opened anything, that taskbar went away with the desktop and brushing the bottom of
             // the screen produced a different dock, in a different visual language, listing
             // different apps.
             //
-            // One Taskbar, here, above every screen. Same component, same icons, same window
+            // One dock, here, above every screen. Same component, same icons, same window
             // entries, always in the same place — which is the whole of what "consistent" means
             // for the one strip a person's eye returns to all day.
-            Taskbar {
-                y: parent.height - self.height;
+            GroundedDock {
+                y: 0;
                 width: 100%;
-                windows: root.window-list;
+                height: parent.height;
+                buttons: root.dock-buttons;
+                windows: root.dock-windows;
+                reveal-index: root.dock-reveal-index;
+                first <=> root.dock-first;
+                capacity-changed(n) => { root.dock-capacity = n; }
                 minimized-screen: root.minimized-screen;
                 minimized-title: root.minimized-title;
                 minimized-app-id: root.minimized-app-id;
@@ -2890,9 +2912,8 @@ export component App inherits Window {
                     root.minimized-screen = 0;
                 }
                 launcher-label: Tr.dock-apps;
-                companion-count: root.whisper-hint-count;
                 companion-online: root.companion-online;
-                companion-status: root.companion-status;
+                launch-app(app-id) => { root.launch-app(app-id); }
                 // The launcher is drawn on the desktop screen and nowhere else, so from Files,
                 // Recipes or any other screen this button flipped a property nothing drew (#219).
                 // Opening it goes to the desktop first, as open_lens does, and puts the Lens
@@ -2917,7 +2938,6 @@ export component App inherits Window {
                 // other screen this used to open nothing a person could see; it goes to the
                 // desktop first, as Apps does (#219, #241). The shell's handler for the Lens
                 // opening brings the window forward over whatever app is in front.
-                chat-with: root.active-harness-name;
                 cards-waiting: root.cards-pending;
                 open-companion => {
                     if (!root.lens-open) {
@@ -2969,11 +2989,10 @@ export component App inherits Window {
             toggle(open) => {
                 MindPanelState.set-expanded(root.current-screen == 1 ? "desktop" : "elsewhere", open);
             }
-            // Into the Agents screen with that agent selected, on the Active tab it is listed in.
+            // Into the Agents screen with that agent's run opened.
             open-agent(id) => {
                 root.current-screen = 34;
                 root.navigate(34);
-                AgentsState.select-tab("active");
                 AgentsState.select(id);
             }
             open-agents => {
@@ -3399,6 +3418,22 @@ export component App inherits Window {
             close-menu => { root.taskbar-menu-open = false; }
         }
 
+        // The window overview, over every screen: a switcher that only drew on the desktop would be
+        // unreachable from Files or Settings, where the shell is in front too.
+        AltTab {
+            is-open: root.alt-tab-open;
+            cells: root.alt-tab-cells;
+            selected: root.alt-tab-selected;
+            status: root.alt-tab-status;
+            plate: root.alt-tab-plate;
+            page: root.alt-tab-page;
+            pages: root.alt-tab-pages;
+            navigate(direction, columns) => { root.alt-tab-navigate(direction, columns); }
+            hover(i) => { root.alt-tab-hover(i); }
+            activate(i) => { root.alt-tab-activate(i); }
+            cancel => { root.alt-tab-cancel(); }
+        }
+
             // Debug: navigate to screen from Rust
             // Set debug-target-screen from Rust, then call debug-navigate()
             // to switch to that screen (useful for automated screenshots).
@@ -3416,6 +3451,11 @@ export component App inherits Window {
     /// five places, one of which is Rust setting the property directly.
     changed lens-open => {
         if (!root.lens-open) { global-keys.focus(); }
+    }
+
+    /// Same for the switcher: its own scope held the keys and goes away with it.
+    changed alt-tab-open => {
+        if (!root.alt-tab-open) { global-keys.focus(); }
     }
 
     /// Give the shell's shortcut scope the keyboard, so there is a focus chain to deliver to.

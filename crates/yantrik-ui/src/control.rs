@@ -735,6 +735,10 @@ pub fn publish(
                 // it reads everything else off, rather than knowing which file to trust.
                 .with("version", yantrik_version::version())
                 .with("windows", serde_json::Value::Array(open))
+                // The grounded dock as drawn: its buttons in order (app, running, windows,
+                // focused), which page of them is showing, and whether a mind is waiting on the
+                // person (the amber dot). What a pointer reads off the bar, a mind reads here.
+                .with("dock", crate::wire::dock_bar::for_describe(&ui))
                 // Which of them the person is looking at. The list's order is not that answer —
                 // the registry's launches come first. `desktop_in_front` is true for the desktop
                 // itself (or one of its screens), false for an app window, null when the
@@ -764,6 +768,10 @@ pub fn publish(
                     "agents",
                     if agent_reading { crate::agents::for_describe_by_an_agent() } else { crate::agents::for_describe() },
                 )
+                // The Agents workroom as the screen says it: the page, the counts, each mind's
+                // state — and, for the person's reader, the desks and the requests waiting.
+                // `show_workroom` changes the page.
+                .with("workroom", crate::wire::agents::workroom_for_describe(&ui, agent_reading))
                 // The agent catalog: the roles `hand_off` can start, what each may touch, and
                 // whether a mind it runs on is attached now. See `agents::catalog`.
                 .with("catalog", crate::agents::catalog::for_describe())
@@ -964,6 +972,8 @@ pub fn publish(
                 .with("power_menu", crate::control_overlays::panel_for_describe(ui.get_power_menu_open(), screen, "close_power_menu"))
                 .with("clipboard_panel", crate::control_overlays::panel_for_describe(ui.get_clip_panel_open(), screen, "close_clipboard"))
                 .with("cheat_sheet", crate::control_overlays::panel_for_describe(ui.get_cheat_sheet_open(), screen, "close_cheat_sheet"))
+                // The window overview (Super+Tab): whether it is up and what it has selected.
+                .with("window_switcher", crate::control_switcher::for_describe(screen))
                 // The mode menu over the status bar's chip, for the same reason again:
                 // `show_mind_audit` opens it, and a caller that opened it has to be able to see
                 // that it is still there and put it away (`close_mind_menu`) (#184).
@@ -2059,6 +2069,8 @@ pub fn publish(
     // The network mark's popover as data: set_wifi, disconnect_network, connect_wifi. See
     // `control_network`, which also says why no action there takes a password.
     let surface = crate::control_network::actions(surface, ui);
+    // The window overview (Super+Tab): open_switcher, switcher_move, switcher_commit, switcher_cancel.
+    let surface = crate::control_switcher::actions(surface, ui);
     // An agent's commands, each in a terminal of its own in its pane — agent_run, agent_job,
     // agent_input, agent_kill. The agent comes from its token, never an argument. See
     // `control_agent_terminal` and design/agents-workspace-2026-09-23.md, decision 3.
@@ -2076,6 +2088,8 @@ pub fn publish(
     // The chat in one read, for a client that is not the Lens: the Yantrik terminal. See
     // `control_chat`.
     let surface = crate::control_chat::actions(surface, ui);
+    // The workroom's own navigation: show_workroom. See `control_workroom`.
+    let surface = crate::control_workroom::actions(surface, ui);
     crate::control_agents::actions(surface, ui).serve();
 }
 

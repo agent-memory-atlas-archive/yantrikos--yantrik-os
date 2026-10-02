@@ -18,6 +18,7 @@ pub mod agents;
 #[cfg(test)]
 mod lens_card_layout;
 pub mod lens_work;
+pub mod agents_workroom;
 pub mod runs_on_card;
 // The Recipes screen: every recipe as its stages, live.
 pub mod recipes;
@@ -34,6 +35,8 @@ mod shell_overlays;
 mod cheat_sheet;
 pub mod network;
 pub mod dock;
+/// The grounded dock's buttons and window list, published from the window list.
+pub mod dock_bar;
 pub mod harness;
 pub mod i18n;
 mod lens;
@@ -108,6 +111,7 @@ pub fn wire_all(ui: &App, ctx: &AppContext) {
     backlight::wire(ui, ctx);
     app_grid::wire(ui, ctx);
     window_switcher::wire(ui, ctx);
+    crate::control_switcher::wire(ui);
     show_desktop::wire(ui);
     voice_mode::wire(ui, ctx);
     settings::wire(ui, ctx);

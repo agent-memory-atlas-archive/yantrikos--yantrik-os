@@ -48,6 +48,8 @@ mod companion_rpc;
 mod control;
 mod control_approvals;
 mod control_overlays;
+mod control_switcher;
+mod alt_tab;
 mod power_status;
 mod control_network;
 mod control_installer;
@@ -75,6 +77,7 @@ mod control_agent_terminal;
 mod control_recipes;
 /// Agents on the shell's surface: new_agent / send_to_agent / stop_agent / read_agent / show_agent.
 mod control_agents;
+mod control_workroom;
 // The chat in one read, for the Yantrik terminal (`chat_view`).
 mod control_chat;
 mod jobs;
@@ -146,7 +149,10 @@ mod trail;
 // What protects the credential vault on this machine, and the honest answer when nothing does.
 mod vault_unlock;
 mod voice;
+mod dock_model;
 // NOTE: #[allow(dead_code)] required to avoid rustc 1.93.1 ICE in check_mod_deathness.
+// It guards `windows`, the next line, and only it: a `mod` added between this comment and
+// `mod windows;` would take the attribute and leave `windows` bare (#585 B1).
 #[allow(dead_code)]
 mod windows;
 mod wire;

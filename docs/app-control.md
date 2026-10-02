@@ -222,6 +222,11 @@ a name and forward a pid it chose — the same-user limit #154 describes. Python
 (Blender, LibreOffice) do not forward the token and are unbound, as are spends that carry no
 token at all.
 
+The Agents workroom's pages are `show_workroom` (safe), read back under `workroom` in `describe
+shell`: the counts and each mind's state for any reader, the desks and the requests waiting for the
+person's own — `control_workroom.rs`. The answer says what the screen shows after the call and adds
+a `note` when that is not what was asked.
+
 `shell.run_recipe {recipe, inputs?}` starts a recipe — a formation among them, whose Agent steps
 hand work to catalog roles through `hand_off` (see [harness.md](harness.md), Formations). It is
 **sensitive**: it starts agents. Its run is given the leave for its agents that the companion's own
@@ -303,10 +308,12 @@ content, and a content action a paired action takes back stays `standard` (`add_
 | shell | `answer_recipe`, `pause_recipe`, `resume_recipe`, `cancel_recipe` | standard | steering a run already started |
 | shell | `new_agent`, `hand_off` | sensitive | starts an agent, with what that costs and whatever reach the role carries |
 | shell | `send_to_agent`, `stop_agent` | standard | talking to, or stopping, an agent the person started |
-| shell | `read_agent`, `show_agent` | safe | reads and showings |
+| shell | `read_agent`, `show_agent`, `show_workroom` | safe | reads and showings; `show_workroom` changes the Agents page and nothing about any agent, and is held while an approval card waits |
 | shell | `agent_run`, `agent_input` | sensitive | arbitrary commands; typing into a live shell |
 | shell | `agent_job`, `agent_kill` | standard | reading a job's state; ending a job the caller's token owns |
 | shell | `request_approval`, `approval_status`, `consume_approval`, `set_mind_mode`, `record_unasked_action`, `show_mind_audit`, `close_mind_menu` | safe | the approval machinery itself, which must never act; `set_mind_mode` refuses every loosening, so it can only tighten |
+| shell | `open_switcher`, `switcher_move`, `switcher_cancel` | safe | drawing the window overview (Super+Tab; Alt+Tab is labwc's own cycling and not this), moving its selection, putting it away; nothing is switched. Cancel gives the previous window back only when no card waits |
+| shell | `switcher_commit` | standard | brings the selected window in front of the shell, as `focus_window` does; a window that has closed is taken off the card and the answer says so |
 | shell | `open_quick_settings`, `close_quick_settings`, `open_power_menu`, `close_power_menu`, `open_clipboard`, `close_clipboard`, `open_cheat_sheet`, `close_cheat_sheet` | safe | showing or putting away the bar's three panels and the keyboard cheat sheet; opening the power menu powers nothing off, choosing an entry is the person's |
 | arcade | `new_character`, `new_game`, `update_game`, `update_character`, `build`, `play`, `verify`, `screenshot` | standard | editing and building library content, editable again |
 | arcade | `delete` | sensitive | destroys the one named game |
