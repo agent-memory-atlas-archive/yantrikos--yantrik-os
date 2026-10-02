@@ -477,7 +477,7 @@ TOOLS = [
                 "args": {
                     "type": "object",
                     "additionalProperties": True,
-                    "description": "action arguments as an object keyed by the parameter names os_describe lists, e.g. {\"text\": \"hello\"}. A single-parameter action also accepts the bare value.",
+                    "description": "action arguments as an object keyed by the parameter names os_describe lists, e.g. {\"title\": \"Plan\", \"text\": \"- step one\"}. Always send the object. Only an action whose act: line lists exactly one parameter takes a bare value; an action with two or more (new_note takes title and text) refuses one, and nothing runs.",
                 },
             },
             "required": ["app", "action"],
