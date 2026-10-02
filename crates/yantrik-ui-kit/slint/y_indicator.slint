@@ -93,7 +93,10 @@ export component YIndicator inherits Rectangle {
     // itself the moment the tooltip is up. Nothing ticks at rest.
     Timer {
         running: root.hovered && !root.pressed && !root.tip-shown && root.tooltip != "";
-        interval: Theme.dur-tooltip;
+        // The same 600ms as `Theme.dur-tooltip`, written out: the idle-window test reads a Timer's
+        // rate from its text and cannot resolve a token. Repeating at this rate is harmless here,
+        // because `running` goes false after the first tick.
+        interval: 600ms;
         triggered => { root.tip-shown = true; }
     }
 
