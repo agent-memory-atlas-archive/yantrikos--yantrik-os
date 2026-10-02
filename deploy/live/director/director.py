@@ -87,6 +87,7 @@ def send(text):
 def wait_for_turn(sent_at):
     """Wait until the Mind answers what was just sent. Returns (state, why it stopped waiting)."""
     seen_busy = False
+    card_seen = False
     while True:
         time.sleep(POLL_SECS)
         state = shell_state()
@@ -97,7 +98,15 @@ def wait_for_turn(sent_at):
         if state.get("locked"):
             return state, "locked"
         if state.get("pending_approvals"):
-            return state, "card"
+            # A card is the Mind waiting for a person, not the turn ending: keep waiting (up to
+            # the turn limit) so a person who answers it finds the mission still going. On 561
+            # the Director stopped the moment the first card rose, before Pranab could answer.
+            if not card_seen:
+                card_seen = True
+                log(event="card waiting", actions=[a.get("action") for a in state["pending_approvals"]])
+            if time.time() - sent_at > TURN_LIMIT_SECS:
+                return state, "card unanswered"
+            continue
         if state.get("thinking"):
             seen_busy = True
         if (seen_busy or time.time() - sent_at > 30) and mind_idle(state):
