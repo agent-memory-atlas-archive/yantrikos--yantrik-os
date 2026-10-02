@@ -7,38 +7,20 @@ use crate::clipboard::SharedHistory;
 use crate::{App, ClipboardEntryData};
 
 /// Wire clipboard panel callbacks.
+///
+/// Opening is not wired here: the panel opens from the bar, a keybind and the control surface,
+/// and the one hook all three reach is `shell-overlay-opened` (see `shell_overlays`), which calls
+/// [`refresh_on_open`]. A 200 ms timer used to watch `clip-panel-open` for it, which woke the
+/// shell five times a second for as long as it ran, panel or no panel.
 pub fn wire(ui: &App, ctx: &AppContext) {
-    wire_open(ui, ctx);
     wire_paste(ui, ctx);
     wire_search(ui, ctx);
 }
 
-/// When the panel opens, populate the entry list from SharedHistory.
-fn wire_open(ui: &App, ctx: &AppContext) {
-    let clip = ctx.clip_history.clone();
-    let ui_weak = ui.as_weak();
-
-    // Watch the `clip-panel-open` property — refresh entries on open.
-    // We use a small timer that checks for the panel being opened.
-    let was_open = std::cell::Cell::new(false);
-    let timer = slint::Timer::default();
-    timer.start(
-        slint::TimerMode::Repeated,
-        std::time::Duration::from_millis(200),
-        move || {
-            let Some(ui) = ui_weak.upgrade() else { return };
-            let is_open = ui.get_clip_panel_open();
-
-            // Only refresh when transitioning from closed -> open
-            if is_open && !was_open.get() {
-                // Clear search query on fresh open
-                ui.set_clip_search_query("".into());
-                populate_entries(&ui, &clip, "");
-            }
-            was_open.set(is_open);
-        },
-    );
-    std::mem::forget(timer);
+/// A fresh open: clear the search and load the newest entries, once.
+pub(super) fn refresh_on_open(ui: &App, clip: &SharedHistory) {
+    ui.set_clip_search_query("".into());
+    populate_entries(ui, clip, "");
 }
 
 /// Build the model from SharedHistory (optionally filtered) and push it to the UI.

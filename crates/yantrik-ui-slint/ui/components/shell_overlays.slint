@@ -1,0 +1,81 @@
+// The overlays the bar opens: Quick Settings, the power menu and the clipboard panel.
+//
+// They stood inside DesktopScreen, which is only on screen while the desktop is. The bar is the
+// shell's and is drawn above every screen, so its network, settings and power buttons toggled a
+// flag on any screen -- and from Files, Settings or Agents the flag drew nothing, because the
+// panel it opens was not there to draw. They live here now, instantiated once in app.slint
+// after the screens, so a click on the bar shows what it promises wherever the person is.
+//
+// Nothing here owns state: every flag and value is the app's, bound through, so the desktop's
+// own keybinds, the control surface and the bar all open the same panels.
+
+import { QuickSettings } from "quick_settings.slint";
+import { PowerMenu } from "power_menu.slint";
+import { ClipboardPanel, ClipboardEntryData } from "clipboard_panel.slint";
+
+export component ShellOverlays inherits Rectangle {
+    // Quick Settings
+    in-out property <bool> quick-settings-open: false;
+    in property <bool> battery-available: false;
+    in property <int> battery-level: 100;
+    in property <bool> battery-charging: false;
+    in property <bool> wifi-connected: false;
+    // The network's name, for the tile. It once stood as an empty string here, so the tile never
+    // had a network to name.
+    in property <string> wifi-ssid: "";
+    in-out property <int> brightness-level: 80;
+    in-out property <int> volume-level: 50;
+    callback toggle-wifi();
+    callback brightness-changed(int);
+    callback volume-changed(int);
+
+    // Power menu
+    in-out property <bool> power-menu-open: false;
+    callback power-action(string);
+
+    // Clipboard panel
+    in-out property <bool> clip-panel-open: false;
+    in property <[ClipboardEntryData]> clip-panel-entries: [];
+    in-out property <string> clip-search-query: "";
+    callback clipboard-paste(int);
+    callback clipboard-search(string);
+
+    width: 100%;
+    height: 100%;
+
+    QuickSettings {
+        width: 100%;
+        height: 100%;
+        is-open <=> root.quick-settings-open;
+        battery-available: root.battery-available;
+        battery-level: root.battery-level;
+        battery-charging: root.battery-charging;
+        wifi-connected: root.wifi-connected;
+        wifi-ssid: root.wifi-ssid;
+        brightness-level <=> root.brightness-level;
+        volume-level <=> root.volume-level;
+        toggle-wifi => { root.toggle-wifi(); }
+        brightness-changed(val) => { root.brightness-changed(val); }
+        volume-changed(val) => { root.volume-changed(val); }
+        close => { root.quick-settings-open = false; }
+    }
+
+    PowerMenu {
+        width: 100%;
+        height: 100%;
+        is-open <=> root.power-menu-open;
+        power-action(action) => { root.power-action(action); }
+        close => { root.power-menu-open = false; }
+    }
+
+    ClipboardPanel {
+        width: 100%;
+        height: 100%;
+        is-open <=> root.clip-panel-open;
+        entries: root.clip-panel-entries;
+        search-query <=> root.clip-search-query;
+        paste-entry(idx) => { root.clipboard-paste(idx); }
+        search-changed(query) => { root.clipboard-search(query); }
+        close => { root.clip-panel-open = false; }
+    }
+}

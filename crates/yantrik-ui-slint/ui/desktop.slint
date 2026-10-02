@@ -33,9 +33,6 @@ import { QuestionRequest } from "components/question_card.slint";
 import { MessageData } from "components/message_bubble.slint";
 import { UrgeCardData, GlanceCard } from "components/glance_card.slint";
 import { WhisperCardStack, WhisperCardItem } from "components/whisper_card.slint";
-import { QuickSettings } from "components/quick_settings.slint";
-import { ClipboardPanel, ClipboardEntryData } from "components/clipboard_panel.slint";
-import { PowerMenu } from "components/power_menu.slint";
 import { AppGrid, AppGridItem, CategoryItem } from "components/app_grid.slint";
 import { WindowSwitcher, WindowItem } from "components/window_switcher.slint";
 import { CommandPalette, CommandItem } from "components/command_palette.slint";
@@ -48,13 +45,6 @@ export component DesktopScreen inherits Rectangle {
     in property <string> clock-text: "00:00";
     in property <string> companion-status: "idle";
     in property <bool> companion-online: true;
-    in property <bool> battery-available: false;
-    in property <int> battery-level: 100;
-    in property <bool> battery-charging: false;
-    in property <bool> wifi-connected: false;
-    /// The SSID, for the Quick Settings tile. It stood as `wifi-ssid: ""` at
-    /// the QuickSettings below, so the tile never had a network to name.
-    in property <string> wifi-ssid: "";
     in property <int> pending-count: 0;
     in property <bool> settings-incognito-mode: false;
     in property <bool> dnd-mode: false;
@@ -143,23 +133,9 @@ export component DesktopScreen inherits Rectangle {
     callback morning-brief-dismissed();
     callback morning-brief-section-action(string);
 
-    // Quick Settings overlay
-    in-out property <bool> quick-settings-open: false;
-    in-out property <int> brightness-level: 80;
-    in-out property <int> volume-level: 50;
-    callback toggle-wifi();
-    callback brightness-changed(int);
-    callback volume-changed(int);
-
-    // Clipboard panel
-    in-out property <bool> clip-panel-open: false;
-    in property <[ClipboardEntryData]> clip-panel-entries: [];
-    in-out property <string> clip-search-query: "";
-    callback clipboard-paste(int);
-    callback clipboard-search(string);
-
-    // Power menu
-    in-out property <bool> power-menu-open: false;
+    // Quick Settings, the power menu and the clipboard panel are not here: they are the shell's
+    // (`ShellOverlays`, drawn once in app.slint), so the bar's buttons work from every screen.
+    // `power-action` stays because the launcher's own power row calls it.
     callback power-action(string);
 
     // App grid
@@ -906,33 +882,6 @@ export component DesktopScreen inherits Rectangle {
         // it is the same bar above every screen instead of vanishing when you leave this one.
     }
 
-    // ── Layer 2.5: Quick Settings overlay (slide down from status bar) ──
-    QuickSettings {
-        width: 100%;
-        height: 100%;
-        is-open <=> root.quick-settings-open;
-        battery-available: root.battery-available;
-        battery-level: root.battery-level;
-        battery-charging: root.battery-charging;
-        wifi-connected: root.wifi-connected;
-        wifi-ssid: root.wifi-ssid;
-        brightness-level <=> root.brightness-level;
-        volume-level <=> root.volume-level;
-        toggle-wifi => { root.toggle-wifi(); }
-        brightness-changed(val) => { root.brightness-changed(val); }
-        volume-changed(val) => { root.volume-changed(val); }
-        close => { root.quick-settings-open = false; }
-    }
-
-    // ── Layer 2.52: Power menu overlay ──
-    PowerMenu {
-        width: 100%;
-        height: 100%;
-        is-open <=> root.power-menu-open;
-        power-action(action) => { root.power-action(action); }
-        close => { root.power-menu-open = false; }
-    }
-
     // ── Layer 2.53: App grid overlay ──
     AppGrid {
         width: 100%;
@@ -968,18 +917,6 @@ export component DesktopScreen inherits Rectangle {
         search-changed(query) => { root.command-palette-search(query); }
         command-selected(action-id) => { root.command-palette-selected(action-id); }
         close => { root.command-palette-open = false; }
-    }
-
-    // ── Layer 2.55: Clipboard history panel ──
-    ClipboardPanel {
-        width: 100%;
-        height: 100%;
-        is-open <=> root.clip-panel-open;
-        entries: root.clip-panel-entries;
-        search-query <=> root.clip-search-query;
-        paste-entry(idx) => { root.clipboard-paste(idx); }
-        search-changed(query) => { root.clipboard-search(query); }
-        close => { root.clip-panel-open = false; }
     }
 
     // ── Layer 2.6: Whisper Cards (floating, top-right) ──

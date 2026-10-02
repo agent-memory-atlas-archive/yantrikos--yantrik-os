@@ -10,6 +10,7 @@
 import { Theme, ThemeMode, ThemeOverrides, AccentPreset } from "theme.slint";
 import { Taskbar } from "components/taskbar.slint";
 import { StatusBar } from "components/status_bar.slint";
+import { ShellOverlays } from "components/shell_overlays.slint";
 import { BootScreen, BootStage } from "boot.slint";
 import { OnboardingScreen } from "onboarding.slint";
 import { InstallerScreen, InstallerDisk, KeyboardChoice } from "installer.slint";
@@ -291,9 +292,11 @@ export component App inherits Window {
     // The desktop's own overlays use the right edge too — the Lens docks there — so the panel
     // steps out of the way while one is up rather than drawing over it. Its room is kept, so
     // nothing underneath moves.
-    property <bool> mind-panel-covered: root.current-screen == 1
-        && (root.lens-open || root.app-grid-open || root.quick-settings-open || root.power-menu-open
-            || root.window-switcher-open || root.command-palette-open || root.clip-panel-open);
+    // The bar's three panels are the shell's and open over any screen, so they cover it on any
+    // screen; the rest are the desktop's.
+    property <bool> mind-panel-covered: root.quick-settings-open || root.power-menu-open || root.clip-panel-open
+        || (root.current-screen == 1
+            && (root.lens-open || root.app-grid-open || root.window-switcher-open || root.command-palette-open));
 
     // Desktop state
     in property <[UrgeCardData]> urges: [];
@@ -373,6 +376,22 @@ export component App inherits Window {
     in property <[BriefSection]> morning-brief-sections: [];
     callback morning-brief-dismissed();
     callback morning-brief-section-action(string);
+
+    // Fired when one of the bar's panels opens: "quick-settings", "power-menu" or "clipboard".
+    // The panels are part of the shell's own window, which sits behind an app window that is in
+    // front of it, so an open from the bar, a keybind or the control surface has to bring the
+    // shell forward or the panel opens where nobody can see it (see `app-grid-opened`). The
+    // clipboard also refreshes its entries here, once, instead of a timer watching the flag.
+    callback shell-overlay-opened(string);
+    changed quick-settings-open => {
+        if (self.quick-settings-open) { self.shell-overlay-opened("quick-settings"); }
+    }
+    changed power-menu-open => {
+        if (self.power-menu-open) { self.shell-overlay-opened("power-menu"); }
+    }
+    changed clip-panel-open => {
+        if (self.clip-panel-open) { self.shell-overlay-opened("clipboard"); }
+    }
 
     // Clipboard panel state
     in-out property <bool> clip-panel-open: false;
@@ -1461,11 +1480,6 @@ export component App inherits Window {
             clock-text: root.clock-text;
             companion-status: root.companion-status;
             companion-online: root.companion-online;
-            battery-available: root.battery-available;
-            battery-level: root.battery-level;
-            battery-charging: root.battery-charging;
-            wifi-connected: root.wifi-connected;
-            wifi-ssid: root.sys-wifi-ssid;
             pending-count: root.pending-count;
             settings-incognito-mode: root.settings-incognito-mode;
             dnd-mode: root.dnd-mode;
@@ -1543,14 +1557,6 @@ export component App inherits Window {
             morning-brief-sections: root.morning-brief-sections;
             morning-brief-dismissed => { root.morning-brief-dismissed(); }
             morning-brief-section-action(id) => { root.morning-brief-section-action(id); }
-            // Clipboard panel
-            clip-panel-open <=> root.clip-panel-open;
-            clip-panel-entries: root.clip-panel-entries;
-            clip-search-query <=> root.clip-search-query;
-            clipboard-paste(idx) => { root.clipboard-paste(idx); }
-            clipboard-search(query) => { root.clipboard-search(query); }
-            // Power menu
-            power-menu-open <=> root.power-menu-open;
             power-action(action) => { root.power-action(action); }
             // App grid
             app-grid-open <=> root.app-grid-open;
@@ -1569,13 +1575,6 @@ export component App inherits Window {
             command-palette-selected(action-id) => { root.command-palette-selected(action-id); }
             // Dock items
             dock-items: root.dock-items;
-            // Quick Settings
-            quick-settings-open <=> root.quick-settings-open;
-            brightness-level <=> root.brightness-level;
-            volume-level <=> root.volume-level;
-            toggle-wifi => { root.toggle-wifi(); }
-            brightness-changed(val) => { root.brightness-changed(val); }
-            volume-changed(val) => { root.volume-changed(val); }
             // Focus mode
             focus-mode <=> root.focus-mode;
             focus-remaining: root.focus-remaining;
@@ -2645,6 +2644,36 @@ export component App inherits Window {
         //
         // Boot, onboarding, lock and login deliberately do not: those are states where the
         // machine is not yet yours to read.
+        // ── The bar's panels: Quick Settings, the power menu, the clipboard ──
+        //
+        // After the screens, so they draw over any of them -- they were inside the desktop, and
+        // from every other screen the bar's buttons set a flag that drew nothing. Before the bar
+        // and the taskbar, as they were on the desktop: the bars stay clickable above the dim.
+        // Not on boot, onboarding, lock or login, where the bar is not drawn either.
+        if current-screen != 0 && current-screen != 2 && current-screen != 3 && current-screen != 32 : ShellOverlays {
+            width: 100%;
+            height: parent.height;
+            y: 0;
+            quick-settings-open <=> root.quick-settings-open;
+            battery-available: root.battery-available;
+            battery-level: root.battery-level;
+            battery-charging: root.battery-charging;
+            wifi-connected: root.wifi-connected;
+            wifi-ssid: root.sys-wifi-ssid;
+            brightness-level <=> root.brightness-level;
+            volume-level <=> root.volume-level;
+            toggle-wifi => { root.toggle-wifi(); }
+            brightness-changed(val) => { root.brightness-changed(val); }
+            volume-changed(val) => { root.volume-changed(val); }
+            power-menu-open <=> root.power-menu-open;
+            power-action(action) => { root.power-action(action); }
+            clip-panel-open <=> root.clip-panel-open;
+            clip-panel-entries: root.clip-panel-entries;
+            clip-search-query <=> root.clip-search-query;
+            clipboard-paste(idx) => { root.clipboard-paste(idx); }
+            clipboard-search(query) => { root.clipboard-search(query); }
+        }
+
         if current-screen != 0 && current-screen != 2 && current-screen != 3 && current-screen != 32 : StatusBar {
             x: 0;
             y: 0;

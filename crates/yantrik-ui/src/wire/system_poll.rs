@@ -493,8 +493,13 @@ fn handle_keybind(ui: &App, action: &str) {
                 yantrik_os::screenshot::CaptureMode::ClipboardRegion,
             );
         }
+        // The clipboard and the power menu are the shell's panels (`ShellOverlays`), drawn over
+        // every screen the bar is on, so these two no longer wait for the desktop. They still
+        // stand down on boot and onboarding, where the bar is not drawn: a flag set there would
+        // show the panel the moment onboarding ended. Opening raises the shell by the
+        // `shell-overlay-opened` hook, so a keybind pressed inside an app shows it.
         "clipboard-history" => {
-            if ui.get_current_screen() == 1 {
+            if crate::control_overlays::bar_is_drawn(ui.get_current_screen()) {
                 ui.set_clip_panel_open(!ui.get_clip_panel_open());
             }
         }
@@ -510,10 +515,13 @@ fn handle_keybind(ui: &App, action: &str) {
             tracing::info!(dnd = will_enable, "Do Not Disturb toggled via hotkey");
         }
         "power-menu" => {
-            if ui.get_current_screen() == 1 {
+            if crate::control_overlays::bar_is_drawn(ui.get_current_screen()) {
                 ui.set_power_menu_open(!ui.get_power_menu_open());
             }
         }
+        // The guards on the next three stay: the launcher, the window switcher and the lens are
+        // drawn by DesktopScreen, so on another screen the flag would draw nothing and would
+        // be found open on return.
         "app-grid" => {
             if ui.get_current_screen() == 1 {
                 ui.set_app_grid_open(!ui.get_app_grid_open());

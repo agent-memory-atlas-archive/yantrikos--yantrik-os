@@ -20,6 +20,7 @@ mod route_tests;
 mod approval_tests;
 mod taskbar_menu_tests;
 mod kit_controls_tests;
+mod bar_overlays_tests;
 mod monitor_tests;
 mod weather_tests;
 mod minds_tests;
@@ -77,6 +78,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.iter().any(|a| a == "verify-apps-button") { return apps_button_tests::run(&window, output); }
     if args.iter().any(|a| a == "verify-taskbar-menu") { return taskbar_menu_tests::run(&window, output); }
     if args.iter().any(|a| a == "verify-kit-controls") { return kit_controls_tests::run(&window, output); }
+    if args.iter().any(|a| a == "verify-bar-overlays") { return bar_overlays_tests::run(&window, output); }
     if args.iter().any(|a| a == "verify-lens-answers") { return lens_tests::run(&window, output); }
     if args.iter().any(|a| a == "verify-approval-card") { return approval_tests::run(&window, output); }
     if args.iter().any(|a| a == "lens-answer") { return lens_tests::run_lens(&window, output); }

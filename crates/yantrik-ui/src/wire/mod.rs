@@ -21,6 +21,7 @@ pub(crate) mod files;
 pub mod open_with;
 pub(crate) mod chat;
 mod clipboard;
+mod shell_overlays;
 pub mod dock;
 pub mod harness;
 pub mod i18n;
@@ -83,6 +84,7 @@ pub fn wire_all(ui: &App, ctx: &AppContext) {
     chat::wire(ui, ctx);
     harness::wire(ui, ctx);
     clipboard::wire(ui, ctx);
+    shell_overlays::wire(ui, ctx);
     lens::wire(ui, ctx);
     navigate::wire(ui, ctx);
     dock::wire(ui, ctx);
