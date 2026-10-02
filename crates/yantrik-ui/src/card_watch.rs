@@ -10,8 +10,14 @@
 //!
 //! So while a card waits, a change of focus to any other window brings the shell back in front.
 //! The changes come from `toplevel_watch`, which follows the compositor's own stream, so nothing
-//! here polls. Three things the security review asked for shape it:
+//! here polls. What two security reviews asked for shapes it:
 //!
+//! - **A mind cannot move windows while a card waits.** `focus_window`, `show_app`, `open_app`,
+//!   `minimise_window` and `maximise_window` are refused on the control surface until the card is
+//!   answered ([`hold_windows`]); bringing the shell itself forward is still allowed. Without
+//!   that, a mind could spend the raises below by focusing an ordinary window six times, and the
+//!   card would stay behind the sixth (second review, 2 Oct 2026). Any focus change still left is
+//!   the person's own, or Mind View's, which the rules below answer.
 //! - **It cannot be beaten by timing.** A window that takes focus back inside [`MIN_GAP`] is not
 //!   ignored: a single recheck runs when the gap ends and raises if something other than the
 //!   shell is still in front.
@@ -21,10 +27,11 @@
 //!   five times would otherwise buy a mind a permanently hidden card.
 //! - **A raise cannot answer the card.** When the shell comes forward, the keyboard goes to a
 //!   neutral scope, never the Lens's text field (the rest of whatever the person was typing
-//!   would land there, and Enter would send it to the mind). For [`PRESS_GUARD`] after a raise,
-//!   a press on Allow is ignored, because a click meant for the window that was just covered can
-//!   land on it.
+//!   would land there, and Enter would send it to the mind). For [`PRESS_GUARD`] after the shell
+//!   comes forward, by whatever path, or after a new card appears, a press on Allow is ignored:
+//!   a click meant for the window that was just covered can land on it.
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -52,6 +59,8 @@ static RAISES: AtomicU32 = AtomicU32::new(0);
 static RECHECK_PENDING: AtomicBool = AtomicBool::new(false);
 static LAST: Mutex<Option<Instant>> = Mutex::new(None);
 static RAISED_AT: Mutex<Option<Instant>> = Mutex::new(None);
+/// The ids of the cards waiting now: a new id is a new card, whose count and guard start again.
+static WAITING_IDS: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 static SHELL_UI: OnceLock<slint::Weak<App>> = OnceLock::new();
 
 /// Give this module the shell's window, so a raise can put the keyboard somewhere neutral.
@@ -59,20 +68,56 @@ pub fn attach(ui: slint::Weak<App>) {
     let _ = SHELL_UI.set(ui);
 }
 
-/// The approvals store's word on whether any card is waiting. A new stretch of waiting starts
-/// its count and its gap again; an answered or expired card ends it.
-pub fn set_waiting(waiting: bool) {
-    let was = WAITING.swap(waiting, Ordering::Relaxed);
-    if waiting && !was {
+/// The approvals store's word on which cards are waiting, by id. A card that was not waiting
+/// before starts the count and the gap again, so a harmless card left pending cannot have used
+/// up the raises before the real one arrives (second review), and it starts the press guard: a
+/// card painted under a pointer that was already pressing is not a decision.
+pub fn set_waiting<'a>(ids: impl IntoIterator<Item = &'a str>) {
+    let now: HashSet<String> = ids.into_iter().map(str::to_string).collect();
+    WAITING.store(!now.is_empty(), Ordering::Relaxed);
+    let new_card = match WAITING_IDS.lock() {
+        Ok(mut seen) => {
+            let fresh = now.iter().any(|id| !seen.as_ref().is_some_and(|s| s.contains(id)));
+            *seen = Some(now);
+            fresh
+        }
+        Err(_) => false,
+    };
+    if new_card {
         RAISES.store(0, Ordering::Relaxed);
         if let Ok(mut last) = LAST.lock() {
             *last = None;
         }
+        shell_came_forward();
     }
 }
 
-/// Whether the shell came forward over another window less than [`PRESS_GUARD`] ago, so that a
-/// press on Allow now may be a click that was aimed somewhere else.
+/// Refuse an action that would move a window over the shell while a card waits. The shell's
+/// handlers for those actions call this before anything else.
+pub fn hold_windows(action: &str) -> Result<(), String> {
+    if !WAITING.load(Ordering::Relaxed) {
+        return Ok(());
+    }
+    Err(format!(
+        "a card is waiting for the person at this machine, so `{action}` was not run: windows \
+         stay where they are until it is answered, because a card behind a window is a decision \
+         nobody can make. Read `pending_approvals` in `describe shell`, and ask again once it is \
+         answered."
+    ))
+}
+
+/// The shell has just come forward, by any path: card_watch's own raise, a card going up, the
+/// Lens opening, a mind's `show_screen`. Each is a moment a click aimed at the window that was in
+/// front can land on Allow, so each starts the press guard (second review: only card_watch's own
+/// raises did, and a mind could choose the moment with any of the others).
+pub fn shell_came_forward() {
+    if let Ok(mut at) = RAISED_AT.lock() {
+        *at = Some(Instant::now());
+    }
+}
+
+/// Whether the shell came forward, or a new card appeared, less than [`PRESS_GUARD`] ago, so
+/// that a press on Allow now may be a click that was aimed somewhere else.
 pub fn just_raised() -> bool {
     RAISED_AT
         .lock()
@@ -124,8 +169,10 @@ fn decide(waiting: bool, title: &str, shells: usize, since_last: Option<Duration
 }
 
 fn raise(title: &str) {
-    if title != MIND_VIEW_TITLE {
-        RAISES.fetch_add(1, Ordering::Relaxed);
+    // Claimed, not counted after the fact: two focus changes deciding at once must not both get
+    // the fifth raise (second review).
+    if title != MIND_VIEW_TITLE && !claim_a_raise() {
+        return;
     }
     if let Ok(mut last) = LAST.lock() {
         *last = Some(Instant::now());
@@ -142,9 +189,7 @@ fn raise(title: &str) {
         }
         match crate::windows::raise_shell() {
             Ok(()) => {
-                if let Ok(mut at) = RAISED_AT.lock() {
-                    *at = Some(Instant::now());
-                }
+                shell_came_forward();
                 if let Some(ui) = SHELL_UI.get() {
                     let _ = ui.upgrade_in_event_loop(|ui| ui.invoke_focus_global_keys());
                 }
@@ -153,6 +198,13 @@ fn raise(title: &str) {
             Err(why) => tracing::warn!(%why, "a card is waiting behind another window and the shell could not come back in front"),
         }
     });
+}
+
+/// Take one of the raises other windows are allowed, if any is left.
+fn claim_a_raise() -> bool {
+    RAISES
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |r| (r < MAX_RAISES).then_some(r + 1))
+        .is_ok()
 }
 
 /// One recheck at a time: when the gap ends, raise if a card still waits and something other
@@ -217,19 +269,70 @@ mod tests {
         assert_eq!(decide(true, "Mind View", 1, None, MAX_RAISES + 20), Decision::Raise);
     }
 
+    /// The statics are shared, so the tests that touch them take turns.
+    static SERIAL: Mutex<()> = Mutex::new(());
+
+    /// Second review: a harmless card kept pending could use up the raises before the real one
+    /// arrived. Each new card starts the count and the gap again, and only a new one does.
     #[test]
-    fn a_new_stretch_of_waiting_counts_and_times_again() {
-        set_waiting(false);
+    fn a_new_card_counts_and_times_again_and_an_old_one_does_not() {
+        let _turn = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        set_waiting([]);
+        set_waiting(["decoy"]);
         RAISES.store(MAX_RAISES, Ordering::Relaxed);
         *LAST.lock().unwrap() = Some(Instant::now());
-        set_waiting(true);
-        assert_eq!(RAISES.load(Ordering::Relaxed), 0);
+        set_waiting(["decoy"]);
+        assert_eq!(RAISES.load(Ordering::Relaxed), MAX_RAISES, "the same card waiting on is not a new one");
+        set_waiting(["decoy", "real"]);
+        assert_eq!(RAISES.load(Ordering::Relaxed), 0, "a new card starts the count again");
         assert!(LAST.lock().unwrap().is_none());
-        set_waiting(false);
+        assert!(just_raised(), "and a card just painted is not answered by a press already on its way");
+        set_waiting([]);
+        *RAISED_AT.lock().unwrap() = None;
+    }
+
+    /// Second review: a mind focusing an ordinary window six times spent the raises and kept the
+    /// card behind the sixth. Window moves are refused while a card waits, and only then.
+    #[test]
+    fn window_moves_are_held_while_a_card_waits_and_only_then() {
+        let _turn = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        set_waiting([]);
+        assert!(hold_windows("focus_window").is_ok());
+        set_waiting(["c1"]);
+        let why = hold_windows("focus_window").unwrap_err();
+        assert!(why.contains("`focus_window` was not run") && why.contains("pending_approvals"), "{why}");
+        set_waiting([]);
+        assert!(hold_windows("focus_window").is_ok(), "answered, and windows move again");
+        *RAISED_AT.lock().unwrap() = None;
+    }
+
+    /// The fifth raise is claimed once, however many focus changes decide at the same moment.
+    #[test]
+    fn the_cap_is_claimed_not_counted_after() {
+        let _turn = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        RAISES.store(MAX_RAISES - 1, Ordering::Relaxed);
+        let won = (0..8).filter(|_| claim_a_raise()).count();
+        assert_eq!(won, 1);
+        RAISES.store(0, Ordering::Relaxed);
+    }
+
+    /// The handlers that move windows are the ones that ask first. Read from the source, the way
+    /// `published_actions_cannot_grant` reads it, so that a new window verb added without the
+    /// hold fails here rather than in front of a person.
+    #[test]
+    fn every_window_moving_action_asks_hold_windows_first() {
+        let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/control.rs")).unwrap();
+        for action in ["focus_window", "show_app", "open_app", "minimise_window", "maximise_window"] {
+            assert!(
+                src.contains(&format!("crate::card_watch::hold_windows(\"{action}\")")),
+                "`{action}` moves a window and does not call hold_windows; a card could be covered"
+            );
+        }
     }
 
     #[test]
     fn a_press_right_after_a_raise_is_not_taken_for_an_answer() {
+        let _turn = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         *RAISED_AT.lock().unwrap() = Some(Instant::now());
         assert!(just_raised());
         *RAISED_AT.lock().unwrap() = Some(Instant::now() - PRESS_GUARD - Duration::from_millis(10));

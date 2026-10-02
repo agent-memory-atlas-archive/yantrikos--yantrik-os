@@ -1754,7 +1754,9 @@ fn publish(ui: &App, cards: Vec<Card>, pane: &str) {
     let waiting = cards.iter().filter(|c| c.status == Status::Pending).count();
     // While anything waits, a window that takes focus over the shell is answered by bringing the
     // shell back (card_watch): a card behind Mind View is a decision nobody can make.
-    crate::card_watch::set_waiting(waiting > 0);
+    crate::card_watch::set_waiting(
+        cards.iter().filter(|c| c.status == Status::Pending).map(|c| c.id.as_str()),
+    );
     // Every waiting card, wherever it is drawn: the taskbar's count. `pending_approvals` below
     // holds only the one card on screen.
     ui.set_cards_pending(waiting as i32);
