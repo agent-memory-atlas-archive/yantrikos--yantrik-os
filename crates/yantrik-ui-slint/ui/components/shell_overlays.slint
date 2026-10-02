@@ -23,11 +23,17 @@ export component ShellOverlays inherits Rectangle {
     // The network's name, for the tile. It once stood as an empty string here, so the tile never
     // had a network to name.
     in property <string> wifi-ssid: "";
-    in-out property <int> brightness-level: 80;
-    in-out property <int> volume-level: 50;
+    // The machine's real levels (wire/audio.rs, wire/backlight.rs): nothing invented, and a
+    // row for hardware that is absent is not drawn.
+    in property <bool> brightness-available: false;
+    in-out property <int> brightness-level: 0;
+    in property <bool> volume-available: false;
+    in property <bool> volume-muted: false;
+    in-out property <int> volume-level: 0;
     callback toggle-wifi();
     callback brightness-changed(int);
     callback volume-changed(int);
+    callback volume-mute-toggled();
 
     // Power menu
     in-out property <bool> power-menu-open: false;
@@ -52,11 +58,15 @@ export component ShellOverlays inherits Rectangle {
         battery-charging: root.battery-charging;
         wifi-connected: root.wifi-connected;
         wifi-ssid: root.wifi-ssid;
+        brightness-available: root.brightness-available;
         brightness-level <=> root.brightness-level;
+        volume-available: root.volume-available;
+        volume-muted: root.volume-muted;
         volume-level <=> root.volume-level;
         toggle-wifi => { root.toggle-wifi(); }
         brightness-changed(val) => { root.brightness-changed(val); }
         volume-changed(val) => { root.volume-changed(val); }
+        volume-mute-toggled => { root.volume-mute-toggled(); }
         close => { root.quick-settings-open = false; }
     }
 

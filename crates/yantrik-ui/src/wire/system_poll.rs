@@ -106,6 +106,8 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                 )
             };
             publish_network(&ui, &readout);
+            // The brightness keys move the panel behind the shell's back; one file read.
+            super::backlight::refresh(&ui);
         }
 
         // 1. Drain all pending system events
@@ -126,6 +128,11 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                 }
             }
             return;
+        }
+
+        // 1-. The volume follows what the audio server said, whoever changed it.
+        if let Some(ui) = ui_weak.upgrade() {
+            super::audio::apply_events(&ui, &events);
         }
 
         // 1a. Bridge system events into the cognitive event bus

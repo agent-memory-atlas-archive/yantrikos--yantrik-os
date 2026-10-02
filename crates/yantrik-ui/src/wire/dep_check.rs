@@ -14,7 +14,7 @@ const OPTIONAL_DEPS: &[(&str, &str)] = &[
     ("mpv", "Media Player, Music Player"),
     ("nmcli", "Network Manager, WiFi toggle"),
     ("brightnessctl", "Brightness control"),
-    ("amixer", "Volume control"),
+    ("wpctl", "Volume control"),
     ("chromium", "Browser-based apps"),
     ("firefox-esr", "Browser"),
     ("docker", "Container Manager"),

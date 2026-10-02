@@ -7,6 +7,10 @@
 //! main.rs stays untouched.
 
 mod about;
+/// The volume slider and the machine's real volume (PipeWire).
+pub mod audio;
+/// The brightness slider and the machine's real backlight.
+pub mod backlight;
 // The Agents screen and every agent popped out into its own window.
 pub mod agents;
 pub mod runs_on_card;
@@ -89,6 +93,8 @@ pub fn wire_all(ui: &App, ctx: &AppContext) {
     navigate::wire(ui, ctx);
     dock::wire(ui, ctx);
     power::wire(ui, ctx);
+    audio::wire(ui, ctx);
+    backlight::wire(ui, ctx);
     app_grid::wire(ui, ctx);
     window_switcher::wire(ui, ctx);
     show_desktop::wire(ui);

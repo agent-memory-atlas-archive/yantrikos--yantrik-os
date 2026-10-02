@@ -902,6 +902,7 @@ fn system_event_tag(event: &SystemEvent) -> &'static str {
     match event {
         SystemEvent::BatteryChanged { .. } => "battery",
         SystemEvent::NetworkChanged { .. } => "network",
+        SystemEvent::AudioChanged { .. } => "audio",
         SystemEvent::NotificationReceived { .. } => "notification",
         SystemEvent::FileChanged { .. } => "file",
         SystemEvent::ProcessStarted { .. } => "proc_start",

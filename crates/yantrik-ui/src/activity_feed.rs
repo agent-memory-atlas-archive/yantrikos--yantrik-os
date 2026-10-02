@@ -233,7 +233,8 @@ impl ActivityAccumulator {
                     FileChangeKind::Renamed { .. } => self.current.file_modifies += 1,
                 }
             }
-            SystemEvent::KeybindTriggered { .. } => {}
+            // The volume is not something the person did or the machine suffered.
+            SystemEvent::KeybindTriggered { .. } | SystemEvent::AudioChanged { .. } => {}
         }
     }
 

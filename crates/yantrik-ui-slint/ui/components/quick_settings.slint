@@ -10,12 +10,18 @@ export component QuickSettings inherits Rectangle {
     in property <bool> battery-charging: false;
     in property <bool> wifi-connected: false;
     in property <string> wifi-ssid: "";
-    in-out property <int> brightness-level: 80;
-    in-out property <int> volume-level: 50;
+    // The machine's real levels. A row for hardware that is not there (a VM has no backlight,
+    // a box may have no audio server) is not drawn at all, rather than drawn with a made-up value.
+    in property <bool> brightness-available: false;
+    in-out property <int> brightness-level: 0;
+    in property <bool> volume-available: false;
+    in property <bool> volume-muted: false;
+    in-out property <int> volume-level: 0;
 
     callback toggle-wifi();
     callback brightness-changed(int);
     callback volume-changed(int);
+    callback volume-mute-toggled();
     callback close();
 
     width: 100%;
@@ -167,7 +173,7 @@ export component QuickSettings inherits Rectangle {
             Rectangle { height: 1px; background: Theme.separator; }
 
             // -- Brightness slider --
-            VerticalLayout {
+            if root.brightness-available : VerticalLayout {
                 spacing: 8px;
 
                 HorizontalLayout {
@@ -238,7 +244,7 @@ export component QuickSettings inherits Rectangle {
             }
 
             // -- Volume slider --
-            VerticalLayout {
+            if root.volume-available : VerticalLayout {
                 spacing: 8px;
 
                 HorizontalLayout {
@@ -249,11 +255,20 @@ export component QuickSettings inherits Rectangle {
                         horizontal-stretch: 1;
                         vertical-alignment: center;
                     }
-                    Text {
-                        text: root.volume-level + "%";
-                        color: Theme.cyan;
-                        font-size: Theme.font-small;
-                        font-weight: 600;
+                    // The level, or "Muted"; pressing it mutes and unmutes.
+                    Rectangle {
+                        width: 56px;
+                        Text {
+                            width: 100%;
+                            horizontal-alignment: right;
+                            text: root.volume-muted ? "Muted" : root.volume-level + "%";
+                            color: root.volume-muted ? Theme.text-dim : Theme.cyan;
+                            font-size: Theme.font-small;
+                            font-weight: 600;
+                        }
+                        TouchArea {
+                            clicked => { root.volume-mute-toggled(); }
+                        }
                     }
                 }
 
