@@ -73,7 +73,14 @@ def mind_idle(state):
 def show_mind_view():
     """Put Mind View in front, so the stream shows the Mind's work. A person can minimise it or
     open something over it between turns; the person watching should not see an idle desktop
-    while the Mind builds. Best effort: Mind View may not exist yet before the Mind opens an app."""
+    while the Mind builds. Best effort: Mind View may not exist yet before the Mind opens an app.
+
+    Never while a card is waiting: the card is drawn in the shell's Mind panel, and Mind View
+    maximised covers the whole shell. On 561 a waiting agent_run card sat behind it and the
+    person at the machine looked for it and could not see it (2 Oct 2026)."""
+    state = shell_state()
+    if state is not None and state.get("pending_approvals"):
+        return
     subprocess.run([YOS, "act", "shell", "focus_window", "title=Mind View"],
                    capture_output=True, text=True, timeout=30)
 
