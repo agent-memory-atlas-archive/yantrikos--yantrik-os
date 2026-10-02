@@ -29,8 +29,9 @@ use crate::app_context::AppContext;
 use crate::{
     AccentPreset, AgentDetailsData, AgentHeaderData, AgentItemData, AgentMindData, AgentRoleData, AgentRowData,
     AgentRunData, AgentTabData, AgentWindow, AgentsState, App, ApprovalRequest, RouteStopData, ThemeMode,
-    ThemeOverrides, ToolCallData,
+    ThemeOverrides, ToolCallData, WorkCardData,
 };
+use super::lens_work;
 
 /// The screen id `app.slint` draws the Agents screen at.
 pub const SCREEN: i32 = 34;
@@ -562,6 +563,7 @@ fn refresh(ui: &App, state: &Shared, force: bool) {
 
         // Published whatever the view, so choosing Overview finds the route already there.
         publish_route(&g, s, selected.as_ref(), st.run);
+        publish_lens(&g, s);
     });
 
     if g.get_new_open() {
@@ -591,6 +593,52 @@ fn refresh(ui: &App, state: &Shared, force: bool) {
         }
     } else {
         st.roles_read = None;
+    }
+}
+
+/// What the Lens's conversation shows of the runs it started (Chat v2): a card per run, the run the
+/// strip describes, and the counts. The runs are the active mind's own conversation, which is the
+/// one the Lens is. Set only where it changed, so a conversation in which nothing moves asks for no
+/// redraw.
+fn publish_lens(g: &AgentsState, s: &Store) {
+    let host = crate::wire::harness::host();
+    let active = host.map(|h| h.active_id()).unwrap_or_else(|| crate::wire::harness::BUILTIN_ID.to_string());
+    let works = s
+        .agent(&feed::main_agent(&active))
+        .map(|a| lens_work::works_of(a, now()))
+        .unwrap_or_default();
+    let cards: Vec<WorkCardData> = works.iter().map(work_card).collect();
+    if let Some(model) = crate::models::changed(g.get_lens_cards(), cards) {
+        g.set_lens_cards(model);
+    }
+    let strip = lens_work::strip_of(&works).map(work_card).unwrap_or_default();
+    if g.get_lens_strip() != strip {
+        g.set_lens_strip(strip);
+    }
+    let live = works.iter().filter(|w| w.live).count() as i32;
+    let waiting = works.iter().filter(|w| w.state == "needs-you").count() as i32;
+    if g.get_lens_live() != live {
+        g.set_lens_live(live);
+    }
+    if g.get_lens_waiting() != waiting {
+        g.set_lens_waiting(waiting);
+    }
+    let identity = if active == crate::wire::harness::BUILTIN_ID { "Built-in mind" } else { "Attached mind" };
+    if g.get_lens_identity() != identity {
+        g.set_lens_identity(identity.into());
+    }
+}
+
+fn work_card(w: &lens_work::Work) -> WorkCardData {
+    WorkCardData {
+        run: w.run.as_str().into(),
+        title: w.title.as_str().into(),
+        mind: w.mind.as_str().into(),
+        state: w.state.into(),
+        label: w.label.into(),
+        activity: w.activity.as_str().into(),
+        can_view_desk: w.can_view_desk,
+        can_review: w.can_review,
     }
 }
 
@@ -844,7 +892,7 @@ fn duration(secs: u64) -> String {
 }
 
 /// Local time today, the date before today.
-fn clock(unix: u64) -> String {
+pub(super) fn clock(unix: u64) -> String {
     use chrono::TimeZone;
     let Some(at) = chrono::Local.timestamp_opt(unix as i64, 0).single() else { return String::new() };
     if at.date_naive() == chrono::Local::now().date_naive() {
@@ -2011,6 +2059,8 @@ mod tests {
             can_session: true,
             status: crate::approvals::Status::Pending,
             record: String::new(),
+            decided_at: String::new(),
+            session: false,
             age_secs: 4,
         }
     }
@@ -2091,8 +2141,13 @@ mod tests {
     /// The Lens's "open in Agents" is wired from its header to the shell, through every layer.
     #[test]
     fn the_lens_offers_open_in_agents_and_the_shell_answers_it() {
+        // The header button (Chat v2: ChatHeader) is offered only for an agent's conversation, and
+        // the Lens forwards its press.
+        let header = read("../yantrik-ui-slint/ui/components/chat_chrome.slint");
+        assert!(header.contains("if root.can-open-in-agents : ChatIconButton {\n                    label: \"Open in Agents\";"));
+        assert!(header.contains("clicked => { root.open-in-agents(); }"));
         let lens = read("../yantrik-ui-slint/ui/components/intent_lens.slint");
-        assert!(lens.contains("if root.can-open-in-agents : agents-hit := TouchArea") && lens.contains("clicked => { root.open-in-agents(); }"));
+        assert!(lens.contains("open-in-agents => { root.open-in-agents(); }"));
         let desktop = read("../yantrik-ui-slint/ui/desktop.slint");
         assert!(desktop.contains("open-in-agents => { root.lens-open-in-agents(); }"));
         assert!(desktop.contains("can-open-in-agents: root.lens-can-open-in-agents;"));

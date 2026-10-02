@@ -15,6 +15,9 @@ pub mod backlight;
 pub mod osd;
 // The Agents screen and every agent popped out into its own window.
 pub mod agents;
+#[cfg(test)]
+mod lens_card_layout;
+pub mod lens_work;
 pub mod runs_on_card;
 // The Recipes screen: every recipe as its stages, live.
 pub mod recipes;

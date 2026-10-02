@@ -357,6 +357,8 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
         decision: "".into(),
         record: "".into(),
         age_text: "94s left".into(),
+        decided_at: "".into(),
+        session: false,
     };
     g.set_items(ModelRc::new(VecModel::from(vec![
         item("prompt", "t2", "move the duplicates into Trash"),
