@@ -207,6 +207,30 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     assert_eq!(chosen.borrow().last().map(String::as_str), Some("balanced"), "a press where Performance was reaches Balanced");
     assert_eq!(chosen.borrow().iter().filter(|p| *p == "performance").count(), 1, "Performance was asked for once, while it was offered, and not since");
 
+    // A backlight puts the shared brightness slider in the popover, and a VM (none) draws none.
+    ui.set_power_profile("balanced".into());
+    ui.set_power_performance_offered(true);
+    ui.set_brightness_available(true);
+    ui.set_brightness_level(70);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let lit = draw(w);
+    save_crop(&lit, &path("popover-with-brightness"), (W - 460, W), (0, 260), 2)?;
+    assert!(changed(&three, &lit, (900, 1280), (100, 260)) > 1_000, "a backlight adds the brightness slider");
+    let levels: Rc<RefCell<Vec<i32>>> = Rc::default();
+    {
+        let l = levels.clone();
+        ui.on_brightness_changed(move |v| l.borrow_mut().push(v));
+    }
+    // The slider is the popover's first row below the level; press its middle.
+    let mut slid = false;
+    for y in (110..200).step_by(4) {
+        click(w, 1090.0, y as f32);
+        if !levels.borrow().is_empty() { slid = true; break; }
+    }
+    assert!(slid, "pressing the slider reaches the shell's one brightness callback");
+    assert!(ui.get_brightness_level() >= 30 && ui.get_brightness_level() <= 70, "the shared level follows the slider: {}", ui.get_brightness_level());
+    ui.set_brightness_available(false);
+
     // No daemon: no choice at all, and the popover is shorter.
     ui.set_power_profile("".into());
     std::thread::sleep(std::time::Duration::from_millis(300));

@@ -91,6 +91,13 @@ export component ShellOverlays inherits Rectangle {
         power-profile: root.power-profile;
         performance-offered: root.power-performance-offered;
         profile-chosen(p) => { root.set-power-profile(p); }
+        brightness-available: root.brightness-available;
+        brightness-level: root.brightness-level;
+        brightness-changed(v) => {
+            // The slider shows `value` once the drag ends, so the shared level moves with it.
+            root.brightness-level = v;
+            root.brightness-changed(v);
+        }
         close-requested => { root.battery-popover-open = false; }
     }
 

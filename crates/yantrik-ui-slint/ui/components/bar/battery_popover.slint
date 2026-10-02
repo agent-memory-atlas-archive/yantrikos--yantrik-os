@@ -7,9 +7,12 @@
 // `profile-chosen` goes to the owner, who sets it and then shows what the daemon says is in
 // effect.
 //
-// Brightness is not here yet: the one brightness reader and setter is story 0.2, and a second
-// one would be the duplicate this project does not allow.
+// Brightness is the one slider the machine's backlight already has (`wire/backlight.rs`, story
+// 0.2): this binds to its level and its callback rather than reading the panel a second time. It
+// is drawn only when there is a backlight; a VM or a desktop monitor has none.
 import { Theme } from "theme.slint";
+import { Icons } from "../icon.slint";
+import { YSlider } from "../y_slider.slint";
 import { YPopover } from "../y_popover.slint";
 import { YButton } from "../y_button.slint";
 
@@ -21,6 +24,9 @@ export component BatteryPopover inherits YPopover {
     in property <string> power-profile: "";
     in property <bool> performance-offered: false;
     callback profile-chosen(string);
+    in property <bool> brightness-available: false;
+    in property <int> brightness-level: 0;
+    callback brightness-changed(int);
 
     label: "Battery";
     content-spacing: Theme.sp-3;
@@ -49,6 +55,15 @@ export component BatteryPopover inherits YPopover {
                 font-size: Theme.fs-caption;
             }
         }
+    }
+
+    if root.brightness-available : YSlider {
+        label: "Brightness";
+        icon: Icons.sun;
+        value: root.brightness-level;
+        show-value: true;
+        value-suffix: "%";
+        changed(v) => { root.brightness-changed(v); }
     }
 
     if root.power-profile != "" : VerticalLayout {
