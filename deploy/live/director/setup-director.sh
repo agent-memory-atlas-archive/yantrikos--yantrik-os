@@ -11,8 +11,8 @@ ENABLE=${ENABLE:-1}
 . ../guest.sh
 
 guest 'set -e; install -d -m 755 /opt/yantrik-live/director; install -d -o yantrik -g yantrik -m 700 /home/yantrik/director' < /dev/null
-for f in director.py missions.json; do
-  guest "set -e; cat > /opt/yantrik-live/director/$f.new; chmod 644 /opt/yantrik-live/director/$f.new; mv /opt/yantrik-live/director/$f.new /opt/yantrik-live/director/$f" < "$f"
+for f in director.py missions.json check-page; do
+  guest "set -e; cat > /opt/yantrik-live/director/$f.new; chmod 644 /opt/yantrik-live/director/$f.new; [ $f = check-page ] && chmod 755 /opt/yantrik-live/director/$f.new; mv /opt/yantrik-live/director/$f.new /opt/yantrik-live/director/$f" < "$f"
 done
 for u in yantrik-live-director.service yantrik-live-director.timer; do
   guest "set -e; cat > /etc/systemd/system/$u; chmod 644 /etc/systemd/system/$u" < "$u"
