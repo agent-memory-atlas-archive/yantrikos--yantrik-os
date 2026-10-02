@@ -478,11 +478,16 @@ export component App inherits Window {
 
     // Quick Settings state
     in-out property <bool> quick-settings-open: false;
-    in-out property <int> brightness-level: 80;
-    in-out property <int> volume-level: 50;
+    // Real readings, published by wire/audio.rs and wire/backlight.rs. Nothing invented here.
+    in-out property <bool> brightness-available: false;
+    in-out property <int> brightness-level: 0;
+    in-out property <bool> volume-available: false;
+    in-out property <bool> volume-muted: false;
+    in-out property <int> volume-level: 0;
     callback toggle-wifi();
     callback brightness-changed(int);
     callback volume-changed(int);
+    callback volume-mute-toggled();
 
     // Command Palette state (Ctrl+Shift+P)
     in-out property <bool> command-palette-open: false;
@@ -2660,11 +2665,15 @@ export component App inherits Window {
             battery-charging: root.battery-charging;
             wifi-connected: root.wifi-connected;
             wifi-ssid: root.sys-wifi-ssid;
+            brightness-available: root.brightness-available;
             brightness-level <=> root.brightness-level;
+            volume-available: root.volume-available;
+            volume-muted: root.volume-muted;
             volume-level <=> root.volume-level;
             toggle-wifi => { root.toggle-wifi(); }
             brightness-changed(val) => { root.brightness-changed(val); }
             volume-changed(val) => { root.volume-changed(val); }
+            volume-mute-toggled => { root.volume-mute-toggled(); }
             power-menu-open <=> root.power-menu-open;
             power-action(action) => { root.power-action(action); }
             clip-panel-open <=> root.clip-panel-open;

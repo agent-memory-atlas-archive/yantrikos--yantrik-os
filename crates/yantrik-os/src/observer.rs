@@ -124,6 +124,16 @@ impl SystemObserver {
                 .expect("failed to spawn network monitor");
             handles.push(h);
 
+            // The volume, wherever it was changed (PipeWire, through pactl subscribe).
+            let tx = event_tx.clone();
+            let h = std::thread::Builder::new()
+                .name("yos-audio".into())
+                .spawn(move || {
+                    crate::audio::run_audio_watcher(tx);
+                })
+                .expect("failed to spawn audio watcher");
+            handles.push(h);
+
             // No notification daemon here.
             //
             // This used to hold `org.freedesktop.Notifications` from a thread of its own — and

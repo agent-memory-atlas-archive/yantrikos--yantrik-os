@@ -49,6 +49,7 @@ mod control;
 mod control_approvals;
 mod control_overlays;
 mod control_installer;
+mod control_levels;
 mod installer_rules;
 mod control_update;
 mod control_files;

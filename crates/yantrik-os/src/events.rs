@@ -25,6 +25,14 @@ pub enum SystemEvent {
         signal: Option<u8>,
     },
 
+    // ── Sound ──
+    /// The default output's volume or mute changed, whoever changed it.
+    AudioChanged {
+        /// 0-100.
+        volume_pct: u8,
+        muted: bool,
+    },
+
     // ── Notifications ──
     NotificationReceived {
         app: String,

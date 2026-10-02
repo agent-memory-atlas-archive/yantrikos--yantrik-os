@@ -881,6 +881,24 @@ pub fn publish(
                 .with("disk", ui.get_bar_disk_text().to_string())
                 .with("disk_percent", ui.get_bar_disk_percent())
                 .with("wifi", ui.get_wifi_connected())
+                // The machine's own levels, as Quick Settings shows them. `null` / `available:
+                // false` rather than a number when the machine has no audio server or no
+                // backlight (a VM has neither a panel nor, sometimes, a mixer).
+                .with(
+                    "audio",
+                    crate::control_levels::audio_for_describe(
+                        ui.get_volume_available(),
+                        ui.get_volume_level(),
+                        ui.get_volume_muted(),
+                    ),
+                )
+                .with(
+                    "brightness",
+                    crate::control_levels::brightness_for_describe(
+                        ui.get_brightness_available(),
+                        ui.get_brightness_level(),
+                    ),
+                )
                 // `wifi` alone was the whole of what the desktop said about
                 // its network, and on the wired test machine it is false —
                 // so a mind reading this concluded there was no network on a
@@ -967,6 +985,9 @@ pub fn publish(
     let panel_ui = ui_for.clone();
     let desk_ui = ui_for.clone();
     let rule_ui = ui_for.clone();
+    let volume_ui = ui_for.clone();
+    let mute_ui = ui_for.clone();
+    let brightness_ui = ui_for.clone();
     let lock_ui = ui_for;
 
     let surface = ControlSurface::new("shell")
@@ -1858,6 +1879,61 @@ pub fn publish(
                 Ok(serde_json::json!({
                     "do_not_disturb": crate::wire::settings::dnd_mode(),
                 }))
+            },
+        )
+        .action(
+            // Quick Settings' volume slider, for a caller. Standard: it moves the machine's own
+            // output level, which the volume keys move too and which the person takes back with
+            // the same slider; nothing is stored by the shell. Settles on return: the answer is
+            // the volume read back from PipeWire, which can differ from the level asked for.
+            Action::new("set_volume", "Set the machine's output volume, 0 to 100 percent, on the default speaker")
+                .arg(Param::integer("level").describe("Percent, 0 to 100")),
+            move |args| {
+                let ui = volume_ui()?;
+                crate::control_levels::set_volume(
+                    args,
+                    yantrik_os::audio::set_volume,
+                    || {
+                        let now = yantrik_os::audio::read();
+                        crate::wire::audio::publish(&ui, now);
+                        now
+                    },
+                )
+            },
+        )
+        .action(
+            Action::new("set_mute", "Mute or unmute the machine's default speaker, keeping its volume")
+                .arg(Param::flag("muted").describe("true to mute, false to unmute")),
+            move |args| {
+                let ui = mute_ui()?;
+                crate::control_levels::set_mute(
+                    args,
+                    yantrik_os::audio::set_mute,
+                    || {
+                        let now = yantrik_os::audio::read();
+                        crate::wire::audio::publish(&ui, now);
+                        now
+                    },
+                )
+            },
+        )
+        .action(
+            // Refused, not pretended, on a machine with no backlight: a VM or a desktop monitor
+            // has none, and `describe` says so under `brightness.available`.
+            Action::new("set_brightness", "Set the screen's brightness, 1 to 100 percent, on a machine that has a backlight")
+                .arg(Param::integer("level").describe("Percent, 0 to 100; the panel is never set below 1 so the screen stays readable")),
+            move |args| {
+                let ui = brightness_ui()?;
+                crate::control_levels::set_brightness(
+                    args,
+                    ui.get_brightness_available(),
+                    yantrik_os::backlight::set,
+                    || {
+                        let now = yantrik_os::backlight::read();
+                        crate::wire::backlight::publish(&ui, now);
+                        now
+                    },
+                )
             },
         )
         .action(

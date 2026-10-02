@@ -361,31 +361,8 @@ fn wire_quick_settings(ui: &App) {
         tracing::info!(new_state, "WiFi toggled");
     });
 
-    // Brightness via brightnessctl
-    ui.on_brightness_changed(move |level| {
-        if !has_command("brightnessctl") {
-            tracing::debug!("brightnessctl not installed — brightness control unavailable");
-            return;
-        }
-        let pct = format!("{}%", level);
-        let _ = std::process::Command::new("brightnessctl")
-            .args(["s", &pct])
-            .spawn();
-        tracing::debug!(level, "Brightness changed");
-    });
-
-    // Volume via amixer
-    ui.on_volume_changed(move |level| {
-        if !has_command("amixer") {
-            tracing::debug!("amixer not installed — volume control unavailable");
-            return;
-        }
-        let pct = format!("{}%", level);
-        let _ = std::process::Command::new("amixer")
-            .args(["-M", "set", "Master", &pct])
-            .spawn();
-        tracing::debug!(level, "Volume changed");
-    });
+    // Brightness and volume are wired in wire/backlight.rs and wire/audio.rs, which read the
+    // machine's real levels as well as set them.
 }
 
 // ── Memory search ──

@@ -1,0 +1,232 @@
+//! The machine's volume: PipeWire's default output, read and set through `wpctl`.
+//!
+//! The image runs PipeWire with WirePlumber. The shell used to move the raw ALSA mixer
+//! instead, which is a different control from the one the volume keys and every other
+//! app move, so the slider and the speaker could disagree. Everything here goes through the one
+//! the session's audio server owns.
+//!
+//! Commands run with argument vectors, never through a shell. A machine with no `wpctl` (or no
+//! audio server) answers `None`/`Err`: there is no guessed value to fall back to.
+
+use std::io::{BufRead, BufReader};
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::time::Duration;
+
+use crossbeam_channel::Sender;
+
+use crate::events::SystemEvent;
+
+const DEFAULT_SINK: &str = "@DEFAULT_AUDIO_SINK@";
+
+/// What the default output is doing right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AudioState {
+    /// 0..=100. A sink turned up past 100% (wpctl allows it) reads as 100: the slider's range
+    /// ends there, and the shell never sets more.
+    pub volume_pct: u8,
+    pub muted: bool,
+}
+
+/// Parse the output of `wpctl get-volume @DEFAULT_AUDIO_SINK@`, which looks like
+/// `Volume: 0.45` or `Volume: 0.45 [MUTED]`. Anything else is not a reading.
+pub fn parse_get_volume(out: &str) -> Option<AudioState> {
+    let rest = out.trim().strip_prefix("Volume:")?;
+    let mut parts = rest.split_whitespace();
+    let fraction: f64 = parts.next()?.parse().ok()?;
+    if !fraction.is_finite() || fraction < 0.0 {
+        return None;
+    }
+    let muted = parts.any(|p| p == "[MUTED]");
+    let volume_pct = (fraction * 100.0).round().min(100.0) as u8;
+    Some(AudioState { volume_pct, muted })
+}
+
+/// The current volume and mute of the default output, or `None` when there is no audio server
+/// to ask.
+pub fn read() -> Option<AudioState> {
+    let out = Command::new("wpctl")
+        .args(["get-volume", DEFAULT_SINK])
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_get_volume(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// The argument vector that sets the volume. `-l 1.0` is wpctl's own ceiling, so even a value
+/// that slipped past the clamp could not push the sink over 100%.
+fn set_volume_args(pct: u8) -> Vec<String> {
+    vec![
+        "set-volume".into(),
+        "-l".into(),
+        "1.0".into(),
+        DEFAULT_SINK.into(),
+        format!("{}%", pct.min(100)),
+    ]
+}
+
+fn run_wpctl(args: &[String]) -> Result<(), String> {
+    let out = Command::new("wpctl")
+        .args(args)
+        .stderr(Stdio::piped())
+        .stdout(Stdio::null())
+        .output()
+        .map_err(|e| format!("wpctl could not be run: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(format!("wpctl failed: {}", String::from_utf8_lossy(&out.stderr).trim()))
+    }
+}
+
+/// Set the default output's volume, clamped to 0..=100.
+pub fn set_volume(pct: u8) -> Result<(), String> {
+    run_wpctl(&set_volume_args(pct))
+}
+
+/// Mute or unmute the default output.
+pub fn set_mute(muted: bool) -> Result<(), String> {
+    run_wpctl(&["set-mute".into(), DEFAULT_SINK.into(), if muted { "1" } else { "0" }.into()])
+}
+
+/// Whether one line of `pactl subscribe` is about an output: a sink changing (volume, mute) or
+/// the server picking another default. Input, stream and card lines are not the volume.
+fn is_output_event(line: &str) -> bool {
+    let l = line.trim();
+    l.starts_with("Event 'change' on sink #") || l.starts_with("Event 'change' on server")
+}
+
+/// How long the lines must stop for before the level is read. A slider drag or a held key
+/// makes dozens of events a second; one reading after they settle is the value that matters.
+const SETTLE: Duration = Duration::from_millis(120);
+
+/// How long to wait before asking the audio server again after it went away.
+const RETRY: Duration = Duration::from_secs(5);
+
+/// Watch the audio server and say `AudioChanged` when the default output's volume or mute
+/// changes, whoever changed it: the keys, another app, `wpctl` in a terminal.
+///
+/// Stops at once, logging once, when `pactl` is not installed. When the server goes away
+/// (a restart of PipeWire) it asks again every few seconds, without logging each time.
+pub fn run_audio_watcher(tx: Sender<SystemEvent>) {
+    let mut last = read();
+    let mut warned = false;
+    loop {
+        let mut child = match Command::new("pactl")
+            .arg("subscribe")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                tracing::info!("pactl is not installed; the shell will not follow volume changes made elsewhere");
+                return;
+            }
+            Err(e) => {
+                if !warned {
+                    tracing::warn!(error = %e, "could not start `pactl subscribe`; retrying quietly");
+                    warned = true;
+                }
+                std::thread::sleep(RETRY);
+                continue;
+            }
+        };
+        let Some(stdout) = child.stdout.take() else { return };
+        tracing::info!("Audio watcher started (pactl subscribe)");
+
+        // A reader thread, so the settling wait below can time out. It ends when pactl does.
+        let (line_tx, line_rx) = mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                if is_output_event(&line) && line_tx.send(()).is_err() {
+                    break;
+                }
+            }
+        });
+
+        // `Err` from the blocking recv means the reader finished: pactl exited.
+        while line_rx.recv().is_ok() {
+            while line_rx.recv_timeout(SETTLE).is_ok() {}
+            let now = read();
+            if now != last {
+                last = now;
+                if let Some(AudioState { volume_pct, muted }) = now {
+                    let _ = tx.try_send(SystemEvent::AudioChanged { volume_pct, muted });
+                }
+            }
+        }
+        let _ = child.wait();
+        std::thread::sleep(RETRY);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_normal_reading() {
+        assert_eq!(parse_get_volume("Volume: 0.45\n"), Some(AudioState { volume_pct: 45, muted: false }));
+        assert_eq!(parse_get_volume("Volume: 1.00\n"), Some(AudioState { volume_pct: 100, muted: false }));
+        assert_eq!(parse_get_volume("Volume: 0.00\n"), Some(AudioState { volume_pct: 0, muted: false }));
+    }
+
+    #[test]
+    fn a_muted_sink_keeps_its_level() {
+        assert_eq!(parse_get_volume("Volume: 0.45 [MUTED]\n"), Some(AudioState { volume_pct: 45, muted: true }));
+    }
+
+    #[test]
+    fn a_sink_turned_up_past_full_reads_as_full() {
+        assert_eq!(parse_get_volume("Volume: 1.20\n"), Some(AudioState { volume_pct: 100, muted: false }));
+        assert_eq!(parse_get_volume("Volume: 1.53 [MUTED]\n"), Some(AudioState { volume_pct: 100, muted: true }));
+    }
+
+    #[test]
+    fn rounding_follows_the_nearest_percent() {
+        assert_eq!(parse_get_volume("Volume: 0.336\n").map(|s| s.volume_pct), Some(34));
+        assert_eq!(parse_get_volume("Volume: 0.304\n").map(|s| s.volume_pct), Some(30));
+    }
+
+    #[test]
+    fn anything_else_is_not_a_reading() {
+        for bad in [
+            "",
+            "\n",
+            "Volume:",
+            "Volume: loud",
+            "Volume: -0.5",
+            "Volume: NaN",
+            "Volume: inf",
+            "Could not connect to PipeWire",
+            "wpctl: command not found",
+            "0.45",
+        ] {
+            assert_eq!(parse_get_volume(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn the_set_command_is_an_argument_vector_capped_at_full() {
+        assert_eq!(
+            set_volume_args(45),
+            ["set-volume", "-l", "1.0", "@DEFAULT_AUDIO_SINK@", "45%"]
+        );
+        assert_eq!(set_volume_args(250).last().map(String::as_str), Some("100%"));
+    }
+
+    #[test]
+    fn only_output_lines_wake_the_watcher() {
+        assert!(is_output_event("Event 'change' on sink #53"));
+        assert!(is_output_event("Event 'change' on server #0"));
+        assert!(!is_output_event("Event 'change' on source #54"));
+        assert!(!is_output_event("Event 'new' on sink-input #120"));
+        assert!(!is_output_event("Event 'remove' on sink-input #120"));
+        assert!(!is_output_event("Event 'change' on card #2"));
+    }
+}
