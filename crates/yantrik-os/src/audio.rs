@@ -18,6 +18,7 @@ use crossbeam_channel::Sender;
 use crate::events::SystemEvent;
 
 const DEFAULT_SINK: &str = "@DEFAULT_AUDIO_SINK@";
+const DEFAULT_SOURCE: &str = "@DEFAULT_AUDIO_SOURCE@";
 
 /// What the default output is doing right now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +69,21 @@ fn set_volume_args(pct: u8) -> Vec<String> {
     ]
 }
 
+/// The argument vector for moving the volume by `step` percent in ONE wpctl call. wpctl applies
+/// the step to the level the server holds at that instant, so two key presses that overlap each
+/// move it twice; reading the level first and writing a target lost one of them (review of the
+/// on-screen display). `-l 1.0` is the ceiling on the way up, and wpctl stops at 0 on the way
+/// down by itself.
+fn step_volume_args(step: i8) -> Vec<String> {
+    let amount = format!("{}%{}", step.unsigned_abs(), if step < 0 { "-" } else { "+" });
+    let mut args: Vec<String> = vec!["set-volume".into()];
+    if step > 0 {
+        args.extend(["-l".to_string(), "1.0".to_string()]);
+    }
+    args.extend([DEFAULT_SINK.to_string(), amount]);
+    args
+}
+
 fn run_wpctl(args: &[String]) -> Result<(), String> {
     let out = Command::new("wpctl")
         .args(args)
@@ -87,9 +103,39 @@ pub fn set_volume(pct: u8) -> Result<(), String> {
     run_wpctl(&set_volume_args(pct))
 }
 
+/// Move the volume of the default output by `step` percent, atomically (see
+/// [`step_volume_args`]).
+pub fn step_volume(step: i8) -> Result<(), String> {
+    run_wpctl(&step_volume_args(step))
+}
+
 /// Mute or unmute the default output.
 pub fn set_mute(muted: bool) -> Result<(), String> {
-    run_wpctl(&["set-mute".into(), DEFAULT_SINK.into(), if muted { "1" } else { "0" }.into()])
+    run_wpctl(&set_mute_args(DEFAULT_SINK, muted))
+}
+
+/// Whether the default input (the microphone) is muted, or `None` when there is no audio server
+/// or no input to ask. Same `wpctl get-volume` line as the output, so the same parser reads it;
+/// only the mute is kept, because the shell has no microphone level to show.
+pub fn read_mic_muted() -> Option<bool> {
+    let out = Command::new("wpctl")
+        .args(["get-volume", DEFAULT_SOURCE])
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_get_volume(&String::from_utf8_lossy(&out.stdout)).map(|s| s.muted)
+}
+
+/// Mute or unmute the default input.
+pub fn set_mic_mute(muted: bool) -> Result<(), String> {
+    run_wpctl(&set_mute_args(DEFAULT_SOURCE, muted))
+}
+
+fn set_mute_args(target: &str, muted: bool) -> Vec<String> {
+    vec!["set-mute".into(), target.into(), if muted { "1" } else { "0" }.into()]
 }
 
 /// Whether one line of `pactl subscribe` is about an output: a sink changing (volume, mute) or
@@ -221,6 +267,18 @@ mod tests {
     }
 
     #[test]
+    fn the_microphone_is_muted_with_its_own_target_not_the_speakers() {
+        assert_eq!(set_mute_args(DEFAULT_SOURCE, true), ["set-mute", "@DEFAULT_AUDIO_SOURCE@", "1"]);
+        assert_eq!(set_mute_args(DEFAULT_SINK, false), ["set-mute", "@DEFAULT_AUDIO_SINK@", "0"]);
+    }
+
+    #[test]
+    fn a_microphone_reading_is_the_same_line_as_a_speakers() {
+        assert_eq!(parse_get_volume("Volume: 1.00 [MUTED]\n").map(|s| s.muted), Some(true));
+        assert_eq!(parse_get_volume("Volume: 1.00\n").map(|s| s.muted), Some(false));
+    }
+
+    #[test]
     fn only_output_lines_wake_the_watcher() {
         assert!(is_output_event("Event 'change' on sink #53"));
         assert!(is_output_event("Event 'change' on server #0"));
@@ -228,5 +286,14 @@ mod tests {
         assert!(!is_output_event("Event 'new' on sink-input #120"));
         assert!(!is_output_event("Event 'remove' on sink-input #120"));
         assert!(!is_output_event("Event 'change' on card #2"));
+    }
+
+    #[test]
+    fn a_step_is_one_relative_wpctl_call_never_a_read_then_a_write() {
+        assert_eq!(
+            step_volume_args(5),
+            ["set-volume", "-l", "1.0", "@DEFAULT_AUDIO_SINK@", "5%+"]
+        );
+        assert_eq!(step_volume_args(-5), ["set-volume", "@DEFAULT_AUDIO_SINK@", "5%-"]);
     }
 }
