@@ -356,11 +356,21 @@ fn job_arg(args: &Value) -> Result<JobId, String> {
 }
 
 /// `wait`, in seconds: the design's default, and never past the terminal's own bound.
+///
+/// A yes or no is read as what it plainly means: `true` waits the default, `false` only starts
+/// the command. Minds send `wait: true` whatever the parameter says. On the live instance the
+/// Mind did it twice in one turn, was refused twice, and went on without the output it had asked
+/// for (2 Oct 2026). Refusing a request whose meaning is not in doubt helps nobody.
 fn wait_arg(args: &Value) -> Result<Duration, String> {
     let most = jobs().limits().max_wait.as_secs();
     let Some(given) = args.get("wait").filter(|v| !v.is_null()) else {
         return Ok(DEFAULT_WAIT);
     };
+    match given.as_bool() {
+        Some(true) => return Ok(DEFAULT_WAIT),
+        Some(false) => return Ok(Duration::ZERO),
+        None => {}
+    }
     let secs = given
         .as_f64()
         .or_else(|| given.as_str().and_then(|s| s.trim().parse().ok()))
@@ -759,6 +769,13 @@ mod tests {
         // The bounds on `wait`, refused before anything is started.
         let err = agent_run(&json!({"command": "true", "wait": 601}), call("t-pi")).unwrap_err();
         assert!(err.contains("between 0 and 600"), "{err}");
+        // A yes or no is what it plainly means, not a refusal: on 561 the Mind sent
+        // `wait: true` twice and never saw its output.
+        assert_eq!(wait_arg(&json!({"wait": true})).unwrap(), DEFAULT_WAIT);
+        assert_eq!(wait_arg(&json!({"wait": false})).unwrap(), Duration::ZERO);
+        let yes = agent_run(&json!({"command": "echo yes-wait", "wait": true}), call("t-pi")).unwrap();
+        assert_eq!(yes["exit_code"], 0, "`wait: true` waits for the command: {yes}");
+        assert!(wait_arg(&json!({"wait": "soon"})).unwrap_err().contains("number of seconds"));
 
         // ── Wired to the harness host, as the shell does when it makes one ──
         //
