@@ -45,7 +45,7 @@ const SYSFS_POLL: Duration = Duration::from_secs(60);
 
 /// Main loop for the battery monitor thread.
 pub fn run_battery_monitor(tx: Sender<SystemEvent>) {
-    if let Ok(connection) = zbus::blocking::Connection::system() {
+    if let Ok(connection) = crate::power_profile::system_bus() {
         if upower_on_bus(&connection) {
             tracing::info!("Battery monitor started (UPower signals)");
             watch_upower(&connection, &tx);

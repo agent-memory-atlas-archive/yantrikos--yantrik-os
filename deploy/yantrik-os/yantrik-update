@@ -1473,6 +1473,9 @@ pkg_installed() {
 missing_packages() { # <status-command>
   local pkg missing=""
   for pkg in $REQUIRED_PACKAGES; do
+    # power-profiles-daemon conflicts with tlp on Debian: apt would remove tlp to install it, and
+    # someone who installed tlp chose it. Their machine is left as it is.
+    if [ "$pkg" = power-profiles-daemon ] && [ "$("$1" tlp)" = "installed" ]; then continue; fi
     [ "$("$1" "$pkg")" = "installed" ] || missing="$missing $pkg"
   done
   printf '%s' "${missing# }"
@@ -1489,6 +1492,9 @@ reconcile_packages() {
     return 0
   }
   local missing; missing="$(missing_packages pkg_installed)"
+  if [ "$(pkg_installed tlp)" = "installed" ] && [ "$(pkg_installed power-profiles-daemon)" != "installed" ]; then
+    info "tlp is installed, so power-profiles-daemon is left out: they conflict and apt would remove tlp"
+  fi
   [ -n "$missing" ] || return 0
   say "this machine is missing packages the image ships: $missing"
   # shellcheck disable=SC2086  # a package list, split on purpose
@@ -2716,7 +2722,7 @@ cmd_selftest() {
   # reading over D-Bus and no profile choice.
   local pre14; pre14="$root/dpkg-pre14"
   printf '#!/bin/sh
-case "$1" in upower|power-profiles-daemon) ;; *) echo installed ;; esac
+case "$1" in upower|power-profiles-daemon|tlp) ;; *) echo installed ;; esac
 ' > "$pre14"
   chmod +x "$pre14"
   out="$(missing_packages "$pre14")"
@@ -2726,6 +2732,24 @@ case "$1" in upower|power-profiles-daemon) ;; *) echo installed ;; esac
 ' "$c_grn" "$c_off"
   else
     printf '  %sFAIL%s a machine without UPower: wanted %s, got %s
+'       "$c_red" "$c_off" "$want" "${out:-nothing}"
+    fails=$((fails + 1))
+  fi
+
+  # The same machine with tlp on it: power-profiles-daemon is skipped, because installing it
+  # would make apt remove tlp. UPower is still given.
+  local withtlp; withtlp="$root/dpkg-withtlp"
+  printf '#!/bin/sh
+case "$1" in upower|power-profiles-daemon) ;; *) echo installed ;; esac
+' > "$withtlp"
+  chmod +x "$withtlp"
+  out="$(missing_packages "$withtlp")"
+  want="upower"
+  if [ "$out" = "$want" ]; then
+    printf '  %sok%s   a machine with tlp is not given power-profiles-daemon, which would remove it
+' "$c_grn" "$c_off"
+  else
+    printf '  %sFAIL%s a machine with tlp: wanted %s, got %s
 '       "$c_red" "$c_off" "$want" "${out:-nothing}"
     fails=$((fails + 1))
   fi

@@ -120,6 +120,13 @@ pub(crate) fn apply_profile(ui: &App, profile: Option<&PowerProfileInfo>) {
     }
 }
 
+/// Show what the daemon says is in effect, from any thread.
+pub(crate) fn apply_profile_later(weak: slint::Weak<App>, now: Option<yantrik_os::power_profile::PowerProfiles>) {
+    let _ = weak.upgrade_in_event_loop(move |ui| {
+        apply_profile(&ui, now.map(|p| PowerProfileInfo { active: p.active, offered: p.offered }).as_ref());
+    });
+}
+
 /// The popover's choice. The daemon is asked off the UI thread (a bus call is milliseconds, but
 /// not none) and the shell then shows what the daemon says is in effect, not what was asked.
 pub(crate) fn wire(ui: &App) {
@@ -134,12 +141,7 @@ pub(crate) fn wire(ui: &App) {
             }
             // On failure, show what is really in effect, so a refused choice does not stay lit.
             let now = answer.ok().or_else(yantrik_os::power_profile::read);
-            let _ = weak.upgrade_in_event_loop(move |ui| {
-                apply_profile(
-                    &ui,
-                    now.map(|p| PowerProfileInfo { active: p.active, offered: p.offered }).as_ref(),
-                );
-            });
+            apply_profile_later(weak, now);
         });
     });
 }

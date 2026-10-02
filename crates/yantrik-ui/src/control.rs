@@ -1962,23 +1962,27 @@ pub fn publish(
             .risk("standard")
             .arg(Param::text("profile").describe("power-saver, balanced or performance")),
             move |args| {
-                let ui = profile_ui()?;
+                let weak = profile_ui()?.as_weak();
                 let profile = args["profile"]
                     .as_str()
-                    .ok_or("`profile` must be power-saver, balanced or performance")?;
-                let now = yantrik_os::power_profile::set(profile)?;
-                crate::power_status::apply_profile(
-                    &ui,
-                    Some(&yantrik_os::PowerProfileInfo {
-                        active: now.active.clone(),
-                        offered: now.offered.clone(),
-                    }),
-                );
-                tracing::info!(profile = %now.active, "Power profile set");
-                Ok(serde_json::json!({
-                    "power_profile": now.active,
-                    "offered": now.offered,
-                }))
+                    .ok_or("`profile` must be power-saver, balanced or performance")?
+                    .to_string();
+                // The bus calls are off the UI thread: a power-profiles-daemon that hangs, or a
+                // polkit prompt nobody answers, must not freeze the shell. The answer is what
+                // the daemon reports afterwards, finished on the socket's side; each call has a
+                // 2 s timeout, so a stuck daemon is an error here and not a wait.
+                let work = move || {
+                    let now = yantrik_os::power_profile::set(&profile)?;
+                    crate::power_status::apply_profile_later(weak, Some(now.clone()));
+                    tracing::info!(profile = %now.active, "Power profile set");
+                    Ok(serde_json::json!({
+                        "power_profile": now.active,
+                        "offered": now.offered,
+                    }))
+                };
+                yantrik_app_runtime::control::answer_later(work)
+                    .map(|()| serde_json::json!({ "answering": "off the UI thread" }))
+                    .or_else(|work| work())
             },
         )
         .action(
@@ -3369,9 +3373,24 @@ mod power_profile_tests {
     #[test]
     fn the_answer_is_read_back_and_a_profile_not_offered_is_refused() {
         let d = declaration();
-        assert!(d.contains("yantrik_os::power_profile::set(profile)?"), "the handler calls the daemon and propagates a refusal. As written:\n{d}");
+        assert!(d.contains("yantrik_os::power_profile::set(&profile)?"), "the handler calls the daemon and propagates a refusal. As written:\n{d}");
         assert!(d.contains("now.active"), "the answer is the daemon's read-back. As written:\n{d}");
         assert!(!d.contains("\"power_profile\": profile"), "never echo the request as the answer. As written:\n{d}");
+    }
+
+    /// A hung daemon froze the shell when the call was made in the handler itself, which runs on
+    /// the UI thread. The call belongs inside the closure handed to `answer_later`, which runs
+    /// on the socket's side.
+    #[test]
+    fn the_daemon_is_not_called_on_the_ui_thread() {
+        let d = declaration();
+        let later = d.find("answer_later(").expect("the answer is finished off the UI thread");
+        let work = d.find("let work = move ||").expect("the bus work is a closure");
+        let call = d.find("power_profile::set(").expect("the handler sets the profile");
+        assert!(work < call && call < later, "`power_profile::set` must be inside the `answer_later` closure, not in the handler body. As written:
+{d}");
+        assert!(!d[..work].contains("power_profile::set("), "no bus call before the closure. As written:
+{d}");
     }
 
     /// `describe shell` carries the battery's state and times, and the profile at the top level

@@ -37,9 +37,19 @@ impl PowerProfiles {
     }
 }
 
+/// How long any one call to the bus may take. zbus waits forever without a timeout, and a hung
+/// daemon, or a polkit prompt nobody answers, would otherwise hold whatever thread asked.
+const METHOD_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// A system-bus connection whose calls give up after [`METHOD_TIMEOUT`]. Every D-Bus call the
+/// power code makes goes through one of these, battery.rs's too.
+pub(crate) fn system_bus() -> zbus::Result<Connection> {
+    zbus::blocking::connection::Builder::system()?.method_timeout(METHOD_TIMEOUT).build()
+}
+
 /// What the daemon says now, or `None` when there is no daemon.
 pub fn read() -> Option<PowerProfiles> {
-    let conn = Connection::system().ok()?;
+    let conn = system_bus().ok()?;
     NAMES.iter().find_map(|n| read_from(&conn, n))
 }
 
@@ -78,7 +88,7 @@ pub fn set(profile: &str) -> Result<PowerProfiles, String> {
     if !KNOWN.contains(&profile) {
         return Err(format!("`{profile}` is not a power profile; use power-saver, balanced or performance"));
     }
-    let conn = Connection::system().map_err(|e| format!("no system bus: {e}"))?;
+    let conn = system_bus().map_err(|e| format!("no system bus: {e}"))?;
     let (name, current) = NAMES
         .iter()
         .find_map(|n| read_from(&conn, n).map(|c| (n, c)))
@@ -93,14 +103,14 @@ pub fn set(profile: &str) -> Result<PowerProfiles, String> {
         "Set",
         &(name.2, "ActiveProfile", zbus::zvariant::Value::from(profile)),
     )
-    .map_err(|e| format!("the daemon refused: {e}"))?;
+    .map_err(|e| format!("the daemon did not take it (it refused, or did not answer within {} s): {e}", METHOD_TIMEOUT.as_secs()))?;
     read_from(&conn, name).ok_or_else(|| "the daemon stopped answering after the change".to_string())
 }
 
 /// Tell the shell what the daemon says, once at the start and again when it changes. Returns
 /// at once when there is no daemon: nothing is sent, so nothing is drawn.
 pub fn run_power_profile_monitor(tx: Sender<SystemEvent>) {
-    let Ok(conn) = Connection::system() else { return };
+    let Ok(conn) = system_bus() else { return };
     let Some((name, mut last)) = NAMES.iter().find_map(|n| read_from(&conn, n).map(|c| (n, c))) else {
         tracing::info!("power-profiles-daemon not available: no power profile choice");
         return;
