@@ -77,6 +77,15 @@ pub fn panel_for_describe(open: bool, screen: i32, close_with: &str) -> serde_js
 /// Show one panel, put the other two away so only one is up, bring the shell forward, and answer
 /// with what was observed afterwards.
 fn open_panel(ui: &App, panel: Panel) -> Result<serde_json::Value, String> {
+    // The panels are drawn under the approval overlay but over the Lens, so a card shown in the
+    // Lens's chat could be covered by one a mind opened (final review of the card fix). Held
+    // while a card waits; putting a panel away never is. Each name written out, so the test that
+    // reads the source for the hold finds it.
+    match panel {
+        Panel::QuickSettings => crate::card_watch::hold_windows("open_quick_settings")?,
+        Panel::PowerMenu => crate::card_watch::hold_windows("open_power_menu")?,
+        Panel::Clipboard => crate::card_watch::hold_windows("open_clipboard")?,
+    }
     let screen = ui.get_current_screen();
     if !bar_is_drawn(screen) {
         return Err(format!(
@@ -277,6 +286,17 @@ mod tests {
         ] {
             assert!(declaration(name).contains(".risk(\"safe\")"), "`{name}` must be graded safe");
         }
+    }
+
+    /// Final review of the card fix: a panel opened over the Lens covered the card in its chat.
+    /// Opening waits for the card, before anything is set; putting a panel away uncovers it and
+    /// is never held.
+    #[test]
+    fn opening_a_panel_waits_for_a_card_and_closing_one_never_does() {
+        let open = function("open_panel");
+        let held = open.find("card_watch::hold_windows(").expect("open_panel asks hold_windows");
+        assert!(held < open.find("panel.set(ui, true)").unwrap(), "asked before the panel is drawn");
+        assert!(!function("close_panel").contains("hold_windows"), "putting a panel away is never held");
     }
 
     /// A panel opened behind an app window is a panel nobody sees, and a caller told "open"

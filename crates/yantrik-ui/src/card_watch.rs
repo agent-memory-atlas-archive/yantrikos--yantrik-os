@@ -14,7 +14,7 @@
 //!
 //! - **A mind cannot move windows while a card waits.** `focus_window`, `show_app`, `open_app`,
 //!   `minimise_window`, `maximise_window`, `files_open`, `configure_harness`, the second press
-//!   of `show_desktop` and `show_mind_audit` are refused on the control surface until the card
+//!   of `show_desktop`, `show_mind_audit` and the bar's three panel opens are refused on the control surface until the card
 //!   is answered ([`hold_windows`]); bringing the shell itself forward is still allowed. Without
 //!   that, a mind could spend the raises below by focusing an ordinary window six times, and the
 //!   card would stay behind the sixth (second review, 2 Oct 2026). Any focus change still left is
@@ -439,18 +439,20 @@ mod tests {
 
     /// The handlers that move windows are the ones that ask first. Read from the source, the way
     /// `published_actions_cannot_grant` reads it, so that a new window verb added without the
-    /// hold fails here rather than in front of a person. The final review found four the second
+    /// hold fails here rather than in front of a person. The final review found what the second
     /// one missed: a file opened into its viewer, a harness's setup terminal, Show desktop's
-    /// second press bringing every window back, and the mode menu drawn over the card.
+    /// second press bringing every window back, the mode menu drawn over the card, and the bar's
+    /// panels drawn over the Lens and the card in its chat.
     #[test]
     fn every_window_moving_action_asks_hold_windows_first() {
-        let held: [(&str, &[&str]); 3] = [
+        let held: [(&str, &[&str]); 4] = [
             (
                 "control.rs",
                 &["focus_window", "show_app", "open_app", "minimise_window", "maximise_window", "configure_harness", "show_desktop"],
             ),
             ("control_files.rs", &["files_open"]),
             ("control_approvals.rs", &["show_mind_audit"]),
+            ("control_overlays.rs", &["open_quick_settings", "open_power_menu", "open_clipboard"]),
         ];
         for (file, actions) in held {
             let src = std::fs::read_to_string(format!("{}/src/{file}", env!("CARGO_MANIFEST_DIR"))).unwrap();
