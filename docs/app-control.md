@@ -319,7 +319,9 @@ content, and a content action a paired action takes back stays `standard` (`add_
 | shell | `power_off` | dangerous, deferred | log out, restart or shut down: ends every program and every mind at work. Refused while minds are working unless `even_if_minds_working` is true; the refusal says how many. Answers when logind has accepted the request, before anything has stopped |
 | arcade | `new_character`, `new_game`, `update_game`, `update_character`, `build`, `play`, `verify`, `screenshot` | standard | editing and building library content, editable again |
 | arcade | `delete` | sensitive | destroys the one named game |
+| calendar | `events_between` | safe | a read: events from `from` to `to` (ISO dates, inclusive, at most 62 days) straight from the store, with date, start, end, title, location; no view changes |
 | calendar | `select_day`, `show_month`, `go_to_today`, `set_view` | standard | moving around the calendar |
+
 | calendar | `add_event`, `update_own_event`, `delete_own_event` | standard | content, paired: what `add_event` writes, `update_own_event` moves and `delete_own_event` takes back — the caller's own events, by the #201 record |
 | calendar | `update_event`, `delete_event` | sensitive | reach any stored event — the person's own, a Google-synced one, another caller's — so the person sees a card (#332); a delete has no trash, and its description says the event is not recoverable |
 | containers | `refresh`, `start`, `show_logs` | standard | reads, and starting what is stopped |
