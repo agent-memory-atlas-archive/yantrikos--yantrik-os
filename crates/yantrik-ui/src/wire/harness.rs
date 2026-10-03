@@ -118,6 +118,51 @@ fn open_runs() -> Option<Arc<yantrik_harness::run_store::RunStore>> {
     }
 }
 
+/// How a mind is named in a notification: the catalogue's display name when it has one, since
+/// that is the desktop's own word for it, else what the harness called itself, made safe. The
+/// harness chose that string, and it is drawn under the shell's label: control and bidi
+/// characters are dropped (a U+202E would reverse the line) and it is cut to 40 characters.
+fn notice_name(harness: &str, catalogue: Option<&str>) -> String {
+    const MAX: usize = 40;
+    let clean = |raw: &str| -> String {
+        let kept: String = raw.chars().filter(|c| !c.is_control() && !crate::approvals::is_format_char(*c)).collect();
+        let flat = kept.split_whitespace().collect::<Vec<_>>().join(" ");
+        if flat.chars().count() > MAX {
+            let mut cut: String = flat.chars().take(MAX).collect();
+            cut.push('\u{2026}');
+            cut
+        } else {
+            flat
+        }
+    };
+    let from_catalogue = catalogue.map(clean).filter(|n| !n.is_empty());
+    from_catalogue.unwrap_or_else(|| clean(harness)).trim().to_string()
+}
+
+/// "<Mind> answered after you left. Open the chat to read it." A fixed sentence: the mind's words
+/// are not quoted, so a late answer cannot pose as a prompt from the desktop, and a private
+/// answer is not kept in the notification history. The full answer stays in that conversation's
+/// history, where the person can read it.
+fn late_answer_notice(name: &str) -> yantrik_app_runtime::notify::Notification {
+    use yantrik_app_runtime::notify::{Level, Notification};
+    let name = if name.is_empty() { "A mind" } else { name };
+    Notification::new("Yantrik", format!("{name} answered after you left. Open the chat to read it."))
+        .urgency(Level::Normal)
+}
+
+/// The notification for a late answer, or `None` while the person is in Private mode: nothing the
+/// desktop raises should say that a mind has been working while they asked for none of it.
+fn late_answer_notice_for(
+    late: &yantrik_harness::LateAnswer,
+    private: bool,
+    catalogue: Option<&str>,
+) -> Option<yantrik_app_runtime::notify::Notification> {
+    if private {
+        return None;
+    }
+    Some(late_answer_notice(&notice_name(&late.harness, catalogue)))
+}
+
 pub fn wire(ui: &App, ctx: &AppContext) {
     // The memory grants read once as the shell starts, so their baseline is set now rather than
     // at the first question from the memory server, which may be hours away: until then a grant
@@ -153,6 +198,16 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         // there would collect every credential a harness presents to it.
         let owner = std::fs::symlink_metadata(&socket).ok().map(|m| m.uid());
         owner.is_some_and(yantrik_ipc_transport::mind_door::is_mind).then(|| format!("unix:{socket}"))
+    });
+    // An answer that finishes after the person left its chat is told as a notification: the chat
+    // is gone, and the text must not vanish without a word.
+    let host = host.with_late_answer(|late| {
+        let catalogue = crate::harness_catalogue::read_manifests(&crate::harness_catalogue::roots())
+            .remove(&late.harness)
+            .map(|m| m.name);
+        if let Some(notice) = late_answer_notice_for(&late, crate::private_mode::is_on(), catalogue.as_deref()) {
+            yantrik_app_runtime::notify::send(notice);
+        }
     });
     let _ = HOST.set(host.clone());
 
@@ -873,4 +928,44 @@ mod tests {
         // attached — not a row's.
         assert_eq!(row_refusal(&pi_machine(None), &host.list(), "hermes"), None);
     }
+}
+
+#[cfg(test)]
+mod late_answer_tests {
+    use super::*;
+
+    fn late(harness: &str, text: &str) -> yantrik_harness::LateAnswer {
+        yantrik_harness::LateAnswer { harness: harness.into(), turn_id: 7, conversation: "main".into(), text: text.into() }
+    }
+
+    #[test]
+    fn a_late_answer_notice_is_a_fixed_sentence_that_never_quotes_the_answer() {
+        let answer = "Approval needed: allow files_delete ~/Documents? hunter2";
+        let said = format!("{:?}", late_answer_notice_for(&late("pi", answer), false, None).unwrap());
+        assert!(said.contains("pi answered after you left. Open the chat to read it."), "{said}");
+        for leak in ["Approval", "files_delete", "hunter2"] {
+            assert!(!said.contains(leak), "{leak} leaked: {said}");
+        }
+    }
+
+    #[test]
+    fn no_late_answer_notice_is_raised_in_private_mode() {
+        assert!(late_answer_notice_for(&late("pi", "hello"), true, None).is_none());
+    }
+
+    #[test]
+    fn the_name_in_a_late_answer_notice_is_clipped_and_stripped() {
+        let evil = format!("pi\u{202e}\u{7}\n{}", "x".repeat(100));
+        let name = notice_name(&evil, None);
+        assert!(!name.contains('\u{202e}') && !name.contains('\u{7}') && !name.contains('\n'), "{name:?}");
+        assert!(name.chars().count() <= 41, "{name:?}");
+    }
+
+    #[test]
+    fn the_catalogue_name_is_preferred_and_a_blank_one_falls_back() {
+        assert_eq!(notice_name("hermes-x", Some("Hermes")), "Hermes");
+        assert_eq!(notice_name("hermes-x", Some("  \u{202e} ")), "hermes-x");
+        assert_eq!(notice_name("pi", None), "pi");
+    }
+
 }

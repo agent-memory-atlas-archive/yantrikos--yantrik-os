@@ -651,6 +651,24 @@ fn publish_lens(g: &AgentsState, s: &Store) {
     }
 }
 
+/// The latest status line of the active mind's open turn, for `describe shell`; empty when it has
+/// no turn running.
+pub fn latest_status() -> String {
+    let active = crate::wire::harness::host()
+        .map(|h| h.active_id())
+        .unwrap_or_else(|| crate::wire::harness::BUILTIN_ID.to_string());
+    crate::agents::store()
+        .read(|s| s.agent(&feed::main_agent(&active)).filter(|a| a.open_turn().is_some()).map(|a| a.status.trim().to_string()))
+        .unwrap_or_default()
+}
+
+/// A mind's status line as `describe shell` carries it: invisible and bidi characters dropped,
+/// whitespace flattened and cut to 120 characters, so the line cannot spoof or bloat the describe.
+pub fn status_for_describe(raw: &str) -> String {
+    let visible: String = raw.chars().filter(|c| !c.is_control() || c.is_whitespace()).filter(|c| !crate::approvals::is_format_char(*c)).collect();
+    crate::agents::progress::brief(&visible, 120)
+}
+
 fn work_card(w: &lens_work::Work) -> WorkCardData {
     WorkCardData {
         run: w.run.as_str().into(),
@@ -2728,5 +2746,18 @@ mod first_prompt_attribution_tests {
         let wiring = wiring.split("#[cfg(test)]").next().unwrap();
         assert_eq!(wiring.matches("answer_for(").count(), 1, "one caller: the card's answer");
         assert!(wiring.contains("g.on_answer_question("));
+    }
+}
+
+#[cfg(test)]
+mod status_for_describe_tests {
+    use super::status_for_describe;
+
+    #[test]
+    fn a_status_in_describe_is_flat_visible_and_clipped() {
+        let said = status_for_describe(&format!("Thinking\u{202e}\u{7}\n\n {}", "word ".repeat(100)));
+        assert!(!said.contains('\u{202e}') && !said.contains('\u{7}') && !said.contains('\n'), "{said:?}");
+        assert!(said.chars().count() <= 121, "{said:?}");
+        assert!(said.starts_with("Thinking word"), "{said:?}");
     }
 }
