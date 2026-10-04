@@ -50,6 +50,7 @@ mod control_approvals;
 mod control_overlays;
 mod control_switcher;
 mod alt_tab;
+mod window_name;
 mod power_status;
 mod control_network;
 mod control_power;

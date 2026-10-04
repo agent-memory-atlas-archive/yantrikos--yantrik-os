@@ -30,7 +30,18 @@ fn entry_of<'a>(installed: &'a [DesktopEntry], id: &str) -> Option<&'a DesktopEn
 /// Whether the shell draws this app's tile from its own glyph set (so it has a name in
 /// `APP_NAMES`, or is one of the launcher's built-ins), as opposed to a real icon from the theme.
 fn has_own_glyph(tr: &Tr<'_>, id: &str) -> bool {
-    pins::builtin_label(tr, id).is_some() || crate::windows::APP_NAMES.iter().any(|(app, _)| *app == id)
+    let tile = crate::window_name::tile_id(id);
+    pins::builtin_label(tr, &tile).is_some() || crate::windows::APP_NAMES.iter().any(|(app, _)| *app == tile)
+}
+
+/// The icon theme's image for a running app's tile: only for an app this shell draws no glyph
+/// for, as the launcher does. The window overview asks the same, so a window wears one tile on
+/// the dock and in the overview.
+pub(crate) fn theme_icon(tr: &Tr<'_>, id: &str, installed: &[DesktopEntry]) -> Option<slint::Image> {
+    if has_own_glyph(tr, id) {
+        return None;
+    }
+    entry_of(installed, id).and_then(|d| crate::icons::resolve(&d.icon))
 }
 
 /// Put the dock's buttons and its window list on the screen.
@@ -66,26 +77,19 @@ pub fn publish(ui: &App, installed: &[DesktopEntry]) {
                 // A mind's desk: labelled as such, by what Mind View calls it.
                 return dock_model::mind_view_label(group);
             }
-            entry_of(installed, id)
-                .filter(|_| !has_own_glyph(&tr, id))
-                .map(|e| e.name.clone())
-                .unwrap_or_else(|| crate::windows::app_display_name(id))
+            let title = group.first().map_or("", |w| w.title.as_str());
+            crate::window_name::display_name(id, title, installed)
         })
     });
 
     let buttons: Vec<DockButton> = entries
         .iter()
         .map(|e| {
-            // A real icon only for apps this shell draws no glyph for, as the launcher does.
-            let icon = if has_own_glyph(&tr, &e.app_id) {
-                None
-            } else {
-                entry_of(installed, &e.app_id).and_then(|d| crate::icons::resolve(&d.icon))
-            };
+            let icon = theme_icon(&tr, &e.app_id, installed);
             DockButton {
                 app_id: e.app_id.clone().into(),
                 label: e.label.clone().into(),
-                icon_id: super::app_grid::icon_id_for(&e.app_id).into(),
+                icon_id: crate::window_name::tile_id(&e.app_id).into(),
                 has_icon: icon.is_some(),
                 icon: icon.unwrap_or_default(),
                 pinned: e.pinned,

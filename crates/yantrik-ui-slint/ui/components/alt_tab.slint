@@ -1,3 +1,4 @@
+
 // Window overview (Super+Tab; Alt+Tab is labwc's own) — one centred opaque card of the open windows, 8 to a page.
 //
 // Selection, order and paging all live in Rust (`alt_tab.rs`), so a pointer, a key and a
@@ -5,17 +6,24 @@
 // what the person pressed. Opaque, with no dimming layer: the windows behind stay readable.
 //
 // There are no live previews. The compositor streams window titles and focus, not pixels, and
-// the shell has no capture path for one toplevel, so every cell shows its app's icon on a
-// neutral tile and says so. A tile never pretends to be the window.
+// the shell has no capture path for one toplevel, so a cell is what the shell does know: the
+// app's tile (the kit's AppTile, the same one the dock draws), the app's name and the window's
+// title. It used to be a grey 16:9 box reading "Preview unavailable", four of them on a card,
+// which told a person nothing they could switch by (design sign-off, 4 October).
 
 import { Theme } from "theme.slint";
-import { Icon, Icons } from "icon.slint";
+import { Icons } from "icon.slint";
+import { AppTile } from "app_tile.slint";
 import { YIconButton } from "y_button.slint";
 
 export struct SwitcherCell {
     title: string,
-    app-id: string,
+    // The id the tile is drawn for (`window_name::tile_id`): its glyph and its colour.
+    tile-id: string,
     app-name: string,
+    // A theme icon, for an app the shell draws no glyph for, exactly as the dock decides it.
+    has-icon: bool,
+    icon: image,
 }
 
 component SwitcherCellView inherits Rectangle {
@@ -24,69 +32,50 @@ component SwitcherCellView inherits Rectangle {
     callback pointer-moved();
     callback activated();
 
-    // 224 wide where the card has room (preview 208×117, cell 224×166); a card that is narrower
-    // than three or two of those narrows the cells and keeps the preview's 16:9.
+    // 144 wide where the card has room; a card narrower than its columns narrows the cells.
     in property <length> cell-width: Theme.sw-cell-w;
-    property <length> preview-width: root.cell-width - 2 * Theme.sp-2;
-    property <length> preview-height: root.preview-width * 9 / 16;
     width: root.cell-width;
-    height: Theme.sp-2 + root.preview-height + Theme.sw-footer-h;
+    height: Theme.sw-cell-h;
     border-radius: Theme.r-lg;
-    background: root.selected ? Theme.bg-elevated : transparent;
-    // The outline is drawn inside the cell, so a selected cell never overlaps its neighbour.
-    border-width: root.selected ? Theme.focus-ring-width : 0px;
-    border-color: Theme.text-primary;
+    // The tile surface, one step lighter than the card; the selected cell is raised a step more
+    // and ringed in the accent. The ring is drawn inside the cell, so it never overlaps a neighbour.
+    background: root.selected ? Theme.tile-off-hover : Theme.tile-off;
+    border-width: root.selected ? Theme.focus-ring-width : Theme.hairline;
+    border-color: root.selected ? Theme.accent : Theme.tile-border;
 
-    // The preview slot: 208×117, 16:9.
-    Rectangle {
-        x: Theme.sp-2;
-        y: Theme.sp-2;
-        width: root.preview-width;
-        height: root.preview-height;
-        border-radius: Theme.r-md;
-        background: Theme.bg-card;
-        border-width: Theme.hairline;
-        border-color: Theme.border-subtle;
-
-        VerticalLayout {
+    VerticalLayout {
+        padding-top: Theme.sp-3;
+        padding-left: Theme.sp-2;
+        padding-right: Theme.sp-2;
+        alignment: start;
+        HorizontalLayout {
             alignment: center;
-            spacing: Theme.sp-2;
-            Icon {
-                commands: Icons.app-or-window(root.cell.app-id);
-                tint: Theme.text-secondary;
-                size: Theme.sw-icon-lg;
-                thickness: Theme.icon-stroke;
-                x: (parent.width - self.width) / 2;
-            }
-            Text {
-                text: "Preview unavailable";
-                color: Theme.text-dim;
-                font-size: Theme.fs-micro;
-                horizontal-alignment: center;
+            AppTile {
+                app-id: root.cell.tile-id;
+                glyph: Icons.app-or-window(root.cell.tile-id);
+                has-icon: root.cell.has-icon;
+                icon: root.cell.icon;
+                size: Theme.sw-tile;
             }
         }
-    }
-
-    // Footer: 18px icon, then the app's name.
-    Icon {
-        x: Theme.sp-4;
-        y: Theme.sp-2 + root.preview-height + Theme.sp-4;
-        commands: Icons.app-or-window(root.cell.app-id);
-        tint: Theme.text-primary;
-        size: Theme.sw-icon-sm;
-        thickness: Theme.icon-stroke;
-    }
-    Text {
-        x: Theme.sp-4 + Theme.sw-icon-sm + Theme.sp-2;
-        y: Theme.sp-2 + root.preview-height;
-        width: parent.width - (Theme.sp-4 + Theme.sw-icon-sm + Theme.sp-2) - Theme.sp-3;
-        height: Theme.sw-footer-h;
-        text: root.cell.app-name;
-        color: Theme.text-primary;
-        font-size: Theme.fs-caption;
-        font-weight: Theme.fw-headline;
-        vertical-alignment: center;
-        overflow: elide;
+        Rectangle { height: Theme.sp-2; }
+        Text {
+            text: root.cell.app-name;
+            color: Theme.text-primary;
+            font-size: Theme.fs-body;
+            font-weight: Theme.fw-body-strong;
+            horizontal-alignment: center;
+            overflow: elide;
+        }
+        // The title, unless it only says the name again (Calendar's window is titled "Calendar").
+        // The row stays, so every cell's name sits at the same height.
+        Text {
+            text: root.cell.title == root.cell.app-name ? "" : root.cell.title;
+            color: Theme.text-secondary;
+            font-size: Theme.fs-caption;
+            horizontal-alignment: center;
+            overflow: elide;
+        }
     }
 
     TouchArea {
@@ -105,7 +94,6 @@ export component AltTab inherits Rectangle {
     // Index within `cells` (the current page), or -1.
     in property <int> selected: -1;
     in property <string> status: "";
-    in property <string> plate: "";
     in property <int> page: 0;
     in property <int> pages: 1;
 
@@ -127,11 +115,12 @@ export component AltTab inherits Rectangle {
     property <length> card-width: min(Theme.sw-card-max-w, root.width - 2 * Theme.sp-7);
     property <int> rows: max(1, (root.cells.length + root.columns - 1) / root.columns);
     property <length> cell-width: min(Theme.sw-cell-w, (root.card-width - 2 * Theme.sp-4 - (root.columns - 1) * Theme.sp-3) / root.columns);
-    property <length> cell-height: Theme.sp-2 + (root.cell-width - 2 * Theme.sp-2) * 9 / 16 + Theme.sw-footer-h;
+    property <length> cell-height: Theme.sw-cell-h;
     property <length> grid-width: root.columns * root.cell-width + (root.columns - 1) * Theme.sp-3;
     property <length> card-height: Theme.sp-4 + root.rows * root.cell-height + (root.rows - 1) * Theme.sp-3 + Theme.sp-3 + root.pager-h + Theme.sp-4;
-    // The card and its plate, centred together.
-    property <length> block-top: (root.height - (root.card-height + Theme.sp-2 + Theme.sw-plate-h)) / 2;
+    // The card alone, centred. The plate that used to sit under it gave the selected window's
+    // title a second time; the cell carries it now, and `describe shell` the full text.
+    property <length> block-top: (root.height - root.card-height) / 2;
 
     if root.is-open : FocusScope {
         width: 100%;
@@ -229,29 +218,6 @@ export component AltTab inherits Rectangle {
                 label: "Next page";
                 icon-path: Icons.chevron-right;
                 clicked => { root.navigate("page-next", root.columns); }
-            }
-        }
-
-        // The selected window's full title, on a plate of its own under the card.
-        if root.is-open && root.plate != "" : Rectangle {
-            property <length> plate-width: min(Theme.sw-plate-max-w, root.card-width);
-            x: (root.width - self.plate-width) / 2;
-            y: root.block-top + root.card-height + Theme.sp-2;
-            width: self.plate-width;
-            height: Theme.sw-plate-h;
-            background: Theme.bg-surface;
-            border-radius: Theme.r-lg;
-            border-width: Theme.hairline;
-            border-color: Theme.border-strong;
-            Text {
-                x: Theme.sp-4;
-                width: parent.width - 2 * Theme.sp-4;
-                text: root.plate;
-                color: Theme.text-primary;
-                font-size: Theme.fs-body;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-                overflow: elide;
             }
         }
     }

@@ -831,6 +831,20 @@ pub(crate) fn toplevel_entry(line: &str) -> WindowEntry {
         _ => ("", line.trim()),
     };
     let title = title.to_string();
+    let app_id = shell_app_id(declared_id, &title);
+    WindowEntry {
+        icon_char: icon_for_app(&app_id).to_string(),
+        subtitle: derive_context(&title, &app_id),
+        wayland_app_id: declared_id.to_string(),
+        title,
+        app_id,
+    }
+}
+
+/// The shell's id for a window that declared `declared_id` to the compositor and is titled
+/// `title`: one rule for the window list read from `wlrctl` and the window overview read from
+/// the compositor's stream, so a window is the same app in both.
+pub(crate) fn shell_app_id(declared_id: &str, title: &str) -> String {
     // Prefer what the window calls itself. Our own windows call themselves nothing — Slint gives
     // them no Wayland app_id — so the title is matched against APP_NAMES next, which is a lookup
     // rather than a guess: those strings ARE the window titles our apps declare, and
@@ -841,25 +855,30 @@ pub(crate) fn toplevel_entry(line: &str) -> WindowEntry {
     // `images` — none of which is the id the dock keys its running mark by, so after a shell
     // restart those four tiles stayed dark with the apps plainly open on screen. Guessing is now
     // the last resort, for windows that are neither ours nor self-identifying.
-    let app_id = if crate::mind_view::is_nested_window(declared_id, &title) {
+    if crate::mind_view::is_nested_window(declared_id, title) {
         // The window a nested compositor draws into, which is Mind View. The compositor names
         // it itself ("wlroots - WL-1", or "labwc - WL-1" on labwc 0.8) and the title is kept as
         // it is, because the title is what the taskbar hands `wlrctl` to find it again.
         crate::mind_view::APP_ID.to_string()
     } else if !declared_id.is_empty() {
         declared_id.to_lowercase()
-    } else if let Some(id) = app_id_for_title(&title) {
+    } else if let Some(id) = app_id_for_title(title) {
         id.to_string()
     } else {
-        derive_app_id(&title)
-    };
-    WindowEntry {
-        icon_char: icon_for_app(&app_id).to_string(),
-        subtitle: derive_context(&title, &app_id),
-        wayland_app_id: declared_id.to_string(),
-        title,
-        app_id,
+        derive_app_id(title)
     }
+}
+
+/// [`shell_app_id`] for a window the compositor's stream describes, paired with the launch
+/// registry the way the window list's merge pairs them (`merge_windows`): a program the shell
+/// started keeps the id it was started under. Without this a Chromium the dock opened as `browser`
+/// was the Browser on the dock and "Chromium" in the window overview.
+pub(crate) fn stream_app_id(declared_id: &str, title: &str) -> String {
+    crate::running::running()
+        .into_iter()
+        .find(|app| same_program(&app.binary, declared_id))
+        .map(|app| app.app_id)
+        .unwrap_or_else(|| shell_app_id(declared_id, title))
 }
 
 /// The app id whose window is titled exactly this, if it is one of ours.

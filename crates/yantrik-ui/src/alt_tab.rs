@@ -5,7 +5,7 @@
 //! Pointer, keys and `yos act shell` all end in these functions, because a switcher whose
 //! keyboard path and control path disagreed about "next" would be two switchers.
 
-/// Cells to a page. Fixed: a card that grew with the window count would shrink its thumbnails
+/// Cells to a page. Fixed: a card that grew with the window count would shrink its cells
 /// to stamps, which the spec rules out.
 pub const PAGE: usize = 8;
 
@@ -261,11 +261,6 @@ impl Switcher {
         let to = (from + PAGE - 1).min(n);
         format!("{from}–{to} of {n} {noun} · Page {} of {}", self.page() + 1, self.pages())
     }
-
-    /// What the plate under the card says: the full title of the selected window.
-    pub fn plate(&self) -> String {
-        self.selected().map(|c| c.title.clone()).unwrap_or_default()
-    }
 }
 
 #[cfg(test)]
@@ -327,7 +322,7 @@ mod tests {
         assert!(s.remove(4));
         assert_eq!(s.selected().unwrap().id, 3);
         assert!(!s.remove(42), "no such window: nothing changes");
-        assert!(s.remove(3) && s.selected().is_none() && s.plate().is_empty());
+        assert!(s.remove(3) && s.selected().is_none());
         assert!(!Switcher::open(vec![], None, false).remove(1));
     }
 

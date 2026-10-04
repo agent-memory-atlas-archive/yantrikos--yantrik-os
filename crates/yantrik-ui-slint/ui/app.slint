@@ -499,7 +499,6 @@ export component App inherits Window {
     in property <[SwitcherCell]> alt-tab-cells: [];
     in property <int> alt-tab-selected: -1;
     in property <string> alt-tab-status: "";
-    in property <string> alt-tab-plate: "";
     in property <int> alt-tab-page: 0;
     in property <int> alt-tab-pages: 1;
     callback alt-tab-navigate(string, int);
@@ -3602,7 +3601,6 @@ export component App inherits Window {
             cells: root.alt-tab-cells;
             selected: root.alt-tab-selected;
             status: root.alt-tab-status;
-            plate: root.alt-tab-plate;
             page: root.alt-tab-page;
             pages: root.alt-tab-pages;
             navigate(direction, columns) => { root.alt-tab-navigate(direction, columns); }
