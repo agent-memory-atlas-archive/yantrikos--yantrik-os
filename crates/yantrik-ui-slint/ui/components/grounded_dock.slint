@@ -529,19 +529,24 @@ export component GroundedDock inherits Rectangle {
                 clicked => { root.close-list(); root.open-companion(); }
                 wheel(n) => { root.page-by(n); }
                 attention(on) => { root.attend(on, "mind", root.cards-waiting > 0 ? root.mind-label + " — " + root.cards-waiting + " waiting for you" : root.mind-label, 0, self.anchor-x); }
-                // The mind's own tile: teal, the one place teal appears in the dock. A mind that
-                // cannot be reached is a grey tile rather than a teal one that lies.
+                // The mind is not an app, so it is not a tile: the ring glyph in the mind's teal on
+                // no fill, inside a 1px teal circle, where every app is a filled rounded square.
+                // The one place teal appears in the dock. A mind that cannot be reached is grey
+                // rather than a teal that lies. Same 32px footprint as a tile; the 40px button
+                // around it is the hit area.
                 Rectangle {
                     width: Theme.dock-icon;
                     height: Theme.dock-icon;
                     x: (parent.width - self.width) / 2;
                     y: (parent.height - self.height) / 2;
-                    border-radius: Theme.dock-icon * Theme.dock-tile-radius-ratio;
-                    background: root.companion-online ? Theme.mind-teal : Theme.dock-raised-line;
+                    border-radius: self.width / 2;
+                    background: transparent;
+                    border-width: 1px;
+                    border-color: root.companion-online ? Theme.mind : Theme.dock-raised-line;
                     Icon {
                         commands: Icons.companion;
                         size: Theme.dock-icon * Theme.dock-mind-glyph-ratio;
-                        tint: Theme.mind-teal-ink;
+                        tint: root.companion-online ? Theme.mind : Theme.text-dim;
                         thickness: 1.8px;
                         x: (parent.width - self.width) / 2;
                         y: (parent.height - self.height) / 2;

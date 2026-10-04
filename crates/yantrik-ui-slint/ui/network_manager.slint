@@ -587,6 +587,10 @@ export component NetworkManager inherits Rectangle {
                                     text: root.firewall-state == "absent" ? "Not installed"
                                         : root.firewall-state == "unknown" ? "Unknown"
                                         : root.firewall-rule-count < 0 ? root.firewall-state
+                                        // Active and inactive say so in words, not in green and
+                                        // amber alone.
+                                        : root.firewall-state == "active" ? "Filtering · \{root.firewall-rule-count} rules"
+                                        : root.firewall-state == "inactive" ? "Not filtering · \{root.firewall-rule-count} rules"
                                         : "\{root.firewall-rule-count} rules";
                                     color: root.firewall-state == "active" ? Theme.color-success
                                          : root.firewall-state == "inactive" ? Theme.color-warning

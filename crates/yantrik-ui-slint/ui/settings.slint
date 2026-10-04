@@ -117,7 +117,7 @@ export struct ThemeCardData {
     preview: image,
     ground: color,
     surface: color,
-    card: color,
+    text: color,
     accent: color,
 }
 
@@ -207,15 +207,17 @@ component ThemeCard inherits Rectangle {
     background: Theme.bg-card;
     border-width: root.selected || focus.has-focus ? 2px : 1px;
     border-color: root.selected || focus.has-focus ? Theme.text-primary : Theme.border-default;
-    // The place itself: its wallpaper, with the colours it brings in the corner.
+    // The place itself: its wallpaper, with the colours it brings in the corner. Ground, surface,
+    // text and accent, as filled discs: three grounds side by side were three near-blacks that
+    // read as empty rings, where the text and the accent are what tells two themes apart.
     Rectangle {
         x: 8px; y: 8px; width: parent.width - 16px; height: 104px;
         border-radius: Theme.r-lg; clip: true; background: root.theme.ground;
         Image { width: 100%; height: 100%; source: root.theme.preview; image-fit: cover; }
         HorizontalLayout {
-            x: 10px; y: parent.height - 28px; spacing: 6px;
-            for swatch in [root.theme.ground, root.theme.surface, root.theme.card, root.theme.accent] : Rectangle {
-                width: 18px; height: 18px; border-radius: 9px; background: swatch;
+            x: 10px; y: parent.height - 26px; spacing: 6px;
+            for swatch in [root.theme.ground, root.theme.surface, root.theme.text, root.theme.accent] : Rectangle {
+                width: 16px; height: 16px; border-radius: 8px; background: swatch;
                 border-width: 1px; border-color: Theme.glass-border-strong;
             }
         }
@@ -816,13 +818,13 @@ export component SettingsScreen inherits Rectangle {
                                 }
 
                                 // The swatch is the preset's own token, so it is the colour you get.
-                                // The serialised id stays "cyan" for the first preset: saved
-                                // settings and the control surface already say it.
+                                // The serialised ids stay "cyan" and "purple": saved settings and
+                                // the control surface already say them. No amber and no green:
+                                // those mean "needs you" and success, never every primary
+                                // (yantrik_app_runtime::theme::ACCENTS is the same three).
                                 for accent in [
                                     {id:"cyan",label:"Soft blue",color:AccentPreset.swatch-0},
-                                    {id:"amber",label:"Amber",color:AccentPreset.swatch-1},
-                                    {id:"purple",label:"Purple",color:AccentPreset.swatch-2},
-                                    {id:"green",label:"Green",color:AccentPreset.swatch-3},
+                                    {id:"purple",label:"Violet",color:AccentPreset.swatch-2},
                                     {id:"pink",label:"Pink",color:AccentPreset.swatch-4}
                                 ] : AccentChoice {swatch:accent.color;label:accent.label;selected:root.accent-color==accent.id;chosen=>{root.choose-accent(accent.id);}}
 
@@ -1151,16 +1153,12 @@ export component SettingsScreen inherits Rectangle {
                             // ── THE BUILT-IN COMPANION'S STATUS ──
                             HorizontalLayout {
                                 spacing: Theme.sp-2;
+                                // A section mark, not a status light: the card below says the
+                                // state in words, and a coloured bar here said it in colour alone.
                                 Rectangle {
                                     width: 3px; height: 14px;
                                     border-radius: 1.5px;
-                                    background: root.ai-status.status == "connected" ? Theme.color-success
-                                              : root.ai-status.status == "fallback" ? Theme.amber
-                                              : Theme.color-emotional;
-                                    drop-shadow-blur: 6px;
-                                    drop-shadow-color: root.ai-status.status == "connected" ? Theme.color-success-dim
-                                                     : root.ai-status.status == "fallback" ? Theme.amber-glow
-                                                     : Theme.color-danger-dim;
+                                    background: Theme.border-strong;
                                 }
                                 Text {
                                     // What this card is about: the desktop's own AI. The minds that
@@ -1309,7 +1307,9 @@ export component SettingsScreen inherits Rectangle {
                                                 font-size: Theme.fs-caption;
                                             }
                                             Text {
-                                                text: root.ai-status.latency-ms >= 0 ? root.ai-status.latency-ms + "ms" : "—";
+                                                // The judgement in words too, not in the colour alone.
+                                                text: root.ai-status.latency-ms < 0 ? "—"
+                                                    : root.ai-status.latency-ms + "ms · " + (root.ai-status.latency-ms < 200 ? "fast" : root.ai-status.latency-ms < 500 ? "ok" : "slow");
                                                 color: root.ai-status.latency-ms >= 0 && root.ai-status.latency-ms < 200 ? Theme.color-success
                                                      : root.ai-status.latency-ms < 500 ? Theme.amber
                                                      : Theme.color-emotional;
@@ -1658,6 +1658,16 @@ export component SettingsScreen inherits Rectangle {
                                             font-weight: 500;
                                             horizontal-stretch: 1;
                                         }
+                                        // The dot's state in words, so it is never colour alone.
+                                        Text {
+                                            text: provider.status == "connected" ? "Connected"
+                                                : provider.status == "testing" ? "Testing…"
+                                                : provider.status == "error" ? "Failed"
+                                                : "Not tested";
+                                            color: Theme.text-secondary;
+                                            font-size: Theme.fs-micro;
+                                            vertical-alignment: center;
+                                        }
                                         // Type badge
                                         Rectangle {
                                             width: ptype-txt.preferred-width + 12px;
@@ -1714,7 +1724,7 @@ export component SettingsScreen inherits Rectangle {
                                             horizontal-stretch: 1;
                                         }
                                         if provider.latency-ms >= 0 : Text {
-                                            text: provider.latency-ms + "ms";
+                                            text: provider.latency-ms + "ms · " + (provider.latency-ms < 200 ? "fast" : provider.latency-ms < 500 ? "ok" : "slow");
                                             color: provider.latency-ms < 200 ? Theme.color-success
                                                  : provider.latency-ms < 500 ? Theme.amber
                                                  : Theme.color-emotional;
@@ -2386,13 +2396,24 @@ export component SettingsScreen inherits Rectangle {
                                                 background: root.privacy-preset == preset-item.value ? Theme.color-success-dim : Theme.hover-fill;
                                                 border-width: 1px;
                                                 border-color: root.privacy-preset == preset-item.value ? Theme.color-success-dim : Theme.border-subtle;
-                                                Text {
-                                                    text: preset-item.label;
-                                                    color: root.privacy-preset == preset-item.value ? Theme.color-success : Theme.text-secondary;
-                                                    font-size: Theme.fs-caption;
-                                                    font-weight: root.privacy-preset == preset-item.value ? 600 : 400;
-                                                    horizontal-alignment: center;
-                                                    vertical-alignment: center;
+                                                // The chosen one carries a check, not only a colour.
+                                                HorizontalLayout {
+                                                    alignment: center;
+                                                    spacing: 4px;
+                                                    if root.privacy-preset == preset-item.value : Icon {
+                                                        commands: Icons.check;
+                                                        size: 12px;
+                                                        tint: Theme.color-success;
+                                                        y: (parent.height - self.height) / 2;
+                                                    }
+                                                    Text {
+                                                        text: preset-item.label;
+                                                        color: root.privacy-preset == preset-item.value ? Theme.color-success : Theme.text-secondary;
+                                                        font-size: Theme.fs-caption;
+                                                        font-weight: root.privacy-preset == preset-item.value ? 600 : 400;
+                                                        horizontal-alignment: center;
+                                                        vertical-alignment: center;
+                                                    }
                                                 }
                                             }
                                         }

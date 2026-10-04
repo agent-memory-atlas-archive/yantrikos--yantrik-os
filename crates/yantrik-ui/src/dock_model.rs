@@ -236,6 +236,21 @@ mod tests {
         assert!(src.contains(r#"root.list-count == 1 ? "1 window""#));
     }
 
+    /// The mind is not an app, so its button is not a tile: the ring in the mind's teal on no
+    /// fill, at most a 1px teal edge, where it was a solid teal tile beside the app tiles.
+    #[test]
+    fn the_mind_button_is_a_glyph_not_a_tile() {
+        let src = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../yantrik-ui-slint/ui/components/grounded_dock.slint")).unwrap();
+        let mind = &src[src.find("// ── Yantrik Mind ──").expect("the mind button")..];
+        let mind = &mind[..mind.find("// ── Show desktop ──").expect("the next section")];
+        assert!(mind.contains("DockBtn {"), "the same 40px button, so the same hit area and label");
+        assert!(mind.contains("width: Theme.dock-icon;") && mind.contains("height: Theme.dock-icon;"), "the same 32px footprint");
+        assert!(mind.contains("background: transparent;"), "no fill");
+        assert!(mind.contains("border-width: 1px;") && !mind.contains("border-width: 2px"), "at most a 1px edge");
+        assert!(mind.contains("Theme.mind :") && mind.contains("commands: Icons.companion;"), "the ring in the mind's teal");
+        assert!(!mind.contains("background: root.companion-online"), "not a teal tile");
+    }
+
     fn win(title: &str, app: &str) -> Win {
         Win { title: title.into(), app_id: app.into(), subtitle: String::new() }
     }

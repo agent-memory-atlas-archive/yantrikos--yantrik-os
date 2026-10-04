@@ -19,73 +19,68 @@ export global ThemeMode {
 }
 
 // Accent color presets — index selects which accent palette is active.
-// 0 = soft blue (default), 1 = amber, 2 = purple, 3 = green, 4 = pink
+// 0 = soft blue (default), 2 = violet, 4 = pink. 1 and 3 are not presets.
+//
+// The accent is every primary and every ON, so it may not be a colour that already means
+// something (colour roles, design/minds-surfaces-spec-2026-10-02.md). Amber (1) and green (3)
+// were presets and were taken out: amber is "needs you" and green is success, and either as the
+// accent made every button say it. No preset may sit in the amber or the teal hue family; a test
+// holds that (crates/yantrik-ui-kit/src/colour_roles.rs).
+//
+// The survivors keep their old numbers, so an index already in a running window or saved by an
+// older build still means the same colour. Any index that is not 2 or 4 resolves to the soft
+// blue below, so a retired one cannot paint anything; the saved name is mapped back to a
+// preset in one place for the shell and every app (yantrik_app_runtime::theme::ACCENTS).
 //
 // Crisp, not louder (desk-and-mind, "bright and sharp"). Each preset keeps its hue and gains
 // saturation: the old cyan #4ecdc4 sat at 56% saturation, which on a near-black ground reads as
 // a pastel wash rather than an edge. The light-mode values stay dark enough to carry white text
-// on a primary button (the cyan is 5.5:1 against #ffffff, up from 5.2).
+// on a primary button (the soft blue is 5.5:1 against #ffffff).
 export global AccentPreset {
     in-out property <int> index: 0;
 
     // The dark-theme value of each preset, once. `accent` below and the Settings swatches both
     // read these, so the picker cannot show one colour and apply another (it did, #583).
     out property <color> swatch-0: #8fb4e3;
-    out property <color> swatch-1: #f2b73e;
     out property <color> swatch-2: #b98aef;
-    out property <color> swatch-3: #5ede78;
     out property <color> swatch-4: #f27aa0;
 
     // Resolved accent colors — reactive to index + dark mode.
     out property <color> accent:
-        index == 0 ? (ThemeMode.dark ? swatch-0 : #2b64a8)   // soft blue, the system accent
-      : index == 1 ? (ThemeMode.dark ? swatch-1 : #8f6512)   // amber
-      : index == 2 ? (ThemeMode.dark ? swatch-2 : #7338b4)   // purple
-      : index == 3 ? (ThemeMode.dark ? swatch-3 : #1f7d30)   // green
-      :               (ThemeMode.dark ? swatch-4 : #bd3563);  // pink
+        index == 2 ? (ThemeMode.dark ? swatch-2 : #7338b4)   // violet
+      : index == 4 ? (ThemeMode.dark ? swatch-4 : #bd3563)   // pink
+      :              (ThemeMode.dark ? swatch-0 : #2b64a8);  // soft blue, the system accent
 
     out property <color> accent-light:
-        index == 0 ? (ThemeMode.dark ? #a9c5ec : #4a82c2)
-      : index == 1 ? (ThemeMode.dark ? #f6cd75 : #b88838)
-      : index == 2 ? (ThemeMode.dark ? #d0a8f6 : #9060c8)
-      : index == 3 ? (ThemeMode.dark ? #8eeba2 : #48a858)
-      :               (ThemeMode.dark ? #f69cbb : #d06080);
+        index == 2 ? (ThemeMode.dark ? #d0a8f6 : #9060c8)
+      : index == 4 ? (ThemeMode.dark ? #f69cbb : #d06080)
+      :              (ThemeMode.dark ? #a9c5ec : #4a82c2);
 
     out property <color> accent-dim:
-        index == 0 ? (ThemeMode.dark ? #6f95c4 : #9dbbe0)
-      : index == 1 ? (ThemeMode.dark ? #a87c28 : #c8a860)
-      : index == 2 ? (ThemeMode.dark ? #7c4fae : #b090d0)
-      : index == 3 ? (ThemeMode.dark ? #33854a : #80c090)
-      :               (ThemeMode.dark ? #aa4570 : #d898b0);
+        index == 2 ? (ThemeMode.dark ? #7c4fae : #b090d0)
+      : index == 4 ? (ThemeMode.dark ? #aa4570 : #d898b0)
+      :              (ThemeMode.dark ? #6f95c4 : #9dbbe0);
 
     out property <color> accent-glow:
-        index == 0 ? (ThemeMode.dark ? #8fb4e340 : #2b64a830)
-      : index == 1 ? (ThemeMode.dark ? #f2b73e40 : #8f651230)
-      : index == 2 ? (ThemeMode.dark ? #b98aef40 : #7338b430)
-      : index == 3 ? (ThemeMode.dark ? #5ede7840 : #1f7d3030)
-      :               (ThemeMode.dark ? #f27aa040 : #bd356330);
+        index == 2 ? (ThemeMode.dark ? #b98aef40 : #7338b430)
+      : index == 4 ? (ThemeMode.dark ? #f27aa040 : #bd356330)
+      :              (ThemeMode.dark ? #8fb4e340 : #2b64a830);
 
     out property <color> accent-glow-strong:
-        index == 0 ? (ThemeMode.dark ? #8fb4e370 : #2b64a850)
-      : index == 1 ? (ThemeMode.dark ? #f2b73e70 : #8f651250)
-      : index == 2 ? (ThemeMode.dark ? #b98aef70 : #7338b450)
-      : index == 3 ? (ThemeMode.dark ? #5ede7870 : #1f7d3050)
-      :               (ThemeMode.dark ? #f27aa070 : #bd356350);
+        index == 2 ? (ThemeMode.dark ? #b98aef70 : #7338b450)
+      : index == 4 ? (ThemeMode.dark ? #f27aa070 : #bd356350)
+      :              (ThemeMode.dark ? #8fb4e370 : #2b64a850);
 
     out property <color> tint:
-        index == 0 ? (ThemeMode.dark ? #8fb4e31c : #2b64a817)
-      : index == 1 ? (ThemeMode.dark ? #f2b73e1c : #8f651217)
-      : index == 2 ? (ThemeMode.dark ? #b98aef1c : #7338b417)
-      : index == 3 ? (ThemeMode.dark ? #5ede781c : #1f7d3017)
-      :               (ThemeMode.dark ? #f27aa01c : #bd356317);
+        index == 2 ? (ThemeMode.dark ? #b98aef1c : #7338b417)
+      : index == 4 ? (ThemeMode.dark ? #f27aa01c : #bd356317)
+      :              (ThemeMode.dark ? #8fb4e31c : #2b64a817);
 
     // Label for current accent (for settings display)
     out property <string> label:
-        index == 0 ? "Soft blue"
-      : index == 1 ? "Amber"
-      : index == 2 ? "Purple"
-      : index == 3 ? "Green"
-      :              "Pink";
+        index == 2 ? "Violet"
+      : index == 4 ? "Pink"
+      :              "Soft blue";
 }
 
 // Community theme overrides — set from ~/.config/yantrik/theme-override.yaml.
@@ -226,8 +221,11 @@ export global Theme {
     out property <color> tint-accent:        AccentPreset.tint;
 
     // ─── Semantic status colors ───────────────────────────────────
-    out property <color> color-success:      ThemeMode.dark ? #26a69a : #2e7d32;
-    out property <color> color-success-dim:  ThemeMode.dark ? #26a69a28 : #2e7d3220;
+    // Success is green in both modes. The dark value was #26a69a, a teal, and teal is a mind's
+    // colour and nothing else's: a finished download read as a mind being present. Never by
+    // colour alone either; a success carries a check or a word beside the green.
+    out property <color> color-success:      ThemeMode.dark ? #3fb950 : #2e7d32;
+    out property <color> color-success-dim:  ThemeMode.dark ? #3fb95028 : #2e7d3220;
     out property <color> color-danger:       ThemeMode.dark ? #ef9a9a : #c62828;
     // The destructive button's fill: the one red, for what cannot be undone (delete, erase,
     // power off). A filled button, so it is a stronger red than color-danger, which is a text
@@ -464,7 +462,6 @@ export global Theme {
     out property <length> dock-desk-strip: 12px;   // the show-desktop corner
     out property <length> dock-divider-inset: 8px;
     out property <length> dock-check: 16px;
-    out property <float> dock-tile-radius-ratio: 0.26;
     out property <float> dock-mind-glyph-ratio: 0.6;
     out property <length> dock-label-gap: 8px;   // a label or a list opens this far above the dock
     // Delays, written out in grounded_dock.slint too: the idle-window test reads a Timer's rate from its
@@ -480,7 +477,6 @@ export global Theme {
     out property <color> dock-marker:     ThemeMode.dark ? #ffffff : #1b2126;       // running: static, white
     out property <color> dock-popover:    ThemeMode.dark ? #151A1E : #ffffff;       // opaque panel for labels and the list
     out property <color> mind-teal:       #69C8BC;   // minds and their presence, nothing else
-    out property <color> mind-teal-ink:   #0c1a18;   // the glyph on the teal tile
     out property <color> needs-you:       #E7B567;   // a person's response is pending, nothing else
 
     // Lock screen (design/ui-overhaul-2026-10-01.md §1.6, PR 6.2)

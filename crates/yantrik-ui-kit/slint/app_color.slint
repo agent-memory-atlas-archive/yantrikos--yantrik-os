@@ -128,15 +128,20 @@ export global AppColor {
              : id == "arcade"         ? "orange"
 
              // The files, and the machine. Files is the folder blue; the rest are cool.
+             //
+             // Not teal: teal is a mind's colour (colour roles), so a wall of teal machine tiles
+             // read as a wall of minds. Containers is the blue (its launcher neighbour Calendar
+             // is red), Downloads the folder sky it saves into, Packages green. Browser alone
+             // keeps teal, because the design names it so (`the_design_colours_hold`).
              : id == "files"          ? "sky"
              : id == "terminal"       ? "green"
              : id == "system"         ? "azure"
              : id == "sysmonitor"     ? "lime"
              : id == "network"        ? "azure"
-             : id == "containers"     ? "teal"
-             : id == "packages"       ? "teal"
+             : id == "containers"     ? "blue"
+             : id == "packages"       ? "green"
              : id == "devices"        ? "slate"
-             : id == "downloads"      ? "teal"
+             : id == "downloads"      ? "sky"
              : id == "browser"        ? "teal"
              : id == "weather"        ? "azure"
 
