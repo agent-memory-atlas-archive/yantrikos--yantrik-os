@@ -251,3 +251,149 @@ fn a_risk_tile_is_neutral_and_only_high_risk_is_amber() {
     assert!(src.contains("needs-you: root.perm-high-risk-count > 0;"));
     assert!(src.contains("text: \"Scan path\";"), "the scan path field says what it is");
 }
+
+/// WCAG 2 contrast of two `#rrggbb` colours, from 1:1 to 21:1.
+fn contrast(a: &str, b: &str) -> f64 {
+    let luminance = |hex: &str| {
+        let h = hex.trim_start_matches('#');
+        let channel = |at: usize| {
+            let v = u8::from_str_radix(&h[at..at + 2], 16).unwrap_or_else(|_| panic!("{hex}")) as f64 / 255.0;
+            if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+        };
+        0.2126 * channel(0) + 0.7152 * channel(2) + 0.0722 * channel(4)
+    };
+    let (a, b) = (luminance(a), luminance(b));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+/// The value of `out property <color> {name}:` in `scope`, up to its `;`.
+fn token<'a>(scope: &'a str, name: &str) -> &'a str {
+    let key = format!("out property <color> {name}:");
+    let start = scope.find(&key).unwrap_or_else(|| panic!("no `{name}` token")) + key.len();
+    &scope[start..start + scope[start..].find(';').expect("the token ends")]
+}
+
+/// Every theme file: its name, whether it is dark, and its palette's `bg_deep` and `accent`.
+fn theme_files() -> Vec<(String, bool, String, String)> {
+    let dir: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR")).join("../yantrik-design-tokens/themes");
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(&dir).expect("the themes") {
+        let path = entry.unwrap().path();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let dark = text.lines().any(|l| l.trim() == "dark = true");
+        let palette = &text[text.find("[palette]").unwrap_or_else(|| panic!("{name} has no palette"))..];
+        let colour = |key: &str| {
+            let line = palette.lines().find(|l| l.trim_start().starts_with(&format!("{key} = \"#")));
+            hexes(line.unwrap_or_else(|| panic!("{name} has no palette {key}")))[0].clone()
+        };
+        let (bg_deep, accent) = (colour("bg_deep"), colour("accent"));
+        out.push((name, dark, bg_deep, accent));
+    }
+    out
+}
+
+/// Text and glyphs on an accent fill are `Theme.text-on-accent`: the theme's deepest ground in dark
+/// mode, white in light. White on the dark accents was 2.1:1 (soft blue) and 2.6:1 (violet). This
+/// reads the rule and every colour it meets from the source: each dark preset, at rest and at its
+/// hover step, under the stock ground and every theme file's; each light preset under white; and
+/// each theme file's own accent under its own ink. 4.5:1 is the floor for 14px text.
+#[test]
+fn the_ink_on_an_accent_fill_reads_on_every_accent() {
+    let tokens = read("crates/yantrik-design-tokens/slint/theme.slint");
+    let start = tokens.find("export global AccentPreset").expect("the presets");
+    let presets = &tokens[start..start + tokens[start..].find("\n}\n").expect("the presets end")];
+    let theme = &tokens[tokens.find("export global Theme {").expect("the Theme global")..];
+    let rule = token(theme, "text-on-accent").trim();
+    assert_eq!(rule, "ThemeMode.dark ? Theme.bg-deep : #ffffff", "the ink follows the ground in dark mode and is white in light");
+
+    let mut dark_inks = vec![("theme.slint".to_string(), hexes(token(theme, "bg-deep"))[0].clone())];
+    let themes = theme_files();
+    assert!(themes.len() >= 2, "Lake and Nightfall at least");
+    dark_inks.extend(themes.iter().filter(|t| t.1).map(|t| (t.0.clone(), t.2.clone())));
+
+    // A dark preset is its swatch, and its hover step is accent-light's dark half. The light
+    // presets are the hexes written into `accent` itself.
+    let rest: Vec<String> = presets.lines().filter(|l| l.contains("property <color> swatch-")).flat_map(hexes).collect();
+    let hover: Vec<String> = hexes(token(presets, "accent-light")).into_iter().step_by(2).collect();
+    let light = hexes(token(presets, "accent"));
+    assert_eq!((rest.len(), hover.len(), light.len()), (3, 3, 3), "three presets, read in each form");
+
+    for (whose, ink) in &dark_inks {
+        for accent in rest.iter().chain(&hover) {
+            let ratio = contrast(ink, accent);
+            assert!(ratio >= 4.5, "{whose}'s ink {ink} on the dark accent {accent} is {ratio:.2}:1");
+        }
+    }
+    for accent in &light {
+        let ratio = contrast("#ffffff", accent);
+        assert!(ratio >= 4.5, "white on the light accent {accent} is {ratio:.2}:1");
+    }
+    for (name, dark, bg_deep, accent) in &themes {
+        let ink = if *dark { bg_deep.as_str() } else { "#ffffff" };
+        let ratio = contrast(ink, accent);
+        assert!(ratio >= 4.5, "{name}: its ink {ink} on its accent {accent} is {ratio:.2}:1");
+    }
+}
+
+/// The contrast sum itself, on pairs with published ratios.
+#[test]
+fn contrast_is_wcag() {
+    assert!((contrast("#000000", "#ffffff") - 21.0).abs() < 0.01);
+    assert!((contrast("#777777", "#ffffff") - 4.48).abs() < 0.01);
+    assert!((contrast("#ffffff", "#8fb4e3") - 2.14).abs() < 0.01, "white on the soft blue, the sign-off's case");
+}
+
+/// Every .slint file under `dir`, build output skipped.
+fn slint_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_dir() && path.file_name().is_some_and(|n| n != "target") {
+            slint_files(&path, out);
+        } else if path.extension().is_some_and(|e| e == "slint") {
+            out.push(path);
+        }
+    }
+}
+
+/// Nothing sits on an accent fill in white, near-white text-primary, or bg-deep (pale in light
+/// mode, so a hand-written "dark ink" turned pale there): the ink is Theme.text-on-accent. A fill
+/// is an element whose own background names the accent (or the app's identity accent, which is
+/// as light); a colour, tint, glyph fill or knob anywhere inside it is checked. A value that also
+/// names text-on-accent chooses between the fill's ink and another state's, and passes.
+#[test]
+fn nothing_on_an_accent_fill_is_white_or_text_primary() {
+    use crate::slint_source::{blocks, names, own_text, strip, values};
+    const FORBIDDEN: [&str; 5] = ["white", "#fff", "Theme.text-primary", "Theme.bg-deep", "Theme.lock-ground"];
+    const ACCENTS: [&str; 3] = ["Theme.accent", "AccentPreset.accent", "AppIdentity.accent"];
+    let root: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+    let mut files = Vec::new();
+    for dir in ["crates/yantrik-ui-slint/ui", "crates/yantrik-ui-kit/slint", "crates/yantrik-lock/ui", "apps", "tests/ui-preview"] {
+        slint_files(&root.join(dir), &mut files);
+    }
+    assert!(files.len() > 100, "read the shell, the kit and the apps, found {}", files.len());
+    let mut fills = 0;
+    for path in &files {
+        let s = strip(&std::fs::read_to_string(path).unwrap());
+        let all = blocks(&s);
+        for (i, block) in all.iter().enumerate() {
+            let own = own_text(&s, *block, &all);
+            if !values(&own, "background").iter().any(|v| ACCENTS.iter().any(|t| names(v, t))) {
+                continue;
+            }
+            fills += 1;
+            let inner = &s[block.open + 1..block.close];
+            let mut inks: Vec<String> = ["color", "tint", "fill"].iter().flat_map(|p| values(inner, p)).collect();
+            for inside in all[i + 1..].iter().take_while(|b| b.open < block.close) {
+                inks.extend(values(&own_text(&s, *inside, &all), "background"));
+            }
+            for ink in inks.iter().filter(|v| !v.contains("text-on-accent")) {
+                if let Some(bad) = FORBIDDEN.iter().find(|f| ink.contains(*f)) {
+                    let line = s[..block.open].matches('\n').count() + 1;
+                    panic!("{}:{line} puts `{ink}` ({bad}) on an accent fill; the ink there is Theme.text-on-accent", path.display());
+                }
+            }
+        }
+    }
+    assert!(fills > 50, "found the accent fills, {fills} of them");
+}

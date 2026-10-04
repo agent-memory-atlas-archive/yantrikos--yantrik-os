@@ -385,7 +385,7 @@ export component DownloadManagerScreen inherits Rectangle {
                     background: select-all-ta.has-hover ? Theme.hover-fill-strong : Theme.hover-fill;
                     border-radius: 6px;
                     border-width: 1px;
-                    border-color: root.dl-all-selected ? AppIdentity.accent : Theme.border-subtle;
+                    border-color: root.dl-all-selected ? Theme.accent : Theme.border-subtle;
 
                     Rectangle {
                         width: 14px;
@@ -393,7 +393,7 @@ export component DownloadManagerScreen inherits Rectangle {
                         x: 7px;
                         y: 7px;
                         border-radius: 3px;
-                        background: root.dl-all-selected ? AppIdentity.accent : transparent;
+                        background: root.dl-all-selected ? Theme.accent : transparent;
                         border-width: root.dl-all-selected ? 0 : 1px;
                         border-color: Theme.text-dim;
 
@@ -608,8 +608,8 @@ export component DownloadManagerScreen inherits Rectangle {
                                     height: 18px;
                                     border-radius: 4px;
                                     border-width: 1px;
-                                    border-color: dl.is-selected ? AppIdentity.accent : Theme.text-dim;
-                                    background: dl.is-selected ? AppIdentity.accent : transparent;
+                                    border-color: dl.is-selected ? Theme.accent : Theme.text-dim;
+                                    background: dl.is-selected ? Theme.accent : transparent;
                                     y: (parent.height - self.height) / 2;
 
                                     if dl.is-selected : Icon {

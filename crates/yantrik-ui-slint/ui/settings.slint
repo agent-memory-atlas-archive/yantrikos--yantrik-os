@@ -2077,7 +2077,7 @@ export component SettingsScreen inherits Rectangle {
                                             clicked => { root.toggle-auto-fallback(); }
                                             Rectangle {
                                                 border-radius: Theme.r-lg;
-                                                background: root.ai-status.using-fallback ? AppIdentity.accent : Theme.border-default;
+                                                background: root.ai-status.using-fallback ? Theme.accent : Theme.border-default;
                                                 border-width: 1px;
                                                 border-color: root.ai-status.using-fallback ? Theme.accent-dim : Theme.border-subtle;
                                                 // Toggle knob
@@ -2087,7 +2087,7 @@ export component SettingsScreen inherits Rectangle {
                                                     x: root.ai-status.using-fallback ? parent.width - 21px : 3px;
                                                     y: 3px;
                                                     border-radius: 9px;
-                                                    background: Theme.text-primary;
+                                                    background: root.ai-status.using-fallback ? Theme.text-on-accent : Theme.text-primary;
                                                     animate x { duration: Theme.dur-fast; easing: ease-in-out; }
                                                     animate background { duration: Theme.dur-fast; }
                                                 }
@@ -2478,7 +2478,7 @@ export component SettingsScreen inherits Rectangle {
                                             clicked => { root.privacy-cloud-confirm = !root.privacy-cloud-confirm; }
                                             Rectangle {
                                                 border-radius: Theme.r-lg;
-                                                background: root.privacy-cloud-confirm ? AppIdentity.accent : Theme.border-default;
+                                                background: root.privacy-cloud-confirm ? Theme.accent : Theme.border-default;
                                                 border-width: 1px;
                                                 border-color: root.privacy-cloud-confirm ? Theme.accent-dim : Theme.border-subtle;
                                                 Rectangle {
@@ -2486,7 +2486,7 @@ export component SettingsScreen inherits Rectangle {
                                                     x: root.privacy-cloud-confirm ? parent.width - 21px : 3px;
                                                     y: 3px;
                                                     border-radius: 9px;
-                                                    background: Theme.text-primary;
+                                                    background: root.privacy-cloud-confirm ? Theme.text-on-accent : Theme.text-primary;
                                                     animate x { duration: Theme.dur-fast; easing: ease-in-out; }
                                                 }
                                             }
@@ -3629,11 +3629,11 @@ SettingRow{label:"About this device";description:"Detailed information about thi
                                         // The state is a colour as well as a word: amber for
                                         // something the person has to do, red for something that
                                         // broke, accent for the mind that is talking.
-                                        background: h.active ? AppIdentity.accent
+                                        background: h.active ? Theme.accent
                                                   : root.harness-state-tint(h.state);
                                         pill-text := Text {
                                             text: h.state;
-                                            color: h.active ? Theme.bg-deep
+                                            color: h.active ? Theme.text-on-accent
                                                  : root.harness-state-color(h.state);
                                             font-size: Theme.fs-caption;
                                             font-weight: 500;

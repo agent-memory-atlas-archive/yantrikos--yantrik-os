@@ -121,7 +121,7 @@ component ToggleSwitch inherits TouchArea {
             width: 44px;
             height: 24px;
             border-radius: Theme.r-lg;
-            background: checked ? AppIdentity.accent : Theme.bg-elevated;
+            background: checked ? Theme.accent : Theme.bg-elevated;
             border-width: 1px;
             border-color: checked ? Theme.accent-dim : Theme.text-dim;
 
@@ -132,7 +132,7 @@ component ToggleSwitch inherits TouchArea {
                 width: 18px;
                 height: 18px;
                 border-radius: 9px;
-                background: Theme.text-primary;
+                background: checked ? Theme.text-on-accent : Theme.text-primary;
                 animate x { duration: Theme.dur-fast; easing: ease-in-out; }
             }
         }

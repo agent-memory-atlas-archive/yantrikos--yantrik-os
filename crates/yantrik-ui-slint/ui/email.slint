@@ -740,7 +740,7 @@ export component EmailClient inherits Rectangle {
                                 }
                                 Text {
                                     text: root.setup-testing ? "Working..." : "Sign In";
-                                    color: root.setup-testing ? Theme.text-dim : Theme.bg-deep;
+                                    color: root.setup-testing ? Theme.text-dim : Theme.text-on-accent;
                                     font-size: Theme.fs-body; font-weight: 600;
                                     horizontal-alignment: center; vertical-alignment: center;
                                 }
@@ -1682,7 +1682,7 @@ export component EmailClient inherits Rectangle {
                                     }
                                     mouse-cursor: pointer;
                                 }
-                                Text { text: "Draft"; color: Theme.bg-deep; font-size: Theme.fs-caption; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                                Text { text: "Draft"; color: Theme.text-on-accent; font-size: Theme.fs-caption; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
                             }
                         }
                     }

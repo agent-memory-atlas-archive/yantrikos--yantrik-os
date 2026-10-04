@@ -14,6 +14,8 @@ pub mod lock_shared;
 
 #[cfg(test)]
 mod colour_roles;
+#[cfg(test)]
+mod slint_source;
 
 #[cfg(test)]
 mod app_header_is_mandatory {
