@@ -55,7 +55,7 @@ def yos(*args, timeout=60):
     that (`delete_event`, TimeoutExpired, the whole run gone). The caller sees the timeout and
     decides what it means."""
     try:
-        r = subprocess.run(["yos", *args], capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run([YOS, *args], capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         return f"{YOS_TIMED_OUT} after {timeout}s: {' '.join(args[:3])} -- probably waiting on a card)"
     return (r.stdout or "") + (r.stderr or "")
@@ -201,6 +201,10 @@ def show_arena_month():
     return False
 
 
+EDITOR_PATTERN = "^/opt/yantrik/bin/yantrik-text-editor"
+# By its install path: over a plain ssh session /opt/yantrik/bin is not on PATH, `yos` was not found,
+# and the run refused to start as if approvals could not be turned off (VM 520, 4 October).
+YOS = "/opt/yantrik/bin/yos" if os.path.exists("/opt/yantrik/bin/yos") else "yos"
 CALENDAR_STORE = os.path.join(HOME, ".local", "share", "yantrik", "calendar")
 # Every arena task plays on this day, and every event it asks for is titled "Arena <tag>...".
 ARENA_DAY = "2026-09-30"
@@ -293,12 +297,14 @@ def close_editor():
     # opened new ones, so by B5 `new` was refused ("Eight tabs are already open") for the mind that
     # ran last -- a handicap the arena created and Hermes, run first, never met. Every mind starts
     # from a fresh editor.
-    # By full path, not `-x`: `pkill -x` matches the kernel's process NAME, which is cut to 15
+    # Anchored at the start of the command line: an unanchored `-f` also matched any ssh session or
+# shell whose command line merely CONTAINED the path, so the guard below saw an editor that was not
+# there (VM 520, 4 October). By full path, not `-x`: `pkill -x` matches the kernel's process NAME, which is cut to 15
     # characters, and "yantrik-text-editor" is 19 -- so `pkill -x yantrik-text-editor` never matched,
     # and the editor ran with its eight tabs from 13:52 through every reading after it.
-    subprocess.run(["pkill", "-f", "/opt/yantrik/bin/yantrik-text-editor"], capture_output=True)
+    subprocess.run(["pkill", "-f", EDITOR_PATTERN], capture_output=True)
     for _ in range(20):
-        if subprocess.run(["pgrep", "-f", "/opt/yantrik/bin/yantrik-text-editor"],
+        if subprocess.run(["pgrep", "-f", EDITOR_PATTERN],
                           capture_output=True).returncode != 0:
             break
         time.sleep(0.25)
@@ -315,7 +321,7 @@ def close_editor():
 # 520 on 1 Oct 2026 closed a Notes window it had not opened.
 RESET_ENDS = {
     "Notes": ["pgrep", "-x", "yantrik-notes"],
-    "the editor": ["pgrep", "-f", "/opt/yantrik/bin/yantrik-text-editor"],
+    "the editor": ["pgrep", "-f", EDITOR_PATTERN],
 }
 
 
