@@ -108,6 +108,9 @@ test_*.py
 # pass with the file it runs never committed, leaving the table in docs/app-control.md holding
 # nothing: the walk that keeps every method a service answers listed beside its grade.
 !tests/service-methods/test_*.py
+# ...nor the arena's own tests: CI runs a discover over tests/arena, which would pass with the
+# file it runs never committed.
+!tests/arena/test_*.py
 # ...nor the Python surface SDK's conformance suite, which CI discovers the same way.
 !sdk/python/tests/test_*.py
 # ...nor the surface SDK's template, adapter and guide-sample suites (docs/sdk), which CI
