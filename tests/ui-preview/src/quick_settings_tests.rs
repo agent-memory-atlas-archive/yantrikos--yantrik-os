@@ -100,7 +100,7 @@ fn vm_shape(ui: &App) {
     wired(&ui.global::<NetworkState>());
 }
 
-fn laptop_shape(ui: &App) {
+pub(crate) fn laptop_shape(ui: &App) {
     ui.set_battery_available(true);
     ui.set_battery_level(76);
     ui.set_brightness_available(true);

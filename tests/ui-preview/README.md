@@ -153,6 +153,24 @@ the session row answers too, and that the card leads with the description's firs
 cargo run --manifest-path tests/ui-preview/Cargo.toml --profile fast -- target/approval-card.png 1280 800 verify-approval-card
 ```
 
+## Review stills (light theme and Nightfall)
+
+`review-still <name>` renders one still for a design review, in a theme a test VM cannot be
+switched into without a pointer. Each run renders one still because every scene shares the one
+headless window. There are no assertions: these are pictures.
+
+- `appearance`: Settings → Appearance, light, soft-blue accent (also writes `-scrolled`).
+- `quick-settings`: the whole shell with Quick Settings open, light, laptop shape.
+- `app-header`: Calendar at 1280×800 with an ordinary day, light.
+- `approval`: one ApprovalCard at its natural height (440 wide, on the Lens panel's ground), light.
+- `approval-nightfall`: the same card on Nightfall: dark, violet (accent index 2) and its palette
+  overrides from `themes/nightfall.toml`, applied as `wire/theme.rs` applies them.
+- `approval-lens`, `approval-lens-nightfall`: the card in the Lens at 1280×800, where its details are clamped.
+
+```sh
+cargo run --manifest-path tests/ui-preview/Cargo.toml --profile fast -- target/light-appearance.png 1280 800 review-still appearance
+```
+
 ## Taskbar window menu
 
 `verify-taskbar-menu` draws the whole shell — app.slint's `App` — with two fixture windows on
