@@ -11,8 +11,11 @@ use crate::{
     AIModelData, AIProviderData, AIStatusData, AccentPreset, App, SettingsCategoryItem, ThemeMode,
 };
 
-/// Accent color preset names in cycle order (matches AccentPreset.index).
-const ACCENT_PRESETS: &[&str] = &["cyan", "amber", "purple", "green", "pink"];
+// The accents Settings offers, and what a retired one falls back to, are one table shared with
+// every app (yantrik_app_runtime::theme::ACCENTS), so the shell and an app can never disagree
+// about which colour a saved name is.
+use yantrik_app_runtime::theme::{offered_accent, ACCENTS};
+pub use yantrik_app_runtime::theme::accent_name_to_index;
 
 /// The wallpapers this OS ships, the default first.
 ///
@@ -389,6 +392,17 @@ pub fn next_auto_lock(current: i32) -> i32 {
 
 /// Load persisted settings (or defaults if missing/corrupt).
 pub fn load() -> UserSettings {
+    offered_choices(load_file())
+}
+
+/// A file from a build that offered amber or green opens on the soft blue, with the swatch that
+/// is lit, the accent drawn and the next save all saying so.
+fn offered_choices(mut settings: UserSettings) -> UserSettings {
+    settings.accent_color = offered_accent(&settings.accent_color).to_string();
+    settings
+}
+
+fn load_file() -> UserSettings {
     let path = settings_path();
     match crate::config_store::load(&path).and_then(|v| v.ok_or_else(|| "No settings file".into()))
     {
@@ -412,9 +426,7 @@ pub fn load() -> UserSettings {
                             .trim_start_matches("accent_color:")
                             .trim()
                             .trim_matches('"');
-                        if ACCENT_PRESETS.contains(&val) {
-                            settings.accent_color = val.to_string();
-                        }
+                        settings.accent_color = offered_accent(val).to_string();
                     }
                 }
                 if save(&settings).is_ok() {
@@ -507,18 +519,6 @@ fn unavailable_service(ui: &App, service: &str) {
     }
 }
 
-/// Convert accent color name to AccentPreset index.
-pub fn accent_name_to_index(name: &str) -> i32 {
-    match name {
-        "cyan" => 0,
-        "amber" => 1,
-        "purple" => 2,
-        "green" => 3,
-        "pink" => 4,
-        _ => 0,
-    }
-}
-
 /// Wire settings callbacks with persistence.
 pub fn wire(ui: &App, ctx: &AppContext) {
     STATUS_UI.with(|slot| *slot.borrow_mut() = Some(ui.as_weak()));
@@ -571,15 +571,14 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         persist(&s);
     });
 
-    // Cycle accent color: cyan → amber → purple → green → pink → cyan
+    // Cycle accent color through the offered ones: soft blue → violet → pink → soft blue
     let ui_weak = ui.as_weak();
     let s = settings.clone();
     ui.on_cycle_accent_color(move || {
         let Some(ui) = ui_weak.upgrade() else { return };
         let current = ui.get_settings_accent_color().to_string();
-        let current_idx = accent_name_to_index(&current);
-        let next_idx = (current_idx + 1) % ACCENT_PRESETS.len() as i32;
-        let next_name = ACCENT_PRESETS[next_idx as usize];
+        let at = ACCENTS.iter().position(|(n, _)| *n == offered_accent(&current)).unwrap_or(0);
+        let (next_name, next_idx) = ACCENTS[(at + 1) % ACCENTS.len()];
         ui.set_settings_accent_color(next_name.into());
         ui.global::<AccentPreset>().set_index(next_idx);
         if let Ok(mut st) = s.lock() {
@@ -775,7 +774,7 @@ pub fn wire(ui: &App, ctx: &AppContext) {
     let accent_settings = settings.clone();
     ui.on_choose_accent(move |name| {
         let Some(ui) = weak.upgrade() else { return };
-        if !ACCENT_PRESETS.contains(&name.as_str()) {
+        if !ACCENTS.iter().any(|(n, _)| *n == name.as_str()) {
             return;
         }
         ui.set_settings_accent_color(name.clone());
@@ -1552,6 +1551,16 @@ mod tests {
 
         let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644));
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// Amber and green were accents once; a file that still says either loads as the soft blue,
+    /// and the accents still offered load as themselves.
+    #[test]
+    fn a_retired_accent_loads_as_the_soft_blue() {
+        for (saved, loaded) in [("amber", "cyan"), ("green", "cyan"), ("purple", "purple"), ("pink", "pink"), ("cyan", "cyan")] {
+            let file: UserSettings = serde_yaml::from_str(&format!("accent_color: {saved}")).expect("parses");
+            assert_eq!(offered_choices(file).accent_color, loaded, "{saved}");
+        }
     }
 
     /// A settings file written before the preference existed opens with notifications audible.

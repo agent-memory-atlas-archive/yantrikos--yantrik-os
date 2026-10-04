@@ -46,7 +46,7 @@ pub struct Theme {
     pub name: String,
     pub description: String,
     pub dark: bool,
-    /// An accent preset id: `cyan` (the soft blue), `amber`, `purple`, `green` or `pink`.
+    /// An accent Settings offers: `cyan` (the soft blue), `purple` (violet) or `pink`.
     pub accent: String,
     /// A wallpaper preset id.
     pub wallpaper: String,
@@ -237,7 +237,7 @@ fn cards() -> Vec<ThemeCardData> {
             preview: crate::lock_wallpaper::preview_image(&t.wallpaper).unwrap_or_default(),
             ground: colour(&t.palette.bg_deep),
             surface: colour(&t.palette.bg_surface),
-            card: colour(&t.palette.bg_card),
+            text: colour(&t.palette.text_primary),
             accent: colour(&t.palette.accent),
         })
         .collect()
@@ -297,7 +297,7 @@ mod tests {
         assert_eq!(all()[0].id, DEFAULT, "the default theme leads the cards");
         for t in all() {
             assert!(crate::wire::settings::WALLPAPER_PRESETS.contains(&t.wallpaper.as_str()), "{} names wallpaper {}", t.id, t.wallpaper);
-            assert!(["cyan", "amber", "purple", "green", "pink"].contains(&t.accent.as_str()), "{} accent {}", t.id, t.accent);
+            assert!(yantrik_app_runtime::theme::ACCENTS.iter().any(|(n, _)| *n == t.accent), "{} accent {} is not one Settings offers", t.id, t.accent);
             for c in [&t.palette.bg_deep, &t.palette.bg_surface, &t.palette.bg_card, &t.palette.bg_elevated, &t.palette.amber, &t.palette.cyan, &t.palette.text_primary, &t.palette.text_secondary, &t.palette.text_dim, &t.palette.accent] {
                 assert!(rgb(c).is_some(), "{}: {c} is not #rrggbb", t.id);
             }

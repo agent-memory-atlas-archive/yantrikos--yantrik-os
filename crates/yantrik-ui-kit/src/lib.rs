@@ -849,7 +849,7 @@ mod consent_buttons_are_pointer_only {
         assert!(theme.contains("swatch-0: #8fb4e3"), "swatch-0 is the default accent");
         assert!(theme.contains("ThemeMode.dark ? swatch-0 :"), "the preset reads the same token the swatch does");
         assert!(!theme.contains("accent-override:       #38d8cd"), "the theme-file fallback is not the retired teal accent");
-        assert!(theme.contains("index == 0 ? \"Soft blue\""), "the preset's label");
+        assert!(theme.contains(":              \"Soft blue\";"), "the preset's label, and the one any index not offered gets");
     }
 
     /// Mind identity stays teal while the shell accent is blue.

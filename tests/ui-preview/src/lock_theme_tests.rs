@@ -260,7 +260,7 @@ fn theme_card(file: &str, id: &str, wallpaper: &str) -> ThemeCardData {
         preview: lock_wallpaper::preview_image(wallpaper).expect("a preview"),
         ground: value("bg_deep"),
         surface: value("bg_surface"),
-        card: value("bg_card"),
+        text: value("text_primary"),
         accent: value("accent"),
     }
 }

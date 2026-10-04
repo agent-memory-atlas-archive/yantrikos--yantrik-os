@@ -673,7 +673,7 @@ export component OnboardingScreen inherits Rectangle {
                         HorizontalLayout {
                             spacing: Theme.sp-3;
                             Icon {
-                                commands: root.hw-scan-step >= 3 ? Icons.check : Icons.clock;
+                                commands: root.hw-scan-step < 3 ? Icons.clock : root.ai-hw-gpu-ok ? Icons.check : Icons.warning;
                                 size: 14px;
                                 tint: root.hw-scan-step >= 3 ? (root.ai-hw-gpu-ok ? Theme.color-success : Theme.amber) : Theme.text-dim;
                                 y: (parent.height - self.height) / 2;
@@ -698,7 +698,7 @@ export component OnboardingScreen inherits Rectangle {
                         HorizontalLayout {
                             spacing: Theme.sp-3;
                             Icon {
-                                commands: root.hw-scan-step >= 4 ? Icons.check : Icons.clock;
+                                commands: root.hw-scan-step < 4 ? Icons.clock : root.ai-hw-disk-ok ? Icons.check : Icons.warning;
                                 size: 14px;
                                 tint: root.hw-scan-step >= 4 ? (root.ai-hw-disk-ok ? Theme.color-success : Theme.amber) : Theme.text-dim;
                                 y: (parent.height - self.height) / 2;
@@ -1276,7 +1276,8 @@ export component OnboardingScreen inherits Rectangle {
                                             horizontal-stretch: 1;
                                         }
                                         Text {
-                                            text: root.ai-test-latency-ms + "ms";
+                                            // The judgement in words too, not in the colour alone.
+                                            text: root.ai-test-latency-ms + "ms · " + (root.ai-test-latency-ms < 300 ? "fast" : "slow");
                                             color: root.ai-test-latency-ms < 300 ? Theme.color-success : Theme.amber;
                                             font-size: Theme.fs-caption;
                                             font-weight: 500;

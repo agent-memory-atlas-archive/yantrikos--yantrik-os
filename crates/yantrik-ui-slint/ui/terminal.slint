@@ -214,7 +214,8 @@ export component TerminalScreen inherits Rectangle {
                             }
 
                             Text {
-                                text: tab.title;
+                                // A dead shell says so in words, not only by a red dot.
+                                text: tab.is-alive ? tab.title : tab.title + " (exited)";
                                 color: tab.is-active ? Theme.text-primary : Theme.text-secondary;
                                 font-size: Theme.fs-caption;
                                 font-weight: tab.is-active ? Theme.fw-headline : Theme.fw-body;

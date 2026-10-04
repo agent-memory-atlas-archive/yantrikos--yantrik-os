@@ -332,6 +332,24 @@ mod app_colour_tests {
         assert_eq!(hue("browser"), "teal");
         assert_eq!(hue("studio"), "violet");
     }
+
+    /// Teal is a mind's colour, so an app tile wears it only where the design names it: Browser.
+    /// Containers, Downloads and Packages were teal and read as three minds in the launcher.
+    #[test]
+    fn teal_is_the_browser_alone() {
+        let src = app_color_slint();
+        let teal: Vec<String> = arms(function_body(&src, "hue-for-app"), "id")
+            .into_iter()
+            .filter(|(_, h)| h == "teal")
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(teal, ["browser"], "only Browser is a teal tile");
+        let table = arms(function_body(&src, "hue-for-app"), "id");
+        let hue = |id: &str| table.iter().find(|(k, _)| k == id).map(|(_, h)| h.clone());
+        assert_eq!(hue("containers").as_deref(), Some("blue"));
+        assert_eq!(hue("downloads").as_deref(), Some("sky"));
+        assert_eq!(hue("packages").as_deref(), Some("green"));
+    }
 }
 
 fn populate_grid(ui: &App, installed: &Arc<Vec<DesktopEntry>>, query: &str) {
