@@ -97,7 +97,7 @@ mod tests {
     fn a_full_root_disk_leads_the_card() {
         let s = assess(&snap(1), Some("2h 1m".into()), Some(0.5), 4);
         assert!(s.needs_you());
-        assert_eq!(s.line(), "Disk nearly full · 1.0 GB free · Uptime 2h 1m · Load 0.50");
+        assert_eq!(s.line(), "Disk nearly full · 1.0 GB free (97%) · Uptime 2h 1m · Load 0.50");
     }
 
     #[test]

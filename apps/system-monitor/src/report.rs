@@ -110,7 +110,7 @@ mod tests {
     fn the_row_with_the_disk_at_95_percent_leads_with_it() {
         let status = assess(&snap(29.6));
         assert!(status.needs_you());
-        assert_eq!(status.lead, "Disk nearly full · 1.7 GB free");
+        assert_eq!(status.lead, "Disk nearly full · 1.7 GB free (95%)");
     }
 
     #[test]
@@ -122,7 +122,7 @@ mod tests {
         assert_eq!(status.verdict(), "3 limits reached");
         assert_eq!(
             status.lead,
-            "Disk nearly full · 1.7 GB free · Memory nearly full · 1.0 GB available · Load 6.00 above 4 cores"
+            "Disk nearly full · 1.7 GB free (95%) · Memory nearly full · 1.0 GB available · Load 6.00 above 4 cores"
         );
     }
 
@@ -159,7 +159,7 @@ mod tests {
     #[test]
     fn describe_reports_the_rows_words_and_the_tripped_limit() {
         let view = described(&snap(29.6));
-        let line = "Disk nearly full · 1.7 GB free · CPU 8% · Memory 50% · Disk 95% full · Swap none";
+        let line = "Disk nearly full · 1.7 GB free (95%) · CPU 8% · Memory 50% · Swap none";
         assert_eq!(view["state"]["status"], line);
         assert_eq!(view["state"]["health_summary"], line);
         assert_eq!(view["state"]["health"], "1 limit reached");

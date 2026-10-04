@@ -14,6 +14,7 @@ import { AgentRail, AgentContextItem, AgentSuggestion } from "components/agent_r
 import { AgentProposalCard, AgentProposal } from "components/agent_proposal.slint";
 import { AppColor, AppIdentity } from "components/app_color.slint";
 import { YButton } from "components/y_button.slint";
+import { YReading } from "components/y_reading.slint";
 
 // ── Data structs ──
 
@@ -30,7 +31,7 @@ export struct EthernetInterface {
     status: string,       // "UP", "DOWN"
     ip-address: string,
     mac-address: string,
-    speed: string,        // "1000Mbps"
+    speed: string,        // "1000 Mbit/s"; "" when the link reports none (virtio)
     is-dhcp: bool,
     subnet: string,
     gateway: string,
@@ -525,8 +526,12 @@ export component NetworkManager inherits Rectangle {
                                 }
                                 Text {
                                     // The rail carries live state: the point of the app is to see
-                                    // all six at once, not one per tab.
-                                    text: root.ethernet-interfaces.length == 0 ? "No interface" : root.ethernet-interfaces[0].status == "UP" ? root.ethernet-interfaces[0].speed : "Down";
+                                    // all six at once, not one per tab. A link up with no speed
+                                    // reported (virtio has none) is still up, not blank.
+                                    text: root.ethernet-interfaces.length == 0 ? "No interface"
+                                        : root.ethernet-interfaces[0].status != "UP" ? "Down"
+                                        : root.ethernet-interfaces[0].speed != "" ? root.ethernet-interfaces[0].speed
+                                        : "Up";
                                     color: root.ethernet-interfaces.length > 0 && root.ethernet-interfaces[0].status == "UP" ? Theme.color-success : Theme.text-dim;
                                     font-size: Theme.fs-micro;
                                     overflow: elide;
@@ -795,21 +800,13 @@ export component NetworkManager inherits Rectangle {
                             // Details row
                             HorizontalLayout {
                                 spacing: Theme.sp-6;
-                                VerticalLayout {
-                                    spacing: 2px;
-                                    Text { text: "IP Address"; color: Theme.text-dim; font-size: Theme.fs-caption; }
-                                    Text { text: root.wifi-ip-address != "" ? root.wifi-ip-address : "—"; color: Theme.text-secondary; font-size: Theme.fs-body; }
-                                }
+                                YReading { label: "IP Address"; value: root.wifi-ip-address; }
                                 VerticalLayout {
                                     spacing: 2px;
                                     Text { text: "Signal"; color: Theme.text-dim; font-size: Theme.fs-caption; }
                                     Text { text: root.wifi-signal-strength + "%"; color: Theme.text-secondary; font-size: Theme.fs-body; }
                                 }
-                                VerticalLayout {
-                                    spacing: 2px;
-                                    Text { text: "Speed"; color: Theme.text-dim; font-size: Theme.fs-caption; }
-                                    Text { text: root.wifi-speed != "" ? root.wifi-speed : "—"; color: Theme.text-secondary; font-size: Theme.fs-body; }
-                                }
+                                YReading { label: "Speed"; value: root.wifi-speed; }
                             }
                         }
                     }
@@ -860,30 +857,14 @@ export component NetworkManager inherits Rectangle {
                                 // Row 1
                                 HorizontalLayout {
                                     spacing: Theme.sp-7;
-                                    VerticalLayout {
-                                        spacing: 2px;
-                                        Text { text: "IP Address"; color: Theme.text-dim; font-size: Theme.fs-caption; }
-                                        Text { text: root.wifi-ip-address != "" ? root.wifi-ip-address : "\u{2014}"; color: Theme.text-secondary; font-size: Theme.fs-body; }
-                                    }
-                                    VerticalLayout {
-                                        spacing: 2px;
-                                        Text { text: "Subnet Mask"; color: Theme.text-dim; font-size: Theme.fs-caption; }
-                                        Text { text: root.wifi-subnet != "" ? root.wifi-subnet : "\u{2014}"; color: Theme.text-secondary; font-size: Theme.fs-body; }
-                                    }
+                                    YReading { label: "IP Address"; value: root.wifi-ip-address; }
+                                    YReading { label: "Subnet Mask"; value: root.wifi-subnet; }
                                 }
                                 // Row 2
                                 HorizontalLayout {
                                     spacing: Theme.sp-7;
-                                    VerticalLayout {
-                                        spacing: 2px;
-                                        Text { text: "Gateway"; color: Theme.text-dim; font-size: Theme.fs-caption; }
-                                        Text { text: root.wifi-gateway != "" ? root.wifi-gateway : "\u{2014}"; color: Theme.text-secondary; font-size: Theme.fs-body; }
-                                    }
-                                    VerticalLayout {
-                                        spacing: 2px;
-                                        Text { text: "DNS"; color: Theme.text-dim; font-size: Theme.fs-caption; }
-                                        Text { text: root.wifi-dns != "" ? root.wifi-dns : "\u{2014}"; color: Theme.text-secondary; font-size: Theme.fs-body; }
-                                    }
+                                    YReading { label: "Gateway"; value: root.wifi-gateway; }
+                                    YReading { label: "DNS"; value: root.wifi-dns; }
                                 }
                             }
                         }
@@ -1167,40 +1148,16 @@ export component NetworkManager inherits Rectangle {
                             // Details grid
                             HorizontalLayout {
                                 spacing: Theme.sp-7;
-                                VerticalLayout {
-                                    spacing: 2px;
-                                    Text { text: "IP Address"; color: Theme.text-dim; font-size: Theme.fs-caption; }
-                                    Text { text: iface.ip-address != "" ? iface.ip-address : "—"; color: Theme.text-secondary; font-size: Theme.fs-body; }
-                                }
-                                VerticalLayout {
-                                    spacing: 2px;
-                                    Text { text: "MAC"; color: Theme.text-dim; font-size: Theme.fs-caption; }
-                                    Text { text: iface.mac-address != "" ? iface.mac-address : "—"; color: Theme.text-secondary; font-size: Theme.fs-body; }
-                                }
-                                VerticalLayout {
-                                    spacing: 2px;
-                                    Text { text: "Speed"; color: Theme.text-dim; font-size: Theme.fs-caption; }
-                                    Text { text: iface.speed != "" ? iface.speed : "—"; color: Theme.text-secondary; font-size: Theme.fs-body; }
-                                }
+                                YReading { label: "IP Address"; value: iface.ip-address; }
+                                YReading { label: "MAC"; value: iface.mac-address; }
+                                YReading { label: "Speed"; value: iface.speed; }
                             }
 
                             if iface.status == "UP" : HorizontalLayout {
                                 spacing: Theme.sp-7;
-                                VerticalLayout {
-                                    spacing: 2px;
-                                    Text { text: "Subnet"; color: Theme.text-dim; font-size: Theme.fs-caption; }
-                                    Text { text: iface.subnet != "" ? iface.subnet : "—"; color: Theme.text-secondary; font-size: Theme.fs-body; }
-                                }
-                                VerticalLayout {
-                                    spacing: 2px;
-                                    Text { text: "Gateway"; color: Theme.text-dim; font-size: Theme.fs-caption; }
-                                    Text { text: iface.gateway != "" ? iface.gateway : "—"; color: Theme.text-secondary; font-size: Theme.fs-body; }
-                                }
-                                VerticalLayout {
-                                    spacing: 2px;
-                                    Text { text: "DNS"; color: Theme.text-dim; font-size: Theme.fs-caption; }
-                                    Text { text: iface.dns != "" ? iface.dns : "—"; color: Theme.text-secondary; font-size: Theme.fs-body; }
-                                }
+                                YReading { label: "Subnet"; value: iface.subnet; }
+                                YReading { label: "Gateway"; value: iface.gateway; }
+                                YReading { label: "DNS"; value: iface.dns; }
                             }
                         }
                     }

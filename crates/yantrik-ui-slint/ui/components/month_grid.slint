@@ -8,7 +8,9 @@
 // The Calendar app sizes it to the whole pane (`cell-min-height` 56px, the numeral and the event
 // dots in the corner of a roomy cell); Today asks for `compact` and gets a short cell with the
 // numeral centred and one dot under it. Colours default to the accent and are overridden by the
-// app that has an identity colour of its own.
+// app that has an identity colour of its own -- except today's disc, which is always the system
+// accent: Calendar's identity colour is red, and a filled red square reads as the destructive
+// fill, which is reserved for what cannot be undone.
 //
 // A cell is only a button when the owner says so (`clickable`): a grid whose days do nothing must
 // not show a pointer over them.
@@ -31,8 +33,6 @@ export component MonthGrid inherits VerticalLayout {
     in property <bool> clickable: true;
     in property <color> accent: Theme.accent;
     in property <color> tint: Theme.tint-accent;
-    // The ink on a filled "today" disc.
-    in property <color> accent-ink: Theme.bg-deep;
     callback day-clicked(int);
 
     // A month needs 6 rows only when it spills past cell 35; drawing 6 regardless left an empty
@@ -118,11 +118,11 @@ export component MonthGrid inherits VerticalLayout {
                     width: root.compact ? 24px : 22px;
                     height: root.compact ? 22px : 20px;
                     border-radius: Theme.r-sm;
-                    background: cell-day.is-today ? root.accent : transparent;
+                    background: cell-day.is-today ? Theme.accent : transparent;
 
                     Text {
                         text: cell-day.day-number;
-                        color: cell-day.is-today ? root.accent-ink
+                        color: cell-day.is-today ? Theme.text-on-accent
                             : cell-day.is-selected ? root.accent
                             : cell-day.is-current-month ? Theme.text-secondary
                             : Theme.text-dim.transparentize(30%);
