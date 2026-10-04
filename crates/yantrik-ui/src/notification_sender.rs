@@ -199,7 +199,15 @@ pub fn toast_program(n: &Notification) -> Option<String> {
     } else {
         program
     };
-    (!shown.eq_ignore_ascii_case(n.app.trim())).then(|| clip(&shown, TOAST_PROGRAM_CHARS))
+    // A program filed under its own name used to have nothing beside it, so as not to say the
+    // name twice. But that name is the program's to choose: a binary called `Yantrik` is filed
+    // as `Yantrik` by the service's own rule, and its toast, its Today row and its group in the
+    // centre read "Yantrik" alone, the desktop's line (sign-off review, 4 October). Where its
+    // executable lives is a fact it did not choose, and it is what goes beside the name instead.
+    if shown.eq_ignore_ascii_case(n.app.trim()) && !exe.is_empty() {
+        return Some(clip_left(&one_line(exe), TOAST_PROGRAM_CHARS));
+    }
+    Some(clip(&shown, TOAST_PROGRAM_CHARS))
 }
 
 /// Keep the END of a path, where its name is: `…/release/yantrik-ui`.
@@ -393,6 +401,23 @@ mod tests {
         assert_eq!(sender_summary(&n), "Via D-Bus, not verified");
         assert_eq!(toast_program(&n).as_deref(), Some("via D-Bus, not verified"));
         assert_eq!(toast_name(&n), "notify-send \u{b7} via D-Bus, not verified");
+    }
+
+    #[test]
+    fn a_program_filed_under_the_desktops_name_never_has_it_alone() {
+        // A binary at /tmp/Yantrik that gave no name: the service files it under its own,
+        // `Yantrik`. The program and the name agree, and that is no reason to drop the program.
+        for (app, exe) in [("Yantrik", "/tmp/Yantrik"), ("yantrik", "/home/yantrik/bin/yantrik")] {
+            let mut n = note(None, &format!("{app} (pid 77)"), 77, exe, false);
+            n.app = app.into();
+            let name = toast_name(&n);
+            assert!(!name.eq_ignore_ascii_case("Yantrik"), "{name}");
+            assert!(name.ends_with(&clip_left(exe, TOAST_PROGRAM_CHARS)), "where it lives is beside it: {name}");
+        }
+        // The desktop itself keeps its plain name.
+        let mut n = note(Some("Yantrik"), "yantrik-ui (pid 7)", 7, SHELL, true);
+        n.app = "Yantrik".into();
+        assert_eq!(toast_name(&n), "Yantrik");
     }
 
     #[test]
