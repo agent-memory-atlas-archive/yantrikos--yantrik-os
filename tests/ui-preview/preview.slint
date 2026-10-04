@@ -519,7 +519,6 @@ export component SystemMonitorProbe inherits Window {
     in-out property <int> selected-pid: -1;
     in-out property <string> ai-model-name;
     // Mirrored out of the screen so the test can see the geometry the person sees.
-    out property <length> health-fill-x: monitor.health-fill-x;
     out property <length> swap-fill-x: monitor.swap-fill-x;
     out property <length> swap-fill-width: monitor.swap-fill-width;
     out property <length> core-fill-x: monitor.core-fill-x;
@@ -535,6 +534,7 @@ export component SystemMonitorProbe inherits Window {
         height: 100%;
         show-back: false;
         cpu-usage: 62.0;
+        cpu-measured: true;
         cpu-model: "Fixture CPU @ 3.6 GHz";
         cpu-cores: root.cores;
         memory-usage: 55.0;
@@ -549,9 +549,10 @@ export component SystemMonitorProbe inherits Window {
         process-search <=> root.search;
         selected-process-pid <=> root.selected-pid;
         ai-model-name: root.ai-model-name;
-        health-score: 60.0;
-        health-status: "Degraded";
-        health-summary: "High CPU usage";
+        status-lead: "Disk nearly full · 1.7 GB free";
+        status-rest: "CPU 62% · Memory 55% · Disk 95% full · Swap 42%";
+        status-thresholds: "Limits: any disk at 90% full, memory at 90% used, 1-minute load above 4 (the core count)";
+        status-needs-you: true;
         uptime-text: "3 h 12 m";
         kill-process(pid) => { root.selected-pid = pid; }
         force-kill-process(pid) => { root.selected-pid = pid; }

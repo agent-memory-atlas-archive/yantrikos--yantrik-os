@@ -264,10 +264,10 @@ pub fn wire(ui: &App, ctx: &AppContext) {
             if ui.get_current_screen() == 10 {
                 ui.set_sys_cpu_usage(snap.cpu_usage_percent);
                 update_memory_readouts(&ui, &snap);
-                // Uptime moves while the screen is open. Read on entry only,
-                // it was as stale as the About screen's was before #50 — a
-                // minute out after a minute of looking at it.
-                ui.set_sys_uptime_text(super::about::read_uptime().into());
+                // Uptime and load move while the screen is open. Read on entry
+                // only, uptime was as stale as the About screen's was before
+                // #50 — a minute out after a minute of looking at it.
+                super::system_status::update(&ui, &snap);
 
                 let procs: Vec<ProcessData> = snap
                     .running_processes

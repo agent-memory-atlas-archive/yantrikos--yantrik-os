@@ -10,6 +10,7 @@ import { AppHeader } from "components/app_header.slint";
 import { AgentRail, AgentContextItem, AgentSuggestion } from "components/agent_rail.slint";
 import { AgentProposalCard, AgentProposal } from "components/agent_proposal.slint";
 import { AppColor, AppIdentity } from "components/app_color.slint";
+import { MachineStatusRow } from "components/machine_status_row.slint";
 
 // ── Data structs ──
 
@@ -24,6 +25,8 @@ export struct DiskData {
     used-bytes: string,
     total-bytes: string,
     usage-percent: float,
+    // At the limit the status row checks: the bar wears amber.
+    needs-you: bool,
 }
 
 export struct NetworkInterfaceData {
@@ -83,6 +86,9 @@ export component SystemMonitor inherits Rectangle {
 
     // CPU
     in property <float> cpu-usage: 0.0;
+    // False until two readings give an interval to measure over. One reading's figure is the
+    // average since boot, and the ring and the cores draw nothing rather than that.
+    in property <bool> cpu-measured: false;
     in property <string> cpu-model: "";
     in property <string> cpu-frequency: "";
     in property <string> load-avg-1: "0.00";
@@ -124,10 +130,13 @@ export component SystemMonitor inherits Rectangle {
     // Uptime
     in property <string> uptime-text: "";
 
-    // Health Score
-    in property <string> health-status: "Healthy";  // "Healthy", "Degraded", "Critical"
-    in property <float> health-score: 100.0;  // 0-100
-    in property <string> health-summary: "";  // "All systems nominal" or issue description
+    // What the readings add up to (components/machine_status_row.slint). This was a health
+    // score with no visible basis and "All systems nominal"; now it is observed facts and the
+    // limits they were checked against.
+    in property <string> status-lead: "";
+    in property <string> status-rest: "";
+    in property <string> status-thresholds: "";
+    in property <bool> status-needs-you: false;
 
     // AI Workloads
     in property <string> ai-model-name: "";
@@ -169,8 +178,7 @@ export component SystemMonitor inherits Rectangle {
     // which drew a 62% bar from about 20% of its track. The fills now say `x: 0`, and these
     // mirrors pin it: a fill must start at the left edge of its track and take a real width.
     // The core and disk fills live inside repeaters, so they report through changed
-    // callbacks; the health and swap fills are single elements and bind directly.
-    out property <length> health-fill-x: health-fill.x;
+    // callbacks; the swap fill is a single element and binds directly.
     out property <length> swap-fill-x: swap-fill.x;
     out property <length> swap-fill-width: swap-fill.width;
     out property <length> core-fill-x: 0px;
@@ -277,110 +285,28 @@ export component SystemMonitor inherits Rectangle {
             }
         }
 
-        // ── Health Score Card ──
-        health-card := Rectangle {
-            height: 48px;
+        // ── What the readings add up to ──
+        //
+        // Observed facts and the limits they were checked against. This was a health score whose
+        // basis was nowhere on screen, a full bar, and "All systems nominal" -- drawn directly
+        // above a disk card at 95% full.
+        Rectangle {
+            height: status-row.height;
             background: Theme.bg-surface;
 
-            // One colour for the dot, the word, the score and the bar. Critical is danger, so
-            // red; anything else is normal data, so the accent, and the word says which. Healthy
-            // was the success colour, whose dark value is a teal (teal is only for minds), and
-            // Degraded was amber (amber is only "needs you"). Colour system.
-            property <color> health-tone: root.health-status == "Critical" ? Theme.color-emotional : Theme.accent;
+            status-row := MachineStatusRow {
+                width: 100%;
+                lead: root.status-lead;
+                rest: root.status-rest;
+                thresholds: root.status-thresholds;
+                needs-you: root.status-needs-you;
+            }
 
             // Bottom border
             Rectangle {
                 y: parent.height - 1px;
                 height: 1px;
                 background: Theme.separator;
-            }
-
-            HorizontalLayout {
-                padding-left: Theme.sp-4;
-                padding-right: Theme.sp-4;
-                spacing: Theme.sp-4;
-                alignment: stretch;
-
-                // Left: status dot + status text
-                HorizontalLayout {
-                    spacing: Theme.sp-2;
-                    horizontal-stretch: 0;
-                    alignment: center;
-
-                    Rectangle {
-                        width: 10px;
-                        height: 10px;
-                        y: (parent.height - 10px) / 2;
-                        border-radius: 5px;
-                        background: health-card.health-tone;
-                        animate background { duration: 150ms; easing: ease-in-out; }
-                    }
-
-                    Text {
-                        text: root.health-status;
-                        color: health-card.health-tone;
-                        font-size: Theme.fs-body;
-                        font-weight: 600;
-                        vertical-alignment: center;
-                        animate color { duration: 150ms; easing: ease-in-out; }
-                    }
-                }
-
-                // Score percentage + the bar it belongs to.
-                //
-                // `alignment: center` and `horizontal-stretch: 1` on the child contradict each
-                // other, and centre wins: the layout gives every child its preferred width and
-                // centres the group, so the bar -- which has no preferred width, only a stretch
-                // -- collapsed to nothing. On screen that was a bare "100%" floating in the
-                // middle of the row with no indication of what it measured.
-                HorizontalLayout {
-                    horizontal-stretch: 1;
-                    spacing: 10px;
-
-                    Text {
-                        text: Math.round(root.health-score) + "%";
-                        color: health-card.health-tone;
-                        font-size: Theme.fs-body;
-                        font-weight: 700;
-                        vertical-alignment: center;
-                        min-width: 36px;
-                        animate color { duration: 150ms; easing: ease-in-out; }
-                    }
-
-                    // Wrapped so the 4px bar sits on the text's centre line. A fixed-height
-                    // child of a HorizontalLayout is placed at the top of the row, which put
-                    // the bar a clear 20px above the "100%" it belongs to.
-                    VerticalLayout {
-                        horizontal-stretch: 1;
-                        alignment: center;
-                    Rectangle {
-                        height: 4px;
-                        border-radius: 2px;
-                        background: Theme.bg-deep;
-
-                        health-fill := Rectangle {
-                            x: 0;
-                            width: max(0px, parent.width * root.health-score / 100);
-                            height: 100%;
-                            border-radius: 2px;
-                            background: health-card.health-tone;
-                            animate width { duration: 150ms; easing: ease-in-out; }
-                            animate background { duration: 150ms; easing: ease-in-out; }
-                        }
-                    }
-                    }
-                }
-
-                // Right: summary text
-                Text {
-                    text: root.health-summary;
-                    color: Theme.text-dim;
-                    font-size: Theme.fs-micro;
-                    horizontal-stretch: 0;
-                    vertical-alignment: center;
-                    overflow: elide;
-                    max-width: 260px;
-                }
             }
         }
 
@@ -452,15 +378,16 @@ export component SystemMonitor inherits Rectangle {
                                         border-color: root.cpu-usage > 80 ? Theme.color-emotional : Theme.accent;
                                         background: transparent;
                                         // Clip to show percentage (using opacity trick)
-                                        opacity: root.cpu-usage / 100;
+                                        opacity: root.cpu-measured ? root.cpu-usage / 100 : 0;
                                         animate opacity { duration: 300ms; }
                                         animate border-color { duration: 300ms; }
                                     }
 
                                     // Center text
                                     Text {
-                                        text: Math.round(root.cpu-usage) + "%";
-                                        color: root.cpu-usage > 80 ? Theme.color-emotional : Theme.accent;
+                                        text: root.cpu-measured ? Math.round(root.cpu-usage) + "%" : "—";
+                                        color: !root.cpu-measured ? Theme.text-dim
+                                            : root.cpu-usage > 80 ? Theme.color-emotional : Theme.accent;
                                         font-size: Theme.fs-title-1;
                                         font-weight: 700;
                                         horizontal-alignment: center;
@@ -538,6 +465,12 @@ export component SystemMonitor inherits Rectangle {
                                 color: Theme.text-dim;
                                 font-size: Theme.fs-micro;
                                 letter-spacing: 1px;
+                            }
+
+                            if root.cpu-cores.length == 0 : Text {
+                                text: "No reading yet";
+                                color: Theme.text-dim;
+                                font-size: Theme.fs-caption;
                             }
 
                             for core in root.cpu-cores : HorizontalLayout {
@@ -811,8 +744,12 @@ export component SystemMonitor inherits Rectangle {
                                             width: max(0px, parent.width * disk.usage-percent / 100);
                                             height: 100%;
                                             border-radius: 4px;
-                                            // Red only when the disk is nearly full (danger).
-                                            background: disk.usage-percent > 90 ? Theme.color-emotional : Theme.accent;
+                                            // Amber at the limit the status row checks, because a
+                                            // full disk needs its owner; never red, which is for
+                                            // an action that destroys something. Decided in Rust
+                                            // (machine_status::disk_needs_you), so the bar and
+                                            // the row cannot disagree about where the limit is.
+                                            background: disk.needs-you ? Theme.amber : Theme.accent;
                                             animate width { duration: 300ms; }
                                             changed x => { root.disk-fill-x = self.x; }
                                             changed width => { root.disk-fill-width = self.width; }
@@ -821,7 +758,7 @@ export component SystemMonitor inherits Rectangle {
 
                                     Text {
                                         text: Math.round(disk.usage-percent) + "%";
-                                        color: disk.usage-percent > 90 ? Theme.color-emotional : Theme.text-dim;
+                                        color: disk.needs-you ? Theme.text-primary : Theme.text-dim;
                                         font-size: Theme.fs-micro;
                                         font-weight: 600;
                                         min-width: 32px;

@@ -949,7 +949,12 @@ export component App inherits Window {
     in property <float> sys-cpu-usage: 0.0;
     in property <float> sys-memory-usage: 0.0;
     in property <string> sys-memory-text: "0 / 0 MB";
-    in property <string> sys-uptime-text: "";
+    // The STATUS row (wire/system_status.rs): uptime, load, and the limits the readings were
+    // checked against, in System Monitor's words.
+    in property <string> sys-status-lead: "";
+    in property <string> sys-status-rest: "";
+    in property <string> sys-status-thresholds: "";
+    in property <bool> sys-status-needs-you: false;
     /// The SSID, when there is one. Empty on anything not wireless: this
     /// carried NetworkManager's primary connection name, so Settings > Network
     /// headed "Wired connection 1" with "Wi-Fi".
@@ -2362,7 +2367,10 @@ export component App inherits Window {
                 network-online: root.network-online;
                 network-label: root.network-label;
                 network-detail: root.network-detail;
-                uptime-text: root.sys-uptime-text;
+                status-lead: root.sys-status-lead;
+                status-rest: root.sys-status-rest;
+                status-thresholds: root.sys-status-thresholds;
+                status-needs-you: root.sys-status-needs-you;
                 top-processes: root.sys-top-processes;
                 cpu-history: root.sys-cpu-history;
                 memory-history: root.sys-memory-history;
