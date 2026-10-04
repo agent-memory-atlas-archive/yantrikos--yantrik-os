@@ -45,6 +45,8 @@ export component StatusBar inherits Rectangle {
     // The minds: how many have an unresolved request, and how many requests that is.
     in property <int> minds-needing: 0;
     in property <int> minds-requests: 0;
+    // Approval cards waiting, wherever they are drawn — the corner card's included.
+    in property <int> minds-approvals: 0;
     callback minds-clicked();
     callback anchor-clicked();
 
@@ -129,6 +131,7 @@ export component StatusBar inherits Rectangle {
             MindsChip {
                 needing: root.minds-needing;
                 requests: root.minds-requests;
+                approvals: root.minds-approvals;
                 clicked => { root.minds-clicked(); }
             }
         }

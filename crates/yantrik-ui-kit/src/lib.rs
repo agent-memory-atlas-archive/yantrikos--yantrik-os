@@ -820,12 +820,16 @@ mod consent_buttons_are_pointer_only {
     #[test]
     fn the_real_approval_card_keeps_pointer_only_on_both_buttons() {
         let src = read("crates/yantrik-ui-slint/ui/components/intent_lens.slint");
-        for label in ["label: \"Decline\";", "label: \"Approve once\";"] {
+        // The affirmative's words are the action's own since the sign-off of 4 October ("Delete
+        // event", else "Allow once"), so it is found by the property that labels it.
+        let confirm = "label: root.data.confirm-label != \"\" ? root.data.confirm-label : \"Allow once\";";
+        for label in ["label: \"Decline\";", confirm] {
             let b = button_with(&src, label);
             assert!(b.contains("pointer-only: true;"), "{label} lost pointer-only:\n{b}");
         }
+        assert_eq!(src.matches("pointer-only: true;").count(), 2, "the card's two buttons, and no third left without it");
         // Nothing on the card takes focus when it appears.
-        let card = &src[src.find("label: \"Decline\";").unwrap() - 600..src.find("label: \"Approve once\";").unwrap() + 400];
+        let card = &src[src.find("label: \"Decline\";").unwrap() - 600..src.find(confirm).unwrap() + 400];
         for banned in ["forward-focus", "init =>", ".focus()", "key-pressed", "accessible-action"] {
             assert!(!card.contains(banned), "the approval buttons must not use `{banned}`");
         }

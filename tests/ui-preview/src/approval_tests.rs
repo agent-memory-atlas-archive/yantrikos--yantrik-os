@@ -3,12 +3,13 @@
 //! description of any action on this desktop; its card — the paragraph, an agent row, two
 //! arguments, the session row — used to come out taller than the Lens panel. The panel's layout
 //! ran out of room at the bottom: the reply box went off the edge and Deny/Allow showed as a
-//! 3px sliver nobody could press. The card now keeps the height its panel allows — identity
-//! pinned on top, details scrolling in the middle, buttons pinned at the bottom — and the
-//! description is clamped under "show more", with its first sentence as the card's own summary
-//! line.
+//! 3px sliver nobody could press. The card now keeps the height its panel allows. Since the
+//! design sign-off of 4 October (item 6) the part that yields is the provenance at the top — who
+//! is asking, the action's name, Details and source — while the consequence rows, the warning and
+//! the buttons stay whole under it; `run` checks each of those is drawn above the buttons in the
+//! Lens, and checks the rest at the card's natural height.
 use super::*;
-use slint::{ModelRc, SharedString, VecModel};
+use slint::{Model, ModelRc, SharedString, VecModel};
 
 /// What `shell` publishes for `run_recipe` (crates/yantrik-ui/src/control_recipes.rs) — the
 /// longest description any app publishes, and the card this defect was hit with.
@@ -47,6 +48,13 @@ fn card(summary: &str) -> ApprovalRequest {
         on_behalf: "".into(),
         requester: "pi 0.87".into(),
         verified: "pi --mode rpc (pid 4242) · the attached mind".into(),
+        identity: "The attached mind (pi --mode rpc, pid 4242) · verified".into(),
+        claim: "calls itself “pi 0.87” · unverified".into(),
+        confirm_label: "Allow once".into(),
+        destructive: false,
+        consequences: lines(&[
+            "Runs: recipe: builtin_formation_council; inputs: {\"question\": \"attack the plan to ship 0.4 on Friday\"}",
+        ]),
         discrepancies: lines(&[]),
         app: "shell".into(),
         action: "run_recipe".into(),
@@ -66,7 +74,7 @@ fn card(summary: &str) -> ApprovalRequest {
         can_session: true,
         decision: "".into(),
         record: "".into(),
-        age_text: "94s left".into(),
+        age_text: "Expires in 2 min, then declined".into(),
         decided_at: "".into(),
         session: false,
     }
@@ -110,42 +118,6 @@ fn settle(w: &MinimalSoftwareWindow, width: u32, height: u32) -> slint::SharedPi
     }
 }
 
-/// The runs of inked rows in a window, as (first row, last row, leftmost ink, rightmost ink).
-/// Ink is any pixel differing from the card's own left padding on the same row, which no text
-/// reaches — the theme's colours stay the theme's business. The scan stops left of the details
-/// scrollbar: it is ink on every row and would stretch every line to the panel's edge. A text
-/// row has ink in the dozens; a row carrying only the descenders of the line above has less,
-/// and must not merge two lines into one band.
-fn bands_in(px: &[slint::Rgb8Pixel], width: u32, win_top: u32, win_bottom: u32) -> Vec<(u32, u32, u32, u32)> {
-    let ink = |x: u32, y: u32| -> bool {
-        let (c, bg) = (px[(y * width + x) as usize], px[(y * width + 912) as usize]);
-        let d = |a: u8, b: u8| (a as i32 - b as i32).abs();
-        d(c.r, bg.r).max(d(c.g, bg.g)).max(d(c.b, bg.b)) >= 12
-    };
-    let mut bands: Vec<(u32, u32, u32, u32)> = Vec::new(); // y0, y1, min_x, max_x per run
-    for y in win_top..win_bottom {
-        let (mut first, mut last, mut n) = (u32::MAX, 0u32, 0u32);
-        for x in 916..1264 {
-            if ink(x, y) {
-                n += 1;
-                first = first.min(x);
-                last = x;
-            }
-        }
-        if n >= 40 {
-            match bands.last_mut() {
-                Some(b) if y == b.1 + 1 => {
-                    b.1 = y;
-                    b.2 = b.2.min(first);
-                    b.3 = b.3.max(last);
-                }
-                _ => bands.push((y, y, first, last)),
-            }
-        }
-    }
-    bands
-}
-
 fn save(pixels: &slint::SharedPixelBuffer<slint::Rgb8Pixel>, path: &str, width: u32, height: u32) -> Result<(), Box<dyn std::error::Error>> {
     let mut encoder = png::Encoder::new(BufWriter::new(File::create(path)?), width, height);
     encoder.set_color(png::ColorType::Rgb);
@@ -170,6 +142,38 @@ fn scan(w: &MinimalSoftwareWindow, x: f32, top: f32, bottom: f32, mut hit: impl 
     None
 }
 
+/// The rows whose pixels differ between two frames inside a box, as (first row, last row, how
+/// many pixels). `None` when nothing differs.
+fn diff_box(a: &[slint::Rgb8Pixel], b: &[slint::Rgb8Pixel], width: u32, xs: (u32, u32), ys: (u32, u32)) -> Option<(u32, u32, u32)> {
+    let (mut top, mut bottom, mut n) = (u32::MAX, 0u32, 0u32);
+    for y in ys.0..ys.1 {
+        for x in xs.0..xs.1 {
+            let at = (y * width + x) as usize;
+            if a[at] != b[at] {
+                top = top.min(y);
+                bottom = y;
+                n += 1;
+            }
+        }
+    }
+    (n > 0).then_some((top, bottom, n))
+}
+
+/// The top edge of the band a button answers on, walked up one pixel at a time from a point
+/// that answered until a click there stops landing on it.
+fn button_top(w: &MinimalSoftwareWindow, x: f32, from: f32, floor: f32, mut count: impl FnMut() -> i32) -> f32 {
+    let mut top = from;
+    while top > floor {
+        let before = count();
+        click(w, x, top - 1.0);
+        if count() == before {
+            break;
+        }
+        top -= 1.0;
+    }
+    top
+}
+
 pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::error::Error>> {
     let (width, height) = (1280u32, 800u32);
     // The Lens panel's box at 1280×800 (theme.slint): right-docked, between the two bars, and
@@ -192,17 +196,6 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     std::thread::sleep(std::time::Duration::from_millis(300));
     save(&render(w, width, height), output, width, height)?;
 
-    // The summary line is drawn, up in the card's pinned head: emptying it changes the picture.
-    let led = render(w, width, height);
-    ui.set_approvals(ModelRc::new(VecModel::from(vec![card("")])));
-    render(w, width, height);
-    let bare = render(w, width, height);
-    let differ = led.as_slice().iter().zip(bare.as_slice()).filter(|(a, b)| a != b).count();
-    assert!(differ >= 300, "the card leads with the description's first sentence: only {differ} pixels change when it is emptied");
-    ui.set_approvals(ModelRc::new(VecModel::from(vec![card(RUN_RECIPE_SUMMARY)])));
-    render(w, width, height);
-    render(w, width, height);
-
     // Deny and Allow each answer a person's click somewhere inside the panel. The session row
     // sits under the buttons and answers first — the scan keeps going until the button itself
     // does. Deny is the left half of the card's content, Allow the right.
@@ -213,21 +206,15 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     let before = ui.get_allowed();
     let allow_y = scan(w, allow_x, panel_top, panel_bottom - 4.0, || ui.get_allowed() > before)
         .expect("Allow answers a click inside the panel (#218)");
+    // On main before the sign-off this failed: the pinned identity rows alone outgrew the Lens's
+    // 240px, the buttons and the session row were pushed out of the card, and a transcript
+    // bubble sat on the session row. Now only the provenance at the top yields.
     assert!(ui.get_sessioned() >= 1, "the session row under the buttons answers too");
     assert!((allow_y - deny_y).abs() <= 4.0, "Deny and Allow are one row: {deny_y} against {allow_y}");
 
-    // The band the button actually answers on, to the pixel: walk out from the point that
-    // answered until clicks stop landing on it. The #218 card left a 3px sliver of this row
-    // inside the panel — a sliver is not a button, and a whole one is 32px tall.
-    let mut top = deny_y;
-    while top > panel_top {
-        let before = ui.get_denied();
-        click(w, deny_x, top - 1.0);
-        if ui.get_denied() == before {
-            break;
-        }
-        top -= 1.0;
-    }
+    // The band the button actually answers on, to the pixel. The #218 card left a 3px sliver of
+    // this row inside the panel — a sliver is not a button, and a whole one is 32px tall.
+    let top = button_top(w, deny_x, deny_y, panel_top, || ui.get_denied());
     let mut bottom = deny_y;
     while bottom < panel_bottom {
         let before = ui.get_denied();
@@ -242,66 +229,103 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     assert!(bottom <= reply_top, "the button ends above the reply box, inside the Lens: its lowest answer is {bottom}, the reply box starts at {reply_top}");
     assert!(allow_y >= panel_top && allow_y <= reply_top, "Allow is inside the Lens too, at {allow_y}");
 
-    // #137: a card that speaks about one call draws the app's sentence under the argument box,
-    // with a footnote under it — and that footnote is longer than the card is wide. Elided, it
-    // was one line that cut off exactly the clause that is its whole point: the grant binds to
-    // the argument box, "not to this sentence". Wrapped, its last line ends partway across the
-    // card, and all of it can be read. The block sits at the end of the details section, and on
-    // this short card the details fit — the section is precisely as tall as its content, and
-    // nothing scrolls anywhere — so the whole block has to be readable at rest, the footnote's
-    // last line included. Measure the text lines above the buttons: the bottom one is the
-    // details' last, the grade line, whole; the one above it is the footnote's last line — a
-    // short tail when it wrapped, a full-width elided line when it did not.
+    // ── Sign-off item 6: what changes and the warning are never under the buttons ──
+    //
+    // The Lens gives a card 240px at 1280×800. The consequence rows and the warning are pinned
+    // above the buttons and only the provenance above them scrolls, so each row is drawn whole,
+    // inside the panel, above the top of the button band. Measured by changing one row's words
+    // for others of the same length and finding where the frame changed: a clipped row changes
+    // a sliver, a row under the buttons changes nothing at all.
+    let xs = (panel_left as u32 + 16, 1264);
+    let ys = (panel_top as u32, reply_top as u32);
+    let row_drawn_above = |base: ApprovalRequest, change: &dyn Fn(&mut ApprovalRequest), what: &str| -> (u32, u32) {
+        ui.set_approvals(ModelRc::new(VecModel::from(vec![base.clone()])));
+        let a = settle(w, width, height);
+        let before = ui.get_denied();
+        let deny = scan(w, deny_x, panel_top, panel_bottom - 4.0, || ui.get_denied() > before)
+            .unwrap_or_else(|| panic!("{what}: Decline answers inside the panel"));
+        let btn = button_top(w, deny_x, deny, panel_top, || ui.get_denied());
+        let mut changed = base;
+        change(&mut changed);
+        ui.set_approvals(ModelRc::new(VecModel::from(vec![changed])));
+        let b = settle(w, width, height);
+        let (t, bt, n) = diff_box(a.as_slice(), b.as_slice(), width, xs, ys)
+            .unwrap_or_else(|| panic!("{what} is not drawn anywhere in the Lens"));
+        println!("{what}: drawn on rows {t}..{bt} ({n} pixels), the buttons start at {btn}");
+        assert!(bt - t >= 8, "{what} is a whole line of type, not a clipped sliver: rows {t}..{bt}");
+        assert!((bt as f32) < btn - 2.0, "{what} ends above the buttons: row {bt}, buttons at {btn}");
+        assert!(t as f32 > panel_top, "{what} is inside the panel");
+        (t, bt)
+    };
+    let deleting = super::review_stills::delete_card();
+    let set_row = |at: usize, text: &'static str| {
+        move |c: &mut ApprovalRequest| {
+            let mut rows: Vec<SharedString> = c.consequences.iter().collect();
+            rows[at] = text.into();
+            c.consequences = ModelRc::new(VecModel::from(rows));
+        }
+    };
+    let what = row_drawn_above(deleting.clone(), &set_row(0, "Removes: id: sweep-demo-not-real"), "the \"Deletes:\" row");
+    let undo = row_drawn_above(deleting.clone(), &set_row(1, "Undo: not possible, the app said so"), "the undo row");
+    assert!(undo.0 > what.1, "the undo row is under the row that says what changes");
+    let dangerous = super::review_stills::dangerous_card();
+    row_drawn_above(
+        dangerous.clone(),
+        &|c: &mut ApprovalRequest| c.warning = "This is graded dangerous \u{2014} it can destroy data or state.".into(),
+        "the warning",
+    );
+    // And the red button answers there with the action's own words on it.
+    ui.set_approvals(ModelRc::new(VecModel::from(vec![deleting])));
+    settle(w, width, height);
+    let before = ui.get_allowed();
+    scan(w, allow_x, panel_top, panel_bottom - 4.0, || ui.get_allowed() > before).expect("\"Delete event\" answers a click inside the panel");
+    save(&settle(w, width, height), &output.replace(".png", "-delete.png"), width, height)?;
+
+    // ── The card at its natural height: what the Lens's cap scrolls is all there ──
+    let natural = ApprovalCardProbe::new()?;
+    natural.set_data(card(RUN_RECIPE_SUMMARY));
+    natural.show()?;
+    let size = |p: &ApprovalCardProbe| (440u32, p.get_card_h().ceil() as u32);
+    let (nw, nh) = size(&natural);
+    w.set_size(slint::PhysicalSize::new(nw, nh));
+    let led = settle(w, nw, nh);
+    // The 18px line is the description's first sentence: emptying it changes the picture.
+    natural.set_data(card(""));
+    let (bw, bh) = size(&natural);
+    w.set_size(slint::PhysicalSize::new(bw, bh));
+    let bare = settle(w, bw, bh);
+    let differ = led.as_slice().iter().zip(bare.as_slice()).filter(|(a, b)| a != b).count();
+    assert!(differ >= 300, "the card leads with the description's first sentence: only {differ} pixels change when it is emptied");
+
+    // #137, under Details (open by default on a dangerous card): the app's sentence about one
+    // call wraps — elided, it cut off exactly the clause that is its point, that the grant binds
+    // to the arguments and "not to this sentence".
     let sentence = "After this, prompts go to images.example and may cost money, and every \
         picture this app draws from now on is drawn there rather than on this machine.";
-    ui.set_approvals(ModelRc::new(VecModel::from(vec![roomy_card(sentence)])));
-    render(w, width, height);
-    let before = ui.get_denied();
-    let speak_deny_y = scan(w, deny_x, panel_top, panel_bottom - 4.0, || ui.get_denied() > before)
-        .expect("the speaking card's Deny answers a click inside the panel (#137)");
-    let at_rest = settle(w, width, height);
-
-    let win_top = (speak_deny_y - 210.0).max(panel_top) as u32;
-    let win_bottom = (speak_deny_y - 36.0) as u32; // above the button the scan just found
-    let bands = bands_in(at_rest.as_slice(), width, win_top, win_bottom);
-    // Text lines only: the argument box's fill, if the window still reaches it, is tens of
-    // rows of ink rather than the seven or so a line of type is.
-    let texts: Vec<&(u32, u32, u32, u32)> = bands.iter().filter(|b| b.1 - b.0 + 1 <= 14).collect();
-    let widest = texts.iter().map(|b| b.3 - b.2).max().unwrap_or(0);
-    // The last two lines of the section: the grade line, and above it the footnote's last.
-    let (foot_w, foot_rows) =
-        texts.get(texts.len().saturating_sub(2)).map(|b| (b.3 - b.2, b.1 - b.0 + 1)).unwrap_or((0, 0));
-    let (tail_w, tail_rows) = texts.last().map(|b| (b.3 - b.2, b.1 - b.0 + 1)).unwrap_or((0, 0));
-    println!(
-        "#137 block: Deny at {speak_deny_y}, window {win_top}..{win_bottom}, {} text lines, \
-         widest {widest}px, footnote's last line {foot_w}px, bottom line {tail_w}px over \
-         {tail_rows} rows",
-        texts.len()
-    );
-    assert!(
-        texts.len() >= 4,
-        "the details hold the sentence, its footnote and the grade line: {} text lines",
-        texts.len()
-    );
-    assert!(
-        foot_rows >= 4 && foot_w + 40 <= widest,
-        "the footnote's last line is its own short wrapped line, well under the block's full \
-         {widest}px width: {foot_w}px over {foot_rows} rows"
-    );
-    assert!(
-        tail_rows >= 4,
-        "the section ends on a whole line at the bottom, not a clipped sliver: the last line \
-         is {tail_rows} rows of {tail_w}px"
-    );
+    let open = |explained: &str| ApprovalRequest { grade: "dangerous".into(), ..roomy_card(explained) };
+    // Measured after a frame is drawn: the card's height is its laid-out height.
+    w.set_size(slint::PhysicalSize::new(440, 900));
+    let measure = |data: ApprovalRequest| {
+        natural.set_data(data);
+        settle(w, 440, 900);
+        natural.get_card_h()
+    };
+    let without = measure(open(""));
+    let with = measure(open(sentence));
+    println!("#137 block: the card is {without}px without the sentence and {with}px with it");
+    assert!(with - without >= 45.0, "the per-call sentence wraps over several lines under Details: {}px", with - without);
+    // Sensitive: Details is closed, and the sentence is not on the face of the card.
+    let closed_without = measure(roomy_card(""));
+    assert_eq!(measure(roomy_card(sentence)), closed_without, "Details and source is closed on a sensitive card");
 
     println!(
         "PASS: the longest card fits the Lens at 1280×800 — Deny answers at {deny_y} and Allow at \
          {allow_y}, one row, the whole {}px button inside the panel above the reply box, the \
-         session row reachable, the card leads with the description's first sentence \
-         ({differ} pixels drawn), and the per-call sentence's footnote ends on the card (#137: \
-         {} text lines, the footnote's last {foot_w}px of a {widest}px block)",
+         session row reachable; the consequence rows and the warning are drawn whole above the \
+         buttons; the card leads with the description's first sentence ({differ} pixels drawn); \
+         the per-call sentence wraps under Details, open on a dangerous card and closed on a \
+         sensitive one",
         bottom - top,
-        texts.len()
     );
     Ok(())
 }
@@ -327,26 +351,35 @@ pub fn run_pointer_only(w: &MinimalSoftwareWindow, output: &str) -> Result<(), B
 
     // Shift+Tab and Tab both ways round the whole focus chain, with every confirming key at each
     // stop: if either button, or the row under them, could take focus it would be pressed here.
-    for _ in 0..12 {
-        for k in [slint::SharedString::from(Key::Tab), "\n".into(), "\r".into(), " ".into()] {
-            key(w, k);
+    let keys_round = || {
+        for _ in 0..12 {
+            for k in [slint::SharedString::from(Key::Tab), "\n".into(), "\r".into(), " ".into()] {
+                key(w, k);
+            }
+            key(w, slint::SharedString::from(Key::Backtab));
+            key(w, "\n".into());
+            key(w, " ".into());
+            render(w, width, height);
         }
-        key(w, slint::SharedString::from(Key::Backtab));
-        key(w, "\n".into());
-        key(w, " ".into());
-        render(w, width, height);
-    }
+    };
+    keys_round();
     assert_eq!(
         (ui.get_allowed(), ui.get_denied()),
         (0, 0),
         "Tab, Enter, Return and Space press neither Allow once nor Deny on the real approval card"
     );
+    // The same on a destructive card: the red "Delete event" button is the same pointer-only
+    // button with other words and another fill (sign-off item 1).
+    ui.set_approvals(ModelRc::new(VecModel::from(vec![super::review_stills::delete_card()])));
+    settle(w, width, height);
+    keys_round();
+    assert_eq!((ui.get_allowed(), ui.get_denied()), (0, 0), "no key presses the red \"Delete event\" button or Decline");
 
     let (deny_x, allow_x) = (panel_left + 100.0, panel_left + 280.0);
     let before = ui.get_denied();
-    scan(w, deny_x, panel_top, panel_bottom - 4.0, || ui.get_denied() > before).expect("a click on Deny answers");
+    scan(w, deny_x, panel_top, panel_bottom - 4.0, || ui.get_denied() > before).expect("a click on Decline answers");
     let before = ui.get_allowed();
-    scan(w, allow_x, panel_top, panel_bottom - 4.0, || ui.get_allowed() > before).expect("a click on Allow once answers");
-    println!("PASS approval card: keys press nothing (Tab/Backtab/Enter/Return/Space ×12), a click answers Deny and Allow once");
+    scan(w, allow_x, panel_top, panel_bottom - 4.0, || ui.get_allowed() > before).expect("a click on Delete event answers");
+    println!("PASS approval card: keys press nothing (Tab/Backtab/Enter/Return/Space ×12, on an Allow-once card and on a red Delete-event card), a click answers Decline and the action");
     Ok(())
 }

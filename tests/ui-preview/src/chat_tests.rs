@@ -81,7 +81,11 @@ fn approval(decision: &str, record: &str, decided_at: &str) -> ApprovalRequest {
         can_session: true,
         decision: decision.into(),
         record: record.into(),
-        age_text: if decision.is_empty() { "94s left".into() } else { "".into() },
+        identity: "The attached mind (pi --mode rpc, pid 4242) \u{b7} verified".into(),
+        claim: "calls itself \u{201c}pi 0.87\u{201d} \u{b7} unverified".into(),
+        confirm_label: "Allow once".into(),
+        consequences: lines(&["Moves: from: ~/Pictures/2024; to: ~/Pictures/By date"]),
+        age_text: if decision.is_empty() { "Expires in 2 min, then declined".into() } else { "".into() },
         decided_at: decided_at.into(),
         ..Default::default()
     }

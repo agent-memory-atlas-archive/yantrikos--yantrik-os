@@ -7,6 +7,7 @@
 //!   review-still app-header        Calendar with its header (filled New Event, outline Today…), light
 //!   review-still approval          one approval card at its natural height, light
 //!   review-still approval-nightfall  the same card on Nightfall (dark, violet, its palette)
+//!   review-still approval-dangerous[-nightfall]  a dangerous card, Details and source open
 //!   review-still approval-lens[-nightfall]  the card in the Lens at 1280x800, where it is clamped
 //!
 //! Fixture data only; nothing is acted on.
@@ -76,14 +77,21 @@ fn lines(rows: &[&str]) -> ModelRc<SharedString> {
 
 /// calendar.delete_event asked for by a program started from a terminal, as row_for builds it:
 /// the app's own description, its first sentence as the summary, and no session offer because
-/// the app says it cannot be undone.
-fn delete_card() -> ApprovalRequest {
+/// the app says it cannot be undone. Since the sign-off of 4 October: the verified fact first and
+/// the claim under it, the red "Delete event" button, the consequence rows — and no separate
+/// warning, because the undo row already says it (approval_wording.rs).
+pub(crate) fn delete_card() -> ApprovalRequest {
     ApprovalRequest {
         id: "appr-review-1".into(),
         agent: "".into(),
         on_behalf: "".into(),
         requester: "design-sweep".into(),
         verified: "a program started from a terminal: sshd-session (pid 2290461)".into(),
+        identity: "A terminal program (sshd-session, pid 2290461) \u{b7} verified".into(),
+        claim: "calls itself \u{201c}design-sweep\u{201d} \u{b7} unverified".into(),
+        confirm_label: "Delete event".into(),
+        destructive: true,
+        consequences: lines(&["Deletes: id: sweep-demo-not-real", "Undo: not possible, the app says so"]),
         discrepancies: lines(&[]),
         app: "calendar".into(),
         action: "delete_event".into(),
@@ -94,19 +102,50 @@ fn delete_card() -> ApprovalRequest {
         args: lines(&["id: sweep-demo-not-real"]),
         target: "".into(),
         explained: "".into(),
-        warning: "The app says this cannot be undone.".into(),
+        warning: "".into(),
         can_session: false,
         decision: "".into(),
         record: "".into(),
-        age_text: "112s left".into(),
+        age_text: "Expires in 2 min, then declined".into(),
         decided_at: "".into(),
         session: false,
+    }
+}
+
+/// system-monitor.kill_process, graded dangerous, asked by a script that names itself after the
+/// attached mind: Details and source open by default, a discrepancy in red, and the warning kept
+/// beside the undo row because it says more than the row does.
+pub(crate) fn dangerous_card() -> ApprovalRequest {
+    ApprovalRequest {
+        id: "appr-review-2".into(),
+        requester: "hermes".into(),
+        verified: "python3 sweep.py (pid 31337)".into(),
+        identity: "A program (python3 sweep.py, pid 31337) \u{b7} verified".into(),
+        claim: "calls itself \u{201c}hermes\u{201d} \u{b7} unverified".into(),
+        confirm_label: "Kill process".into(),
+        destructive: true,
+        consequences: lines(&["Kills: force: true; pid: 2210"]),
+        discrepancies: lines(&["Calls itself hermes, but is not the attached mind's process."]),
+        app: "system-monitor".into(),
+        action: "kill_process".into(),
+        summary: "End a running process by pid".into(),
+        purpose: "End a running process by pid".into(),
+        caller_says: "Tidy up a stuck helper so the build can finish.".into(),
+        grade: "dangerous".into(),
+        args: lines(&["force: true", "pid: 2210"]),
+        warning: "This is graded dangerous \u{2014} it can destroy work or state.".into(),
+        age_text: "Expires in 2 min, then declined".into(),
+        ..Default::default()
     }
 }
 
 /// The card alone at its natural height, on the Lens panel's ground at the panel's width:
 /// nothing clamped, so the arguments and the warning are in the picture.
 fn approval_card(w: &MinimalSoftwareWindow, output: &str, night: bool) -> Result<(), Box<dyn std::error::Error>> {
+    approval_card_of(w, output, night, delete_card())
+}
+
+fn approval_card_of(w: &MinimalSoftwareWindow, output: &str, night: bool, card: ApprovalRequest) -> Result<(), Box<dyn std::error::Error>> {
     let ui = ApprovalCardProbe::new()?;
     if night {
         nightfall(&ui.global::<ThemeOverrides>(), &ui.global::<ThemeMode>(), &ui.global::<AccentPreset>());
@@ -114,7 +153,7 @@ fn approval_card(w: &MinimalSoftwareWindow, output: &str, night: bool) -> Result
         ui.global::<ThemeMode>().set_dark(false);
         ui.global::<AccentPreset>().set_index(0);
     }
-    ui.set_data(delete_card());
+    ui.set_data(card);
     ui.show()?;
     let h = ui.get_card_h().ceil() as u32;
     let h = if h < 50 { 640 } else { h };
@@ -239,6 +278,8 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str, which: &str) -> Result<(), B
         "app-header" => app_header(w, output),
         "approval" => approval_card(w, output, false),
         "approval-nightfall" => approval_card(w, output, true),
+        "approval-dangerous" => approval_card_of(w, output, false, dangerous_card()),
+        "approval-dangerous-nightfall" => approval_card_of(w, output, true, dangerous_card()),
         "approval-lens" => approval(w, output, false),
         "approval-lens-nightfall" => approval(w, output, true),
         other => Err(format!("unknown still {other:?}").into()),
