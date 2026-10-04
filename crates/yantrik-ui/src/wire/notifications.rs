@@ -153,6 +153,16 @@ fn wire_centre(ui: &App) {
         invoke_action(&weak, &id.to_string(), &action_id.to_string());
     });
 
+    // Open or close a folded run of a mind's turn notices. Kept on the UI thread, outside the
+    // list, which the poll rebuilds every second.
+    let weak = ui.as_weak();
+    ui.on_notification_toggle_group(move |key| {
+        crate::notification_groups::toggle(&key);
+        if let Some(ui) = weak.upgrade() {
+            resync(&ui);
+        }
+    });
+
     // "Clear all from this app" — one call per notification, because the store is addressed by
     // id and inventing a bulk method for a button nobody holds down is more surface than this
     // needs.
@@ -184,11 +194,37 @@ fn wire_centre(ui: &App) {
     });
 }
 
-/// Mark everything currently showing as read, and redraw.
+/// The notification centre's screen number.
+const CENTRE: i32 = 9;
+
+thread_local! {
+    /// Whether the person has the notification centre open: set on entering it, and spent on
+    /// the next navigation anywhere else.
+    static CENTRE_OPEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A screen was navigated to. Called by `wire::navigate` for every screen, because it is what
+/// knows a screen changed.
 ///
-/// Called when the notification centre opens. Public because `wire::navigate` is what knows a
-/// screen was entered.
-pub fn mark_showing_read(weak: &slint::Weak<App>) {
+/// What the centre showed is read once the person LEAVES it, not the moment it opens. It used to
+/// be marked read on open, before the screen was drawn: the Today panel said "450 unread", the
+/// centre opened on 450 cards already read, and "Mark all read" — whose rule is "enabled while
+/// anything is unread" — was switched off on every visit, a dead control over a list whose new
+/// cards could no longer be told from the old. Now the new ones read as new while they are on
+/// screen, the button clears them, and leaving clears whatever is left, so the badge still does
+/// not outlive the look (VM 520 sign-off, 4 October).
+pub fn navigated(weak: &slint::Weak<App>, screen: i32) {
+    if screen == CENTRE {
+        CENTRE_OPEN.with(|open| open.set(true));
+        return;
+    }
+    if CENTRE_OPEN.with(|open| open.replace(false)) {
+        mark_showing_read(weak);
+    }
+}
+
+/// Mark everything currently showing as read, and redraw: on leaving the notification centre.
+fn mark_showing_read(weak: &slint::Weak<App>) {
     let unread: Vec<String> = with_mirror(|m| {
         m.showing()
             .into_iter()
@@ -1235,7 +1271,7 @@ fn split_headline(line: &str) -> (String, String) {
 /// anything that closes with it — `?!`, a quote, a bracket. `3.5` and `v1.2` are not sentence
 /// ends, because what follows them is not a space. That is as much sentence detection as a
 /// notification title has any use for.
-fn first_sentence_end(line: &str) -> Option<usize> {
+pub(super) fn first_sentence_end(line: &str) -> Option<usize> {
     let mut chars = line.char_indices().peekable();
     while let Some((i, c)) = chars.next() {
         if !matches!(c, '.' | '!' | '?') {
@@ -1288,7 +1324,7 @@ fn plain_line(line: &str) -> String {
     cleaned
 }
 
-fn clip_at_word(text: &str, max: usize) -> String {
+pub(super) fn clip_at_word(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_string();
     }

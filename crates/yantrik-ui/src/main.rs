@@ -134,6 +134,8 @@ mod rc_keys;
 mod notifications;
 // The short "Sent by … · verified" line on a notification card.
 mod notification_sender;
+// A mind's turn notices: their words, and the run of them that folds into one group.
+mod notification_groups;
 // The Memory screen's newest memories, by recall's own domain rule.
 mod recent_memories;
 // The newest memories read from the store directly, never queued behind the companion.

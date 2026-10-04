@@ -54,7 +54,7 @@ fn a_primary_button_is_the_accent_not_the_apps_colour() {
 /// these screens only behind that limit (`needs-you`), never as the colour of a reading.
 #[test]
 fn amber_is_not_used_for_data() {
-    for file in ["components/bond_ring.slint", "system_dashboard.slint", "system_monitor.slint", "components/model_tier_badge.slint"] {
+    for file in ["bond.slint", "personality.slint", "system_dashboard.slint", "system_monitor.slint", "components/model_tier_badge.slint"] {
         let src = read(&format!("{UI}{file}"));
         for line in src.lines().filter(|l| l.contains("Theme.amber")) {
             assert!(line.contains("needs-you ? Theme.amber"), "{file} paints data amber: {}", line.trim());

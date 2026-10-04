@@ -160,7 +160,9 @@ export component TodayPopover inherits YPopover {
             padding-left: Theme.sp-3;
             padding-right: Theme.sp-3;
             Text {
-                text: root.unread > 0 ? "All notifications · " + root.unread + " unread" : "All notifications";
+                // Capped like the notification centre's own count.
+                text: root.unread > 99 ? "All notifications · 99+ unread"
+                    : root.unread > 0 ? "All notifications · " + root.unread + " unread" : "All notifications";
                 color: Theme.text-primary;
                 font-size: Theme.fs-body;
                 font-weight: Theme.fw-body-strong;

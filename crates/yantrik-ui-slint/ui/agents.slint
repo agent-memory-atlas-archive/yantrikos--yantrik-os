@@ -83,7 +83,8 @@ export struct AgentItemData {
 export struct AgentHeaderData {
     id: string,
     mind: string,
-    title: string,
+    title: string,         // the run's name: its task's first sentence, "Command: …", or "Untitled run"
+    raw: string,           // the prompt as it was sent, when the title does not already say it all
     state: string,
     label: string,
     since: string,
@@ -904,6 +905,16 @@ component TaskDetail inherits Rectangle {
                                 font-size: Theme.fs-page;
                                 font-weight: 600;
                                 wrap: word-wrap;
+                            }
+                            // The prompt as it was sent — ":beliefs the user", a role's whole
+                            // brief — under the name, small, for whoever needs the exact words.
+                            // It used to BE the heading, in the page's largest type.
+                            if AgentsState.header.raw != "" : Text {
+                                text: AgentsState.header.raw;
+                                color: Theme.text-secondary;
+                                font-size: Theme.font-label;
+                                wrap: no-wrap;
+                                overflow: elide;
                             }
                             HorizontalLayout {
                                 spacing: 8px;

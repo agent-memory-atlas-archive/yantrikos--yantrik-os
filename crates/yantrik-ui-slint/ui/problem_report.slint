@@ -1,4 +1,4 @@
-// Report a problem — the records this desktop wrote when something went wrong, and the one act
+// Problems — the records this desktop wrote when something went wrong, and the one act
 // that sends one of them anywhere.
 //
 // Nothing here sends on its own. The screen exists so that the person can see, in full, the
@@ -76,12 +76,14 @@ export component ProblemReportScreen inherits Rectangle {
                                 padding-left: 10px;
                                 padding-right: 10px;
                                 spacing: 8px;
-                                Rectangle {
-                                    width: 8px;
-                                    height: 8px;
+                                // A glyph in dim text, not a coloured dot: the line under the title
+                                // already says panic, crash or failure, and a red dot beside it
+                                // said the same thing in a colour that means "destroy".
+                                Icon {
+                                    commands: Icons.warning;
+                                    size: 16px;
+                                    tint: Theme.text-dim;
                                     y: (parent.height - self.height) / 2;
-                                    border-radius: 4px;
-                                    background: row.kind == "failure" ? Theme.amber : Theme.color-emotional;
                                 }
                                 VerticalLayout {
                                     spacing: 2px;

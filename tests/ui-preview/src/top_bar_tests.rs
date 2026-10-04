@@ -159,6 +159,11 @@ fn note(id: &str, app: &str, summary: &str, body: &str, ago: &str, read: bool, a
         group_name: app.into(),
         group_icon: "".into(),
         group_count: 0,
+        group_unread: 0,
+        is_turn_group: false,
+        group_key: "".into(),
+        expanded: false,
+        in_group: false,
         actions: ModelRc::new(VecModel::from(
             actions.iter().map(|(i, l)| NotifActionData { id: (*i).into(), label: (*l).into() }).collect::<Vec<_>>(),
         )),

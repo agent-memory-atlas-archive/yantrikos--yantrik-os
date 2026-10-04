@@ -13,7 +13,7 @@ use crate::bridge;
 use crate::filebrowser;
 use crate::notifications;
 use crate::{
-    App, BondData, BreadcrumbSegment, FileEntry, OpinionData, ProcessData, SharedRefData,
+    App, BreadcrumbSegment, FileEntry, OpinionData, ProcessData, SharedRefData,
     UrgeCardData,
 };
 
@@ -35,6 +35,8 @@ pub fn wire(ui: &App, ctx: &AppContext) {
 
     ui.on_navigate(move |screen| {
         tracing::debug!(screen, "Navigate to screen");
+        // Leaving the notification centre is when what it showed counts as read.
+        super::notifications::navigated(&ui_weak, screen);
 
         match screen {
             // Desktop — load pending urges
@@ -81,17 +83,7 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                 timer.start(TimerMode::Repeated, Duration::from_millis(16), move || {
                     if let Ok(bond) = reply_rx.try_recv() {
                         if let Some(ui) = weak.upgrade() {
-                            ui.set_bond_data(BondData {
-                                loaded: true,
-                                bond_score: bond.bond_score as f32,
-                                bond_level: bond.bond_level.into(),
-                                total_interactions: bond.total_interactions as i32,
-                                days_together: bond.days_together as i32,
-                                current_streak: bond.current_streak as i32,
-                                humor_rate: bond.humor_rate as f32,
-                                vulnerability_events: bond.vulnerability_events as i32,
-                                shared_references: bond.shared_references as i32,
-                            });
+                            ui.set_bond_data(bond.to_ui());
                         }
                         *handle.borrow_mut() = None;
                     }
@@ -143,17 +135,14 @@ pub fn wire(ui: &App, ctx: &AppContext) {
             6 => { if let Some(ui) = ui_weak.upgrade() { ui.invoke_search_memories("".into()); } }
             // Directory I/O is owned by the asynchronous Files controller.
             8 => { if let Some(ui)=ui_weak.upgrade() { ui.invoke_file_refresh(); } }
-            // Notification Center — draw the mirror at once, and mark what is showing as read.
-            //
-            // Read on open, because opening this screen IS reading them: leaving the badge at
-            // eleven after somebody has looked at all eleven is how a badge stops meaning
-            // anything. The service is told off-thread and its answer arrives on the next poll.
+            // Notification Center — draw the mirror at once. What it shows is marked read when
+            // the person leaves it (`notifications::navigated`, above), not before they have
+            // seen which cards are new: leaving the badge at eleven after somebody has looked at
+            // all eleven is how a badge stops meaning anything, and marking them read before the
+            // screen is drawn is how "Mark all read" came to be off on every visit.
             9 => {
-                {
-                    let store = notification_store.borrow();
-                    notifications::sync_to_ui(&store, &ui_weak);
-                }
-                super::notifications::mark_showing_read(&ui_weak);
+                let store = notification_store.borrow();
+                notifications::sync_to_ui(&store, &ui_weak);
             }
             // System Dashboard — populate from snapshot
             10 => {

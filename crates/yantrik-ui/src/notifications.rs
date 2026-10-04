@@ -255,11 +255,14 @@ pub fn sender_line(n: &Notification) -> String {
 
 /// Convert one notification to the Slint row.
 pub fn to_slint_data(n: &Notification) -> crate::NotificationData {
+    // The desktop's agent notices say what happened and keep the prompt in the body; anything
+    // else is shown as it was sent (notification_groups.rs).
+    let (title, body) = crate::notification_groups::display_copy(n);
     crate::NotificationData {
         id: n.id.clone().into(),
         app_name: n.app.clone().into(),
-        summary: n.title.clone().into(),
-        body: n.body.clone().into(),
+        summary: title.into(),
+        body: body.into(),
         urgency: urgency_int(n.urgency),
         time_ago: crate::bridge::format_time_ago(seconds_since(&n.created_at)).into(),
         is_read: n.read,
@@ -269,6 +272,11 @@ pub fn to_slint_data(n: &Notification) -> crate::NotificationData {
         group_name: n.app.clone().into(),
         group_icon: first_letter(&n.app),
         group_count: 0,
+        group_unread: 0,
+        is_turn_group: false,
+        group_key: slint::SharedString::default(),
+        expanded: false,
+        in_group: false,
         actions: slint::ModelRc::new(slint::VecModel::from(
             n.actions
                 .iter()
@@ -286,6 +294,38 @@ pub fn to_slint_data(n: &Notification) -> crate::NotificationData {
     }
 }
 
+/// The one row a run of a mind's turn notices folds into: "Yantrik Mind finished 12 turns ·
+/// last 2m ago", pressed to show the cards inside it. Read when every card in it is.
+fn turn_group_row(run: &crate::notification_groups::Run, open: bool) -> crate::NotificationData {
+    let newest = run.notes.first().map(|n| seconds_since(&n.created_at)).unwrap_or(0.0);
+    let ago = crate::bridge::format_time_ago(newest);
+    let first = run.notes.first();
+    crate::NotificationData {
+        id: slint::SharedString::default(),
+        app_name: first.map(|n| n.app.clone()).unwrap_or_default().into(),
+        summary: run.label(&ago).into(),
+        body: slint::SharedString::default(),
+        urgency: 1,
+        time_ago: ago.into(),
+        is_read: run.unread() == 0,
+        sender_line: slint::SharedString::default(),
+        // Every card in a run passed the same test (the desktop itself), so the newest one's
+        // line speaks for the run.
+        sender_short: first.map(|n| crate::notification_sender::sender_summary(n)).unwrap_or_default().into(),
+        is_group_header: false,
+        group_name: slint::SharedString::default(),
+        group_icon: slint::SharedString::default(),
+        group_count: run.notes.len() as i32,
+        group_unread: run.unread() as i32,
+        is_turn_group: true,
+        group_key: run.key().into(),
+        expanded: open,
+        in_group: false,
+        actions: slint::ModelRc::default(),
+        source: first.map(|n| n.source.as_str()).unwrap_or_default().into(),
+    }
+}
+
 fn first_letter(app: &str) -> slint::SharedString {
     app.chars()
         .next()
@@ -299,7 +339,9 @@ fn first_letter(app: &str) -> slint::SharedString {
 pub const TODAY_SHOWN: usize = 5;
 
 /// Put the whole list on screen: grouped by app, newest group first, newest within a group
-/// first, with a synthetic header row before each group.
+/// first, with a synthetic header row before each group. Inside a group, a run of one mind's turn
+/// notices folds into one row (`notification_groups::fold`), and its cards follow only when the
+/// person has opened it.
 ///
 /// Groups used to be ordered alphabetically, so a notification that arrived a second ago sat
 /// under "Zoom" at the bottom of the screen if that was where its app's name fell. They are in
@@ -337,12 +379,32 @@ pub fn sync_to_ui(mirror: &NotificationMirror, ui_weak: &slint::Weak<crate::App>
             is_group_header: true,
             group_name: first.app.clone().into(),
             group_icon: first_letter(&first.app),
+            // How many there are, and — apart, so a total is never read as unread — how many
+            // of them are.
             group_count: group.len() as i32,
+            group_unread: group.iter().filter(|n| !n.read).count() as i32,
+            is_turn_group: false,
+            group_key: slint::SharedString::default(),
+            expanded: false,
+            in_group: false,
             actions: slint::ModelRc::default(),
             source: first.source.as_str().into(),
         });
-        for n in group {
-            items.push(to_slint_data(n));
+        let group: Vec<&Notification> = group.into_iter().copied().collect();
+        for entry in crate::notification_groups::fold(&group) {
+            match entry {
+                crate::notification_groups::Entry::One(n) => items.push(to_slint_data(n)),
+                crate::notification_groups::Entry::Turns(run) => {
+                    let open = run.expanded();
+                    items.push(turn_group_row(&run, open));
+                    if open {
+                        items.extend(run.notes.iter().map(|n| crate::NotificationData {
+                            in_group: true,
+                            ..to_slint_data(n)
+                        }));
+                    }
+                }
+            }
         }
     }
 

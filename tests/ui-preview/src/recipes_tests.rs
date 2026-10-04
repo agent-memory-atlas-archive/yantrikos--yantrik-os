@@ -126,7 +126,7 @@ pub fn rows() -> Vec<RecipeRowData> {
         },
         RecipeRowData {
             error: "Step 1 failed: web_search: no results for \"{{topic}}\"".into(),
-            unbound: "{{topic}} has no value".into(),
+            unbound: "Needs {{topic}} — sent as written until set".into(),
             ..row(Row {
                 id: "rcp_research",
                 name: "Research a topic",
@@ -159,7 +159,7 @@ pub fn rows() -> Vec<RecipeRowData> {
         }),
         RecipeRowData {
             template: true,
-            unbound: "{{city}} has no value".into(),
+            unbound: "Needs {{city}} — sent as written until set".into(),
             ..row(Row {
                 id: "builtin_morning_briefing",
                 name: "Morning briefing",
