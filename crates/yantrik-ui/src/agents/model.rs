@@ -1087,6 +1087,14 @@ impl Agent {
         self.turns.iter().flat_map(|t| t.cards())
     }
 
+    /// The questions it asked the person that still wait for an answer (#25), oldest first.
+    pub fn waiting_questions(&self) -> impl Iterator<Item = &Question> {
+        self.turns.iter().flat_map(|t| t.items.iter()).filter_map(|i| match i {
+            Item::Question(q) if q.waiting() => Some(q),
+            _ => None,
+        })
+    }
+
     /// Whether anything of it is still running: its turn, or a command the shell owns.
     /// A mind's main conversation with no role, recipe or parent: the person's chat with it (the
     /// Lens). Its turns are listed as runs, not the conversation as one agent.
