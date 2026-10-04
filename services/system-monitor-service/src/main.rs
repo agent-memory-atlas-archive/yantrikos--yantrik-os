@@ -8,6 +8,9 @@
 //!   sysmon.processes   { sort_by?, limit? }      → Vec<ProcessInfo>
 //!   sysmon.kill_process { pid }                  → ()
 
+mod recent;
+
+use yantrik_ipc_contracts::machine_status::{Fact, MachineStatus, Readings};
 use yantrik_ipc_contracts::system_monitor::*;
 #[cfg(test)]
 use yantrik_service_sdk::gate::{self, Authority};
@@ -118,8 +121,16 @@ fn human_bytes(bytes: u64) -> String {
 fn describe_view() -> Result<View, ServiceError> {
     let snap = build_snapshot()?;
     // Top few by CPU: the question "what is this machine doing" is almost always "what is using
-    // it", and a full process table is the transcript an agent was told to avoid.
-    let top = read_processes("cpu", 5).unwrap_or_default();
+    // it", and a full process table is the transcript an agent was told to avoid. From the last
+    // sample when there is a recent one (recent.rs): taking a new one costs half a second.
+    let (top, sampled_ago) =
+        recent::busiest(|| read_processes("cpu", recent::SHOWN as u32).unwrap_or_default());
+    // The window's status row, in the same words: what was measured, which limits were checked,
+    // and which were reached. A window that is closed must not leave a caller with less.
+    let status = MachineStatus::assess(
+        &Readings::from_snapshot(&snap),
+        &[Fact::Cpu, Fact::Memory, Fact::Disk, Fact::Swap],
+    );
 
     let mem_used = human_bytes(snap.memory.used_bytes);
     let mem_total = human_bytes(snap.memory.total_bytes);
@@ -174,7 +185,11 @@ fn describe_view() -> Result<View, ServiceError> {
         .with("swap_total", human_bytes(snap.memory.swap_total_bytes))
         .with("uptime_secs", snap.uptime_secs as i64)
         .with("disks", serde_json::Value::Array(disks))
-        .with("top_processes", serde_json::Value::Array(processes)))
+        .with("top_processes", serde_json::Value::Array(processes))
+        .with("top_processes_age_ms", sampled_ago.as_millis() as i64)
+        .with("status", status.line())
+        .with("limits_reached", status.json()["limits_reached"].clone())
+        .with("thresholds", status.thresholds))
 }
 
 /// An uptime a person reads: "3d 4h", "12m".
@@ -531,10 +546,7 @@ mod platform {
             let mount = parts[1];
             let fs = parts[2];
 
-            if !matches!(
-                fs,
-                "ext4" | "ext3" | "ext2" | "xfs" | "btrfs" | "f2fs" | "vfat" | "ntfs" | "zfs"
-            ) {
+            if !yantrik_ipc_contracts::machine_status::is_real_filesystem(fs) {
                 continue;
             }
             if !seen.insert(mount.to_string()) {
@@ -761,6 +773,9 @@ mod platform {
 
             procs.push(info);
         }
+        // Whatever order this caller wanted, `describe` wants the busiest, and should not have
+        // to sleep half a second to learn what this call has just measured.
+        crate::recent::remember(&procs);
 
         match sort_by {
             "mem" | "memory" => {

@@ -50,12 +50,33 @@ fn a_primary_button_is_the_accent_not_the_apps_colour() {
 }
 
 /// Amber means a person's answer is pending. A bond score, a busy CPU and a model tier are not.
+/// A disk at the limit the status row checks is — it needs its owner — so amber may appear on
+/// these screens only behind that limit (`needs-you`), never as the colour of a reading.
 #[test]
 fn amber_is_not_used_for_data() {
     for file in ["components/bond_ring.slint", "system_dashboard.slint", "system_monitor.slint", "components/model_tier_badge.slint"] {
         let src = read(&format!("{UI}{file}"));
-        assert!(!src.contains("Theme.amber;") && !src.contains("? Theme.amber :"), "{file} paints data amber");
+        for line in src.lines().filter(|l| l.contains("Theme.amber")) {
+            assert!(line.contains("needs-you ? Theme.amber"), "{file} paints data amber: {}", line.trim());
+        }
     }
+}
+
+/// System Monitor drew a disk at 95% in red, the colour of an action that destroys something.
+/// A full disk is amber, at the same limit the status row checks, and never red.
+#[test]
+fn a_full_disk_is_amber_never_red() {
+    let src = read(&format!("{UI}system_monitor.slint"));
+    let start = src.find("for disk in root.disks").expect("the disk card's rows");
+    let rows = &src[start..start + src[start..].find("Rectangle { height: 1px").expect("the row's rule")];
+    assert!(rows.contains("disk.needs-you ? Theme.amber"), "the disk bar is amber at the limit");
+    for red in ["color-emotional", "color-danger"] {
+        assert!(!rows.contains(red), "a disk row draws `{red}`");
+    }
+    let row = read(&format!("{UI}components/machine_status_row.slint"));
+    let glyph = row.find("if root.needs-you : Icon").expect("the warning glyph, only when a limit is reached");
+    assert_eq!(row.matches("Theme.amber").count(), 1, "amber is the glyph's and nothing else's");
+    assert!(row.find("Theme.amber").unwrap() > glyph);
 }
 
 /// A finished recipe step is not drawn as a success (the success token's dark value was a teal):

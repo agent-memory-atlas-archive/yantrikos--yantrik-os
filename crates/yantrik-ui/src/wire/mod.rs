@@ -56,6 +56,7 @@ pub mod settings;
 pub mod theme;
 pub mod theme_files;
 mod system_poll;
+mod system_status;
 mod timers;
 mod today;
 pub mod toast;

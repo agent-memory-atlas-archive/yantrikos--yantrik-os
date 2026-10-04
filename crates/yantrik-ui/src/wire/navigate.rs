@@ -170,10 +170,9 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                     // system poll's own cadence, on every screen — there is
                     // nothing about it to populate on entry.
                     //
-                    // Uptime is the About screen's reader, not a second copy
-                    // of it: this path had its own formatter that printed
-                    // "3d 1h" where About printed "3d 1h 2m".
-                    ui.set_sys_uptime_text(super::about::read_uptime().into());
+                    // The STATUS row: uptime (the About screen's reader, not a
+                    // second copy of it), load, and the limits checked.
+                    super::system_status::update(&ui, &snap);
 
                     let procs: Vec<ProcessData> = snap
                         .running_processes
