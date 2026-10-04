@@ -136,6 +136,8 @@ mod notifications;
 mod notification_sender;
 // A mind's turn notices: their words, and the run of them that folds into one group.
 mod notification_groups;
+// A notification's title and body: the first sentence over the whole text, never a cut in two.
+mod notification_title;
 // The Memory screen's newest memories, by recall's own domain rule.
 mod recent_memories;
 // The newest memories read from the store directly, never queued behind the companion.

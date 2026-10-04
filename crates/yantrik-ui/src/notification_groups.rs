@@ -80,7 +80,10 @@ pub fn you_asked(prompt: &str) -> String {
 ///
 /// Notices stored before this change were titled `Yantrik Mind finished: “yes”`. For the
 /// desktop's own agent notices, a quoted tail on the title is the prompt: it moves to the body as
-/// "You asked: …" and the title keeps what happened. Everything else is shown as it was sent.
+/// "You asked: …" and the title keeps what happened. Everything else goes through the one title
+/// rule (`notification_title::shown`): a short title is left as sent with its body, and a long
+/// one, or none, becomes the first sentence over the whole text. The centre and Today both draw
+/// what this returns, through `notifications::to_slint_data`.
 pub fn display_copy(n: &Notification) -> (String, String) {
     if from_the_desktop_about_an_agent(n) {
         if let Some((head, quoted)) = n.title.split_once(": \u{201c}") {
@@ -93,7 +96,7 @@ pub fn display_copy(n: &Notification) -> (String, String) {
             return (head.to_string(), body);
         }
     }
-    (n.title.clone(), n.body.clone())
+    crate::notification_title::shown(&n.title, &n.body)
 }
 
 // ── Recognising a turn notice ───────────────────────────────────────────────────────────────

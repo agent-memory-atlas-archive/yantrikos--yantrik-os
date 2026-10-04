@@ -5,7 +5,7 @@
 //! it is now the first sentence of the task, short enough to read at a glance, and the prompt as
 //! it was sent goes under it in small secondary text for whoever needs the exact words.
 
-use super::notifications::{clip_at_word, first_sentence_end};
+use crate::notification_title::{clip_at_word, first_sentence_end};
 
 /// The longest a heading may be, ellipsis included.
 pub const HEADING_CHARS: usize = 60;
