@@ -10,6 +10,7 @@ import { AppIdentity } from "components/app_color.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { AppAction, AppHeader } from "components/app_header.slint";
 import { YEmptyState } from "components/y_empty_state.slint";
+import { YStatusPill } from "components/y_status_pill.slint";
 import { ListView } from "std-widgets.slint";
 
 export struct PackageData {
@@ -407,25 +408,41 @@ export component PackageManager inherits Rectangle {
                             background: idx == root.selected-index ? Theme.bg-selected
                                 : row-ta.has-hover ? Theme.hover-fill : transparent;
 
+                            // A fixed grid, left-aligned at 16px: status 16, name and description
+                            // flexible, source pill, tag pill, size 72 right-aligned, state 96. Every
+                            // column is the same width on every row, so the names read down one
+                            // edge. The row used to centre its content on its own width, and the
+                            // name drifted by up to 90px from one row to the next.
                             HorizontalLayout {
                                 padding-left: 16px;
                                 padding-right: 16px;
                                 spacing: 12px;
-                                alignment: center;
+                                alignment: start;
 
-                                // Status indicator dot
+                                // Status: an 8px dot in its 16px column. Installed is a neutral
+                                // fill, not the success teal, which is the minds' colour; the state
+                                // pill says the word.
                                 Rectangle {
-                                    width: 8px;
-                                    height: 8px;
-                                    border-radius: 4px;
-                                    background: pkg.upgradable ? Theme.holo-blue
-                                        : pkg.installed ? Theme.color-success
-                                        : Theme.text-dim;
+                                    width: 16px;
+
+                                    Rectangle {
+                                        x: (parent.width - self.width) / 2;
+                                        y: (parent.height - self.height) / 2;
+                                        width: 8px;
+                                        height: 8px;
+                                        border-radius: 4px;
+                                        background: pkg.upgradable ? Theme.holo-blue
+                                            : pkg.installed ? Theme.text-secondary
+                                            : transparent;
+                                        border-width: pkg.upgradable || pkg.installed ? 0px : 1px;
+                                        border-color: Theme.text-dim;
+                                    }
                                 }
 
-                                // Name + description
+                                // Name + description: the one flexible column.
                                 VerticalLayout {
                                     horizontal-stretch: 1;
+                                    min-width: 0px;
                                     alignment: center;
                                     spacing: 2px;
 
@@ -456,75 +473,97 @@ export component PackageManager inherits Rectangle {
                                     }
                                 }
 
-                                // Source badge: which store the row is from, so a Flatpak and a
+                                // Source pill: which store the row is from, so a Flatpak and a
                                 // Debian package of the same name are never mistaken for each other.
+                                // In a fixed slot, so the tag after it starts at one x.
                                 Rectangle {
-                                    width: source-text.preferred-width + 14px;
-                                    height: 20px;
-                                    background: pkg.source == "flathub" ? AppIdentity.accent.transparentize(80%) : Theme.hover-fill;
-                                    border-radius: 10px;
-                                    border-width: 1px;
-                                    border-color: pkg.source == "flathub" ? AppIdentity.accent.transparentize(50%) : transparent;
+                                    width: 64px;
 
-                                    source-text := Text {
-                                        text: pkg.source == "flathub" ? "Flathub" : "Debian";
-                                        font-size: Theme.fs-micro;
-                                        font-weight: 600;
-                                        color: pkg.source == "flathub" ? AppIdentity.accent : Theme.text-secondary;
-                                        horizontal-alignment: center;
-                                        vertical-alignment: center;
+                                    Rectangle {
+                                        x: 0;
+                                        y: (parent.height - self.height) / 2;
+                                        width: source-text.preferred-width + 14px;
+                                        height: 20px;
+                                        background: pkg.source == "flathub" ? AppIdentity.accent.transparentize(80%) : Theme.hover-fill;
+                                        border-radius: 10px;
+                                        border-width: 1px;
+                                        border-color: pkg.source == "flathub" ? AppIdentity.accent.transparentize(50%) : transparent;
+
+                                        source-text := Text {
+                                            text: pkg.source == "flathub" ? "Flathub" : "Debian";
+                                            font-size: Theme.fs-micro;
+                                            font-weight: 600;
+                                            color: pkg.source == "flathub" ? AppIdentity.accent : Theme.text-secondary;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
                                     }
                                 }
 
-                                // Repo badge
-                                if pkg.repo != "" : Rectangle {
-                                    width: repo-text.width + 12px;
-                                    height: 20px;
-                                    background: Theme.hover-fill;
-                                    border-radius: 10px;
+                                // Tag pill: the Debian section or the Flatpak branch. The slot stays
+                                // when a row has none, so the columns after it do not move.
+                                Rectangle {
+                                    width: 72px;
 
-                                    repo-text := Text {
-                                        text: pkg.repo;
-                                        font-size: Theme.fs-micro;
-                                        color: Theme.text-dim;
-                                        horizontal-alignment: center;
-                                        vertical-alignment: center;
+                                    if pkg.repo != "" : Rectangle {
+                                        x: 0;
+                                        y: (parent.height - self.height) / 2;
+                                        width: min(parent.width, repo-text.preferred-width + 12px);
+                                        height: 20px;
+                                        background: Theme.hover-fill;
+                                        border-radius: 10px;
+
+                                        repo-text := Text {
+                                            width: parent.width - 12px;
+                                            text: pkg.repo;
+                                            font-size: Theme.fs-micro;
+                                            color: Theme.text-dim;
+                                            overflow: elide;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
                                     }
                                 }
 
-                                // Size
-                                if pkg.size-text != "" : Text {
+                                // Size, right-aligned so the figures line up by their last digit.
+                                Text {
+                                    width: 72px;
                                     text: pkg.size-text;
                                     font-size: Theme.font-small;
                                     color: Theme.text-dim;
-                                    width: 60px;
+                                    overflow: elide;
                                     horizontal-alignment: right;
                                     vertical-alignment: center;
                                 }
 
-                                // Status badge
+                                // State. Installed is the kit's neutral outline pill: the word
+                                // carries the state. Upgradable keeps the accent, because it is an
+                                // action waiting to be taken.
                                 Rectangle {
-                                    width: 76px;
-                                    height: 24px;
-                                    background: pkg.upgradable ? Theme.accent-dim
-                                        : pkg.installed ? Theme.color-success-dim
-                                        : transparent;
-                                    border-radius: 12px;
-                                    border-width: pkg.installed || pkg.upgradable ? 1px : 0;
-                                    border-color: pkg.upgradable ? AppIdentity.accent.transparentize(60%)
-                                        : pkg.installed ? Theme.color-success.transparentize(60%)
-                                        : transparent;
+                                    width: 96px;
 
-                                    Text {
-                                        text: pkg.upgradable ? "Upgradable"
-                                            : pkg.installed ? "Installed"
-                                            : "";
-                                        font-size: Theme.fs-micro;
-                                        color: pkg.upgradable ? Theme.holo-blue
-                                            : pkg.installed ? Theme.color-success
-                                            : transparent;
-                                        horizontal-alignment: center;
-                                        vertical-alignment: center;
+                                    if pkg.upgradable : Rectangle {
+                                        y: (parent.height - self.height) / 2;
+                                        width: parent.width;
+                                        height: 22px;
+                                        background: Theme.accent-dim;
+                                        border-radius: 11px;
+                                        border-width: 1px;
+                                        border-color: AppIdentity.accent.transparentize(60%);
+
+                                        Text {
+                                            text: "Upgradable";
+                                            font-size: Theme.fs-micro;
+                                            color: Theme.holo-blue;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+
+                                    if !pkg.upgradable && pkg.installed : YStatusPill {
+                                        y: (parent.height - self.height) / 2;
+                                        width: parent.width;
+                                        text: "Installed";
                                     }
                                 }
                             }

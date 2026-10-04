@@ -42,12 +42,22 @@ export component YButton inherits Rectangle {
     // answer such a card; that is the spec's choice, and the only non-pointer way to press one
     // used to be the accessibility action, which is closed here on purpose.
     in property <bool> pointer-only: false;
+    // What the button says on hover; most useful on a disabled one, to say why it is off. The
+    // button clips, so it does not draw this itself: its owner draws a YTooltip from
+    // `pointer-over` and `anchor-x`. Assistive tech reads it as the description.
+    in property <string> tooltip: "";
+    // The pointer is on the button, disabled or not, when it has a tooltip to show.
+    out property <bool> pointer-over: ta.has-hover;
+    // The button's centre in window coordinates, read off the touch area: Slint 1.17 reports a
+    // layout child component's own absolute position with its offset counted twice.
+    out property <length> anchor-x: ta.absolute-position.x + root.width / 2;
     callback clicked();
     // Put keyboard focus on the button, for an owner that decides where focus starts.
     public function focus-button() { keyboard.focus(); }
     forward-focus: keyboard;
     accessible-role: button;
     accessible-label: root.label;
+    accessible-description: root.tooltip;
     accessible-enabled: !root.disabled && !root.loading && !root.pointer-only;
     accessible-action-default => { if (!root.disabled && !root.loading && !root.pointer-only) { root.clicked(); } }
 
@@ -90,7 +100,9 @@ export component YButton inherits Rectangle {
     }
 
     ta := TouchArea {
-        enabled: !root.disabled && !root.loading;
+        // A disabled button with a tooltip still notices the pointer, so it can say why it is
+        // off; the press itself is refused below either way.
+        enabled: (!root.disabled && !root.loading) || root.tooltip != "";
         mouse-cursor: root.disabled ? default : pointer;
         clicked => {
             if (!root.disabled && !root.loading) { if (!root.pointer-only) { keyboard.focus(); } root.clicked(); }
