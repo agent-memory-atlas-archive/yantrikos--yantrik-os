@@ -8,9 +8,12 @@
 //!                                   a person presses Allow
 //!                                            │
 //!   mind ──approval_status───▶ shell ────────┘  → "granted"
-//!   mind ──consume_approval──▶ shell            → the grant is burned, once
-//!   mind ──act on the app────▶ the app          → the action actually runs
+//!   mind ──app.act + grant───▶ the app          → the app spends the grant, once (#116),
+//!                                                  and the action actually runs
 //! ```
+//!
+//! `consume_approval` spends a grant directly. It is for a caller that runs the action itself;
+//! calling it before an `app.act` that carries the same grant leaves the app nothing to spend.
 //!
 //! # A mind must not be able to approve itself
 //!
@@ -53,6 +56,30 @@ use crate::App;
 /// that is every tick.
 const REFRESH: Duration = Duration::from_secs(1);
 
+/// What `request_approval` tells a caller, which is also the whole of the flow it will ever read.
+///
+/// Since #116 the app spends the grant: the caller passes the granted id as `grant` on `app.act`
+/// and the app's dispatch burns it, once. This used to say "consume_approval before running the
+/// action", and a caller that did so burned the grant itself, so the app's own spend was then
+/// refused as already used.
+const REQUEST_APPROVAL_PURPOSE: &str =
+    "Ask the person at this machine to allow one action, once. Puts a card on their screen \
+     showing who is asking, what the action does, and every argument. Answer is \
+     `{request_id, status: \"pending\"}`; poll approval_status until it is granted or denied. \
+     On `granted`, call the app's action (app.act) with the identical action and args and \
+     `grant: <request_id>` beside them: the app spends the grant as it runs the action. Do not \
+     call consume_approval first — that spends the grant, and the app then refuses it as already \
+     used; consume_approval is only for a caller that runs the action itself. Asking is not \
+     being allowed: only a person pressing Allow creates a grant, and nothing on this surface \
+     can create one.";
+
+/// The `next` a fresh request answers with: the same flow, in one line.
+const REQUEST_APPROVAL_NEXT: &str =
+    "poll approval_status; on `granted` call the app's action (app.act) with the identical \
+     action and args and `grant` set to this request_id — the app spends the grant as it runs \
+     the action. Do not call consume_approval first: the app would then refuse the grant as \
+     already used. consume_approval is only for a caller that runs the action itself";
+
 // ── What the socket may do ──────────────────────────────────────────
 
 /// Add the three approval actions to the shell's surface.
@@ -73,15 +100,7 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
             // documentation it will ever read. It used to be told, by a model improvising, to
             // "send /approve in the chat panel" — a prompt that did not exist. Saying the three
             // steps here is what stops that being invented again.
-            Action::new(
-                "request_approval",
-                "Ask the person at this machine to allow one action, once. Puts a card on their \
-                 screen showing who is asking, what the action does, and every argument. Answer \
-                 is `{request_id, status: \"pending\"}`; poll approval_status until it is \
-                 granted or denied, then consume_approval before running the action. Asking is \
-                 not being allowed: only a person pressing Allow creates a grant, and nothing on \
-                 this surface can create one.",
-            )
+            Action::new("request_approval", REQUEST_APPROVAL_PURPOSE)
             .risk("safe")
             .arg(Param::text("app").describe("The app the action belongs to, e.g. calendar"))
             .arg(Param::text("action").describe("The action's exact name, e.g. delete_event"))
@@ -310,9 +329,7 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                     "request_id": asked.id,
                     "status": asked.status.as_str(),
                     "expires_in_secs": approvals::REQUEST_TTL.as_secs(),
-                    "next": "poll approval_status; on `granted` call consume_approval with the \
-                             identical app, action and args_json, and run the action only if \
-                             that succeeds",
+                    "next": REQUEST_APPROVAL_NEXT,
                 }))
             },
         )
@@ -361,8 +378,9 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                 "Spend a grant. Succeeds exactly once, and only if the person granted this \
                  request and the app, action and arguments are byte-for-byte what they were \
                  shown (key order aside). Anything else is refused, and the refusal says which \
-                 part differed. Call it immediately before the action, and run the action only \
-                 if it succeeded.",
+                 part differed. Only for a caller that runs the action itself: when the action \
+                 is an app's, pass the id as `grant` on app.act instead and the app spends it — \
+                 consuming it here first makes that spend fail as already used.",
             )
             .risk("safe")
             .arg(Param::text("request_id"))
@@ -2208,6 +2226,33 @@ mod control_approvals_tests {
                 "`{wanted}` is not published any more; the approval flow is broken. Published: {}",
                 names.join(", ")
             );
+        }
+    }
+
+    /// What a caller is told to do after asking is the flow the apps run (#116): the granted id
+    /// rides as `grant` on app.act and the app spends it. Telling it to consume first — what this
+    /// said before — had a caller burn the grant and the app refuse it as already used.
+    #[test]
+    fn approvals_a_caller_is_told_to_pass_the_grant_not_to_consume_it_first() {
+        for (what, text) in [
+            ("request_approval's description", super::REQUEST_APPROVAL_PURPOSE),
+            ("request_approval's `next`", super::REQUEST_APPROVAL_NEXT),
+        ] {
+            let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(flat.contains("approval_status"), "{what} must say to poll: {flat}");
+            assert!(flat.contains("app.act") && flat.contains("`grant"), "{what} must say to pass `grant` on app.act: {flat}");
+            assert!(flat.contains("request_id"), "{what} must say the grant is the request id: {flat}");
+            assert!(
+                flat.contains("Do not call consume_approval first"),
+                "{what} must warn off consuming before the app does: {flat}"
+            );
+            assert!(
+                flat.contains("only for a caller that runs the action itself"),
+                "{what} must say who consume_approval is still for: {flat}"
+            );
+            for stale in ["then consume_approval", "call consume_approval with", "consume_approval before"] {
+                assert!(!flat.contains(stale), "{what} still tells the old flow (`{stale}`): {flat}");
+            }
         }
     }
 

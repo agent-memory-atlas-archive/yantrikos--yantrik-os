@@ -122,6 +122,16 @@ def main(argv=None, office=None):
         profile = tempfile.mkdtemp(prefix="yantrik-libreoffice-profile-")
         headless = start_headless(args.soffice, pipe, profile)
 
+    # Before the socket exists, not after. The socket is what tells the shell — and a test — that
+    # the adapter is up, and the server thread answers on it at once; installed after the bind, a
+    # SIGTERM sent on that cue could arrive before the main thread got here and kill the adapter
+    # with Python's default action: no "stopped" line, and the socket left behind. Seen in CI as a
+    # return code of -15 on a loaded runner. A stop asked for before the bind finishes is kept in
+    # `stop`, and the loop below ends on its first look.
+    stop = threading.Event()
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(signum, lambda *_: stop.set())
+
     office = office if office is not None else Office(pipe, hidden=args.headless)
     surface = build(office, app_id)
     try:
@@ -133,9 +143,6 @@ def main(argv=None, office=None):
             shutil.rmtree(profile, ignore_errors=True)
         return 1
 
-    stop = threading.Event()
-    for signum in (signal.SIGTERM, signal.SIGINT):
-        signal.signal(signum, lambda *_: stop.set())
     print("[yantrik] %s answering on %s for the LibreOffice on the pipe `%s`%s"
           % (app_id, server.path, pipe,
              " (serving pid %d)" % app_pid if app_pid else " (headless)" if headless else ""),
