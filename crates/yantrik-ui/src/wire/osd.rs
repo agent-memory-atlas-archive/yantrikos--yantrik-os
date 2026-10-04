@@ -194,6 +194,41 @@ mod tests {
         assert!(!app.contains("YOsd"), "the shell's window no longer draws a pill nobody can see");
     }
 
+    /// The pill sits 80px above the dock, not over the middle of the work (design sign-off). Its
+    /// window is placed by labwc, so the rule is checked: no `MoveTo` (labwc reads its x and y
+    /// with atoi, and "center" was 0, the top-left corner), the bottom dropped onto the usable
+    /// area's, which ends at `<margin bottom>`, and lifted by exactly `Theme.osd-gap`. The worked
+    /// example is the sign-off's: 1280x800 with a 48px dock puts its top at 608.
+    #[test]
+    fn the_pill_sits_the_osd_gap_above_the_dock_whatever_the_screen() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let rc = std::fs::read_to_string(root.join("config/labwc/rc.xml")).unwrap();
+        let theme = std::fs::read_to_string(root.join("crates/yantrik-design-tokens/slint/theme.slint")).unwrap();
+        let px = |name: &str| -> i32 {
+            let line = theme.lines().find(|l| l.contains(&format!("out property <length> {name}:"))).unwrap_or_else(|| panic!("{name}"));
+            line.split(':').nth(1).unwrap().trim().split("px").next().unwrap().parse().unwrap()
+        };
+        let attr = |tag: &str, name: &str| -> String {
+            tag.split(&format!("{name}=\"")).nth(1).unwrap_or_else(|| panic!("{name} in {tag}")).split('"').next().unwrap().to_string()
+        };
+        let rule = rc.split("<windowRule title=\"Yantrik OSD\"").nth(1).unwrap().split("</windowRule>").next().unwrap();
+        assert!(!rule.contains("\"MoveTo\""), "labwc's MoveTo takes whole pixels only: {rule}");
+        assert!(rule.contains("<action name=\"AutoPlace\" policy=\"center\" />"), "centred across: {rule}");
+        assert!(rule.contains("<action name=\"MoveToEdge\" direction=\"down\" snapWindows=\"no\" />"), "down to the dock, not to a window: {rule}");
+        let lift = rule.find("\"MoveRelative\"").map(|at| &rule[at..]).expect("lifted off the dock");
+        let lift = &lift[..lift.find("/>").unwrap()];
+        assert_eq!(attr(lift, "x"), "0");
+        assert_eq!(attr(lift, "y").parse::<i32>().unwrap(), -px("osd-gap"), "the lift is Theme.osd-gap");
+
+        let margin = &rc[rc.find("<margin ").unwrap()..];
+        let dock: i32 = attr(&margin[..margin.find("/>").unwrap()], "bottom").parse().unwrap();
+        assert_eq!(dock, px("taskbar-height"), "the usable area ends at the dock's top");
+        let top = |screen_h: i32| screen_h - dock - px("osd-gap") - px("osd-h");
+        assert_eq!((px("osd-w"), px("osd-h")), (240, 64));
+        assert_eq!(top(800), 608);
+        assert_eq!(top(1080), 888);
+    }
+
     #[test]
     fn showing_goes_through_one_present_that_gives_the_keyboard_back() {
         let src = include_str!("osd.rs");

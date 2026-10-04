@@ -57,6 +57,31 @@ pub fn read() -> Option<AudioState> {
     parse_get_volume(&String::from_utf8_lossy(&out.stdout))
 }
 
+/// The default output's name as the audio server gives it (`node.description`, the words
+/// PipeWire and every mixer show: "Built-in Audio Analog Stereo"), out of `wpctl inspect`.
+/// `None` when the line is not there or says nothing: no name is better than a guessed one.
+pub fn parse_output_name(inspect: &str) -> Option<String> {
+    inspect.lines().find_map(|line| {
+        let line = line.trim().trim_start_matches('*').trim_start();
+        let value = line.strip_prefix("node.description")?.trim_start().strip_prefix('=')?.trim();
+        let name = value.strip_prefix('"').and_then(|v| v.strip_suffix('"')).unwrap_or(value).trim();
+        (!name.is_empty()).then(|| name.to_string())
+    })
+}
+
+/// The default output's name, or `None` when there is no audio server to ask or it names none.
+pub fn read_output_name() -> Option<String> {
+    let out = Command::new("wpctl")
+        .args(["inspect", DEFAULT_SINK])
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_output_name(&String::from_utf8_lossy(&out.stdout))
+}
+
 /// The argument vector that sets the volume. `-l 1.0` is wpctl's own ceiling, so even a value
 /// that slipped past the clamp could not push the sink over 100%.
 fn set_volume_args(pct: u8) -> Vec<String> {
@@ -286,6 +311,21 @@ mod tests {
         assert!(!is_output_event("Event 'new' on sink-input #120"));
         assert!(!is_output_event("Event 'remove' on sink-input #120"));
         assert!(!is_output_event("Event 'change' on card #2"));
+    }
+
+    #[test]
+    fn the_output_is_named_by_its_description_or_not_at_all() {
+        let inspect = "id 52, type PipeWire:Interface:Node
+    alsa.card = \"0\"
+  * node.description = \"Built-in Audio Analog Stereo\"
+  * node.name = \"alsa_output.pci-0000_00_1f.3.analog-stereo\"
+";
+        assert_eq!(parse_output_name(inspect).as_deref(), Some("Built-in Audio Analog Stereo"));
+        assert_eq!(parse_output_name("    node.description = \"HDMI\"").as_deref(), Some("HDMI"));
+        for nothing in ["", "id 52, type PipeWire:Interface:Node
+  * node.name = \"alsa_output.x\"", "  * node.description = \"\"", "  * node.descriptionx = \"A\""] {
+            assert_eq!(parse_output_name(nothing), None, "{nothing:?}");
+        }
     }
 
     #[test]

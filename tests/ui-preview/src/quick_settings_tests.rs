@@ -328,6 +328,28 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     save(&muted, &named("qs-laptop-muted.png"), 1280, 800)?;
     assert!(changed(&unmuted, &muted, 1280, (920, 960), (348, 380)) > 10, "a muted sink draws a different speaker");
     ui.set_volume_muted(false);
+
+    // The output the audio server names is under the slider, in secondary text; with no name
+    // there is no line (the laptop shape above has none, which is why the footer is at 465).
+    let nameless = draw();
+    ui.set_volume_device("Built-in Audio Analog Stereo".into());
+    let named_output = draw();
+    save(&named_output, &named("qs-laptop-output-name.png"), 1280, 800)?;
+    assert!(changed(&nameless, &named_output, 1280, (950, 1260), (382, 398)) > 100, "the output's name is drawn under the volume slider");
+    assert_eq!(changed(&nameless, &named_output, 1280, (900, 1280), (36, 380)), 0, "nothing above the slider moves");
+    ui.set_volume_device("".into());
+    assert_eq!(changed(&nameless, &draw(), 1280, (900, 1280), (36, 800)), 0, "no name, no line");
+
+    // The footer's icons say what they are: resting on Lock shows its tooltip, above it.
+    park();
+    let resting = draw();
+    w.dispatch_event(slint::platform::WindowEvent::PointerMoved { position: slint::LogicalPosition::new(1204.0, 465.0) });
+    draw();
+    std::thread::sleep(std::time::Duration::from_millis(700));
+    let tipped = draw();
+    save(&tipped, &named("qs-footer-tooltip.png"), 1280, 800)?;
+    assert!(changed(&resting, &tipped, 1280, (1150, 1260), (420, 448)) > 100, "the footer's Lock has a tooltip");
+    park();
     ui.set_quick_settings_open(false);
 
     // ── Idle: a settled panel repaints nothing ──

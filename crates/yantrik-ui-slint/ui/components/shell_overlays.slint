@@ -32,6 +32,7 @@ export component ShellOverlays inherits Rectangle {
     in-out property <int> brightness-level: 0;
     in property <bool> volume-available: false;
     in property <bool> volume-muted: false;
+    in property <string> volume-device: "";
     in-out property <int> volume-level: 0;
     callback brightness-changed(int);
     callback volume-changed(int);
@@ -91,6 +92,7 @@ export component ShellOverlays inherits Rectangle {
     in-out property <string> clip-search-query: "";
     callback clipboard-paste(int);
     callback clipboard-search(string);
+    callback clipboard-clear();
 
     // Keyboard cheat sheet
     in-out property <bool> cheat-sheet-open: false;
@@ -161,6 +163,7 @@ export component ShellOverlays inherits Rectangle {
         brightness-level <=> root.brightness-level;
         volume-available: root.volume-available;
         volume-muted: root.volume-muted;
+        volume-device: root.volume-device;
         volume-level <=> root.volume-level;
         brightness-changed(val) => { root.brightness-changed(val); }
         volume-changed(val) => { root.volume-changed(val); }
@@ -215,6 +218,7 @@ export component ShellOverlays inherits Rectangle {
         search-query <=> root.clip-search-query;
         paste-entry(idx) => { root.clipboard-paste(idx); }
         search-changed(query) => { root.clipboard-search(query); }
+        clear-history => { root.clipboard-clear(); }
         close => { root.clip-panel-open = false; }
     }
 

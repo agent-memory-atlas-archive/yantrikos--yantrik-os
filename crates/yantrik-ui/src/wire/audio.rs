@@ -51,9 +51,25 @@ pub fn publish(ui: &App, state: Option<AudioState>) {
     }
 }
 
+/// Name the default output under the slider, as the audio server names it, or name nothing.
+/// Read off the UI thread (it runs `wpctl`), when the shell starts and each time Quick Settings
+/// opens: the default output can change without its volume changing, so no volume event says so.
+pub(super) fn refresh_output_name(ui: &App) {
+    let weak = ui.as_weak();
+    std::thread::spawn(move || {
+        let name = audio::read_output_name().unwrap_or_default();
+        let _ = weak.upgrade_in_event_loop(move |ui| {
+            if ui.get_volume_device().as_str() != name {
+                ui.set_volume_device(name.into());
+            }
+        });
+    });
+}
+
 /// Read the machine and show it.
 pub fn wire(ui: &App, _ctx: &AppContext) {
     publish(ui, audio::read());
+    refresh_output_name(ui);
 
     // The slider already shows where the person put it; the worker makes the machine agree.
     // Moving it while muted is asking to hear something, so it unmutes, as the other desktops do.

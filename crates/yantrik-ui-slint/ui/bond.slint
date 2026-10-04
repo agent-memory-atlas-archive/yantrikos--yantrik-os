@@ -78,7 +78,8 @@ export component BondScreen inherits Rectangle {
             VerticalLayout {
                 width: parent.width;
                 padding: 24px;
-                spacing: 24px;
+                // The level block and the stats card: the derivation ends 16px above the card.
+                spacing: Theme.sp-4;
                 alignment: start;
 
                 // The level, and where it comes from.
@@ -107,17 +108,32 @@ export component BondScreen inherits Rectangle {
                         font-size: Theme.fs-body;
                         horizontal-alignment: center;
                     }
-                    Text {
-                        text: "How this is counted: each conversation turn adds 0.01 to a score, a longer message up to 0.03 more, "
-                            + "one that says how you feel (\"I'm worried\", \"I miss…\") 0.05 more, and the first turn of each day "
-                            + "in a run of days up to 0.035 more; laughing at a joke (\"haha\", \"lol\") adds 0.02. "
-                            + "The score stops at 5.0 and sets the level: Stranger below 0.5, "
-                            + "Acquaintance below 1.5, Friend below 2.5, Confidant below 3.5, Partner-in-Crime from 3.5. "
-                            + "It is " + Math.round(data.bond-score * 100) / 100 + " now.";
-                        color: Theme.text-secondary;
-                        font-size: Theme.font-label;
-                        horizontal-alignment: center;
-                        wrap: word-wrap;
+                    // How it is counted, one rule to a line, left-aligned in a column no wider than
+                    // 720px: a centred paragraph of numbers is hard to read and harder to check.
+                    HorizontalLayout {
+                        padding-top: Theme.sp-3;
+                        alignment: start;
+                        VerticalLayout {
+                            max-width: 720px;
+                            spacing: 2px;
+                            for line in [
+                                "How this is counted:",
+                                "Each conversation turn adds 0.01 to a score.",
+                                "A longer message adds up to 0.03 more.",
+                                "One that says how you feel (\"I'm worried\", \"I miss…\") adds 0.05 more.",
+                                "The first turn of each day in a run of days adds up to 0.035 more.",
+                                "Laughing at a joke (\"haha\", \"lol\") adds 0.02.",
+                                "The score stops at 5.0 and sets the level:",
+                                "Stranger below 0.5, Acquaintance below 1.5, Friend below 2.5, Confidant below 3.5, Partner-in-Crime from 3.5.",
+                                "It is " + Math.round(data.bond-score * 100) / 100 + " now."
+                            ] : Text {
+                                text: line;
+                                color: Theme.text-secondary;
+                                font-size: Theme.font-label;
+                                horizontal-alignment: left;
+                                wrap: word-wrap;
+                            }
+                        }
                     }
                 }
 

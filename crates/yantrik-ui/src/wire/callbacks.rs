@@ -96,7 +96,7 @@ fn wire_lock(ui: &App, ctx: &AppContext) {
                 name,
                 // The kind of connection, never its name: a Wi-Fi name says where this machine is,
                 // to anyone standing at the lock screen (security review of #601).
-                network: network_kind(ui.get_network_online(), &ui.get_network_medium()),
+                network: network_kind(ui.get_network_online(), &ui.get_network_medium(), network_read(&ui)),
                 no_restart,
                 notifications: ui.get_notification_unread_count().max(0) as u32,
                 wallpaper,
@@ -124,14 +124,23 @@ fn lock_name(ui: &App) -> String {
     std::env::var("USER").or_else(|_| std::env::var("LOGNAME")).unwrap_or_default()
 }
 
-/// What the lock screen's status line says about the network: its kind, or nothing when offline.
-fn network_kind(online: bool, medium: &str) -> String {
-    match (online, medium) {
-        (false, _) => String::new(),
-        (true, "wifi") => "Wi-Fi".into(),
-        (true, "ethernet") => "Wired".into(),
-        (true, _) => "Online".into(),
+/// What the lock screen's corner says about the network: its kind, or "Offline". Nothing at all
+/// before the shell has read the network once (`read` false): "Offline" there would be a guess.
+/// The Wi-Fi network's name is never in it (security review of #601).
+fn network_kind(online: bool, medium: &str, read: bool) -> String {
+    match (read, online, medium) {
+        (false, _, _) => String::new(),
+        (true, false, _) => "Offline".into(),
+        (true, true, "wifi") => "Wi-Fi".into(),
+        (true, true, "ethernet") => "Wired".into(),
+        (true, true, _) => "Online".into(),
     }
+}
+
+/// The shell has a network reading: `network-detail` is empty until wire/network.rs publishes the
+/// first one, and never empty after ("Offline" when nothing is up).
+fn network_read(ui: &App) -> bool {
+    !ui.get_network_detail().is_empty()
 }
 
 /// The letter in the avatar disc: one rule, shared with the session-lock client.
@@ -540,5 +549,32 @@ mod unlock_screen_tests {
         for nowhere in [3, 32] {
             assert_eq!(screen_after_unlock(nowhere, true), 1, "screen {nowhere} is never returned to");
         }
+    }
+}
+
+#[cfg(test)]
+mod lock_network_tests {
+    use super::network_kind;
+
+    /// The lock screen's corner names the kind of connection, says "Offline" when nothing is up,
+    /// and says nothing before the first reading. Never a Wi-Fi network's name (#601).
+    #[test]
+    fn the_lock_names_the_kind_of_connection_never_the_network() {
+        assert_eq!(network_kind(true, "ethernet", true), "Wired");
+        assert_eq!(network_kind(true, "wifi", true), "Wi-Fi");
+        assert_eq!(network_kind(true, "", true), "Online");
+        assert_eq!(network_kind(false, "", true), "Offline");
+        assert_eq!(network_kind(false, "", false), "", "no reading yet is not Offline");
+        // The shell's own lock screen (app.slint) says the same words from the same properties.
+        let app = include_str!("../../../yantrik-ui-slint/ui/app.slint");
+        let at = app.find("network-text: root.network-detail == \"\" ? \"\"").expect("the shell's lock screen reads the same state");
+        let words = &app[at..at + app[at..].find(';').unwrap()];
+        for w in ["\"Offline\"", "\"Wi-Fi\"", "\"Wired\"", "\"Online\""] {
+            assert!(words.contains(w), "{w} missing from: {words}");
+        }
+        assert!(!words.contains("ssid"), "the network's name stays off the lock screen: {words}");
+        let view = include_str!("../../../yantrik-ui-kit/slint/lock_view.slint");
+        let corner = &view[view.find("How the machine is connected").unwrap()..view.find("── Notifications").unwrap()];
+        assert!(!corner.contains("TouchArea") && !corner.contains("FocusScope"), "the corner takes no click and no key");
     }
 }

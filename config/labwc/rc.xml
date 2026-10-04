@@ -141,13 +141,19 @@
     <keybind key="W-Down">
       <action name="Iconify" />
     </keybind>
+    <!--
+      Super+Left and Super+Right snap to the same left-half and right-half regions as Super+Alt
+      and the window menu's Snap rows (below), so a half is one snapped state whichever way it
+      was made, and the cheat sheet lists each once with both keys (cheat_sheet.rs merges
+      bindings whose actions are the same).
+    -->
     <!-- @help group="Windows" text="Snap the window to the left half" -->
     <keybind key="W-Left">
-      <action name="SnapToEdge" direction="left" />
+      <action name="SnapToRegion" region="left-half" />
     </keybind>
     <!-- @help group="Windows" text="Snap the window to the right half" -->
     <keybind key="W-Right">
-      <action name="SnapToEdge" direction="right" />
+      <action name="SnapToRegion" region="right-half" />
     </keybind>
     <!-- @help group="Windows" text="Full screen on or off" -->
     <keybind key="F11">
@@ -162,12 +168,14 @@
       right, E and T the two-thirds, C the middle. Super+Alt so nothing an app binds is taken.
       The same layouts are on every window's menu (menu.xml, "Snap") and dragging a window with
       Super held shows them all. The regions are named in <regions> at the end of this file.
+      The halves and Maximize run exactly what Super+Left, Super+Right and Super+Up run, so
+      they are described in those keys' words: the cheat sheet shows each once, with both keys.
     -->
-    <!-- @help group="Snap" text="Left half" -->
+    <!-- @help group="Windows" text="Snap the window to the left half" -->
     <keybind key="W-A-Left">
       <action name="SnapToRegion" region="left-half" />
     </keybind>
-    <!-- @help group="Snap" text="Right half" -->
+    <!-- @help group="Windows" text="Snap the window to the right half" -->
     <keybind key="W-A-Right">
       <action name="SnapToRegion" region="right-half" />
     </keybind>
@@ -219,7 +227,7 @@
     <keybind key="W-A-c">
       <action name="SnapToRegion" region="center" />
     </keybind>
-    <!-- @help group="Snap" text="Maximize or restore the window" -->
+    <!-- @help group="Windows" text="Maximize or restore the window" -->
     <keybind key="W-A-Return">
       <action name="ToggleMaximize" />
     </keybind>
@@ -530,13 +538,21 @@
     <!--
       The on-screen display (volume, brightness, mic, Caps Lock) is a window of its own, because
       drawn in the shell's window it sat behind every app (review of #579). Always on top, no
-      title bar, not in the taskbar or Alt+Tab, and centred (labwc has no "a quarter up from
-      the bottom"; the pill's size is the Theme's). It cannot be kept from taking focus when it
+      title bar, not in the taskbar or Alt+Tab. It cannot be kept from taking focus when it
       maps, so the shell hands the keyboard straight back (wire/osd.rs).
+
+      Placed 80px (Theme.osd-gap) above the dock, centred across: on 1280x800 its top is
+      800 - 48 - 80 - 64 = 608. labwc's MoveTo reads x and y with atoi, so the "center" this
+      once said was 0 and put the pill in the top-left corner. Nothing here is a screen size:
+      AutoPlace centres it, MoveToEdge drops its bottom onto the usable area's, which ends at
+      the <margin bottom> above (the dock's height), and MoveRelative lifts it by the gap. The
+      osd.rs tests hold the gap to Theme.osd-gap and the margin to Theme.taskbar-height.
     -->
     <windowRule title="Yantrik OSD" serverDecoration="no" skipTaskbar="yes" skipWindowSwitcher="yes">
       <action name="ToggleAlwaysOnTop" />
-      <action name="MoveTo" x="center" y="center" />
+      <action name="AutoPlace" policy="center" />
+      <action name="MoveToEdge" direction="down" snapWindows="no" />
+      <action name="MoveRelative" x="0" y="-80" />
     </windowRule>
     <!-- The shell is the desktop itself: present on every workspace, never switched away from. -->
     <windowRule title="Yantrik OS">

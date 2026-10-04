@@ -1,4 +1,4 @@
-//! Wire clipboard history panel — populate entries, handle paste, handle search.
+//! Wire clipboard history panel — populate entries, handle paste, handle search, clear.
 
 use slint::{ComponentHandle, ModelRc, VecModel};
 
@@ -15,6 +15,7 @@ use crate::{App, ClipboardEntryData};
 pub fn wire(ui: &App, ctx: &AppContext) {
     wire_paste(ui, ctx);
     wire_search(ui, ctx);
+    wire_clear(ui, ctx);
 }
 
 /// A fresh open: clear the search and load the newest entries, once.
@@ -83,6 +84,21 @@ fn wire_paste(ui: &App, ctx: &AppContext) {
                 }
             });
         }
+    });
+}
+
+/// "Clear history" in the panel's footer: empty the store, then show what is left (nothing), with
+/// the search kept so the person sees the panel answer the press.
+fn wire_clear(ui: &App, ctx: &AppContext) {
+    let clip = ctx.clip_history.clone();
+    let ui_weak = ui.as_weak();
+    ui.on_clipboard_clear(move || {
+        if let Ok(mut history) = clip.lock() {
+            history.clear();
+        }
+        let Some(ui) = ui_weak.upgrade() else { return };
+        populate_entries(&ui, &clip, &ui.get_clip_search_query());
+        tracing::info!("Clipboard history cleared");
     });
 }
 

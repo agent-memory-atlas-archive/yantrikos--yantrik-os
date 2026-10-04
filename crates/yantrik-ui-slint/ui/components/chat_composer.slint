@@ -6,8 +6,9 @@
 // you are typing in it is a trap. While a run is going the send button reads "Send follow-up",
 // which is what it does: the words go to the mind beside its work.
 //
-// The mode chip ("Ask") is the status bar chip's twin: it opens the same mind-mode choice, it does
-// not change the mode by itself, and a mode change applies to the next run. The starters in the
+// The mode chip ("Mode: Ask") is the status bar chip's twin: it opens the same mind-mode choice,
+// it does not change the mode by itself, and a mode change applies to the next run. The noun is
+// in the chip's words only, so a bare "Ask" beside the field does not read as a button that asks. The starters in the
 // empty state call `fill`, which puts words in the box and never sends them.
 
 import { Theme } from "theme.slint";
@@ -134,7 +135,7 @@ export component ChatComposer inherits Rectangle {
                         padding-right: Theme.sp-2;
                         spacing: Theme.sp-1;
                         Text {
-                            text: root.mode-label;
+                            text: "Mode: " + root.mode-label;
                             color: Theme.chat-text;
                             font-size: Theme.fs-caption;
                             font-weight: 500;

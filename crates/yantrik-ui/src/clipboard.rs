@@ -2,6 +2,11 @@
 //!
 //! Polls `wl-paste` every second on a background thread.
 //! Provides search and time-based retrieval for Intent Lens integration.
+//!
+//! The history is a ring in this process's memory and nowhere else: it is never written to disk,
+//! synced or sent, and it is gone when the shell restarts. The minds' clipboard tools read only
+//! the current clipboard (`wl-paste`), not this. That is what lets the panel's footer say "Kept on
+//! this machine"; a change that stores or sends it must change those words too.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -113,6 +118,12 @@ impl ClipHistory {
         }
     }
 
+    /// Empty the history (the panel's "Clear history"). What is on the clipboard now stays there:
+    /// the watcher has already seen it, so it does not come straight back as a new entry.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
     /// Get the N most recent entries.
     pub fn recent(&self, n: usize) -> Vec<&ClipEntry> {
         self.entries.iter().take(n).collect()
@@ -222,5 +233,28 @@ mod key_tests {
         assert_eq!(h.get(0).unwrap().content, "an ordinary line");
         h.forget("a");
         assert_eq!(h.len(), 1, "forgetting is exact: a short paste does not empty the history");
+    }
+
+    #[test]
+    fn clearing_empties_the_history_and_it_fills_again_from_new_copies() {
+        let mut h = ClipHistory::new();
+        h.push("one".to_string());
+        h.push("two".to_string());
+        h.clear();
+        assert_eq!(h.len(), 0);
+        assert!(h.recent(20).is_empty() && h.search("o").is_empty());
+        h.push("three".to_string());
+        assert_eq!(h.get(0).unwrap().content, "three");
+    }
+
+    /// The panel says "Kept on this machine". That stays true only while nothing here writes the
+    /// history out or hands it to anything that could.
+    #[test]
+    fn the_history_is_kept_in_memory_only() {
+        let src = include_str!("clipboard.rs");
+        let code = src.split("#[cfg(test)]").next().unwrap();
+        for out in ["std::fs", "File::", "write(", "reqwest", "TcpStream", "serde_json"] {
+            assert!(!code.contains(out), "clipboard.rs uses `{out}`: the footer's \"Kept on this machine\" needs a look");
+        }
     }
 }
