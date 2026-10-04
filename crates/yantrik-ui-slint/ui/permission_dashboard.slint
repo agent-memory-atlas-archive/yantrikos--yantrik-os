@@ -853,7 +853,7 @@ export component PermissionDashboardScreen inherits Rectangle {
                             Icon {
                                 commands: root.ai-is-working ? Icons.spark : Icons.spark;
                                 size: 12px;
-                                tint: Theme.text-secondary;
+                                tint: root.ai-is-working ? Theme.text-on-accent : Theme.text-secondary;
                                 y: (parent.height - self.height) / 2;
                             }
                             Text {

@@ -247,8 +247,14 @@ export global Theme {
     out property <color> color-purple:       ThemeMode.dark ? #b084e0 : #7840b0;
     out property <color> color-purple-dim:   ThemeMode.dark ? #b084e028 : #7840b020;
 
-    // Text on colored backgrounds (accent buttons, status badges)
-    out property <color> text-on-accent: ThemeMode.dark ? #0e1215 : #ffffff;
+    // The ink on an accent fill: every label, glyph, knob and count that sits on Theme.accent,
+    // and the one colour for it (never white, never text-primary, never bg-deep by hand). The
+    // dark accents are light (#8fb4e3, #b98aef), and white on them was 2.1:1 and 2.7:1, so in
+    // dark mode the ink is the theme's own deepest ground: it follows a theme's palette
+    // (nightfall.toml's #0a0d17) through bg-deep and is 7:1 or better on every preset. The
+    // light accents are dark (#2b64a8, #7338b4) and carry white at 5.4:1 or better. A test holds
+    // both, against every preset and every theme file (crates/yantrik-ui-kit/src/colour_roles.rs).
+    out property <color> text-on-accent: ThemeMode.dark ? Theme.bg-deep : #ffffff;
     out property <color> accent-button-hover: ThemeMode.dark ? Theme.accent-light : Theme.accent.darker(8%);
     out property <color> accent-button-pressed: ThemeMode.dark ? Theme.accent-dim : Theme.accent.darker(16%);
 

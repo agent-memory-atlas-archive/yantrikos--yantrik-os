@@ -24,6 +24,21 @@ fn px(p: &slint::SharedPixelBuffer<slint::Rgb8Pixel>, x: u32, y: u32) -> (u8, u8
     (c.r, c.g, c.b)
 }
 
+/// The darkest pixel in a rectangle: on an accent fill, the core of its label's strokes. A white
+/// label would leave the fill itself as the darkest thing there.
+fn darkest(p: &slint::SharedPixelBuffer<slint::Rgb8Pixel>, x: u32, y: u32, w: u32, h: u32) -> (u8, u8, u8) {
+    let luma = |c: (u8, u8, u8)| c.0 as u32 * 2126 + c.1 as u32 * 7152 + c.2 as u32 * 722;
+    (y..y + h).flat_map(|y| (x..x + w).map(move |x| (x, y))).map(|(x, y)| px(p, x, y)).min_by_key(|&c| luma(c)).unwrap()
+}
+
+/// WCAG 2 contrast of two drawn colours.
+fn contrast(a: (u8, u8, u8), b: (u8, u8, u8)) -> f64 {
+    let lin = |v: u8| { let v = v as f64 / 255.0; if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) } };
+    let lum = |c: (u8, u8, u8)| 0.2126 * lin(c.0) + 0.7152 * lin(c.1) + 0.0722 * lin(c.2);
+    let (a, b) = (lum(a), lum(b));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
 fn near(got: (u8, u8, u8), want: (u8, u8, u8), what: &str) {
     let d = |a: u8, b: u8| (a as i32 - b as i32).abs();
     assert!(d(got.0, want.0) <= 3 && d(got.1, want.1) <= 3 && d(got.2, want.2) <= 3, "{what}: drew {got:?}, wanted {want:?}");
@@ -50,6 +65,16 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     near(px(&p, 20 + 20 + 6, 20 + 140 + 28), (0x1E, 0x25, 0x2B), "an off tile is the tile fill");
     near(px(&p, 20 + 240 + 6, 20 + 140 + 28), (0x8F, 0xB4, 0xE3), "an on tile is the accent");
     assert_ne!(px(&p, 20 + 20 + 6, 20 + 140 + 28), panel, "an off tile does not vanish into the panel");
+
+    // The ink on an accent fill is the theme's deepest ground, not white (2.1:1 on this blue):
+    // the primary's label, the approval card's primary, and the on tile's title. Each box is
+    // inset past the rounded corners, where the darker panel shows through.
+    let fill = (0x8F, 0xB4, 0xE3);
+    for (x, y, w, h, what) in [(52, 46, 126, 20, "Save"), (222, 102, 126, 20, "Allow once"), (272, 170, 150, 36, "the on tile")] {
+        let ink = darkest(&p, x, y, w, h);
+        let ratio = contrast(ink, fill);
+        assert!(ratio >= 4.5, "{what}'s label on the accent is {ratio:.2}:1 (darkest {ink:?})");
+    }
 
     // Pointer: each kind answers a click.
     click(w, 20.0 + 20.0 + 75.0, 20.0 + 20.0 + 16.0);

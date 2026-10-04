@@ -878,7 +878,7 @@ export component SpreadsheetScreen inherits Rectangle {
                         Rectangle {
                             height: 28px;
                             border-radius: 4px;
-                            background: add-cmt-ta.has-hover ? AppIdentity.accent : Theme.accent.transparentize(20%);
+                            background: add-cmt-ta.has-hover ? Theme.accent-button-hover : Theme.accent;
 
                             add-cmt-ta := TouchArea {
                                 clicked => {
@@ -889,7 +889,7 @@ export component SpreadsheetScreen inherits Rectangle {
 
                             Text {
                                 text: root.active-comment != "" ? "Update" : "Add";
-                                color: white;
+                                color: Theme.text-on-accent;
                                 font-size: Theme.fs-caption;
                                 font-weight: 600;
                                 horizontal-alignment: center;
@@ -1157,7 +1157,7 @@ export component SpreadsheetScreen inherits Rectangle {
             Rectangle {
                 height: 28px;
                 border-radius: 4px;
-                background: root.sheet-ai-working ? Theme.text-dim : (submit-ai-ta.has-hover ? AppIdentity.accent : Theme.accent.transparentize(0.2));
+                background: root.sheet-ai-working ? Theme.text-dim : (submit-ai-ta.has-hover ? Theme.accent-button-hover : Theme.accent);
 
                 submit-ai-ta := TouchArea {
                     enabled: !root.sheet-ai-working;
@@ -1165,7 +1165,7 @@ export component SpreadsheetScreen inherits Rectangle {
                 }
                 Text {
                     text: root.sheet-ai-working ? "Thinking..." : "Ask";
-                    color: white;
+                    color: Theme.text-on-accent;
                     font-size: Theme.fs-micro;
                     font-weight: 600;
                     horizontal-alignment: center;
