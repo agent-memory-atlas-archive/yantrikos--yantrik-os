@@ -279,6 +279,7 @@ export component SettingsProbe inherits Window {
     in-out property <string> theme:"lake";
     in-out property <bool> save-error;
     in-out property <bool> dark:true;
+    in property <string> wallpaper:"serenity";
     callback search(string);
     public function focus-search(){screen.focus-search();}
     changed dark=>{ThemeMode.dark=root.dark;}
@@ -290,7 +291,7 @@ export component SettingsProbe inherits Window {
         themes:root.themes;theme-id<=>root.theme;choose-theme(id)=>{root.action="theme:"+id;}
         choose-accent(a)=>{root.accent=a;root.action="accent:"+a;}
         toggle-dark-mode=>{root.dark=!root.dark;}
-        wallpaper-path:"serenity";wallpaper-changed(id)=>{root.action="wallpaper:"+id;}
+        wallpaper-path:root.wallpaper;wallpaper-changed(id)=>{root.action="wallpaper:"+id;}
         open-network=>{root.action="network";}
         navigate-to(id)=>{root.action="screen:"+id;}
         save-error:root.save-error;
@@ -927,3 +928,33 @@ export { ColourSystemProbe } from "colour_system_probe.slint";
 // stopped the whole preview crate from compiling on main.
 export { OsdWindow } from "osd_window.slint";
 export { IconProbe } from "icon_probe.slint";
+
+// Review stills (src/review_stills.rs): the theme globals a scene sets from Rust (the accent
+// preset and a theme's palette overrides), and Calendar at 1280x800 with an ordinary day.
+export { AccentPreset, ThemeOverrides } from "theme.slint";
+export component CalendarStillProbe inherits Window {
+    width: 1280px; height: 800px; background: Theme.bg-deep;
+    default-font-family: Theme.font-ui;
+    in property <[CalendarDay]> days;
+    in property <[CalendarEvent]> events;
+    CalendarScreen {
+        width: 100%;
+        height: 100%;
+        month-title: "October 2026";
+        days: root.days;
+        events-today: root.events;
+        selected-day: 4;
+    }
+}
+
+// One approval card at its natural height, on the Lens panel's ground at the panel's width.
+import { ApprovalCard } from "components/intent_lens.slint";
+export component ApprovalCardProbe inherits Window {
+    width: Theme.chat-panel-width;
+    height: card.preferred-height + 16px;
+    background: Theme.chat-panel;
+    default-font-family: Theme.font-ui;
+    in property <ApprovalRequest> data;
+    out property <length> card-h: card.preferred-height + 16px;
+    card := ApprovalCard { x: 8px; y: 8px; width: parent.width - 16px; data: root.data; }
+}

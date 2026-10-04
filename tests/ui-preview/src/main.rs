@@ -49,6 +49,7 @@ mod calendar_tests;
 mod top_bar_tests;
 mod icon_tests;
 mod memory_busy_tests;
+mod review_stills;
 use slint::{
     platform::{
         software_renderer::{MinimalSoftwareWindow, RepaintBufferType},
@@ -73,6 +74,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let height: u32 = args.get(3).map(|s| s.parse()).transpose()?.unwrap_or(800);
     let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
     slint::platform::set_platform(Box::new(Headless(window.clone())))?;
+    if let Some(i) = args.iter().position(|a| a == "review-still") {
+        return review_stills::run(&window, output, args.get(i + 1).map(String::as_str).unwrap_or(""));
+    }
     if args.iter().any(|a| a == "verify-settings") { return settings_tests::run(&window, output, width, height); }
     if args.iter().any(|a| a == "verify-lock") { return lock_theme_tests::run_lock(&window, output, width, height); }
     if args.iter().any(|a| a == "verify-themes") { return lock_theme_tests::run_themes(&window, output, width, height); }

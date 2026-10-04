@@ -244,7 +244,7 @@ pub fn run_lock(w: &MinimalSoftwareWindow, output: &str, width: u32, height: u32
 
 /// The theme cards' colours, from the theme files themselves: the card must show what the theme
 /// has, so the fixture reads the same files the shell embeds.
-fn theme_card(file: &str, id: &str, wallpaper: &str) -> ThemeCardData {
+pub(crate) fn theme_card(file: &str, id: &str, wallpaper: &str) -> ThemeCardData {
     let value = |key: &str| -> slint::Color {
         // The last one: `accent` is also a top-level preset id, before the palette's own.
         let line = file.lines().filter(|l| l.trim_start().starts_with(&format!("{key} ="))).last().unwrap_or_else(|| panic!("{id}: no {key}"));
