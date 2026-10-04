@@ -90,6 +90,10 @@ export component CalendarScreen inherits Rectangle {
     /// empty, and the only way to find out the event had not been stored was to look for it
     /// later. A calendar that cannot save has to say so at the moment it cannot.
     in property <string> notice: "";
+    /// The id of the event `notice` is about, when it is information about one event rather than
+    /// a failure: a caller was refused that event and it is untouched. The bar is then neutral
+    /// and offers "Open event"; empty, the notice is a failure and draws as one.
+    in property <string> notice-event: "";
 
     // View mode: 0=month, 1=week, 2=day
     in-out property <int> view-mode: 0;
@@ -130,6 +134,8 @@ export component CalendarScreen inherits Rectangle {
     callback delete-event(int);
     // The notice bar's close button: the app clears `notice`.
     callback dismiss-notice();
+    // "Open event" on a notice about one event: the app shows that event's day.
+    callback open-notice-event();
     callback cancel-event-form();
     callback today-pressed();
 
@@ -649,6 +655,12 @@ export component CalendarScreen inherits Rectangle {
             VerticalLayout {
                 if root.notice != "" : YNoticeBar {
                     text: root.notice;
+                    tone: root.notice-event != "" ? 0 : 1;
+                    // The refusal names the event, who asked and what the person can do; at the
+                    // sidebar's width that is five lines, and cutting it cuts the part to act on.
+                    max-lines: 6;
+                    action-label: root.notice-event != "" ? "Open event" : "";
+                    action => { root.open-notice-event(); }
                     dismissed => { root.dismiss-notice(); }
                 }
 

@@ -14,6 +14,7 @@ use yantrik_ipc_contracts::calendar::{
 };
 use yantrik_ipc_transport::{peer_identity, reach};
 
+mod notice;
 mod ownership;
 mod views;
 use views::ViewMode;
@@ -837,14 +838,6 @@ fn delete_through_service(event_id: &str) -> Result<String, String> {
 /// drift — `delete_event` and `delete_own_event` must answer with the same event for the same
 /// words, and differ only in the rule that runs afterwards. The answer is the store's id and
 /// the name to use in a notice.
-/// The line the window shows when a caller was refused an event it did not create. The caller's
-/// own answer carries the rule, the ids and the door that asks first; this is for the person
-/// looking at the calendar, who needs to know which event and who asked — not an id and the name
-/// of an action.
-fn refused_notice(done: &str, title: &str, who: &str) -> String {
-    format!("“{title}” was not {done}: {who} asked, and it did not create it, so that needs your OK.")
-}
-
 fn named_event(args: &serde_json::Value) -> Result<(String, String), String> {
     let given = |key: &str| {
         args[key].as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
@@ -982,7 +975,7 @@ fn change_and_answer(
         ask.reminder_minutes,
     ) {
         Ok(event) => {
-            ui.set_notice(SharedString::new());
+            notice::say(ui, SharedString::new());
             show_date(ui, state, &event.start);
             Ok(serde_json::json!({
                 "id": event.id,
@@ -994,7 +987,7 @@ fn change_and_answer(
             }))
         }
         Err(e) => {
-            ui.set_notice(format!("Could not change the event {}: {e}", ask.id).into());
+            notice::say(ui, format!("Could not change the event {}: {e}", ask.id).into());
             Err(e)
         }
     }
@@ -1509,11 +1502,11 @@ fn publish_control(app: &CalendarApp, state: Rc<RefCell<CalState>>) {
                 ) {
                     Ok(stored) => stored,
                     Err(e) => {
-                        ui.set_notice(format!("Could not save “{title}”: {e}").into());
+                        notice::say(&ui, format!("Could not save “{title}”: {e}").into());
                         return Err(e);
                     }
                 };
-                ui.set_notice(SharedString::new());
+                notice::say(&ui, SharedString::new());
                 show_date(&ui, &add_state, &date);
                 let on = if all_day { date.clone() } else { format!("{date} {time}") };
                 let mut answer = serde_json::json!({
@@ -1555,14 +1548,14 @@ fn publish_control(app: &CalendarApp, state: Rc<RefCell<CalState>>) {
 
                 match remove_event(&ui, &delete_state, &id) {
                     Ok(title) => {
-                        ui.set_notice(SharedString::new());
+                        notice::say(&ui, SharedString::new());
                         Ok(serde_json::json!({ "deleted": title, "id": id }))
                     }
                     // On screen as well as in the answer. A delete that did not happen leaves a
                     // row where it was, and a row that stayed put has to say which of the two
                     // things it means.
                     Err(e) => {
-                        ui.set_notice(format!("Could not delete {named}: {e}").into());
+                        notice::say(&ui, format!("Could not delete {named}: {e}").into());
                         Err(e)
                     }
                 }
@@ -1605,6 +1598,9 @@ fn publish_control(app: &CalendarApp, state: Rc<RefCell<CalState>>) {
                 let event = get_event_via_service(&id)?;
                 let me = requester();
                 if !ownership::may_delete_unasked(event.creator.as_deref(), me.as_deref()) {
+                    // The caller gets the rule, with the ids and the other door; the person
+                    // gets which event, that it is untouched, and who asked.
+                    notice::kept(&ui, notice::Refused::Delete, &event.title, me.as_deref(), &id);
                     let who =
                         me.unwrap_or_else(|| "nobody this machine could identify".to_string());
                     let why = match event.creator.as_deref() {
@@ -1623,19 +1619,16 @@ fn publish_control(app: &CalendarApp, state: Rc<RefCell<CalState>>) {
                     let why = format!(
                         "{why}. Any event comes off through `delete_event`, which asks first"
                     );
-                    // The caller gets the rule, with the ids and the other door; the person
-                    // gets which event and who asked, in one line.
-                    ui.set_notice(refused_notice("deleted", &event.title, &who).into());
                     return Err(why);
                 }
 
                 match remove_event(&ui, &own_delete_state, &id) {
                     Ok(title) => {
-                        ui.set_notice(SharedString::new());
+                        notice::say(&ui, SharedString::new());
                         Ok(serde_json::json!({ "deleted": title, "id": id }))
                     }
                     Err(e) => {
-                        ui.set_notice(format!("Could not delete {named}: {e}").into());
+                        notice::say(&ui, format!("Could not delete {named}: {e}").into());
                         Err(e)
                     }
                 }
@@ -1682,6 +1675,7 @@ fn publish_control(app: &CalendarApp, state: Rc<RefCell<CalState>>) {
                 let event = get_event_via_service(&ask.id)?;
                 let me = requester();
                 if !ownership::may_change_unasked(event.creator.as_deref(), me.as_deref()) {
+                    notice::kept(&ui, notice::Refused::Change, &event.title, me.as_deref(), &ask.id);
                     let who =
                         me.unwrap_or_else(|| "nobody this machine could identify".to_string());
                     let why = match event.creator.as_deref() {
@@ -1702,7 +1696,6 @@ fn publish_control(app: &CalendarApp, state: Rc<RefCell<CalState>>) {
                     let why = format!(
                         "{why}. Any event changes through `update_event`, which asks first"
                     );
-                    ui.set_notice(refused_notice("changed", &event.title, &who).into());
                     return Err(why);
                 }
                 change_and_answer(&ui, &own_update_state, &ask)
@@ -1881,7 +1874,7 @@ fn wire(app: &CalendarApp) -> slint::Timer {
             ui.set_event_time("09:00".into());
             ui.set_event_title(title);
             ui.set_event_notes(SharedString::default());
-            ui.set_notice(SharedString::new());
+            notice::say(&ui, SharedString::new());
             ui.set_show_event_form(true);
         });
     }
@@ -1898,12 +1891,12 @@ fn wire(app: &CalendarApp) -> slint::Timer {
             // is the default the store applies.
             match store_event(&ui, &st, &title, &date, &time, &notes, None, false, None) {
                 Ok(_) => {
-                    ui.set_notice(SharedString::new());
+                    notice::say(&ui, SharedString::new());
                     ui.set_show_event_form(false);
                 }
                 // The form stays open holding what was typed. Closing it on a failed save threw
                 // the event away twice: once from the store, once from the screen.
-                Err(e) => ui.set_notice(format!("Could not save “{}”: {e}", title.trim()).into()),
+                Err(e) => notice::say(&ui, format!("Could not save “{}”: {e}", title.trim()).into()),
             }
         });
     }
@@ -1929,10 +1922,10 @@ fn wire(app: &CalendarApp) -> slint::Timer {
             // The same path the `delete_event` action takes, so the trash icon cannot succeed
             // where the action would fail or report something the action would not.
             match remove_event(&ui, &st, &event_id) {
-                Ok(_) => ui.set_notice(SharedString::new()),
+                Ok(_) => notice::say(&ui, SharedString::new()),
                 // A row that stayed on screen after a delete used to mean either "it is still
                 // there" or "the store never heard"; now it means the first, and says the second.
-                Err(e) => ui.set_notice(format!("Could not delete “{event_title}”: {e}").into()),
+                Err(e) => notice::say(&ui, format!("Could not delete “{event_title}”: {e}").into()),
             }
         });
     }
@@ -1942,7 +1935,28 @@ fn wire(app: &CalendarApp) -> slint::Timer {
         let weak = app.as_weak();
         app.on_dismiss_notice(move || {
             if let Some(ui) = weak.upgrade() {
-                ui.set_notice(SharedString::new());
+                notice::say(&ui, SharedString::new());
+            }
+        });
+    }
+
+    // ── Open the event a refusal was about ──
+    //
+    // Read from the store by id at the press, not remembered from the refusal: the event may have
+    // moved since, or gone. The window goes to its day, where it is in the day's list with its
+    // own delete. The notice stays up — the person opened it to act on what it says.
+    {
+        let weak = app.as_weak();
+        let st = state.clone();
+        app.on_open_notice_event(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let id = ui.get_notice_event().to_string();
+            if id.is_empty() {
+                return;
+            }
+            match get_event_via_service(&id) {
+                Ok(event) => show_date(&ui, &st, &event.start),
+                Err(e) => notice::say(&ui, format!("Could not open that event: {e}").into()),
             }
         });
     }
@@ -2139,20 +2153,6 @@ fn wire(app: &CalendarApp) -> slint::Timer {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_refused_delete_tells_the_person_which_event_and_who_asked_not_an_id() {
-        // What the window showed: "Could not delete 01a0e22b-9d34-…: 01a0e22b-… was created by
-        // node and this call is harness_arena.py: only the caller that created an event may
-        // delete it without a person being asked. Any event comes off through `delete_event`…"
-        let line = refused_notice("deleted", "Lunch with Sam", "harness_arena.py");
-        assert_eq!(
-            line,
-            "“Lunch with Sam” was not deleted: harness_arena.py asked, and it did not create it, \
-             so that needs your OK."
-        );
-        assert!(!line.contains("delete_event") && !line.contains('`'), "no action names for a person");
-    }
 
     #[test]
     fn a_date_or_an_events_start_names_the_day_to_show() {

@@ -77,11 +77,13 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
         ("empty", 0, 0, ""),
         ("events", 30, 0, ""),
         ("rail", 0, 30, ""),
-        ("both", 30, 30, "“Load test 0” was not deleted: refuse.py asked, and it did not create it, so that needs your OK."),
+        ("both", 30, 30, "Kept “Load test 0”. refuse.py asked to delete it, but on its own it may only delete events it made. Delete it yourself if you want it gone."),
     ] {
         ui.set_events(events(n_events));
         ui.set_context(context(n_context));
         ui.set_notice(notice.into());
+        // A refusal is about one event, so it draws as information with "Open event".
+        ui.set_notice_event(if notice.is_empty() { "" } else { "evt-load-0" }.into());
         let p = draw();
         save(&p, &format!("{stem}-{label}.png"))?;
         println!("{label}: screen {}px", ui.get_screen_h());

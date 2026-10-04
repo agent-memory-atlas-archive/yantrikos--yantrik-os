@@ -826,6 +826,7 @@ export component CalendarProbe inherits Window {
     in property <[CalendarEvent]> events;
     in property <[AgentContextItem]> context;
     in property <string> notice;
+    in property <string> notice-event;
     out property <length> screen-h: cal.height;
     cal := CalendarScreen {
         width: 100%;
@@ -836,6 +837,7 @@ export component CalendarProbe inherits Window {
         selected-day: 30;
         agent-context: root.context;
         notice: root.notice;
+        notice-event: root.notice-event;
     }
 }
 
