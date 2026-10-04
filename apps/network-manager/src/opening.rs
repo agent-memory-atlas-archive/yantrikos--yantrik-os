@@ -6,39 +6,13 @@
 //!
 //! Pure: the route table arrives as text, so the tests need no kernel and no window.
 
-/// Where the kernel lists its IPv4 routes.
-pub const ROUTE_TABLE: &str = "/proc/net/route";
+/// The route table and its reader are shared with network-service, which reads the same table
+/// for each interface's gateway: one parser, so the two cannot disagree on the default route.
+pub use yantrik_ipc_contracts::route_table::{default_route_interface, ROUTE_TABLE};
 
 /// The window's sections, as `active-tab` numbers them.
 pub const WIFI: i32 = 0;
 pub const ETHERNET: i32 = 1;
-
-/// `RTF_UP`: a route the kernel will actually use.
-const ROUTE_UP: u32 = 0x1;
-
-/// The interface the default route leaves by, read from `/proc/net/route`.
-///
-/// A default route is destination 0.0.0.0 with mask 0.0.0.0. With more than one (a cable and
-/// a radio both up), the kernel prefers the lowest metric, and so does this.
-pub fn default_route_interface(table: &str) -> Option<String> {
-    table
-        .lines()
-        // The header row: "Iface Destination Gateway Flags RefCnt Use Metric Mask MTU …".
-        .skip(1)
-        .filter_map(|line| {
-            let f: Vec<&str> = line.split_whitespace().collect();
-            if f.len() < 8 || f[1] != "00000000" || f[7] != "00000000" {
-                return None;
-            }
-            let flags = u32::from_str_radix(f[3], 16).ok()?;
-            if flags & ROUTE_UP == 0 {
-                return None;
-            }
-            Some((f[6].parse::<u32>().unwrap_or(u32::MAX), f[0].to_string()))
-        })
-        .min_by_key(|(metric, _)| *metric)
-        .map(|(_, iface)| iface)
-}
 
 /// The section to open on.
 ///
@@ -59,42 +33,20 @@ pub fn opening_tab(route_iface: Option<&str>, ethernet: &[String], wifi_adapter_
 mod tests {
     use super::*;
 
-    const HEADER: &str =
-        "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT";
-
-    fn table(rows: &[&str]) -> String {
-        std::iter::once(HEADER).chain(rows.iter().copied()).collect::<Vec<_>>().join("\n")
-    }
-
     fn names(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
     }
 
+    // The route table's own cases are with its parser, in `yantrik_ipc_contracts::route_table`.
     #[test]
-    fn the_default_route_is_the_all_zero_destination_and_mask() {
-        let t = table(&[
-            "eth0\t0000A8C0\t00000000\t0001\t0\t0\t100\t00FFFFFF\t0\t0\t0",
+    fn the_shared_reader_finds_the_wired_default_route() {
+        let t = [
+            "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT",
             "eth0\t00000000\t0104A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0",
-        ]);
-        assert_eq!(default_route_interface(&t).as_deref(), Some("eth0"));
-    }
-
-    #[test]
-    fn with_two_default_routes_the_lower_metric_carries_the_traffic() {
-        let t = table(&[
-            "wlan0\t00000000\t0104A8C0\t0003\t0\t0\t600\t00000000\t0\t0\t0",
-            "enp3s0\t00000000\t0104A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0",
-        ]);
-        assert_eq!(default_route_interface(&t).as_deref(), Some("enp3s0"));
-    }
-
-    #[test]
-    fn a_route_that_is_not_up_and_a_table_with_no_default_name_nothing() {
-        let down = table(&["eth0\t00000000\t0104A8C0\t0002\t0\t0\t100\t00000000\t0\t0\t0"]);
-        assert_eq!(default_route_interface(&down), None);
-        let local = table(&["eth0\t0000A8C0\t00000000\t0001\t0\t0\t100\t00FFFFFF\t0\t0\t0"]);
-        assert_eq!(default_route_interface(&local), None);
-        assert_eq!(default_route_interface(""), None);
+        ]
+        .join("\n");
+        let eth = names(&["eth0"]);
+        assert_eq!(opening_tab(default_route_interface(&t).as_deref(), &eth, true), ETHERNET);
     }
 
     /// The reported case: no Wi-Fi adapter, a cable carrying the traffic.

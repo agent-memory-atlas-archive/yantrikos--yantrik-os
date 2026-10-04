@@ -79,6 +79,17 @@ fn a_full_disk_is_amber_never_red() {
     assert!(row.find("Theme.amber").unwrap() > glyph);
 }
 
+/// Calendar's identity colour is red, and its month grid filled today with it: a red square on
+/// the one day a person looks for first, in the colour kept for what cannot be undone. Today is
+/// the system accent in every grid that draws one (the app's month view and the Today panel).
+#[test]
+fn today_is_the_accent_not_the_apps_colour() {
+    let src = read(&format!("{UI}components/month_grid.slint"));
+    assert!(src.contains("cell-day.is-today ? Theme.accent : transparent"), "today's disc is the system accent");
+    assert!(src.contains("cell-day.is-today ? Theme.text-on-accent"), "today's numeral is the ink made for the accent");
+    assert!(!src.contains("is-today ? root.accent"), "today's disc follows the app's identity colour");
+}
+
 /// A finished recipe step is not drawn as a success (the success token's dark value was a teal):
 /// done recedes to neutral, the accent marks the current step, amber the person's turn.
 #[test]

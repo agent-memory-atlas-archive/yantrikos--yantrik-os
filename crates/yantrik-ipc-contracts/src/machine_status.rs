@@ -125,12 +125,13 @@ pub enum Limit {
 }
 
 impl Limit {
-    /// What the person reads first on the row, beside the warning glyph.
+    /// What the person reads first on the row, beside the warning glyph. A full disk carries
+    /// its percentage here, so the readings after it need not name the same disk again.
     pub fn sentence(&self) -> String {
         match self {
-            Limit::Disk { mount, free_bytes, .. } => {
+            Limit::Disk { mount, percent, free_bytes } => {
                 let disk = Disk { mount: mount.clone(), ..Default::default() };
-                format!("{} nearly full · {} free", disk.name(), bytes(*free_bytes))
+                format!("{} nearly full · {} free ({}%)", disk.name(), bytes(*free_bytes), whole(*percent))
             }
             Limit::Memory { available_bytes, .. } => {
                 format!("Memory nearly full · {} available", bytes(*available_bytes))
@@ -293,11 +294,14 @@ fn facts(r: &Readings, shown: &[Fact]) -> Vec<String> {
                 .memory
                 .filter(|(t, _)| *t > 0)
                 .map(|(t, u)| format!("Memory {}%", whole(u as f64 / t as f64 * 100.0))),
-            // The fullest one: it is the one that will run out first.
+            // The fullest one: it is the one that will run out first. When it is at the limit
+            // its percentage already leads the row, and "Disk" twice on one line reads as two
+            // disks.
             Fact::Disk => r
                 .disks
                 .iter()
                 .max_by(|a, b| a.percent().total_cmp(&b.percent()))
+                .filter(|d| !disk_needs_you(d.percent()))
                 .map(|d| format!("{} {}% full", d.name(), whole(d.percent()))),
             Fact::Swap => r.swap.map(|(total, used)| match total {
                 0 => "Swap none".to_string(),
@@ -379,8 +383,10 @@ mod tests {
         let r = Readings { disks: vec![disk("/", 31.3, 29.6)], ..calm() };
         let s = MachineStatus::assess(&r, APP_ROW);
         assert!(s.needs_you());
-        assert_eq!(s.lead, "Disk nearly full · 1.7 GB free");
-        assert_eq!(s.line(), "Disk nearly full · 1.7 GB free · CPU 8% · Memory 50% · Disk 95% full · Swap none");
+        assert_eq!(s.lead, "Disk nearly full · 1.7 GB free (95%)");
+        // The disk is named once: its percentage is folded into the limit, not repeated after.
+        assert_eq!(s.line(), "Disk nearly full · 1.7 GB free (95%) · CPU 8% · Memory 50% · Swap none");
+        assert_eq!(s.line().matches("Disk").count(), 1);
         assert!(!s.line().contains("No limits reached"));
         assert_eq!(s.verdict(), "1 limit reached");
     }
@@ -396,7 +402,7 @@ mod tests {
         let s = MachineStatus::assess(&r, APP_ROW);
         assert_eq!(
             s.lead,
-            "Disk /home nearly full · 8.0 GB free · Memory nearly full · 1.0 GB available · Load 9.50 above 4 cores"
+            "Disk /home nearly full · 8.0 GB free (92%) · Memory nearly full · 1.0 GB available · Load 9.50 above 4 cores"
         );
         assert_eq!(s.verdict(), "3 limits reached");
         assert_eq!(s.limits.len(), 3);
@@ -425,7 +431,7 @@ mod tests {
         let full = Readings { disks: vec![disk("/", 31.3, 29.6)], ..calm() };
         assert_eq!(
             MachineStatus::assess(&full, shell).line(),
-            "Disk nearly full · 1.7 GB free · Uptime 6d 5h · Load 1.15"
+            "Disk nearly full · 1.7 GB free (95%) · Uptime 6d 5h · Load 1.15"
         );
     }
 
@@ -493,7 +499,7 @@ mod tests {
     fn the_answer_for_a_caller_carries_the_row_and_the_limits() {
         let r = Readings { disks: vec![disk("/", 31.3, 29.6)], ..calm() };
         let j = MachineStatus::assess(&r, APP_ROW).json();
-        assert_eq!(j["status"], "Disk nearly full · 1.7 GB free · CPU 8% · Memory 50% · Disk 95% full · Swap none");
+        assert_eq!(j["status"], "Disk nearly full · 1.7 GB free (95%) · CPU 8% · Memory 50% · Swap none");
         assert_eq!(j["limits_reached"][0]["limit"], "disk");
         assert_eq!(j["limits_reached"][0]["percent"], 95.0);
         assert_eq!(j["limits_reached"][0]["threshold_percent"], 90.0);
