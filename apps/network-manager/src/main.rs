@@ -49,6 +49,9 @@ use yantrik_ipc_transport::SyncRpcClient;
 /// secret travels in. Pure, so `tests/network-core` can exercise it without a window.
 mod connect;
 
+/// Which section the window opens on: the interface the default route leaves by.
+mod opening;
+
 slint::include_modules!();
 
 /// What the last refresh learned, beside the window.
@@ -101,6 +104,8 @@ fn main() {
 
     // What is true now, before the window is shown.
     refresh(&app, &state);
+    // Once, on open: afterwards the section is the person's to choose.
+    open_on_the_link_in_use(&app);
 
     // Published after the first read, so a describe arriving immediately reports the machine
     // rather than a half-built window.
@@ -142,6 +147,21 @@ fn main() {
     refresh_agent_rail(&app, &state);
 
     run_until_closed(&app, "yantrik-network-manager");
+}
+
+/// Select the section for the interface that carries traffic, from the first reading.
+///
+/// The route table is read here rather than through network-service, which reports interfaces
+/// and their addresses but not routes; it is a file on this machine, read once.
+fn open_on_the_link_in_use(ui: &NetworkManagerApp) {
+    let table = std::fs::read_to_string(opening::ROUTE_TABLE).unwrap_or_default();
+    let ethernet: Vec<String> =
+        ui.get_ethernet_interfaces().iter().map(|e| e.name.to_string()).collect();
+    ui.set_active_tab(opening::opening_tab(
+        opening::default_route_interface(&table).as_deref(),
+        &ethernet,
+        ui.get_wifi_adapter_present(),
+    ));
 }
 
 // ══════════════════════════════════════════════════════════════════════

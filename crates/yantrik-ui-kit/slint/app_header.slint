@@ -28,6 +28,7 @@
 import { Theme } from "theme.slint";
 import { Icon, Icons } from "icon.slint";
 import { YButton } from "y_button.slint";
+import { YSegmented } from "y_segmented.slint";
 import { WindowControls } from "window_controls.slint";
 import { AppColor, AppIdentity } from "app_color.slint";
 import { WindowChrome } from "window_chrome.slint";
@@ -90,6 +91,14 @@ export component AppHeader inherits Rectangle {
     in property <string> status: "";
     // Actions left of the spacer, beside the title. Mode switches, not verbs.
     in property <[AppAction]> leading-actions: [];
+    // One choice among a few, beside the mode switches: °C / °F. Drawn as a segmented control,
+    // not as an action, because an action labelled with the current choice reads as a verb, and
+    // drawn active it took the primary's filled accent. Empty draws nothing.
+    in property <[string]> segments: [];
+    in property <int> segment: 0;
+    // What the choice is about, for assistive tech: "Temperature unit".
+    in property <string> segments-label: "";
+    callback segment-chosen(int);
     // Actions at the right edge. The usual place.
     in property <[AppAction]> actions: [];
     in property <bool> show-search: false;
@@ -294,6 +303,17 @@ export component AppHeader inherits Rectangle {
                            : a.emphasis == 1 ? 1
                            : 2;
                     clicked => { root.action(a.id); }
+                }
+            }
+
+            if root.segments.length > 0 : VerticalLayout {
+                alignment: center;
+                horizontal-stretch: 0;
+                YSegmented {
+                    label: root.segments-label;
+                    items: root.segments;
+                    selected: root.segment;
+                    chosen(i) => { root.segment-chosen(i); }
                 }
             }
 

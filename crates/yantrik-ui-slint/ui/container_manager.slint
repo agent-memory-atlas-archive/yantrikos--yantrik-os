@@ -558,10 +558,13 @@ export component ContainerManagerScreen inherits Rectangle {
                                 }
                             }
 
+                            // Nothing to run until an image is named: an enabled primary that
+                            // does nothing when pressed is a promise the button cannot keep.
                             YButton {
                                 label: "Run New";
                                 variant: 0;
                                 size: 0;
+                                disabled: run-image-input == "";
                                 clicked => {
                                     if run-image-input != "" {
                                         ct-run(run-image-input);
