@@ -1294,14 +1294,7 @@ fn publish_lens_questions(ui: &App) {
     let agent = feed::main_agent(&host.active_id());
     let questions: Vec<crate::QuestionRequest> = agents::store().read(|s| {
         let Some(a) = s.agent(&agent) else { return Vec::new() };
-        a.turns
-            .iter()
-            .flat_map(|t| t.items.iter())
-            .filter_map(|i| match i {
-                Item::Question(q) if q.waiting() => Some(lens_question(&a.meta.id.0, &a.meta.mind, q)),
-                _ => None,
-            })
-            .collect()
+        a.waiting_questions().map(|q| lens_question(&a.meta.id.0, &a.meta.mind, q)).collect()
     });
     if let Some(model) = crate::models::changed(ui.get_lens_questions(), questions) {
         ui.set_lens_questions(model);
@@ -1317,16 +1310,15 @@ pub fn questions_for_describe() -> serde_json::Value {
         s.agents()
             .iter()
             .flat_map(|a| {
-                a.turns.iter().flat_map(|t| t.items.iter()).filter_map(move |i| match i {
-                    Item::Question(q) if q.waiting() => Some(serde_json::json!({
+                a.waiting_questions().map(move |q| {
+                    serde_json::json!({
                         "agent": a.meta.id.0,
                         "mind": a.meta.mind,
                         "request": q.request,
                         "prompt": clip(&q.prompt, QUESTION_CHARS),
                         "options": q.options.iter().take(QUESTION_OPTIONS)
                             .map(|o| clip(o, QUESTION_OPTION_CHARS)).collect::<Vec<_>>(),
-                    })),
-                    _ => None,
+                    })
                 })
             })
             .collect()

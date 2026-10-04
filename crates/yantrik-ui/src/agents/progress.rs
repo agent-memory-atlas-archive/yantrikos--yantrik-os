@@ -29,8 +29,11 @@ pub struct Progress {
     pub recent: Vec<String>,
     /// A call still running, when there is one.
     pub running: Option<String>,
-    /// An approval it asked for is waiting on the person.
+    /// The person owes it an answer: an approval it asked for, a command of its at a prompt, or a
+    /// question it asked.
     pub waiting_on_you: bool,
+    /// The question it asked the person and still waits on, as it asked it, when there is one.
+    pub question: Option<String>,
     /// Why the shell thinks it is stuck, in plain words, when it does.
     pub stuck: Option<String>,
     /// The same, as what kind of stuck: for words that must not quote the mind (a notification).
@@ -61,13 +64,14 @@ pub fn of(agent: &Agent, now: u64) -> Option<Progress> {
     let turn = agent.open_turn()?;
     let cards: Vec<&Card> = turn.cards().collect();
     let running = cards.iter().rev().find(|c| c.running()).map(|c| call_line(c));
-    // An approval card, or a command at a prompt (#182): either way the person is the one
-    // being waited on, and the quiet is theirs, not the task's.
-    let waiting_on_you = !agent.pending_approvals.is_empty() || agent.job_waits;
+    // An approval card, a command at a prompt (#182), or a question it asked (#25): either way
+    // the person is the one being waited on, and the quiet is theirs, not the task's.
+    let waiting_on_you = super::store::waits_on_person(agent);
+    let question = agent.waiting_questions().last().map(|q| q.prompt.trim().to_string());
     let quiet_secs = now.saturating_sub(agent.touched);
     let repeating = going_round(&cards);
-    // Quiet is only stuck when nothing explains it: not a question to the person, and not a
-    // command the shell itself is watching run (a build can be silent for minutes).
+    // Quiet is only stuck when nothing explains it: not the person owing it an answer, and not
+    // a command the shell itself is watching run (a build can be silent for minutes).
     let quiet = quiet_secs >= STUCK_QUIET_SECS && !waiting_on_you && running.is_none();
     let stuck_kind = match &repeating {
         Some((call, times, _)) => Some(Stuck::Repeating { call: call.clone(), times: *times }),
@@ -87,6 +91,7 @@ pub fn of(agent: &Agent, now: u64) -> Option<Progress> {
         recent: cards.iter().rev().take(RECENT_CALLS).rev().map(|c| step_line(c)).collect(),
         running,
         waiting_on_you,
+        question,
         stuck,
         stuck_kind,
     })
@@ -168,6 +173,8 @@ impl Progress {
         out.push('.');
         if let Some(why) = &self.stuck {
             out.push_str(&format!("\nIt looks stuck: {why}."));
+        } else if let Some(question) = &self.question {
+            out.push_str(&format!("\nIt is waiting for your answer to its question: “{}”", brief(question, 120)));
         } else if self.waiting_on_you {
             out.push_str("\nIt is waiting for you to answer an approval card.");
         } else if let Some(call) = &self.running {
@@ -313,6 +320,40 @@ mod tests {
         assert!(p.told("Hermes").contains("Right now: agent_run."));
 
         assert_eq!(of(&quiet, 10 + STUCK_QUIET_SECS - 1).unwrap().stuck, None);
+    }
+
+    /// A question to the person (#25) is the person's quiet, like an approval: a mind that asks
+    /// "Keep or Erase?" and waits two minutes is waiting on them, not stuck. Once answered, it no
+    /// longer excuses anything.
+    #[test]
+    fn a_question_waiting_on_the_person_is_not_stuck_until_it_is_answered() {
+        let asked = |answer: &str| {
+            let mut a = agent_with(vec![card("os_act", CallState::Ok, "", 10)], 0, 10);
+            a.turns[0].items.push(Item::Question(crate::agents::model::Question {
+                request: "q-1".into(),
+                prompt: "Keep or Erase the three memories about the old address?".into(),
+                options: vec!["Keep".into(), "Erase".into()],
+                answer: answer.into(),
+                closed: String::new(),
+                asked: 10,
+            }));
+            a
+        };
+
+        let p = of(&asked(""), 10 + 120).unwrap();
+        assert_eq!((p.stuck.as_deref(), p.stuck_kind.as_ref()), (None, None), "a question waiting is not stuck");
+        assert!(p.waiting_on_you, "it waits on the person");
+        assert_eq!(p.question.as_deref(), Some("Keep or Erase the three memories about the old address?"));
+        assert!(p.told("Hermes").contains("waiting for your answer to its question: “Keep or Erase"), "{}", p.told("Hermes"));
+
+        let silent = agent_with(vec![card("os_act", CallState::Ok, "", 10)], 0, 10);
+        let p = of(&silent, 10 + 120).unwrap();
+        assert_eq!(p.stuck_kind, Some(Stuck::Quiet { secs: 120 }), "no question: quiet is stuck, as before");
+        assert!(!p.waiting_on_you);
+
+        let p = of(&asked("Keep"), 10 + 120).unwrap();
+        assert_eq!(p.stuck_kind, Some(Stuck::Quiet { secs: 120 }), "an answered question no longer excuses the quiet");
+        assert_eq!((p.waiting_on_you, p.question), (false, None));
     }
 
     #[test]

@@ -650,10 +650,8 @@ impl RowKey {
 
 /// Whether the person still owes this agent an answer: an approval, a job at its prompt (#182),
 /// or a question it asked.
-fn waits_on_person(agent: &Agent) -> bool {
-    !agent.pending_approvals.is_empty()
-        || agent.job_waits
-        || agent.turns.iter().flat_map(|t| t.items.iter()).any(|i| matches!(i, Item::Question(q) if q.waiting()))
+pub(super) fn waits_on_person(agent: &Agent) -> bool {
+    !agent.pending_approvals.is_empty() || agent.job_waits || agent.waiting_questions().next().is_some()
 }
 
 /// Back to work once nothing holds the row on the person.
@@ -2169,6 +2167,26 @@ mod tests {
         assert_eq!(questions(&s, &pi)[0].answer, "Yes");
         assert_eq!(s.agent(&pi).unwrap().state, State::Thinking, "back to work");
         assert!(s.transcript(&pi, 5).unwrap().contains("[asked the person] Delete 3 installers? — answered: Yes"));
+    }
+
+    /// A question past the quiet limit is still the person's to answer: it needs them as waiting,
+    /// never as stuck. Answered and then quiet, it is stuck as any other task.
+    #[test]
+    fn a_question_long_unanswered_needs_you_as_waiting_not_stuck() {
+        let (mut s, clock) = store();
+        let mind = id("yantrik:c-erase");
+        s.open_turn(&mind, "forget the old address");
+        s.event(&mind, &asks("r1", "Keep or Erase?"), Provenance::Reported);
+        clock.fetch_add(120, Ordering::SeqCst);
+
+        let a = s.agent(&mind).unwrap();
+        assert_eq!(a.state, State::WaitingForYou);
+        assert!(!s.stuck(a), "waiting on the person is not stuck");
+        assert_eq!(s.list(Tab::NeedsYou, None), vec![mind.clone()], "it needs the person");
+
+        assert!(s.question_answered(&mind, "r1", "Keep"));
+        clock.fetch_add(120, Ordering::SeqCst);
+        assert!(s.stuck(s.agent(&mind).unwrap()), "answered, then silent: stuck as before");
     }
 
     #[test]
