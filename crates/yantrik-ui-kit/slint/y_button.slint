@@ -1,10 +1,14 @@
 // YButton — the one button.
 //
-// Kinds (`variant`), exactly three:
+// Kinds (`variant`), exactly four:
 //   0 primary      filled accent, dark label. One per group at most.
 //   1 secondary    an outline: transparent, 1px outline-border, white label.
 //   3 destructive  filled red, white label. Only for what cannot be undone: delete, erase,
 //                  power off.
+//   4 destructive, at rest  an outline with a red label or glyph, filled red on hover and
+//                  press. For a delete that repeats down a list: a filled red square on every
+//                  row shouts the one action nobody came to the list to take, so it waits in
+//                  outline until the pointer is on it.
 // Any other value draws as secondary, so a stale call site (2 was a quiet "tertiary" kind,
 // now retired) still draws something valid. Hover and pressed are neutral steps (a lighter or
 // darker fill, a brighter outline), never new colours. Focus keeps the 2px white ring.
@@ -49,7 +53,8 @@ export component YButton inherits Rectangle {
 
     property <bool> hovered: ta.has-hover && !root.disabled;
     property <bool> pressed: ta.pressed && !root.disabled;
-    property <color> fg: root.variant == 0 ? Theme.text-on-accent : root.variant == 3 ? Theme.text-on-destructive : Theme.text-primary;
+    property <bool> red-filled: root.variant == 3 || (root.variant == 4 && (root.hovered || root.pressed));
+    property <color> fg: root.variant == 0 ? Theme.text-on-accent : root.red-filled ? Theme.text-on-destructive : root.variant == 4 ? Theme.color-danger : Theme.text-primary;
     property <length> glyph: root.size == 0 ? 13px : 15px;
 
     height: root.size == 0 ? Theme.h-compact : root.size == 2 ? Theme.h-prominent : Theme.h-regular;
@@ -63,10 +68,11 @@ export component YButton inherits Rectangle {
 
     background:
         root.variant == 3 ? (root.pressed ? Theme.destructive-pressed : root.hovered ? Theme.destructive-hover : Theme.destructive)
+      : root.variant == 4 ? (root.pressed ? Theme.destructive-pressed : root.hovered ? Theme.destructive : transparent)
       : root.variant != 0 ? (root.pressed ? Theme.hover-fill-strong : root.hovered ? Theme.hover-fill : transparent)
       :                     (root.pressed ? Theme.accent-button-pressed : root.hovered ? Theme.accent-button-hover : Theme.accent);
 
-    border-width: keyboard.has-focus ? 2px : root.variant != 0 && root.variant != 3 ? 1px : 0;
+    border-width: keyboard.has-focus ? 2px : root.variant != 0 && !root.red-filled ? 1px : 0;
     border-color: keyboard.has-focus ? Theme.focus-ring : root.pressed ? Theme.text-secondary : root.hovered ? Theme.text-dim : Theme.outline-border;
 
     animate background { duration: Theme.dur-fast; }
