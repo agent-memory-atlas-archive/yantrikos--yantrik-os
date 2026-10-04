@@ -565,11 +565,14 @@ export global Theme {
     // Toggle tile (Wi-Fi, Bluetooth, Night light ...).
     out property <length> tile-h: 56px;
     // On-screen display (volume, brightness, mic, Caps Lock): a 240x64 pill, centred, 80px above
-    // the taskbar. Opaque charcoal in both modes, because it floats over whatever is on screen,
+    // the dock (its window is placed there by rc.xml's windowRule, which wire/osd.rs checks). Opaque charcoal in both modes, because it floats over whatever is on screen,
     // a photograph or a white document, and has to read the same on either.
     out property <length> osd-w: 240px;
     out property <length> osd-h: 64px;
     out property <length> osd-gap: 80px;
+    // The level bar beside the percentage: a 4px track, thinner than a slider's, because nothing
+    // drags it.
+    out property <length> osd-track-h: 4px;
     out property <color> osd-bg: #151a1e;
     out property <color> osd-border: #ffffff1f;
     out property <color> osd-text: #f4f6fa;

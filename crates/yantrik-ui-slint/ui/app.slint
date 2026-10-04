@@ -462,6 +462,7 @@ export component App inherits Window {
     in-out property <string> clip-search-query: "";
     callback clipboard-paste(int);
     callback clipboard-search(string);
+    callback clipboard-clear();
 
     // Power popover state. It hangs from the right edge, under Quick Settings' mark (the bar has
     // no power mark of its own since the top bar followed render 01); Rust sets the other two when
@@ -576,6 +577,8 @@ export component App inherits Window {
     in-out property <bool> volume-available: false;
     in-out property <bool> volume-muted: false;
     in-out property <int> volume-level: 0;
+    // The default output's name as the audio server gives it, "" when it gives none.
+    in-out property <string> volume-device: "";
     // The network popover under the bar's network mark, and where that mark is.
     in-out property <bool> network-open: false;
     // The clock's popover: the month, today's events, the newest notifications, Do Not Disturb.
@@ -1573,9 +1576,12 @@ export component App inherits Window {
             prompt-text: root.lock-prompt;
             wallpaper: root.lock-wallpaper;
             has-wallpaper: root.lock-has-wallpaper;
-            // The status line says only what the machine has, and never the network's name: a lock
-            // screen is read by whoever stands at it, and a Wi-Fi name says where this is.
-            network-text: !root.network-online ? ""
+            // The corner says only how the machine is connected, and never the network's name: a
+            // lock screen is read by whoever stands at it, and a Wi-Fi name says where this is.
+            // The same words as `network_kind` (wire/callbacks.rs) gives the session lock; nothing
+            // before the first reading (`network-detail` is empty until then).
+            network-text: root.network-detail == "" ? ""
+                : !root.network-online ? "Offline"
                 : root.network-medium == "wifi" ? "Wi-Fi"
                 : root.network-medium == "ethernet" ? "Wired" : "Online";
             can-restart: root.lock-can-restart;
@@ -2914,6 +2920,7 @@ export component App inherits Window {
             brightness-level <=> root.brightness-level;
             volume-available: root.volume-available;
             volume-muted: root.volume-muted;
+            volume-device: root.volume-device;
             volume-level <=> root.volume-level;
             brightness-changed(val) => { root.brightness-changed(val); }
             volume-changed(val) => { root.volume-changed(val); }
@@ -2947,6 +2954,7 @@ export component App inherits Window {
             clip-search-query <=> root.clip-search-query;
             clipboard-paste(idx) => { root.clipboard-paste(idx); }
             clipboard-search(query) => { root.clipboard-search(query); }
+            clipboard-clear => { root.clipboard-clear(); }
             cheat-sheet-open <=> root.cheat-sheet-open;
             cheat-sheet-rows: root.cheat-sheet-rows;
             cheat-sheet-query <=> root.cheat-sheet-query;

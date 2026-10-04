@@ -90,7 +90,8 @@ pub fn run_lock(w: &MinimalSoftwareWindow, output: &str, width: u32, height: u32
     view.set_prompt("Enter your password to unlock".into());
     view.set_wallpaper(wallpaper.clone());
     view.set_has_wallpaper(true);
-    view.set_network("Harbor".into());
+    // The kind of connection, as the shell hands it over (`network_kind`): never its name.
+    view.set_network("Wired".into());
     view.set_battery_percent(64);
     view.set_notifications(3);
     let asked: Rc<RefCell<Vec<&'static str>>> = Rc::default();
@@ -106,6 +107,11 @@ pub fn run_lock(w: &MinimalSoftwareWindow, output: &str, width: u32, height: u32
     let client = draw();
     save(&client, &output.replace(".png", "-client.png"), width, height)?;
     assert!(bright(&client, width, (width / 2 - 200, width / 2 + 200, clock_y, clock_y + 150), 200) > 400, "the client draws the same clock");
+    // Bottom left, 24px in: a 16px glyph and "Wired" at 12px, in the light lock text.
+    let net_box = (24, 24 + 90, height - 24 - 16, height - 24);
+    assert!(bright(&client, width, net_box, 180) > 40, "the network corner is drawn bottom left");
+    // Nothing in it takes a click: one there neither unlocks nor reaches main.rs.
+    click(w, 40., fh - 32.);
     click(w, go.0, go.1);
     click(w, sx_suspend, sy);
     assert_eq!(*asked.borrow(), ["submit", "suspend"], "the client's buttons reach main.rs");
@@ -127,7 +133,9 @@ pub fn run_lock(w: &MinimalSoftwareWindow, output: &str, width: u32, height: u32
     ui.set_lock_wallpaper(wallpaper.clone());
     ui.set_lock_has_wallpaper(true);
     ui.set_network_online(true);
-    ui.set_network_label("Harbor".into());
+    ui.set_network_medium("ethernet".into());
+    ui.set_network_label("Ethernet".into());
+    ui.set_network_detail("192.168.4.44".into());
     ui.set_battery_available(true);
     ui.set_battery_level(64);
     ui.set_notification_unread_count(3);
@@ -148,6 +156,23 @@ pub fn run_lock(w: &MinimalSoftwareWindow, output: &str, width: u32, height: u32
     let corner = px(&empty, width, width / 8, height * 3 / 4);
     assert_ne!(corner, (0x10, 0x14, 0x17), "the wallpaper shows, not the solid charcoal");
     assert!(corner.2 >= corner.0, "the lake is blue-grey, not warm: {corner:?}");
+    let net_box = (24, 24 + 90, height - 24 - 16, height - 24);
+    assert!(bright(&empty, width, net_box, 180) > 40, "the shell's screen draws the network corner too");
+    // Offline is said, not left blank; before the first reading nothing is said.
+    ui.set_network_online(false);
+    ui.set_network_detail("Offline".into());
+    let offline = draw();
+    save(&offline, &output.replace(".png", "-offline.png"), width, height)?;
+    assert_ne!(offline.as_bytes(), empty.as_bytes(), "Offline is drawn in place of Wired");
+    // (With no corner the notification count drops back into that spot, so it is put away here.)
+    ui.set_notification_unread_count(0);
+    ui.set_network_detail("".into());
+    let unread = draw();
+    assert_eq!(bright(&unread, width, net_box, 120), 0, "no reading, no network corner");
+    ui.set_notification_unread_count(3);
+    ui.set_network_online(true);
+    ui.set_network_detail("192.168.4.44".into());
+    assert_eq!(draw().as_bytes(), empty.as_bytes(), "back to Wired, the same frame");
 
     // At rest it draws nothing: no timer, no animation, nothing between clock ticks.
     mv(w, fw / 2., fh * 0.8);

@@ -65,6 +65,11 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     };
     let at_45 = row_fill(&volume);
     assert!(at_45 > 20, "the bar is filled for 45% ({at_45}px of fill)");
+    // A 4px track (Theme.osd-track-h), centred: rows 30 to 33 of the 64px pill, nothing above or below.
+    let column: Vec<bool> = (28..36).map(|y| bright(at(&volume, pill_x + 60, pill_y + y))).collect();
+    assert_eq!(column, [false, false, true, true, true, true, false, false], "the level bar is 4px tall, centred");
+    // And the fill grows from the left end of the track, not out from its middle.
+    assert!(bright(at(&volume, pill_x + 52, bar_y)), "45% is filled from the track's left end");
 
     // A second key press inside the hold: brightness replaces the volume and the hold restarts.
     std::thread::sleep(Duration::from_millis(700));

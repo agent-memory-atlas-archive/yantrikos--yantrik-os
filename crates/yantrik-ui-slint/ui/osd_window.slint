@@ -3,7 +3,8 @@
 // The pill used to be drawn inside the shell's window, which sits behind every app window, so
 // nobody saw it while an app was open (review of #579). It is a window of its own instead, kept
 // above the others by the labwc windowRule for this title (config/labwc/rc.xml) — the same way
-// the shell is made omnipresent — and the shell shows and hides it (wire/osd.rs).
+// the shell is made omnipresent — and the shell shows and hides it (wire/osd.rs). The same rule
+// puts it Theme.osd-gap above the dock: a client cannot place its own window on Wayland.
 //
 // It is exactly the pill: no frame, a transparent background for the rounded corners, and
 // nothing in it takes a pointer or a key, so one aimed at it is not caught.

@@ -30,6 +30,11 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                 super::clipboard::refresh_on_open(&ui, &clip);
             }
         }
+        if kind == "quick-settings" {
+            if let Some(ui) = weak.upgrade() {
+                super::audio::refresh_output_name(&ui);
+            }
+        }
         if kind == "today" {
             if let Some(ui) = weak.upgrade() {
                 super::today::refresh_on_open(&ui);

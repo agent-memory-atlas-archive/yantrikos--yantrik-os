@@ -14,7 +14,13 @@
 //
 // Each tile's subtitle is the true state in words, taken from the same properties the bar and the
 // settings read. A tile's `on` is the real state; pressing says `toggled` and the owner changes the
-// real thing, so the tile can never show a state the machine is not in.
+// real thing, so the tile can never show a state the machine is not in. A lit tile is a switch, so
+// its subtitle is that switch's state, never a description: Mind View is the setting "a mind's
+// apps open in a view of their own" (not a place to go), so it says On or Off.
+//
+// Under the volume slider, the output it moves, named as the audio server names it (wire/audio.rs);
+// nothing when the server gives no name. The footer buttons are YIndicators, so each says what it
+// is in the kit's YTooltip on hover and to assistive tech.
 //
 // Keyboard. Arrow keys move between controls (Down and Right go on, Up and Left go back), Space or
 // Enter presses the focused one, Esc closes. A split tile's chevron is reached with Tab. A slider
@@ -66,6 +72,8 @@ export component QuickSettings inherits YPopover {
     in property <bool> volume-available: false;
     in property <bool> volume-muted: false;
     in-out property <int> volume-level: 0;
+    // "" when the audio server names no output: then no line is drawn, rather than a guess.
+    in property <string> volume-device: "";
     callback brightness-changed(int);
     callback volume-changed(int);
     callback volume-mute-toggled();
@@ -178,7 +186,7 @@ export component QuickSettings inherits YPopover {
             x: 0; y: Theme.tile-h + Theme.sp-2; width: parent.width;
             icon: Icons.eye;
             title: "Mind View";
-            subtitle: root.mind-view-on ? "Minds' apps open in their own view" : "Minds' apps open on this desktop";
+            subtitle: root.mind-view-on ? "On" : "Off";
             on: root.mind-view-on;
             toggled => { root.mind-view-chosen(!root.mind-view-on); }
             focus-arrived(s) => { root.cursor = s; }
@@ -257,28 +265,43 @@ export component QuickSettings inherits YPopover {
     }
 
     // ── Levels ──
-    if root.volume-available : Rectangle {
-        height: Theme.h-regular;
-        QsSlider {
-            slot: 8; cursor: root.cursor;
-            width: 100%;
-            label: "Volume";
-            icon: root.volume-muted ? Icons.volume-off : Icons.volume;
-            value: root.volume-level;
-            changed(v) => { root.volume-level = v; root.volume-changed(v); }
-            focus-arrived(s) => { root.cursor = s; }
+    if root.volume-available : VerticalLayout {
+        spacing: Theme.sp-1;
+        Rectangle {
+            height: Theme.h-regular;
+            QsSlider {
+                slot: 8; cursor: root.cursor;
+                width: 100%;
+                label: "Volume";
+                icon: root.volume-muted ? Icons.volume-off : Icons.volume;
+                value: root.volume-level;
+                changed(v) => { root.volume-level = v; root.volume-changed(v); }
+                focus-arrived(s) => { root.cursor = s; }
+            }
+            // The speaker mutes, as the media key does. Over the slider's icon only: the track starts
+            // to its right.
+            TouchArea {
+                x: 0; y: 0;
+                width: Theme.bar-icon-size + Theme.sp-2;
+                height: parent.height;
+                mouse-cursor: pointer;
+                accessible-role: button;
+                accessible-label: root.volume-muted ? "Unmute" : "Mute";
+                accessible-action-default => { root.volume-mute-toggled(); }
+                clicked => { root.volume-mute-toggled(); }
+            }
         }
-        // The speaker mutes, as the media key does. Over the slider's icon only: the track starts
-        // to its right.
-        TouchArea {
-            x: 0; y: 0;
-            width: Theme.bar-icon-size + Theme.sp-2;
-            height: parent.height;
-            mouse-cursor: pointer;
-            accessible-role: button;
-            accessible-label: root.volume-muted ? "Unmute" : "Mute";
-            accessible-action-default => { root.volume-mute-toggled(); }
-            clicked => { root.volume-mute-toggled(); }
+        // The output the slider moves, lined up under the track (YSlider's track-x).
+        if root.volume-device != "" : HorizontalLayout {
+            padding-left: Theme.bar-icon-size + Theme.sp-3;
+            Text {
+                text: root.volume-device;
+                color: Theme.text-secondary;
+                font-size: Theme.fs-caption;
+                overflow: elide;
+                accessible-role: text;
+                accessible-label: "Output: " + root.volume-device;
+            }
         }
     }
     if root.brightness-available : QsSlider {

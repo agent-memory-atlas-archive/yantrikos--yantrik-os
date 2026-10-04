@@ -4,6 +4,9 @@
 // mode is not news. It takes a colour only when it should: red for either bypass ("it is not
 // asking you"), amber for Plan's "read-only" (the existing meaning, kept), the accent for Private,
 // when the Mind is off whatever the mode says. The label carries a bypass's countdown.
+// It reads "Minds: Auto", not "Auto": a mode word alone on the bar does not say whose mode it is
+// (design sign-off). Only the chip's words carry the noun; the modes and their labels in Rust
+// are unchanged, and Private keeps its own word.
 // See mind_mode_menu.slint for what a click opens.
 import { Theme } from "theme.slint";
 import { Icon, Icons } from "../icon.slint";
@@ -33,7 +36,7 @@ export component ModeChip inherits Rectangle {
     border-width: Theme.hairline;
     border-color: root.private-mode ? Theme.accent : root.in-bypass ? Theme.color-danger : Theme.bar-border;
     accessible-role: button;
-    accessible-label: root.private-mode ? "Private mode" : "Mind mode: " + root.mode-label;
+    accessible-label: root.private-mode ? "Private mode" : "Minds: " + root.mode-label;
 
     area := TouchArea {
         mouse-cursor: pointer;
@@ -53,8 +56,9 @@ export component ModeChip inherits Rectangle {
             y: (parent.height - self.height) / 2;
         }
         Text {
-            text: root.private-mode ? "Private" : root.mode-label;
-            max-width: 140px;
+            text: root.private-mode ? "Private" : "Minds: " + root.mode-label;
+            // Room for the noun and the longest label, "Full bypass · no end".
+            max-width: 190px;
             overflow: elide;
             color: root.ink;
             font-size: Theme.fs-caption;

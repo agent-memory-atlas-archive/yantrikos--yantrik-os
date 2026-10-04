@@ -11,9 +11,9 @@
 // is what is on the glass whenever nobody is at the machine. With no wallpaper it is the dock's
 // charcoal, solid. Nothing on it moves: the clock changes once a minute and that is all.
 //
-// Quiet on purpose. The status line says what the machine is (network, battery if it has one)
-// and how many notifications wait — a count, never what they say, because a lock screen is
-// visible to anyone standing behind the person.
+// Quiet on purpose. The status line says what the machine is (battery if it has one), the corner
+// says how it is connected, and how many notifications wait — a count, never what they say,
+// because a lock screen is visible to anyone standing behind the person.
 import { Theme } from "theme.slint";
 import { Icon, Icons } from "icon.slint";
 
@@ -72,8 +72,10 @@ export component YLockView inherits Rectangle {
     in property <int> digits: 0;
     in property <string> revealed-text;
     in-out property <bool> revealed: false;
-    // The status line. A reading the machine does not have is not drawn: no network name means
-    // no mark, battery below zero means no battery.
+    // The status line. A reading the machine does not have is not drawn: no network words means
+    // no mark, battery below zero means no battery. The network words are the shell's
+    // (`network_kind` in wire/callbacks.rs): "Wired", "Wi-Fi", "Online" or "Offline", and the
+    // glyph is picked from them, the bar's own marks (network_indicator.slint).
     in property <string> network-text;
     in property <int> battery-percent: -1;
     in property <bool> battery-charging: false;
@@ -284,11 +286,6 @@ export component YLockView inherits Rectangle {
         padding-right: Theme.sp-7;
         alignment: end;
         spacing: Theme.sp-5;
-        if root.network-text != "" : HorizontalLayout {
-            spacing: Theme.sp-2;
-            VerticalLayout { alignment: center; Icon { commands: Icons.wifi; size: 18px; tint: Theme.lock-text; thickness: Theme.icon-stroke; } }
-            Text { text: root.network-text; color: Theme.lock-text; font-size: Theme.fs-body; vertical-alignment: center; }
-        }
         if root.battery-percent >= 0 : HorizontalLayout {
             spacing: Theme.sp-2;
             VerticalLayout { alignment: center; Icon { commands: Icons.battery; size: 18px; tint: Theme.lock-text; thickness: Theme.icon-stroke; } }
@@ -301,10 +298,38 @@ export component YLockView inherits Rectangle {
         }
     }
 
-    // ── Notifications, bottom left: a count and what it hides ──
+    // ── How the machine is connected, bottom left ──
+    //
+    // Read only: a glyph and a word, nothing that takes a click or a key. Joining a network is
+    // the unlocked desktop's business; on a lock screen it would be a way past it.
+    property <length> network-h: 16px;
+    if root.network-text != "" : HorizontalLayout {
+        x: Theme.sp-6;
+        y: root.height - root.network-h - Theme.sp-6;
+        height: root.network-h;
+        spacing: Theme.sp-2;
+        accessible-role: text;
+        accessible-label: "Network: " + root.network-text;
+        Icon {
+            commands: root.network-text == "Wi-Fi" ? Icons.wifi
+                : root.network-text == "Offline" ? Icons.network-off
+                : Icons.network;
+            size: root.network-h;
+            tint: root.network-text == "Offline" ? Theme.lock-text-dim : Theme.lock-text;
+            thickness: Theme.icon-stroke;
+        }
+        Text {
+            text: root.network-text;
+            color: root.network-text == "Offline" ? Theme.lock-text-dim : Theme.lock-text;
+            font-size: Theme.fs-caption;
+            vertical-alignment: center;
+        }
+    }
+
+    // ── Notifications, bottom left, above the network: a count and what it hides ──
     if root.notification-count > 0 : VerticalLayout {
         x: Theme.sp-7;
-        y: root.height - self.height - Theme.sp-7;
+        y: root.height - self.height - Theme.sp-7 - (root.network-text != "" ? root.network-h + Theme.sp-3 : 0px);
         width: 320px;
         height: 40px;
         alignment: end;

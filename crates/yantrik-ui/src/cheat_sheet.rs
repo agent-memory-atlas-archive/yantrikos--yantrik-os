@@ -11,7 +11,10 @@
 //! <keybind key="A-F4">
 //! ```
 //!
-//! A binding with no such comment is a test failure, not a blank row. This is also the one
+//! A binding with no such comment is a test failure, not a blank row. Two bindings that run the
+//! same action are one row with both keys ("Super+← or Super+Alt+←"): the sheet lists what can be
+//! done, and the same thing listed twice under two names reads as two different things. They
+//! must say the same words, or the sheet reports them. This is also the one
 //! parser of rc.xml's keybinds: the `rc_keys` tests read through [`keybinds`] too, so the keys
 //! the sheet shows and the keys the screens are checked against cannot be two readings of one
 //! file.
@@ -39,16 +42,26 @@ pub(crate) struct Keybind {
     /// Modifiers in a fixed order, then the key, lowercase: `super+shift+s`.
     pub canonical: String,
     pub help: Option<Help>,
+    /// What it runs: the binding's body with its whitespace folded, so two bindings that run the
+    /// same actions compare equal however the file indents them. Empty for an empty body.
+    pub action: String,
 }
+
+/// Between two keys that do the same thing, in `Row::caps`. Lower case, so it can never be a cap:
+/// [`cap`] upper-cases every key it does not name.
+pub(crate) const OR: &str = "or";
 
 /// One row of the sheet.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Row {
     pub group: &'static str,
-    /// The key as drawn, one cap per entry: `["Super", "Shift", "S"]`.
+    /// The keys as drawn, one cap per entry: `["Super", "Shift", "S"]`. A row reached by more than
+    /// one key has them all, in file order, with [`OR`] between: `["Super", "←", "or", "Super",
+    /// "Alt", "←"]`.
     pub caps: Vec<String>,
     pub text: String,
-    pub canonical: String,
+    /// Every key that reaches the row, canonical: one for most rows.
+    pub canonicals: Vec<String>,
 }
 
 /// A shortcut in one canonical spelling: modifiers in a fixed order, then the key, lowercase.
@@ -112,6 +125,15 @@ pub(crate) fn keybinds(rc: &str) -> Vec<Keybind> {
                 let after = &rest[k + KEYBIND.len()..];
                 let Some(end) = after.find('"') else { break };
                 let spec = &after[..end];
+                // A self-closing `<keybind ... />` has no body: the next `</keybind>` is another's.
+                let action = after[end..]
+                    .find('>')
+                    .filter(|open| !after[end..end + open].ends_with('/'))
+                    .and_then(|open| {
+                        let body = &after[end + open + 1..];
+                        body.find("</keybind>").map(|close| body[..close].split_whitespace().collect::<Vec<_>>().join(" "))
+                    })
+                    .unwrap_or_default();
                 let mut pieces: Vec<&str> = spec.split('-').collect();
                 let key = pieces.pop().unwrap_or_default();
                 let mut modifiers = BTreeSet::new();
@@ -128,6 +150,7 @@ pub(crate) fn keybinds(rc: &str) -> Vec<Keybind> {
                     spec: spec.to_string(),
                     canonical: canonical(&modifiers, key),
                     help: pending.take(),
+                    action,
                 });
                 rest = &after[end..];
             }
@@ -173,10 +196,13 @@ fn caps(canonical: &str) -> Vec<String> {
     canonical.split('+').map(cap).collect()
 }
 
-/// The sheet for `rc`, or every binding that has no `@help` comment or names a group the sheet
-/// does not draw. The shell never shows the error: the same check is a test on the shipped file.
+/// The sheet for `rc`, or every binding that has no `@help` comment, names a group the sheet
+/// does not draw, or runs what an earlier binding runs but says it in other words. The shell
+/// never shows the error: the same check is a test on the shipped file.
 pub(crate) fn sheet(rc: &str) -> Result<Vec<Row>, Vec<String>> {
-    let mut rows = Vec::new();
+    let mut rows: Vec<Row> = Vec::new();
+    // Which row each action went to, and the key that put it there.
+    let mut by_action: Vec<(String, usize, String)> = Vec::new();
     let mut problems = Vec::new();
     for bind in keybinds(rc) {
         let Some(help) = bind.help else {
@@ -191,7 +217,24 @@ pub(crate) fn sheet(rc: &str) -> Result<Vec<Row>, Vec<String>> {
             problems.push(format!("{} has an empty description", bind.spec));
             continue;
         }
-        rows.push(Row { group, caps: caps(&bind.canonical), text: help.text, canonical: bind.canonical });
+        // The same action as an earlier binding: its key joins that row. An empty body runs
+        // nothing, so it is the same as nothing.
+        if let Some((_, row, first)) = by_action.iter().find(|(a, _, _)| !a.is_empty() && *a == bind.action) {
+            let row = &mut rows[*row];
+            if row.group != *group || row.text != help.text {
+                problems.push(format!(
+                    "{} runs what {first} runs, so it is on that row; its @help must say the same (group {:?}, text {:?})",
+                    bind.spec, row.group, row.text
+                ));
+                continue;
+            }
+            row.caps.push(OR.to_string());
+            row.caps.extend(caps(&bind.canonical));
+            row.canonicals.push(bind.canonical);
+            continue;
+        }
+        by_action.push((bind.action.clone(), rows.len(), bind.spec.clone()));
+        rows.push(Row { group, caps: caps(&bind.canonical), text: help.text, canonicals: vec![bind.canonical] });
     }
     if problems.is_empty() {
         // Sections in the sheet's order; inside one, the file's.
@@ -256,6 +299,39 @@ mod tests {
         assert!(problems[0].starts_with("W-slash has no @help"), "{problems:?}");
     }
 
+    /// Super+← and Super+Alt+← both snap the window to the left half. Listed once each, under
+    /// Windows and under Snap, they read as two different things (design sign-off).
+    #[test]
+    fn two_keys_for_one_action_are_one_row_with_both_keys() {
+        let rc = r#"
+            <!-- @help group="Windows" text="Snap the window to the left half" -->
+            <keybind key="W-Left">
+              <action name="SnapToEdge" direction="left" />
+            </keybind>
+            <!-- @help group="Windows" text="Close the window" -->
+            <keybind key="A-F4"><action name="Close" /></keybind>
+            <!-- @help group="Windows" text="Snap the window to the left half" -->
+            <keybind key="W-A-Left"><action name="SnapToEdge"   direction="left" /></keybind>
+        "#;
+        let rows = sheet(rc).unwrap();
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(rows[0].caps, ["Super", "←", OR, "Super", "Alt", "←"]);
+        assert_eq!(rows[0].canonicals, ["super+left", "super+alt+left"]);
+        assert_eq!(matching(&rows, "super alt left").len(), 1, "either key finds the row");
+
+        // The second says it in other words: reported, not silently merged or listed twice.
+        let differs = rc.replacen(
+            r#"<!-- @help group="Windows" text="Snap the window to the left half" -->
+            <keybind key="W-A-Left">"#,
+            r#"<!-- @help group="Snap" text="Left half" -->
+            <keybind key="W-A-Left">"#,
+            1,
+        );
+        assert!(differs.contains("Left half"));
+        let problems = sheet(&differs).unwrap_err();
+        assert!(problems[0].starts_with("W-A-Left runs what W-Left runs"), "{problems:?}");
+    }
+
     #[test]
     fn a_group_the_sheet_does_not_draw_is_reported() {
         let rc = r#"<!-- @help group="Misc" text="Something" --><keybind key="W-x"></keybind>"#;
@@ -294,9 +370,9 @@ mod tests {
         let rows = sheet(SHIPPED_RC).unwrap_or_else(|problems| {
             panic!("every keybind in config/labwc/rc.xml needs a `<!-- @help group=\"...\" text=\"...\" -->` comment just before it:\n{}", problems.join("\n"))
         });
-        let listed: BTreeSet<String> = rows.iter().map(|r| r.canonical.clone()).collect();
+        let listed: BTreeSet<String> = rows.iter().flat_map(|r| r.canonicals.iter().cloned()).collect();
         let bound = crate::rc_keys::bound_keys(SHIPPED_RC);
-        assert_eq!(listed.len(), rows.len(), "a key is on the sheet twice");
+        assert_eq!(listed.len(), rows.iter().map(|r| r.canonicals.len()).sum::<usize>(), "a key is on the sheet twice");
         assert_eq!(
             listed.difference(&bound).collect::<Vec<_>>(),
             Vec::<&String>::new(),
@@ -309,6 +385,13 @@ mod tests {
         );
         assert!(bound.contains("super+/"), "Super+/ opens the sheet and must be bound");
         assert!(rows.len() >= 40, "only {} rows; the scan is reading the wrong thing", rows.len());
+        // No two rows run the same thing (that is one row with both keys), and the left and
+        // right halves are the rows the sign-off found twice.
+        let halves: Vec<&Row> = rows.iter().filter(|r| r.text.starts_with("Snap the window to the")).collect();
+        assert_eq!(halves.len(), 2, "{halves:?}");
+        assert_eq!(halves[0].caps, ["Super", "←", OR, "Super", "Alt", "←"]);
+        assert_eq!(halves[1].caps, ["Super", "→", OR, "Super", "Alt", "→"]);
+        assert!(!rows.iter().any(|r| r.text == "Left half" || r.text == "Right half"), "not listed a second time under Snap");
     }
 
     #[test]
