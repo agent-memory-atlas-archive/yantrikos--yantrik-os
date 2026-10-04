@@ -2206,6 +2206,7 @@ export component IntentLens inherits Rectangle {
                         mind: q.mind;
                         prompt: q.prompt;
                         options: q.options;
+                        asked: q.asked;
                         answered(a) => { root.question-answer(q.agent, q.request, a); }
                     }
                 }

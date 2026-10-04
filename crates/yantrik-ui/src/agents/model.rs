@@ -953,6 +953,13 @@ pub struct Question {
 }
 
 impl Question {
+    /// Why it closed when the agent stopped waiting on it: the turn that asked ended unanswered,
+    /// or the host refused the answer because the run no longer asks. The card reads "No longer
+    /// waiting: the agent stopped asking."
+    pub const STOPPED_ASKING: &'static str = "the agent stopped asking";
+    /// Why it closed when the desktop restarted: its run was orphaned with the shell.
+    pub const RESTARTED: &'static str = "the desktop restarted while it waited";
+
     /// Still waiting for the person.
     pub fn waiting(&self) -> bool {
         self.answer.is_empty() && self.closed.is_empty()

@@ -1340,6 +1340,7 @@ fn lens_question(agent: &str, mind: &str, q: &crate::agents::model::Question) ->
                 .map(|o| slint::SharedString::from(clip(o, QUESTION_OPTION_CHARS)))
                 .collect::<Vec<_>>(),
         )),
+        asked: clock(q.asked).into(),
     }
 }
 
@@ -1367,14 +1368,16 @@ fn question_of(q: &crate::agents::model::Question, key: String) -> AgentItemData
         )),
         answer: q.answer.as_str().into(),
         explain: q.closed.as_str().into(),
+        asked: clock(q.asked).into(),
         ..Default::default()
     }
 }
 
 /// The person answered the agent's question through its card. The host takes it first — it
 /// alone knows the run and refuses a second answer — and only then does the card settle; if the
-/// host could not deliver it, the card closes with why instead of claiming an answer that never
-/// arrived.
+/// host could not deliver it, the card closes instead of claiming an answer that never arrived.
+/// Every refusal means the run is no longer asking, so the card says the one sentence a turn
+/// that ended unanswered says; the host's own words go to the log.
 pub fn answer_question(agent: &str, request: &str, answer: &str) {
     let answer = answer.trim();
     if answer.is_empty() {
@@ -1396,7 +1399,10 @@ pub fn answer_question(agent: &str, request: &str, answer: &str) {
         Ok(()) => {
             agents::store().question_answered(&id, request, answer);
         }
-        Err(why) => agents::store().question_closed(&id, request, &why),
+        Err(why) => {
+            tracing::info!(agent = %id.0, request, why = %why, "a question's answer was refused; its card closes");
+            agents::store().question_closed(&id, request, crate::agents::model::Question::STOPPED_ASKING);
+        }
     }
 }
 
@@ -1550,6 +1556,7 @@ fn card_of(c: &Card, key: String, open: bool) -> AgentItemData {
         request: Default::default(),
         options: Default::default(),
         answer: Default::default(),
+        asked: Default::default(),
         block: Default::default(),
         styled: Default::default(),
     }
@@ -2024,6 +2031,32 @@ mod tests {
 
         agents::store().question_answered(&agent, "q-describe-1", "No");
         assert!(mine(questions_for_describe()).is_empty(), "an answered question is not waiting");
+    }
+
+    /// A question whose turn ended unanswered leaves `describe shell`, and its card is drawn
+    /// closed with the reason, beside when it was asked, so it never passes for a live one.
+    #[test]
+    fn a_question_whose_turn_ended_leaves_describe_and_its_card_says_so() {
+        let agent = AgentId::new("pi", "c-describe-stale-question");
+        agents::store().open_turn(&agent, "forget the old address");
+        let ask = yantrik_harness::event::Event::Request {
+            request_id: "q-stale-1".into(),
+            prompt: "Keep or Erase?".into(),
+            options: vec!["Keep".into(), "Erase".into()],
+        };
+        agents::store().event(&agent, &ask, agents::model::Provenance::Reported);
+        let mine = || -> usize {
+            questions_for_describe().as_array().unwrap().iter().filter(|q| q["agent"] == agent.0.as_str()).count()
+        };
+        assert_eq!(mine(), 1);
+
+        agents::store().close_turn(&agent, true);
+        assert_eq!(mine(), 0, "the agent stopped asking");
+        let card = agents::store().read(|s| {
+            items_of(s.agent(&agent).unwrap(), &HashSet::new(), &[], None).into_iter().find(|i| i.kind == "question").unwrap()
+        });
+        assert_eq!(card.explain.as_str(), agents::model::Question::STOPPED_ASKING);
+        assert!(!card.asked.is_empty(), "the card says when it was asked");
     }
 
     fn read(relative: &str) -> String {
