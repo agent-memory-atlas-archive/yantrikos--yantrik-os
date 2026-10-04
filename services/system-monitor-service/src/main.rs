@@ -8,6 +8,7 @@
 //!   sysmon.processes   { sort_by?, limit? }      → Vec<ProcessInfo>
 //!   sysmon.kill_process { pid }                  → ()
 
+mod cpu;
 mod recent;
 
 use yantrik_ipc_contracts::machine_status::{Fact, MachineStatus, Readings};
@@ -138,9 +139,12 @@ fn describe_view() -> Result<View, ServiceError> {
         .first()
         .map(|p| format!(", busiest {} ({:.0}%)", p.name, p.cpu_percent))
         .unwrap_or_default();
+    // No figure until there is an interval to measure it over (cpu.rs).
+    let cpu_percent = snap.cpu.measured_percent();
+    let cpu_text = cpu_percent.map_or("CPU —".to_string(), |p| format!("CPU {p:.0}%"));
     let summary = format!(
-        "System — CPU {:.0}%, memory {} / {} ({:.0}%), load {:.2}, up {}{}",
-        snap.cpu.overall_percent,
+        "System — {}, memory {} / {} ({:.0}%), load {:.2}, up {}{}",
+        cpu_text,
         mem_used,
         mem_total,
         snap.memory.usage_percent,
@@ -175,7 +179,10 @@ fn describe_view() -> Result<View, ServiceError> {
         .collect();
 
     Ok(View::new(summary)
-        .with("cpu_percent", (snap.cpu.overall_percent).round() as i64)
+        // Null until two reads of /proc/stat have an interval between them; the interval is
+        // `cpu_window_ms`, so a caller knows what the share is a share of.
+        .with("cpu_percent", cpu_percent.map(|p| p.round() as i64))
+        .with("cpu_window_ms", snap.cpu.window_ms)
         .with("cores", snap.cpu.cores.len() as i64)
         .with("load", serde_json::json!([snap.cpu.load_avg_1, snap.cpu.load_avg_5, snap.cpu.load_avg_15]))
         .with("memory_used", mem_used)
@@ -376,22 +383,26 @@ mod platform {
     use std::collections::HashMap;
 
     pub fn build_snapshot() -> Result<SystemSnapshot, ServiceError> {
-        let (overall, cores) = read_cpu_usage();
+        // A share of CPU over the interval since the last read (cpu.rs), never the since-boot
+        // average one read gives. The core count does not wait for an interval: the load limit
+        // is checked against it from the first read.
+        let times = crate::cpu::parse_stat(&std::fs::read_to_string("/proc/stat").unwrap_or_default());
+        let core_count = times.len().saturating_sub(1);
+        let delta = crate::cpu::measure(times);
         let (l1, l5, l15) = read_load_avg();
 
         let cpu = CpuInfo {
-            overall_percent: overall,
-            cores: cores
-                .into_iter()
-                .enumerate()
-                .map(|(i, usage)| CpuCore {
+            overall_percent: delta.as_ref().map_or(0.0, |d| d.overall),
+            cores: (0..core_count)
+                .map(|i| CpuCore {
                     id: i as u32,
-                    usage_percent: usage,
+                    usage_percent: delta.as_ref().and_then(|d| d.cores.get(i).copied()).unwrap_or(0.0),
                 })
                 .collect(),
             load_avg_1: l1,
             load_avg_5: l5,
             load_avg_15: l15,
+            window_ms: delta.as_ref().map(|d| d.window.as_millis() as u64),
         };
 
         let meminfo = read_meminfo();
@@ -453,48 +464,6 @@ mod platform {
             networks,
             uptime_secs,
         })
-    }
-
-    fn read_cpu_usage() -> (f64, Vec<f64>) {
-        let content = match std::fs::read_to_string("/proc/stat") {
-            Ok(c) => c,
-            Err(_) => return (0.0, Vec::new()),
-        };
-
-        let mut overall = 0.0;
-        let mut cores = Vec::new();
-
-        for line in content.lines() {
-            if !line.starts_with("cpu") {
-                continue;
-            }
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() < 5 {
-                continue;
-            }
-            let values: Vec<u64> = parts[1..]
-                .iter()
-                .filter_map(|s| s.parse().ok())
-                .collect();
-            if values.len() < 4 {
-                continue;
-            }
-            let idle = values[3] + values.get(4).copied().unwrap_or(0);
-            let total: u64 = values.iter().sum();
-            let usage = if total > 0 {
-                (total - idle) as f64 / total as f64 * 100.0
-            } else {
-                0.0
-            };
-
-            if parts[0] == "cpu" {
-                overall = usage;
-            } else {
-                cores.push(usage);
-            }
-        }
-
-        (overall, cores)
     }
 
     fn read_load_avg() -> (f64, f64, f64) {
@@ -831,6 +800,7 @@ mod platform {
                 load_avg_1: 0.0,
                 load_avg_5: 0.0,
                 load_avg_15: 0.0,
+                window_ms: None,
             },
             memory: MemoryInfo {
                 total_bytes: 0,

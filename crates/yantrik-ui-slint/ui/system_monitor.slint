@@ -86,6 +86,9 @@ export component SystemMonitor inherits Rectangle {
 
     // CPU
     in property <float> cpu-usage: 0.0;
+    // False until two readings give an interval to measure over. One reading's figure is the
+    // average since boot, and the ring and the cores draw nothing rather than that.
+    in property <bool> cpu-measured: false;
     in property <string> cpu-model: "";
     in property <string> cpu-frequency: "";
     in property <string> load-avg-1: "0.00";
@@ -375,15 +378,16 @@ export component SystemMonitor inherits Rectangle {
                                         border-color: root.cpu-usage > 80 ? Theme.color-emotional : Theme.accent;
                                         background: transparent;
                                         // Clip to show percentage (using opacity trick)
-                                        opacity: root.cpu-usage / 100;
+                                        opacity: root.cpu-measured ? root.cpu-usage / 100 : 0;
                                         animate opacity { duration: 300ms; }
                                         animate border-color { duration: 300ms; }
                                     }
 
                                     // Center text
                                     Text {
-                                        text: Math.round(root.cpu-usage) + "%";
-                                        color: root.cpu-usage > 80 ? Theme.color-emotional : Theme.accent;
+                                        text: root.cpu-measured ? Math.round(root.cpu-usage) + "%" : "—";
+                                        color: !root.cpu-measured ? Theme.text-dim
+                                            : root.cpu-usage > 80 ? Theme.color-emotional : Theme.accent;
                                         font-size: Theme.fs-title-1;
                                         font-weight: 700;
                                         horizontal-alignment: center;
@@ -461,6 +465,12 @@ export component SystemMonitor inherits Rectangle {
                                 color: Theme.text-dim;
                                 font-size: Theme.fs-micro;
                                 letter-spacing: 1px;
+                            }
+
+                            if root.cpu-cores.length == 0 : Text {
+                                text: "No reading yet";
+                                color: Theme.text-dim;
+                                font-size: Theme.fs-caption;
                             }
 
                             for core in root.cpu-cores : HorizontalLayout {

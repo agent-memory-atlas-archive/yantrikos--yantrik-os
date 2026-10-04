@@ -66,7 +66,11 @@ impl Disk {
 pub struct Readings {
     /// Already in the screen's own words ("6d 5h"), so it reads the same as the rest of it.
     pub uptime: Option<String>,
+    /// The busy share over `cpu_window_ms`. `None` until there is an interval to measure it
+    /// over: one read of the counters is the average since boot, and would read 8% through a
+    /// minute at 100%. The row then says "CPU —", and nothing else on it depends on CPU.
     pub cpu_percent: Option<f64>,
+    pub cpu_window_ms: Option<u64>,
     /// `(total, used)`, where used is total less what is available.
     pub memory: Option<(u64, u64)>,
     /// `(total, used)`. A total of zero is a machine with no swap.
@@ -84,7 +88,8 @@ impl Readings {
     pub fn from_snapshot(s: &crate::system_monitor::SystemSnapshot) -> Readings {
         Readings {
             uptime: None,
-            cpu_percent: Some(s.cpu.overall_percent),
+            cpu_percent: s.cpu.measured_percent(),
+            cpu_window_ms: s.cpu.window_ms,
             memory: Some((s.memory.total_bytes, s.memory.used_bytes)),
             swap: Some((s.memory.swap_total_bytes, s.memory.swap_used_bytes)),
             disks: s
@@ -283,7 +288,7 @@ fn facts(r: &Readings, shown: &[Fact]) -> Vec<String> {
         .iter()
         .filter_map(|fact| match fact {
             Fact::Uptime => r.uptime.as_ref().map(|u| format!("Uptime {u}")),
-            Fact::Cpu => r.cpu_percent.map(|p| format!("CPU {}%", whole(p))),
+            Fact::Cpu => Some(cpu_fact(r.cpu_percent, r.cpu_window_ms)),
             Fact::Memory => r
                 .memory
                 .filter(|(t, _)| *t > 0)
@@ -301,6 +306,23 @@ fn facts(r: &Readings, shown: &[Fact]) -> Vec<String> {
             Fact::Load => r.load_1.map(|l| format!("Load {l:.2}")),
         })
         .collect()
+}
+
+/// Past this, a share of CPU is an average over a stretch nobody would call "now", and says so.
+const CPU_NOW_MS: u64 = 10_000;
+
+/// "CPU 8%" over the poll's few seconds; "CPU 8% over the last 5 min" when the interval is long
+/// (a `describe` asked minutes after the last); "CPU —" with no interval at all.
+fn cpu_fact(percent: Option<f64>, window_ms: Option<u64>) -> String {
+    match (percent, window_ms) {
+        (Some(p), Some(ms)) if ms > CPU_NOW_MS => {
+            let secs = ms / 1000;
+            let span = if secs < 120 { format!("{secs} s") } else { format!("{} min", secs / 60) };
+            format!("CPU {}% over the last {span}", whole(p))
+        }
+        (Some(p), _) => format!("CPU {}%", whole(p)),
+        (None, _) => "CPU —".to_string(),
+    }
 }
 
 /// "1.7 GB", "512 MB": free space is read at a glance, not to the byte.
@@ -330,6 +352,7 @@ mod tests {
         Readings {
             uptime: Some("6d 5h".into()),
             cpu_percent: Some(8.2),
+            cpu_window_ms: Some(2000),
             memory: Some((16 * GB, 8 * GB)),
             swap: Some((0, 0)),
             disks: vec![disk("/", 31.3, 10.0)],
@@ -409,9 +432,61 @@ mod tests {
     #[test]
     fn nothing_measured_claims_nothing() {
         let s = MachineStatus::assess(&Readings::default(), APP_ROW);
-        assert_eq!(s.line(), "");
+        assert_eq!(s.line(), "CPU —");
         assert!(!s.needs_you());
         assert_eq!(s.thresholds, "No limits checked: nothing measured yet");
+    }
+
+    #[test]
+    fn no_cpu_figure_without_an_interval_and_nothing_else_moves() {
+        let unmeasured = Readings { cpu_percent: None, cpu_window_ms: None, ..calm() };
+        let s = MachineStatus::assess(&unmeasured, APP_ROW);
+        assert_eq!(s.line(), "CPU — · Memory 50% · Disk 32% full · Swap none · No limits reached");
+        // The load limit is checked against the core count, which needs no interval.
+        assert!(s.thresholds.contains("1-minute load above 4"));
+        let busy = Readings { load_1: Some(9.0), ..unmeasured };
+        assert_eq!(MachineStatus::assess(&busy, APP_ROW).lead, "Load 9.00 above 4 cores");
+    }
+
+    #[test]
+    fn a_share_over_a_long_interval_says_how_long() {
+        let r = Readings { cpu_percent: Some(12.0), cpu_window_ms: Some(300_000), ..calm() };
+        assert!(MachineStatus::assess(&r, APP_ROW).line().starts_with("CPU 12% over the last 5 min · "));
+        let r = Readings { cpu_window_ms: Some(45_000), ..r };
+        assert!(MachineStatus::assess(&r, APP_ROW).line().starts_with("CPU 12% over the last 45 s · "));
+    }
+
+    #[test]
+    fn a_snapshot_without_an_interval_has_no_cpu_figure() {
+        use crate::system_monitor::*;
+        let mut snap = SystemSnapshot {
+            cpu: CpuInfo {
+                overall_percent: 8.0,
+                cores: vec![CpuCore { id: 0, usage_percent: 8.0 }, CpuCore { id: 1, usage_percent: 8.0 }],
+                load_avg_1: 0.5,
+                load_avg_5: 0.5,
+                load_avg_15: 0.5,
+                window_ms: None,
+            },
+            memory: MemoryInfo {
+                total_bytes: 0,
+                used_bytes: 0,
+                usage_percent: 0.0,
+                swap_total_bytes: 0,
+                swap_used_bytes: 0,
+                available_bytes: 0,
+                cached_bytes: 0,
+                buffers_bytes: 0,
+            },
+            disks: vec![],
+            networks: vec![],
+            uptime_secs: 0,
+        };
+        let r = Readings::from_snapshot(&snap);
+        assert_eq!(r.cpu_percent, None, "the 8% is a since-boot average, not a reading");
+        assert_eq!(r.cores, 2);
+        snap.cpu.window_ms = Some(2000);
+        assert_eq!(Readings::from_snapshot(&snap).cpu_percent, Some(8.0));
     }
 
     #[test]

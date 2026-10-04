@@ -29,6 +29,12 @@ pub fn summary(status: &MachineStatus, memory_used: &str, memory_total: &str, up
     format!("System — {line}; memory {memory_used} of {memory_total}; up {uptime}")
 }
 
+/// `describe`'s `cpu_percent`: the share over `cpu_window_ms`, or null when there is no interval
+/// yet. It was the since-boot average, reported as if it were now.
+pub fn cpu_percent(percent: f32, window_ms: Option<u64>) -> Option<f64> {
+    window_ms.map(|_| (percent * 10.0).round() as f64 / 10.0)
+}
+
 /// `describe`'s status fields.
 ///
 /// `health` and `health_summary` are kept for callers that read them, and now carry the status
@@ -61,6 +67,7 @@ mod tests {
                 load_avg_1: 1.15,
                 load_avg_5: 1.0,
                 load_avg_15: 0.9,
+                window_ms: Some(2000),
             },
             memory: MemoryInfo {
                 total_bytes: 16 * GB,
@@ -136,6 +143,17 @@ mod tests {
             assert!(!text.contains("nominal"), "{text}");
             assert!(!text.contains("health_score"), "the score nothing measured is gone: {text}");
         }
+    }
+
+    #[test]
+    fn before_the_second_sample_there_is_no_cpu_figure_anywhere() {
+        // The first reading's CPU is the counters over themselves: the average since boot.
+        let mut first = snap(10.0);
+        first.cpu.window_ms = None;
+        let status = assess(&first);
+        assert_eq!(status.line(), "CPU — · Memory 50% · Disk 32% full · Swap none · No limits reached");
+        assert_eq!(cpu_percent(8.0, None), None);
+        assert_eq!(cpu_percent(8.04, Some(2000)), Some(8.0));
     }
 
     #[test]

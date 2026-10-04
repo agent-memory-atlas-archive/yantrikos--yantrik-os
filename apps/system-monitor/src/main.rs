@@ -35,6 +35,8 @@ struct Status {
     failure: Option<String>,
     /// What the last reading adds up to: the status row, kept whole for `describe`.
     machine: MachineStatus,
+    /// The interval the CPU figures on screen cover; `None` while there is none.
+    cpu_window_ms: Option<u64>,
 }
 
 /// Put the two kinds of bad news on screen, and nothing when there is none.
@@ -53,7 +55,12 @@ fn refresh_agent_rail(ui: &SystemMonitorApp) {
     let context = vec![
         AgentContextItem {
             id: "cpu".into(),
-            label: format!("CPU {:.0}%", ui.get_cpu_usage()).into(),
+            // No figure before the first interval: one read is the average since boot.
+            label: if ui.get_cpu_measured() {
+                format!("CPU {:.0}%", ui.get_cpu_usage()).into()
+            } else {
+                "CPU —".into()
+            },
             detail: "processor".into(),
             source: "file".into(),
         },
@@ -217,8 +224,13 @@ fn format_uptime(secs: u64) -> String {
 // ── Apply snapshot to UI ─────────────────────────────────────────────
 
 fn apply_snapshot(ui: &SystemMonitorApp, status: &Rc<RefCell<Status>>, snap: &SystemSnapshot) {
-    // CPU
-    ui.set_cpu_usage(snap.cpu.overall_percent as f32);
+    // CPU — a share over the interval since the last reading, and no figure until there is
+    // one: a single read of the counters is the average since boot, which reads 8% through a
+    // minute at 100%. The per-core bars wait for the same interval.
+    let measured = snap.cpu.measured_percent();
+    ui.set_cpu_measured(measured.is_some());
+    ui.set_cpu_usage(measured.unwrap_or(0.0) as f32);
+    status.borrow_mut().cpu_window_ms = snap.cpu.window_ms;
     ui.set_load_avg_1(format!("{:.2}", snap.cpu.load_avg_1).into());
     ui.set_load_avg_5(format!("{:.2}", snap.cpu.load_avg_5).into());
     ui.set_load_avg_15(format!("{:.2}", snap.cpu.load_avg_15).into());
@@ -227,6 +239,7 @@ fn apply_snapshot(ui: &SystemMonitorApp, status: &Rc<RefCell<Status>>, snap: &Sy
         .cpu
         .cores
         .iter()
+        .filter(|_| measured.is_some())
         .map(|c| CpuCoreData {
             core_id: c.id as i32,
             usage: c.usage_percent as f32,
@@ -472,6 +485,7 @@ fn publish_control(app: &SystemMonitorApp, status: Rc<RefCell<Status>>) {
             let cpu = ui.get_cpu_usage();
             let mem = ui.get_memory_usage();
             let machine = status.borrow().machine.clone();
+            let cpu_window_ms = status.borrow().cpu_window_ms;
 
             let procs = ui.get_processes();
             // The busiest handful. The window shows hundreds; a caller asking "what is eating the
@@ -544,7 +558,9 @@ fn publish_control(app: &SystemMonitorApp, status: Rc<RefCell<Status>>) {
                 )
                 // Said twice: this is the same text the person is looking at on the strip.
                 .with("notice", ui.get_notice().to_string())
-                .with("cpu_percent", (cpu * 10.0).round() as f64 / 10.0)
+                // Null, with `cpu_window_ms`, until there is an interval to measure over.
+                .with("cpu_percent", report::cpu_percent(cpu, cpu_window_ms))
+                .with("cpu_window_ms", cpu_window_ms)
                 // Also null when nothing has measured it, which today is always: the snapshot
                 // contract has no model string in it, so neither path can fill this in. It was
                 // reported as `""`, and an audit read that as a CPU whose model is empty.
@@ -637,6 +653,8 @@ fn show_reading(ui: &SystemMonitorApp, status: &Rc<RefCell<Status>>, reading: sa
 
     status.borrow_mut().reading = Some(reading.provenance);
     show_status(ui, status);
+    // The rail's context is the readings themselves, so it moves with them.
+    refresh_agent_rail(ui);
 }
 
 /// The busiest hundred; the list shows them all and `describe` names the top ten.

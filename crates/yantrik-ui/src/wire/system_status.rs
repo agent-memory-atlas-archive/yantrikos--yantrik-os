@@ -28,7 +28,9 @@ fn assess(snap: &yantrik_os::SystemSnapshot, uptime: Option<String>, load_1: Opt
     let memory_measured = snap.memory_total_bytes > 0;
     let readings = Readings {
         uptime,
-        cpu_percent: Some(snap.cpu_usage_percent as f64),
+        // CPU has its own bar above this card, and no limit is checked against it.
+        cpu_percent: None,
+        cpu_window_ms: None,
         memory: memory_measured.then_some((snap.memory_total_bytes, snap.memory_used_bytes)),
         swap: memory_measured.then_some((snap.swap_total_bytes, snap.swap_used_bytes)),
         // The shell's observer measures the root filesystem and nothing else.

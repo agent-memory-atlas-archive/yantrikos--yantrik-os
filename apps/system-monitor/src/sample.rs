@@ -8,6 +8,7 @@
 
 use std::cell::Cell;
 use std::sync::mpsc;
+use std::time::Instant;
 
 use yantrik_ipc_contracts::machine_status::is_real_filesystem;
 use yantrik_ipc_contracts::system_monitor::{
@@ -30,8 +31,8 @@ pub struct Reading {
 /// which threw away both the reason and the fact that it had happened. It is worth keeping — a
 /// monitor that goes blank because a service died is worse than one reading its own `sysinfo` —
 /// but only as long as it is visible, so the value and the provenance arrive together.
-pub fn take(sort: &str, limit: u32) -> Reading {
-    let (snap, from_snapshot) = outcome::reading(snapshot_via_service(), snapshot_local);
+pub fn take(sort: &str, limit: u32, local: &mut Local) -> Reading {
+    let (snap, from_snapshot) = outcome::reading(snapshot_via_service(), || snapshot_local(local));
     let (procs, from_processes) =
         outcome::reading(processes_via_service(sort, limit), || processes_local(sort, limit));
     Reading { snap, procs, provenance: outcome::worse(from_snapshot, from_processes) }
@@ -53,8 +54,9 @@ impl Sampler {
         let (asks, work) = mpsc::channel::<(&'static str, u32)>();
         let (done, readings) = mpsc::channel();
         std::thread::spawn(move || {
+            let mut local = Local::default();
             while let Ok((sort, limit)) = work.recv() {
-                if done.send(take(sort, limit)).is_err() {
+                if done.send(take(sort, limit, &mut local)).is_err() {
                     break;
                 }
                 wake();
@@ -106,11 +108,31 @@ fn processes_via_service(sort_by: &str, limit: u32) -> Result<Vec<ProcessInfo>, 
 
 // ── Local sysinfo fallback ───────────────────────────────────────────
 
-fn snapshot_local() -> SystemSnapshot {
+/// The fallback's `sysinfo` state, kept between readings on the sampler's thread.
+///
+/// `sysinfo`'s CPU figures are, like /proc/stat's, a difference between two refreshes, and the
+/// fallback built a fresh `System` for every reading — so it never had two, and its CPU was
+/// whatever one refresh said. It now keeps one, and reports no figure until it has an interval.
+pub struct Local {
+    sys: sysinfo::System,
+    cpu_refreshed: Option<Instant>,
+}
+
+impl Default for Local {
+    fn default() -> Self {
+        Local { sys: sysinfo::System::new(), cpu_refreshed: None }
+    }
+}
+
+fn snapshot_local(local: &mut Local) -> SystemSnapshot {
     use sysinfo::System;
 
-    let mut sys = System::new_all();
-    sys.refresh_all();
+    let sys = &mut local.sys;
+    sys.refresh_cpu_usage();
+    sys.refresh_memory();
+    // The poll is two seconds apart, well past sysinfo's minimum between CPU refreshes.
+    let now = Instant::now();
+    let window = local.cpu_refreshed.replace(now).map(|at| now.duration_since(at));
 
     let cores: Vec<_> = sys
         .cpus()
@@ -137,6 +159,7 @@ fn snapshot_local() -> SystemSnapshot {
         load_avg_1: load.one,
         load_avg_5: load.five,
         load_avg_15: load.fifteen,
+        window_ms: window.map(|w| w.as_millis() as u64),
     };
 
     let (cached, buffers) = cached_and_buffers();
