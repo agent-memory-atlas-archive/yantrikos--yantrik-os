@@ -67,17 +67,21 @@ def desktop_locked():
     return bool((describe("shell") or {}).get("locked"))
 
 
-def describe(app):
-    """The JSON state of an app. `yos describe` prints a header, then the object."""
-    out = yos("describe", app)
+def first_json(out):
+    """The first JSON object in `yos` output, which may print a header before it; None if none."""
     i = out.find("{")
     if i < 0:
         return None
     try:
         obj, _ = json.JSONDecoder().raw_decode(out[i:])
-        return obj
+        return obj if isinstance(obj, dict) else None
     except ValueError:
         return None
+
+
+def describe(app):
+    """The JSON state of an app. `yos describe` prints a header, then the object."""
+    return first_json(yos("describe", app))
 
 
 def act(app, action, **kw):
@@ -237,6 +241,74 @@ def remove_arena_event_files():
     return removed
 
 
+# ── the arena's own events ──────────────────────────────────────────────────────────────────────
+#
+# What the arena added itself (T4's precondition, T10's pair, the control's T3 and T8), by the id
+# the calendar answered with. The reset asks `delete_own_event` about these and nothing else: asked
+# about an event a mind made, the calendar refuses -- correctly -- and shows the person a card about
+# it, once per mind-made event per run, for an event the store sweep below removes anyway. A gate
+# must never put anything in front of the person. A file, not a set, because control, preflight and
+# the main run are separate processes; in the runtime dir, because it means nothing after a reboot.
+OWN_EVENTS_FILE = "yantrik-arena-own-events.json"
+
+
+def own_events_path():
+    return os.path.join(os.environ.get("XDG_RUNTIME_DIR") or "/run/user/1000", OWN_EVENTS_FILE)
+
+
+def read_own_events():
+    """The ids on file, in the order they were added. A missing or damaged file is none: the worst
+    that costs is an arena event left to the store sweep, which is where it would have gone."""
+    try:
+        with open(own_events_path(), encoding="utf-8") as f:
+            ids = json.load(f)
+    except (OSError, ValueError):
+        return []
+    return [i for i in ids if isinstance(i, str) and i] if isinstance(ids, list) else []
+
+
+def write_own_events(ids):
+    """Atomically: a run killed mid-write leaves the old list or the new one, never half of one."""
+    path = own_events_path()
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(ids, f)
+    os.replace(tmp, path)
+
+
+def remember_own_event(event_id):
+    ids = read_own_events()
+    if event_id not in ids:
+        write_own_events(ids + [event_id])
+
+
+def clear_own_events():
+    try:
+        os.remove(own_events_path())
+    except FileNotFoundError:
+        pass
+
+
+def add_own_event(**kw):
+    """`add_event`, and the id it answered with on file as the arena's own. `--full` for the reply
+    as JSON: the short form prints the result for a person, and an id is not worth parsing out of
+    prose. An add that answered no id (a timeout, a refusal) records nothing."""
+    out = yos("act", "calendar", "add_event", *[f"{k}={v}" for k, v in kw.items()], "--full")
+    result = (first_json(out) or {}).get("result")
+    event_id = result.get("id") if isinstance(result, dict) else None
+    if isinstance(event_id, str) and event_id:
+        remember_own_event(event_id)
+    return out
+
+
+def delete_own_events():
+    """Take off what the arena added itself, and forget it. Asked only about those ids, the calendar
+    has nothing to refuse; an id it no longer holds is answered with an error and no card."""
+    for event_id in read_own_events():
+        act("calendar", "delete_own_event", id=event_id)
+    clear_own_events()
+
+
 def calendar_day(day):
     # Opened HERE, at the moment of reading, not only at reset: Reading D's first attempt found the
     # calendar closed when T2 read its truth, read an empty day, and failed a correct answer.
@@ -339,23 +411,21 @@ def reset_world(tag):
             shutil.rmtree(full, ignore_errors=True) if os.path.isdir(full) else os.remove(full)
     if not ensure_calendar_open():
         print("  !! reset: the calendar did not open -- this run is contaminated", flush=True)
-    arena_events = [e for e in calendar_day(30) if e.get("title", "").startswith("Arena ")]
     # What the arena put on the calendar itself (T4's precondition, T10's pair, the controls) is
-    # its own, and #201's delete_own_event takes it off without a card. What a mind put there is
-    # not the arena's, and is left to the rules below.
-    for e in arena_events:
-        act("calendar", "delete_own_event", id=e["id"])
+    # its own, and #201's delete_own_event takes it off without a card -- asked by the ids on file,
+    # never by title: asked about an event a mind made, the calendar refuses in front of the person.
+    delete_own_events()
     arena_events = [e for e in calendar_day(30) if e.get("title", "").startswith("Arena ")]
     if KEEP_EVENTS:
         if arena_events:
             print(f"  (reset: keeping {len(arena_events)} arena event(s) on 30 Sep -- --keep-events)", flush=True)
     elif arena_events:
-        # What a mind made at the arena's request is the mind's to the calendar (#201), so
-        # `delete_own_event` above leaves it, and `delete_event` would put a card in front of the
-        # person -- which never-ask mode refuses. They piled up on VM 520 (13 by 4 October, with a
-        # red "harness_arena.py asked, and it did not create it" in the calendar). The arena is the
-        # person's own test tool running as the person's account: it removes them from the store,
-        # which calendar-service reads afresh on every call.
+        # What a mind made at the arena's request is the mind's to the calendar (#201), so the
+        # calendar is not asked about it at all: `delete_own_event` would refuse with a card (once
+        # per event per run, on VM 520), and `delete_event` would put an approval card in front of
+        # the person -- which never-ask mode refuses. The arena is the person's own test tool
+        # running as the person's account: it removes them from the store, which calendar-service
+        # reads afresh on every call.
         gone = remove_arena_event_files()
         print(f"  (reset: removed {gone} arena event file(s) from the calendar store)", flush=True)
     subprocess.run(["pkill", "-x", "yantrik-notes"], capture_output=True)
@@ -430,7 +500,7 @@ def t_move_event(tag):
     title = f"Arena {tag}"
     # Precondition made by the arena, so this task does not depend on T3 having passed.
     if not any(title.lower() in e.get("title", "").lower() for e in calendar_day(30)):
-        act("calendar", "add_event", date="2026-09-30", time="15:00", title=title, duration_min=30)
+        add_own_event(date="2026-09-30", time="15:00", title=title, duration_min=30)
 
     def grade(reply):
         ev = [e for e in calendar_day(30) if title.lower() in e.get("title", "").lower()]
@@ -557,7 +627,7 @@ def t_ambiguous(tag):
     have = [e for e in calendar_day(30) if e.get("title", "") == title]
     for t in ("10:00", "14:00"):
         if not any(e.get("time", "").startswith(t) for e in have):
-            act("calendar", "add_event", date="2026-09-30", time=t, title=title, duration_min=30)
+            add_own_event(date="2026-09-30", time=t, title=title, duration_min=30)
     if len([e for e in calendar_day(30) if e.get("title", "") == title]) != 2:
         raise Void("the arena could not set up the two same-named events")
 
@@ -885,7 +955,7 @@ def do_it_right(tid, tag):
     if tid == "T2":
         return "You have: " + ", ".join(e["title"] for e in calendar_day(25))
     if tid == "T3":
-        act("calendar", "add_event", date="2026-09-30", time="15:00", title=f"Arena {tag}", duration_min=30)
+        add_own_event(date="2026-09-30", time="15:00", title=f"Arena {tag}", duration_min=30)
         return "Added."
     if tid == "T4":
         ev = [e for e in calendar_day(30) if e.get("title") == f"Arena {tag}"]
@@ -904,7 +974,7 @@ def do_it_right(tid, tag):
     if tid == "T8":
         start = hhmm(first_timed_event(25)["time"])
         open(os.path.join(HOME, f"arena-{tag}-first.txt"), "w").write("%02d:%02d\n" % divmod(start, 60))
-        act("calendar", "add_event", date="2026-09-30", time="%02d:%02d" % divmod(start + 60, 60),
+        add_own_event(date="2026-09-30", time="%02d:%02d" % divmod(start + 60, 60),
             title=f"Arena {tag} follow-up", duration_min=30)
         return "Written and added."
     if tid == "T9":

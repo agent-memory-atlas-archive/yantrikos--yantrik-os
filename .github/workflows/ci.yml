@@ -186,6 +186,12 @@ jobs:
       - name: The attachable harnesses close every turn exactly once
         run: python3 -m unittest discover -s harnesses/tests -v
 
+      # The arena runs on the desktop, but the record of what it added itself does not need one:
+      # the reset deletes through the calendar only those ids, so a gate never shows the person
+      # a refusal card. Stdlib only, with `yos` faked.
+      - name: The arena deletes through the calendar only the events it made
+        run: python3 -m unittest discover -s tests/arena -v
+
       # The Blender control surface's tests: the addon that answers for somebody else's
       # program, driven against a fake `bpy`. Stdlib-only, no Blender and no display needed,
       # like everything above. Among them is one vector the Rust side asserts too — the
