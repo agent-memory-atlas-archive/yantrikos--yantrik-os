@@ -258,6 +258,9 @@ pub struct Engine {
     /// then acted past must not come back on the next timer tick, or nothing they do can ever
     /// clear it. A new notice raises it again.
     notice_seen: Arc<std::sync::atomic::AtomicBool>,
+    /// Whether the current notice is information (the list came back changed) rather than a
+    /// fault. The window leads the one with an info glyph and the other with a warning glyph.
+    notice_is_info: Arc<std::sync::atomic::AtomicBool>,
     /// When the list was last written. Read only by the progress throttle.
     last_save: Arc<Mutex<Option<Instant>>>,
 }
@@ -281,6 +284,7 @@ impl Engine {
             store_path: state_dir.join("state.json"),
             notice: Arc::new(Mutex::new(String::new())),
             notice_seen: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            notice_is_info: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             last_save: Arc::new(Mutex::new(None)),
         };
         engine.load();
@@ -316,9 +320,19 @@ impl Engine {
         self.notice_seen.store(true, Ordering::Relaxed);
     }
 
+    /// Whether the notice is information rather than a fault.
+    pub fn notice_is_info(&self) -> bool {
+        self.notice_is_info.load(Ordering::Relaxed)
+    }
+
     fn set_notice(&self, text: impl Into<String>) {
+        self.set_notice_as(text, false);
+    }
+
+    fn set_notice_as(&self, text: impl Into<String>, info: bool) {
         let text = text.into();
         let raise = !text.is_empty();
+        self.notice_is_info.store(info, Ordering::Relaxed);
         if let Ok(mut notice) = self.notice.lock() {
             *notice = text;
         }
@@ -410,15 +424,9 @@ impl Engine {
 
         if interrupted > 0 || missing > 0 {
             // Said out loud rather than left for someone to notice in the list: these are the two
-            // states where what is on screen differs from what the person last saw.
-            let mut parts = Vec::new();
-            if interrupted > 0 {
-                parts.push(format!("{interrupted} interrupted by the last shutdown, now paused"));
-            }
-            if missing > 0 {
-                parts.push(format!("{missing} finished file(s) no longer on disk"));
-            }
-            self.set_notice(format!("Restored the download list — {}", parts.join("; ")));
+            // states where what is on screen differs from what the person last saw. Information,
+            // not a fault: nothing was lost by this app, and every row still says what it is.
+            self.set_notice_as(restored_notice(interrupted, missing), true);
         }
     }
 
@@ -1437,6 +1445,31 @@ fn now_stamp() -> String {
     chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
+/// `one` or `many` by count. A person reads "1 download is" and "6 downloads are", never
+/// "file(s)": the hedge makes them do the grammar the app already knew.
+pub fn plural<'a>(n: usize, one: &'a str, many: &'a str) -> &'a str {
+    if n == 1 { one } else { many }
+}
+
+/// What a restored list says about the rows that came back different from how they were left.
+fn restored_notice(interrupted: usize, missing: usize) -> String {
+    let mut text = String::from("Restored the download list.");
+    if interrupted > 0 {
+        text.push_str(&format!(
+            " {interrupted} {} interrupted by the last shutdown and {} now paused.",
+            plural(interrupted, "download was", "downloads were"),
+            plural(interrupted, "is", "are"),
+        ));
+    }
+    if missing > 0 {
+        text.push_str(&format!(
+            " {missing} finished {} no longer on disk.",
+            plural(missing, "download is", "downloads are"),
+        ));
+    }
+    text
+}
+
 // ── Tests ───────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1803,10 +1836,30 @@ mod tests {
         assert_eq!(engine.snapshot().len(), 1);
         // Nothing finished means nothing to verify, and it says which state it is in.
         assert!(engine.verify(4, None).unwrap_err().contains("missing"));
+        // Said as information, in whole words, not as a fault with a "file(s)" in it.
+        assert_eq!(
+            engine.notice(),
+            "Restored the download list. 1 finished download is no longer on disk."
+        );
+        assert!(engine.notice_is_info());
 
         // Put the file back and the next start says completed again.
         store.part("moved.iso", 400);
         assert_eq!(store.engine().snapshot()[0].status, Status::Completed);
+    }
+
+    #[test]
+    fn the_restored_notice_counts_in_words() {
+        assert_eq!(
+            restored_notice(0, 6),
+            "Restored the download list. 6 finished downloads are no longer on disk."
+        );
+        assert_eq!(
+            restored_notice(1, 2),
+            "Restored the download list. 1 download was interrupted by the last shutdown and is now \
+             paused. 2 finished downloads are no longer on disk."
+        );
+        assert!(!restored_notice(3, 0).contains("(s)"));
     }
 
     #[test]
@@ -1818,6 +1871,7 @@ mod tests {
         assert!(engine.snapshot().is_empty(), "an unreadable list starts empty, not broken");
         let notice = engine.notice();
         assert!(notice.contains("could not be read"), "and the app says so: {notice}");
+        assert!(!engine.notice_is_info(), "a list it could not read is a fault, not information");
 
         let kept: Vec<String> = store
             .entries()

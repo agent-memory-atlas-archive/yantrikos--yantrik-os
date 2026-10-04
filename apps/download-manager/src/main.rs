@@ -73,6 +73,7 @@ fn settle<T>(
         Ok(_) => ui.set_error_text("".into()),
         Err(reason) => ui.set_error_text(reason.as_str().into()),
     }
+    ui.set_error_is_info(false);
     // Whatever the state file had to say, the person has had it on screen and has now done
     // something else. Leaving it to be re-raised by the next timer tick would make a banner
     // about the last restart impossible to get past. `describe` keeps reporting it.
@@ -332,12 +333,14 @@ fn refresh(ui: &DownloadManagerApp, engine: &Engine) {
         // looks different from the way the person left it.
         if let Some(notice) = engine.unseen_notice() {
             ui.set_error_text(notice.as_str().into());
+            ui.set_error_is_info(engine.notice_is_info());
         } else if let Some(failed) = items
             .iter()
             .rev()
             .find(|d| d.status == Status::Failed && !d.error.is_empty())
         {
             ui.set_error_text(format!("{} — {}", failed.filename, failed.error).into());
+            ui.set_error_is_info(false);
         }
     }
 }
@@ -428,8 +431,9 @@ fn summary(items: &[Download], totals: engine::Totals) -> String {
     if totals.missing > 0 {
         let gone = items.iter().find(|d| d.status == Status::Missing);
         return format!(
-            "Downloads — {} finished file(s) no longer on disk{}",
+            "Downloads — {} finished {} no longer on disk{}",
             totals.missing,
+            engine::plural(totals.missing, "download is", "downloads are"),
             gone.map(|d| format!(" ({})", d.filename)).unwrap_or_default()
         );
     }

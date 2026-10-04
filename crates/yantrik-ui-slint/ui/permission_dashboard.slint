@@ -123,56 +123,47 @@ component RiskBadge inherits Rectangle {
 }
 
 // ── Risk summary card ──
-
+//
+// A neutral tile with the count said in words: "18 high-risk files". The tiles used to be filled
+// with a hue each -- high risk on a teal-green, medium on violet, low on blue -- so the colours
+// contradicted the words beside them. High risk with files in it is the one that needs the
+// person, so it alone carries the amber, as a warning glyph beside the words; the others are text.
 component RiskSummaryCard inherits Rectangle {
-    in property <string> label;
+    // "high", "medium" or "low", as the sentence says it.
+    in property <string> level;
     in property <int> count;
-    in property <color> badge-color;
-    in property <color> badge-bg;
-    width: 140px;
-    height: 64px;
+    // Draw the amber warning glyph: these files need the person's attention.
+    in property <bool> needs-you: false;
+    height: 40px;
+    min-width: 140px;
+    preferred-width: row.preferred-width;
+    horizontal-stretch: 0;
     border-radius: Theme.r-lg;
-    background: Theme.bg-elevated;
+    background: Theme.tile-off;
     border-width: 1px;
-    border-color: Theme.border-subtle;
+    border-color: Theme.tile-border;
 
-    HorizontalLayout {
-        padding: Theme.sp-3;
-        spacing: 10px;
+    row := HorizontalLayout {
+        padding-left: Theme.sp-3;
+        padding-right: Theme.sp-3;
+        spacing: Theme.sp-2;
         alignment: start;
 
-        Rectangle {
-            width: 38px;
-            height: 38px;
-            border-radius: Theme.r-md;
-            background: badge-bg;
-            vertical-stretch: 0;
-
-            Text {
-                text: count;
-                color: badge-color;
-                font-size: Theme.fs-title-1;  // No exact token — intentionally larger than fs-headline
-                font-weight: 700;
-                horizontal-alignment: center;
-                vertical-alignment: center;
+        if root.needs-you : VerticalLayout {
+            alignment: center;
+            Icon {
+                commands: Icons.warning;
+                size: 16px;
+                tint: Theme.amber;
             }
         }
 
-        VerticalLayout {
-            alignment: center;
-            spacing: 2px;
-
-            Text {
-                text: label;
-                color: Theme.text-secondary;
-                font-size: Theme.font-small;
-                font-weight: 600;
-            }
-            Text {
-                text: count == 1 ? "file" : "files";
-                color: Theme.text-dim;
-                font-size: Theme.fs-micro;
-            }
+        Text {
+            text: root.count + " " + root.level + "-risk " + (root.count == 1 ? "file" : "files");
+            color: root.needs-you ? Theme.text-primary : Theme.text-secondary;
+            font-size: Theme.font-small;
+            font-weight: 600;
+            vertical-alignment: center;
         }
     }
 }
@@ -635,22 +626,17 @@ export component PermissionDashboardScreen inherits Rectangle {
 
                 // Risk summary cards
                 RiskSummaryCard {
-                    label: "High Risk";
+                    level: "high";
                     count: root.perm-high-risk-count;
-                    badge-color: Theme.color-danger;
-                    badge-bg: Theme.color-danger-dim;
+                    needs-you: root.perm-high-risk-count > 0;
                 }
                 RiskSummaryCard {
-                    label: "Medium Risk";
+                    level: "medium";
                     count: root.perm-medium-risk-count;
-                    badge-color: Theme.color-warning;
-                    badge-bg: Theme.color-warning-dim;
                 }
                 RiskSummaryCard {
-                    label: "Low Risk";
+                    level: "low";
                     count: root.perm-low-risk-count;
-                    badge-color: Theme.color-success;
-                    badge-bg: Theme.color-success-dim;
                 }
 
                 // Spacer
@@ -664,9 +650,10 @@ export component PermissionDashboardScreen inherits Rectangle {
                     HorizontalLayout {
                         spacing: Theme.sp-2;
 
-                        // Scan path input
+                        // Scan path input. Labelled inside the field: it and the search field
+                        // below were two look-alike boxes, and this one held only "/".
                         Rectangle {
-                            width: 220px;
+                            width: 280px;
                             height: 30px;
                             border-radius: Theme.r-md;
                             background: Theme.bg-card;
@@ -677,13 +664,23 @@ export component PermissionDashboardScreen inherits Rectangle {
                             HorizontalLayout {
                                 padding-left: 10px;
                                 padding-right: 10px;
-                                alignment: center;
+                                spacing: Theme.sp-2;
+
+                                Text {
+                                    text: "Scan path";
+                                    color: Theme.text-dim;
+                                    font-size: Theme.font-small;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 0;
+                                }
 
                                 scan-path-input := TextInput {
                                     horizontal-stretch: 1;
                                     text <=> root.perm-scan-path;
+                                    accessible-label: "Scan path";
                                     font-size: Theme.font-small;
                                     color: Theme.text-primary;
+                                    vertical-alignment: center;
                                     accepted => {
                                         root.perm-scan-dir(root.perm-scan-path);
                                     }

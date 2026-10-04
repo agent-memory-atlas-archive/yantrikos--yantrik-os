@@ -183,3 +183,50 @@ fn success_is_green_not_teal() {
         }
     }
 }
+
+/// Downloads painted red on everything a file that is gone touches: the row's dot, a "File gone"
+/// pill, a full bar under the row and the banner that says the list was restored. None of it is
+/// destructive. A settled row is a dim glyph and the neutral outline pill; the banner is the kit's
+/// neutral notice.
+#[test]
+fn a_download_that_is_gone_is_not_red() {
+    let src = read(&format!("{UI}download_manager.slint"));
+    for status in ["missing", "failed", "completed"] {
+        assert!(!src.contains(&format!("dl.status == \"{status}\" ? Theme.color")), "a {status} row is painted a hue");
+    }
+    assert!(src.contains("Icons.file-missing"), "a gone file is a shape, not a red dot");
+    assert!(src.contains("YStatusPill {"), "a settled row wears the neutral outline pill");
+    let bar = src.find("if root.error-text != \"\" : YNoticeBar").expect("the banner is the kit's notice");
+    assert!(src[bar..bar + 200].contains("tone: 0;"), "and the neutral kind of it");
+    let engine = read("apps/download-manager/src/engine.rs");
+    assert!(!engine.contains("file(s) no longer"), "a count is said in words");
+}
+
+/// "Installed" was a teal-green pill, and the row centred its content so the name drifted.
+#[test]
+fn a_package_row_is_a_left_aligned_grid_with_a_neutral_installed_pill() {
+    let src = read(&format!("{UI}package_manager.slint"));
+    let row = &src[src.find("for pkg[idx] in root.packages").expect("the list")..];
+    let row = &row[..row.find("row-ta := TouchArea").expect("the row's touch area")];
+    let grid = &row[row.find("HorizontalLayout {").expect("the row's grid")..];
+    let alignment = &grid[grid.find("alignment:").expect("the grid's alignment")..];
+    assert!(alignment.starts_with("alignment: start;"), "the row centres its content");
+    assert!(!row.contains("color-success"), "a package row draws the success teal");
+    assert!(row.contains("YStatusPill {") && row.contains("text: \"Installed\";"));
+    for width in ["width: 16px;", "width: 72px;", "width: 96px;"] {
+        assert!(row.contains(width), "the grid lost its `{width}` column");
+    }
+}
+
+/// The risk tiles were filled with hues that contradicted their words. Amber is "needs you", and
+/// only high risk with files in it is that.
+#[test]
+fn a_risk_tile_is_neutral_and_only_high_risk_is_amber() {
+    let src = read(&format!("{UI}permission_dashboard.slint"));
+    assert!(!src.contains("badge-bg"), "a risk tile is filled with a hue");
+    let card = &src[src.find("component RiskSummaryCard").expect("the tile")..];
+    let card = &card[..card.find("\n}\n").expect("the tile ends")];
+    assert!(card.contains("background: Theme.tile-off;") && card.contains("tint: Theme.amber;"));
+    assert!(src.contains("needs-you: root.perm-high-risk-count > 0;"));
+    assert!(src.contains("text: \"Scan path\";"), "the scan path field says what it is");
+}

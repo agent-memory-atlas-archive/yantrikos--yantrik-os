@@ -35,6 +35,7 @@
 import { Theme } from "theme.slint";
 import { Icon } from "icon.slint";
 import { YWheelArea } from "y_wheel.slint";
+import { YTooltip } from "y_tooltip.slint";
 
 export component YIndicator inherits Rectangle {
     in property <string> icon: "";
@@ -77,7 +78,6 @@ export component YIndicator inherits Rectangle {
     property <bool> ring: keys.has-focus && !root.pointer-focus && root.enabled;
     property <bool> hovered: root.enabled && area.has-hover;
     property <bool> pressed: root.enabled && area.pressed;
-    property <bool> tip-shown: false;
     property <color> fg: (root.hovered || root.active) ? Theme.text-primary : Theme.text-secondary;
 
     height: Theme.h-regular;
@@ -97,19 +97,6 @@ export component YIndicator inherits Rectangle {
 
     function activate() { if (root.enabled) { root.clicked(); } }
 
-    changed hovered => { if (!root.hovered) { root.tip-shown = false; } }
-
-    // One single-shot delay: it runs only while the pointer rests on the indicator, and stops
-    // itself the moment the tooltip is up. Nothing ticks at rest.
-    Timer {
-        running: root.hovered && !root.pressed && !root.tip-shown && root.tooltip != "";
-        // The same 600ms as `Theme.dur-tooltip`, written out: the idle-window test reads a Timer's
-        // rate from its text and cannot resolve a token. Repeating at this rate is harmless here,
-        // because `running` goes false after the first tick.
-        interval: 600ms;
-        triggered => { root.tip-shown = true; }
-    }
-
     keys := FocusScope {
         enabled: root.enabled;
         key-pressed(event) => {
@@ -123,8 +110,9 @@ export component YIndicator inherits Rectangle {
         enabled: root.enabled;
         mouse-cursor: root.enabled ? pointer : default;
         pointer-event(event) => {
+            // A press hides the tooltip: YTooltip below is told the pointer is not resting while
+            // the indicator is pressed.
             if (event.kind == PointerEventKind.down) {
-                root.tip-shown = false;
                 if (event.button == PointerEventButton.left) {
                     root.pointer-focus = true;
                     keys.focus();
@@ -190,25 +178,10 @@ export component YIndicator inherits Rectangle {
         }
     }
 
-    if root.tip-shown && root.tooltip != "" : Rectangle {
+    YTooltip {
+        text: root.tooltip;
+        hovered: root.hovered && !root.pressed;
         x: root.tooltip-end ? parent.width + Theme.sp-2 - self.width : (parent.width - self.width) / 2;
         y: root.tooltip-above ? -self.height - Theme.sp-1 : parent.height + Theme.sp-1;
-        width: tip-text.preferred-width + 2 * Theme.sp-3;
-        height: tip-text.preferred-height + 2 * Theme.sp-1 + Theme.sp-1;
-        border-radius: Theme.r-sm;
-        background: Theme.bg-elevated;
-        border-width: Theme.hairline;
-        border-color: Theme.border-card;
-        drop-shadow-blur: Theme.shadow-md-blur;
-        drop-shadow-offset-y: Theme.shadow-md-dy;
-        drop-shadow-color: Theme.overlay-shadow;
-
-        tip-text := Text {
-            text: root.tooltip;
-            color: Theme.text-primary;
-            font-size: Theme.fs-caption;
-            x: Theme.sp-3;
-            y: (parent.height - self.height) / 2;
-        }
     }
 }

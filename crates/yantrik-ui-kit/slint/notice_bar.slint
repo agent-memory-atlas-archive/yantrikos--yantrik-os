@@ -28,6 +28,10 @@ export component YNoticeBar inherits Rectangle {
     in property <string> text;
     // 1 = danger (something could not be done), 0 = plain information.
     in property <int> tone: 1;
+    // The glyph a plain notice leads with. Information by default; a caller whose line reports a
+    // failure that destroys nothing passes `Icons.warning`, so a shape tells the two apart and
+    // not a hue.
+    in property <string> icon-path: Icons.info;
     in property <bool> dismissible: true;
     // Beyond this many lines the rest is elided rather than pushing the content off the screen.
     in property <int> max-lines: 3;
@@ -65,7 +69,7 @@ export component YNoticeBar inherits Rectangle {
         if root.tone != 1 : VerticalLayout {
             alignment: start;
             padding-top: (root.line - 16px) / 2;
-            Icon { commands: Icons.info; size: 16px; tint: Theme.text-secondary; }
+            Icon { commands: root.icon-path; size: 16px; tint: Theme.text-secondary; }
         }
 
         VerticalLayout {
