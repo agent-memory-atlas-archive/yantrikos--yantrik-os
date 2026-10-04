@@ -149,6 +149,38 @@ pub fn answer(
     }
 }
 
+/// What the lock screen says about the person and the machine, read by the shell when it locks and
+/// handed to `yantrik-lock` as plain arguments. No secret, and no notification's text: only how
+/// many are waiting, because the screen can be seen by anyone standing behind the person.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Look {
+    pub name: String,
+    pub network: String,
+    pub notifications: u32,
+    /// The pre-blurred wallpaper, if one has been made (`lock_wallpaper`).
+    pub wallpaper: Option<std::path::PathBuf>,
+    /// The machine is declared open at boot (`lock::start_open_marker_present`): no Restart.
+    pub no_restart: bool,
+}
+
+impl Look {
+    /// The arguments for the lock client. A reading the machine does not have is left out, so the
+    /// client draws nothing for it rather than an empty label.
+    fn args(&self) -> Vec<String> {
+        let mut args = vec!["--name".to_string(), self.name.clone(), "--notifications".to_string(), self.notifications.to_string()];
+        if !self.network.is_empty() {
+            args.extend(["--network".to_string(), self.network.clone()]);
+        }
+        if let Some(path) = &self.wallpaper {
+            args.extend(["--wallpaper".to_string(), path.to_string_lossy().into_owned()]);
+        }
+        if self.no_restart {
+            args.push("--no-restart".to_string());
+        }
+        args
+    }
+}
+
 fn lock_bin() -> std::path::PathBuf {
     std::env::current_exe()
         .ok()
@@ -161,6 +193,7 @@ fn lock_bin() -> std::path::PathBuf {
 pub fn engage(
     ui: slint::Weak<App>,
     greeting: String,
+    look: Look,
     secret: crate::lock::Secret,
     on_unlock: impl Fn(&App, &str, crate::lock::Secret) + Send + Clone + 'static,
 ) {
@@ -175,7 +208,7 @@ pub fn engage(
         return;
     }
     std::thread::spawn(move || loop {
-        hold(&bin, &greeting, secret, &ui, &on_unlock);
+        hold(&bin, &greeting, &look, secret, &ui, &on_unlock);
         // A lock asked for while this thread was on its way out found RUNNING still set and left
         // the work to it: take it, rather than leave that lock without a compositor client.
         RUNNING.store(false, Ordering::SeqCst);
@@ -189,6 +222,7 @@ pub fn engage(
 fn hold(
     bin: &std::path::Path,
     greeting: &str,
+    look: &Look,
     secret: crate::lock::Secret,
     ui: &slint::Weak<App>,
     on_unlock: &(impl Fn(&App, &str, crate::lock::Secret) + Send + Clone + 'static),
@@ -196,7 +230,7 @@ fn hold(
     let mut starts: u32 = 0;
     loop {
         starts += 1;
-        match run_once(bin, greeting, secret) {
+        match run_once(bin, greeting, look, secret) {
             Outcome::Unlocked(pin, checked) => {
                 // Released here as well as by the unlock itself: that runs later, on the UI thread,
                 // and the caller must not read "still wanted" in between.
@@ -246,7 +280,7 @@ enum Outcome {
     Died(String),
 }
 
-fn run_once(bin: &std::path::Path, greeting: &str, secret: crate::lock::Secret) -> Outcome {
+fn run_once(bin: &std::path::Path, greeting: &str, look: &Look, secret: crate::lock::Secret) -> Outcome {
     // A socket pair, not pipes: a pipe can be reopened through /proc/<pid>/fd by any process of
     // the same user, which could then write `ok` to the client or answer for it; a socket cannot
     // be opened that way.
@@ -260,6 +294,7 @@ fn run_once(bin: &std::path::Path, greeting: &str, secret: crate::lock::Secret) 
     };
     let mut child = match Command::new(bin)
         .args(["--greeting", greeting, "--ask", secret.arg()])
+        .args(look.args())
         .stdin(Stdio::from(OwnedFd::from(theirs)))
         .stdout(Stdio::from(OwnedFd::from(theirs_out)))
         .stderr(Stdio::inherit())
@@ -340,6 +375,27 @@ mod tests {
         assert_eq!(answer("pin correct horse", ask, check), None, "the old protocol is not a question");
         assert_eq!(answer("locked", ask, check), None, "not a question");
         assert_eq!(answer("ok", ask, check), None, "the client cannot answer itself");
+    }
+
+    #[test]
+    fn the_lock_client_is_told_who_and_what_but_never_what_a_notification_says() {
+        let look = Look {
+            name: "Pranab".into(),
+            network: "Wi-Fi".into(),
+            notifications: 3,
+            wallpaper: Some("/home/p/.cache/yantrik/lock-wallpaper.png".into()),
+            no_restart: false,
+        };
+        assert_eq!(
+            look.args(),
+            ["--name", "Pranab", "--notifications", "3", "--network", "Wi-Fi", "--wallpaper", "/home/p/.cache/yantrik/lock-wallpaper.png"]
+        );
+        // A machine declared open at boot: the lock draws no Restart, which would come back open.
+        let open = Look { name: "Pranab".into(), no_restart: true, ..Look::default() };
+        assert_eq!(open.args(), ["--name", "Pranab", "--notifications", "0", "--no-restart"]);
+        // Nothing up and no picture: no flags for them, so the lock draws neither.
+        let bare = Look { name: "Pranab".into(), ..Look::default() };
+        assert_eq!(bare.args(), ["--name", "Pranab", "--notifications", "0"]);
     }
 
     #[test]

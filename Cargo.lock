@@ -11554,11 +11554,13 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "libc",
+ "png",
  "slint",
  "slint-build",
  "smithay-client-toolkit 0.20.0",
  "wayland-client",
  "yantrik-design-tokens",
+ "yantrik-ui-kit",
 ]
 
 [[package]]
@@ -11930,6 +11932,7 @@ dependencies = [
  "libc",
  "mailparse",
  "native-tls",
+ "png",
  "pty-process",
  "rubato",
  "rusqlite",
@@ -11956,6 +11959,7 @@ dependencies = [
  "yantrik-ml",
  "yantrik-os",
  "yantrik-shell-core",
+ "yantrik-ui-kit",
  "yantrik-ui-slint",
  "yantrik-version",
  "yantrikdb",
