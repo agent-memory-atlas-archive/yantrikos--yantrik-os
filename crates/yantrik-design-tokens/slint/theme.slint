@@ -653,6 +653,10 @@ export global Theme {
     out property <color> tile-off-hover:   ThemeMode.dark ? #262e35 : #dce1e7;
     out property <color> tile-off-pressed: ThemeMode.dark ? #2d363e : #d2d8df;
     out property <color> tile-border:      ThemeMode.dark ? #2c343b : #c5ccd4;
+    // A notice that informs and waits on nothing (YNoticeBar, tone 0): the same raised neutral
+    // surface and edge as a tile, and no hue -- red is for what failed, amber for what needs you.
+    out property <color> notice-surface:   root.tile-off;
+    out property <color> notice-line:      root.tile-border;
     // Secondary button: transparent with this outline and a white label.
     out property <color> outline-border:   ThemeMode.dark ? #4a535b : #8a949e;
 
