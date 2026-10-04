@@ -264,6 +264,26 @@ pub struct Verified {
 }
 
 impl Verified {
+    /// Who is asking, as the machine established it, in a few words: the attached mind its
+    /// ancestry belongs to, else the verified program's executable (the kernel's word, not its
+    /// command line, which the caller writes), else "an unidentified program". Never the name the
+    /// request gave itself. For the shell's own "… is asking to …" notification, which goes out
+    /// as `Yantrik` (security review of #614).
+    pub fn who(&self) -> String {
+        if !self.attached_mind.trim().is_empty() {
+            return self.attached_mind.trim().to_string();
+        }
+        let exe = self.exe.strip_suffix(" (deleted)").unwrap_or(&self.exe);
+        // The first recognisable process up the chain was the installed shell, so the caller is
+        // something it started -- a bridge, a mind -- and not the shell, which raises no cards of
+        // its own. Said the way the notification card says it (third-pass review of #614).
+        if yantrik_ipc_transport::owner::is_installed_desktop_binary(exe) {
+            return crate::notification_sender::bridged_by(exe);
+        }
+        let name = crate::notification_sender::one_line(yantrik_ipc_transport::peer_identity::basename(exe));
+        if name.is_empty() { "an unidentified program".to_string() } else { name }
+    }
+
     /// What `describe shell` publishes beside `requester`. Facts and no prose: a caller reading
     /// this has to be able to compare it with `ps`, not to be reassured by it.
     pub fn to_json(&self) -> serde_json::Value {
@@ -1357,6 +1377,29 @@ mod approvals_tests {
             discrepancies: Vec::new(),
             agent: String::new(),
         }
+    }
+
+    #[test]
+    fn who_is_asking_is_what_the_machine_verified_never_the_claim() {
+        // The attached mind the kernel's ancestry matched.
+        assert_eq!(verified().who(), "Hermes Agent");
+        // No mind matched: the executable, not the command line it wrote for itself.
+        let program = Verified {
+            attached_mind: String::new(),
+            line: "Yantrik Security Update (pid 5)".into(),
+            exe: "/usr/bin/python3.11".into(),
+            ..verified()
+        };
+        assert_eq!(program.who(), "python3.11");
+        // A call through the shell's bridge with no attached mind: the walk names the shell, but
+        // the shell is not what is asking.
+        let bridged = Verified { exe: "/opt/yantrik/bin/yantrik-ui".into(), ..program.clone() };
+        assert_eq!(bridged.who(), "a program yantrik-ui started");
+        // A file name is cleaned like any other text the caller chose.
+        let odd = Verified { exe: "/tmp/ev\nil".into(), ..program.clone() };
+        assert_eq!(odd.who(), "ev il");
+        // Nothing established.
+        assert_eq!(Verified::default().who(), "an unidentified program");
     }
 
     fn ask(store: &mut Store, now: Instant) -> String {
