@@ -74,10 +74,12 @@ export struct AgentItemData {
     block: string,
     styled: styled-text,
     // For a question the agent asked (#25): its request id, the answers it offers (none: a free
-    // answer) and what the person answered, "" while it waits. `explain` says why it closed.
+    // answer) and what the person answered, "" while it waits. `explain` says why it closed;
+    // `asked` is when it was asked ("16:16"), so two cards with the same words can be told apart.
     request: string,
     options: [string],
     answer: string,
+    asked: string,
 }
 
 export struct AgentHeaderData {
@@ -462,6 +464,7 @@ component ItemView inherits Rectangle {
             options: root.item.options;
             answer: root.item.answer;
             closed: root.item.explain;
+            asked: root.item.asked;
             answered(a) => { AgentsState.answer-question(AgentsState.header.id, root.item.request, a); }
         }
 

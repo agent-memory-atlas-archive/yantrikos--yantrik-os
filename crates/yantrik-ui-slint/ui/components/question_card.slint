@@ -15,6 +15,7 @@ export struct QuestionRequest {
     request: string,   // the agent's own id for the question
     prompt: string,
     options: [string], // the answers offered as buttons; none: a free answer
+    asked: string,     // when it was asked, "16:16"
 }
 
 export component QuestionCard inherits Rectangle {
@@ -25,6 +26,8 @@ export component QuestionCard inherits Rectangle {
     in property <string> answer;
     /// Why it can no longer be answered; "" while it can.
     in property <string> closed;
+    /// When it was asked ("16:16"): the same question asked twice is two cards, told apart by this.
+    in property <string> asked;
     callback answered(string);
 
     // Waiting on the person, so its edge is the needs-you amber; once answered or closed it is an
@@ -42,11 +45,20 @@ export component QuestionCard inherits Rectangle {
     VerticalLayout {
         padding: Theme.sp-3;
         spacing: Theme.sp-2;
-        Text {
-            text: root.waiting ? "Your answer needed \u{00b7} " + root.mind : root.mind + " asked";
-            color: root.waiting ? Theme.chat-needs-you : Theme.chat-text-2;
-            font-size: Theme.fs-caption;
-            font-weight: 600;
+        HorizontalLayout {
+            spacing: Theme.sp-2;
+            Text {
+                horizontal-stretch: 1;
+                text: root.waiting ? "Your answer needed \u{00b7} " + root.mind : root.mind + " asked";
+                color: root.waiting ? Theme.chat-needs-you : Theme.chat-text-2;
+                font-size: Theme.fs-caption;
+                font-weight: 600;
+            }
+            if root.asked != "" : Text {
+                text: "asked " + root.asked;
+                color: Theme.text-secondary;
+                font-size: Theme.fs-caption;
+            }
         }
         Text {
             text: root.prompt;
@@ -86,11 +98,12 @@ export component QuestionCard inherits Rectangle {
             font-size: Theme.fs-caption;
             wrap: word-wrap;
         }
+        // Closed: the agent stopped asking, or the desktop restarted. The buttons are gone and
+        // this says why, so a dead card never reads as one still waiting.
         if root.closed != "" : Text {
-            text: "Not answered: " + root.closed;
-            color: Theme.text-dim;
+            text: "No longer waiting: " + root.closed + ".";
+            color: Theme.text-secondary;
             font-size: Theme.fs-caption;
-            font-italic: true;
             wrap: word-wrap;
         }
     }

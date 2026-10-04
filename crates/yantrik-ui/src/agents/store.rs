@@ -1067,6 +1067,9 @@ fn append(items: &mut Vec<Item>, delta: &str, thinking: bool) {
 }
 
 /// End the open turn: reported calls still open are interrupted; the shell's own keep running.
+/// Its questions still waiting are closed: the host expires a run's requests when it ends, so an
+/// answer has nowhere to go. Left open, the card kept its buttons and a click was refused (VM 520,
+/// 4 October: two identical Erase cards, one of them dead, and no telling which).
 fn settle_turn(agent: &mut Agent, ok: bool, now: u64, note: Option<&str>) {
     let Some(turn) = agent.turns.last_mut().filter(|t| t.open()) else { return };
     for card in turn.cards_mut() {
@@ -1074,6 +1077,13 @@ fn settle_turn(agent: &mut Agent, ok: bool, now: u64, note: Option<&str>) {
             card.state = CallState::Interrupted;
             card.ended = Some(now);
             card.output.settle();
+        }
+    }
+    for item in &mut turn.items {
+        if let Item::Question(q) = item {
+            if q.waiting() {
+                q.closed = Question::STOPPED_ASKING.to_string();
+            }
         }
     }
     if let Some(note) = note {
@@ -1622,7 +1632,7 @@ fn parse(text: &str, now: u64) -> Option<Agent> {
                 // Its run was orphaned when the desktop stopped, so nobody can answer it now.
                 ItemRecord::Question(q) => Item::Question(Question {
                     closed: if q.answer.is_empty() && q.closed.is_empty() {
-                        "the desktop restarted while it waited".to_string()
+                        Question::RESTARTED.to_string()
                     } else {
                         q.closed
                     },
@@ -2217,6 +2227,83 @@ mod tests {
         assert_eq!(kept.len(), 2);
         assert_eq!(kept[0].closed, "the desktop restarted while it waited", "never drawn with buttons again");
         assert_eq!((kept[1].answer.as_str(), kept[1].closed.as_str()), ("No", ""), "an answered one stays answered");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every way a turn ends in the store closes the questions it asked and nobody answered: the
+    /// host has expired them, so a card left with buttons is one a click is refused on (VM 520,
+    /// 4 October: two identical Erase cards, one dead). Closed, it leaves `waiting_questions`, the
+    /// Needs-you tab and the transcript's "waiting" line.
+    #[test]
+    fn a_question_closes_when_the_turn_that_asked_ends_unanswered() {
+        let ends: [(&str, fn(&mut Store, &AgentId)); 5] = [
+            ("completed", |s, a| s.close_turn(a, true)),
+            ("failed", |s, a| s.close_turn(a, false)),
+            ("cancelled", |s, a| {
+                s.note(a, "Stopped.");
+                s.close_turn(a, false)
+            }),
+            ("orphaned", |s, a| s.set_state(a, State::HarnessGone)),
+            ("interrupted", |s, a| s.open_turn(a, "something else")),
+        ];
+        for (how, end) in ends {
+            let (mut s, _) = store();
+            let mind = id("yantrik:c-erase");
+            s.open_turn(&mind, "forget the old address");
+            s.event(&mind, &asks("r1", "Keep or Erase?"), Provenance::Reported);
+            assert_eq!(s.list(Tab::NeedsYou, None), vec![mind.clone()], "{how}: it waits on the person");
+            end(&mut s, &mind);
+
+            let q = &questions(&s, &mind)[0];
+            assert_eq!((q.answer.as_str(), q.closed.as_str()), ("", Question::STOPPED_ASKING), "{how}");
+            assert_eq!(s.agent(&mind).unwrap().waiting_questions().count(), 0, "{how}: nothing still asked");
+            assert!(s.list(Tab::NeedsYou, None).is_empty(), "{how}: it no longer needs the person");
+            let said = s.transcript(&mind, 5).unwrap();
+            assert!(said.contains("Keep or Erase? — not answered: the agent stopped asking"), "{how}: {said}");
+        }
+    }
+
+    /// Closing is for what still waits: an answer the person gave stands when the turn ends, and a
+    /// question the next turn asks is open while the one before it is closed.
+    #[test]
+    fn an_ended_turn_closes_only_its_own_unanswered_questions() {
+        let (mut s, _) = store();
+        let mind = id("yantrik:c-erase2");
+        s.open_turn(&mind, "forget the old address");
+        s.event(&mind, &asks("r1", "Keep or Erase?"), Provenance::Reported);
+        s.event(&mind, &asks("r2", "And the old phone number?"), Provenance::Reported);
+        assert!(s.question_answered(&mind, "r2", "Keep"));
+        s.close_turn(&mind, true);
+        s.open_turn(&mind, "try again");
+        s.event(&mind, &asks("r3", "Keep or Erase?"), Provenance::Reported);
+
+        let q = questions(&s, &mind);
+        assert_eq!(q[0].closed, Question::STOPPED_ASKING, "turn 1's unanswered question is closed");
+        assert_eq!((q[1].answer.as_str(), q[1].closed.as_str()), ("Keep", ""), "an answered one is untouched");
+        assert!(q[2].waiting(), "turn 2's question is open");
+        let waiting: Vec<_> = s.agent(&mind).unwrap().waiting_questions().map(|q| q.request.clone()).collect();
+        assert_eq!(waiting, vec!["r3".to_string()], "only the live one is waiting");
+        assert_eq!(s.list(Tab::NeedsYou, None), vec![mind.clone()]);
+    }
+
+    /// A restart still closes what was waiting as before, and a question already closed when the
+    /// agent stopped asking keeps that reason through the save.
+    #[test]
+    fn a_restart_keeps_a_closed_questions_reason_and_closes_the_rest_as_before() {
+        let dir = scratch_dir("questions-closed");
+        let (mut s, _) = store();
+        let mind = id("yantrik:c-erase3");
+        s.open_turn(&mind, "forget the old address");
+        s.event(&mind, &asks("r1", "Keep or Erase?"), Provenance::Reported);
+        s.close_turn(&mind, true);
+        s.open_turn(&mind, "try again");
+        s.event(&mind, &asks("r2", "Keep or Erase?"), Provenance::Reported);
+        s.save(&dir).unwrap();
+        let back = Store::load(&dir, Box::new(|| 1_800_000_000));
+        let kept = questions(&back, &mind);
+        assert_eq!(kept[0].closed, Question::STOPPED_ASKING);
+        assert_eq!(kept[1].closed, Question::RESTARTED);
+        assert_eq!(back.agent(&mind).unwrap().waiting_questions().count(), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
