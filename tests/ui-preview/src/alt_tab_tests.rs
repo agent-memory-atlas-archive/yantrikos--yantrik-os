@@ -1,8 +1,9 @@
 //! The Alt+Tab switcher (`alt_tab.slint`), drawn by the whole shell with real key and pointer
 //! events. Two scenes — 8 windows, one page, and 20 windows on page 2 of 3 — and the claims that
-//! matter: the card is opaque with no dimming layer, Tab, Shift+Tab, Return and Escape reach the
-//! shell's callbacks, a pointer that has not moved does not select, a pointer move does, and a
-//! click on a cell activates that cell.
+//! matter: the card is opaque with no dimming layer and at most 640 wide, each cell wears its
+//! app's coloured tile, the selected cell is ringed and raised, Tab, Shift+Tab, Return and Escape
+//! reach the shell's callbacks, a pointer that has not moved does not select, a pointer move does,
+//! and a click on a cell activates that cell.
 //!
 //! The selection rules themselves (order, paging, wrap) are `alt_tab.rs`'s tests; this stands in
 //! for it by handing the card a page, which is all the card ever sees.
@@ -43,13 +44,11 @@ fn show(ui: &App, total: usize, selected: usize) {
         .map(|n| {
             let (title, app_id, name) = NAMES[n % NAMES.len()];
             let title = if n >= NAMES.len() { format!("{title} ({})", n / NAMES.len() + 1) } else { title.to_string() };
-            SwitcherCell { title: title.into(), app_id: app_id.into(), app_name: name.into() }
+            SwitcherCell { title: title.into(), tile_id: app_id.into(), app_name: name.into(), has_icon: false, icon: Default::default() }
         })
         .collect();
-    let plate = cells[selected % 8].title.clone();
     ui.set_alt_tab_cells(ModelRc::new(VecModel::from(cells)));
     ui.set_alt_tab_selected((selected % 8) as i32);
-    ui.set_alt_tab_plate(plate);
     ui.set_alt_tab_page(page as i32);
     ui.set_alt_tab_pages(pages as i32);
     ui.set_alt_tab_status(if pages == 1 {
@@ -86,6 +85,21 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str, width: u32, height: u32) -> 
     };
     let behind = draw();
 
+    // The card as alt_tab.slint lays it out: at most 640 wide (Theme.sw-card-max-w), cells at most
+    // 144 wide and 116 tall (sw-cell-w, sw-cell-h) and 12 apart, the 48px tile 12 below a cell's
+    // top, and a pager row a compact icon button high (Theme.h-compact, 28). No plate under it.
+    let cols = if width < 560 { 2 } else if width < 760 { 3 } else { 4 };
+    let card_w = (width as f32 - 64.0).min(640.0);
+    let card_x = (width as f32 - card_w) / 2.0;
+    let cell_w = 144f32.min((card_w - 32.0 - (cols as f32 - 1.0) * 12.0) / cols as f32);
+    let cell_h = 116.0;
+    let grid_w = cols as f32 * cell_w + (cols as f32 - 1.0) * 12.0;
+    let x0 = card_x + (card_w - grid_w) / 2.0;
+    let rows = (8 + cols - 1) / cols;
+    let card_h = 16.0 + rows as f32 * cell_h + (rows as f32 - 1.0) * 12.0 + 12.0 + 28.0 + 16.0;
+    let y0 = (height as f32 - card_h) / 2.0 + 16.0;
+    let at = |img: &slint::SharedPixelBuffer<slint::Rgb8Pixel>, x: f32, y: f32| img.as_slice()[y as usize * width as usize + x as usize];
+
     // ── 8 windows: one page, the previous window (index 1) selected ───────────────────────────
     show(&ui, 8, 1);
     ui.set_alt_tab_open(true);
@@ -93,6 +107,15 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str, width: u32, height: u32) -> 
     save(&one_page, output, width, height)?;
     // Opaque and undimmed: outside the card the desktop is exactly what it was.
     assert_eq!(behind.as_slice()[5 * width as usize + 5], one_page.as_slice()[5 * width as usize + 5], "no dimming layer");
+    let mid = y0 + cell_h / 2.0;
+    assert_eq!(at(&behind, card_x - 3.0, mid), at(&one_page, card_x - 3.0, mid), "the card is no wider than 640");
+    // Cell 0 is Terminal: its tile is Terminal's green (AppColor.tile-green), above the glyph.
+    let tile = at(&one_page, x0 + cell_w / 2.0, y0 + 12.0 + 5.0);
+    assert_eq!((tile.r, tile.g, tile.b), (0x22, 0xa1, 0x52), "cell 0 wears Terminal's tile, not a grey box");
+    // Cell 1 is selected: ringed (its edge is not cell 0's hairline) and raised (its fill is not).
+    let x1 = x0 + cell_w + 12.0;
+    assert_ne!(at(&one_page, x1 + 0.5, mid), at(&one_page, x0 + 0.5, mid), "the selected cell has the accent ring");
+    assert_ne!(at(&one_page, x1 + cell_w / 2.0, y0 + cell_h - 6.0), at(&one_page, x0 + cell_w / 2.0, y0 + cell_h - 6.0), "and a raised fill");
     assert!(log.borrow().is_empty(), "opening alone selects nothing: {:?}", log.borrow());
 
     // The keys reach the shell's callbacks, with the column count the card is drawn with.
@@ -104,7 +127,6 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str, width: u32, height: u32) -> 
     key(w, Key::Return.into());
     key(w, Key::Escape.into());
     draw();
-    let cols = if width < 560 { 2 } else if width < 760 { 3 } else { 4 };
     let expect: Vec<String> = [
         format!("navigate:next:{cols}"),
         format!("navigate:previous:{cols}"),
@@ -126,16 +148,6 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str, width: u32, height: u32) -> 
     // The pointer's position when the card opened must not select: nothing has moved yet. Then a
     // real move over a cell does, and a click on it activates it.
     let point = |x: f32, y: f32| WindowEvent::PointerMoved { position: slint::LogicalPosition::new(x, y) };
-    let card_x = (width as f32 - (width as f32 - 64.0).min(1040.0)) / 2.0;
-    let card_w = (width as f32 - 64.0).min(1040.0);
-    let cell_w = 224f32.min((card_w - 32.0 - (cols as f32 - 1.0) * 12.0) / cols as f32);
-    let cell_h = 8.0 + (cell_w - 16.0) * 9.0 / 16.0 + 41.0;
-    let grid_w = cols as f32 * cell_w + (cols as f32 - 1.0) * 12.0;
-    let x0 = card_x + (card_w - grid_w) / 2.0;
-    let rows = (8 + cols - 1) / cols;
-    // The pager row is a compact icon button's height (Theme.h-compact, 28).
-    let card_h = 16.0 + rows as f32 * cell_h + (rows as f32 - 1.0) * 12.0 + 12.0 + 28.0 + 16.0;
-    let y0 = (height as f32 - (card_h + 48.0)) / 2.0 + 16.0;
     let (cx, cy) = (x0 + cell_w / 2.0, y0 + cell_h / 2.0); // the centre of cell 0
     draw();
     assert!(log.borrow().is_empty(), "a pointer that has not moved selects nothing: {:?}", log.borrow());

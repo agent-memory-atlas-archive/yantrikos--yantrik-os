@@ -23,8 +23,8 @@
 //! 1.2 s each), so a stuck compositor is an error in the answer, not a frozen desktop.
 //!
 //! The windows are not captured: the compositor's window stream carries titles and focus, not
-//! pixels, and no capture path for a single toplevel exists in the shell. Every cell shows its
-//! app's icon on a neutral tile (alt_tab.slint).
+//! pixels, and no capture path for a single toplevel exists in the shell. Every cell is the app's
+//! tile, its name and the window's title (alt_tab.slint), named by `window_name` as the dock is.
 //!
 //! Left out on purpose, and said in `describe`: Mind View scope (a desk's own windows and a way
 //! back), the workspace in the footer, and previews.
@@ -56,36 +56,63 @@ pub fn for_describe(screen: i32) -> serde_json::Value {
         Some(s) => serde_json::json!({
             "open": true,
             "close_with": "switcher_cancel",
-            "windows": s.cells().iter().map(|c| c.title.clone()).collect::<Vec<_>>(),
-            "selected": s.selected().map(|c| c.title.clone()),
+            "windows": s.cells().iter().map(described).collect::<Vec<_>>(),
+            "selected": s.selected().map(described),
             "page": s.page() + 1,
             "pages": s.pages(),
             "status": s.status(),
-            "previews": "unavailable",
+            "previews": "none: each cell is the app's tile, its name and the window's title",
             "order_source": if s.cells().iter().all(Cell::is_live) { "compositor focus stream" } else { "the compositor's listing order (the focus stream is off)" },
             "left_out": ["Mind View scope", "workspace in the footer", "previews"],
         }),
     }
 }
 
+/// The id the desktop's own cell is drawn under. The shell is not an app, so its tile is the
+/// quiet one with no colour.
+const DESKTOP_ID: &str = "desktop";
+
 /// The open windows as cells, most recently used first. On a worker: when the window stream is
 /// off this runs `wlrctl`.
+///
+/// The stream hands over the app id each window DECLARED, and our Slint windows declare none. Fed
+/// to the namer as it was, that left Calendar and the desktop itself with no name and a bare
+/// window glyph (the test VM, 4 October). So the id is resolved first, by the rule the window list uses
+/// (`windows::stream_app_id`), and then named by the one function every surface names windows with.
 fn gather() -> Vec<Cell> {
+    let installed = crate::apps::Catalogue::shared().get();
+    let app_of = |declared: &str, title: &str| {
+        if title == SHELL_WINDOW_TITLE { DESKTOP_ID.to_string() } else { crate::windows::stream_app_id(declared, title) }
+    };
+    let name = |app_id: &str, title: &str| crate::window_name::display_name(app_id, title, &installed);
     let mut open: Vec<Cell> = match crate::toplevel_watch::windows() {
         Some(list) => list
             .into_iter()
-            .map(|w| Cell { id: w.id, app_name: crate::windows::app_display_name(&w.app_id), title: w.title, app_id: w.app_id })
+            .map(|w| {
+                let app_id = app_of(&w.app_id, &w.title);
+                Cell { id: w.id, app_name: name(&app_id, &w.title), title: w.title, app_id }
+            })
             .collect(),
         None => crate::windows::shell_windows()
             .into_iter()
             .enumerate()
-            .map(|(n, w)| Cell::listed(n, w.title, w.app_id.clone(), crate::windows::app_display_name(&w.app_id)))
+            .map(|(n, w)| {
+                let app_id = if w.title == SHELL_WINDOW_TITLE { DESKTOP_ID.to_string() } else { w.app_id };
+                let app_name = name(&app_id, &w.title);
+                Cell::listed(n, w.title, app_id, app_name)
+            })
             .collect(),
     };
     if !open.iter().any(|c| c.title == SHELL_WINDOW_TITLE) {
-        open.push(Cell::listed(open.len(), SHELL_WINDOW_TITLE.into(), "desktop".into(), "Desktop".into()));
+        open.push(Cell::listed(open.len(), SHELL_WINDOW_TITLE.into(), DESKTOP_ID.into(), name(DESKTOP_ID, SHELL_WINDOW_TITLE)));
     }
     crate::alt_tab::order(open, &crate::toplevel_watch::recency_ids())
+}
+
+/// One cell as `describe shell` and the actions' answers report it: the same name and title the
+/// card draws, and the app the window belongs to.
+fn described(c: &Cell) -> serde_json::Value {
+    serde_json::json!({ "name": c.app_name, "title": c.title, "app": c.app_id })
 }
 
 /// The window in front, read before the shell is brought forward. On a worker.
@@ -103,15 +130,26 @@ fn publish(ui: &App, s: Option<&Switcher>) {
         ui.set_alt_tab_cells(ModelRc::default());
         return;
     };
+    // The dock's tile for each window: the same glyph and colour, or the same theme icon.
+    let tr = ui.global::<crate::Tr>();
+    let installed = crate::apps::Catalogue::shared().get();
     let cells: Vec<SwitcherCell> = s
         .page_cells()
         .iter()
-        .map(|c| SwitcherCell { title: c.title.clone().into(), app_id: c.app_id.clone().into(), app_name: c.app_name.clone().into() })
+        .map(|c| {
+            let icon = crate::wire::dock_bar::theme_icon(&tr, &c.app_id, &installed);
+            SwitcherCell {
+                title: c.title.clone().into(),
+                tile_id: crate::window_name::tile_id(&c.app_id).into(),
+                app_name: c.app_name.clone().into(),
+                has_icon: icon.is_some(),
+                icon: icon.unwrap_or_default(),
+            }
+        })
         .collect();
     ui.set_alt_tab_cells(ModelRc::new(VecModel::from(cells)));
     ui.set_alt_tab_selected(s.selected_on_page().map_or(-1, |i| i as i32));
     ui.set_alt_tab_status(s.status().into());
-    ui.set_alt_tab_plate(s.plate().into());
     ui.set_alt_tab_page(s.page() as i32);
     ui.set_alt_tab_pages(s.pages() as i32);
     ui.set_alt_tab_open(true);
@@ -188,7 +226,7 @@ fn answer(s: &Switcher, was_open: bool) -> serde_json::Value {
     serde_json::json!({
         "open": true,
         "was_open": was_open,
-        "selected": s.selected().map(|c| c.title.clone()),
+        "selected": s.selected().map(described),
         "page": s.page() + 1,
         "pages": s.pages(),
         "windows": s.cells().len(),
@@ -612,6 +650,38 @@ mod tests {
         assert!(d["bound_to"].as_str().unwrap().contains("Alt+Tab is the compositor's own"));
         let src = code();
         assert!(src.contains("order_source") && src.contains("focus stream is off") && src.contains("left_out"));
+    }
+
+    /// The design sign-off (4 October): a cell is the app's tile, its name and the window's title,
+    /// never preview text; the card is at most 640 wide, and no plate repeats the title under it.
+    #[test]
+    fn a_cell_is_the_apps_tile_name_and_title_with_no_preview_text() {
+        let card = include_str!("../../yantrik-ui-slint/ui/components/alt_tab.slint");
+        let code: String = card.lines().filter(|l| !l.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
+        assert!(!code.contains("Preview unavailable") && !code.contains("plate"), "no preview text and no plate");
+        assert!(code.contains("AppTile {") && code.contains("size: Theme.sw-tile;"), "the kit's tile, not a copy of it");
+        assert!(code.contains("root.selected ? Theme.accent"), "the selected cell is ringed in the accent");
+        let theme = include_str!("../../yantrik-design-tokens/slint/theme.slint");
+        let token = |name: &str| -> f32 {
+            let line = theme.lines().find(|l| l.contains(&format!("<length> {name}:"))).unwrap_or_else(|| panic!("no {name}"));
+            line.split(':').nth(1).unwrap().trim().trim_end_matches(';').trim_end_matches("px").parse().unwrap()
+        };
+        assert!(token("sw-card-max-w") <= 640.0, "the card is at most 640 wide");
+        assert_eq!(token("sw-tile"), 48.0);
+    }
+
+    /// `describe shell` and the actions' answers give each cell the name and title the card draws.
+    #[test]
+    fn describe_reports_the_name_and_title_the_card_draws() {
+        let cell = super::Cell { id: 3, title: "Budget — LibreOffice Calc".into(), app_id: "libreoffice-calc".into(), app_name: "LibreOffice Calc".into() };
+        let v = super::described(&cell);
+        assert_eq!((v["name"].as_str(), v["title"].as_str(), v["app"].as_str()), (Some("LibreOffice Calc"), Some("Budget — LibreOffice Calc"), Some("libreoffice-calc")));
+        let s = super::Switcher::open(vec![cell.clone(), cell], None, false);
+        assert_eq!(super::answer(&s, false)["selected"]["name"], "LibreOffice Calc");
+        let src = code();
+        let publish = function("publish");
+        assert!(publish.contains("app_name: c.app_name.clone()") && publish.contains("title: c.title.clone()"), "the card draws the cell's own name and title");
+        assert!(src.contains("\"windows\": s.cells().iter().map(described)"), "describe lists every cell that way");
     }
 
     #[test]

@@ -574,15 +574,13 @@ export global Theme {
     out property <color> osd-border: #ffffff1f;
     out property <color> osd-text: #f4f6fa;
     out property <color> osd-track: #ffffff26;
-    // Window overview (Super+Tab card): cell, footer, icon sizes, the card's and plate's widest
-    // size, the plate's height, and the card widths below which it draws three and two columns.
-    out property <length> sw-cell-w: 224px;
-    out property <length> sw-footer-h: 41px;
-    out property <length> sw-icon-lg: 40px;
-    out property <length> sw-icon-sm: 18px;
-    out property <length> sw-card-max-w: 1040px;
-    out property <length> sw-plate-max-w: 720px;
-    out property <length> sw-plate-h: 40px;
+    // Window overview (Super+Tab card): a cell's widest size and its height (12 + the 48px app
+    // tile + 8 + a 14px name + a 12px title + 12), the tile, the card's widest size (four cells
+    // across at 640), and the card widths below which it draws three and two columns.
+    out property <length> sw-cell-w: 144px;
+    out property <length> sw-cell-h: 116px;
+    out property <length> sw-tile: 48px;
+    out property <length> sw-card-max-w: 640px;
     out property <length> sw-cols-3-below: 760px;
     out property <length> sw-cols-2-below: 560px;
     // Agents workroom (agents*.slint). The spec's numbers (design/minds-surfaces-spec-2026-10-02.md
