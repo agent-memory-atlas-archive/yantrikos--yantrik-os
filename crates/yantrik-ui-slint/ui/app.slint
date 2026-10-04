@@ -944,6 +944,8 @@ export component App inherits Window {
     callback notification-dismissed(string);
     callback notification-action(string, string);
     callback notification-clear-group(string);
+    // Open or close a folded run of one mind's turn notices, by its key.
+    callback notification-toggle-group(string);
 
     // System Dashboard state (screen 10)
     in property <float> sys-cpu-usage: 0.0;
@@ -2308,6 +2310,7 @@ export component App inherits Window {
                 notification-dismissed(id) => { root.notification-dismissed(id); }
                 notification-action(id, action) => { root.notification-action(id, action); }
                 clear-group(name) => { root.notification-clear-group(name); }
+                toggle-turn-group(key) => { root.notification-toggle-group(key); }
             }
         }
 

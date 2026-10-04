@@ -233,12 +233,33 @@ pub struct StateSnapshot {
 pub struct BondSnapshot {
     pub bond_score: f64,
     pub bond_level: String,
+    /// Which of the five levels, 1 to 5, so the screen can say "Level 4 of 5".
+    pub level_number: i64,
     pub total_interactions: i64,
     pub days_together: i64,
     pub current_streak: i64,
     pub humor_rate: f64,
     pub vulnerability_events: i64,
     pub shared_references: i64,
+}
+
+impl BondSnapshot {
+    /// The bond as the Slint struct has it, with `loaded` set: this is only built from a read of
+    /// the store. One conversion, for the push and for the Bond screen's own fetch.
+    pub fn to_ui(&self) -> BondData {
+        BondData {
+            loaded: true,
+            bond_score: self.bond_score as f32,
+            bond_level: self.bond_level.clone().into(),
+            level_number: self.level_number as i32,
+            total_interactions: self.total_interactions as i32,
+            days_together: self.days_together as i32,
+            current_streak: self.current_streak as i32,
+            humor_rate: self.humor_rate as f32,
+            vulnerability_events: self.vulnerability_events as i32,
+            shared_references: self.shared_references as i32,
+        }
+    }
 }
 
 /// Personality/evolution screen data.
@@ -2920,6 +2941,8 @@ fn bond_snapshot(companion: &CompanionService) -> BondSnapshot {
     BondSnapshot {
         bond_score: bond.bond_score,
         bond_level: bond.bond_level.name().to_string(),
+        // Stranger is 1 and Partner-in-Crime 5 (yantrik-companion-core's `BondLevel`).
+        level_number: bond.bond_level.as_u8() as i64,
         total_interactions: bond.total_interactions,
         days_together: bond.days_together as i64,
         current_streak: bond.current_streak_days,
@@ -2939,20 +2962,10 @@ fn push_bond(companion: &CompanionService, ui_weak: &slint::Weak<App>) {
     let weak = ui_weak.clone();
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(ui) = weak.upgrade() {
-            ui.set_bond_data(BondData {
-                // The one place this becomes true: the store has been read, on the thread that
-                // owns it. Until then the property is the Slint default, and the rail and
-                // `describe shell` say so instead of showing that default as a level.
-                loaded: true,
-                bond_score: bond.bond_score as f32,
-                bond_level: bond.bond_level.into(),
-                total_interactions: bond.total_interactions as i32,
-                days_together: bond.days_together as i32,
-                current_streak: bond.current_streak as i32,
-                humor_rate: bond.humor_rate as f32,
-                vulnerability_events: bond.vulnerability_events as i32,
-                shared_references: bond.shared_references as i32,
-            });
+            // `to_ui` is the one place `loaded` becomes true: the store has been read, on the
+            // thread that owns it. Until then the property is the Slint default, and the rail and
+            // `describe shell` say so instead of showing that default as a level.
+            ui.set_bond_data(bond.to_ui());
         }
     });
 }

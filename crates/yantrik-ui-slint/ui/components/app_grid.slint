@@ -103,12 +103,16 @@ component LauncherCell inherits Rectangle {
                 hovered: touch.has-hover;
             }
         }
+        // Two lines before an ellipsis: on one, "Chromium Web Browser" was "Chromium We…".
         Text {
             text: root.name;
             color: Theme.text-primary;
             font-size: Theme.fs-caption;
             horizontal-alignment: center;
+            vertical-alignment: top;
+            wrap: word-wrap;
             overflow: elide;
+            height: 2 * Theme.fs-caption + 6px;
         }
     }
 
@@ -132,11 +136,15 @@ component LauncherCell inherits Rectangle {
         }
     }
 
-    // A badge on the icon's corner, shown on hover so forty tiles are not forty buttons, and
+    // A bare pin on the icon's corner, shown on hover so forty tiles are not forty buttons, and
     // always once pinned, so the grid answers "which of these are on my desktop" at a glance.
     // It sits ON the icon (centre + 12px starts it inside the 48px tile's right edge), not at
     // the cell's corner, where it read as belonging to the next tile. Declared last so it takes
     // the click: pinning must not also launch the app and close the launcher.
+    //
+    // A 10px glyph at 60%, with no disc behind it. It was a dark round badge, and a dark round
+    // badge on an app's corner is where a desktop puts an unread count. The press area stays
+    // 22px, so the smaller glyph is not a smaller target.
     pin-hit := TouchArea {
         x: parent.width / 2 + 14px;
         y: 3px;
@@ -144,22 +152,18 @@ component LauncherCell inherits Rectangle {
         height: 22px;
         visible: root.pinnable && (touch.has-hover || pin-hit.has-hover || root.pinned);
         mouse-cursor: pointer;
+        accessible-role: button;
+        accessible-label: root.pinned ? "Unpin " + root.name : "Pin " + root.name;
         clicked => { root.toggle-pin(); }
 
-        Rectangle {
-            width: 100%; height: 100%;
-            border-radius: self.width / 2;
-            background: pin-hit.has-hover ? Theme.bg-elevated : Theme.panel-solid;
-            border-width: 1px;
-            border-color: root.pinned ? Theme.accent.transparentize(40%) : Theme.border-strong;
-            Icon {
-                commands: Icons.pushpin;
-                size: 12px;
-                thickness: 1.7px;
-                tint: root.pinned ? Theme.accent : pin-hit.has-hover ? Theme.text-primary : Theme.text-dim;
-                x: (parent.width - self.width) / 2;
-                y: (parent.height - self.height) / 2;
-            }
+        Icon {
+            commands: Icons.pushpin;
+            size: 10px;
+            thickness: 1.7px;
+            opacity: pin-hit.has-hover ? 1.0 : 0.6;
+            tint: root.pinned ? Theme.accent : Theme.text-primary;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
         }
     }
 }
@@ -182,7 +186,8 @@ export component AppGrid inherits Rectangle {
     height: 100%;
 
     property <length> cell-w: 104px;
-    property <length> cell-h: 100px;
+    // Room for a name on two lines under the 48px tile.
+    property <length> cell-h: 112px;
     property <length> cell-gap: 6px;
     property <length> head-h: 30px;
     property <length> section-gap: 10px;

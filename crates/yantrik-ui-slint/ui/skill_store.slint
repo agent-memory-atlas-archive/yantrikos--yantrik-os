@@ -4,6 +4,7 @@
 import { Theme } from "theme.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { YEmptyState } from "components/y_empty_state.slint";
+import { YSwitch } from "components/y_switch.slint";
 
 export struct SkillData {
     id: string,
@@ -256,24 +257,15 @@ export component SkillStore inherits Rectangle {
                                 }
                             }
 
-                            // Toggle switch
-                            Rectangle {
-                                width: 44px;
-                                height: 24px;
-                                border-radius: 12px;
-                                background: skill.enabled ? Theme.accent : Theme.bg-card;
-
-                                animate background { duration: 150ms; }
-
-                                Rectangle {
-                                    width: 18px;
-                                    height: 18px;
-                                    border-radius: 9px;
-                                    y: 3px;
-                                    x: skill.enabled ? parent.width - self.width - 3px : 3px;
-                                    background: Theme.text-on-accent;
-
-                                    animate x { duration: 150ms; }
+                            // The kit's switch, with its word. This was a hand-drawn one whose off
+                            // track was the card's own colour, so off was a grey disc readable
+                            // only by which side it sat on.
+                            VerticalLayout {
+                                alignment: center;
+                                YSwitch {
+                                    label: skill.enabled ? "On" : "Off";
+                                    on: skill.enabled;
+                                    toggled => { root.toggle-skill(skill.id); }
                                 }
                             }
                         }

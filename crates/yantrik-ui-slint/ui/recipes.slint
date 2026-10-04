@@ -79,7 +79,7 @@ export struct RecipeRowData {
     question: string,
     choices: [string],
     template: bool,
-    unbound: string,       // "2 steps with an input nothing sets"
+    unbound: string,       // "Needs {{person}} and {{date}} — sent as written until set"
     can-answer: bool,
     can-pause: bool,
     can-resume: bool,
@@ -427,11 +427,23 @@ component StepLine inherits Rectangle {
                 color: Theme.accent;
                 font-size: Theme.fs-micro;
             }
-            if root.step.unbound != "" : Text {
-                text: "⚠ " + root.step.unbound;
-                color: Theme.color-warning;
-                font-size: Theme.fs-micro;
-                wrap: word-wrap;
+            // A precondition, not a destruction: an amber glyph for "this needs you" and the words
+            // in secondary text. It was a red-orange "⚠" character and line, which read as an error.
+            if root.step.unbound != "" : HorizontalLayout {
+                spacing: 6px;
+                Icon {
+                    commands: Icons.warning;
+                    size: 12px;
+                    tint: Theme.amber;
+                    y: 1px;
+                }
+                Text {
+                    text: root.step.unbound;
+                    color: Theme.text-secondary;
+                    font-size: Theme.fs-micro;
+                    wrap: word-wrap;
+                    horizontal-stretch: 1;
+                }
             }
             if root.step.agent != "" : Text {
                 text: (root.step.state == "waiting" ? "at work: " : root.step.state == "done" ? "answered by " : "hands to ") + root.step.agent;
@@ -504,11 +516,19 @@ component RecipeCard inherits Rectangle {
                     vertical-alignment: center;
                     horizontal-stretch: 1;
                 }
-                if root.recipe.unbound != "" : Text {
-                    text: "⚠ " + root.recipe.unbound;
-                    color: Theme.color-warning;
-                    font-size: Theme.fs-micro;
-                    vertical-alignment: center;
+                // The same precondition on the row, said the same way as in the opened step.
+                if root.recipe.unbound != "" : HorizontalLayout {
+                    spacing: 6px;
+                    VerticalLayout {
+                        alignment: center;
+                        Icon { commands: Icons.warning; size: 12px; tint: Theme.amber; }
+                    }
+                    Text {
+                        text: root.recipe.unbound;
+                        color: Theme.text-secondary;
+                        font-size: Theme.fs-micro;
+                        vertical-alignment: center;
+                    }
                 }
                 Text {
                     text: root.recipe.progress;

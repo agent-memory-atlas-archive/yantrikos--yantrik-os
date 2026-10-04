@@ -15,7 +15,7 @@
 //! up in it, every tick, so its countdown moves.
 //!
 //! The same tick watches for what the person should hear about an agent they are not looking at —
-//! "pi finished: …", "deepseek needs you" — and says it through the notification service, as the
+//! "pi finished · made 2 calls", "deepseek needs you" — and says it through the notification service, as the
 //! desktop (see [`Watch`]).
 
 use std::cell::{Cell, RefCell};
@@ -906,7 +906,9 @@ fn draw(g: &AgentsState, surface: &mut Surface, s: &Store, agent: Option<&AgentI
     let mut header = header_of(a, seen);
     if let Some(t) = surface.run.and_then(|n| a.turns.iter().find(|t| t.n == n)) {
         // One run of a chat: named by what it was asked.
-        header.title = one_line(&t.prompt, TITLE_CHARS).into();
+        let (title, raw) = super::run_heading::named(&t.prompt, TITLE_CHARS);
+        header.title = title.into();
+        header.raw = raw.into();
     }
     if g.get_header() != header {
         g.set_header(header);
@@ -1050,10 +1052,12 @@ fn header_of(a: &Agent, seen: &Seen) -> AgentHeaderData {
     } else {
         format!("{} holds one conversation at a time — the same one the Lens talks to.", a.meta.mind)
     };
+    let (title, raw) = super::run_heading::named(latest_request(&a.turns, &a.meta.title), TITLE_CHARS);
     AgentHeaderData {
         id: a.meta.id.0.as_str().into(),
         mind: a.meta.mind.as_str().into(),
-        title: one_line(latest_request(&a.turns, &a.meta.title), TITLE_CHARS).into(),
+        title: title.into(),
+        raw: raw.into(),
         state: a.state.key().into(),
         label: a.state.label().into(),
         since: since(a).into(),
@@ -1742,8 +1746,8 @@ fn show_agent(ui: &App, state: &Shared, agent: AgentId) {
 /// Something the person should hear about an agent they are not looking at.
 #[derive(Clone, Debug, PartialEq)]
 enum Notice {
-    /// Its turn ended — finished, or not.
-    Finished { agent: AgentId, mind: String, title: String, ok: bool },
+    /// Its turn ended — finished, or not — after `calls` calls the shell drew as cards.
+    Finished { agent: AgentId, mind: String, title: String, ok: bool, calls: usize },
     /// A card of its waits on the person: an approval, or a command at a prompt.
     NeedsYou { agent: AgentId, mind: String, what: String },
     /// Its turn is going round, or has gone quiet (#234): the shell's own reading, once a turn.
@@ -1757,24 +1761,27 @@ impl Notice {
         }
     }
 
-    /// Said as the desktop, in the desktop's words. The title quotes the task, and nothing the
-    /// agent wrote goes in: a notification from `Yantrik` must not carry a mind's sentences as
-    /// though the desktop had said them (#139).
+    /// Said as the desktop, in the desktop's words, and nothing the agent wrote goes in: a
+    /// notification from `Yantrik` must not carry a mind's sentences as though the desktop had
+    /// said them (#139). The title is what the shell saw happen; the task is the person's own
+    /// words, so it goes in the body, labelled as theirs. It was the title, and two cards in the
+    /// centre were titled "yes" (sign-off, 4 October).
     fn notification(&self) -> yantrik_app_runtime::notify::Notification {
+        use crate::notification_groups::{turn_title, you_asked};
         use yantrik_app_runtime::notify::{Level, Notification};
         let (title, body) = match self {
-            Notice::Finished { mind, title, ok: true, .. } => (
-                format!("{mind} finished: \u{201c}{}\u{201d}", one_line(title, 60)),
-                "Its turn is done. Open it to read what it said and what it ran.".to_string(),
+            Notice::Finished { mind, title, ok: true, calls, .. } => (
+                turn_title(mind, true, *calls),
+                format!("{} Open it to read what it said and what it ran.", you_asked(title)),
             ),
-            Notice::Finished { mind, title, ok: false, .. } => (
-                format!("{mind} could not finish: \u{201c}{}\u{201d}", one_line(title, 60)),
-                "Its turn ended without finishing. Open it to see where it stopped.".to_string(),
+            Notice::Finished { mind, title, ok: false, calls, .. } => (
+                turn_title(mind, false, *calls),
+                format!("{} Its turn ended without finishing. Open it to see where it stopped.", you_asked(title)),
             ),
             Notice::NeedsYou { mind, what, .. } => (format!("{} needs you", one_line(mind, 40)), what.clone()),
             Notice::Stuck { mind, title, why, .. } => (
-                format!("{mind} looks stuck: \u{201c}{}\u{201d}", one_line(title, 60)),
-                format!("{} Open it to see where, give it a hint, or stop it.", why.plain()),
+                format!("{mind} looks stuck"),
+                format!("{} {} Open it to see where, give it a hint, or stop it.", you_asked(title), why.plain()),
             ),
         };
         let n = Notification::new("Yantrik", title)
@@ -1836,6 +1843,7 @@ impl Watch {
                             // exactly one word…”" was the toast for a Blender scene (VM 520).
                             title: turn.prompt.clone(),
                             ok: turn.ok != Some(false),
+                            calls: turn.cards().count(),
                         });
                     }
                 }
@@ -2270,7 +2278,7 @@ mod tests {
         s.approval_answered(&pi, "appr-3", true);
         s.close_turn(&pi, true);
         let told = watch.changes(&s, &waiting, 0);
-        assert_eq!(told, vec![Notice::Finished { agent: pi.clone(), mind: "pi".into(), title: "tidy the photos folder".into(), ok: true }]);
+        assert_eq!(told, vec![Notice::Finished { agent: pi.clone(), mind: "pi".into(), title: "tidy the photos folder".into(), ok: true, calls: 0 }]);
 
         // A later turn in the same conversation is told by its own prompt, not the first one's.
         s.open_turn(&pi, "now rename them by date");
@@ -2312,7 +2320,7 @@ mod tests {
         let actions = format!("{words:?}");
         assert!(actions.contains("show_agent") && actions.contains("Tell it"), "{actions}");
         assert!(actions.contains("stop_agent") && actions.contains("Stop"), "{actions}");
-        let finished = Notice::Finished { agent: hermes.clone(), mind: "hermes".into(), title: "x".into(), ok: true };
+        let finished = Notice::Finished { agent: hermes.clone(), mind: "hermes".into(), title: "x".into(), ok: true, calls: 0 };
         let plain = format!("{:?}", finished.notification());
         assert!(plain.contains("Open") && !plain.contains("stop_agent"), "only a stuck task offers Stop: {plain}");
         assert!(watch.changes(&s, &[], later + 60).is_empty(), "once a turn, not once a tick");
@@ -2349,9 +2357,19 @@ mod tests {
             mind: "pi".into(),
             title: "tidy the photos folder".into(),
             ok: true,
+            calls: 2,
         };
         let sent = format!("{:?}", finished.notification());
-        for said in ["\"Yantrik\"", "pi finished: \u{201c}tidy the photos folder\u{201d}", "Normal", "show_agent", "Open", "pi:c-7f3a91"] {
+        // The title is what happened; the task is in the body, as the person's (sign-off, 4 Oct).
+        for said in [
+            "\"Yantrik\"",
+            "\"pi finished \u{b7} made 2 calls\"",
+            "You asked: \u{201c}tidy the photos folder\u{201d}.",
+            "Normal",
+            "show_agent",
+            "Open",
+            "pi:c-7f3a91",
+        ] {
             assert!(sent.contains(said), "{said:?} missing: {sent}");
         }
         let needs = Notice::NeedsYou { agent: AgentId("deepseek:main".into()), mind: "deepseek".into(), what: "x".into() };
@@ -2372,7 +2390,9 @@ mod tests {
         let a = s.agent(&id).unwrap();
         let seen = Seen { minds: Vec::new(), agents: Vec::new(), approvals: Vec::new() };
         let header = header_of(a, &seen);
-        assert_eq!(header.title.as_str(), "You are the Researcher on this desktop. Find out what is true and say how you know.");
+        // The heading is the brief's first sentence; the brief itself, on one line, goes under it.
+        assert_eq!(header.title.as_str(), "You are the Researcher on this desktop.");
+        assert_eq!(header.raw.as_str(), "You are the Researcher on this desktop. Find out what is true and say how you know.");
         let desk = |s: &Store| {
             let room = workroom::compose(s, &[], &[], &[], &[], now());
             room.desks.into_iter().next().expect("the open turn is a desk").task
@@ -2380,7 +2400,8 @@ mod tests {
         assert!(!desk(&s).contains('\n'));
         s.open_turn(&id, &format!("{}\nend", "x".repeat(500)));
         let long = header_of(s.agent(&id).unwrap(), &seen);
-        assert!(!long.title.contains('\n') && long.title.chars().count() <= TITLE_CHARS);
+        assert!(!long.title.contains('\n') && long.title.chars().count() <= super::super::run_heading::HEADING_CHARS);
+        assert!(!long.raw.contains('\n') && long.raw.chars().count() <= TITLE_CHARS);
         assert!(!desk(&s).contains('\n'));
     }
 

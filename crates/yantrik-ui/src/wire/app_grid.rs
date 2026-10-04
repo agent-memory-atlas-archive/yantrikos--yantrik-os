@@ -159,6 +159,31 @@ mod launcher_tests {
 }
 
 #[cfg(test)]
+mod one_per_app_tests {
+    use super::one_per_app;
+    use crate::apps::DesktopEntry;
+
+    fn entry(app_id: &str, name: &str) -> DesktopEntry {
+        DesktopEntry { app_id: app_id.into(), name: name.into(), exec: app_id.into(), ..Default::default() }
+    }
+
+    /// The distribution's Blender and ours were two tiles; ours is the one kept.
+    #[test]
+    fn our_entry_shadows_the_one_it_wraps() {
+        let installed = vec![entry("blender", "Blender"), entry("yantrik-blender", "Blender"), entry("gimp", "GIMP")];
+        let ids: Vec<&str> = one_per_app(&installed).iter().map(|e| e.app_id.as_str()).collect();
+        assert_eq!(ids, ["yantrik-blender", "gimp"]);
+    }
+
+    /// Only the same app: a bare id that happens to match ours under another name stays.
+    #[test]
+    fn a_different_app_under_a_matching_id_is_kept() {
+        let installed = vec![entry("notes", "Sticky Notes"), entry("yantrik-notes", "Notes")];
+        assert_eq!(one_per_app(&installed).len(), 2);
+    }
+}
+
+#[cfg(test)]
 mod icon_id_tests {
     use super::icon_id_for;
 
@@ -352,9 +377,28 @@ mod app_colour_tests {
     }
 }
 
-fn populate_grid(ui: &App, installed: &Arc<Vec<DesktopEntry>>, query: &str) {
-    let apps: Vec<AppGridItem> = installed
+/// One tile per app.
+///
+/// The scan already keeps one entry per desktop id, but the same program can arrive under two:
+/// the distribution's `blender.desktop` and our `yantrik-blender.desktop`, which starts the same
+/// Blender with the addon that gives it a surface. "Blender" was in All apps twice. Our entry
+/// shadows the bare id it wraps — same id once `yantrik-` is taken off, same name — and the
+/// distribution's is left out of the grid. The launch dispatch routes either id to the same
+/// place, so nothing that opened before stops opening.
+fn one_per_app(installed: &[DesktopEntry]) -> Vec<&DesktopEntry> {
+    let ours: Vec<(&str, String)> = installed
         .iter()
+        .filter_map(|e| Some((e.app_id.strip_prefix("yantrik-")?, e.name.to_lowercase())))
+        .collect();
+    installed
+        .iter()
+        .filter(|e| !ours.iter().any(|(bare, name)| *bare == e.app_id && *name == e.name.to_lowercase()))
+        .collect()
+}
+
+fn populate_grid(ui: &App, installed: &Arc<Vec<DesktopEntry>>, query: &str) {
+    let apps: Vec<AppGridItem> = one_per_app(installed)
+        .into_iter()
         .filter(|entry| {
             super::launcher::matches(
                 query,
