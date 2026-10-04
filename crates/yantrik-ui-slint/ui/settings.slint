@@ -817,15 +817,16 @@ export component SettingsScreen inherits Rectangle {
                                     vertical-alignment: center;
                                 }
 
-                                // The swatch is the preset's own token, so it is the colour you get.
+                                // The swatch is the preset's own token as it applies in this mode (light or dark), so it
+                                // is the colour you get.
                                 // The serialised ids stay "cyan" and "purple": saved settings and
                                 // the control surface already say them. No amber and no green:
                                 // those mean "needs you" and success, never every primary
                                 // (yantrik_app_runtime::theme::ACCENTS is the same three).
                                 for accent in [
-                                    {id:"cyan",label:"Soft blue",color:AccentPreset.swatch-0},
-                                    {id:"purple",label:"Violet",color:AccentPreset.swatch-2},
-                                    {id:"pink",label:"Pink",color:AccentPreset.swatch-4}
+                                    {id:"cyan",label:"Soft blue",color:AccentPreset.resolved-0},
+                                    {id:"purple",label:"Violet",color:AccentPreset.resolved-2},
+                                    {id:"pink",label:"Pink",color:AccentPreset.resolved-4}
                                 ] : AccentChoice {swatch:accent.color;label:accent.label;selected:root.accent-color==accent.id;chosen=>{root.choose-accent(accent.id);}}
 
                             }

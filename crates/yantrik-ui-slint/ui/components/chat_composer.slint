@@ -6,6 +6,9 @@
 // you are typing in it is a trap. While a run is going the send button reads "Send follow-up",
 // which is what it does: the words go to the mind beside its work.
 //
+// The line under the box says where the words go (`destination`): the answering mind, its model,
+// and whether that is online or on this machine, or nothing when the shell does not know.
+//
 // The mode chip ("Mode: Ask") is the status bar chip's twin: it opens the same mind-mode choice,
 // it does not change the mode by itself, and a mode change applies to the next run. The noun is
 // in the chip's words only, so a bare "Ask" beside the field does not read as a button that asks. The starters in the
@@ -18,16 +21,23 @@ import { ChatPill } from "chat_parts.slint";
 export component ChatComposer inherits Rectangle {
     in property <string> mind-name;
     in property <string> mode-label: "Ask";
+    // Where the words go, as the shell knows it from the configured backend: "Yantrik Mind ·
+    // deepseek-v4.1-flash · online, via Ollama Cloud", or "… · on this machine". Drawn as a line
+    // under the box; "" when the shell does not know, and then no line and no room for one.
+    in property <string> destination: "";
     // A run for this chat is going: the button says so.
     in property <bool> run-active: false;
     out property <bool> has-text: input.chat-text != "";
     // Whether the cursor is in the box (the idle-redraw and focus tests read it).
     out property <bool> focused: input.has-focus;
+    // The destination line's own room, under the box.
+    property <length> destination-h: root.destination != "" ? 18px : 0px;
     // The bar's own height, which the panel's arithmetic subtracts.
-    out property <length> bar-height: max(112px, min(200px, input.preferred-height + 14px) + 72px);
-    // The tallest `bar-height` gets: the field's 200px cap plus the 72px around it. The approval
-    // card's height limit reads this and not `bar-height`, so typing cannot resize the card.
-    out property <length> bar-height-max: 272px;
+    out property <length> bar-height: max(112px, min(200px, input.preferred-height + 14px) + 72px) + root.destination-h;
+    // The tallest `bar-height` gets: the field's 200px cap plus the 72px around it, and the
+    // destination line. The approval card's height limit reads this and not `bar-height`, so
+    // typing cannot resize the card.
+    out property <length> bar-height-max: 272px + root.destination-h;
 
     callback send(string);
     callback mic();
@@ -59,7 +69,7 @@ export component ChatComposer inherits Rectangle {
         x: Theme.sp-3;
         y: Theme.sp-3;
         width: parent.width - 2 * Theme.sp-3;
-        height: parent.height - 2 * Theme.sp-3;
+        height: parent.height - 2 * Theme.sp-3 - root.destination-h;
         border-radius: Theme.chat-radius;
         background: Theme.chat-panel;
         border-width: 1px;
@@ -117,7 +127,8 @@ export component ChatComposer inherits Rectangle {
                 alignment: center;
                 mode-chip := Rectangle {
                     height: 28px;
-                    width: chip-row.preferred-width + 2 * Theme.sp-3;
+                    // The row carries its own padding; adding more here left a gap before the chevron.
+                    width: chip-row.preferred-width;
                     border-radius: 14px;
                     background: chip-ta.has-hover ? Theme.hover-fill : transparent;
                     border-width: 1px;
@@ -194,5 +205,21 @@ export component ChatComposer inherits Rectangle {
                 }
             }
         }
+    }
+
+    // Where the words go, under the box: an observed fact from the configured backend, never a
+    // guess, so it is simply not drawn when the shell does not know.
+    if root.destination != "" : destination-line := Text {
+        x: Theme.sp-3 + Theme.sp-1;
+        y: root.height - Theme.sp-3 - root.destination-h + 2px;
+        width: root.width - 2 * (Theme.sp-3 + Theme.sp-1);
+        height: root.destination-h - 2px;
+        text: root.destination;
+        color: Theme.chat-text-2;
+        font-size: Theme.fs-caption;
+        vertical-alignment: center;
+        overflow: elide;
+        accessible-role: text;
+        accessible-label: "Your words go to " + root.destination;
     }
 }

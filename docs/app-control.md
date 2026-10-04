@@ -286,7 +286,7 @@ content, and a content action a paired action takes back stays `standard` (`add_
 
 | Surface | Action | Grade | Why |
 | --- | --- | --- | --- |
-| shell | `read_message`, `open_lens`, `show_desktop` | safe | reads and showings; nothing written |
+| shell | `read_message`, `open_lens`, `close_lens`, `show_desktop` | safe | reads and showings; nothing written. `close_lens` puts the Lens and its chat panel away as Escape does, keeping the conversation and any draft; `describe shell` › `lens.close_with` names it while the Lens is open |
 | shell | `open_app`, `start_service`, `refresh_apps`, `send_message` | standard | launch, start, rescan, say a line to the desktop — undone by closing or stopping, nothing stored |
 | shell | `show_screen`, `show_app`, `focus_window`, `close_window`, `minimise_window`, `maximise_window` | standard | moving and placing windows; the state they change dies with the session |
 | shell | `pin_app` | sensitive | **regraded (#48)**: writes the START pin list into the shell's settings, and it is still pinned after a restart |
@@ -294,6 +294,7 @@ content, and a content action a paired action takes back stays `standard` (`add_
 | shell | `set_do_not_disturb` | sensitive | **regraded (#48)**: writes `dnd_mode` into the shell's settings; left on, it swallows every notification that follows, quietly, until somebody notices |
 | shell | `set_volume`, `set_mute`, `set_brightness` | standard | the machine's own output level and backlight, which the keys move too and the same slider takes back; nothing is written to the shell's settings. They answer with the level read back from PipeWire / the panel, and `set_brightness` refuses on a machine with no backlight |
 | shell | `set_theme` | sensitive | chooses the desktop's theme (lake, nightfall): the colours, accent, wallpaper and dark flag together, saved in the shell's settings, and it rewrites files outside the shell (labwc's themerc, foot's colours, GTK's scheme) on a worker. `describe shell` lists the themes under `theme`; the answer is the theme the shell reports back |
+| shell | `set_dark_style` | standard | switches between the dark and light appearance through the Quick Settings tile's own callback, which saves `dark_mode`; one click puts it back and nothing outside the shell is written. `describe shell` › `settings.dark` is the mode in use |
 | shell | `report_problem` | sensitive | sends what it carries out of the machine |
 | shell | `install_harness`, `start_harness` | sensitive | fetches software onto the machine; decides what it runs on every login |
 | shell | `set_mind_panel` | safe | showing: how much of one panel is drawn, remembered in the panel's own file; nothing sent, run or granted |

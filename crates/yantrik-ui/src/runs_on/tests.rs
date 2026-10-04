@@ -133,6 +133,32 @@ fn vm_520_the_providers_in_use_are_listed_though_none_is_saved() {
     assert!(!in_use.iter().any(|u| u.used_by.iter().any(|n| n == "Hermes Agent")));
 }
 
+/// The line under the chat composer: where the words go, from the same facts as every other
+/// surface, and nothing at all when the provider is not known.
+#[test]
+fn the_composer_line_says_where_words_go_or_nothing() {
+    let (minds, companion) = vm_520();
+    let rows = resolve(&minds, Some(&companion));
+    let line = |name: &str| rows.iter().find(|r| r.name == name).unwrap().destination();
+    assert_eq!(line("Yantrik Mind"), "Yantrik Mind \u{b7} deepseek-v4.1-flash \u{b7} online, via Ollama Cloud");
+    assert_eq!(line("Yantrik Companion"), "Yantrik Companion \u{b7} qwen3.8:27b \u{b7} online, via aig.mycluster.cyou");
+    // Hermes names a model and no provider: no line rather than a guessed one.
+    assert_eq!(line("Hermes Agent"), "");
+
+    let companion_at = |url: &str| {
+        let c = CompanionFact { base_url: url.into(), model: "qwen3.5:9b".into(), source: "config.yaml".into(), provider_name: String::new() };
+        resolve(&minds[..1], Some(&c))[0].destination()
+    };
+    assert_eq!(companion_at("http://localhost:11434/v1"), "Yantrik Companion \u{b7} qwen3.5:9b \u{b7} on this machine");
+    assert_eq!(companion_at("http://127.0.0.1:8341/v1"), "Yantrik Companion \u{b7} qwen3.5:9b \u{b7} on this machine");
+    assert_eq!(companion_at("http://192.168.4.35:11434/v1"), "Yantrik Companion \u{b7} qwen3.5:9b \u{b7} on this network, at 192.168.4.35:11434");
+    assert_eq!(companion_at(""), "", "nothing set up, nothing said");
+
+    // A local runtime named only in a mind's own words could be on any machine.
+    let ollama = resolve(&[mind("x", "X", Some("ollama:qwen3.5:9b"), true)], None);
+    assert_eq!(ollama[0].destination(), "X \u{b7} qwen3.5:9b \u{b7} via Ollama");
+}
+
 #[test]
 fn a_saved_provider_is_not_listed_again_as_in_use() {
     let (minds, companion) = vm_520();

@@ -4,6 +4,8 @@
 //!
 //!   review-still appearance        Settings → Appearance, light
 //!   review-still quick-settings    the whole shell with Quick Settings open, light
+//!   review-still quick-settings-dark  the same, dark, so the two can be held side by side
+//!   review-still lens-composer[-dark]  the chat composer with its "where the words go" line
 //!   review-still app-header        Calendar with its header (filled New Event, outline Today…), light
 //!   review-still approval          one approval card at its natural height, light
 //!   review-still approval-nightfall  the same card on Nightfall (dark, violet, its palette)
@@ -172,9 +174,9 @@ fn appearance(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std
     save(&settle(w, 1280, 800), &output.replace(".png", "-scrolled.png"), 1280, 800)
 }
 
-fn quick_settings(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn quick_settings(w: &MinimalSoftwareWindow, output: &str, dark: bool) -> Result<(), Box<dyn std::error::Error>> {
     let ui = App::new()?;
-    ui.global::<ThemeMode>().set_dark(false);
+    ui.global::<ThemeMode>().set_dark(dark);
     ui.global::<AccentPreset>().set_index(0);
     ui.set_current_screen(1);
     ui.set_clock_text("10:24".into());
@@ -182,7 +184,7 @@ fn quick_settings(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn
     ui.set_wallpaper_path("lake".into());
     ui.set_mind_mode("ask".into());
     ui.set_mind_mode_label("Ask".into());
-    ui.set_settings_dark_mode(false);
+    ui.set_settings_dark_mode(dark);
     ui.set_dnd_mode(false);
     quick_settings_tests::laptop_shape(&ui);
     ui.show()?;
@@ -191,6 +193,20 @@ fn quick_settings(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn
     settle(w, 1280, 800);
     ui.set_quick_settings_open(true);
     std::thread::sleep(std::time::Duration::from_millis(400));
+    save(&settle(w, 1280, 800), output, 1280, 800)
+}
+
+/// The chat panel's composer with its "where the words go" line and the "Mode:" chip, as the
+/// answering mind's facts give them on VM 520 (Yantrik Mind on Ollama Cloud).
+fn lens_composer(w: &MinimalSoftwareWindow, output: &str, dark: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let ui = ChatProbe::new()?;
+    ui.global::<ThemeMode>().set_dark(dark);
+    ui.global::<AccentPreset>().set_index(0);
+    ui.set_messages(ModelRc::new(VecModel::from(Vec::<MessageData>::new())));
+    ui.set_destination("Yantrik Mind \u{b7} deepseek-v4.1-flash \u{b7} online, via Ollama Cloud".into());
+    ui.show()?;
+    w.set_size(slint::PhysicalSize::new(1280, 800));
+    settle(w, 1280, 800);
     save(&settle(w, 1280, 800), output, 1280, 800)
 }
 
@@ -235,7 +251,10 @@ fn app_header(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std
 pub fn run(w: &MinimalSoftwareWindow, output: &str, which: &str) -> Result<(), Box<dyn std::error::Error>> {
     match which {
         "appearance" => appearance(w, output),
-        "quick-settings" => quick_settings(w, output),
+        "quick-settings" => quick_settings(w, output, false),
+        "quick-settings-dark" => quick_settings(w, output, true),
+        "lens-composer" => lens_composer(w, output, false),
+        "lens-composer-dark" => lens_composer(w, output, true),
         "app-header" => app_header(w, output),
         "approval" => approval_card(w, output, false),
         "approval-nightfall" => approval_card(w, output, true),
