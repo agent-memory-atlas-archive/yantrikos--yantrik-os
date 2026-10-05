@@ -1863,6 +1863,49 @@ mod tests {
         assert_eq!(mistyped["error"]["code"], -32602);
     }
 
+    /// Every app's agent rail asks whether the companion can be reached on a timer, on the
+    /// window's thread — the thread `describe` runs on. It used to be a round trip to the shell
+    /// right there, so a describe that arrived during one waited for the shell; `yos check
+    /// weather` measured ~600 ms. Here the shell takes two seconds to answer, the rail ticks on the
+    /// UI stand-in just before each describe, and each describe still answers within the bound.
+    #[cfg(unix)]
+    #[test]
+    fn a_rail_asking_a_slow_shell_on_the_ui_thread_holds_up_no_describe() {
+        use crate::companion::{Reach, ReachWatch, REACH_FIRST_WAIT};
+        use std::time::Instant;
+
+        served_test_surface();
+        let watch = ReachWatch::new(
+            Box::new(|| {
+                std::thread::sleep(Duration::from_secs(2));
+                Reach::Ready
+            }),
+            Duration::from_millis(50),
+            REACH_FIRST_WAIT,
+            Duration::from_secs(30),
+        );
+        // What `refresh_agent_rail` does on its timer, on the thread that owns the window.
+        let rail_tick = |watch: &Arc<ReachWatch>| {
+            let watch = Arc::clone(watch);
+            post_to_ui(Box::new(move || {
+                let _ = watch.get();
+            }))
+            .expect("the UI stand-in takes the tick");
+        };
+
+        for read in 0..3 {
+            rail_tick(&watch);
+            let glance = Instant::now();
+            let described = call(r#"{"jsonrpc":"2.0","id":1,"method":"app.describe","params":{}}"#);
+            assert_eq!(described["result"]["app"], "caller-test", "{described}");
+            assert!(
+                glance.elapsed() < Duration::from_millis(700),
+                "describe {read} waited {:?} behind the rail asking a two-second shell",
+                glance.elapsed()
+            );
+        }
+    }
+
     /// The token rides beside `args` and reaches the handler through `agent_token()`; `args` —
     /// what an approval card shows and an audit line keeps — never holds it, even when a caller
     /// puts it there.
