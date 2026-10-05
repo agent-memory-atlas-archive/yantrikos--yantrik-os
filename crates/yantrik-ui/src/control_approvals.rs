@@ -1308,7 +1308,8 @@ fn who_is_calling(claimed: &str) -> approvals::Verified {
         line: identity.line(),
         exe: identity.exe(),
         pid: identity.pid(),
-        attached_mind: identity.attached_mind.clone().unwrap_or_default(),
+        // What the card names: by pid, or by a word of the program's name that is the mind's own.
+        attached_mind: identity.shown_mind.clone().unwrap_or_default(),
         mind_by_pid: identity.attached_by_pid,
         discrepancies: {
             let said = crate::caller_identity::mismatch(claimed, &identity, &minds);
@@ -1316,7 +1317,7 @@ fn who_is_calling(claimed: &str) -> approvals::Verified {
         },
         agent: String::new(),
         // The rule `CallerIdentity::line` uses for its terminal prefix, kept as a fact.
-        from_terminal: identity.attached_mind.is_none() && identity.via_shell,
+        from_terminal: !identity.attached_by_pid && identity.via_shell,
         raised_by_desktop: false,
     }
 }

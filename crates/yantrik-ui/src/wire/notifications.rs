@@ -886,10 +886,9 @@ pub fn companion_said(ui: &App, title: &str, text: &str) {
     if ui.get_lens_open() {
         return;
     }
-    notify::send(
-        notify::Notification::new("Yantrik", title)
-            .body(text.chars().take(200).collect::<String>()),
-    );
+    // The text is the model's: filed as the companion's, labelled as a model's (security review of
+    // #648, L3). It went out under "Yantrik" with nothing saying a model wrote it.
+    post_companion(CompanionPost::Result, title.to_string(), text.chars().take(200).collect());
 }
 
 /// The built-in companion said something *unprompted* while the Lens was closed, so the person
@@ -1121,7 +1120,8 @@ fn deliver(
                 "the answering mind is not the built-in companion, so its proactive message is \
                  a notification and not part of the conversation"
             );
-            post_companion(CompanionPost::Result, text);
+            let (title, body) = title_and_body(text);
+            post_companion(CompanionPost::Result, title, body);
         }
         ProactiveDelivery::Transcript { notify } => push_to_transcript(notify),
     }
@@ -1193,7 +1193,8 @@ fn notify_companion_thought(text: &str) -> bool {
         );
         return false;
     }
-    post_companion(CompanionPost::Reflection, &cleaned);
+    let (title, body) = title_and_body(&cleaned);
+    post_companion(CompanionPost::Reflection, title, body);
     true
 }
 
@@ -1229,8 +1230,7 @@ fn labelled(kind: CompanionPost, body: &str) -> String {
 /// File something the built-in companion said as a notification: the one place one is made, so
 /// every companion post carries its label (security review of #648, L3: the result route filed
 /// unlabelled).
-fn post_companion(kind: CompanionPost, text: &str) {
-    let (title, body) = title_and_body(text);
+fn post_companion(kind: CompanionPost, title: String, body: String) {
     notify::send(
         notify::Notification::new("Yantrik Companion", title)
             .body(labelled(kind, &body))
@@ -1320,11 +1320,67 @@ mod tests {
         assert_eq!(labelled(CompanionPost::Result, "Backups checked."), "AI-generated result \u{b7} Backups checked.");
         let src = include_str!("notifications.rs");
         let code = src.split("#[cfg(test)]").next().unwrap();
-        assert_eq!(code.matches(concat!("Notification::new(\"Yantrik ", "Companion\"")).count(), 1, "one place makes a companion post");
-        let thought = &code[code.find(concat!("fn notify_companion_", "thought(")).unwrap()..];
-        assert!(thought[..thought.find("\n}\n").unwrap()].contains("post_companion(CompanionPost::Reflection"));
-        let result = &code[code.find(concat!("fn deliv", "er(")).unwrap()..];
-        assert!(result[..result.find("\n}\n").unwrap()].contains("post_companion(CompanionPost::Result"));
+        let body_of = |name: &str| {
+            let at = &code[code.find(&format!("fn {name}(")).unwrap_or_else(|| panic!("fn {name}"))..];
+            at[..at.find("\n}\n").unwrap()].to_string()
+        };
+        assert!(body_of("notify_companion_thought").contains("post_companion(CompanionPost::Reflection"));
+        assert!(body_of("deliver").contains("post_companion(CompanionPost::Result"));
+        assert!(body_of("companion_said").contains("post_companion(CompanionPost::Result"), "a finished task's text is a model's");
+    }
+
+    /// Security review of #648, L3: model-written text must not reach a notification any way but
+    /// `post_companion`. Every place in the shell that makes a notification is listed here with
+    /// what it says; each says the desktop's own words (a fixed sentence, a version, a mind's
+    /// cleaned name). A new one fails this until it is either routed through `post_companion` or
+    /// added here because its words are the desktop's.
+    #[test]
+    fn model_text_reaches_a_notification_only_through_post_companion() {
+        const DESKTOPS_OWN_WORDS: [(&str, &str); 9] = [
+            ("focus.rs", "start"),                         // "Session complete. Nice work."
+            ("wire/agents.rs", "notification"),            // turn titles, "You asked: …"
+            ("wire/harness.rs", "late_answer_notice"),     // "<mind> answered after you left."
+            ("wire/notifications.rs", "watch_for_updates"), // "Update available — <version>"
+            ("wire/notifications.rs", "approval_waiting"), // "<verified asker> is asking to …"
+            ("wire/notifications.rs", "bypass_ended"),     // "Bypass ended"
+            ("wire/notifications.rs", "private_mode_notice"),
+            ("wire/notifications.rs", "post_companion"),   // the one door for model text
+            ("wire/screenshot.rs", "take_screenshot"),     // "Screenshot saved"
+        ];
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        let mut stack = vec![root.clone()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    files.push(path);
+                }
+            }
+        }
+        let mut found = 0;
+        for path in files {
+            let rel = path.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/");
+            let src = std::fs::read_to_string(&path).unwrap();
+            let code = src.split("#[cfg(test)]").next().unwrap();
+            for (at, _) in code.match_indices(concat!("Notification::", "new(")) {
+                let before = &code[..at];
+                let name = before
+                    .rmatch_indices("fn ")
+                    .map(|(i, _)| &before[i + 3..])
+                    .find(|rest| rest.starts_with(|c: char| c.is_ascii_lowercase() || c == '_'))
+                    .map(|rest| rest.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).next().unwrap_or(""))
+                    .unwrap_or("");
+                assert!(
+                    DESKTOPS_OWN_WORDS.contains(&(rel.as_str(), name)),
+                    "{rel}: `{name}` makes a notification; model text goes through post_companion, and the desktop's own words are listed here"
+                );
+                found += 1;
+            }
+        }
+        assert!(found >= DESKTOPS_OWN_WORDS.len(), "found {found} places");
     }
 
     use super::*;

@@ -144,6 +144,8 @@ fn the_verified_fact_leads_and_the_claim_follows() {
     let named = Verified { mind_by_pid: false, ..mind.clone() };
     assert_eq!(identity(&named), Identity { fact: "Caller process confirmed: node \u{b7} PID 4242 \u{b7} name matches pi".into(), tag: "not verified" });
     assert!(!identity(&named).fact.contains("the attached mind"));
+    let typed = Verified { from_terminal: true, ..named.clone() };
+    assert_eq!(identity(&typed).fact, "Caller process confirmed: node \u{b7} PID 4242 \u{b7} from a terminal \u{b7} name matches pi");
     let program = Verified { line: "curl -s (pid 9)".into(), pid: 9, exe: "/usr/bin/curl".into(), ..Verified::default() };
     assert_eq!(identity(&program).fact, "Caller process confirmed: curl \u{b7} PID 9");
     for nothing in [Verified::default(), Verified { line: "could not be identified".into(), ..Verified::default() }] {
