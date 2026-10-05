@@ -25,6 +25,12 @@
 
 use std::net::IpAddr;
 
+/// What this proxy promises about itself, one word each, printed by `yantrik-egress capabilities`
+/// for root to read (`yantrik-update mind-egress apply` puts it in /run/yantrik/mind-egress.json).
+/// `refuses-private-all-modes`: an address that is not the internet is refused without a `lan`
+/// rule in audit as well as enforce ([`Policy::decide`]; the test below holds it to that).
+pub const CAPABILITIES: &[&str] = &["refuses-private-all-modes"];
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -362,6 +368,15 @@ mod tests {
         assert_eq!(p.decide("192.168.4.42", 8888, true, Place::Lan, false), Verdict::Allow { audit: true }, "a lan rule reaches it");
         assert!(matches!(p.decide("192.168.4.42", 22, false, Place::Lan, false), Verdict::Refuse(_)), "only on its ports");
         assert_eq!(p.decide("example.com", 443, false, Place::Internet, false), Verdict::Allow { audit: true }, "the internet still audits");
+    }
+
+    #[test]
+    fn the_capability_it_prints_is_one_it_has() {
+        assert!(CAPABILITIES.contains(&"refuses-private-all-modes"));
+        for mode in [Mode::Audit, Mode::Enforce] {
+            let p = Policy { mode, ..Policy::default() };
+            assert!(matches!(p.decide("10.0.0.7", 80, true, place_of("10.0.0.7".parse().unwrap()), false), Verdict::Refuse(_)), "{mode:?}");
+        }
     }
 
     #[test]

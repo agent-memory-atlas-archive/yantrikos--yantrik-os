@@ -2253,6 +2253,7 @@ MIND_EGRESS_NFT=/etc/yantrik/mind-egress.nft
 MIND_EGRESS_UNIT=/etc/systemd/system/yantrik-mind-egress.service
 MIND_EGRESS_REFRESH_UNIT=/etc/systemd/system/yantrik-mind-egress-refresh.service
 MIND_EGRESS_PATH_UNIT=/etc/systemd/system/yantrik-mind-egress.path
+MIND_EGRESS_STATUS=/run/yantrik/mind-egress.json
 EGRESS_STATE=/var/lib/yantrik-egress
 MIND_EGRESS_MAX=64
 # 127.0.0.1 ports every mind may reach: the egress proxy (7450), the memory server (7440,
@@ -2265,8 +2266,9 @@ MIND_LOOPBACK_PORTS="7440, 7450, 8341"
 # `direct <ip> <port>` lines (a literal address on the local network: 10/8, 172.16/12,
 # 192.168/16, 100.64/10 which is CGNAT and Tailscale, fc00::/7) and `loopback <ip> <port>` lines
 # (127.0.0.1 or ::1), no scope ids, ports 1-65535. Prints `state private|audit|enforce`, then one
-# `<direct|loopback> <4|6> <ip> <port>` per entry; anything else is an error (exit 1, one line
-# saying why), and the caller loads no entries and no DNS.
+# `<direct|loopback> <4|6> <ip> <port>` per entry (`state private <audit|enforce>` and nothing
+# after it in Private mode); anything else is an error (exit 1, one line saying why), and the
+# caller loads no entries and no DNS.
 PY_MIND_DIRECT='
 import ipaddress, sys
 most = int(sys.argv[1])
@@ -2282,7 +2284,7 @@ if len(lines) < 2 or lines[0] not in ("private on", "private off"):
 if lines[1] not in ("mode audit", "mode enforce"):
     no("it did not say the policy mode")
 if lines[0] == "private on":
-    print("state private")
+    print("state private " + lines[1].split(" ")[1])
     sys.exit(0)
 seen = []
 for l in lines[2:]:
@@ -2455,10 +2457,13 @@ write_file_atomic() { # <path>
 }
 
 # Write the table for <uid> to <out> from what the policy reader answered (<status> its exit,
-# <answer> what it printed) and <resolv.conf>; print one line saying what it holds and why. Pure
-# apart from <out>: the selftest drives it with stand-in answers.
+# <answer> what it printed) and <resolv.conf>; print one line saying what it holds and why, then
+# `status <audit|enforce|fallback> <private true|false> <dns true|false>` for the status file
+# (fallback: the answer gave no entries to trust, so the table holds loopback only). Pure apart
+# from <out>: the selftest drives it with stand-in answers.
 mind_egress_render() { # <uid> <status> <answer> <resolv.conf> <out>
   local uid="$1" status="$2" answer="$3" resolv="$4" out="$5" parsed state="" entries="" note dns=nodns resolvers=""
+  local mode=fallback private=false
   case "$uid" in ''|0|*[!0-9]*) printf 'not an account to hold: %s\n' "$uid" | LC_ALL=C tr -c '[:print:]\n' '?'; return 1 ;; esac
   if [ "$status" != 0 ]; then
     note="NONE, the egress policy could not be read: $(printf '%s\n' "$answer" | head -1 | cut -c1-200)"
@@ -2466,9 +2471,10 @@ mind_egress_render() { # <uid> <status> <answer> <resolv.conf> <out>
     state="$(printf '%s\n' "$parsed" | head -1)"; state="${state#state }"
     entries="$(printf '%s\n' "$parsed" | sed 1d)"
     case "$state" in
-      private) note="NONE, Private mode is on" ;;
-      *) note="$(printf '%s' "$entries" | grep -c .) from the person's lan rules ($state)"
-         [ "$state" = audit ] && dns=dns ;;
+      "private audit"|"private enforce") note="NONE, Private mode is on"; mode="${state#private }"; private=true ;;
+      audit|enforce) note="$(printf '%s' "$entries" | grep -c .) from the person's lan rules ($state)"
+         mode="$state"; [ "$state" = audit ] && dns=dns ;;
+      *) note="NONE, the policy reader's answer was refused: a state it does not have"; entries="" ;;
     esac
   else
     note="NONE, the policy reader's answer was refused: ${parsed:-it could not be checked}"
@@ -2477,23 +2483,68 @@ mind_egress_render() { # <uid> <status> <answer> <resolv.conf> <out>
   [ "$dns" = dns ] && { resolvers="$(python3 -I -c "$PY_MIND_RESOLVERS" "$resolv")" || resolvers=""; }
   mind_egress_text "$uid" "$entries" "$resolvers" "$dns" "$note" | write_file_atomic "$out" || return 1
   printf 'entries: %s; DNS %s\n' "$note" "$([ "$dns" = dns ] && echo allowed || echo refused)"
+  printf 'status %s %s %s\n' "$mode" "$private" "$([ "$dns" = dns ] && echo true || echo false)"
+}
+
+# What the mind may rely on (design/mind-egress-2026-09-29.md): /run/yantrik/mind-egress.json,
+# written by root only once a table is loaded and removed when none is, so a mind that finds no
+# such file (or one it cannot trust) fails closed. From a `status` line mind_egress_render
+# printed, and the proxy's `yantrik-egress capabilities`; any other input is refused.
+mind_egress_status_text() { # <status line> <capabilities> <loaded at>
+  local refuses=false word mode private dns rest
+  printf '%s\n' "$2" | grep -qx 'refuses-private-all-modes' && refuses=true
+  read -r word mode private dns rest <<<"$1"
+  [ "$word" = status ] && [ -z "$rest" ] || return 1
+  case "$mode:$private:$dns" in
+    audit:false:true|audit:true:false|enforce:false:false|enforce:true:false|fallback:false:false) ;;
+    *) return 1 ;;
+  esac
+  case "$3" in ''|*[!0-9]*) return 1 ;; esac
+  printf '{"enforced": true, "table": "inet yantrik_mind_egress", "proxy": "http://127.0.0.1:7450", "proxy_refuses_private": %s, "mode": "%s", "private": %s, "dns_allowed": %s, "loaded_at": %s, "version": 1}\n' \
+    "$refuses" "$mode" "$private" "$dns" "$3"
+}
+
+# Put the status file in place whole (write_file_atomic: a link planted at it is replaced, not
+# followed), in a directory only its writer may change: made 0755 if missing, and refused if it
+# is a link, someone else's, or group or world writable. The file is the writer's (root's), 0644.
+mind_egress_status_write() { # <path> <status line> <capabilities>
+  local dir text
+  dir="$(dirname "$1")"
+  text="$(mind_egress_status_text "$2" "$3" "$(date +%s)")" || { rm -f -- "$1"; return 1; }
+  [ -L "$dir" ] && { rm -f -- "$1"; return 1; }
+  [ -d "$dir" ] || mkdir -m 0755 -- "$dir" || return 1
+  if [ -L "$dir" ] || [ "$(stat -c %u -- "$dir")" != "$(id -u)" ] || [ $(( 0$(stat -c %a -- "$dir") & 022 )) != 0 ]; then
+    rm -f -- "$1"; return 1
+  fi
+  printf '%s\n' "$text" | write_file_atomic "$1"
+}
+
+# Run the proxy's own code with <args>, as the proxy's account; why not, on stderr.
+mind_egress_as_proxy() { # <args>
+  local euid egid setpriv
+  euid="$(id -u yantrik-egress 2>/dev/null)"; egid="$(id -g yantrik-egress 2>/dev/null)"
+  case "$euid:$egid" in
+    :*|*:|0:*|*:0|*[!0-9:]*) echo "there is no egress account (yantrik-egress)" >&2; return 1 ;;
+  esac
+  [ -x "$BIN_DIR/yantrik-egress" ] && tree_is_roots \
+    || { echo "the egress proxy is not installed in a tree only root writes" >&2; return 1; }
+  setpriv="$(command -v setpriv 2>/dev/null)" || { echo "no setpriv to run yantrik-egress as its account" >&2; return 1; }
+  # Not the lock's descriptor (9): the proxy has no business holding it.
+  env -i "$setpriv" --reuid="$euid" --regid="$egid" --clear-groups --no-new-privs -- \
+    "$BIN_DIR/yantrik-egress" "$@" 9>&-
+}
+
+# What the installed proxy promises (one word a line), or nothing from one too old to say.
+mind_egress_capabilities() {
+  mind_egress_as_proxy capabilities 2>/dev/null | head -20
 }
 
 # Ask the proxy's own code for the entries, as the proxy's account. Prints its answer (or why there
 # is none) and returns its status.
 mind_egress_ask() {
-  local euid egid setpriv errf answer rc
-  euid="$(id -u yantrik-egress 2>/dev/null)"; egid="$(id -g yantrik-egress 2>/dev/null)"
-  case "$euid:$egid" in
-    :*|*:|0:*|*:0|*[!0-9:]*) echo "there is no egress account (yantrik-egress)"; return 1 ;;
-  esac
-  [ -x "$BIN_DIR/yantrik-egress" ] && tree_is_roots \
-    || { echo "the egress proxy is not installed in a tree only root writes"; return 1; }
-  setpriv="$(command -v setpriv 2>/dev/null)" || { echo "no setpriv to read the policy as yantrik-egress"; return 1; }
+  local errf answer rc
   errf="$(mktemp)" || return 1
-  # Not the lock's descriptor (9): the reader has no business holding it.
-  answer="$(env -i "$setpriv" --reuid="$euid" --regid="$egid" --clear-groups --no-new-privs -- \
-    "$BIN_DIR/yantrik-egress" direct "$EGRESS_STATE" 2>"$errf" 9>&-)"
+  answer="$(mind_egress_as_proxy direct "$EGRESS_STATE" 2>"$errf")"
   rc=$?
   [ "$rc" = 0 ] || answer="$(head -1 "$errf")"
   rm -f "$errf"
@@ -2502,19 +2553,23 @@ mind_egress_ask() {
 }
 
 # Make the table from the policy and load it. Fails closed: a table that does not load is replaced
-# by one with no entries and no DNS, never left at what was there before.
+# by one with no entries and no DNS, never left at what was there before. The status file says
+# what loaded, written only after it did; with no table loaded it is removed.
 mind_egress_load() {
   local nft uid answer rc result errf
   nft="$(command -v nft 2>/dev/null)"
-  [ -n "$nft" ] || { warn "no nft on this machine; the mind account cannot be held to its egress proxy, so no mind starts"; return 1; }
+  [ -n "$nft" ] || { rm -f -- "$MIND_EGRESS_STATUS"; warn "no nft on this machine; the mind account cannot be held to its egress proxy, so no mind starts"; return 1; }
   uid="$(id -u yantrik-mind 2>/dev/null)"
-  case "$uid" in ''|0|*[!0-9]*) info "no mind account here; nothing to hold to the egress proxy"; return 0 ;; esac
+  case "$uid" in ''|0|*[!0-9]*) rm -f -- "$MIND_EGRESS_STATUS"; info "no mind account here; nothing to hold to the egress proxy"; return 0 ;; esac
   install -d -o root -g root -m 0755 /etc/yantrik
   answer="$(mind_egress_ask)"; rc=$?
   errf="$(mktemp)" || return 1
   if result="$(mind_egress_render "$uid" "$rc" "$answer" /etc/resolv.conf "$MIND_EGRESS_NFT")" \
      && "$nft" -f "$MIND_EGRESS_NFT" 2>"$errf"; then
     rm -f "$errf"
+    mind_egress_status_write "$MIND_EGRESS_STATUS" "$(printf '%s\n' "$result" | sed -n 2p)" "$(mind_egress_capabilities)" \
+      || warn "could not write $MIND_EGRESS_STATUS; a mind will take its egress as not enforced"
+    result="$(printf '%s\n' "$result" | head -1)"
     case "$result" in
       *"Private mode is on"*|*"from the person's"*) info "the mind account reaches out only through the egress proxy; $result" ;;
       *) warn "the mind account reaches out only through the egress proxy; $result" ;;
@@ -2525,8 +2580,11 @@ mind_egress_load() {
   rm -f "$errf"
   mind_egress_text "$uid" "" "" nodns "NONE, the table made from the policy did not load" | write_file_atomic "$MIND_EGRESS_NFT"
   if mind_egress_text "$uid" "" "" nodns "NONE, the table made from the policy did not load" | "$nft" -f -; then
+    mind_egress_status_write "$MIND_EGRESS_STATUS" "status fallback false false" "$(mind_egress_capabilities)" \
+      || warn "could not write $MIND_EGRESS_STATUS; a mind will take its egress as not enforced"
     return 0
   fi
+  rm -f -- "$MIND_EGRESS_STATUS"
   warn "could not load the mind's egress table at all; the mind account is NOT held to the egress proxy"
   return 1
 }
@@ -3624,8 +3682,9 @@ with tarfile.open(sys.argv[1], "w") as t:
   mkdir -p "$me"
   printf '# made by NetworkManager\nnameserver 192.168.4.1\nnameserver 127.0.0.53\nnameserver fe80::1%%wlan0\n; nameserver 9.9.9.9\nnameserver not-an-address\nnameserver 192.168.4.1\nsearch lan\n' > "$me/resolv.conf"
   tbl="$me/mind-egress.nft"
-  me_render() { # me_render <answer> [status] [uid]: the result line; the table is in $tbl
-    mind_egress_render "${3:-998}" "${2:-0}" "$1" "$me/resolv.conf" "$tbl"
+  me_render() { # me_render <answer> [status] [uid]: the result line; the table is in $tbl, all it said in $me/out
+    mind_egress_render "${3:-998}" "${2:-0}" "$1" "$me/resolv.conf" "$tbl" > "$me/out"
+    head -1 "$me/out"
   }
   me_has() { grep -qF -- "$1" "$tbl" && echo yes || echo no; }
   me_set() { # the elements line of one set, or nothing
@@ -3750,6 +3809,96 @@ loopback 127.0.0.1 11434")"
       "$(printf '%s\n' "$PY_MIND_DIRECT" | grep -oE '"[0-9a-f.:]+/[0-9]+"' | tr -d '"' | sort | tr '\n' ' ')"
   fi
 
+  # N. What a mind may rely on: /run/yantrik/mind-egress.json, from the status line the render
+  #    printed and the proxy's capabilities, written only once a table loaded. Stand-ins for nft,
+  #    the reader and the proxy; no root.
+  local now=1759600000 ms="$root/mind-status" sp ok_caps='refuses-private-all-modes'
+  local js='{"enforced": true, "table": "inet yantrik_mind_egress", "proxy": "http://127.0.0.1:7450", "proxy_refuses_private": '
+  ms_text() { # ms_text <answer> [caps]: the file's text for what the reader answered
+    me_render "$1" >/dev/null
+    mind_egress_status_text "$(sed -n 2p "$me/out")" "${2-$ok_caps}" "$now"
+  }
+  is "mind-status: audit" "$js"'true, "mode": "audit", "private": false, "dns_allowed": true, "loaded_at": 1759600000, "version": 1}' \
+    "$(ms_text "$(printf 'private off\nmode audit\ndirect 192.168.4.42 8888\n')")"
+  is "mind-status: enforce" "$js"'true, "mode": "enforce", "private": false, "dns_allowed": false, "loaded_at": 1759600000, "version": 1}' \
+    "$(ms_text "$(printf 'private off\nmode enforce\ndirect 192.168.4.42 8888\n')")"
+  is "mind-status: Private mode, audit underneath: no DNS" "$js"'true, "mode": "audit", "private": true, "dns_allowed": false, "loaded_at": 1759600000, "version": 1}' \
+    "$(ms_text "$(printf 'private on\nmode audit\n')")"
+  is "mind-status: Private mode, enforce underneath" "$js"'true, "mode": "enforce", "private": true, "dns_allowed": false, "loaded_at": 1759600000, "version": 1}' \
+    "$(ms_text "$(printf 'private on\nmode enforce\n')")"
+  is "mind-status: the fallback table (an answer that was refused)" "$js"'true, "mode": "fallback", "private": false, "dns_allowed": false, "loaded_at": 1759600000, "version": 1}' \
+    "$(ms_text "$(printf 'private off\nmode audit\ndirect 8.8.8.8 443\n')")"
+  is "mind-status: ... and a policy that does not read" "fallback" \
+    "$(me_render 'policy.yaml: bad' 1 >/dev/null; sed -n 2p "$me/out" | cut -d' ' -f2)"
+  is "mind-status: the text is JSON" "audit False True 1" \
+    "$(ms_text "$(printf 'private off\nmode audit\n')" | python3 -I -c 'import json,sys; d=json.load(sys.stdin); print(d["mode"], d["private"], d["dns_allowed"], d["version"])')"
+  t "mind-status: proxy_refuses_private from the proxy's capabilities, not assumed: none said" \
+    '"proxy_refuses_private": false,' "$(ms_text "$(printf 'private off\nmode audit\n')" '')"
+  t "mind-status: ... one that only starts the same" '"proxy_refuses_private": false,' \
+    "$(ms_text "$(printf 'private off\nmode audit\n')" 'refuses-private-all-modes-soon')"
+  t "mind-status: ... said among others" '"proxy_refuses_private": true,' \
+    "$(ms_text "$(printf 'private off\nmode audit\n')" "$(printf 'something-else\nrefuses-private-all-modes\n')")"
+  local bad
+  for bad in 'status audit true true' 'status enforce false true' 'status fallback false true' 'status audit false true x' \
+             'status aud false true' 'state audit false true' 'status * false true' ''; do
+    is "mind-status: a status line '$bad' writes no text" "[refused]" \
+      "$(mind_egress_status_text "$bad" "$ok_caps" "$now" || echo '[refused]')"
+  done
+  is "mind-status: ... nor a time that is not a number" "[refused]" \
+    "$(mind_egress_status_text 'status audit false true' "$ok_caps" '1;2' || echo '[refused]')"
+
+  # mind_egress_load itself, with stand-ins: the file follows what loaded.
+  mkdir -p "$ms/bin" "$ms/run"
+  sp="$ms/run/yantrik/mind-egress.json"
+  printf '%s\n' '#!/bin/sh' '[ "$2" = - ] && cat >/dev/null' 'case "$NFT_LOADS:$2" in all:*|fallback:-) exit 0 ;; esac' \
+    'echo "Error: the stand-in nft refuses" >&2; exit 1' > "$ms/bin/nft"
+  chmod +x "$ms/bin/nft"
+  ml_run() { # ml_run <all|fallback|none> <answer> [caps]: mind_egress_load with stand-ins
+    ( export PATH="$ms/bin:$PATH" NFT_LOADS="$1"
+      MIND_EGRESS_NFT="$ms/mind-egress.nft" MIND_EGRESS_STATUS="$sp" ML_ANSWER="$2" ML_CAPS="${3-$ok_caps}"
+      id() { if [ "${2:-}" = yantrik-mind ]; then echo 998; else command id "$@"; fi; }
+      install() { :; }
+      mind_egress_ask() { printf '%s\n' "$ML_ANSWER"; }
+      mind_egress_capabilities() { printf '%s\n' "$ML_CAPS"; }
+      mind_egress_load ) >/dev/null 2>&1
+  }
+  ms_field() { python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$sp" "$1" 2>/dev/null || echo '[no file]'; }
+  ml_run all "$(printf 'private off\nmode audit\n')"
+  is "mind-status: written once the table loads" "audit True True" "$(ms_field mode) $(ms_field enforced) $(ms_field dns_allowed)"
+  is "mind-status: ... in a directory made root's way (0755), the file 0644" "755 644" "$(stat -c %a "$(dirname "$sp")") $(stat -c %a "$sp")"
+  is "mind-status: ... owned by its writer" "$(id -u):$(id -g)" "$(stat -c %u:%g "$sp")"
+  is "mind-status: ... loaded_at is the time it loaded" "yes" \
+    "$(t0="$(ms_field loaded_at)"; [ "$t0" -le "$(date +%s)" ] && [ "$t0" -gt $(( $(date +%s) - 60 )) ] && echo yes || echo no)"
+  ml_run all "$(printf 'private off\nmode audit\n')" ''
+  is "mind-status: ... proxy_refuses_private from the installed proxy" "False" "$(ms_field proxy_refuses_private)"
+  ml_run fallback "$(printf 'private off\nmode audit\n')"
+  is "mind-status: the policy's table did not load, the fallback did: fallback, no DNS" "fallback False True" \
+    "$(ms_field mode) $(ms_field dns_allowed) $(ms_field enforced)"
+  ml_run none "$(printf 'private off\nmode audit\n')"
+  is "mind-status: nothing loaded: the file is removed" "absent" "$([ -e "$sp" ] || [ -L "$sp" ] || echo absent)"
+  ml_run none "$(printf 'private off\nmode audit\n')"
+  is "mind-status: ... and not made" "absent" "$([ -e "$sp" ] || [ -L "$sp" ] || echo absent)"
+
+  # Whole, by rename: a reader holding the old file keeps the old file, and nothing is left beside it.
+  ml_run all "$(printf 'private off\nmode enforce\n')"
+  ln "$sp" "$ms/held"
+  ml_run all "$(printf 'private off\nmode audit\n')"
+  is "mind-status: replaced by a rename, not rewritten in place" "enforce audit" \
+    "$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["mode"])' "$ms/held") $(ms_field mode)"
+  is "mind-status: ... no temporary file left" "" "$(find "$(dirname "$sp")" -name '.mind-egress.json.*')"
+  printf 'the person'"'"'s file\n' > "$ms/victim"
+  rm -f "$sp"; ln -s "$ms/victim" "$sp"
+  ml_run all "$(printf 'private off\nmode audit\n')"
+  is "mind-status: a link planted at the path is replaced, not followed" "the person's file" "$(cat "$ms/victim")"
+  is "mind-status: ... by a plain file" "file audit" "$([ -f "$sp" ] && [ ! -L "$sp" ] && echo file || echo other) $(ms_field mode)"
+  chmod 0775 "$(dirname "$sp")"
+  ml_run all "$(printf 'private off\nmode audit\n')"
+  is "mind-status: a directory others may write: no file, the old one removed" "absent" "$([ -e "$sp" ] || echo absent)"
+  chmod 0755 "$(dirname "$sp")"
+  mv "$(dirname "$sp")" "$ms/run/elsewhere"; ln -s "$ms/run/elsewhere" "$(dirname "$sp")"
+  ml_run all "$(printf 'private off\nmode audit\n')"
+  is "mind-status: a directory that is a link: nothing written through it" "absent" "$([ -e "$ms/run/elsewhere/mind-egress.json" ] || echo absent)"
+
   # Seeded lan rules: the endpoints the person and root configured, never the mind's own.
   local sd="$root/seed" cands plan
   mkdir -p "$sd/opt" "$sd/home/.config/yantrik" "$sd/etc" "$sd/mind/.config"
@@ -3850,6 +3999,8 @@ c.sendall((json.dumps({"ok": True, "seeded": req["rules"]}) + "\n").encode())' "
     t "mind-egress (real reader): a policy with a rule nobody could have written is no entries" \
       "NONE, the egress policy could not be read" "$(me_render "$ans" "$rc")"
     is "mind-egress (real reader): ... none" "none" "$(me_none)"
+    t "mind-status (real proxy): it says it refuses private ranges in every mode" '"proxy_refuses_private": true,' \
+      "$(mind_egress_status_text 'status audit false true' "$("$YANTRIK_EGRESS_BIN" capabilities)" "$now")"
   else
     printf '  skip mind-egress checks against the real policy reader: set YANTRIK_EGRESS_BIN to a built yantrik-egress\n'
   fi

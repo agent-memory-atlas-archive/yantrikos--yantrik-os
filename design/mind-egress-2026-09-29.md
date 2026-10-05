@@ -246,6 +246,40 @@ A phone can answer the card like any other, since cards reach channels. Only the
 writes a rule. This is OpenShell's Policy Advisor, done through the approvals we already have.
 Repeated attempts to one host make one card, not a stream.
 
+### 5. What a mind may rely on
+
+A mind cannot see the kernel's table, so it is told, in a file only root writes:
+`/run/yantrik/mind-egress.json`. `yantrik-update mind-egress apply` writes it after a table has
+loaded (and only then), at boot from `yantrik-mind-egress.service` (`/run` is tmpfs) and again from
+the `.path` refresh when the policy, Private mode or resolv.conf changes. It is written beside
+itself and renamed into place, so a link planted at the path is replaced, never followed.
+
+```json
+{"enforced": true, "table": "inet yantrik_mind_egress", "proxy": "http://127.0.0.1:7450",
+ "proxy_refuses_private": true, "mode": "audit", "private": false, "dns_allowed": true,
+ "loaded_at": 1759600000, "version": 1}
+```
+
+- `mode`: `audit` or `enforce`, the policy's; `fallback` when the policy could not be read or its
+  answer was refused and the loaded table holds loopback only (`private` and `dns_allowed` false).
+- `private`: Private mode is on; the table has no entries and refuses DNS.
+- `dns_allowed`: the account may send DNS (audit, not Private). Otherwise every lookup is refused.
+- `proxy_refuses_private`: the installed `yantrik-egress capabilities` prints
+  `refuses-private-all-modes`, so the proxy refuses private and special ranges without a `lan`
+  rule in audit too. Read from the binary at each apply, never assumed; false from an older proxy.
+- `loaded_at`: unix seconds of the load. `version`: this layout; a reader refuses one it does not know.
+
+Trust it only if all of these hold, else take egress as not enforced:
+- `/run/yantrik` is owned by uid 0 and is not group- or world-writable;
+- the file is opened with `O_NOFOLLOW`, and `fstat` on that descriptor (not a second `stat` of the
+  path) shows a regular file owned by uid 0 with no group or other write bit;
+- it parses, `enforced` is true and `version` is one it knows.
+
+A missing file means **not enforced: fail closed**. It is removed when nothing could be loaded
+(and then no mind starts anyway: its unit `Requires=` the boot unit). When it holds, a mind sends
+everything through the proxy and leaves resolving names to it; with `dns_allowed` false it must
+not try to resolve anything itself.
+
 ## What this is not
 
 - **Not a sandbox for the person's own processes.** Agents' terminals run as the person, and

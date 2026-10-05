@@ -18,7 +18,8 @@
 //! `yantrik-egress direct [STATE_DIR]` prints the direct set instead and exits: where the kernel
 //! lets the mind account connect without this proxy (`direct`, `yantrik-update mind-egress`).
 //! `yantrik-egress seed-plan` reads `<source> <url>` lines and prints which become seeded `lan`
-//! rules (`seed`, `yantrik-update`'s seeding).
+//! rules (`seed`, `yantrik-update`'s seeding). `yantrik-egress capabilities` prints what this
+//! build promises, one word a line (`policy::CAPABILITIES`).
 
 mod control;
 mod direct;
@@ -78,8 +79,14 @@ fn main() {
             print!("{}", seed::plan_text(&input));
             return;
         }
+        Some("capabilities") if args.len() == 1 => {
+            for c in policy::CAPABILITIES {
+                println!("{c}");
+            }
+            return;
+        }
         Some(_) => {
-            eprintln!("usage: yantrik-egress            the proxy, configured by its unit's environment\n       yantrik-egress direct [DIR]   print the direct set from the policy in DIR\n       yantrik-egress seed-plan      <source> <url> lines on stdin: which become seeded lan rules");
+            eprintln!("usage: yantrik-egress            the proxy, configured by its unit's environment\n       yantrik-egress direct [DIR]   print the direct set from the policy in DIR\n       yantrik-egress seed-plan      <source> <url> lines on stdin: which become seeded lan rules\n       yantrik-egress capabilities   print what this build promises, one word a line");
             std::process::exit(2);
         }
     }
