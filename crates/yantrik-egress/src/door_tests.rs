@@ -171,8 +171,14 @@ async fn guarded_lets_the_internet_through_both_doors_and_never_the_home_network
     assert_eq!(both(d.endpoint, "192.0.2.7:8888").await, [502, 502], "endpoint: the lan rule");
     assert_eq!(both(d.public, "192.0.2.7:8888").await, [403, 403], "public: never");
     assert_eq!(both(d.endpoint, "192.0.2.7:22").await, [403, 403], "endpoint: not its port");
+    // A name that does not resolve, and an address that is never a destination: refused, counted,
+    // and not a question for the person, since no rule could answer it.
+    assert_eq!(both(d.endpoint, "nonexistent.invalid:443").await, [502, 502]);
+    assert_eq!(both(d.endpoint, "0.0.0.0:443").await, [403, 403]);
+    assert_eq!(seen(&d, "nonexistent.invalid", 443).never, 2);
     let proposals: Vec<String> = { let s = d.state.lock().unwrap(); s.ledger.proposals(&s.policy) }.into_iter().map(|s| s.host).collect();
-    assert!(!proposals.iter().any(|h| h == "1.1.1.1"), "nothing public is a proposal: {proposals:?}");
+    assert!(!proposals.iter().any(|h| ["1.1.1.1", "nonexistent.invalid", "0.0.0.0", "127.0.0.1"].contains(&h.as_str())), "{proposals:?}");
+    assert!(proposals.iter().any(|h| h == "10.0.0.7"), "the home network is asked about: {proposals:?}");
 }
 
 #[tokio::test]

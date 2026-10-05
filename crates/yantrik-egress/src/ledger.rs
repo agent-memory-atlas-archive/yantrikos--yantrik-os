@@ -1,8 +1,10 @@
 //! Where the mind went: every destination, counted.
 //!
 //! What Settings shows in the audit week ("Where the Mind connects"), and what a refusal in
-//! guarded or enforce turns into (in guarded nothing public is refused, so only the home network,
-//! private ranges and this machine are ever proposals): a destination with refusals and no rule is a proposal, one per host and
+//! guarded or enforce turns into (in guarded nothing public is refused, so only the home network
+//! and private ranges are ever proposals). A refusal no rule could answer — a name that did not
+//! resolve, or one that led to this machine or an address that is never a destination (a
+//! sinkhole's 0.0.0.0) — is counted, and never a proposal: a destination with refusals and no rule is a proposal, one per host and
 //! port however many times it was tried. Kept to a fixed number of destinations — the least
 //! recently seen goes first — so a mind trying a million names cannot grow it without end.
 
@@ -22,6 +24,10 @@ pub struct Seen {
     /// Let through because the policy, or the rule, was only watching.
     pub audited: u64,
     pub refused: u64,
+    /// Of `refused`, the ones no rule could answer: the name did not resolve, or it led to this
+    /// machine or an address that is never a destination. Not a proposal on their own.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub never: u64,
     /// Unix seconds.
     pub first: u64,
     pub last: u64,
@@ -38,6 +44,12 @@ pub enum Outcome {
     Allowed,
     Audited,
     Refused,
+    /// Refused where no rule could change the answer (`Seen::never`).
+    Never,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -63,8 +75,9 @@ impl Ledger {
         match outcome {
             Outcome::Allowed => s.allowed += 1,
             Outcome::Audited => s.audited += 1,
-            Outcome::Refused => {
+            Outcome::Refused | Outcome::Never => {
                 s.refused += 1;
+                s.never += u64::from(outcome == Outcome::Never);
                 s.why = why.chars().take(300).collect();
             }
         }
@@ -81,11 +94,12 @@ impl Ledger {
         v
     }
 
-    /// What the person has not answered: destinations refused, with no rule for them now.
+    /// What the person has not answered: destinations refused, with no rule for them now, where a
+    /// rule could have changed the answer.
     pub fn proposals(&self, policy: &crate::policy::Policy) -> Vec<Seen> {
         self.list()
             .into_iter()
-            .filter(|s| s.refused > 0 && !policy.rules.iter().any(|r| r.matches(&s.host, s.port)))
+            .filter(|s| s.refused > s.never && !policy.rules.iter().any(|r| r.matches(&s.host, s.port)))
             .collect()
     }
 
@@ -147,6 +161,23 @@ mod tests {
         let hosts: Vec<String> = l.proposals(&p).into_iter().map(|s| s.host).collect();
         assert_eq!(hosts, ["nas.lan"], "nothing public was refused");
         assert_eq!(l.list().iter().find(|s| s.host == "example.com").map(|s| (s.allowed, s.audited)), Some((1, 0)), "recorded, not watched");
+    }
+
+    #[test]
+    fn a_refusal_no_rule_could_answer_is_never_a_proposal() {
+        let p = Policy { mode: Mode::Guarded, rules: vec![] };
+        let mut l = Ledger::default();
+        l.record("nonexistent.invalid", 443, Outcome::Never, false, false, "did not resolve", 1);
+        l.record("sink.example.com", 443, Outcome::Never, false, false, "never a destination", 2);
+        l.record("127.0.0.1", 7450, Outcome::Never, false, false, "this machine", 3);
+        assert!(l.proposals(&p).is_empty());
+        assert_eq!(l.list().iter().map(|s| (s.refused, s.never)).collect::<Vec<_>>(), [(1, 1); 3], "still counted");
+        // The same destination refused once for a reason a rule could answer is asked about.
+        l.record("sink.example.com", 443, Outcome::Refused, true, false, "local network", 4);
+        assert_eq!(l.proposals(&p).iter().map(|s| s.host.as_str()).collect::<Vec<_>>(), ["sink.example.com"]);
+        // A ledger written before `never` existed reads, every refusal a proposal as before.
+        let old: Ledger = serde_json::from_str(r#"{"seen":{"a.example:443":{"host":"a.example","port":443,"allowed":0,"audited":0,"refused":2,"first":1,"last":1,"lan":false,"http":false}}}"#).unwrap();
+        assert_eq!(old.proposals(&p).len(), 1);
     }
 
     #[test]

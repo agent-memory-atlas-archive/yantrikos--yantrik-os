@@ -211,7 +211,7 @@ async fn one(proxy: &Proxy, stream: &mut TcpStream, peer: SocketAddr) -> Result<
     if addrs.is_empty() {
         let why = format!("{host} did not resolve");
         tracing::info!(door = proxy.door.name(), host, port, why, "refused");
-        proxy.record(&host, port, Outcome::Refused, false, http, &why);
+        proxy.record(&host, port, Outcome::Never, false, http, &why);
         let _ = reply(stream, 502, &why).await;
         return Err("did not resolve");
     }
@@ -232,6 +232,9 @@ async fn one(proxy: &Proxy, stream: &mut TcpStream, peer: SocketAddr) -> Result<
     let (outcome, why) = match &verdict {
         Verdict::Allow { audit: true } => (Outcome::Audited, ""),
         Verdict::Allow { audit: false } => (Outcome::Allowed, ""),
+        // This machine, or an address that is never a destination: no rule opens it, so it is
+        // not a question for the person (a sinkhole's 0.0.0.0, a typo resolving nowhere useful).
+        Verdict::Refuse(why) if place == Place::Forbidden => (Outcome::Never, why.as_str()),
         Verdict::Refuse(why) => (Outcome::Refused, why.as_str()),
     };
     proxy.record(&host, port, outcome, place == Place::Lan, http, why);
