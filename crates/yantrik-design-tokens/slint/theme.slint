@@ -182,6 +182,11 @@ export global Theme {
     out property <color> glass-rail:    ThemeMode.dark ? #12151ca8 : #f4f5f8ef;
     out property <color> glass-border:  ThemeMode.dark ? #ffffff21 : #0000001a;
     out property <color> glass-border-strong: ThemeMode.dark ? #ffffff36 : #00000026;
+    // A label drawn straight on the wallpaper, with no card behind it: white in either theme,
+    // over a copy of itself 1px lower in 35% black. The wallpaper is a photograph, so no single
+    // ink contrasts with all of it; the shadow is what keeps white legible over its light parts.
+    out property <color> label-on-wallpaper: #ffffff;
+    out property <color> label-shadow:       #00000059;
 
     // ─── Amber palette ────────────────────────────────────────────
     out property <color> amber:             ThemeOverrides.enabled ? ThemeOverrides.amber-override
@@ -353,6 +358,14 @@ export global Theme {
     out property <int>    fw-caption: 400;
     out property <length> fs-micro: 11px;        // Badges, fine detail
     out property <int>    fw-micro: 500;
+    // An app's name under its tile: the desktop's workspace, the launcher, the window switcher,
+    // a mind's desk and the dock's hover label, all drawn by AppLabel. It was 11-12px regular,
+    // much of it grey, and on a 1x screen with no GPU that read soft beside the tiles above it.
+    // lh-label is one line of it rounded up to whole pixels (Barlow's line box is 1.2em, 15.6px
+    // here), so whatever a layout stacks under a label still starts on a whole pixel.
+    out property <length> fs-label: 13px;
+    out property <int>    fw-label: 500;
+    out property <length> lh-label: 16px;
     out property <length> fs-mono: 13px;         // Terminal, code, IDs
 
     // ─── Spacing scale (8px base grid) ────────────────────────────
@@ -621,6 +634,7 @@ export global Theme {
     out property <length> wr-row-h: 56px;
     out property <length> wr-desk-min-w: 320px;
     out property <length> wr-desk-h: 248px;
+    out property <length> wr-desk-task-h: 14px;     // the task line under a desk's name: 11px text, whole pixels
     out property <length> wr-desk-preview-h: 104px;
     out property <length> wr-desk-line-h: 48px;
     out property <length> wr-desk-acts-h: 52px;

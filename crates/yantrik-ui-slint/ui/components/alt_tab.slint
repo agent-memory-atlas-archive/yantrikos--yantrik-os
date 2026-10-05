@@ -14,6 +14,7 @@
 import { Theme } from "theme.slint";
 import { Icons } from "icon.slint";
 import { AppTile } from "app_tile.slint";
+import { AppLabel } from "app_label.slint";
 import { YIconButton } from "y_button.slint";
 
 export struct SwitcherCell {
@@ -59,14 +60,7 @@ component SwitcherCellView inherits Rectangle {
             }
         }
         Rectangle { height: Theme.sp-2; }
-        Text {
-            text: root.cell.app-name;
-            color: Theme.text-primary;
-            font-size: Theme.fs-body;
-            font-weight: Theme.fw-body-strong;
-            horizontal-alignment: center;
-            overflow: elide;
-        }
+        AppLabel { text: root.cell.app-name; }
         // The title, unless it only says the name again (Calendar's window is titled "Calendar").
         // The row stays, so every cell's name sits at the same height.
         Text {
@@ -120,7 +114,8 @@ export component AltTab inherits Rectangle {
     property <length> card-height: Theme.sp-4 + root.rows * root.cell-height + (root.rows - 1) * Theme.sp-3 + Theme.sp-3 + root.pager-h + Theme.sp-4;
     // The card alone, centred. The plate that used to sit under it gave the selected window's
     // title a second time; the cell carries it now, and `describe shell` the full text.
-    property <length> block-top: (root.height - root.card-height) / 2;
+    // Whole pixels, like every centring offset here, so the names in the cells land on them.
+    property <length> block-top: Math.round((root.height - root.card-height) / 2 / 1px) * 1px;
 
     if root.is-open : FocusScope {
         width: 100%;
@@ -151,7 +146,7 @@ export component AltTab inherits Rectangle {
         }
 
         if root.is-open : Rectangle {
-            x: (root.width - root.card-width) / 2;
+            x: Math.round((root.width - root.card-width) / 2 / 1px) * 1px;
             y: root.block-top;
             width: root.card-width;
             height: root.card-height;
@@ -178,7 +173,7 @@ export component AltTab inherits Rectangle {
             }
 
             for cell[i] in root.cells : SwitcherCellView {
-                x: (parent.width - root.grid-width) / 2 + Math.mod(i, root.columns) * (root.cell-width + Theme.sp-3);
+                x: Math.round(((parent.width - root.grid-width) / 2 + Math.mod(i, root.columns) * (root.cell-width + Theme.sp-3)) / 1px) * 1px;
                 y: Theme.sp-4 + Math.floor(i / root.columns) * (root.cell-height + Theme.sp-3);
                 cell-width: root.cell-width;
                 cell: cell;

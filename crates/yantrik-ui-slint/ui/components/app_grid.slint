@@ -21,6 +21,7 @@
 import { Theme } from "theme.slint";
 import { Icon, Icons } from "icon.slint";
 import { AppTile } from "app_tile.slint";
+import { AppLabel } from "app_label.slint";
 import { DockButton } from "grounded_dock.slint";
 
 // One power button in the launcher's footer; the footer names it on hover.
@@ -87,10 +88,15 @@ component LauncherCell inherits Rectangle {
         clicked => { root.clicked(); }
     }
 
+    // The tile and its name, centred in the cell by a whole-pixel offset. `alignment: center`
+    // put them 13.5px down a 112px cell, and the name with them.
+    property <length> content-h: 48px + 7px + 2 * Theme.lh-label;
     VerticalLayout {
-        alignment: center;
+        alignment: start;
         spacing: 7px;
-        padding: 8px;
+        padding-left: 8px;
+        padding-right: 8px;
+        padding-top: Math.round((root.height - root.content-h) / 2 / 1px) * 1px;
 
         HorizontalLayout {
             alignment: center;
@@ -103,17 +109,7 @@ component LauncherCell inherits Rectangle {
                 hovered: touch.has-hover;
             }
         }
-        // Two lines before an ellipsis: on one, "Chromium Web Browser" was "Chromium We…".
-        Text {
-            text: root.name;
-            color: Theme.text-primary;
-            font-size: Theme.fs-caption;
-            horizontal-alignment: center;
-            vertical-alignment: top;
-            wrap: word-wrap;
-            overflow: elide;
-            height: 2 * Theme.fs-caption + 6px;
-        }
+        AppLabel { text: root.name; lines: 2; }
     }
 
     // Several windows: the dock's neutral numeral, on the tile's corner.
@@ -273,8 +269,9 @@ export component AppGrid inherits Rectangle {
         // A fixed frame, deliberately. It used to be sized from the number of apps showing, so
         // filtering changed the row count, which re-centred the panel: the launcher jumped under
         // the pointer and the icon you were reaching for moved. Only the contents change.
-        x: (parent.width - root.panel-w) / 2;
-        y: (parent.height - root.panel-h) / 2;
+        // Centred on whole pixels, so every name in it is too.
+        x: Math.round((parent.width - root.panel-w) / 2 / 1px) * 1px;
+        y: Math.round((parent.height - root.panel-h) / 2 / 1px) * 1px;
         width: root.panel-w;
         height: root.panel-h;
         background: Theme.panel-solid;
@@ -367,7 +364,7 @@ export component AppGrid inherits Rectangle {
 
                 // Centred: the grid is as wide as its columns, not the panel.
                 Rectangle {
-                    x: (parent.width - root.grid-w) / 2;
+                    x: Math.round((parent.width - root.grid-w) / 2 / 1px) * 1px;
                     width: root.grid-w;
                     height: root.content-h;
 

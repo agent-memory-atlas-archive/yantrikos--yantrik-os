@@ -178,6 +178,18 @@ headless window. There are no assertions: these are pictures.
 cargo run --manifest-path tests/ui-preview/Cargo.toml --profile fast -- target/light-appearance.png 1280 800 review-still appearance
 ```
 
+## App labels
+
+`verify-labels` draws the kit's AppLabel (the name under every app tile: 13px medium, on whole
+pixels) on the lake wallpaper across the sky, the ridge and the reflection, beside the same names
+in the card ink, and on a glass card the way the desktop's workspace draws them. It asserts that
+a label on the wallpaper is white and that its 1px shadow darkens the wallpaper under it, on the
+brightest row.
+
+```sh
+cargo run --manifest-path tests/ui-preview/Cargo.toml --profile fast -- target/labels.png 1280 800 verify-labels
+```
+
 ## Taskbar window menu
 
 `verify-taskbar-menu` draws the whole shell — app.slint's `App` — with two fixture windows on

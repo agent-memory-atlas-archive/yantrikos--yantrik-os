@@ -34,6 +34,7 @@
 import { Theme } from "theme.slint";
 import { Icon, Icons } from "icon.slint";
 import { AppTile } from "app_tile.slint";
+import { AppLabel } from "app_label.slint";
 import { YWheelArea } from "y_wheel.slint";
 
 // One button of the middle of the dock: an app, pinned or running or both.
@@ -573,21 +574,22 @@ export component GroundedDock inherits Rectangle {
     // ── Name label ──
     //
     // Small, opaque, 8px above the dock. Not for an app whose window list is up: the list names it.
+    // The name is the AppLabel every tile has, on whole pixels: the pill is centred on the
+    // button, and the name in the pill, by rounded offsets.
     if root.label-shown && !root.list-shown && root.over-name != "" : Rectangle {
-        width: lbl.preferred-width + 2 * Theme.sp-3;
+        width: Math.ceil(lbl.preferred-width / 1px) * 1px + 2 * Theme.sp-3;
         height: Theme.dock-label-h;
-        x: max(8px, min(root.over-x - self.width / 2, root.width - self.width - 8px));
+        x: Math.round(max(8px, min(root.over-x - self.width / 2, root.width - self.width - 8px)) / 1px) * 1px;
         y: bar.y - Theme.dock-label-gap - self.height;
         border-radius: Theme.r-md;
         background: Theme.dock-popover;
         border-width: 1px;
         border-color: Theme.dock-border;
-        lbl := Text {
+        lbl := AppLabel {
+            x: Theme.sp-3;
+            y: Math.round((parent.height - self.height) / 2 / 1px) * 1px;
+            width: parent.width - 2 * Theme.sp-3;
             text: root.over-name;
-            color: Theme.text-primary;
-            font-size: Theme.fs-caption;
-            horizontal-alignment: center;
-            vertical-alignment: center;
         }
     }
 
