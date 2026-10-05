@@ -9,7 +9,8 @@
 //!
 //! | variable | default | |
 //! |---|---|---|
-//! | `EGRESS_LISTEN` | `127.0.0.1:7450` | where the mind's `HTTPS_PROXY` points |
+//! | `EGRESS_LISTEN` | `127.0.0.1:7450` | the endpoint door, where the mind's `HTTPS_PROXY` points: `lan` rules apply |
+//! | `EGRESS_PUBLIC_LISTEN` | `127.0.0.1:7451` | the public door, for anything fetched for someone else: the internet only (`door`). Pinned: any other value is refused ([`PUBLIC_DOOR`]) |
 //! | `EGRESS_STATE` | `/var/lib/yantrik-egress` | the policy, the ledger, Private mode |
 //! | `EGRESS_CONTROL` | `/run/yantrik-egress/control` | the desktop's socket |
 //! | `EGRESS_SERVE_UID` | the uid of `yantrik-mind` | the one account served |
@@ -26,6 +27,9 @@
 
 mod control;
 mod direct;
+mod door;
+#[cfg(test)]
+mod door_tests;
 mod ledger;
 mod local;
 mod peer;
@@ -43,6 +47,25 @@ use std::time::Duration;
 
 /// How often the ledger is written when it changed.
 const FLUSH: Duration = Duration::from_secs(30);
+
+/// The public door's one address. Pinned, not configured: the kernel's table lets the mind reach
+/// this port (`MIND_LOOPBACK_PORTS` in `yantrik-update`) and the Mind's status file names it
+/// (`public_proxy`), so a drop-in that moved it would send untrusted fetches to a port this proxy
+/// does not serve, and anything else that bound it would get them.
+const PUBLIC_DOOR: &str = "127.0.0.1:7451";
+
+/// The public door from `EGRESS_PUBLIC_LISTEN`: unset, empty or [`PUBLIC_DOOR`] itself; anything
+/// else is refused and the proxy does not start.
+fn public_door(value: Option<&str>) -> Result<SocketAddr, String> {
+    let pinned: SocketAddr = PUBLIC_DOOR.parse().map_err(|e| format!("{PUBLIC_DOOR}: {e}"))?;
+    match value.filter(|v| !v.is_empty()) {
+        None => Ok(pinned),
+        Some(v) if v.parse::<SocketAddr>().ok() == Some(pinned) => Ok(pinned),
+        Some(v) => Err(format!(
+            "EGRESS_PUBLIC_LISTEN is {v}, but the public door is pinned to {PUBLIC_DOOR}: the kernel's table and the Mind's status file name that port"
+        )),
+    }
+}
 
 fn env(name: &str, default: &str) -> String {
     std::env::var(name).ok().filter(|v| !v.is_empty()).unwrap_or_else(|| default.to_string())
@@ -130,9 +153,10 @@ fn main() {
 }
 
 async fn run() -> Result<(), String> {
-    let listen: SocketAddr = env("EGRESS_LISTEN", "127.0.0.1:7450").parse().map_err(|e| format!("EGRESS_LISTEN: {e}"))?;
-    if !listen.ip().is_loopback() {
-        return Err("EGRESS_LISTEN must be a loopback address: this proxy is for this machine's mind only".into());
+    let listen = loopback("EGRESS_LISTEN", "127.0.0.1:7450")?;
+    let public_listen = public_door(std::env::var("EGRESS_PUBLIC_LISTEN").ok().as_deref())?;
+    if public_listen == listen {
+        return Err("EGRESS_PUBLIC_LISTEN must not be EGRESS_LISTEN: the two doors are two ports".into());
     }
     let dir = PathBuf::from(env("EGRESS_STATE", "/var/lib/yantrik-egress"));
     let control_path = PathBuf::from(env("EGRESS_CONTROL", "/run/yantrik-egress/control"));
@@ -148,7 +172,7 @@ async fn run() -> Result<(), String> {
     let state = Arc::new(Mutex::new(state::State::load(&dir)));
     {
         let s = state.lock().map_err(|_| "state poisoned")?;
-        tracing::info!(mode = ?s.policy.mode, rules = s.policy.rules.len(), private = s.private, serve_uid, %listen, "yantrik-egress starting");
+        tracing::info!(mode = ?s.policy.mode, rules = s.policy.rules.len(), private = s.private, serve_uid, %listen, %public_listen, "yantrik-egress starting");
     }
 
     let _ = std::fs::remove_file(&control_path);
@@ -175,8 +199,41 @@ async fn run() -> Result<(), String> {
         });
     }
 
-    let listener = tokio::net::TcpListener::bind(listen).await.map_err(|e| format!("{listen}: {e}"))?;
-    let local = listener.local_addr().map_err(|e| e.to_string())?;
-    proxy::serve(listener, Arc::new(proxy::Proxy { state, serve_uid, local })).await;
+    // Both doors are bound before either serves: a proxy with one door is not started.
+    let open = Arc::new(tokio::sync::Semaphore::new(proxy::MOST_OPEN));
+    let mut doors = Vec::new();
+    for (addr, door) in [(listen, door::Door::Endpoint), (public_listen, door::Door::Public)] {
+        let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| format!("{addr}: {e}"))?;
+        let local = listener.local_addr().map_err(|e| e.to_string())?;
+        doors.push((listener, Arc::new(proxy::Proxy { state: state.clone(), serve_uid, local, door })));
+    }
+    let (public, endpoint) = (doors.pop().ok_or("no public door")?, doors.pop().ok_or("no endpoint door")?);
+    tokio::join!(proxy::serve(endpoint.0, endpoint.1, open.clone()), proxy::serve(public.0, public.1, open));
     Ok(())
+}
+
+/// A listening address from `name`, which must be on loopback: this proxy is for this machine's
+/// mind only.
+fn loopback(name: &str, default: &str) -> Result<SocketAddr, String> {
+    let addr: SocketAddr = env(name, default).parse().map_err(|e| format!("{name}: {e}"))?;
+    if !addr.ip().is_loopback() {
+        return Err(format!("{name} must be a loopback address: this proxy is for this machine's mind only"));
+    }
+    Ok(addr)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_public_door_is_pinned() {
+        let pinned: SocketAddr = PUBLIC_DOOR.parse().unwrap();
+        for v in [None, Some(""), Some("127.0.0.1:7451")] {
+            assert_eq!(public_door(v), Ok(pinned), "{v:?}");
+        }
+        for v in ["127.0.0.1:7452", "127.0.0.2:7451", "[::1]:7451", "0.0.0.0:7451", "localhost:7451", "7451"] {
+            assert!(public_door(Some(v)).is_err(), "{v}");
+        }
+    }
 }

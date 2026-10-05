@@ -30,7 +30,9 @@ use std::net::IpAddr;
 /// /run/yantrik-mind-egress/mind-egress.json).
 /// `refuses-private-all-modes`: an address that is not the internet is refused without a `lan`
 /// rule in audit as well as enforce ([`Policy::decide`]; the test below holds it to that).
-pub const CAPABILITIES: &[&str] = &["refuses-private-all-modes"];
+/// `public-door`: a second listener, `EGRESS_PUBLIC_LISTEN` (127.0.0.1:7451), that never reaches
+/// the local network or a host a `lan` rule names (`crate::door`).
+pub const CAPABILITIES: &[&str] = &["refuses-private-all-modes", "public-door"];
 
 use serde::{Deserialize, Serialize};
 
@@ -256,7 +258,17 @@ impl Policy {
     pub fn read(path: &std::path::Path) -> Result<Policy, String> {
         match std::fs::read_to_string(path) {
             Ok(text) => {
-                let p = serde_yaml::from_str::<Policy>(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+                let mut p = serde_yaml::from_str::<Policy>(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+                // A rule written before `valid` refused a trailing dot is read without it: the
+                // name it meant, as `lan_hosts` already published it and the public door refuses
+                // it. Refusing the whole policy for it would refuse everything, and the next seed
+                // or allow would be saved over the person's rules.
+                for r in &mut p.rules {
+                    let trimmed = r.host.trim_end_matches('.');
+                    if trimmed.len() != r.host.len() {
+                        r.host = trimmed.to_string();
+                    }
+                }
                 match p.rules.iter().find_map(|r| valid(r).err()) {
                     None => Ok(p),
                     Some(e) => Err(format!("{}: {e}", path.display())),
@@ -278,10 +290,13 @@ impl Policy {
     }
 }
 
-/// A rule the person could have written: a host that is a name or `*.name`, and real ports.
+/// A rule the person could have written: a host that is a name or `*.name`, and real ports. A
+/// host is written one way only — lowercase, no trailing dot — the way a request's host is made
+/// (`crate::request`), so a rule and the request it names compare as text.
 pub fn valid(r: &Rule) -> Result<(), String> {
     let name = r.host.strip_prefix("*.").unwrap_or(&r.host);
     let ok = !name.is_empty()
+        && !name.ends_with('.')
         && name.len() <= 253
         && name.contains(['.', ':'])
         && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"-.:".contains(&b));
@@ -459,7 +474,7 @@ mod tests {
 
     #[test]
     fn a_rule_the_person_could_not_have_meant_is_refused() {
-        for bad in ["", "*", "*.", "localhost", "a b.com", "Example.com", "x.com/path"] {
+        for bad in ["", "*", "*.", "localhost", "a b.com", "Example.com", "x.com/path", "x.com.", "*.x.com.", "x.com.."] {
             assert!(valid(&rule(bad, &[443])).is_err(), "{bad}");
         }
         assert!(valid(&rule("x.com", &[])).is_err());
@@ -483,5 +498,28 @@ mod tests {
         let got = Policy::load(&p);
         assert_eq!(got.mode, Mode::Enforce);
         assert_eq!(got.rules.len(), 1);
+    }
+
+    /// A policy written before `valid` refused a trailing dot is read with the dot taken off, not
+    /// refused whole: the name it meant, the one `lan_hosts` published and the public door refuses.
+    #[test]
+    fn a_rule_written_with_a_trailing_dot_before_is_read_without_it() {
+        let d = std::env::temp_dir().join(format!("yantrik-egress-dot-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let p = d.join("policy.yaml");
+        std::fs::write(
+            &p,
+            "mode: enforce\nrules:\n  - host: gpu.example.ts.net.\n    ports: [11434]\n    lan: true\n    why: the model\n  \
+             - host: '*.lab.example..'\n    ports: [80]\n    lan: true\n    why: the lab\n",
+        )
+        .unwrap();
+        let got = Policy::read(&p).unwrap();
+        assert_eq!(got.rules.iter().map(|r| r.host.as_str()).collect::<Vec<_>>(), ["gpu.example.ts.net", "*.lab.example"]);
+        assert_eq!(got.decide("gpu.example.ts.net", 11434, false, Place::Lan, false), Verdict::Allow { audit: false });
+        for host in [".", "*."] {
+            std::fs::write(&p, format!("rules:\n  - host: '{host}'\n    ports: [80]\n    why: nothing\n")).unwrap();
+            assert!(Policy::read(&p).is_err(), "{host} is still no host");
+        }
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

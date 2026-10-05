@@ -174,6 +174,70 @@ which the table lets out. The mind's unit sets `HTTPS_PROXY`, `HTTP_PROXY` and `
 - **Private mode.** The shell tells the proxy "private"; every `CONNECT` is then refused. This
   sits beside the freeze and the closed door.
 
+### Two doors
+
+(5 Oct 2026.) The proxy listens on two loopback ports, each set in its unit the same way:
+
+| door | address | variable | `lan` rules |
+|---|---|---|---|
+| **endpoint door** | `127.0.0.1:7450` | `EGRESS_LISTEN` | honoured, as above |
+| **public door** | `127.0.0.1:7451` | `EGRESS_PUBLIC_LISTEN` | never |
+
+The public door is **pinned**. `yantrik-egress` refuses to start with `EGRESS_PUBLIC_LISTEN` set to
+anything but `127.0.0.1:7451` (`PUBLIC_DOOR` in `main.rs`), because the kernel table's loopback
+set and the status file's `public_proxy` name that port (`EGRESS_PUBLIC_DOOR` in `yantrik-update`,
+from which both are made). A drop-in that moved it would otherwise send untrusted fetches to a
+port the proxy does not serve, and to whatever else bound it. The selftest checks that the
+updater, the unit and the proxy's pin agree, and that the binary refuses another address.
+
+**Why.** The proxy grants the local network on the *name asked for*: a `lan` rule for
+`gpu.example.ts.net:11434` lets any request for that name through. Security reviews found
+untrusted fetches riding those rules. yt-dlp and ffmpeg follow redirects and HLS segment URLs the
+Mind never sees, through this proxy, so a public playlist that lists
+`http://gpu.example.ts.net:11434/...` reached the LAN service with a blind GET. Parser
+differentials in the Mind's own checks did the same twice. The Mind cannot guard hops it never
+sees, so the fix is at the OS: only the Mind's own endpoint clients get the door that honours
+`lan` rules.
+
+**The public door.** Same code as the endpoint door: the head, `CONNECT` and absolute-form
+`http://`, the limits (one shared count of open connections), Private mode, audit and enforce,
+the ledger, the refusal of addresses that are never a destination. On top of that:
+
+- a host that any `lan` rule names, exactly or by `*.domain`, is refused **on every port**, before
+  it is looked up. A `lan` rule can never let a request through this door. The rule's host is
+  read as the request's is (lowercase, no trailing dot), and an address rule is compared as an
+  address, so `2001:470:0::1` names `[2001:470::1]` and `203.0.113.9` names
+  `[::ffff:203.0.113.9]`. A new rule cannot be written with a trailing dot; a `policy.yaml` that
+  already has one is read with the dot taken off (see section 3).
+- what the name resolves to must be the internet. The local network, every range in
+  `private_ranges.json` (CGNAT and Tailscale, ULA, NAT64, 6to4, Teredo, the documentation
+  ranges, …), loopback, link-local, this machine's own addresses, and IPv4 written as IPv6
+  (`::ffff:a.b.c.d`) are all refused, in audit too. It is the same classifier
+  (`policy::place_of`), not a copy. A name that resolves to both kinds is reached at its internet
+  addresses only, as on the endpoint door.
+
+Every request's log line names the door that served it (`door=endpoint|public`).
+
+**Which Mind callers use which.**
+
+- **Public door (7451): anything fetched for someone else.** yt-dlp; ffmpeg; the browser and
+  `net_guard`; the fetch tool; fetches of search results; image fetches; paper fetches. Set their
+  `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY` (or the client's proxy option) to
+  `http://127.0.0.1:7451`, and pass the same to every child process they start.
+- **Endpoint door (7450): the Mind's own configured endpoints only.** Its model servers (Ollama,
+  llama-server, a provider API), Home Assistant, its SearXNG instance's *query* (not the results'
+  pages), and other endpoints from its own configuration. This is the unit's default
+  `HTTPS_PROXY`, so a caller that is not moved keeps working as before.
+
+When in doubt, use the public door: a request it refuses can be retried on the endpoint door only
+by code that owns the endpoint. The Mind finds the public door in the status file
+(`public_proxy`, section 5), set only when the running proxy prints `public-door` in
+`yantrik-egress capabilities`. When it is `null` (an older proxy), there is no public door, and
+untrusted fetches must keep the Mind's own `lan_hosts` checks.
+
+The kernel table lets the mind account reach both ports on `127.0.0.1` (`MIND_LOOPBACK_PORTS` in
+`yantrik-update`) and nothing else of the proxy's.
+
 ### 3. The policy is the person's
 
 - **Where it lives.** `/var/lib/yantrik-egress/policy.yaml`, owned by the proxy. It is changed only
@@ -202,6 +266,13 @@ which the table lets out. The mind's unit sets `HTTPS_PROXY`, `HTTP_PROXY` and `
   button that lets minds reach a LAN service by address (web search, #656) should write exactly
   such a rule, in either mode. In the same way, `{host: 127.0.0.1, ports: [11434], lan: true}`
   opens a local Ollama to the mind (a **loopback entry**); without it the mind cannot reach one.
+
+  A host is written one way: lowercase, with no trailing dot, as a request's host is made, so a
+  rule and the request it names compare as text. A rule with a trailing dot is refused when it is
+  written (and a seeded URL's host loses its dot first). A `policy.yaml` from before that check
+  is **read with the dot taken off**, not refused whole: that is the name the status file's
+  `lan_hosts` already published and the public door refuses, while refusing the policy would
+  refuse everything and the next seed or allow would be saved over the person's other rules.
 
 - **Seeded rules.** Until the person can write `lan` rules from the desktop, every
   `yantrik-update reconcile` (and `apply`) seeds them for the LAN services this machine is already
@@ -263,10 +334,17 @@ the file only; the directory stays.
 
 ```json
 {"enforced": true, "table": "inet yantrik_mind_egress", "proxy": "http://127.0.0.1:7450",
- "proxy_refuses_private": true, "mode": "audit", "private": false, "dns_allowed": true,
+ "public_proxy": "http://127.0.0.1:7451", "proxy_refuses_private": true, "mode": "audit", "private": false, "dns_allowed": true,
  "lan_hosts": [{"host": "192.168.4.42", "ports": [8888]}, {"host": "homeassistant.local", "ports": [8123]}],
- "loaded_at": 1759600000, "version": 2}
+ "loaded_at": 1759600000, "version": 3}
 ```
+
+- `proxy`: the endpoint door, as a URL. It honours `lan` rules (see "Two doors").
+- `public_proxy`: the public door, as a URL like `proxy` (`http://127.0.0.1:7451`); use it as it
+  is. It is set only when the installed `yantrik-egress capabilities`
+  prints `public-door`, read from the binary at each apply like `proxy_refuses_private`. It is
+  **`null`** from a proxy without one, and then every untrusted fetch keeps the `lan_hosts` checks
+  below.
 
 - `mode`: `audit` or `enforce`, the policy's; `fallback` when the policy could not be read or its
   answer was refused and the loaded table holds loopback only (`private` and `dns_allowed` false).
@@ -290,8 +368,13 @@ the file only; the directory stays.
   that did not check) or there are more than 64 hosts: a reader must then take **every name it
   has not resolved itself as possibly the local network** and refuse it on the untrusted path —
   fail closed, never treat `null` as an empty list. `[]` means there are no `lan` rules.
-- `loaded_at`: unix seconds of the load. `version`: this layout (2 adds `lan_hosts`); a reader
-  refuses one it does not know.
+- `loaded_at`: unix seconds of the load. `version`: this layout (2 adds `lan_hosts`; 3 adds
+  `public_proxy`). A reader refuses one it does not know.
+- **Version 3 and version 2 readers.** Version 3 only adds `public_proxy`. Every version 2 field
+  is still there, with the same name, type and meaning; the selftest checks that. A version 2
+  reader keeps working by ignoring the new field, **once it accepts `version` 3 as well as 2**. A
+  reader that still refuses every version it does not know will see 3 and fail closed (egress
+  taken as not enforced) until it adds 3.
 
 Trust it only if all of these hold, else take egress as not enforced:
 - `/run/yantrik-mind-egress` is owned by uid 0 and is not group- or world-writable;
