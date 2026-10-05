@@ -292,9 +292,33 @@ fn decisions_of(s: &Store, cards: &[approvals::Card], jobs: &[(AgentId, String)]
             });
         }
     }
+    out.extend(loose_approvals(s, cards));
     // Oldest first: the one that has waited longest is the one to look at.
     out.sort_by(|x, y| y.age_secs.cmp(&x.age_secs));
     out
+}
+
+/// Approval cards no agent holds — a program started from a terminal, a script on the socket —
+/// which wait on the person on the shell's top-right card. Listed so "Needs you" and the top bar
+/// never say nothing waits while a card does (sign-off item 7, 4 October). Named by what the
+/// machine established (`Verified::who`), never the caller's own name; no key, because there is
+/// no run to open: the card itself is where it is answered.
+fn loose_approvals(s: &Store, cards: &[approvals::Card]) -> Vec<Decision> {
+    cards
+        .iter()
+        .filter(|c| c.status == approvals::Status::Pending)
+        .filter(|c| !s.agents().iter().any(|a| a.pending_approvals.contains(&c.id)))
+        .map(|card| Decision {
+            key: String::new(),
+            request: card.id.clone(),
+            mind_id: String::new(),
+            mind: card.verified.who(),
+            task: "not an agent \u{b7} answer it on its card".to_string(),
+            text: one_line(if card.summary.is_empty() { &card.purpose } else { &card.summary }, REQUEST_CHARS),
+            age_secs: card.age_secs,
+            action: action_label(&card.app, &card.action).to_string(),
+        })
+        .collect()
 }
 
 fn finished(a: &Agent, t: &Turn) -> Option<Finished> {
@@ -353,7 +377,8 @@ pub fn compose(
     let working = desks.iter().filter(|d| d.state == "working").count();
 
     let decisions = decisions_of(s, cards, jobs, now);
-    let mut asking: Vec<&str> = decisions.iter().map(|d| d.mind.as_str()).collect();
+    // Minds only: a card no agent holds is a request, not a mind asking.
+    let mut asking: Vec<&str> = decisions.iter().filter(|d| !d.mind_id.is_empty()).map(|d| d.mind.as_str()).collect();
     asking.sort_unstable();
     asking.dedup();
 
@@ -839,6 +864,47 @@ mod tests {
         assert_eq!(w.decisions[0].action, "Answer question");
         assert_eq!(w.decisions[0].text, "Which folder?");
         assert!(w.summary().ends_with("1 needs you"), "{}", w.summary());
+    }
+
+    /// A card no agent holds — a terminal program's — still counts as needing the person, so the
+    /// top bar and "Needs you" say so while the shell's corner card waits (sign-off item 7). It is
+    /// named by the machine's finding, not the caller's name, and is no mind; an agent's own card
+    /// is counted once, under its agent.
+    #[test]
+    fn a_card_no_agent_holds_still_needs_you() {
+        let card = |id: &str, agent: &str| approvals::Card {
+            id: id.into(),
+            requester: "design-sweep".into(),
+            verified: approvals::Verified { exe: "/usr/sbin/sshd-session".into(), agent: agent.into(), ..Default::default() },
+            app: "calendar".into(),
+            action: "delete_event".into(),
+            grade: "sensitive".into(),
+            purpose: "Take an event off the calendar. It is not recoverable".into(),
+            summary: "Take an event off the calendar.".into(),
+            args: vec!["id: x".into()],
+            target: String::new(),
+            explained: String::new(),
+            warning: String::new(),
+            said: String::new(),
+            caller_says: String::new(),
+            can_session: false,
+            status: approvals::Status::Pending,
+            record: String::new(),
+            decided_at: String::new(),
+            session: false,
+            age_secs: 5,
+        };
+        let mut s = Store::new();
+        let a = start(&mut s, "pi:c-1", "pi", "tidy the calendar");
+        s.approval_asked(&a, "held", "calendar.delete_event");
+        let cards = [card("loose", ""), card("held", "pi:c-1")];
+        let w = compose(&s, &[("pi".into(), "pi".into())], &["pi".into()], &cards, &[], now());
+        assert_eq!(w.requests, 2, "both wait on the person");
+        assert_eq!(w.request_minds, 1, "a program on the socket is not a mind asking");
+        let loose = w.decisions.iter().find(|d| d.request == "loose").expect("the corner card is listed");
+        assert_eq!(loose.mind, "sshd-session", "named by the kernel's word, not \"design-sweep\"");
+        assert!(loose.key.is_empty() && loose.mind_id.is_empty(), "no run to open, no mind");
+        assert_eq!(w.decisions.iter().filter(|d| d.request == "held").count(), 1, "the agent's card once");
     }
 
     #[test]

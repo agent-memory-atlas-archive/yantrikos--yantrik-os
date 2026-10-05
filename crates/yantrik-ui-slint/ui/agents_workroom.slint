@@ -114,8 +114,11 @@ export component DecisionCard inherits Rectangle {
     border-color: Theme.amber;
     accessible-role: button;
     accessible-label: root.data.mind + ": " + root.data.text + ". " + root.data.action;
+    // A request no agent holds (key "") has no run to open: it is answered on the shell's own
+    // card in the top-right corner, which the task line says. Nothing here presses for it.
     ta := TouchArea {
-        mouse-cursor: pointer;
+        enabled: root.data.key != "";
+        mouse-cursor: root.data.key != "" ? pointer : default;
         clicked => { root.open(); }
     }
     HorizontalLayout {
@@ -157,7 +160,7 @@ export component DecisionCard inherits Rectangle {
                 font-size: Theme.fs-caption;
             }
         }
-        VerticalLayout {
+        if root.data.key != "" : VerticalLayout {
             alignment: center;
             YButton {
                 label: root.data.action;

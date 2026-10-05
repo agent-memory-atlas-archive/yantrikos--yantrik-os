@@ -62,6 +62,14 @@ export struct ApprovalRequest {
     // /proc to the first ancestor a person would recognise. Never empty — `caller_identity`
     // answers "could not be identified" rather than leaving a blank where a fact should be.
     verified: string,
+    // The card's first identity line: the walk's structured findings in words, "A terminal program
+    // (sshd-session, pid 2290461)", with `identity-tag` ("verified", or "nothing verified") drawn
+    // beside it and never cut — and under it `claim`, "calls itself “design-sweep”", in amber with
+    // "· unverified" beside it. Worded in approval_wording.rs; the fact always comes first (design
+    // sign-off, 4 October, item 2), and neither is read from the caller's argv.
+    identity: string,
+    identity-tag: string,
+    claim: string,
     // What does not add up about this request, one already-bounded sentence per entry — the
     // claimed name names an attached mind the ancestry contradicts, or the claimed grade is not
     // the one the app publishes. Drawn in the same red as `warning`, because they are the same
@@ -103,6 +111,22 @@ export struct ApprovalRequest {
     // carries one, it offers no "Allow for this session" (`can_session` below).
     explained: string,
     warning: string,        // "" unless there is something that cannot be undone
+    // What changes (sign-off item 4), worded in approval_wording.rs with every argument and the
+    // target escaped before they were joined (review of #639, B1):
+    //   what     "Deletes: <target>", else "Deletes: <the arguments>" — one pinned line;
+    //   exactly  every argument as the grant binds it, `; ` between — in full on the card's face
+    //            when the pinned line names a target or is cut at the card's edge;
+    //   undo     "Undo: not possible, the app says so", the caller-only form, or "".
+    what: string,
+    exactly: string,
+    undo: string,
+    // Graded dangerous, or the app says it cannot be undone: the affirmative button is the kit's
+    // filled red and says the action (sign-off item 1). The same reading as `warning`.
+    destructive: bool,
+    // The affirmative button's words: the action from the APP's published id or description —
+    // "Delete event" — on a destructive card, else "Allow once". Never the caller's purpose
+    // (approval_wording::confirm_label is not handed it).
+    confirm-label: string,
     // Whether "Allow for this session" may be offered at all. False for `dangerous` and for any
     // action whose own published sentence says it cannot be undone — the same predicate that
     // draws `warning`, so the card can never offer to stop asking about the thing it is warning
@@ -112,7 +136,7 @@ export struct ApprovalRequest {
     can-session: bool,
     decision: string,       // "" while waiting; then allowed | denied | expired
     record: string,         // the one line that stays in the conversation afterwards
-    age-text: string,       // "94s left", while waiting
+    age-text: string,       // "Expires in 2 min, then declined", while waiting
     decided-at: string,     // "10:42" once decided: the resolved line's time
     // Once allowed: whether it was "for this session" (a standing rule) rather than once. The
     // resolved line says which, because the two are different promises.
@@ -176,25 +200,47 @@ export component ApprovalCard inherits Rectangle {
     // was already at its bottom — and a person could not answer the card at all.
     //
     // So whoever draws the card says how tall it may be, and the card keeps that promise by
-    // making ONE part of itself yield: the details in the middle scroll, while the identity
-    // rows above (who is asking, what the action is) and the buttons below stay pinned where
-    // the layout put them. The default asks for more than any screen has, which leaves the
-    // card exactly as tall as it likes in a pane that scrolls itself (the Agents screen).
+    // making ONE part of itself yield: the middle — the whole sentence and the whole of the app's
+    // word about this call when their pinned lines were cut, the exact name, the agent, Details
+    // and source — which scrolls. Above it a floor is pinned, each line elided rather than
+    // scrolled away: who is asking (the fact and the claim), any discrepancy, and the action's
+    // sentence. Below it are pinned what changes — with every argument the grant binds, in full,
+    // whenever the one-line summary of them cannot carry it — the first line of the app's word
+    // about the call, the undo line, the warning and the buttons (review of #639; on main the
+    // pinned identity rows alone outgrew the Lens's 240px and pushed the buttons out of the
+    // card, over the transcript). The card is never taller than this limit and the buttons are
+    // always inside it: when even the pinned lines do not fit, everything above the buttons
+    // scrolls as one and Allow waits until its end has been in view (fourth review of #639; see
+    // `allow-ready`). Every host passes a limit: the Lens its panel's arithmetic, the top-right
+    // corner the screen between the bars (about 684px at 1280×800, 484px at 800×600). Only an
+    // agent's pane, which scrolls itself, leaves the out-of-reach default.
     // Not called `max-height`: that name belongs to the Rectangle this inherits from, where it
     // is a layout constraint, and Slint refuses to let a component shadow a built-in property.
     in property <length> height-limit: 10000px;
 
-    // How much of the purpose block shows before "show more" takes over: three caption lines,
-    // at their 14px line pitch — a rounder number clips the fourth line mid-glyph.
-    // The summary row above already carries the description's first sentence, so the clamped
-    // paragraph is for whoever wants the rest of it — and they ask, instead of the card
-    // spending a sixth of the screen on protocol detail (#218, item 3). It used to be 160px
-    // with a scroll of its own, which is what made the card too tall for the Lens; a scroll
-    // inside the scrolling details section would also fight the outer one for the gesture.
-    property <length> purpose-clamp: 42px;
+    // Details and source: closed by default for a sensitive request, open for a dangerous one
+    // (sign-off item 4). A press is remembered for the request it was made on, so a card that
+    // takes this one's place starts at its own grade's default.
+    // The request whose whole content has been in view: set when the section above the buttons,
+    // having had to scroll, reaches its end. Allow waits for it (see `allow-ready`). Per request
+    // id, like the disclosure below, so the next card in this place starts over.
+    property <string> read-id: "";
+    property <string> toggled-id: "";
+    property <bool> toggled-open: false;
+    property <bool> details-open: root.toggled-id == root.data.id ? root.toggled-open
+        : root.data.grade == "dangerous";
+    // The type size under Details: 13px, secondary (the sign-off's floor is 12px).
+    property <length> details-type: 13px;
+
+    // How much of the app's paragraph shows under Details before "show more" takes over: three
+    // lines at the 13px type's 16px pitch — a rounder number clips the fourth line mid-glyph.
+    // The 18px line already carries the description's first sentence, so the clamped paragraph
+    // is for whoever wants the rest of it, and they ask (#218, item 3). A scroll of its own
+    // inside the scrolling section would fight the outer one for the gesture.
+    property <length> purpose-clamp: 48px;
     property <bool> purpose-open: false;
     // The caller's words get two lines before "show more": they are a claim, not the action.
-    property <length> caller-clamp: 28px;
+    property <length> caller-clamp: 32px;
     property <bool> caller-open: false;
 
     height: body.preferred-height;
@@ -272,7 +318,7 @@ export component ApprovalCard inherits Rectangle {
         Rectangle { horizontal-stretch: 1; }
     }
 
-    if root.waiting : Rectangle {
+    if root.waiting : card := Rectangle {
         border-radius: Theme.chat-radius;
         // Opaque, not glass: this card is drawn over whatever screen is up, and a question about
         // something that cannot be undone must not have another window's words showing through it.
@@ -282,482 +328,547 @@ export component ApprovalCard inherits Rectangle {
         border-color: root.grade-edge;
         drop-shadow-blur: 18px;
         drop-shadow-color: Theme.overlay-shadow;
-        // The promise to the panel: never taller than it was told it may be. What yields is the
-        // details section in the middle (see its height below); the rows above it and the
-        // buttons under it keep their arithmetic heights, so the buttons are the one thing on
-        // the card that is always where the layout put them (#218).
-        height: min(card-body.preferred-height, root.height-limit);
+
+        // ── Never taller than its host allows, and the buttons always inside it ──
+        //
+        // Fourth review of #639: at 800×600 the largest card a request may make put its buttons
+        // under the window's edge — a card nobody can answer, held in front by card_watch until it
+        // expires. Whatever the size, Decline and Allow are pinned at the foot, and everything
+        // above them gets the room that is left (`above-room`).
+        //
+        // Three cases. Everything fits: nothing scrolls and Allow is live at once. The pinned lines
+        // fit and the middle does not: the middle scrolls, as it always has, and Allow is live —
+        // every argument the grant binds is on screen. Even the pinned lines do not fit: all of it
+        // scrolls as one, and Allow stays disabled until that scroll has been to its end, so the
+        // person has had every argument in view before they can allow it (`allow-ready`). Decline
+        // is always live.
+        property <length> above-room: max(0px, root.height-limit - decide.preferred-height
+            - 2 * Theme.sp-2 - Theme.sp-2);
+        // Measured on the pinned lines alone — the middle is what yields — so whether the card
+        // overflows never depends on how tall the middle is drawn.
+        property <bool> overflowing: pinned-floor.preferred-height + changes.preferred-height
+            + 2 * Theme.sp-2 > self.above-room + 0.5px;
+        // What the gate checks, and all it checks: that the section above the buttons has been at
+        // its end at least once for this request id. A fling or a dragged scrollbar reaches the
+        // end as surely as reading does; it proves every line was put in view, not that it was
+        // read. And only a click on this card's own Allow reaches `allow()`, the one path to
+        // `approval-allow` / `on_approval_allow` in the shell: nothing else on the card, and
+        // nothing a caller sends, can press it.
+        property <bool> allow-ready: !self.overflowing || root.read-id == root.data.id;
+        // A new request in this card starts at its top, however far the last one was scrolled.
+        property <string> card-id: root.data.id;
+        changed card-id => { above-flick.viewport-y = 0px; }
+        height: card-body.preferred-height;
 
         card-body := VerticalLayout {
-            padding: Theme.sp-3;
+            padding-left: Theme.sp-3;
+            padding-right: Theme.sp-3;
+            padding-top: Theme.sp-2;
+            padding-bottom: Theme.sp-2;
             spacing: Theme.sp-2;
 
-            // Pinned top: who is asking, and what the action is in one line. Everything here is
-            // fixed single-line rows (or the summary's bounded sentence), so this section's
-            // height is arithmetic and the details below can be sized by subtracting it.
-            identity := VerticalLayout {
-                spacing: Theme.sp-2;
-
-            // Who is asking — said twice, on purpose, because the two answers are not the same
-            // kind of thing and the card must not let one pass for the other.
-            //
-            // The first pair is the CLAIM: whatever the caller called itself, with the label
-            // `says the caller` under it. Hermes declares this on the MCP handshake and the
-            // bridge passes it through; anything that can open the shell's socket can put any
-            // string there. It cannot raise privilege (the machine ceiling is enforced from the
-            // app's real grade, not from anything on this card) but it can flatter.
-            //
-            // The second pair is what the MACHINE established, and it is not a rewording of the
-            // first: the kernel stamps the peer's pid on the socket at connect (SO_PEERCRED —
-            // the caller cannot write it), and `caller_identity.rs` walks /proc up from there,
-            // past our own `yos`/`yos-mcp` plumbing, to the first program a person would
-            // recognise. It says `could not be identified` rather than guessing.
-            //
-            // Four fixed single-line rows rather than anything that wraps, so the card's height
-            // stays arithmetic — see the geometry table in design/approvals-2026-09-21.md.
-            HorizontalLayout {
-                spacing: Theme.sp-2;
-                Text {
-                    text: "Approval needed";
-                    color: root.grade-ink;
-                    font-size: Theme.fs-body-strong;
-                    font-weight: 600;
-                    vertical-alignment: center;
-                    wrap: no-wrap;
-                }
-                if root.grade-label != "" : Text {
-                    text: "\u{00b7} " + root.grade-label;
-                    color: root.grade-ink;
-                    font-size: Theme.fs-body-strong;
-                    font-weight: 600;
-                    vertical-alignment: center;
-                    wrap: no-wrap;
-                }
-                Rectangle { horizontal-stretch: 1; }
-            }
-            HorizontalLayout {
-                spacing: Theme.sp-2;
-
-                Rectangle {
-                    width: 6px; height: 6px;
-                    y: 5px;
-                    border-radius: 3px;
-                    background: root.grade-ink;
-                }
-                Text {
-                    text: root.data.requester;
-                    color: Theme.text-primary;
-                    font-size: Theme.fs-micro;
-                    font-weight: 600;
-                    vertical-alignment: center;
-                    wrap: no-wrap;
-                    overflow: elide;
-                    horizontal-stretch: 1;
-                }
-                Text {
-                    text: root.data.age-text;
-                    color: Theme.text-dim;
-                    font-size: Theme.fs-micro;
-                    vertical-alignment: center;
-                }
-            }
-            Text {
-                text: "says the caller · nothing on this machine checked that name";
-                color: Theme.text-dim;
-                font-size: Theme.fs-micro;
-                wrap: no-wrap;
-                overflow: elide;
-            }
-
-            // What the machine knows, in the same value-over-label shape, so the eye reads the
-            // pair rather than a sentence. Spacing 0 inside: the two belong together and the
-            // gap belongs between the pairs, not inside one.
-            VerticalLayout {
-                spacing: 0px;
-
-                Text {
-                    text: root.data.verified;
-                    color: Theme.text-primary;
-                    font-size: Theme.fs-micro;
-                    font-weight: 600;
-                    wrap: no-wrap;
-                    overflow: elide;
-                }
-                Text {
-                    text: "verified by this machine · the kernel said so, not the caller";
-                    color: Theme.text-dim;
-                    font-size: Theme.fs-micro;
-                    wrap: no-wrap;
-                    overflow: elide;
-                }
-            }
-
-            // Which agent — one row, only when there is one, in the same value-over-label shape.
-            // From the token the shell issued that agent, checked against the process above, so it
-            // sits with the machine's facts rather than with the caller's claim.
-            if root.data.agent != "" : VerticalLayout {
-                spacing: 0px;
-
-                Text {
-                    text: "agent " + (root.data.on-behalf == "" ? "" : root.data.on-behalf + " · ") + root.data.agent;
-                    color: Theme.text-primary;
-                    font-size: Theme.fs-micro;
-                    font-weight: 600;
-                    wrap: no-wrap;
-                    overflow: elide;
-                }
-                Text {
-                    text: "named by the token the desktop gave it · also asked in its pane";
-                    color: Theme.text-dim;
-                    font-size: Theme.fs-micro;
-                    wrap: no-wrap;
-                    overflow: elide;
-                }
-            }
-
-            // What the caller said and what the machine found do not agree — the kind of
-            // disagreement a person cannot catch by reading, because the claim will look exactly
-            // right. Same red bar as "cannot be undone" below; one line each, elided, and the
-            // sentences are bounded where they are made (caller_identity.rs, control_approvals.rs)
-            // so the card's height stays arithmetic.
-            for said in root.data.discrepancies : HorizontalLayout {
-                spacing: Theme.sp-2;
-                Rectangle {
-                    width: 3px;
-                    background: Theme.color-danger;
-                }
-                Text {
-                    text: said;
-                    color: Theme.color-danger;
-                    font-size: Theme.fs-caption;
-                    vertical-alignment: center;
-                    wrap: no-wrap;
-                    overflow: elide;
-                    horizontal-stretch: 1;
-                }
-            }
-
-            // What it is. The app and action by their exact names, because those are the names
-            // in every other surface on this machine and a friendly rewording would be a third.
-            Text {
-                text: root.data.app + "." + root.data.action;
-                color: Theme.text-primary;
-                font-size: Theme.fs-body-strong;
-                font-weight: 600;
-                wrap: word-wrap;
-            }
-
-            // What it does, in one line a person can read (#218): the app's own first sentence,
-            // picked out of the published description in approvals.rs. Pinned with the identity
-            // rows rather than down in the details, because the line that says what this call
-            // does is the one thing on the card that must never be what a person has to scroll
-            // or press "show more" for. The label says where the line came from, in the same
-            // voice as the labels around it — it is the app's words, not a third name for the
-            // action beside `app.action` and the paragraph below.
-            // Not behind an `if`: conditional, the pair's last line never reached this
-            // section's preferred height, and the details below started on top of the label.
-            // An empty summary collapses the box to zero height instead, and the clip keeps
-            // the collapsed box from spilling whatever it still draws.
+            // Everything above the buttons. As tall as it likes up to `above-room`, past which it
+            // scrolls; reaching its end is what makes Allow live when it had to scroll.
             Rectangle {
-                height: root.data.summary != "" ? summary-pair.preferred-height : 0px;
+                height: min(above-content.preferred-height, card.above-room);
                 clip: true;
 
-                summary-pair := VerticalLayout {
-                    spacing: 0px;
-
-                    Text {
-                        text: root.data.summary;
-                        color: Theme.text-primary;
-                        font-size: Theme.fs-caption;
-                        wrap: word-wrap;
+                above-flick := Flickable {
+                    viewport-width: self.width;
+                    viewport-height: above-content.preferred-height;
+                    changed viewport-y => {
+                        if (self.viewport-y <= self.height - self.viewport-height + 1px) {
+                            root.read-id = root.data.id;
+                        }
                     }
+
+                    above-content := VerticalLayout {
+                        spacing: Theme.sp-2;
+
+            // ── The floor: who is asking and what the action is ──
+            //
+            // Each one line, cut at the card's edge when it must be — never scrolled away while the
+            // pinned lines fit (review of #639, S1). The labels that say what kind of line each is
+            // ("verified", "unverified") are their own Texts beside the cut one, so the cut can
+            // only ever eat the caller's words or the program's name, never the label.
+            pinned-floor := VerticalLayout {
+                spacing: Theme.sp-1;
+
+                HorizontalLayout {
+                    spacing: Theme.sp-2;
                     Text {
-                        text: "what it does · the app's own first sentence";
-                        color: Theme.text-dim;
-                        font-size: Theme.fs-micro;
+                        text: "Approval needed";
+                        color: root.grade-ink;
+                        font-size: Theme.fs-body-strong;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                        wrap: no-wrap;
+                    }
+                    if root.grade-label != "" : Text {
+                        text: "\u{00b7} " + root.grade-label;
+                        color: root.grade-ink;
+                        font-size: Theme.fs-body-strong;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                        wrap: no-wrap;
+                    }
+                    // How long it waits, in whole minutes, and what happens then (sign-off item 5).
+                    Text {
+                        text: root.data.age-text;
+                        color: Theme.text-secondary;
+                        font-size: Theme.fs-caption;
+                        horizontal-alignment: right;
+                        vertical-alignment: center;
                         wrap: no-wrap;
                         overflow: elide;
+                        horizontal-stretch: 1;
                     }
+                }
+
+                // Who is asking — the fact first, the claim under it (sign-off item 2). The first
+                // line is what this MACHINE established: the kernel stamps the peer's pid on the
+                // socket at connect (SO_PEERCRED — the caller cannot write it) and
+                // `caller_identity.rs` walks /proc up from there; the words come from that walk's
+                // fields, never from the caller's argv. The second is whatever the caller called
+                // itself, in amber and marked unverified: anything that can open the shell's socket
+                // can put any string there.
+                HorizontalLayout {
+                    spacing: Theme.sp-1;
+                    Text {
+                        text: root.data.identity;
+                        color: Theme.text-primary;
+                        font-size: Theme.fs-body;
+                        font-weight: 600;
+                        wrap: no-wrap;
+                        overflow: elide;
+                        // Shrinks, eliding, when the row is short of room; never grows past its
+                        // words, so the tag sits right after them.
+                        horizontal-stretch: 1;
+                        max-width: self.preferred-width;
+                    }
+                    Text {
+                        text: "\u{00b7} " + root.data.identity-tag;
+                        color: Theme.text-primary;
+                        font-size: Theme.fs-body;
+                        font-weight: 600;
+                        wrap: no-wrap;
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+                HorizontalLayout {
+                    spacing: Theme.sp-1;
+                    Text {
+                        text: root.data.claim;
+                        color: Theme.chat-needs-you;
+                        font-size: Theme.fs-caption;
+                        wrap: no-wrap;
+                        overflow: elide;
+                        horizontal-stretch: 1;
+                        max-width: self.preferred-width;
+                    }
+                    Text {
+                        text: "\u{00b7} unverified";
+                        color: Theme.chat-needs-you;
+                        font-size: Theme.fs-caption;
+                        wrap: no-wrap;
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+
+                // What the caller said and what the machine found do not agree — the kind of
+                // disagreement a person cannot catch by reading, because the claim will look exactly
+                // right. Same red bar as the warning; one line each, bounded where they are made.
+                for said in root.data.discrepancies : HorizontalLayout {
+                    spacing: Theme.sp-2;
+                    Rectangle {
+                        width: 3px;
+                        background: Theme.color-danger;
+                    }
+                    Text {
+                        text: said;
+                        color: Theme.color-danger;
+                        font-size: Theme.fs-caption;
+                        vertical-alignment: center;
+                        wrap: no-wrap;
+                        overflow: elide;
+                        horizontal-stretch: 1;
+                    }
+                }
+
+                // The action in words, at 18px (sign-off item 3): the app's own first sentence,
+                // picked out of its published description in approvals.rs (`summary_of`) — never
+                // the caller's words. One line here; when it is cut, the whole sentence is the first
+                // thing in the section below.
+                sentence-line := Text {
+                    text: root.data.summary != "" ? root.data.summary
+                        : "The app publishes no description of this action.";
+                    color: Theme.text-primary;
+                    font-size: Theme.fs-title-1;
+                    font-weight: Theme.fw-body-strong;
+                    wrap: no-wrap;
+                    overflow: elide;
                 }
             }
 
-            }   // identity — pinned; everything under here gives way first
-
-            // The scrolling middle: the app's whole paragraph, every argument, the warning and
-            // the grade line.
+            // ── The middle: everything that may yield ──
             //
-            // This is the one part of the card that yields when the card may not be as tall as
-            // it likes (#218): its height is what is left of `height-limit` once the pinned rows
-            // above, the pinned buttons below and the card's own padding and spacing are
-            // subtracted — the 2×sp-3 and 2×sp-2 are exactly those, two paddings and the two
-            // gaps between the three sections. When the details fit — every card on a full
-            // screen, and all of them in a pane that scrolls itself, where `height-limit` is
-            // left at its out-of-reach default — the section is precisely as tall as its
-            // content and nothing scrolls anywhere.
+            // The part that gives way first: its height is what is left of `above-room` once the
+            // floor and what changes are subtracted, with the two gaps between them, and it
+            // scrolls on its own. Where the card has room it is precisely as tall as its content
+            // and nothing scrolls. When even the pinned lines do not fit, the whole section above
+            // the buttons scrolls as one instead (see `overflowing`), and then the middle takes its
+            // natural height inside it — the exact name, the agent, the whole sentence, the app's
+            // word about the call and Details stay reachable by that one scroll, rather than
+            // shrunk to nothing (fifth review of #639). Its own scroll is off then, so the wheel
+            // over it moves the section the gate is watching.
             Rectangle {
-                height: min(details.preferred-height,
-                            max(0px, root.height-limit - identity.preferred-height
-                                - decide.preferred-height
-                                - 2 * Theme.sp-3 - 2 * Theme.sp-2));
+                height: card.overflowing ? mid.preferred-height
+                    : min(mid.preferred-height,
+                          max(0px, card.above-room - pinned-floor.preferred-height
+                              - changes.preferred-height - 2 * Theme.sp-2));
                 clip: true;
 
                 // A Flickable has no preferred height of its own, so the sizing Rectangle is
-                // around it and the layout inside is what gets measured.
+                // around it and the layout inside is what gets measured. Its viewport width is
+                // said so that wrapping text measures its height from the card's width (left to
+                // its default, width into height into width is a binding loop Slint rejects).
                 Flickable {
-                    // Only the vertical scrolls, and the viewport's width has to be said so:
-                    // left at its default it follows the content's minimum width, and the
-                    // wrapping purpose text measures its height from the width it is given —
-                    // width into height into width, which Slint rejects as a binding loop.
                     viewport-width: self.width;
-                    viewport-height: details.preferred-height;
+                    viewport-height: mid.preferred-height;
+                    interactive: !card.overflowing;
 
-                    details := VerticalLayout {
+                    mid := VerticalLayout {
                         spacing: Theme.sp-2;
 
-            // What it does, in the app's own sentence — the whole sentence, all of it readable.
-            //
-            // This used to be a bare wrapping Text fed a purpose cut to 240 characters, and
-            // Studio's `set_backend` publishes 585: the card read "…naming a hosted service means
-            // the sentences typed into this app will leav… (585 characters in full)", cut
-            // mid-word at the clause that said why the grade is what it is, with no way to read
-            // the rest. So the text is no longer cut to fit the card (see `PURPOSE_CHARS` in
-            // approvals.rs). It is still clamped, though — to three lines under "show more"
-            // (#218) — because `run_recipe`'s paragraph is protocol detail for minds, and on
-            // the card it pushed the buttons under the edge of the Lens. What changed since
-            // 22 September is that nothing is lost by the clamp any more: the summary line
-            // above carries the first sentence, "show more" opens the rest in full, and the
-            // section scrolls once the card is at the height its panel allows.
-            //
-            // The label under it says what kind of thing the sentence is, because the two cards
-            // of 22 September were read as the OS warning about THIS call when the sentence is
-            // the app's description of the ACTION and reads the same for `kind: fake` as for a
-            // hosted service. The arguments underneath are what change; their label says so.
-            VerticalLayout {
-                spacing: 0px;
-
-                Rectangle {
-                    height: root.purpose-open ? purpose-text.preferred-height
-                        : min(purpose-text.preferred-height, root.purpose-clamp);
-                    clip: true;
-
-                    purpose-text := Text {
-                        width: parent.width;
-                        // Pinned to the box's top edge, both axes: left to its own geometry the
-                        // paragraph centers itself on the clamped box, and the window then
-                        // shows the middle lines of it instead of the first ones.
-                        y: 0px;
-                        text: root.data.purpose;
-                        color: Theme.text-secondary;
-                        font-size: Theme.fs-caption;
-                        wrap: word-wrap;
-                        vertical-alignment: top;
-                    }
-                }
-                // "show more" rather than a scroll of its own: a second Flickable inside the
-                // scrolling details section would fight the outer one for the same gesture, and
-                // a scrollbar-less clamp gives no sign that there is more. Same shape as the
-                // small hit areas in the Lens header — a TouchArea sized to its label.
-                if purpose-text.preferred-height > root.purpose-clamp : more-hit := TouchArea {
-                    width: more-label.preferred-width + 16px;
-                    height: 20px;
-                    mouse-cursor: pointer;
-                    clicked => { root.purpose-open = !root.purpose-open; }
-
-                    more-label := Text {
-                        width: parent.width;
-                        height: parent.height;
-                        text: root.purpose-open ? "show less" : "show more";
-                        color: more-hit.has-hover ? Theme.amber-light : Theme.text-dim;
-                        font-size: Theme.fs-micro;
-                        vertical-alignment: center;
-                    }
-                }
-                Text {
-                    text: "says the app about the action · the same for every call of it";
-                    color: Theme.text-dim;
-                    font-size: Theme.fs-micro;
-                    wrap: no-wrap;
-                    overflow: elide;
-                }
-            }
-
-            // What the caller says it is for, after the app's sentence and labelled as the
-            // caller's: clamped to two lines under its own "show more", so no length of it can
-            // push the app's sentence down, and it cannot start a line of its own that reads as
-            // one of this card's labels (approvals.rs gives it as one neutralized paragraph).
-            if root.data.caller-says != "" : VerticalLayout {
-                spacing: 0px;
-
-                Rectangle {
-                    height: root.caller-open ? caller-text.preferred-height
-                        : min(caller-text.preferred-height, root.caller-clamp);
-                    clip: true;
-
-                    caller-text := Text {
-                        width: parent.width;
-                        y: 0px;
-                        text: root.data.caller-says;
-                        color: Theme.text-secondary;
-                        font-size: Theme.fs-caption;
-                        font-italic: true;
-                        wrap: word-wrap;
-                        vertical-alignment: top;
-                    }
-                }
-                if caller-text.preferred-height > root.caller-clamp : caller-more := TouchArea {
-                    width: caller-more-label.preferred-width + 16px;
-                    height: 20px;
-                    mouse-cursor: pointer;
-                    clicked => { root.caller-open = !root.caller-open; }
-
-                    caller-more-label := Text {
-                        width: parent.width;
-                        height: parent.height;
-                        text: root.caller-open ? "show less" : "show more";
-                        color: caller-more.has-hover ? Theme.amber-light : Theme.text-dim;
-                        font-size: Theme.fs-micro;
-                        vertical-alignment: center;
-                    }
-                }
-                Text {
-                    text: "says the caller about this call · nothing checks it";
-                    color: Theme.text-dim;
-                    font-size: Theme.fs-micro;
-                    wrap: no-wrap;
-                    overflow: elide;
-                }
-            }
-
-            // The arguments, exactly as the grant is bound to them.
-            //
-            // One Text per argument, `no-wrap` and elided, so the box is exactly as many lines
-            // as there are arguments and the card's height is arithmetic rather than a
-            // measurement. The values arrive already cut to fit (see `ARG_VALUE_CHARS` in
-            // approvals.rs), each cut one naming its true length, and a list longer than eight
-            // arrives with a line saying how many more the grant covers — so the bound is
-            // visible in the text rather than being a silent truncation by the layout.
-            VerticalLayout {
-                spacing: 0px;
-
-                Rectangle {
-                    border-radius: Theme.r-sm;
-                    background: Theme.bg-input;
-                    height: args-body.preferred-height;
-
-                    args-body := VerticalLayout {
-                        padding: Theme.sp-2;
-
-                        for line in root.data.args : Text {
-                            text: line;
-                            color: Theme.text-primary;
-                            font-size: Theme.fs-mono;
-                            wrap: no-wrap;
-                            overflow: elide;
-                        }
-                    }
-                }
-                Text {
-                    text: "asked for in this call · the grant is bound to exactly these";
-                    color: Theme.text-dim;
-                    font-size: Theme.fs-micro;
-                    wrap: no-wrap;
-                    overflow: elide;
-                }
-            }
-
-            // What the app says about THIS call, with these arguments (#137), drawn directly
-            // under the argument box — the bridge in reading order: the purpose states the
-            // rule, the box shows the one call, and this says what that call does. One
-            // sentence, wrapped: it arrives already bounded (see `EXPLAINED_CHARS` in
-            // approvals.rs) and cut at a word like every prose line on this card, and the
-            // details section scrolls however it wraps. Hidden when empty, which is every app
-            // that explains nothing per call: their card is exactly what it was.
-            if root.data.explained != "" : VerticalLayout {
-                spacing: 0px;
-                Text {
-                    // Pinned to the layout's width, like `purpose-text` above: a wrapping Text
-                    // left to its default measures its height at its own unwrapped width, so
-                    // the section's preferred height would count this block as one line tall
-                    // however it wraps — and the details' scroll range is that preferred
-                    // height against the clipped box, so the wrapped lines below the fold
-                    // would be unreachable, the wheel having nothing to scroll.
-                    width: parent.width;
-                    text: root.data.explained;
-                    color: Theme.text-primary;
-                    font-size: Theme.fs-caption;
-                    wrap: word-wrap;
-                }
-                // Wrapped, not elided: this footnote is longer than the card is wide, and the
-                // elided line cut off exactly its point — "not to this sentence". The details
-                // section scrolls, so a wrapped footnote costs nothing but its second line.
-                Text {
-                    width: parent.width;
-                    text: "says the app about this one call, with these arguments · the grant binds to the argument box above, not to this sentence";
-                    color: Theme.text-dim;
-                    font-size: Theme.fs-micro;
-                    wrap: word-wrap;
-                }
-            }
-
-            // What the handle in the box above means, in the words of the app that owns it
-            // (#54) — a line for each handle the app names, so a delete asked by id reads as
-            // the event itself. One Text, `no-wrap` and elided, like every other row: the
-            // card's height is arithmetic, and the line arrives already cut to fit (see
-            // `TARGET_CHARS` in approvals.rs). Hidden when empty, which is the ordinary case.
-            if root.data.target != "" : VerticalLayout {
-                spacing: 0px;
-                Text {
-                    text: root.data.target;
-                    color: Theme.text-primary;
-                    font-size: Theme.fs-caption;
-                    wrap: no-wrap;
-                    overflow: elide;
-                }
-                Text {
-                    text: "says the app what its handle means · the grant binds to the arguments above, not to this line";
-                    color: Theme.text-dim;
-                    font-size: Theme.fs-micro;
-                    wrap: no-wrap;
-                    overflow: elide;
-                }
-            }
-
-            if root.data.warning != "" : HorizontalLayout {
-                spacing: Theme.sp-2;
-                Rectangle {
-                    width: 3px;
-                    background: Theme.color-danger;
-                }
-                Text {
-                    text: root.data.warning;
-                    color: Theme.color-danger;
-                    font-size: Theme.fs-caption;
-                    wrap: word-wrap;
-                    horizontal-stretch: 1;
-                }
-            }
-
-            Text {
-                text: "Graded " + root.data.grade + ". Allowing covers this one action, once.";
-                color: Theme.text-dim;
-                font-size: Theme.fs-micro;
+            // The whole sentence, when the pinned line above had to cut it.
+            if sentence-line.preferred-width > sentence-line.width : Text {
+                width: parent.width;
+                text: sentence-line.text;
+                color: Theme.text-primary;
+                font-size: Theme.fs-body;
                 wrap: word-wrap;
             }
 
-                    }   // details
-                }   // Flickable
-            }   // the scrolling middle
+            // The exact name: every other surface on this machine uses it, and a friendly
+            // rewording would be a third. And which agent, from the token the shell issued it.
+            VerticalLayout {
+                spacing: 0px;
+                Text {
+                    text: root.data.app + "." + root.data.action;
+                    color: Theme.text-secondary;
+                    font-size: Theme.fs-caption;
+                    wrap: no-wrap;
+                    overflow: elide;
+                }
+                if root.data.agent != "" : Text {
+                    text: "agent " + (root.data.on-behalf == "" ? "" : root.data.on-behalf + " · ") + root.data.agent;
+                    color: Theme.text-secondary;
+                    font-size: Theme.fs-caption;
+                    wrap: no-wrap;
+                    overflow: elide;
+                }
+            }
 
-            // Pinned bottom: the answer. Below the scroll, outside it, at a height the card's
-            // arithmetic already reserved — the buttons are the one thing that cannot end up
-            // somewhere a person has to look for it (#218).
+            // The whole of what the app says about THIS call (#137), when its pinned first line
+            // below had to cut it.
+            if root.data.explained != "" && explained-line.preferred-width > explained-line.width : Text {
+                width: parent.width;
+                text: explained-line.text;
+                color: Theme.text-primary;
+                font-size: Theme.fs-body;
+                wrap: word-wrap;
+            }
+
+            // ── Details and source ──
+            //
+            // Where each line came from, and the app's and the caller's words in full (sign-off
+            // item 4). Closed by default for a sensitive request, open for a dangerous one. A
+            // TouchArea, like every hit area on this card: nothing here takes keyboard focus.
+            // The open state is kept per request id, so a card that replaces the one a person
+            // closed starts in its own grade's default rather than inheriting the last one's.
+            details-hit := TouchArea {
+                height: 22px;
+                mouse-cursor: pointer;
+                clicked => {
+                    root.toggled-open = !root.details-open;
+                    root.toggled-id = root.data.id;
+                }
+                Text {
+                    x: 0px;
+                    width: parent.width;
+                    height: parent.height;
+                    text: (root.details-open ? "\u{25be} " : "\u{25b8} ") + "Details and source";
+                    color: details-hit.has-hover ? Theme.text-primary : Theme.text-secondary;
+                    font-size: root.details-type;
+                    vertical-alignment: center;
+                    wrap: no-wrap;
+                }
+            }
+
+            if root.details-open : VerticalLayout {
+                spacing: Theme.sp-2;
+
+                // The provenance labels the rows above used to carry, each beside what it says.
+                Text {
+                    width: parent.width;
+                    text: "Who is asking: the first line is what the kernel and this machine's own records said about the caller, not what the caller said; the name under it is the caller's own, and nothing on this machine checked it."
+                        + (root.data.agent != "" ? " The agent is named by the token the desktop gave it, and it is also asked in its pane." : "");
+                    color: Theme.text-secondary;
+                    font-size: root.details-type;
+                    wrap: word-wrap;
+                }
+                Text {
+                    width: parent.width;
+                    text: "The process the kernel's pid resolved to, by its command line (which the program writes itself): " + root.data.verified;
+                    color: Theme.text-secondary;
+                    font-size: root.details-type;
+                    wrap: word-wrap;
+                }
+
+                // The app's whole description of the action — the same for every call of it.
+                // Clamped to three lines under "show more", because `run_recipe`'s paragraph is
+                // protocol detail for minds (#218); the 18px line already carries its first
+                // sentence, and "show more" opens the rest in full.
+                VerticalLayout {
+                    spacing: 0px;
+                    Text {
+                        text: "What the app says about the action (its own first sentence is the line above):";
+                        color: Theme.text-secondary;
+                        font-size: root.details-type;
+                        wrap: word-wrap;
+                        width: parent.width;
+                    }
+                    Rectangle {
+                        height: root.purpose-open ? purpose-text.preferred-height
+                            : min(purpose-text.preferred-height, root.purpose-clamp);
+                        clip: true;
+
+                        purpose-text := Text {
+                            width: parent.width;
+                            // Pinned to the box's top edge: left to its own geometry the
+                            // paragraph centers itself on the clamped box, and the window then
+                            // shows the middle lines of it instead of the first ones.
+                            y: 0px;
+                            text: root.data.purpose;
+                            color: Theme.text-secondary;
+                            font-size: root.details-type;
+                            wrap: word-wrap;
+                            vertical-alignment: top;
+                        }
+                    }
+                    if purpose-text.preferred-height > root.purpose-clamp : more-hit := TouchArea {
+                        width: more-label.preferred-width + 16px;
+                        height: 20px;
+                        mouse-cursor: pointer;
+                        clicked => { root.purpose-open = !root.purpose-open; }
+
+                        more-label := Text {
+                            width: parent.width;
+                            height: parent.height;
+                            text: root.purpose-open ? "show less" : "show more";
+                            color: more-hit.has-hover ? Theme.amber-light : Theme.text-secondary;
+                            font-size: Theme.fs-caption;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                // What the caller says the call is for, labelled as the caller's words: nothing
+                // checks it, it is never the label on a button, and approvals.rs gives it as one
+                // neutralized paragraph that cannot start a line reading as this card's own.
+                if root.data.caller-says != "" : VerticalLayout {
+                    spacing: 0px;
+                    Text {
+                        width: parent.width;
+                        text: "What the caller says this call is for (its own words; nothing checks them):";
+                        color: Theme.text-secondary;
+                        font-size: root.details-type;
+                        wrap: word-wrap;
+                    }
+                    Rectangle {
+                        height: root.caller-open ? caller-text.preferred-height
+                            : min(caller-text.preferred-height, root.caller-clamp);
+                        clip: true;
+
+                        caller-text := Text {
+                            width: parent.width;
+                            y: 0px;
+                            text: root.data.caller-says;
+                            color: Theme.text-secondary;
+                            font-size: root.details-type;
+                            font-italic: true;
+                            wrap: word-wrap;
+                            vertical-alignment: top;
+                        }
+                    }
+                    if caller-text.preferred-height > root.caller-clamp : caller-more := TouchArea {
+                        width: caller-more-label.preferred-width + 16px;
+                        height: 20px;
+                        mouse-cursor: pointer;
+                        clicked => { root.caller-open = !root.caller-open; }
+
+                        caller-more-label := Text {
+                            width: parent.width;
+                            height: parent.height;
+                            text: root.caller-open ? "show less" : "show more";
+                            color: caller-more.has-hover ? Theme.amber-light : Theme.text-secondary;
+                            font-size: Theme.fs-caption;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                // The arguments, exactly as the grant is bound to them: one Text per argument,
+                // `no-wrap` and elided, the values cut to fit in approvals.rs with each cut naming
+                // its true length, and escaped in the shell so none can draw a line of its own.
+                VerticalLayout {
+                    spacing: 0px;
+                    Text {
+                        width: parent.width;
+                        text: "The arguments in this call; the grant is bound to exactly these:";
+                        color: Theme.text-secondary;
+                        font-size: root.details-type;
+                        wrap: word-wrap;
+                    }
+                    Rectangle {
+                        border-radius: Theme.r-sm;
+                        background: Theme.bg-input;
+                        height: args-body.preferred-height;
+
+                        args-body := VerticalLayout {
+                            padding: Theme.sp-2;
+
+                            for line in root.data.args : Text {
+                                text: line;
+                                color: Theme.text-primary;
+                                font-size: Theme.fs-mono;
+                                wrap: no-wrap;
+                                overflow: elide;
+                            }
+                        }
+                    }
+                }
+
+                if root.data.explained != "" : Text {
+                    width: parent.width;
+                    text: "\"The app says about this call\" is the app's sentence about these arguments; the grant binds to the arguments, not to the sentence.";
+                    color: Theme.text-secondary;
+                    font-size: root.details-type;
+                    wrap: word-wrap;
+                }
+
+                // What a handle in the arguments names, in the words of the app that owns it (#54).
+                if root.data.target != "" : Text {
+                    width: parent.width;
+                    text: "The name of the target is the app's own, from its describe; the grant binds to the arguments, not to the name.";
+                    color: Theme.text-secondary;
+                    font-size: root.details-type;
+                    wrap: word-wrap;
+                }
+
+                Text {
+                    width: parent.width;
+                    text: "Graded " + root.data.grade + ". Allowing covers this one action, once.";
+                    color: Theme.text-secondary;
+                    font-size: root.details-type;
+                    wrap: word-wrap;
+                }
+            }
+
+                    }   // mid
+                }   // Flickable
+            }   // the section that yields
+
+            // ── What changes: pinned above the buttons ──
+            //
+            // One line that says what the call acts on; when that line names a target, or is cut
+            // at the card's edge, every argument the grant binds, in full and wrapped — never in
+            // the part that scrolls, so nothing the grant covers is out of reach while Allow can be
+            // pressed (re-review of #639: "…temporary files now &…" over a red Run command, with
+            // "rm -rf ~/x" scrolled to nowhere). The arguments are bounded in the shell and
+            // escaped value by value; when even these lines do not fit, the whole section scrolls
+            // and Allow waits until its end has been in view. Then the first line of
+            // the app's word about this call, the undo line in the warning's red, and the warning
+            // when there is one the undo line does not already say.
+            changes := VerticalLayout {
+                spacing: Theme.sp-1;
+
+                what-line := Text {
+                    text: root.data.what;
+                    color: Theme.text-primary;
+                    font-size: Theme.fs-body;
+                    wrap: no-wrap;
+                    overflow: elide;
+                    visible: root.data.what != "";
+                    height: root.data.what != "" ? self.preferred-height : 0px;
+                }
+                if root.data.exactly != "" && (root.data.target != "" || what-line.preferred-width > what-line.width) : Text {
+                    width: parent.width;
+                    text: "Exactly: " + root.data.exactly;
+                    color: Theme.text-primary;
+                    font-size: Theme.fs-body;
+                    wrap: word-wrap;
+                }
+                // What the app says about THIS call, with these arguments (#137), in the app's
+                // name: some calls cannot be judged from their arguments alone (review of #639,
+                // S2). Its first line, pinned; the whole of it is in the section above when cut.
+                explained-line := Text {
+                    text: "The app says about this call: " + root.data.explained;
+                    color: Theme.text-primary;
+                    font-size: Theme.fs-body;
+                    wrap: no-wrap;
+                    overflow: elide;
+                    visible: root.data.explained != "";
+                    height: root.data.explained != "" ? self.preferred-height : 0px;
+                }
+                if root.data.undo != "" : Text {
+                    text: root.data.undo;
+                    color: root.data.undo == "Undo: not possible, the app says so"
+                        || root.data.undo == "Undo: not possible, says the caller" ? Theme.color-danger : Theme.text-primary;
+                    font-size: Theme.fs-body;
+                    wrap: no-wrap;
+                    overflow: elide;
+                }
+
+                // The bar and the sentence placed by hand rather than in a HorizontalLayout: a
+                // wrapping Text in a horizontal layout is measured at its unwrapped width, so the
+                // open-ended warning — four lines — was given one and cut mid-sentence. Here the
+                // Text is told its width, and the box takes the height that width needs.
+                if root.data.warning != "" : Rectangle {
+                    height: warning-text.preferred-height;
+                    Rectangle {
+                        x: 0px;
+                        width: 3px;
+                        height: parent.height;
+                        background: Theme.color-danger;
+                    }
+                    warning-text := Text {
+                        x: 3px + Theme.sp-2;
+                        y: 0px;
+                        width: parent.width - 3px - Theme.sp-2;
+                        text: root.data.warning;
+                        color: Theme.color-danger;
+                        font-size: Theme.fs-caption;
+                        wrap: word-wrap;
+                        vertical-alignment: top;
+                    }
+                }
+            }
+
+                    }   // above-content
+                }   // above-flick
+            }   // everything above the buttons
+
+            // Pinned bottom: the answer.
             decide := VerticalLayout {
                 spacing: Theme.sp-2;
 
-            // Deny first, then Allow once as the primary: the look says which button is the
-            // action, and never chooses for the person. (Pranab, 2 Oct: the buttons all looked
-            // alike. This card used to dress Allow as an amber outline to avoid approval fatigue;
-            // the fix for that is not the look but the behaviour, which has not moved.)
+            // Decline first, outlined; then the affirmative (sign-off item 1). For what cannot be
+            // undone, or is graded dangerous, it is the kit's filled red with its white label,
+            // and it says the action — "Delete event" — in words taken from the app's published
+            // action, never from the caller's purpose (approval_wording::confirm_label). For
+            // anything else it is "Allow once" on the accent fill. The look says which button is
+            // the action, and never chooses for the person.
             //
             // Both are `pointer-only`: neither takes keyboard focus, so nothing is focused when
             // the card appears, Tab cannot land on them and Enter or Space can never press
@@ -765,7 +876,6 @@ export component ApprovalCard inherits Rectangle {
             // the tests in control_approvals.rs still apply to what the click does.
             HorizontalLayout {
                 spacing: Theme.sp-2;
-                padding-top: Theme.sp-1;
 
                 YButton {
                     label: "Decline";
@@ -775,10 +885,15 @@ export component ApprovalCard inherits Rectangle {
                     clicked => { root.deny(); }
                 }
 
+                // Disabled — dimmed, and pressing it does nothing — while the request has had to
+                // scroll and its end has not yet been in view (`allow-ready`, fourth review of
+                // #639). Decline never is.
                 YButton {
-                    label: "Approve once";
-                    variant: 0;
+                    label: root.data.confirm-label != "" ? root.data.confirm-label : "Allow once";
+                    variant: root.data.destructive ? 3 : 0;
                     pointer-only: true;
+                    disabled: !card.allow-ready;
+                    tooltip: card.allow-ready ? "" : "Scroll to read the whole request first";
                     horizontal-stretch: 1;
                     clicked => { root.allow(); }
                 }
@@ -812,12 +927,16 @@ export component ApprovalCard inherits Rectangle {
                 Rectangle {
                     height: 30px;
                     border-radius: Theme.r-md;
-                    background: session-ta.has-hover ? Theme.hover-fill : transparent;
+                    background: session-ta.has-hover && card.allow-ready ? Theme.hover-fill : transparent;
                     border-width: 1px;
                     border-color: Theme.border-subtle;
+                    opacity: card.allow-ready ? 1.0 : 0.45;
 
+                    // A standing yes is a yes: held back with Allow until the whole request has
+                    // been in view.
                     session-ta := TouchArea {
-                        mouse-cursor: pointer;
+                        enabled: card.allow-ready;
+                        mouse-cursor: card.allow-ready ? pointer : default;
                         clicked => { root.allow-session(); }
                     }
                     Text {

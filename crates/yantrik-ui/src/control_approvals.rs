@@ -47,6 +47,7 @@ use slint::{ComponentHandle, ModelRc, Timer, TimerMode, VecModel};
 use yantrik_app_runtime::control::{Action, App as ControlSurface, Param};
 
 use crate::approvals::{self, Card, Status};
+use crate::approval_wording;
 use crate::App;
 
 /// How often the cards are re-read so an expiry reaches the screen.
@@ -152,7 +153,7 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                 //
                 // The grade is checked first, because the grade is the one thing the caller
                 // declares that the decision actually turns on.
-                let (grade, grade_note, published_purpose, naming, explained) =
+                let (grade, grade_note, published_purpose, naming, explained, params) =
                     match settle_grade(&app, &action, &grade, &parsed) {
                         Ok(settled) => settled,
                         Err(why) => return Err(why),
@@ -247,6 +248,20 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                         }))
                     }
                     crate::mind_mode::Decision::Ask => {}
+                }
+
+                // A card is going to be raised. A request the card could not show in full is not
+                // asked at all: nothing is raised, nothing is sent to a phone, no pane draws it
+                // (third review of #639 — arguments sized to push Decline and Allow off the
+                // screen, and to hold it there). The request path only: what a grant is bound to,
+                // its single use, its TTL and its spending are the store's and do not change.
+                // Whether the card must show its arguments whole is the store's own reading
+                // (`approvals::shown_whole`): the settled grade, and the app's sentence or the
+                // caller's — cannot be undone, or runs whatever it is given — either of which can
+                // only add caution.
+                let whole = approvals::shown_whole(&grade, &format!("{published_purpose} {purpose}"));
+                if let Some(rule) = crate::approval_bounds::refusal(&parsed, params.as_deref(), whole) {
+                    return Err(crate::approval_bounds::refused(&rule));
                 }
 
                 let mut verified = who_is_asking(&requester);
@@ -766,11 +781,15 @@ fn settle_grade(
     action: &str,
     claimed: &str,
     args: &serde_json::Value,
-) -> Result<(String, String, String, Naming, String), String> {
-    let (published, purpose, naming, explained) = published_detail(app, action, args)?;
+) -> Result<(String, String, String, Naming, String, Option<Vec<String>>), String> {
+    let ((published, purpose, naming, explained), params) = published_detail(app, action, args)?;
     let note = grade_note(claimed, &published);
-    Ok((published, note, purpose, naming, explained))
+    Ok((published, note, purpose, naming, explained, params))
 }
+
+/// What [`published_detail_in`] answers: the grade, the description, the naming index and the
+/// per-call sentence.
+type Detail = (String, String, Naming, String);
 
 /// What the target app itself says one of its actions is graded, what it is for, what the app
 /// says its own ids name, and what it says about one call of it with `args` (#137).
@@ -787,8 +806,8 @@ fn published_detail(
     app: &str,
     action: &str,
     args: &serde_json::Value,
-) -> Result<(String, String, Naming, String), String> {
-    published_detail_in(
+) -> Result<(Detail, Option<Vec<String>>), String> {
+    published_detail_full_in(
         &yantrik_ipc_transport::server::socket_dir(),
         &crate::apps::Catalogue::shared().get(),
         app,
@@ -797,14 +816,31 @@ fn published_detail(
     )
 }
 
-/// [`published_detail`], against a catalogue and a socket directory the caller names.
+/// [`published_detail`], against a catalogue and a socket directory the caller names, without the
+/// parameter names.
 fn published_detail_in(
     dir: &std::path::Path,
     installed: &[crate::apps::DesktopEntry],
     app: &str,
     action: &str,
     args: &serde_json::Value,
-) -> Result<(String, String, Naming, String), String> {
+) -> Result<Detail, String> {
+    published_detail_full_in(dir, installed, app, action, args).map(|(detail, _)| detail)
+}
+
+/// [`published_detail_in`], and the names of the parameters the action publishes, read from the
+/// same `describe` (`parameters.properties`) — or `None` where they are not to hand: the shell's
+/// own surface, read from its registry, which publishes grades and descriptions here and not
+/// parameters, and an app whose describe lists none. A request naming an argument outside them is
+/// one the action's own dispatch would refuse (`check_arguments`), so the card refuses to ask it
+/// (`approval_bounds::refusal`, rule b).
+fn published_detail_full_in(
+    dir: &std::path::Path,
+    installed: &[crate::apps::DesktopEntry],
+    app: &str,
+    action: &str,
+    args: &serde_json::Value,
+) -> Result<(Detail, Option<Vec<String>>), String> {
     let Some(surface) = surface_in(app, installed, dir) else {
         return Err(format!(
             "there is no app called `{app}` on this desktop, so nothing was put in front of the \
@@ -824,7 +860,7 @@ fn published_detail_in(
             .map(|grade| {
                 let purpose =
                     yantrik_app_runtime::control::published_description(action).unwrap_or_default();
-                (grade.to_string(), purpose, Naming::new(), String::new())
+                ((grade.to_string(), purpose, Naming::new(), String::new()), None)
             })
             .ok_or_else(|| {
                 format!(
@@ -861,9 +897,11 @@ fn published_detail_in(
     // trips on the UI thread for one card, and two chances for the grade, the sentence beside it,
     // the names of its ids and whether the action can explain one call of itself to come from
     // different revisions of the same app.
-    let published = reply["actions"]
-        .as_array()
-        .and_then(|list| list.iter().find(|a| a["name"].as_str() == Some(action)))
+    let entry = reply["actions"].as_array().and_then(|list| list.iter().find(|a| a["name"].as_str() == Some(action)));
+    let params: Option<Vec<String>> = entry
+        .and_then(|a| a["parameters"]["properties"].as_object())
+        .map(|props| props.keys().cloned().collect());
+    let published = entry
         .and_then(|a| {
             a["permission"].as_str().map(|grade| {
                 (
@@ -884,7 +922,7 @@ fn published_detail_in(
     // action that just said on the first one that it can explain a call of itself, so no card
     // pays for a question its app cannot answer.
     let explained = if published.2 { explained_or_unsaid(explained_in(&address, action, args)) } else { String::new() };
-    Ok((published.0, published.1, naming_in(&reply), explained))
+    Ok(((published.0, published.1, naming_in(&reply), explained), params))
 }
 
 /// For an action that said it explains each call: its sentence, or — when the sentence did not
@@ -932,44 +970,13 @@ fn explained_in(address: &str, action: &str, args: &serde_json::Value) -> String
 /// one wrapped paragraph and never the app's own layout. The length bound is the store's
 /// (`EXPLAINED_CHARS`, applied in `Store::request`), so the cut names the true length once.
 fn sanitised_explanation(raw: &str) -> String {
-    /// Unicode's format characters (general category Cf), none of which draws anything. Among
-    /// them the bidi controls — the embeds and overrides (U+202A–U+202E), the isolates
-    /// (U+2066–U+2069), the directional marks (U+200E, U+200F) and the Arabic letter mark
-    /// (U+061C) — which change how the rest of a line reads; and the other invisibles a line can
-    /// hide words behind: zero-width spaces and joiners, the word joiner and invisible
-    /// operators, the byte-order mark, the soft hyphen, the interlinear annotation marks and the
-    /// tag characters.
-    fn is_format_character(c: char) -> bool {
-        matches!(
-            c,
-            '\u{00AD}'
-                | '\u{0600}'..='\u{0605}'
-                | '\u{061C}'
-                | '\u{06DD}'
-                | '\u{070F}'
-                | '\u{0890}'..='\u{0891}'
-                | '\u{08E2}'
-                | '\u{180E}'
-                | '\u{200B}'..='\u{200F}'
-                | '\u{202A}'..='\u{202E}'
-                | '\u{2060}'..='\u{2064}'
-                | '\u{2066}'..='\u{206F}'
-                | '\u{FEFF}'
-                | '\u{FFF9}'..='\u{FFFB}'
-                | '\u{110BD}'
-                | '\u{110CD}'
-                | '\u{13430}'..='\u{1343F}'
-                | '\u{1BCA0}'..='\u{1BCA3}'
-                | '\u{1D173}'..='\u{1D17A}'
-                | '\u{E0001}'
-                | '\u{E0020}'..='\u{E007F}'
-        )
-    }
-
+    // Unicode's format characters (general category Cf), none of which draws anything — the bidi
+    // controls among them change how the rest of a line reads, and the other invisibles hide
+    // words — from the one shared list (`approvals::is_format_char`; review of #639).
     let mut out = String::with_capacity(raw.len());
     let mut gap = false;
     for c in raw.chars() {
-        if is_format_character(c) || (c.is_control() && !c.is_whitespace()) {
+        if approvals::is_format_char(c) || (c.is_control() && !c.is_whitespace()) {
             continue; // dropped without a trace: nothing invisible survives the label
         }
         if c.is_whitespace() {
@@ -1307,6 +1314,9 @@ fn who_is_calling(claimed: &str) -> approvals::Verified {
             if said.is_empty() { Vec::new() } else { vec![said] }
         },
         agent: String::new(),
+        // The rule `CallerIdentity::line` uses for its terminal prefix, kept as a fact.
+        from_terminal: identity.attached_mind.is_none() && identity.via_shell,
+        raised_by_desktop: false,
     }
 }
 
@@ -1743,10 +1753,33 @@ fn pane_now(ui: &App, cards: &[Card]) -> String {
     }
 }
 
+/// The agent whose conversation the Lens is: the active mind's `<harness>:main`, or "" when no
+/// harness host is up (the built-in companion holds no agents, so no card is its).
+fn lens_agent() -> String {
+    crate::wire::harness::host().map(|h| crate::agents::feed::main_agent(&h.active_id()).0).unwrap_or_default()
+}
+
+/// Whether the Lens hosts a card: only a request its own mind raised, matched on the verified
+/// agent — the token the shell checked, never the request's words — exactly as an agent's pane
+/// matches its own (`in_the_pane`). Everything else is the shell's top-right card's (sign-off
+/// item 6): a terminal program's request drawn inside a mind's conversation reads as that mind
+/// asking.
+fn in_the_lens(card: &Card, lens: &str) -> bool {
+    !lens.is_empty() && card.verified.agent == lens
+}
+
+/// What the Lens draws of what the screen draws: its own mind's records and card, nothing else.
+fn cards_for_lens<'a>(on_screen: &[&'a Card], lens: &str) -> Vec<&'a Card> {
+    on_screen.iter().copied().filter(|c| in_the_lens(c, lens)).collect()
+}
+
 fn sync_if_changed(ui: &App) {
     let cards = approvals::cards();
     let pane = pane_now(ui, &cards);
-    let now = fingerprint(&cards, &pane);
+    let lens = lens_agent();
+    // The Lens's mind is part of what is shown: switching minds moves a card between the Lens
+    // and the top-right corner.
+    let now = format!("{}|lens:{lens}", fingerprint(&cards, &pane));
     let changed = SHOWN.with(|shown| {
         if *shown.borrow() == now {
             false
@@ -1756,19 +1789,49 @@ fn sync_if_changed(ui: &App) {
         }
     });
     if changed {
-        publish(ui, cards, &pane);
+        publish(ui, cards, &pane, &lens);
     }
 }
 
 fn sync(ui: &App) {
     let cards = approvals::cards();
     let pane = pane_now(ui, &cards);
-    SHOWN.with(|shown| *shown.borrow_mut() = fingerprint(&cards, &pane));
-    publish(ui, cards, &pane);
+    let lens = lens_agent();
+    SHOWN.with(|shown| *shown.borrow_mut() = format!("{}|lens:{lens}", fingerprint(&cards, &pane)));
+    publish(ui, cards, &pane, &lens);
 }
 
 pub(crate) fn row_for(card: Card) -> crate::ApprovalRequest {
+    // The sign-off's wording (approval_wording.rs): worked out here, from the app's published
+    // action and the machine's own finding, and handed to the card as finished lines. The label
+    // is given the action id and the app's description only — a `Published`, which nothing but
+    // the card's app-published field can make — never the caller's words.
+    let published = approval_wording::Published::of(&card);
+    let destructive = approval_wording::destructive(&card.grade, &card.said);
+    let confirm = approval_wording::confirm_label(destructive, &card.action, published);
+    let changes = approval_wording::consequences(&card.action, published, &card.said, &card.target, &card.args);
+    let warning = approval_wording::warning_beside(&card.warning, &changes.undo);
+    let who = approval_wording::identity(&card.verified);
+    // Every argument and the target drawn with its control, bidi and format characters as
+    // visible escapes: none can start a line of the card's own or reorder the rest (review of
+    // #639, B1). The app's one-line sentence too, which is pinned to one elided line.
+    // Each then cut, after escaping, to the row bound the request was checked against.
+    let args: Vec<slint::SharedString> =
+        card.args.iter().map(|a| crate::approval_bounds::clip_row(&approval_wording::visible(a)).into()).collect();
+    let target = approval_wording::visible(&card.target);
+    let explained = approval_wording::visible(&card.explained);
+    let summary = approval_wording::visible(&card.summary);
     crate::ApprovalRequest {
+        // What the machine established, first, and the name the caller gave itself, under it
+        // and marked unverified: the order the Notifications card already reads its sender in.
+        identity: who.fact.into(),
+        identity_tag: who.tag.into(),
+        claim: approval_wording::claim(&card.requester).into(),
+        confirm_label: confirm.into(),
+        destructive,
+        what: changes.what.into(),
+        exactly: changes.exactly.into(),
+        undo: changes.undo.into(),
         id: card.id.into(),
         // Which of the person's agents asked — from its token, never its words — so the card
         // names it wherever it is drawn (design decision 4). Empty for a caller that is no agent.
@@ -1787,11 +1850,13 @@ pub(crate) fn row_for(card: Card) -> crate::ApprovalRequest {
         },
         // One model entry per sentence, one single-line `Text` per entry, for the same reason
         // the arguments are a list: the card's height has to be arithmetic.
+        // Escaped like the arguments: `grade_note` quotes the caller's own grade string, and a
+        // newline in it must not draw a line in the pinned red row (review of #639).
         discrepancies: ModelRc::new(VecModel::from(
             card.verified
                 .discrepancies
-                .into_iter()
-                .map(slint::SharedString::from)
+                .iter()
+                .map(|d| slint::SharedString::from(approval_wording::visible(d)))
                 .collect::<Vec<_>>(),
         )),
         app: card.app.into(),
@@ -1810,22 +1875,21 @@ pub(crate) fn row_for(card: Card) -> crate::ApprovalRequest {
         // the whole paragraph is for the person who wants it, under "show more", not the first
         // thing everybody has to read. Empty when the app publishes nothing — the card hides
         // the row and the purpose block above says so instead.
-        summary: card.summary.into(),
+        summary: summary.into(),
         // One model entry per argument, one single-line `Text` per entry on the card. A
         // newline-joined string was the first shape of this and it is what made the card's
         // height something the layout had to discover by measuring wrapped text.
-        args: ModelRc::new(VecModel::from(
-            card.args.into_iter().map(slint::SharedString::from).collect::<Vec<_>>(),
-        )),
+        args: ModelRc::new(VecModel::from(args)),
         // One elided line beside the box, or nothing: the card hides the row when an app
         // publishes no naming index (#54), so this is a pass-through, not a second fallback.
-        target: card.target.into(),
+        target: target.into(),
         // The app's sentence about this one call (#137), drawn under the argument box — or
         // empty, and the card hides the block and is exactly what it was. A pass-through like
         // the naming line: the sanitising happened in `explained_in` and the bounding and the
         // cutting in `approvals`, where the card's height arithmetic lives.
-        explained: card.explained.into(),
-        warning: card.warning.into(),
+        explained: explained.into(),
+        // Less what the undo row already says (approval_wording::warning_beside).
+        warning: warning.into(),
         can_session: card.can_session,
         decision: match card.status {
             Status::Pending => "",
@@ -1837,16 +1901,17 @@ pub(crate) fn row_for(card: Card) -> crate::ApprovalRequest {
         record: card.record.into(),
         decided_at: card.decided_at.into(),
         session: card.session,
+        // Whole minutes and what happens then, so nothing on the card ticks (sign-off item 5).
         age_text: if card.status == Status::Pending {
             let left = approvals::REQUEST_TTL.as_secs().saturating_sub(card.age_secs);
-            format!("{left}s left").into()
+            approval_wording::expires_text(left).into()
         } else {
             slint::SharedString::new()
         },
     }
 }
 
-fn publish(ui: &App, cards: Vec<Card>, pane: &str) {
+fn publish(ui: &App, cards: Vec<Card>, pane: &str, lens: &str) {
     let waiting = cards.iter().filter(|c| c.status == Status::Pending).count();
     // While anything waits, a window that takes focus over the shell is answered by bringing the
     // shell back (card_watch): a card behind Mind View is a decision nobody can make.
@@ -1884,8 +1949,11 @@ fn publish(ui: &App, cards: Vec<Card>, pane: &str) {
     // avoid. So the oldest is the one on screen and the rest wait behind a count.
     let mut shown: Vec<crate::ApprovalRequest> = Vec::new();
     let mut in_front: Vec<crate::ApprovalRequest> = Vec::new();
-    for card in cards_for_screen(&cards, pane) {
+    let on_screen = cards_for_screen(&cards, pane);
+    let in_lens = cards_for_lens(&on_screen, lens);
+    for card in on_screen {
         let pending = card.status == Status::Pending;
+        let lens_hosts = in_lens.iter().any(|c| c.id == card.id);
         let mut row = row_for(card.clone());
         // Who the agent works for — "Council recipe → Reviewer" — from how the shell started it.
         // Read here, where no other lock is held, never inside `row_for`, which the Agents pane
@@ -1897,15 +1965,30 @@ fn publish(ui: &App, cards: Vec<Card>, pane: &str) {
         if pending {
             in_front.push(row.clone());
         }
-        shown.push(row);
+        if lens_hosts {
+            shown.push(row);
+        }
     }
 
-    // Two models from one list. The Lens draws the whole conversation — the records of what was
-    // decided as well as the one card waiting — and the overlay over the other screens draws
-    // only the card, because a record is a thing to read later, not a thing to put in front of
-    // somebody who is doing something else.
-    ui.set_pending_approvals(ModelRc::new(VecModel::from(in_front)));
-    ui.set_approvals(ModelRc::new(VecModel::from(shown)));
+    // Two models from one list. The Lens draws its own mind's part of the conversation — the
+    // records of what was decided as well as the card waiting, when its mind asked — and the
+    // overlay over the other screens draws only the card, because a record is a thing to read
+    // later, not a thing to put in front of somebody who is doing something else.
+    //
+    // Whether the card in front is the Lens's own: only then does an open Lens stand in for the
+    // top-right card. A card the Lens does not host stays in the corner, over the Lens.
+    ui.set_approval_in_lens(front.is_some_and(|c| in_the_lens(c, lens)));
+    // Written into the models already on screen, row by row, whenever the same requests are
+    // there: this runs every second while a card waits, and a new model makes Slint rebuild the
+    // card — which dropped how far the person had scrolled, whether they had read to the end
+    // (what Allow waits for when the card has to scroll), and Details and "show more" (fourth
+    // review of #639). A new model only when the requests themselves change.
+    if let Some(model) = crate::models::update(ui.get_pending_approvals(), in_front, |r| r.id.clone()) {
+        ui.set_pending_approvals(model);
+    }
+    if let Some(model) = crate::models::update(ui.get_approvals(), shown, |r| r.id.clone()) {
+        ui.set_approvals(model);
+    }
     ui.set_approvals_waiting(waiting.saturating_sub(1) as i32);
 
     // Nothing is waiting any more — by a decision, or because it expired unanswered. Either way
@@ -2734,6 +2817,8 @@ mod control_approvals_tests {
                 "The caller called this `standard`; the app publishes `dangerous`.".into(),
             ],
             agent: String::new(),
+            from_terminal: false,
+            raised_by_desktop: false,
         }));
         assert!(known.verified.contains("pid 696"), "{}", known.verified);
         // Both disagreements survive. Concatenating them into one elided row would have shown
@@ -2985,6 +3070,44 @@ mod control_approvals_tests {
         // And a card is in the pane only for the agent the pane shows.
         assert!(!super::in_the_pane(&card("appr-1", Status::Pending, "pi:c-2"), &super::pane_agent_of(true, true, "pi:c-1")));
         assert!(!super::in_the_pane(&card("appr-1", Status::Pending, "pi:c-1"), &super::pane_agent_of(true, false, "pi:c-1")));
+    }
+
+    /// A mind's conversation hosts only the requests that mind raised (sign-off item 6, 4
+    /// October): a terminal program's card drawn in the Lens read as the mind asking. Matched on
+    /// the verified agent alone, as the pane is; everything else stays the top-right card's, and
+    /// an open Lens hides that card only when the card is the Lens's own.
+    #[test]
+    fn the_lens_hosts_only_its_own_minds_requests() {
+        use crate::approvals::Status;
+        let cards = vec![
+            card("appr-0", Status::Granted, "hermes:main"),
+            card("appr-1", Status::Granted, ""),
+            card("appr-2", Status::Pending, "pi:c-7"),
+        ];
+        let on_screen = super::cards_for_screen(&cards, "");
+        let ids = |lens: &str| super::cards_for_lens(&on_screen, lens).into_iter().map(|c| c.id.as_str()).collect::<Vec<_>>();
+        // Hermes's Lens: its own record, and neither a callerless record nor pi's waiting card.
+        assert_eq!(ids("hermes:main"), ["appr-0"]);
+        // pi's agent is not the Lens's mind even when pi is the one answering: `pi:main` is.
+        assert_eq!(ids("pi:main"), Vec::<&str>::new());
+        // No harness: the Lens hosts nothing, so every card is the corner's.
+        assert_eq!(ids(""), Vec::<&str>::new());
+        assert!(!super::in_the_lens(&card("appr-9", Status::Pending, ""), ""), "no agent is no Lens's");
+        assert!(super::in_the_lens(&card("appr-9", Status::Pending, "pi:main"), "pi:main"));
+
+        // The overlay hides for the Lens only on the Lens's own card.
+        let app = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../yantrik-ui-slint/ui/app.slint")).unwrap();
+        assert!(
+            app.contains("!(root.lens-open && root.lens-chat-mode && root.current-screen == 1 && root.approval-in-lens)"),
+            "the top-right card steps aside for an open Lens only when the Lens hosts the card"
+        );
+        let src = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/control_approvals.rs")).unwrap();
+        let src = src.split("#[cfg(test)]").next().unwrap();
+        assert!(src.contains("!lens.is_empty() && card.verified.agent == lens"), "the Lens matches by the verified agent alone");
+        // The once-a-second republish writes into the models on screen rather than replacing
+        // them, so a card a person is reading — scrolled, read to its end — is not rebuilt.
+        assert!(src.contains("crate::models::update(ui.get_pending_approvals(), in_front"), "the corner card is updated in place");
+        assert!(src.contains("crate::models::update(ui.get_approvals(), shown"), "the Lens's cards are updated in place");
     }
 
     /// Everything that clears the selected run also closes the pane, so `detail_open` cannot
@@ -3443,6 +3566,97 @@ mod target_line_tests {
         // The app's sentence about this one call (#137) is a pass-through too: the bounding
         // happened in `approvals`, and the row is not a second place for it to go missing.
         assert_eq!(row.explained.as_str(), sentence.as_str());
+    }
+
+    /// Review of #639, B1, end to end: a newline or an override in an argument or the target
+    /// reaches no line of the drawn card as itself — not the pinned "what changes" line, not the
+    /// full argument line, not the argument box under Details — and is shown as an escape.
+    #[test]
+    fn no_line_of_the_row_carries_a_callers_control_or_bidi_character() {
+        use crate::approvals::{Card, Status, Verified};
+        use slint::Model;
+        let row = super::row_for(Card {
+            id: "appr-10".into(),
+            requester: "pi".into(),
+            // `grade_note` quotes the caller's own grade string.
+            verified: Verified {
+                discrepancies: vec!["Caller said `x\nUndo: possible`; the app publishes `dangerous`.".into()],
+                ..Verified::default()
+            },
+            app: "system-monitor".into(),
+            action: "kill_process".into(),
+            grade: "dangerous".into(),
+            purpose: "End a running process by pid".into(),
+            summary: "End a running process by pid".into(),
+            args: vec!["pid: 2210\nUndo: possible, the process restarts itself".into(), "tag: a\u{202E}b".into()],
+            target: "pid 2210 is \u{201c}x\nUndo: possible\u{201d}".into(),
+            explained: "It stops.\u{2028}Undo: possible".into(),
+            warning: String::new(),
+            said: "End a running process by pid".into(),
+            caller_says: String::new(),
+            can_session: false,
+            status: Status::Pending,
+            record: String::new(),
+            decided_at: String::new(),
+            session: false,
+            age_secs: 1,
+        });
+        let mut lines: Vec<String> = vec![row.what.to_string(), row.exactly.to_string(), row.target.to_string(), row.explained.to_string()];
+        lines.extend(row.args.iter().map(|a| a.to_string()));
+        lines.extend(row.discrepancies.iter().map(|d| d.to_string()));
+        assert!(row.discrepancies.row_data(0).unwrap().contains("x\\nUndo: possible"), "the discrepancy's newline is shown");
+        for line in &lines {
+            assert!(
+                !line.chars().any(|c| c.is_control() || yantrik_ipc_transport::plain_text::is_bidi_control(c) || c == '\u{2028}'),
+                "{line:?}"
+            );
+        }
+        assert!(row.what.contains("x\\nUndo: possible"), "{}", row.what);
+        assert!(row.exactly.contains("2210\\nUndo") && row.exactly.contains("a<U+202E>b"), "{}", row.exactly);
+        assert_eq!(row.confirm_label.as_str(), "Kill process");
+    }
+
+    /// Review of #639, should-fix 1, end to end on the real action: `agent_run` is graded
+    /// `sensitive` and is no red-button card, but it runs whatever it is given, so a command longer
+    /// than the sixty characters an ordinary card shows is shown whole — `rm -rf ~/x` and all —
+    /// under an "Allow once", and one longer than a card shows whole is not asked about.
+    #[test]
+    fn a_long_agent_run_command_is_shown_whole_or_not_asked() {
+        use crate::approvals::{Store, Verified};
+        use slint::Model;
+        let spec = crate::control_agent_terminal::specs().into_iter().find(|a| a.name == "agent_run").expect("agent_run");
+        let command = "echo cleaning the temporary build files now, one moment please && rm -rf ~/x";
+        assert!(command.chars().count() > 60);
+        let params = vec!["command".to_string(), "cwd".to_string(), "wait".to_string()];
+        let whole = crate::approvals::shown_whole(spec.permission, &spec.description);
+        assert!(whole, "agent_run is open-ended");
+        assert!(crate::approval_bounds::refusal(&serde_json::json!({ "command": command }), Some(&params), whole).is_none());
+        let too_long = format!("echo {} && rm -rf ~/x", "x".repeat(240));
+        assert!(crate::approval_bounds::refusal(&serde_json::json!({ "command": too_long }), Some(&params), whole).is_some());
+
+        let mut store = Store::new();
+        let now = std::time::Instant::now();
+        store
+            .request(
+                "pi",
+                Verified::default(),
+                "shell",
+                "agent_run",
+                serde_json::json!({ "command": command }),
+                spec.permission,
+                &spec.description,
+                "",
+                "",
+                now,
+                "10:00",
+            )
+            .expect("asked");
+        let card = store.cards(now).pop().expect("the card");
+        let row = super::row_for(card);
+        assert!(row.exactly.contains("rm -rf ~/x") && !row.exactly.contains("characters in full"), "{}", row.exactly);
+        assert!(row.args.iter().any(|a| a.ends_with("rm -rf ~/x")), "the argument box too");
+        assert_eq!(row.confirm_label.as_str(), "Allow once");
+        assert!(!row.destructive);
     }
 }
 

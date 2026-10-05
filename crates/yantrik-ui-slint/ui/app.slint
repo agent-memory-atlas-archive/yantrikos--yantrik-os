@@ -168,6 +168,16 @@ export component App inherits Window {
     /// time because Slint has no way to skip a row inside a `for`, and a stack of zero-height
     /// rows would leave the card floating below a gap the size of the session's history.
     in property <[ApprovalRequest]> pending-approvals: [];
+    /// Whether that card is one the Lens's own mind raised, matched on its verified agent: only
+    /// then does an open Lens draw it in place of the corner card (sign-off, 4 October, item 6).
+    in property <bool> approval-in-lens: false;
+    /// Whether the top-right approval card is drawn (the overlay near the foot of this file), and
+    /// how tall it is: the vault prompt is placed under it by that height, never by a guess.
+    property <bool> approval-corner-shown: root.pending-approvals.length > 0
+        && !(root.lens-open && root.lens-chat-mode && root.current-screen == 1 && root.approval-in-lens)
+        && root.current-screen != 0 && root.current-screen != 2
+        && root.current-screen != 3 && root.current-screen != 32;
+    property <length> approval-corner-height: 0px;
     // How many cards wait in all, the Agents pane's included (pending-approvals holds only the one
     // on screen). The taskbar's Chat button says it (card_watch.rs).
     in property <int> cards-pending: 0;
@@ -2985,6 +2995,9 @@ export component App inherits Window {
             // click opens Agents, on Needs you when something does.
             minds-needing: AgentsState.request-minds;
             minds-requests: AgentsState.needs-count;
+            // Every approval card waiting, the corner card's for a caller that is no agent
+            // included (control_approvals::publish): the chip reads "1 approval" in amber.
+            minds-approvals: root.cards-pending;
             minds-clicked => {
                 root.today-open = false;
                 AgentsState.show-section(AgentsState.needs-count > 0 ? "needs_you" : "workroom");
@@ -3398,11 +3411,10 @@ export component App inherits Window {
         // Not on the lock, login, boot or onboarding screens. A card that can be allowed from a
         // locked screen is a way to act on a machine without unlocking it; the request stays
         // pending underneath and expires if nobody comes back, which is the honest outcome.
-        if root.pending-approvals.length > 0
-            && !(root.lens-open && root.lens-chat-mode && root.current-screen == 1)
-            && root.current-screen != 0 && root.current-screen != 2
-            && root.current-screen != 3 && root.current-screen != 32
-            : Rectangle {
+        //
+        // An open Lens stands in only for a card its own mind raised (`approval-in-lens`); it
+        // hosts no other (control_approvals::in_the_lens), so every other card stays here, over it.
+        if root.approval-corner-shown : Rectangle {
             width: 100%;
             height: 100%;
             background: transparent;
@@ -3426,6 +3438,10 @@ export component App inherits Window {
                 width: 404px;
                 height: approval-stack.preferred-height;
                 background: transparent;
+                // Told to the root, so the vault prompt below is placed under the card as tall as
+                // it really is (third review of #639: it assumed 300px and drew over taller cards).
+                init => { root.approval-corner-height = self.height; }
+                changed height => { root.approval-corner-height = self.height; }
 
                 approval-stack := VerticalLayout {
                     spacing: Theme.sp-1;
@@ -3476,12 +3492,20 @@ export component App inherits Window {
             background: transparent;
 
             Rectangle {
-                x: parent.width - 420px;
-                // Below the approval stack when there is one, so neither covers the other. The
-                // 300px is the approval card's bounded worst case — every text on it is clipped
-                // in approvals.rs, so it has one.
-                y: Theme.status-bar-height + Theme.sp-4
-                    + (root.pending-approvals.length > 0 ? 300px : 0px);
+                // Below the approval stack when it is drawn, by the stack's real height, so neither
+                // covers the other — and beside it, to its left, when the space below would put the
+                // prompt under the dock. It used to assume 300px, the card's worst case before the
+                // card pinned every argument; a taller card was drawn under this prompt.
+                property <length> below: Theme.status-bar-height + Theme.sp-4
+                    + (root.approval-corner-shown ? root.approval-corner-height + Theme.sp-2 : 0px);
+                property <bool> fits-below: self.below + vault-stack.preferred-height
+                    <= root.height - Theme.taskbar-height;
+                // Beside only when there is a whole column for it left of the card: on a narrow
+                // screen (800px wide puts "beside" at -40px, and clamping it would lay it over the
+                // card) it stays below, where nothing covers the card's buttons.
+                property <bool> beside: !self.fits-below && parent.width - 840px >= Theme.sp-4;
+                x: self.beside ? parent.width - 840px : parent.width - 420px;
+                y: self.beside ? Theme.status-bar-height + Theme.sp-4 : self.below;
                 width: 404px;
                 // Same lesson as the approval overlay: take the height from the layout inside,
                 // never from the card, or the box is sized to nothing and the card draws off it.

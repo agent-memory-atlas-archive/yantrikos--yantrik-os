@@ -412,7 +412,7 @@ const WHO: &str = " Acts for the agent named by the agent token your call carrie
                    an argument.";
 
 /// The four actions as published: what `describe shell` lists and a caller is asked for.
-fn specs() -> [Action; 4] {
+pub(crate) fn specs() -> [Action; 4] {
     [
         // Sensitive, like the Terminal's own `run`: whatever the command does, it does as the
         // person. Deferred because the answer may be `running: true` — the work outlives the call

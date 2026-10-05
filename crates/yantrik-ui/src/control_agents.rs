@@ -792,6 +792,9 @@ fn allowed_on_card(origin: &RecipeOrigin, call: &AgentCall<'_>, role: &catalog::
             origin.label(),
             origin.id
         ),
+        // The desktop is the one asking: the card names it as such, not as an unidentifiable
+        // program (fourth review of #639).
+        raised_by_desktop: true,
         ..Default::default()
     };
     let purpose = format!(

@@ -289,6 +289,20 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     // It grows the chip and nothing else on the left moves: the mark stays where it was.
     assert_eq!(changed(&calm, &busy, width, (0, 40), (0, 36)), 0, "the mark does not move when the count appears");
 
+    // ── An approval card waits, from a caller that is no agent: the agents' counts are zero,
+    // and the chip still says "1 approval" with its dot and words in amber (sign-off item 7) ──
+    agents.set_request_minds(0);
+    agents.set_needs_count(0);
+    ui.set_cards_pending(1);
+    let approval = look_at_bar(w, &ui, width, height, "approval-1280", output)?;
+    save(&approval, &path("desktop-approval"), width, height)?;
+    let amber = near(&approval, width, (0, 360), (0, 36), AMBER, 12);
+    assert!(amber >= 15, "'1 approval' is drawn in amber with nothing in the agents' counts: {amber} amber pixels");
+    assert!(changed(&calm, &approval, width, (40, 360), (0, 36)) > 0, "the chip reads differently from the calm one");
+    ui.set_cards_pending(0);
+    agents.set_request_minds(2);
+    agents.set_needs_count(3);
+
     // ── The clock is under the screen's middle, at both widths ──
     for (sw, sh) in [(1280u32, 800u32), (1920, 1080)] {
         let frame = look_at_bar(w, &ui, sw, sh, &format!("clock-{sw}"), output)?;
