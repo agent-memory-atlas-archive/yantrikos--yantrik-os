@@ -1419,12 +1419,13 @@ fn approval_of(a: &Agent, approval: &Approval, key: String, pending: &[crate::ap
     let card = match live {
         Some(card) => crate::ApprovalRequest { on_behalf: a.meta.on_behalf().into(), ..crate::control_approvals::row_for(card.clone()) },
         None => {
-            let (app, action) = approval.what.split_once('.').unwrap_or((approval.what.as_str(), ""));
+            let what = approval.shown_what();
+            let (app, action) = what.split_once('.').unwrap_or((what, ""));
             let (decision, record) = match approval.outcome {
                 // Answered or taken back a moment ago, and not yet settled here: the approval
                 // store redraws on its own tick and this follows.
-                ApprovalOutcome::Pending => ("asked", format!("Asked you: {}", approval.what)),
-                outcome => (outcome.key(), approval.record.clone()),
+                ApprovalOutcome::Pending => ("asked", format!("Asked you: {what}")),
+                outcome => (outcome.key(), approval.shown_record().to_string()),
             };
             ApprovalRequest {
                 id: approval.request.as_str().into(),
@@ -1440,7 +1441,7 @@ fn approval_of(a: &Agent, approval: &Approval, key: String, pending: &[crate::ap
     AgentItemData {
         kind: "approval".into(),
         key: key.into(),
-        text: approval.what.as_str().into(),
+        text: approval.shown_what().into(),
         approval: card,
         ..Default::default()
     }
@@ -1448,6 +1449,9 @@ fn approval_of(a: &Agent, approval: &Approval, key: String, pending: &[crate::ap
 
 /// One call, as the card draws it.
 fn card_of(c: &Card, key: String, open: bool) -> AgentItemData {
+    // Drawn as shown: a call holding words the person had erased keeps them, and shows the marker.
+    let shown = c.shown();
+    let c: &Card = &shown;
     let call = c.as_call();
     let has_output = !c.output.bytes.is_empty();
     let live = c.running() && has_output;
@@ -1858,7 +1862,7 @@ impl Watch {
             if self.primed && !fresh.is_empty() {
                 let asked = fresh.iter().find_map(|request| {
                     a.turns.iter().rev().flat_map(|t| t.items.iter()).find_map(|item| match item {
-                        Item::Approval(ap) if &&ap.request == request => Some(ap.what.clone()),
+                        Item::Approval(ap) if &&ap.request == request => Some(ap.shown_what().to_string()),
                         _ => None,
                     })
                 });
@@ -1978,7 +1982,10 @@ fn open_all(agent: &AgentId, key: &str) -> Result<(), String> {
         let a = s.agent(agent)?;
         let turn = a.turns.iter().find(|t| t.n == turn)?;
         match turn.items.get(index)? {
-            Item::Card(c) => Some((c.call.clone(), c.as_call().summary(), c.exit_code, c.output.all())),
+            Item::Card(c) => {
+                let c = c.shown();
+                Some((c.call.clone(), c.as_call().summary(), c.exit_code, c.output.all()))
+            }
             _ => None,
         }
     });

@@ -6,7 +6,7 @@
 //! how long it has run, what it did last, when it was last heard from, and whether it is stuck.
 //! Nothing here asks the mind; nothing here needs its cooperation.
 
-use super::model::{Agent, CallState, Card};
+use super::model::{Agent, CallState, Card, Shown};
 
 /// The same call failing this many times in a row, for the same reason, is a task going round.
 pub const STUCK_REPEATS: usize = 3;
@@ -62,7 +62,9 @@ impl Stuck {
 /// What `agent` is doing right now, or None when it has no turn open.
 pub fn of(agent: &Agent, now: u64) -> Option<Progress> {
     let turn = agent.open_turn()?;
-    let cards: Vec<&Card> = turn.cards().collect();
+    // As shown: a call holding words the person had erased reads with the marker.
+    let shown: Vec<Shown<'_>> = turn.cards().map(Card::shown).collect();
+    let cards: Vec<&Card> = shown.iter().map(|c| &**c).collect();
     let running = cards.iter().rev().find(|c| c.running()).map(|c| call_line(c));
     // An approval card, a command at a prompt (#182), or a question it asked (#25): either way
     // the person is the one being waited on, and the quiet is theirs, not the task's.

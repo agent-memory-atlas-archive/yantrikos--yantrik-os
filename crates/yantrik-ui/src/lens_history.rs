@@ -64,6 +64,7 @@ fn reply(turn: &Turn) -> (String, Vec<ContentBlock>) {
                 text.push(said);
             }
             Item::Card(card) => {
+                let card = card.shown();
                 let call = ToolCallData { status: card.state.status().into(), ..card.as_call().to_card() };
                 blocks.push(ContentBlock { block_type: "tool".into(), text: call.summary.clone(), call });
             }
@@ -74,7 +75,8 @@ fn reply(turn: &Turn) -> (String, Vec<ContentBlock>) {
                 (answer, _) => format!("Asked you: {} (you answered: {answer})", q.prompt),
             })),
             Item::Approval(approval) => {
-                let record = if approval.record.trim().is_empty() { &approval.what } else { &approval.record };
+                let record = approval.shown_record();
+                let record = if record.trim().is_empty() { approval.shown_what() } else { record };
                 blocks.push(line(record));
             }
             // Folded in the Agents pane, and not part of what was said.
