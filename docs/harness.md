@@ -408,10 +408,12 @@ changes nothing:
   **The card shows what Erase removes.** On a Keep/Erase question (one of its answers is exactly
   `Erase`), the question card — in the Agents pane and in the Lens — draws, under the mind's words
   and set apart from them, a line the **shell** makes from those same quoted spans: `Erase
-  removes:` and then each span of at least 4 scalars on its own line in `“…”` (control and bidi
-  characters drawn as escapes), the first four and then `and N more`; or `Erase removes nothing
-  from this conversation` when there are none. Whatever the quote marks look like, the person
-  sees exactly the spans a `redact` may carry before pressing Erase.
+  removes:` and then **every** span of at least 4 scalars, each on its own line in `“…”` (control
+  and bidi characters drawn as escapes); or `Erase removes nothing from this conversation` when
+  there are none. A list taller than the card allows scrolls, and the card's Erase button stays
+  disabled — "Scroll to the end of the list to erase." — until the list fits or has been scrolled
+  to its end. Whatever the quote marks look like, the person sees every span a `redact` may carry
+  before pressing Erase.
 
 One `redact` per question; a second is refused. Accepted, the reply is
 `{"redacted": <places>, "where": ["transcript", "runs"]}` (and `"masked": n` when records were

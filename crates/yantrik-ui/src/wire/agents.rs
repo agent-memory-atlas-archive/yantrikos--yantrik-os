@@ -1350,14 +1350,14 @@ fn lens_question(agent: &str, mind: &str, q: &crate::agents::model::Question) ->
     }
 }
 
-/// How many of a Keep/Erase question's quoted spans the card lists before "and N more".
-const REMOVES_SHOWN: usize = 4;
-
 /// For a Keep/Erase question (one of its answers is exactly "Erase"): what pressing Erase lets a
-/// `redact` remove, as the shell parses the prompt the person sees — its quoted spans of at least
-/// the needle minimum, each escaped so a control or bidi character cannot hide in it, one per line.
-/// Drawn on the card under the agent's words, so the person sees exactly what goes, whatever the
-/// quote marks look like. "" for any other question.
+/// `redact` remove, as the shell parses the prompt the person sees — **every** one of its quoted
+/// spans of at least the needle minimum (each could be erased, so each is named; the prompt's
+/// 2000-character limit keeps the list short), each escaped so a control or bidi character cannot
+/// hide in it, one per line. Drawn on the card under the agent's words, so the person sees exactly
+/// what goes, whatever the quote marks look like; a list taller than the card allows scrolls, and
+/// Erase stays disabled until it has been scrolled to its end (`QuestionCard`). "" for any other
+/// question.
 fn erase_removes(q: &crate::agents::model::Question) -> String {
     use yantrik_harness::redact::{canonical, quoted_texts, MIN_NEEDLE_CHARS};
     if !q.options.iter().any(|o| o == "Erase") {
@@ -1369,11 +1369,8 @@ fn erase_removes(q: &crate::agents::model::Question) -> String {
         return "Erase removes nothing from this conversation".to_string();
     }
     let mut out = String::from("Erase removes:");
-    for span in spans.iter().take(REMOVES_SHOWN) {
+    for span in &spans {
         out.push_str(&format!("\n\u{201c}{}\u{201d}", crate::approval_wording::visible(span)));
-    }
-    if spans.len() > REMOVES_SHOWN {
-        out.push_str(&format!("\nand {} more", spans.len() - REMOVES_SHOWN));
     }
     out
 }
@@ -2947,9 +2944,15 @@ mod first_prompt_attribution_tests {
         assert_eq!(removes("Forget 27\" don't touch ~/Photos \"Priya\"?"), "Erase removes:\n\u{201c}Priya\u{201d}");
         assert_eq!(removes("Forget \u{201d}Priya\u{201c} and \u{201d}x\u{201c}"), "Erase removes nothing from this conversation");
         assert_eq!(removes("Forget \"\"Priya\" do not delete \"Elm\""), "Erase removes nothing from this conversation", "\"Elm\" is under four");
-        // At most four, then how many more; a control or bidi character is drawn as an escape.
+        // Every span is named, however many: each one could be erased. A control or bidi
+        // character is drawn as an escape.
         let many = removes("\"aaaa\" \"bbbb\" \"cccc\" \"dddd\" \"eeee\" \"ffff\"");
-        assert!(many.ends_with("\u{201c}dddd\u{201d}\nand 2 more"), "{many}");
+        assert_eq!(many, "Erase removes:\n“aaaa”\n“bbbb”\n“cccc”\n“dddd”\n“eeee”\n“ffff”");
+        assert!(!many.contains("more"));
+        let spans: Vec<String> = (0..60).map(|i| format!("\"span {i:02}\"")).collect();
+        let all = removes(&spans.join(" "));
+        assert_eq!(all.lines().count(), 61, "the heading and all sixty");
+        assert!(all.ends_with("“span 59”"));
         assert_eq!(removes("Forget \"Pri\u{202e}ya\"?"), "Erase removes:\n\u{201c}Pri<U+202E>ya\u{201d}");
         // Not a Keep/Erase question: nothing to say.
         assert_eq!(erase_removes(&ask("Forget \"Priya\"?", &["Yes", "No"])), "");

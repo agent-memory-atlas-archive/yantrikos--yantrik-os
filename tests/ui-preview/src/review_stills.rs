@@ -13,6 +13,7 @@
 //!   review-still approval-lens[-nightfall]  the card in the Lens at 1280x800, where it is clamped
 //!   review-still icons-desktop|icons-launcher  the app tiles, dark and light (icon_stills.rs)
 //!   review-still question-erase    a Keep/Erase question in the Lens, with the shell's "Erase removes" line
+//!   review-still question-erase-long  the same with thirty spans: the list scrolls and Erase waits
 //!
 //! Fixture data only; nothing is acted on.
 use super::*;
@@ -261,6 +262,28 @@ fn lens_composer(w: &MinimalSoftwareWindow, output: &str, dark: bool) -> Result<
 /// quoted name — so the still shows that only the visibly quoted "Priya" is listed. The line is
 /// the text `wire::agents::erase_removes` makes for this prompt.
 fn question_erase(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::error::Error>> {
+    question_erase_of(
+        w,
+        output,
+        "You asked me to forget your sister's name. The 27\" monitor note stays. Forget \"Priya\"?",
+        "Erase removes:\n\u{201c}Priya\u{201d}".to_string(),
+    )
+}
+
+/// Thirty quoted spans: every one is listed, the list is taller than the card allows, so it
+/// scrolls, and Erase is disabled — "Scroll to the end of the list to erase." — until it has been
+/// read to its end.
+fn question_erase_long(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let spans: Vec<String> = (1..=30).map(|i| format!("old address line {i:02}")).collect();
+    let prompt = format!("Forget these? {}", spans.iter().map(|s| format!("\"{s}\"")).collect::<Vec<_>>().join(" "));
+    let mut removes = String::from("Erase removes:");
+    for s in &spans {
+        removes.push_str(&format!("\n\u{201c}{s}\u{201d}"));
+    }
+    question_erase_of(w, output, &prompt, removes)
+}
+
+fn question_erase_of(w: &MinimalSoftwareWindow, output: &str, prompt: &str, removes: String) -> Result<(), Box<dyn std::error::Error>> {
     let ui = ChatProbe::new()?;
     ui.global::<ThemeMode>().set_dark(false);
     ui.global::<AccentPreset>().set_index(0);
@@ -270,10 +293,10 @@ fn question_erase(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn
         agent: "yantrik-mind:main".into(),
         mind: "Yantrik Mind".into(),
         request: "forget-1".into(),
-        prompt: "You asked me to forget your sister's name. The 27\" monitor note stays. Forget \"Priya\"?".into(),
+        prompt: prompt.into(),
         options: ModelRc::new(VecModel::from(options)),
         asked: "16:16".into(),
-        removes: "Erase removes:\n\u{201c}Priya\u{201d}".into(),
+        removes: removes.into(),
     }])));
     ui.show()?;
     w.set_size(slint::PhysicalSize::new(1280, 800));
@@ -336,6 +359,7 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str, which: &str) -> Result<(), B
         "approval-lens-nightfall" => approval(w, output, true),
         "icons-desktop" | "icons-launcher" => super::icon_stills::run(w, output, which),
         "question-erase" => question_erase(w, output),
+        "question-erase-long" => question_erase_long(w, output),
         other => Err(format!("unknown still {other:?}").into()),
     }
 }
