@@ -30,7 +30,9 @@ use std::net::IpAddr;
 /// /run/yantrik-mind-egress/mind-egress.json).
 /// `refuses-private-all-modes`: an address that is not the internet is refused without a `lan`
 /// rule in audit as well as enforce ([`Policy::decide`]; the test below holds it to that).
-pub const CAPABILITIES: &[&str] = &["refuses-private-all-modes"];
+/// `public-door`: a second listener, `EGRESS_PUBLIC_LISTEN` (127.0.0.1:7451), that never reaches
+/// the local network or a host a `lan` rule names (`crate::door`).
+pub const CAPABILITIES: &[&str] = &["refuses-private-all-modes", "public-door"];
 
 use serde::{Deserialize, Serialize};
 
