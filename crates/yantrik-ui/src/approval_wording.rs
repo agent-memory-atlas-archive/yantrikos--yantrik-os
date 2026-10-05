@@ -309,12 +309,17 @@ pub fn identity(verified: &Verified) -> Identity {
     }
     let pid = verified.pid;
     let exe_path = verified.exe.strip_suffix(" (deleted)").unwrap_or(&verified.exe);
-    if verified.attached_mind.trim().is_empty() && yantrik_ipc_transport::owner::is_installed_desktop_binary(exe_path) {
+    if (verified.attached_mind.trim().is_empty() || !verified.mind_by_pid) && yantrik_ipc_transport::owner::is_installed_desktop_binary(exe_path) {
         return Identity { fact: format!("{CONFIRMED}{} \u{b7} PID {pid}", visible(&bridged_by(exe_path))), tag: "" };
     }
     let exe = clip_chars(&visible(yantrik_ipc_transport::peer_identity::basename(exe_path)), EXE_CHARS);
     let head = if exe.is_empty() { format!("{CONFIRMED}PID {pid}") } else { format!("{CONFIRMED}{exe} \u{b7} PID {pid}") };
     let mind = visible(verified.attached_mind.trim());
+    // The attached mind only by the kernel's pid. A word of the program's own name that matches a
+    // mind is the program's choice: said as a match, and not verified (security review of #648, M2).
+    if !mind.is_empty() && !verified.mind_by_pid {
+        return Identity { fact: format!("{head} \u{b7} name matches {mind}"), tag: "not verified" };
+    }
     let fact = if !mind.is_empty() {
         format!("{head} \u{b7} the attached mind {mind}")
     } else if verified.from_terminal {

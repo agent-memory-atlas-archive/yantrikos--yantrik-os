@@ -39,6 +39,43 @@ pub(crate) fn companion() -> Option<crate::runs_on::CompanionFact> {
     COMPANION.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
+/// config.yaml's backend and its fallback, said (`runs_on::fallback_label`), as the companion was
+/// built from them: what the destination line may claim rests on these (security review of #648,
+/// H1). Set once at start, before the first refresh.
+static CONFIG_LLM: Mutex<Option<(String, Option<String>)>> = Mutex::new(None);
+
+pub(crate) fn set_config_llm(backend: &str, fallback: Option<String>) {
+    *CONFIG_LLM.lock().unwrap_or_else(|e| e.into_inner()) = Some((backend.to_string(), fallback));
+}
+
+/// The companion as the destination line needs it: the target, how it is reached, and its
+/// fallback. A saved primary is applied as an API backend (`ReloadLLM`), whatever config.yaml
+/// names; a saved fallback provider is named over config.yaml's. In-process and CLI backends are
+/// described even with no address.
+pub(crate) fn companion_fact(
+    target: Option<&Target>,
+    config_backend: &str,
+    config_fallback: Option<String>,
+    saved_primary: bool,
+    saved_fallback: Option<String>,
+) -> Option<crate::runs_on::CompanionFact> {
+    use crate::runs_on::{Backend, CompanionFact};
+    let backend = if saved_primary { Backend::Api } else { Backend::from_config(config_backend) };
+    let fallback = saved_fallback.or(config_fallback);
+    match target {
+        Some(t) => Some(CompanionFact {
+            base_url: t.base_url.clone(),
+            model: t.model.clone(),
+            source: t.source.clone(),
+            provider_name: t.name.clone(),
+            backend,
+            fallback,
+        }),
+        None if backend != Backend::Api => Some(CompanionFact { source: "config.yaml".into(), backend, fallback, ..CompanionFact::default() }),
+        None => None,
+    }
+}
+
 pub(crate) fn set_config_key(key: Option<String>) {
     let slot = CONFIG_KEY.get_or_init(|| Mutex::new(None));
     *slot.lock().unwrap_or_else(|e| e.into_inner()) = key.filter(|k| !k.is_empty());
@@ -181,12 +218,18 @@ pub(crate) fn refresh(ui: &App, store: &ProviderStore) {
     );
     let fallback = store.fallback().map(|f| f.name.clone());
     let generation = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
-    *COMPANION.lock().unwrap_or_else(|e| e.into_inner()) = target.as_ref().map(|t| crate::runs_on::CompanionFact {
-        base_url: t.base_url.clone(),
-        model: t.model.clone(),
-        source: t.source.clone(),
-        provider_name: t.name.clone(),
-    });
+    let (config_backend, config_fallback) = CONFIG_LLM
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .unwrap_or_else(|| (ui.get_settings_llm_backend().to_string(), None));
+    *COMPANION.lock().unwrap_or_else(|e| e.into_inner()) = companion_fact(
+        target.as_ref(),
+        &config_backend,
+        config_fallback,
+        store.primary().is_some(),
+        fallback.clone(),
+    );
     super::runs_on_card::publish(ui);
     let Some(target) = target else {
         ui.set_settings_ai_status(card(None, &Health::NotSetUp, fallback.as_deref()));
@@ -217,6 +260,25 @@ mod tests {
 
     fn listed(ids: &[&str]) -> Vec<ListedModel> {
         ids.iter().map(|i| ListedModel { id: i.to_string(), name: i.to_string(), size_bytes: 0 }).collect()
+    }
+
+    /// What the destination line rests on: a saved primary is an API backend whatever config.yaml
+    /// says, config.yaml's in-process and CLI backends are described with no address, and a
+    /// fallback is carried — the saved one over config.yaml's.
+    #[test]
+    fn the_companion_fact_carries_its_backend_and_fallback() {
+        use crate::runs_on::Backend;
+        let t = target(&ProviderStore::default(), "http://localhost:11434/v1", "qwen3.5:9b", None).unwrap();
+        let f = companion_fact(Some(&t), "api", None, false, None).unwrap();
+        assert_eq!((f.backend, f.fallback.as_deref()), (Backend::Api, None));
+        let f = companion_fact(Some(&t), "claude-cli", None, false, None).unwrap();
+        assert_eq!(f.backend, Backend::ClaudeCli);
+        assert_eq!(companion_fact(Some(&t), "claude-cli", None, true, None).unwrap().backend, Backend::Api, "a saved primary is applied as the API");
+        let f = companion_fact(None, "llamacpp", Some("Ollama at localhost:8341".into()), false, None).unwrap();
+        assert_eq!((f.backend, f.fallback.as_deref()), (Backend::InProcess, Some("Ollama at localhost:8341")));
+        assert!(companion_fact(None, "api", None, false, None).is_none());
+        let f = companion_fact(Some(&t), "api", Some("x".into()), false, Some("Saved".into())).unwrap();
+        assert_eq!(f.fallback.as_deref(), Some("Saved"));
     }
 
     #[test]

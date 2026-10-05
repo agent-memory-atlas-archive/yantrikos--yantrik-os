@@ -1121,10 +1121,7 @@ fn deliver(
                 "the answering mind is not the built-in companion, so its proactive message is \
                  a notification and not part of the conversation"
             );
-            let (title, body) = title_and_body(text);
-            notify::send(
-                notify::Notification::new("Yantrik Companion", title).body(body).urgency(Urgency::Low),
-            );
+            post_companion(CompanionPost::Result, text);
         }
         ProactiveDelivery::Transcript { notify } => push_to_transcript(notify),
     }
@@ -1196,27 +1193,49 @@ fn notify_companion_thought(text: &str) -> bool {
         );
         return false;
     }
-    let (title, body) = title_and_body(&cleaned);
-    notify::send(
-        notify::Notification::new("Yantrik Companion", title)
-            .body(reflection_body(&body))
-            .urgency(Urgency::Low),
-    );
+    post_companion(CompanionPost::Reflection, &cleaned);
     true
 }
 
-/// What kind of words an unprompted companion thought is, said on the card before the words
-/// themselves: nobody asked for it and a model wrote it (review of the UI overhaul by GPT-6
-/// Astra, E). In the body, so the toast, Today and the centre all carry it and none can drop it.
-const REFLECTION_TAG: &str = "AI-generated reflection";
+/// What kind of words a companion notification carries, said on the card before the words
+/// themselves: a model wrote them (review of the UI overhaul by GPT-6 Astra, E). In the body, so
+/// the toast, Today and the centre all carry it and none can drop it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CompanionPost {
+    /// An unprompted thought: nobody asked for it.
+    Reflection,
+    /// A background task's result, delivered as a notification because another mind is answering.
+    Result,
+}
 
-/// The body of an unprompted thought's notification, led by its tag.
-fn reflection_body(body: &str) -> String {
-    if body.is_empty() {
-        REFLECTION_TAG.to_string()
-    } else {
-        format!("{REFLECTION_TAG} \u{b7} {body}")
+impl CompanionPost {
+    fn label(self) -> &'static str {
+        match self {
+            CompanionPost::Reflection => "AI-generated reflection",
+            CompanionPost::Result => "AI-generated result",
+        }
     }
+}
+
+/// The body of a companion notification, led by what kind of words it is.
+fn labelled(kind: CompanionPost, body: &str) -> String {
+    if body.is_empty() {
+        kind.label().to_string()
+    } else {
+        format!("{} \u{b7} {body}", kind.label())
+    }
+}
+
+/// File something the built-in companion said as a notification: the one place one is made, so
+/// every companion post carries its label (security review of #648, L3: the result route filed
+/// unlabelled).
+fn post_companion(kind: CompanionPost, text: &str) {
+    let (title, body) = title_and_body(text);
+    notify::send(
+        notify::Notification::new("Yantrik Companion", title)
+            .body(labelled(kind, &body))
+            .urgency(Urgency::Low),
+    );
 }
 
 /// How much of a thought the body keeps. The store's bound is 2,000 (`MAX_BODY`); an unprompted
@@ -1291,15 +1310,21 @@ pub fn describe_summary() -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
-    /// An unprompted thought says what kind of words it is, first, whether or not it has a body.
+    /// A companion notification says what kind of words it is, first, whether or not it has a
+    /// body, and every one is made in one place, so none goes out unlabelled.
     #[test]
-    fn a_reflection_is_tagged_as_one() {
-        assert_eq!(super::reflection_body("Your 9:30 overlaps the standup."), "AI-generated reflection \u{b7} Your 9:30 overlaps the standup.");
-        assert_eq!(super::reflection_body(""), "AI-generated reflection");
+    fn every_companion_post_says_a_model_wrote_it() {
+        use super::{labelled, CompanionPost};
+        assert_eq!(labelled(CompanionPost::Reflection, "Your 9:30 overlaps the standup."), "AI-generated reflection \u{b7} Your 9:30 overlaps the standup.");
+        assert_eq!(labelled(CompanionPost::Reflection, ""), "AI-generated reflection");
+        assert_eq!(labelled(CompanionPost::Result, "Backups checked."), "AI-generated result \u{b7} Backups checked.");
         let src = include_str!("notifications.rs");
-        let filer = &src[src.find(concat!("fn notify_companion_", "thought(")).unwrap()..];
-        let filer = &filer[..filer.find("\n}\n").unwrap()];
-        assert!(filer.contains(".body(reflection_body(&body))"), "the thought poster tags what it files");
+        let code = src.split("#[cfg(test)]").next().unwrap();
+        assert_eq!(code.matches(concat!("Notification::new(\"Yantrik ", "Companion\"")).count(), 1, "one place makes a companion post");
+        let thought = &code[code.find(concat!("fn notify_companion_", "thought(")).unwrap()..];
+        assert!(thought[..thought.find("\n}\n").unwrap()].contains("post_companion(CompanionPost::Reflection"));
+        let result = &code[code.find(concat!("fn deliv", "er(")).unwrap()..];
+        assert!(result[..result.find("\n}\n").unwrap()].contains("post_companion(CompanionPost::Result"));
     }
 
     use super::*;

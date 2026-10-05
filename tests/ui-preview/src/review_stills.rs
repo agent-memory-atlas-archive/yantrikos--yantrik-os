@@ -248,7 +248,7 @@ fn lens_composer(w: &MinimalSoftwareWindow, output: &str, dark: bool) -> Result<
     ui.global::<ThemeMode>().set_dark(dark);
     ui.global::<AccentPreset>().set_index(0);
     ui.set_messages(ModelRc::new(VecModel::from(Vec::<MessageData>::new())));
-    ui.set_destination("Sends message text to: Ollama Cloud \u{b7} deepseek-v4.1-flash".into());
+    ui.set_destination("Sends your message and conversation context to: Ollama Cloud \u{b7} deepseek-v4.1-flash".into());
     ui.show()?;
     w.set_size(slint::PhysicalSize::new(1280, 800));
     settle(w, 1280, 800);

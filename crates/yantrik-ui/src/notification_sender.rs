@@ -38,7 +38,7 @@ const FROM_TERMINAL: &str = "a program started from a terminal: ";
 
 /// How much of the caller's own name the short line repeats. The program comes first and is the
 /// fact; the claim is only what it said, and is cut before it can crowd the fact off the card.
-const CLAIM_CHARS: usize = 24;
+pub(crate) const CLAIM_CHARS: usize = 24;
 
 /// How much of the verified command line names a program that is not the desktop.
 const PROGRAM_CHARS: usize = 32;

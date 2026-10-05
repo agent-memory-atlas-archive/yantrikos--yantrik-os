@@ -51,6 +51,11 @@ pub struct CallerIdentity {
     pub recognisable: Option<ProcessFacts>,
     /// The attached mind this ancestry belongs to, by name, if one matched.
     pub attached_mind: Option<String>,
+    /// Whether that match was by the kernel's pid — the harness's recorded pid is in this
+    /// ancestry — rather than by a word in the program's name, which the program chose. Only a
+    /// pid match is shown as the attached mind; a name match is shown as a name that matches,
+    /// not verified (security review of #648, M2).
+    pub attached_by_pid: bool,
     /// Everything that was walked, deepest first. Kept because the peer usually exits within
     /// milliseconds and this is the only record that it was ever there.
     pub chain: Vec<ProcessFacts>,
@@ -69,7 +74,12 @@ impl CallerIdentity {
         // "a program started from a terminal" is for a person's own script. An attached mind
         // that happens to have a shell in its ancestry is still the mind, and says so instead.
         let from_terminal = self.attached_mind.is_none() && self.via_shell;
-        let note = if self.attached_mind.is_some() { " \u{b7} the attached mind" } else { "" };
+        let note = match (&self.attached_mind, self.attached_by_pid) {
+            (Some(_), true) => " \u{b7} the attached mind",
+            // Short, because the program's label is what gets cut to make room for it.
+            (Some(_), false) => " \u{b7} name match, not verified",
+            (None, _) => "",
+        };
         line_about(self.recognisable.as_ref().or(self.direct.as_ref()), from_terminal, note)
     }
 
@@ -146,11 +156,14 @@ pub fn mismatch(claimed: &str, identity: &CallerIdentity, minds: &[Mind]) -> Str
 /// the shell's own question, because only the shell knows what is attached.
 pub fn identify(chain: Vec<ProcessFacts>, minds: &[Mind]) -> CallerIdentity {
     let program = peer_identity::choose(chain);
-    let attached_mind = mind_for(&program.chain, minds);
+    let by_pid = mind_by_pid(&program.chain, minds);
+    let attached_by_pid = by_pid.is_some();
+    let attached_mind = by_pid.or_else(|| mind_by_name(&program.chain, minds));
     CallerIdentity {
         direct: program.direct,
         recognisable: program.recognisable,
         attached_mind,
+        attached_by_pid,
         chain: program.chain,
         via_shell: program.via_shell,
     }
@@ -170,7 +183,13 @@ pub fn identify(chain: Vec<ProcessFacts>, minds: &[Mind]) -> CallerIdentity {
 /// count, so a mind called "AI" or "OS" cannot match half the process table, and our own bridge
 /// processes are excluded from the search: a mind's name appearing in the path of the program we
 /// wrote to talk to it would prove nothing.
+#[cfg(test)]
 fn mind_for(chain: &[ProcessFacts], minds: &[Mind]) -> Option<String> {
+    mind_by_pid(chain, minds).or_else(|| mind_by_name(chain, minds))
+}
+
+/// The mind whose recorded pid is in this ancestry: the kernel's word, not the program's.
+fn mind_by_pid(chain: &[ProcessFacts], minds: &[Mind]) -> Option<String> {
     for facts in chain {
         if let Some(mind) =
             minds.iter().find(|m| m.pid.is_some_and(|pid| pid > 0 && pid as i32 == facts.pid))
@@ -178,6 +197,12 @@ fn mind_for(chain: &[ProcessFacts], minds: &[Mind]) -> Option<String> {
             return Some(mind.name.clone());
         }
     }
+    None
+}
+
+/// The mind a word of the program's own name matches. Weaker than [`mind_by_pid`]: the program
+/// chose its name, so this is shown as a name that matches and never as the mind.
+fn mind_by_name(chain: &[ProcessFacts], minds: &[Mind]) -> Option<String> {
     // By name, for every mind: a harness's tools can run under a process the recorded pid is not an
     // ancestor of (OpenClaw's go through its own gateway daemon), and only the name finds them.
     // But only in what the PROGRAM is -- its executable, argv0, and for an interpreter the script or
@@ -266,10 +291,16 @@ fn is_this_desktop(facts: &ProcessFacts) -> bool {
 fn name_tokens(name: &str) -> Vec<String> {
     name.to_ascii_lowercase()
         .split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|t| t.len() >= 4 && *t != OS_NAME)
+        .filter(|t| t.len() >= 4 && *t != OS_NAME && !GENERIC_WORDS.contains(t))
         .map(|t| t.to_string())
         .collect()
 }
+
+/// Words a mind's name may carry that name a kind of program, not one: "Hermes Agent" matched
+/// `ssh-agent` and `gpg-agent` by "agent" (security review of #648, M2). Only a word that is the
+/// mind's own can match.
+const GENERIC_WORDS: [&str; 10] =
+    ["agent", "agents", "mind", "minds", "assistant", "server", "service", "daemon", "client", "helper"];
 
 /// The one word that is in every path on this machine and therefore names nothing.
 const OS_NAME: &str = "yantrik";
@@ -351,9 +382,10 @@ mod caller_identity_tests {
             "yos and yos-mcp are ours; the first thing a person would recognise is above them"
         );
         assert_eq!(who.attached_mind.as_deref(), Some("Hermes Agent"));
+        assert!(!who.attached_by_pid, "the host has no pid for it: matched by its program's name");
         assert!(who.line().contains("hermes_cli.main"), "{}", who.line());
         assert!(who.line().contains("pid 696"), "{}", who.line());
-        assert!(who.line().contains("the attached mind"), "{}", who.line());
+        assert!(who.line().ends_with("name match, not verified"), "{}", who.line());
         assert_eq!(who.pid(), 696);
         assert!(who.exe().ends_with("venv/bin/python"), "{}", who.exe());
     }
@@ -392,7 +424,40 @@ mod caller_identity_tests {
         assert!(who.via_shell);
         assert_eq!(who.attached_mind.as_deref(), Some("Hermes Agent"));
         assert!(!who.line().starts_with("a program started from a terminal"), "{}", who.line());
+        assert!(who.line().ends_with("name match, not verified"), "{}", who.line());
+        // With the harness's pid recorded, the same chain is the mind, by the kernel's word.
+        let by_pid = vec![Mind { id: "hermes".into(), name: "Hermes Agent".into(), pid: Some(696) }];
+        let chain = vec![
+            facts(7311, "/usr/bin/python3.11", "python3 yos act shell x"),
+            facts(7200, "/usr/bin/bash", "sh -c python -m hermes_cli.main gateway run"),
+            facts(696, "/home/pranab/hermes-agent/venv/bin/python", "python -m hermes_cli.main gateway run"),
+        ];
+        let who = identify(chain, &by_pid);
+        assert!(who.attached_by_pid);
         assert!(who.line().ends_with("the attached mind"), "{}", who.line());
+    }
+
+    /// Security review of #648, M2: "agent" is a kind of program, and `ssh-agent`, `gpg-agent`
+    /// and any other `*-agent` in an ancestry is no mind called "Hermes Agent". Nor is a program
+    /// called "mind-server" the mind called "Yantrik Mind".
+    #[test]
+    fn a_generic_word_in_a_minds_name_matches_no_program() {
+        let minds = vec![
+            Mind { id: "hermes".into(), name: "Hermes Agent".into(), pid: None },
+            Mind { id: "mind".into(), name: "Yantrik Mind".into(), pid: None },
+        ];
+        for program in [
+            facts(4100, "/usr/bin/ssh-agent", "ssh-agent -D"),
+            facts(4101, "/usr/bin/gpg-agent", "gpg-agent --supervised"),
+            facts(4102, "/usr/libexec/polkit-agent", "polkit-agent"),
+            facts(4103, "/usr/bin/mind-server", "mind-server"),
+        ] {
+            let who = identify(vec![facts(9001, "/usr/bin/python3", "python3 yos act x"), program.clone()], &minds);
+            assert_eq!(who.attached_mind, None, "{}", program.exe);
+        }
+        // Its own word still matches, and says it is a name that matches.
+        let who = identify(vec![facts(696, "/usr/bin/python3", "python -m hermes_cli.main gateway run")], &minds);
+        assert_eq!((who.attached_mind.as_deref(), who.attached_by_pid), (Some("Hermes Agent"), false));
     }
 
     /// The gate runner names the mind it drives in its ARGUMENTS; that is not what the program is,

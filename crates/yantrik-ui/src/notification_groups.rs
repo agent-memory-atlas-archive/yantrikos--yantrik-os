@@ -49,9 +49,19 @@ fn is_expanded(key: &str) -> bool {
 
 // ── The words ───────────────────────────────────────────────────────────────────────────────
 
+/// A mind's name as the desktop repeats it under its own: one plain line, no control, bidi or
+/// zero-width characters, cut like a claim (`notification_sender::plain`, CLAIM_CHARS). A mind
+/// names itself, so its name is a claim the desktop must not let break a line, reorder the rest or
+/// run on (security review of #648, M1). Applied to every title and heading that carries one.
+pub fn mind_name(raw: &str) -> String {
+    let seen: String = raw.chars().filter(|c| !crate::approvals::is_format_char(*c)).collect();
+    crate::notification_sender::plain(&seen, crate::notification_sender::CLAIM_CHARS)
+}
+
 /// A turn notice's title, from what the shell saw: whether it finished, and how many calls it
 /// made. Never the prompt — that is the person's words, and goes in the body, labelled.
 pub fn turn_title(mind: &str, ok: bool, calls: usize) -> String {
+    let mind = mind_name(mind);
     let made = match calls {
         0 => String::new(),
         1 => " \u{b7} made 1 call".to_string(),
@@ -147,7 +157,7 @@ pub fn turn_ended(n: &Notification) -> Option<TurnEnded> {
 /// else — an update notice beside the turns — is headed by the sender, because the heading must
 /// name everything under it.
 pub fn heading(sender: &str, group: &[&Notification]) -> String {
-    let mut minds = group.iter().map(|n| turn_ended(n).map(|t| t.mind));
+    let mut minds = group.iter().map(|n| turn_ended(n).map(|t| mind_name(&t.mind)));
     match minds.next() {
         Some(Some(mind)) if !mind.trim().is_empty() && minds.all(|m| m.as_deref() == Some(mind.as_str())) => mind,
         _ => sender.to_string(),
@@ -349,6 +359,37 @@ mod tests {
         let fake = note("6", "Yantrik Mind finished", Some(impostor));
         assert_eq!(heading("python3", &[&fake]), "python3", "the words alone make nothing a turn notice");
         assert_eq!(heading("Yantrik", &[]), "Yantrik");
+    }
+
+    /// A mind's name is its own claim: in a title and in a heading it is one plain line, with no
+    /// newline to start a line of the desktop's own, no bidi or zero-width character to reorder or
+    /// hide anything, and cut short. A mind may call itself "System Update"; it is still headed as
+    /// a mind's turns only when the desktop's own check says so, and is shown as the plain name.
+    #[test]
+    fn a_minds_name_is_one_plain_line_wherever_the_desktop_repeats_it() {
+        assert_eq!(mind_name("pi\nYantrik: update installed"), "pi Yantrik: update insta\u{2026}");
+        assert_eq!(mind_name("evil\u{202E}gnp\u{2066}"), "evilgnp");
+        assert_eq!(mind_name("Sys\u{200B}tem\u{2060} Up\u{200D}date"), "System Update");
+        assert_eq!(turn_title("pi\n\u{202E}x", true, 0), "pi x replied");
+        assert_eq!(turn_title(&"m".repeat(60), true, 0), format!("{}\u{2026} replied", "m".repeat(24)));
+
+        let named = |mind: &str| note("1", &turn_title(mind, true, 0), Some(desktop()));
+        for (raw, shown) in [
+            ("Yantrik\nMind", "Yantrik Mind"),
+            ("Ya\u{200B}ntrik\u{202E} Mind", "Yantrik Mind"),
+            ("System Update", "System Update"),
+        ] {
+            let notes = [named(raw), named(raw)];
+            let refs: Vec<&Notification> = notes.iter().collect();
+            let h = heading("Yantrik", &refs);
+            assert_eq!(h, shown, "{raw:?}");
+            assert!(!h.chars().any(|c| c.is_control() || crate::approvals::is_format_char(c)), "{h:?}");
+        }
+        // Words alone make nothing a mind's: "System Update" from a program is headed by its sender.
+        let mut impostor = desktop();
+        impostor.desktop = false;
+        let fake = note("9", "System Update replied", Some(impostor));
+        assert_eq!(heading("python3", &[&fake]), "python3");
     }
 
     #[test]

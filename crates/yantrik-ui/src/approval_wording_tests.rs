@@ -137,8 +137,13 @@ fn no_argument_or_target_can_draw_a_line_or_reorder_the_rest() {
 fn the_verified_fact_leads_and_the_claim_follows() {
     let terminal = Verified { line: "a program started from a terminal: sshd-session (pid 2290461)".into(), pid: 2290461, exe: "/usr/lib/openssh/sshd-session".into(), from_terminal: true, ..Verified::default() };
     assert_eq!(identity(&terminal), Identity { fact: "Caller process confirmed: sshd-session \u{b7} PID 2290461 \u{b7} from a terminal".into(), tag: "" });
-    let mind = Verified { line: "pi --mode rpc (pid 4242) \u{b7} the attached mind".into(), pid: 4242, exe: "/usr/bin/node".into(), attached_mind: "pi".into(), ..Verified::default() };
+    let mind = Verified { line: "pi --mode rpc (pid 4242) \u{b7} the attached mind".into(), pid: 4242, exe: "/usr/bin/node".into(), attached_mind: "pi".into(), mind_by_pid: true, ..Verified::default() };
     assert_eq!(identity(&mind).fact, "Caller process confirmed: node \u{b7} PID 4242 \u{b7} the attached mind pi");
+    // Security review of #648, M2: a mind matched only by a word of the program's own name (its
+    // argv0 or script) is a name that matches, not the mind.
+    let named = Verified { mind_by_pid: false, ..mind.clone() };
+    assert_eq!(identity(&named), Identity { fact: "Caller process confirmed: node \u{b7} PID 4242 \u{b7} name matches pi".into(), tag: "not verified" });
+    assert!(!identity(&named).fact.contains("the attached mind"));
     let program = Verified { line: "curl -s (pid 9)".into(), pid: 9, exe: "/usr/bin/curl".into(), ..Verified::default() };
     assert_eq!(identity(&program).fact, "Caller process confirmed: curl \u{b7} PID 9");
     for nothing in [Verified::default(), Verified { line: "could not be identified".into(), ..Verified::default() }] {

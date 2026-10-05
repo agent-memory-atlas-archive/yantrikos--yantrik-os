@@ -116,6 +116,15 @@ fn shift_enter(w: &MinimalSoftwareWindow) {
     w.dispatch_event(WindowEvent::KeyReleased { text: Key::Shift.into() });
 }
 
+/// Empty the focused field from the keyboard: Ctrl+A, then Backspace. Whatever an earlier step put
+/// there (step 3's starter fills the composer), wherever the field happens to be drawn.
+fn clear_field(w: &MinimalSoftwareWindow) {
+    w.dispatch_event(WindowEvent::KeyPressed { text: Key::Control.into() });
+    key(w, "a");
+    w.dispatch_event(WindowEvent::KeyReleased { text: Key::Control.into() });
+    key(w, Key::Backspace);
+}
+
 fn wheel(w: &MinimalSoftwareWindow, delta_y: f32) {
     w.dispatch_event(WindowEvent::PointerScrolled {
         position: slint::LogicalPosition::new(PANEL_X + 220.0, 300.0),
@@ -340,6 +349,10 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     settle(w);
     assert!(!ui.get_following());
     crate::click(w, PANEL_X + 150.0, 690.0);
+    // Step 3's starter left its words in the box (a starter fills and never sends); a person
+    // clears them before writing their own.
+    clear_field(w);
+    settle(w);
     for c in "hello".chars() {
         key(w, c.to_string());
     }

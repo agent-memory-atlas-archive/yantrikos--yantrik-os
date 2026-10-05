@@ -6,8 +6,9 @@
 // you are typing in it is a trap. While a run is going the send button reads "Send follow-up",
 // which is what it does: the words go to the mind beside its work.
 //
-// The row above Send says where the message text goes (`destination`): "Sends message text to:
-// <provider> · <model>", or "Stays on this machine · <model>", in the box, always there.
+// The row above Send says where the message goes (`destination`): "Sends your message and
+// conversation context to: <provider> · <model>", or "Stays on this machine · <model>" only when
+// that is certain, in the box, always there.
 //
 // The mode chip ("Mode: Ask") is the status bar chip's twin: it opens the same mind-mode choice,
 // it does not change the mode by itself, and a mode change applies to the next run. The noun is
@@ -21,9 +22,10 @@ import { ChatPill } from "chat_parts.slint";
 export component ChatComposer inherits Rectangle {
     in property <string> mind-name;
     in property <string> mode-label: "Ask";
-    // Where the message text goes, as the shell knows it from the configured backend: "Sends
-    // message text to: Ollama Cloud · deepseek-v4.1-flash", or "Stays on this machine · …"
-    // (runs_on::RunsOn::destination). "" when the shell does not know, and the row says so.
+    // Where the message goes, as the shell knows it from the configured backend: "Sends your
+    // message and conversation context to: Ollama Cloud · deepseek-v4.1-flash", or "Stays on this
+    // machine · …" (runs_on::RunsOn::destination). "" when the shell does not know, and the row
+    // says so.
     in property <string> destination: "";
     // A run for this chat is going: the button says so.
     in property <bool> run-active: false;
