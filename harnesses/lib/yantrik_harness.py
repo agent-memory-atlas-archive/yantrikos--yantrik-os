@@ -70,7 +70,7 @@ MAIN = "main"
 MAX_EVENT_BYTES = 64 * 1024
 EVENT_PIECE_BYTES = 48 * 1024
 # What one `redact` may carry (crates/yantrik-harness/src/redact.rs): at most this many needles,
-# each from 1 to this many characters after NFC.
+# each from 1 to this many characters in canonical form (NFC, then lowercased).
 REDACT_MAX_NEEDLES = 16
 REDACT_MAX_CHARS = 4096
 # The answer to a Keep/Erase question that lets the desktop erase its copies. Exact.
@@ -242,10 +242,13 @@ def summary_line(text: str, limit: int = 160) -> str:
 
 
 def needle(text: str) -> Dict[str, Any]:
-    """Words to erase, as the desktop takes them: the SHA-256 of their NFC form as UTF-8, and
-    their length in characters after NFC. The words themselves never leave this process."""
-    nfc = unicodedata.normalize("NFC", str(text))
-    return {"sha256": hashlib.sha256(nfc.encode("utf-8")).hexdigest(), "len": len(nfc)}
+    """Words to erase, as the desktop takes them: the SHA-256 of their canonical form as UTF-8,
+    and its length in characters. The canonical form is NFC, then Unicode default lowercasing
+    (`unicodedata.normalize('NFC', t).lower()`, Rust's `str::to_lowercase` on the desktop), and the
+    length is counted after lowercasing ('İ' becomes two characters). The words themselves never
+    leave this process."""
+    canon = unicodedata.normalize("NFC", str(text)).lower()
+    return {"sha256": hashlib.sha256(canon.encode("utf-8")).hexdigest(), "len": len(canon)}
 
 
 def _pieces(text: str, budget: int = EVENT_PIECE_BYTES) -> List[str]:
@@ -444,9 +447,10 @@ class Turn:
         run store. Erase them from the mind's own memory first; this is the desktop's half.
 
         Each text is hashed here (`needle`) and only the digest and length are sent. Matching is
-        exact and case-sensitive, so pass each form the words were said in. The desktop applies it
-        only for a question this run asked, answered with the offered `Erase`, from this session,
-        while the turn is open or within five minutes of its end, and once per question.
+        exact after NFC and case-insensitive: pass each text once, in any case, and the desktop
+        erases every case it was written in. The desktop applies it only for a question this run
+        asked, answered with the offered `Erase`, from this session, while the turn is open or
+        within five minutes of its end, and once per question.
 
         Returns the desktop's reply: `{"redacted": n, "where": ["transcript", "runs"]}`, or
         `{"refused": why}` with nothing changed, or `{"unsent": why}` when it was not sent.

@@ -548,6 +548,25 @@ class ConversationTests(unittest.TestCase):
         self.desktop.wait_closed(turn)
         self.assertEqual((handler.replies, self.desktop.redactions), ([], []))
 
+    def test_needles_match_the_shared_fixtures(self):
+        # The same file the desktop's Rust tests assert (crates/yantrik-harness/src/redact.rs):
+        # both sides compute exactly these digests and lengths.
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "redact_needles.json")
+        with open(path, encoding="utf-8") as f:
+            fixtures = json.load(f)
+        self.assertEqual([f["text"] for f in fixtures],
+                         ["Straße", "İstanbul", "É", "É", "throwaway-erase2"])
+        for f in fixtures:
+            self.assertEqual(yantrik_harness.needle(f["text"]), {"sha256": f["sha256"], "len": f["len"]},
+                             repr(f["text"]))
+
+    def test_a_needle_is_the_same_in_every_case_and_counted_after_lowercasing(self):
+        n = yantrik_harness.needle("throwaway-erase2")
+        self.assertEqual(yantrik_harness.needle("THROWAWAY-ERASE2"), n)
+        self.assertEqual(yantrik_harness.needle("Throwaway-Erase2"), n)
+        self.assertEqual(yantrik_harness.needle("CAFÉ"), yantrik_harness.needle("café"))
+        self.assertEqual(yantrik_harness.needle("İstanbul")["len"], 9)
+
     def test_redact_checks_its_needles_before_sending(self):
         turn = yantrik_harness.Turn.__new__(yantrik_harness.Turn)
         turn.harness = None

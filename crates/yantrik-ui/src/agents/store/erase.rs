@@ -287,6 +287,39 @@ mod tests {
     }
 
     #[test]
+    fn one_needle_erases_every_case_in_the_transcript_and_the_rest_keeps_its_case() {
+        let mut s = Store::with_clock(Box::new(|| 1));
+        let pi = AgentId::new("pi", "c-3");
+        s.open_turn(&pi, "Remember THROWAWAY-ERASE2 for me");
+        s.text(&pi, "Saved Throwaway-Erase2. Also throw");
+        s.text(&pi, "away-erase2, OK?");
+        s.event(&pi, &Event::Thinking { delta: "Keep THROWAWAY-erase2 SAFE".into() }, Provenance::Reported);
+        s.close_turn(&pi, true);
+        let needles = [Needle::of("throwaway-erase2")];
+        let done = s.redact(&pi, &erasure(&needles));
+        let a = s.agent(&pi).unwrap();
+        let turn = &a.turns[0];
+        assert_eq!(turn.prompt, format!("Remember {MARKER} for me"));
+        assert_eq!(a.meta.title, format!("Remember {MARKER} for me"));
+        let text: String = turn.items.iter().filter_map(|i| if let Item::Text(t) = i { Some(t.text()) } else { None }).collect();
+        assert_eq!(text, format!("Saved {MARKER}. Also {MARKER}, OK?"));
+        let thinking: String = turn.items.iter().filter_map(|i| if let Item::Thinking(t) = i { Some(t.text()) } else { None }).collect();
+        assert_eq!(thinking, format!("Keep {MARKER} SAFE"));
+        // prompt, title, two in the reply, thinking.
+        assert_eq!(done.places, 5);
+
+        let shown = s.transcript(&pi, 5).unwrap().to_lowercase();
+        assert!(!shown.contains("throwaway-erase2"), "no case of the words is shown:\n{shown}");
+        let dir = std::env::temp_dir().join(format!("yantrik-erase-ui-case-{}-{}", std::process::id(), crate::agents::model::now()));
+        let (path, contents) = s.file_of(&dir, &pi).unwrap();
+        write_durably(&dir, &path, &contents).unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(!saved.to_lowercase().contains("throwaway-erase2"), "no case of the words is saved:\n{saved}");
+        assert!(saved.contains("Remember ") && saved.contains(" SAFE"), "the words around keep their case");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn an_agent_the_store_does_not_hold_is_nothing_to_erase() {
         let mut s = Store::with_clock(Box::new(|| 1));
         let needles = [Needle::of(SECRET)];

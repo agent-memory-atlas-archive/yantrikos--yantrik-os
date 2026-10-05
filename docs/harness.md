@@ -348,11 +348,22 @@ and `redact` is how the mind asks for those to go too, without the words ever tr
  "needles": [{"sha256": "<64 lowercase hex>", "len": 5}]}
 ```
 
-Each needle is the SHA-256 of the words' NFC form as UTF-8, and their length in Unicode scalar
-values after NFC; at most 16 needles, each 1 to 4096 long. Matching is case-sensitive and over NFC
-(composed and decomposed "é" are the same), with a window of each length slid over the text and
-hashed. A reply arrives in chunks, and the chunks are **joined before matching**: a name split
-across two chunks, or around a tool card, is still found.
+Each needle is the SHA-256, as UTF-8, of the words' **canonical form**: NFC first, then Unicode
+default lowercasing (Rust `str::to_lowercase`; Python `unicodedata.normalize('NFC', t).lower()`).
+`len` is the canonical form's length in Unicode scalar values, counted *after* lowercasing, which
+can change it ('İ' U+0130 lowercases to 'i' + U+0307, two scalars). At most 16 needles; each
+`sha256` is 64 lowercase hex digits and each `len` 1 to 4096. The shell puts each text it holds in
+the same canonical form and slides a window of `len` scalar values over it, hashing each window.
+So matching is case-insensitive and over NFC: one needle for "priya" erases "Priya", "PRIYA" and
+"priya", composed and decomposed "é" (or "É") are the same, and a harness sends each text once —
+never its case variants. Nothing else is folded ("ß" is not "ss").
+
+What is replaced is the **original** stored text: each canonical scalar knows the bytes it came
+from, and a match replaces the stored span that produced it. Where a window begins or ends inside
+what one stored character became (the "i" of a lowercased "İ", an "é" stored as "e" + U+0301), the
+span widens to that whole character. Text around a match keeps its own case and normalisation.
+A reply arrives in chunks, and the chunks are **joined before matching**: a name split across two
+chunks, or around a tool card, is still found.
 
 The host applies it only when all of these hold, and otherwise answers `{"refused": why}` and
 changes nothing:
@@ -385,8 +396,11 @@ written beside, flushed, renamed over and the directory flushed. Neither reaches
 system — its journal, blocks a truncated file gave back, snapshots and backups may still hold the
 old bytes — nor copies the shell does not keep for the agent (the Lens's own chat history).
 
-In `harnesses/lib`, `turn.redact(request_id, texts)` hashes each text locally and sends only the
-needles; it returns the desktop's reply.
+In `harnesses/lib`, `turn.redact(request_id, texts)` hashes each text locally (`needle(text)`, the
+canonical form above) and sends only the needles; it returns the desktop's reply. The digests and
+lengths both sides must compute for a few hard cases ("Straße", "İstanbul", "É" composed and
+decomposed) are in `harnesses/tests/fixtures/redact_needles.json`, asserted by the Rust and the
+Python tests alike.
 
 **Events are the harness's claims.** The pane marks cards from events as *reported*, apart from
 what the shell verified itself. Keep writing the trail line (`⚙️ …`, below) into the text as

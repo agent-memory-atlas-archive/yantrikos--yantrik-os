@@ -548,28 +548,54 @@ mod tests {
     }
 
     #[test]
+    fn one_needle_erases_every_case_the_words_were_written_in_and_the_rest_keeps_its_case() {
+        let store = RunStore::in_memory().unwrap();
+        store.start(1, "mind", "main", "s1").unwrap();
+        store.append(1, "text", &json!({"delta": "Code THROWAWAY-ERASE2, then Throw"})).unwrap();
+        store.append(1, "text", &json!({"delta": "away-Erase2 and throwaway-erase2. OK?"})).unwrap();
+        store.append(1, "event", &json!({"kind": "thinking", "delta": "Keep Throwaway-Erase2 SAFE"})).unwrap();
+        store.ask(1, "f", &json!({"prompt": "Forget THROWAWAY-ERASE2?", "options": ["Keep", "Erase"]})).unwrap();
+        store.answer(1, "f", &json!("Erase")).unwrap();
+        let needle = [Needle::of("throwaway-erase2")];
+        let erased = store.redact(&erasure(1, "f", &needle), now_ms()).unwrap();
+        assert_eq!(text_of(&store, 1), format!("Code {MARKER}, then {MARKER} and {MARKER}. OK?"));
+        let after = payloads(&store, 1);
+        let thinking = after.iter().find(|(_, p)| p["kind"] == "thinking").unwrap();
+        assert_eq!(thinking.1["delta"], format!("Keep {MARKER} SAFE"));
+        let asked = after.iter().find(|(k, _)| k == "request").unwrap();
+        assert_eq!(asked.1["prompt"]["prompt"], format!("Forget {MARKER}?"));
+        // 3 in the reply, 1 in the thinking, 1 in the question.
+        assert_eq!(erased.places, 5);
+        let all = serde_json::to_string(&after).unwrap().to_lowercase();
+        assert!(!all.contains("throwaway-erase2"), "no case of the words is left: {all}");
+    }
+
+    #[test]
     fn the_old_text_leaves_the_write_ahead_log_and_the_database_file() {
         let dir = std::env::temp_dir().join(format!("yantrik-erase-{}-{}", std::process::id(), now_ms()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("runs.db");
         let wal = dir.join("runs.db-wal");
-        let unique = "Zanzibar-Quokka-7741";
+        // Stored in mixed case; the needle is derived from the lowercase form.
+        let stored = "Zanzibar-QUOKKA-7741";
+        let lower = stored.to_lowercase();
         let store = RunStore::open(&path).unwrap();
         store.start(1, "mind", "main", "s1").unwrap();
-        store.append(1, "text", &json!({"delta": format!("the code is {unique}, keep it")})).unwrap();
+        store.append(1, "text", &json!({"delta": format!("the code is {stored}, keep it")})).unwrap();
         store.ask(1, "f", &json!({"prompt": "Forget the code?", "options": ["Keep", "Erase"]})).unwrap();
         store.answer(1, "f", &json!("Erase")).unwrap();
+        // Any case of the words, in the file's bytes.
         let holds = |file: &std::path::Path| {
-            let bytes = std::fs::read(file).unwrap_or_default();
-            bytes.windows(unique.len()).any(|w| w == unique.as_bytes())
+            let bytes = std::fs::read(file).unwrap_or_default().to_ascii_lowercase();
+            bytes.windows(lower.len()).any(|w| w == lower.as_bytes())
         };
         assert!(holds(&wal), "before: the write-ahead log holds the words, so the check below means something");
 
-        let erased = store.redact(&erasure(1, "f", &[Needle::of(unique)]), now_ms()).unwrap();
+        let erased = store.redact(&erasure(1, "f", &[Needle::of(&lower)]), now_ms()).unwrap();
         assert!(erased.checkpointed);
-        assert!(!holds(&wal), "after: runs.db-wal holds no copy of the words");
-        assert!(!holds(&path), "after: runs.db holds no copy of the words");
-        assert!(text_of(&store, 1).contains(MARKER));
+        assert!(!holds(&wal), "after: runs.db-wal holds no copy of the words, in any case");
+        assert!(!holds(&path), "after: runs.db holds no copy of the words, in any case");
+        assert_eq!(text_of(&store, 1), format!("the code is {MARKER}, keep it"));
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
     }

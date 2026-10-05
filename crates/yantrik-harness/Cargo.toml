@@ -15,7 +15,8 @@ getrandom = "0.2"
 # already links (bundled, one copy through yantrikdb).
 rusqlite = { workspace = true }
 # A forget reaches the shell's copies as digests (`redact`): SHA-256 over the NFC form of each
-# needle, so the same words typed composed or decomposed are the same needle.
+# needle, lowercased, so the same words typed composed or decomposed, in any case, are the same
+# needle.
 sha2 = { workspace = true }
 unicode-normalization = "0.1"
 
