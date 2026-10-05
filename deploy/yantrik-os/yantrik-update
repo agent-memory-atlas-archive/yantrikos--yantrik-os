@@ -2573,10 +2573,9 @@ mind_egress_render() { # <uid> <status> <answer> <resolv.conf> <out>
 # printed, the proxy's `yantrik-egress capabilities`, and lan_hosts as mind_egress_lan_json made
 # it (null when not given); any other input is refused. public_proxy is the public door as a URL,
 # like proxy (http://$EGRESS_PUBLIC_DOOR), set only when the proxy says it has one (`public-door`),
-# else null. Version 3 adds it and changes nothing a version 2 reader reads. Version 4 is the mode
-# guarded ("home network closed, internet open": no DNS, as enforce), written only when the mode is
-# guarded, so a version 3 reader, which knows audit and enforce, refuses the file (fails closed)
-# instead of reading a mode it does not know; audit and enforce are still written as version 3.
+# else null. Version 3 adds it and changes nothing a version 2 reader reads. Every mode is written
+# as version 3, guarded ("home network closed, internet open") included: the Mind's reader never
+# reads mode, and guarded writes dns_allowed false (as enforce), which it honours as written.
 mind_egress_status_text() { # <status line> <capabilities> <loaded at> [lan_hosts JSON]
   local refuses=false public=null word mode private dns rest lan="${4:-null}"
   printf '%s\n' "$2" | grep -qx 'refuses-private-all-modes' && refuses=true
@@ -2587,13 +2586,11 @@ mind_egress_status_text() { # <status line> <capabilities> <loaded at> [lan_host
     audit:false:true|audit:true:false|guarded:false:false|guarded:true:false|enforce:false:false|enforce:true:false|fallback:false:false) ;;
     *) return 1 ;;
   esac
-  local version=3
-  [ "$mode" = guarded ] && version=4
   case "$3" in ''|*[!0-9]*) return 1 ;; esac
   case "$lan" in null|'['*']') ;; *) return 1 ;; esac
   case "$lan" in *$'\n'*) return 1 ;; esac
-  printf '{"enforced": true, "table": "inet yantrik_mind_egress", "proxy": "http://127.0.0.1:7450", "public_proxy": %s, "proxy_refuses_private": %s, "mode": "%s", "private": %s, "dns_allowed": %s, "lan_hosts": %s, "loaded_at": %s, "version": %s}\n' \
-    "$public" "$refuses" "$mode" "$private" "$dns" "$lan" "$3" "$version"
+  printf '{"enforced": true, "table": "inet yantrik_mind_egress", "proxy": "http://127.0.0.1:7450", "public_proxy": %s, "proxy_refuses_private": %s, "mode": "%s", "private": %s, "dns_allowed": %s, "lan_hosts": %s, "loaded_at": %s, "version": 3}\n' \
+    "$public" "$refuses" "$mode" "$private" "$dns" "$lan" "$3"
 }
 
 # lan_hosts for the status file from what `yantrik-egress lan-hosts` answered (<status> its exit,
@@ -3962,14 +3959,14 @@ loopback 127.0.0.1 11434")"
     "$(ms_text "$(printf 'private on\nmode audit\n')")"
   is "mind-status: Private mode, enforce underneath" "$js"'true, "mode": "enforce", "private": true, "dns_allowed": false, "lan_hosts": null, "loaded_at": 1759600000, "version": 3}' \
     "$(ms_text "$(printf 'private on\nmode enforce\n')")"
-  is "mind-status: guarded: no DNS, version 4" "$js"'true, "mode": "guarded", "private": false, "dns_allowed": false, "lan_hosts": null, "loaded_at": 1759600000, "version": 4}' \
+  is "mind-status: guarded: no DNS, version 3" "$js"'true, "mode": "guarded", "private": false, "dns_allowed": false, "lan_hosts": null, "loaded_at": 1759600000, "version": 3}' \
     "$(ms_text "$(printf 'private off\nmode guarded\ndirect 192.168.4.42 8888\n')")"
-  is "mind-status: Private mode, guarded underneath" "$js"'true, "mode": "guarded", "private": true, "dns_allowed": false, "lan_hosts": null, "loaded_at": 1759600000, "version": 4}' \
+  is "mind-status: Private mode, guarded underneath" "$js"'true, "mode": "guarded", "private": true, "dns_allowed": false, "lan_hosts": null, "loaded_at": 1759600000, "version": 3}' \
     "$(ms_text "$(printf 'private on\nmode guarded\n')")"
-  is "mind-status: version 4 is guarded's alone: audit, enforce and the fallback stay version 3" "3 3 3 3 3" \
-    "$(for l in 'status audit false true' 'status audit true false' 'status enforce false false' 'status enforce true false' 'status fallback false false'; do
+  is "mind-status: every mode is version 3, guarded included" "3 3 3 3 3 3 3" \
+    "$(for l in 'status audit false true' 'status audit true false' 'status guarded false false' 'status guarded true false' 'status enforce false false' 'status enforce true false' 'status fallback false false'; do
          mind_egress_status_text "$l" "$ok_caps" "$now" | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["version"])'; done | tr '\n' ' ' | sed 's/ $//')"
-  is "mind-status: ... and version 4 has every version 3 field, of the same type" \
+  is "mind-status: ... and guarded has every version 3 field, of the same type" \
     "enforced:bool table:str proxy:str public_proxy:str proxy_refuses_private:bool mode:str private:bool dns_allowed:bool lan_hosts:list loaded_at:int version:int" \
     "$(mind_egress_status_text 'status guarded false false' "$ok_caps" "$now" '[]' | python3 -I -c '
 import json, sys
@@ -4283,7 +4280,7 @@ c.sendall((json.dumps({"ok": True, "seeded": req["rules"]}) + "\n").encode())' "
     printf 'mode: guarded\nrules:\n  - {host: "192.168.4.42", ports: [8888], lan: true, why: x}\n' > "$st/policy.yaml"
     ans="$("$YANTRIK_EGRESS_BIN" direct "$st" 2>&1)"; rc=$?
     is "mind-egress (real reader): guarded keeps the lan entry and refuses DNS" "entries: 1 from the person's lan rules (guarded); DNS refused" "$(me_render "$ans" "$rc")"
-    is "mind-status (real reader): ... and the status file says guarded, version 4" "guarded False False 4" \
+    is "mind-status (real reader): ... and the status file says guarded, version 3" "guarded False False 3" \
       "$(mind_egress_status_text "$(sed -n 2p "$me/out")" "$ok_caps" "$now" | python3 -I -c 'import json,sys; d=json.load(sys.stdin); print(d["mode"], d["private"], d["dns_allowed"], d["version"])')"
     # A rule written with a trailing dot before the proxy refused one is read without it on
     # upgrade, not taken for a policy that does not read.

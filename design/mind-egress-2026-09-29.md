@@ -379,11 +379,12 @@ the file only; the directory stays.
   has not resolved itself as possibly the local network** and refuse it on the untrusted path —
   fail closed, never treat `null` as an empty list. `[]` means there are no `lan` rules.
 - `loaded_at`: unix seconds of the load. `version`: this layout (2 adds `lan_hosts`; 3 adds
-  `public_proxy`; 4 is the mode `guarded`). A reader refuses one it does not know.
-- **Version 4.** Written only when `mode` is `guarded`; the same fields as version 3, of the same
-  types. audit, enforce and fallback are still written as version 3. So a version 3 reader, which
-  knows audit and enforce only, refuses a guarded file and fails closed rather than reading a mode
-  it does not know. A reader that accepts 4 must accept `guarded` with `dns_allowed` false.
+  `public_proxy`). A reader refuses one it does not know.
+- **guarded is version 3.** Every mode is written as version 3, `guarded` included; guarded
+  changes no field's name or type, only adds a value of `mode`, with `dns_allowed` false. The
+  Mind's reader never reads `mode` (its trust rests on the checks below, and it honours
+  `dns_allowed` as written), so it reads a guarded file correctly with no change. A reader that
+  does check `mode` must accept `guarded`.
 - **Version 3 and version 2 readers.** Version 3 only adds `public_proxy`. Every version 2 field
   is still there, with the same name, type and meaning; the selftest checks that. A version 2
   reader keeps working by ignoring the new field, **once it accepts `version` 3 as well as 2**. A
