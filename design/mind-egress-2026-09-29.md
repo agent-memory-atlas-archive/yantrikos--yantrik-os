@@ -249,10 +249,17 @@ Repeated attempts to one host make one card, not a stream.
 ### 5. What a mind may rely on
 
 A mind cannot see the kernel's table, so it is told, in a file only root writes:
-`/run/yantrik/mind-egress.json`. `yantrik-update mind-egress apply` writes it after a table has
-loaded (and only then), at boot from `yantrik-mind-egress.service` (`/run` is tmpfs) and again from
-the `.path` refresh when the policy, Private mode or resolv.conf changes. It is written beside
-itself and renamed into place, so a link planted at the path is replaced, never followed.
+`/run/yantrik-mind-egress/mind-egress.json`. `yantrik-update mind-egress apply` writes it after a
+table has loaded (and only then), at boot from `yantrik-mind-egress.service` (`/run` is tmpfs) and
+again from the `.path` refresh when the policy, Private mode or resolv.conf changes. It is written
+beside itself and renamed into place, so a link planted at the path is replaced, never followed.
+
+The directory is its own, root:root 0755, made by the writer if missing. It is not `/run/yantrik`:
+root services without `XDG_RUNTIME_DIR` keep their sockets there and harden it to 0700
+(`yantrik-ipc-transport`'s `socket_dir`), and the mind's account could not traverse it. The writer
+refuses a directory that is a link, not owned by uid 0 and group root, or group- or
+world-writable, and then writes no file (an old one is removed). Stopping the boot unit removes
+the file only; the directory stays.
 
 ```json
 {"enforced": true, "table": "inet yantrik_mind_egress", "proxy": "http://127.0.0.1:7450",
@@ -285,7 +292,7 @@ itself and renamed into place, so a link planted at the path is replaced, never 
   refuses one it does not know.
 
 Trust it only if all of these hold, else take egress as not enforced:
-- `/run/yantrik` is owned by uid 0 and is not group- or world-writable;
+- `/run/yantrik-mind-egress` is owned by uid 0 and is not group- or world-writable;
 - the file is opened with `O_NOFOLLOW`, and `fstat` on that descriptor (not a second `stat` of the
   path) shows a regular file owned by uid 0 with no group or other write bit;
 - it parses, `enforced` is true and `version` is one it knows.

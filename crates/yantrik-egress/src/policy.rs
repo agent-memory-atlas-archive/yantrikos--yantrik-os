@@ -26,7 +26,8 @@
 use std::net::IpAddr;
 
 /// What this proxy promises about itself, one word each, printed by `yantrik-egress capabilities`
-/// for root to read (`yantrik-update mind-egress apply` puts it in /run/yantrik/mind-egress.json).
+/// for root to read (`yantrik-update mind-egress apply` puts it in
+/// /run/yantrik-mind-egress/mind-egress.json).
 /// `refuses-private-all-modes`: an address that is not the internet is refused without a `lan`
 /// rule in audit as well as enforce ([`Policy::decide`]; the test below holds it to that).
 pub const CAPABILITIES: &[&str] = &["refuses-private-all-modes"];

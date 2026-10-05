@@ -2253,7 +2253,9 @@ MIND_EGRESS_NFT=/etc/yantrik/mind-egress.nft
 MIND_EGRESS_UNIT=/etc/systemd/system/yantrik-mind-egress.service
 MIND_EGRESS_REFRESH_UNIT=/etc/systemd/system/yantrik-mind-egress-refresh.service
 MIND_EGRESS_PATH_UNIT=/etc/systemd/system/yantrik-mind-egress.path
-MIND_EGRESS_STATUS=/run/yantrik/mind-egress.json
+# A directory of its own, not /run/yantrik: a root service hardens that one to 0700
+# (yantrik-ipc-transport's socket_dir), and the mind's account must be able to traverse to the file.
+MIND_EGRESS_STATUS=/run/yantrik-mind-egress/mind-egress.json
 EGRESS_STATE=/var/lib/yantrik-egress
 MIND_EGRESS_MAX=64
 # The most hosts the status file lists in lan_hosts; past it, null (a mind then fails closed).
@@ -2529,7 +2531,7 @@ mind_egress_render() { # <uid> <status> <answer> <resolv.conf> <out>
   printf 'status %s %s %s\n' "$mode" "$private" "$([ "$dns" = dns ] && echo true || echo false)"
 }
 
-# What the mind may rely on (design/mind-egress-2026-09-29.md): /run/yantrik/mind-egress.json,
+# What the mind may rely on (design/mind-egress-2026-09-29.md): /run/yantrik-mind-egress/mind-egress.json,
 # written by root only once a table is loaded and removed when none is, so a mind that finds no
 # such file (or one it cannot trust) fails closed. From a `status` line mind_egress_render
 # printed, the proxy's `yantrik-egress capabilities`, and lan_hosts as mind_egress_lan_json made
@@ -2558,14 +2560,15 @@ mind_egress_lan_json() { # <status> <answer>
 
 # Put the status file in place whole (write_file_atomic: a link planted at it is replaced, not
 # followed), in a directory only its writer may change: made 0755 if missing, and refused if it
-# is a link, someone else's, or group or world writable. The file is the writer's (root's), 0644.
+# is a link, not owned by the writer's uid and group (root:root), or group or world writable. The
+# file is the writer's (root's), 0644.
 mind_egress_status_write() { # <path> <status line> <capabilities> <lan_hosts JSON>
   local dir text
   dir="$(dirname "$1")"
   text="$(mind_egress_status_text "$2" "$3" "$(date +%s)" "$4")" || { rm -f -- "$1"; return 1; }
   [ -L "$dir" ] && { rm -f -- "$1"; return 1; }
   [ -d "$dir" ] || mkdir -m 0755 -- "$dir" || return 1
-  if [ -L "$dir" ] || [ "$(stat -c %u -- "$dir")" != "$(id -u)" ] || [ $(( 0$(stat -c %a -- "$dir") & 022 )) != 0 ]; then
+  if [ -L "$dir" ] || [ "$(stat -c %u:%g -- "$dir")" != "$(id -u):$(id -g)" ] || [ $(( 0$(stat -c %a -- "$dir") & 022 )) != 0 ]; then
     rm -f -- "$1"; return 1
   fi
   printf '%s\n' "$text" | write_file_atomic "$1"
@@ -2679,7 +2682,8 @@ RemainAfterExit=yes
 ExecStart=$BIN_DIR/yantrik-update mind-egress apply
 ExecReload=$BIN_DIR/yantrik-update mind-egress apply
 # Stopped (nftables stopped, which flushes the ruleset, or restarted): the table may be gone, so a
-# mind is no longer told it is held. The next start writes it again.
+# mind is no longer told it is held. The file only: its directory stays, root's. The next start
+# writes it again.
 ExecStop=/bin/rm -f -- $MIND_EGRESS_STATUS
 
 [Install]
@@ -3871,7 +3875,7 @@ loopback 127.0.0.1 11434")"
       "$(printf '%s\n' "$PY_MIND_DIRECT" | grep -oE '"[0-9a-f.:]+/[0-9]+"' | tr -d '"' | sort | tr '\n' ' ')"
   fi
 
-  # N. What a mind may rely on: /run/yantrik/mind-egress.json, from the status line the render
+  # N. What a mind may rely on: /run/yantrik-mind-egress/mind-egress.json, from the status line the render
   #    printed and the proxy's capabilities, written only once a table loaded. Stand-ins for nft,
   #    the reader and the proxy; no root.
   local now=1759600000 ms="$root/mind-status" sp ok_caps='refuses-private-all-modes'
@@ -3937,10 +3941,14 @@ loopback 127.0.0.1 11434")"
 
   t "mind-status: the boot unit removes the file when it stops (nftables stopped flushes the table)" \
     "ExecStop=/bin/rm -f -- $MIND_EGRESS_STATUS" "$(mind_egress_unit_text)"
+  is "mind-status: the file is in a directory of its own, not /run/yantrik (a root service makes that 0700)" \
+    "/run/yantrik-mind-egress/mind-egress.json" "$MIND_EGRESS_STATUS"
+  is "mind-status: ... the boot unit removes that file, and only it (not its directory)" \
+    "ExecStop=/bin/rm -f -- /run/yantrik-mind-egress/mind-egress.json" "$(mind_egress_unit_text | grep '^ExecStop=')"
 
   # mind_egress_load itself, with stand-ins: the file follows what loaded.
   mkdir -p "$ms/bin" "$ms/run"
-  sp="$ms/run/yantrik/mind-egress.json"
+  sp="$ms/run/yantrik-mind-egress/mind-egress.json"
   printf '%s\n' '#!/bin/sh' '[ "$2" = - ] && cat >/dev/null' 'case "$NFT_LOADS:$2" in all:*|fallback:-) exit 0 ;; esac' \
     'echo "Error: the stand-in nft refuses" >&2; exit 1' > "$ms/bin/nft"
   chmod +x "$ms/bin/nft"
@@ -3995,6 +4003,13 @@ loopback 127.0.0.1 11434")"
   ml_run all "$(printf 'private off\nmode audit\n')"
   is "mind-status: a directory others may write: no file, the old one removed" "absent" "$([ -e "$sp" ] || echo absent)"
   chmod 0755 "$(dirname "$sp")"
+  if chgrp 65534 "$(dirname "$sp")" 2>/dev/null; then
+    ml_run all "$(printf 'private off\nmode audit\n')"
+    is "mind-status: a directory whose group is not the writer's (root): no file" "absent" "$([ -e "$sp" ] || echo absent)"
+    chgrp "$(id -g)" "$(dirname "$sp")"
+    ml_run all "$(printf 'private off\nmode audit\n')"
+    is "mind-status: ... its group put back, written again" "audit" "$(ms_field mode)"
+  fi
   mv "$(dirname "$sp")" "$ms/run/elsewhere"; ln -s "$ms/run/elsewhere" "$(dirname "$sp")"
   ml_run all "$(printf 'private off\nmode audit\n')"
   is "mind-status: a directory that is a link: nothing written through it" "absent" "$([ -e "$ms/run/elsewhere/mind-egress.json" ] || echo absent)"

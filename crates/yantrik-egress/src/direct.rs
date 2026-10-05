@@ -33,9 +33,9 @@
 //!
 //! `yantrik-egress lan-hosts [STATE_DIR]` prints, the same way, every host a `lan` rule names —
 //! names, `*.domain` and literal addresses, seeded or the person's — with its ports, for the
-//! status file a mind reads (`lan_hosts` in /run/yantrik/mind-egress.json). The proxy grants the
-//! local network on the name asked for, so a mind fetching for an untrusted caller must refuse
-//! these hosts itself. Private mode does not change it: it lists the policy.
+//! status file a mind reads (`lan_hosts` in /run/yantrik-mind-egress/mind-egress.json). The
+//! proxy grants the local network on the name asked for, so a mind fetching for an untrusted
+//! caller must refuse these hosts itself. Private mode does not change it: it lists the policy.
 //!
 //! ```text
 //! lan homeassistant.local 8123
