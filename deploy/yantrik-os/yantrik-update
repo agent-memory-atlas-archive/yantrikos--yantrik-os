@@ -2031,9 +2031,37 @@ Environment=EGRESS_OWNER_UID=$owner_uid"
     systemctl restart yantrik-egress.service >/dev/null 2>&1 || warn "yantrik-egress.service did not start"
   else
     systemctl start yantrik-egress.service >/dev/null 2>&1 || warn "yantrik-egress.service did not start"
+    # Before reconcile_mind_egress: the status file's proxy_refuses_private is read from the
+    # installed binary, so the running proxy must be that binary.
+    egress_restart_if_replaced "$PREFIX/bin/yantrik-egress"
   fi
   reconcile_egress_seeds
   return 0
+}
+
+# The sha256 of the image the running proxy executes (its /proc/<pid>/exe, which reads even when
+# the file was replaced since), `unreadable` when it runs and cannot be read, nothing when it does
+# not run.
+egress_running_sha() {
+  local pid sha
+  pid="$(systemctl show -p MainPID --value yantrik-egress.service 2>/dev/null)"
+  case "$pid" in ''|0|*[!0-9]*) return 0 ;; esac
+  sha="$(sha256sum < "/proc/$pid/exe" 2>/dev/null | cut -d' ' -f1)"
+  printf '%s\n' "${sha:-unreadable}"
+}
+
+# An update that replaced only the binary leaves the old proxy running: restart it when what runs
+# is not <installed binary>, and not otherwise.
+egress_restart_if_replaced() { # <installed binary>
+  local running installed
+  running="$(egress_running_sha)"
+  installed="$(sha256sum < "$1" 2>/dev/null | cut -d' ' -f1)"
+  [ -n "$running" ] && [ "$running" != "$installed" ] || return 0
+  if systemctl try-restart yantrik-egress.service >/dev/null 2>&1; then
+    info "restarted the egress proxy: the one running was not the installed binary"
+  else
+    warn "yantrik-egress.service did not restart onto the installed binary"
+  fi
 }
 
 # ── Seeded lan rules ─────────────────────────────────────────────────────────────────────
@@ -4013,6 +4041,30 @@ loopback 127.0.0.1 11434")"
   mv "$(dirname "$sp")" "$ms/run/elsewhere"; ln -s "$ms/run/elsewhere" "$(dirname "$sp")"
   ml_run all "$(printf 'private off\nmode audit\n')"
   is "mind-status: a directory that is a link: nothing written through it" "absent" "$([ -e "$ms/run/elsewhere/mind-egress.json" ] || echo absent)"
+
+  # The running proxy is the installed one before the status file is written (its
+  # proxy_refuses_private is read from the installed binary): restarted when it is not, else left.
+  local eb="$root/egress-bin"
+  mkdir -p "$eb"; printf 'the new proxy\n' > "$eb/yantrik-egress"
+  er_run() { # er_run <what egress_running_sha prints>: the systemctl calls made
+    ( ER_RUNNING="$1"
+      egress_running_sha() { [ -z "$ER_RUNNING" ] || printf '%s\n' "$ER_RUNNING"; }
+      systemctl() { printf '%s\n' "$*" >> "$eb/calls"; }
+      rm -f "$eb/calls"; egress_restart_if_replaced "$eb/yantrik-egress" >/dev/null 2>&1
+      cat "$eb/calls" 2>/dev/null )
+  }
+  is "egress restart: the binary changed under the running proxy: try-restart" "try-restart yantrik-egress.service" \
+    "$(er_run "$(printf 'the old proxy\n' | sha256sum | cut -d' ' -f1)")"
+  is "egress restart: ... the running one is the installed one: left alone" "" \
+    "$(er_run "$(sha256sum < "$eb/yantrik-egress" | cut -d' ' -f1)")"
+  is "egress restart: ... not running: nothing to restart" "" "$(er_run '')"
+  is "egress restart: ... running and its image unreadable: restarted, not assumed current" "try-restart yantrik-egress.service" \
+    "$(er_run unreadable)"
+  is "egress restart: requested before the mind's status file is written" "yes" \
+    "$(declare -f reconcile_egress | grep -q 'egress_restart_if_replaced' \
+       && [ "$(declare -f cmd_migrate_minds | grep -n -m1 'reconcile_egress$\|reconcile_egress;' | cut -d: -f1)" \
+            -lt "$(declare -f cmd_migrate_minds | grep -n -m1 'reconcile_mind_egress;\|reconcile_mind_egress$' | cut -d: -f1)" ] \
+       && echo yes || echo no)"
 
   # Seeded lan rules: the endpoints the person and root configured, never the mind's own.
   local sd="$root/seed" cands plan
