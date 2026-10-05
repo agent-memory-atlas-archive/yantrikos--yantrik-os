@@ -27,23 +27,20 @@ const KEY_CHARS: usize = 40;
 const OPEN_ENDED_WARNING: &str = "What it runs can do anything you can. Allowing it for the session lets any mind or \
     caller on this desktop run any command through it, until the shell restarts or the mode is lowered.";
 
-/// The card `row_for` makes of a request at the limits: each row escaped, then cut, and the rows
-/// joined and cut to the budget with the cut named.
+/// The card `row_for` makes of the largest request the shell asks about: eight escaped rows that,
+/// with the seven "; " between them, come to exactly the budget — so the line is drawn whole, as
+/// the refusal guarantees (it measures the same join).
 pub(crate) fn largest() -> ApprovalRequest {
-    let per_row = TOTAL_CHARS / 8;
+    let width_of = |i: usize| if i == 7 { 80 } else { 78 };
     let rows: Vec<String> = (0..8)
         .map(|i| {
             let key = format!("{i}{}", "k".repeat(KEY_CHARS - 1));
-            let value = "<U+0001>".repeat(3) + &"v".repeat(per_row - KEY_CHARS - 2 - 3 * 8);
+            let value = "<U+0001>".repeat(3) + &"v".repeat(width_of(i) - KEY_CHARS - 2 - 3 * 8);
             format!("{key}: {value}")
         })
         .collect();
-    let joined = rows.join("; ");
-    let exactly = if joined.chars().count() > TOTAL_CHARS {
-        format!("{}\u{2026} ({} characters in full)", joined.chars().take(TOTAL_CHARS).collect::<String>(), joined.chars().count())
-    } else {
-        joined
-    };
+    let exactly = rows.join("; ");
+    assert_eq!(exactly.chars().count(), TOTAL_CHARS, "the fixture is at the budget");
     ApprovalRequest {
         id: "appr-largest".into(),
         args: lines(&rows.iter().map(String::as_str).collect::<Vec<_>>()),
@@ -94,6 +91,7 @@ fn answer(
     (width, height): (u32, u32),
     denied: &dyn Fn() -> i32,
     allowed: &dyn Fn() -> i32,
+    sessioned: &dyn Fn() -> i32,
 ) -> Answered {
     let before = denied();
     let deny_y = scan(w, deny_x, top, bottom, || denied() > before)
@@ -104,6 +102,15 @@ fn answer(
     click(w, allow_x, allow_y);
     let waited = allowed() == before;
     if waited {
+        // The session row is a standing yes: it waits with Allow. Every point of the band under
+        // the buttons where it is drawn is pressed, and none of them grants anything.
+        let before = sessioned();
+        let mut y = btn_top + 34.0;
+        while y < (btn_top + 80.0).min(bottom) {
+            click(w, read_x, y);
+            y += 3.0;
+        }
+        assert_eq!(sessioned(), before, "{place}: the session row grants nothing before the card is read");
         // Disabled until the end has been in view: the click granted nothing. Read on, and it does.
         read_to_end(w, read_x, read_y, width, height);
         let before = allowed();
@@ -145,6 +152,7 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str, width: u32, height: u32) -> 
         (width, height),
         &|| denied.get(),
         &|| allowed.get(),
+        &|| sessioned.get(),
     );
     assert!(corner.deny_y < dock_top && corner.allow_y < dock_top, "the buttons are above the dock");
     if (width, height) == (800, 600) {
@@ -162,6 +170,21 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str, width: u32, height: u32) -> 
     let session_y = scan(w, fw - 220.0, corner.deny_y + 8.0, dock_top - 2.0, || sessioned.get() > before)
         .expect("the session row answers under the buttons, above the dock");
     save(&settle(w, width, height), &output.replace(".png", "-read.png"), width, height)?;
+    // A different request arriving in the same card — written into the same row, as the shell's
+    // republish would — is not read: the card is back at its top and Allow waits again.
+    if corner.waited {
+        shell.get_pending_approvals().set_row_data(0, ApprovalRequest { id: "appr-largest-next".into(), ..big.clone() });
+        settle(w, width, height);
+        let (before, before_session) = (allowed.get(), sessioned.get());
+        click(w, fw - 120.0, corner.allow_y);
+        click(w, fw - 220.0, session_y);
+        assert_eq!(allowed.get(), before, "a new request in a card that was read leaves Allow disabled until it is read too");
+        assert_eq!(sessioned.get(), before_session, "and the session row with it");
+        read_to_end(w, fw - 220.0, 140.0, width, height);
+        let before = allowed.get();
+        click(w, fw - 120.0, corner.allow_y);
+        assert!(allowed.get() > before, "read to its end, the new request can be allowed");
+    }
 
     // ── The vault prompt with it: never over the card ──
     let without = settle(w, width, height);
@@ -200,6 +223,7 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str, width: u32, height: u32) -> 
         (width, height),
         &|| lens.get_denied(),
         &|| lens.get_allowed(),
+        &|| lens.get_sessioned(),
     );
     assert!(in_lens.deny_y < reply_top && in_lens.allow_y < reply_top, "both above the reply box, inside the panel");
 

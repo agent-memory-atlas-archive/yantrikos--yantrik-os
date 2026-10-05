@@ -93,7 +93,8 @@ pub fn refusal(args: &serde_json::Value, params: Option<&[String]>, whole: bool)
         }
     }
     let value_chars = if whole { approvals::WHOLE_VALUE_CHARS } else { approvals::ARG_VALUE_CHARS };
-    let total: usize = approvals::args_rows_with(args, value_chars).iter().map(|row| visible(row).chars().count()).sum();
+    // Measured exactly as the card will draw it: the same rows, the same escapes, the same join.
+    let total = joined(&approvals::args_rows_with(args, value_chars)).chars().count();
     if total > TOTAL_CHARS {
         return Some(format!("the arguments come to {total} characters as the card would draw them, past the {TOTAL_CHARS} a card shows"));
     }
@@ -114,6 +115,15 @@ pub fn clip_row(escaped: &str) -> String {
 /// The rows joined as the card's "Exactly:" line, cut to [`TOTAL_CHARS`], the cut named.
 pub fn clip_rows(joined: &str) -> String {
     clip(joined, TOTAL_CHARS)
+}
+
+/// The argument rows as the card's "Exactly:" line draws them before its final cut: each escaped
+/// and cut to [`ROW_CHARS`], joined with "; ". The one join, read by [`refusal`] to measure a
+/// request and by `approval_wording::consequences` to draw it, so the two cannot drift: the
+/// separators count against [`TOTAL_CHARS`] in both (fifth review of #639 — counted only on the
+/// card, they let a request at the limit through and cut its last argument).
+pub fn joined(rows: &[String]) -> String {
+    rows.iter().map(|row| clip_row(&visible(row))).collect::<Vec<_>>().join("; ")
 }
 
 fn clip(text: &str, max: usize) -> String {

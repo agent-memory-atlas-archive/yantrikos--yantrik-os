@@ -36,18 +36,18 @@ fn rows_too_long_to_draw_are_refused() {
         (0..8).map(|i| (format!("a{i}"), json!("\u{E0041}".repeat(60)))).collect();
     let why = refusal(&serde_json::Value::Object(args), None, false).expect("(c) refused");
     assert!(why.contains("characters as the card would draw them"), "{why}");
-    // At the budget, allowed: eight rows of exactly TOTAL_CHARS / 8 escaped characters, with
-    // forty-character names and control characters in every value.
-    let per_row = TOTAL_CHARS / 8;
+    // At the budget, allowed: eight rows with forty-character names and control characters in
+    // every value, which with the seven "; " between them come to exactly TOTAL_CHARS drawn.
+    let width_of = |i: usize| if i == 7 { 80 } else { 78 };
     let args: serde_json::Map<String, serde_json::Value> = (0..8)
         .map(|i| {
             let key = format!("{i}{}", "k".repeat(KEY_CHARS - 1));
-            let value = "\u{1}".repeat(3) + &"v".repeat(per_row - KEY_CHARS - 2 - 3 * 8);
+            let value = "\u{1}".repeat(3) + &"v".repeat(width_of(i) - KEY_CHARS - 2 - 3 * 8);
             (key, json!(value))
         })
         .collect();
     let rows = approvals::args_rows(&serde_json::Value::Object(args.clone()));
-    assert!(rows.iter().all(|r| visible(r).chars().count() == per_row), "{rows:?}");
+    assert_eq!(joined(&rows).chars().count(), TOTAL_CHARS, "{rows:?}");
     assert!(refusal(&serde_json::Value::Object(args.clone()), None, false).is_none(), "exactly the budget is shown");
     // One character more is refused.
     let mut over = args;
@@ -91,6 +91,50 @@ fn a_card_that_must_show_its_arguments_whole_shows_them_whole_or_is_not_asked() 
     assert!(c.exactly.contains("characters in full)"), "the marker reaches the card: {}", c.exactly);
     // And the refusal says why, in one sentence.
     assert!(refused("x").starts_with("this request is too long to put in front of a person in full, so nothing was asked: "));
+}
+
+/// Fifth review of #639: the "; " between rows count. A request shown whole at exactly the budget
+/// is drawn whole and uncut — the card's line is the very string the refusal measured — and one
+/// character more is refused rather than cut on the card.
+#[test]
+fn the_separators_count_and_a_whole_request_at_the_limit_is_drawn_uncut() {
+    // Three rows "a: …", "b: …", "c: …" and two separators: 3 + 3 + 3 + 4 = 13 around the values.
+    let at_limit = |third: usize| {
+        json!({
+            "a": "x".repeat(approvals::WHOLE_VALUE_CHARS),
+            "b": "y".repeat(approvals::WHOLE_VALUE_CHARS),
+            "c": "z".repeat(third),
+        })
+    };
+    let third = TOTAL_CHARS - 13 - 2 * approvals::WHOLE_VALUE_CHARS;
+    let args = at_limit(third);
+    let rows = approvals::args_rows_with(&args, approvals::WHOLE_VALUE_CHARS);
+    assert_eq!(joined(&rows).chars().count(), TOTAL_CHARS);
+    assert!(refusal(&args, None, true).is_none(), "exactly at the limit is asked about");
+    let c = crate::approval_wording::consequences("x", crate::approval_wording::Published::app(""), "", "", &rows);
+    assert!(!c.exactly.contains("characters in full"), "and drawn uncut: {}", c.exactly);
+    assert!(c.exactly.ends_with(&"z".repeat(third)), "its last argument whole");
+    assert_eq!(c.exactly, joined(&rows), "the card draws the string the refusal measured");
+    // One more character, in the last value: refused, never cut.
+    assert!(refusal(&at_limit(third + 1), None, true).is_some(), "one over is refused");
+}
+
+/// The recipe executor's hand_off card is raised by the desktop itself and never meets the
+/// refusal; its task — up to 200 characters, the thing being asked — is shown whole, not cut at
+/// sixty (fifth review of #639).
+#[test]
+fn a_hand_off_the_desktop_raises_shows_its_task_whole() {
+    let task = format!("Review the release notes for 0.4 and {} then say what is missing", "check every section ".repeat(6));
+    assert!(task.chars().count() > approvals::ARG_VALUE_CHARS && task.chars().count() <= 200);
+    let mut store = approvals::Store::new();
+    let now = std::time::Instant::now();
+    let verified = approvals::Verified { raised_by_desktop: true, ..Default::default() };
+    store
+        .request("Council recipe", verified, "shell", "hand_off", json!({ "role": "reviewer", "task": task }), "sensitive", "Hand work to the Reviewer.", "", "", now, "10:00")
+        .expect("raised");
+    let card = store.cards(now).pop().expect("the card");
+    assert!(card.args.iter().any(|r| r.ends_with("then say what is missing")), "{:?}", card.args);
+    assert!(!card.args.iter().any(|r| r.contains("characters in full")), "{:?}", card.args);
 }
 
 /// Which cards must show their arguments whole: the red button's cards, and open-ended ones —

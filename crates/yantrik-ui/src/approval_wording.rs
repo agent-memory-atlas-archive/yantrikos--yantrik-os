@@ -248,8 +248,7 @@ pub fn consequences(action: &str, published: Published, said: &str, target: &str
     let exactly = if none {
         String::new()
     } else {
-        let rows: Vec<String> = args.iter().map(|a| approval_bounds::clip_row(&visible(a))).collect();
-        approval_bounds::clip_rows(&rows.join("; "))
+        approval_bounds::clip_rows(&approval_bounds::joined(args))
     };
     let target = visible(target.trim());
     let what = match (target.is_empty(), exactly.is_empty()) {

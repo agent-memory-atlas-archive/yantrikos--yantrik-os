@@ -344,7 +344,16 @@ export component ApprovalCard inherits Rectangle {
         // is always live.
         property <length> above-room: max(0px, root.height-limit - decide.preferred-height
             - 2 * Theme.sp-2 - Theme.sp-2);
-        property <bool> overflowing: above-content.preferred-height > self.above-room + 0.5px;
+        // Measured on the pinned lines alone — the middle is what yields — so whether the card
+        // overflows never depends on how tall the middle is drawn.
+        property <bool> overflowing: pinned-floor.preferred-height + changes.preferred-height
+            + 2 * Theme.sp-2 > self.above-room + 0.5px;
+        // What the gate checks, and all it checks: that the section above the buttons has been at
+        // its end at least once for this request id. A fling or a dragged scrollbar reaches the
+        // end as surely as reading does; it proves every line was put in view, not that it was
+        // read. And only a click on this card's own Allow reaches `allow()`, the one path to
+        // `approval-allow` / `on_approval_allow` in the shell: nothing else on the card, and
+        // nothing a caller sends, can press it.
         property <bool> allow-ready: !self.overflowing || root.read-id == root.data.id;
         // A new request in this card starts at its top, however far the last one was scrolled.
         property <string> card-id: root.data.id;
@@ -506,12 +515,17 @@ export component ApprovalCard inherits Rectangle {
             // The part that gives way first: its height is what is left of `above-room` once the
             // floor and what changes are subtracted, with the two gaps between them, and it
             // scrolls on its own. Where the card has room it is precisely as tall as its content
-            // and nothing scrolls. When it is down to nothing and the rest still does not fit, the
-            // whole section above the buttons scrolls instead (see `overflowing`).
+            // and nothing scrolls. When even the pinned lines do not fit, the whole section above
+            // the buttons scrolls as one instead (see `overflowing`), and then the middle takes its
+            // natural height inside it — the exact name, the agent, the whole sentence, the app's
+            // word about the call and Details stay reachable by that one scroll, rather than
+            // shrunk to nothing (fifth review of #639). Its own scroll is off then, so the wheel
+            // over it moves the section the gate is watching.
             Rectangle {
-                height: min(mid.preferred-height,
-                            max(0px, card.above-room - pinned-floor.preferred-height
-                                - changes.preferred-height - 2 * Theme.sp-2));
+                height: card.overflowing ? mid.preferred-height
+                    : min(mid.preferred-height,
+                          max(0px, card.above-room - pinned-floor.preferred-height
+                              - changes.preferred-height - 2 * Theme.sp-2));
                 clip: true;
 
                 // A Flickable has no preferred height of its own, so the sizing Rectangle is
@@ -521,6 +535,7 @@ export component ApprovalCard inherits Rectangle {
                 Flickable {
                     viewport-width: self.width;
                     viewport-height: mid.preferred-height;
+                    interactive: !card.overflowing;
 
                     mid := VerticalLayout {
                         spacing: Theme.sp-2;

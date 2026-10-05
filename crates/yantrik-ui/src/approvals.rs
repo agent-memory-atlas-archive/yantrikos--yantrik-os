@@ -1179,7 +1179,10 @@ impl Store {
                 summary: summary_of(&record.published),
                 // Whole, wrapped, on a card whose action cannot be undone or runs whatever it is
                 // given; cut with its length named on any other.
-                args: if shown_whole(&record.grade, &record.said()) {
+                // And on a card the desktop raised itself — the recipe executor's hand_off, whose
+                // task (up to 200 characters) is what a person is being asked to start — which
+                // never passes `request_approval`'s refusal and was cut at sixty (fifth review).
+                args: if shown_whole(&record.grade, &record.said()) || record.verified.raised_by_desktop {
                     args_rows_with(&record.args, WHOLE_VALUE_CHARS)
                 } else {
                     args_rows(&record.args)
