@@ -18,7 +18,11 @@
 //! `yantrik-egress direct [STATE_DIR]` prints the direct set instead and exits: where the kernel
 //! lets the mind account connect without this proxy (`direct`, `yantrik-update mind-egress`).
 //! `yantrik-egress seed-plan` reads `<source> <url>` lines and prints which become seeded `lan`
-//! rules (`seed`, `yantrik-update`'s seeding).
+//! rules (`seed`, `yantrik-update`'s seeding). `yantrik-egress capabilities` prints what this
+//! build promises, one word a line (`policy::CAPABILITIES`). `yantrik-egress lan-hosts
+//! [STATE_DIR]` prints every host a `lan` rule names, with its ports (`direct`). `yantrik-egress
+//! snapshot [STATE_DIR]` prints both, `direct`'s lines then `lan-hosts`', from one read of the
+//! policy (what `yantrik-update mind-egress` asks).
 
 mod control;
 mod direct;
@@ -68,6 +72,28 @@ fn main() {
             }
             return;
         }
+        Some("lan-hosts") if args.len() <= 2 => {
+            let dir = args.get(1).map(PathBuf::from).unwrap_or_else(|| PathBuf::from(env("EGRESS_STATE", "/var/lib/yantrik-egress")));
+            match direct::export_lan_hosts(&dir) {
+                Ok(text) => print!("{text}"),
+                Err(e) => {
+                    eprintln!("yantrik-egress lan-hosts: {e}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
+        Some("snapshot") if args.len() <= 2 => {
+            let dir = args.get(1).map(PathBuf::from).unwrap_or_else(|| PathBuf::from(env("EGRESS_STATE", "/var/lib/yantrik-egress")));
+            match direct::export_snapshot(&dir) {
+                Ok(text) => print!("{text}"),
+                Err(e) => {
+                    eprintln!("yantrik-egress snapshot: {e}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
         Some("seed-plan") if args.len() == 1 => {
             use std::io::Read;
             let mut input = String::new();
@@ -78,8 +104,14 @@ fn main() {
             print!("{}", seed::plan_text(&input));
             return;
         }
+        Some("capabilities") if args.len() == 1 => {
+            for c in policy::CAPABILITIES {
+                println!("{c}");
+            }
+            return;
+        }
         Some(_) => {
-            eprintln!("usage: yantrik-egress            the proxy, configured by its unit's environment\n       yantrik-egress direct [DIR]   print the direct set from the policy in DIR\n       yantrik-egress seed-plan      <source> <url> lines on stdin: which become seeded lan rules");
+            eprintln!("usage: yantrik-egress            the proxy, configured by its unit's environment\n       yantrik-egress direct [DIR]   print the direct set from the policy in DIR\n       yantrik-egress lan-hosts [DIR] print every host a lan rule names, with its ports\n       yantrik-egress snapshot [DIR]  both of those, from one read of the policy\n       yantrik-egress seed-plan      <source> <url> lines on stdin: which become seeded lan rules\n       yantrik-egress capabilities   print what this build promises, one word a line");
             std::process::exit(2);
         }
     }

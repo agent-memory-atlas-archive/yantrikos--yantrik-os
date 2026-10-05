@@ -246,6 +246,65 @@ A phone can answer the card like any other, since cards reach channels. Only the
 writes a rule. This is OpenShell's Policy Advisor, done through the approvals we already have.
 Repeated attempts to one host make one card, not a stream.
 
+### 5. What a mind may rely on
+
+A mind cannot see the kernel's table, so it is told, in a file only root writes:
+`/run/yantrik-mind-egress/mind-egress.json`. `yantrik-update mind-egress apply` writes it after a
+table has loaded (and only then), at boot from `yantrik-mind-egress.service` (`/run` is tmpfs) and
+again from the `.path` refresh when the policy, Private mode or resolv.conf changes. It is written
+beside itself and renamed into place, so a link planted at the path is replaced, never followed.
+
+The directory is its own, root:root 0755, made by the writer if missing. It is not `/run/yantrik`:
+root services without `XDG_RUNTIME_DIR` keep their sockets there and harden it to 0700
+(`yantrik-ipc-transport`'s `socket_dir`), and the mind's account could not traverse it. The writer
+refuses a directory that is a link, not owned by uid 0 and group root, or group- or
+world-writable, and then writes no file (an old one is removed). Stopping the boot unit removes
+the file only; the directory stays.
+
+```json
+{"enforced": true, "table": "inet yantrik_mind_egress", "proxy": "http://127.0.0.1:7450",
+ "proxy_refuses_private": true, "mode": "audit", "private": false, "dns_allowed": true,
+ "lan_hosts": [{"host": "192.168.4.42", "ports": [8888]}, {"host": "homeassistant.local", "ports": [8123]}],
+ "loaded_at": 1759600000, "version": 2}
+```
+
+- `mode`: `audit` or `enforce`, the policy's; `fallback` when the policy could not be read or its
+  answer was refused and the loaded table holds loopback only (`private` and `dns_allowed` false).
+- `private`: Private mode is on; the table has no entries and refuses DNS.
+- `dns_allowed`: the account may send DNS (audit, not Private). Otherwise every lookup is refused.
+- `proxy_refuses_private`: the installed `yantrik-egress capabilities` prints
+  `refuses-private-all-modes`, so the proxy refuses private and special ranges without a `lan`
+  rule in audit too. Read from the binary at each apply, never assumed; false from an older proxy.
+- `lan_hosts`: every host a `lan` rule names, seeded or the person's — names, `*.domain`
+  patterns and literal addresses — lowercased, without a trailing dot, sorted, each once with its
+  ports. The proxy grants the local network on the **name asked for** (`Policy::decide` matches a
+  `lan` rule by the requested host), so a name here reaches whatever it resolves to, a private
+  address included. A mind fetching on behalf of anything untrusted (a URL from a web page, a
+  tool's argument) must refuse these hosts itself, on any port (`*.domain` covers every name under
+  it), and every literal address that is not the internet. Read by the proxy's own code as its
+  account (`yantrik-egress snapshot`, which prints the table's entries and these hosts from one
+  read of the policy, so the table and this list never describe two policies; `lan-hosts` from a
+  proxy older than it), never parsed by root from the YAML; checked again as root.
+  It lists the policy, so Private mode does not empty it (the proxy refuses everything then anyway).
+  **`null`** when it could not be read (no policy reader, a policy that does not read, an answer
+  that did not check) or there are more than 64 hosts: a reader must then take **every name it
+  has not resolved itself as possibly the local network** and refuse it on the untrusted path —
+  fail closed, never treat `null` as an empty list. `[]` means there are no `lan` rules.
+- `loaded_at`: unix seconds of the load. `version`: this layout (2 adds `lan_hosts`); a reader
+  refuses one it does not know.
+
+Trust it only if all of these hold, else take egress as not enforced:
+- `/run/yantrik-mind-egress` is owned by uid 0 and is not group- or world-writable;
+- the file is opened with `O_NOFOLLOW`, and `fstat` on that descriptor (not a second `stat` of the
+  path) shows a regular file owned by uid 0 with no group or other write bit;
+- it parses, `enforced` is true and `version` is one it knows.
+
+A missing file means **not enforced: fail closed**. It is removed when nothing could be loaded
+(and then no mind starts anyway: its unit `Requires=` the boot unit), and when the boot unit
+stops (stopping nftables flushes the ruleset, the table with it). When it holds, a mind sends
+everything through the proxy and leaves resolving names to it; with `dns_allowed` false it must
+not try to resolve anything itself.
+
 ## What this is not
 
 - **Not a sandbox for the person's own processes.** Agents' terminals run as the person, and

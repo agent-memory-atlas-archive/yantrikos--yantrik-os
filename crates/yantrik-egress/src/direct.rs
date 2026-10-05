@@ -30,6 +30,17 @@
 //!
 //! A policy that does not read is an error (exit 1), and the updater loads an empty set for it.
 //! The updater checks every line again as root, and caps the set.
+//!
+//! `yantrik-egress lan-hosts [STATE_DIR]` prints, the same way, every host a `lan` rule names —
+//! names, `*.domain` and literal addresses, seeded or the person's — with its ports, for the
+//! status file a mind reads (`lan_hosts` in /run/yantrik-mind-egress/mind-egress.json). The
+//! proxy grants the local network on the name asked for, so a mind fetching for an untrusted
+//! caller must refuse these hosts itself. Private mode does not change it: it lists the policy.
+//!
+//! ```text
+//! lan homeassistant.local 8123
+//! lan 192.168.4.42 8080,8888
+//! ```
 
 use std::net::IpAddr;
 use std::path::Path;
@@ -93,21 +104,68 @@ pub fn entries(policy: &Policy) -> Vec<Entry> {
 /// (the kernel lets the mind ask DNS only in audit), then the entries, none in Private mode.
 pub fn export(dir: &Path) -> Result<String, String> {
     let policy = Policy::read(&dir.join("policy.yaml"))?;
+    Ok(direct_text(&policy, crate::state::private_at(dir)))
+}
+
+fn direct_text(policy: &Policy, private: bool) -> String {
     let mode = match policy.mode {
         Mode::Audit => "audit",
         Mode::Enforce => "enforce",
     };
-    if crate::state::private_at(dir) {
-        return Ok(format!("private on\nmode {mode}\n"));
+    if private {
+        return format!("private on\nmode {mode}\n");
     }
     let mut out = format!("private off\nmode {mode}\n");
-    for e in entries(&policy) {
+    for e in entries(policy) {
         match e {
             Entry::Direct(ip, port) => out.push_str(&format!("direct {ip} {port}\n")),
             Entry::Loopback(ip, port) => out.push_str(&format!("loopback {ip} {port}\n")),
         }
     }
-    Ok(out)
+    out
+}
+
+/// Every host a `lan` rule names, lowercased and without a trailing dot, each once with all its
+/// ports, sorted: names and `*.domain` as written, literal addresses as written.
+pub fn lan_hosts(policy: &Policy) -> Vec<(String, Vec<u16>)> {
+    let mut out: std::collections::BTreeMap<String, Vec<u16>> = std::collections::BTreeMap::new();
+    for r in policy.rules.iter().filter(|r| r.lan) {
+        let host = r.host.trim_end_matches('.').to_ascii_lowercase();
+        if host.is_empty() {
+            continue;
+        }
+        out.entry(host).or_default().extend(r.ports.iter().filter(|p| **p != 0));
+    }
+    out.into_iter()
+        .filter_map(|(h, mut ports)| {
+            ports.sort();
+            ports.dedup();
+            (!ports.is_empty()).then_some((h, ports))
+        })
+        .collect()
+}
+
+/// What `yantrik-egress lan-hosts` prints for the state in `dir`: `lan <host> <port>[,<port>…]`
+/// a line. A policy that does not read is an error, as for [`export`].
+pub fn export_lan_hosts(dir: &Path) -> Result<String, String> {
+    let policy = Policy::read(&dir.join("policy.yaml"))?;
+    Ok(lan_hosts_text(&policy))
+}
+
+fn lan_hosts_text(policy: &Policy) -> String {
+    let mut out = String::new();
+    for (host, ports) in lan_hosts(policy) {
+        let ports: Vec<String> = ports.iter().map(u16::to_string).collect();
+        out.push_str(&format!("lan {host} {}\n", ports.join(",")));
+    }
+    out
+}
+
+/// What `yantrik-egress snapshot` prints: [`export`] then [`export_lan_hosts`], both from one read
+/// of the policy, so the table and the status file's `lan_hosts` describe the same policy.
+pub fn export_snapshot(dir: &Path) -> Result<String, String> {
+    let policy = Policy::read(&dir.join("policy.yaml"))?;
+    Ok(direct_text(&policy, crate::state::private_at(dir)) + &lan_hosts_text(&policy))
 }
 
 #[cfg(test)]
@@ -191,6 +249,84 @@ mod tests {
         assert!(export(&d).is_err(), "not a policy");
         std::fs::write(d.join("policy.yaml"), b"mode: audit\n\xff\n").unwrap();
         assert!(export(&d).is_err(), "not text");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn every_lan_rule_is_a_lan_host_names_included() {
+        let seeded = |host: &str, ports: &[u16]| Rule { seeded: true, ..rule(host, ports, true) };
+        let p = Policy {
+            mode: Mode::Audit,
+            rules: vec![
+                seeded("homeassistant.local", &[8123]),
+                seeded("gpu.example.ts.net", &[11434]),
+                rule("searx.lan.", &[8888], true),
+                rule("*.home.arpa", &[443], true),
+                rule("192.168.4.42", &[8888, 8080], true),
+                rule("192.168.4.42", &[8888], true),
+                rule("fd00::5", &[443], true),
+                rule("127.0.0.1", &[11434], true),
+                // Not `lan`: not a LAN host.
+                rule("api.x.ai", &[443], false),
+                rule("192.168.4.43", &[22], false),
+            ],
+        };
+        let got: Vec<String> = lan_hosts(&p).iter().map(|(h, ports)| format!("{h} {ports:?}")).collect();
+        assert_eq!(
+            got,
+            [
+                "*.home.arpa [443]",
+                "127.0.0.1 [11434]",
+                "192.168.4.42 [8080, 8888]",
+                "fd00::5 [443]",
+                "gpu.example.ts.net [11434]",
+                "homeassistant.local [8123]",
+                "searx.lan [8888]"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_lan_hosts_export_reads_the_policy_and_refuses_one_that_does_not_read() {
+        let d = std::env::temp_dir().join(format!("yantrik-egress-lan-hosts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        assert_eq!(export_lan_hosts(&d).unwrap(), "", "no policy: no lan hosts");
+        std::fs::write(
+            d.join("policy.yaml"),
+            "mode: enforce\nrules:\n  - host: homeassistant.local\n    ports: [8123]\n    http: true\n    lan: true\n    why: seeded from mind-person.env\n    seeded: true\n  - host: 192.168.4.42\n    ports: [8888, 8080]\n    lan: true\n    why: SearXNG\n  - host: api.x.ai\n    ports: [443]\n    why: the model\n",
+        )
+        .unwrap();
+        assert_eq!(export_lan_hosts(&d).unwrap(), "lan 192.168.4.42 8080,8888\nlan homeassistant.local 8123\n");
+        std::fs::write(d.join("private"), "on\n").unwrap();
+        assert_eq!(export_lan_hosts(&d).unwrap(), "lan 192.168.4.42 8080,8888\nlan homeassistant.local 8123\n", "Private mode: still the policy's");
+        std::fs::write(d.join("policy.yaml"), "mode: enforce\nrules: [\n").unwrap();
+        assert!(export_lan_hosts(&d).is_err(), "not a policy");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_snapshot_is_both_exports_from_one_read() {
+        let d = std::env::temp_dir().join(format!("yantrik-egress-snapshot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        assert_eq!(export_snapshot(&d).unwrap(), "private off\nmode audit\n", "no policy: audit, nothing direct, no lan hosts");
+        std::fs::write(
+            d.join("policy.yaml"),
+            "mode: enforce\nrules:\n  - host: homeassistant.local\n    ports: [8123]\n    lan: true\n    why: HA\n  - host: 192.168.4.42\n    ports: [8888]\n    http: true\n    lan: true\n    why: SearXNG\n",
+        )
+        .unwrap();
+        let both = export(&d).unwrap() + &export_lan_hosts(&d).unwrap();
+        assert_eq!(export_snapshot(&d).unwrap(), both);
+        assert_eq!(both, "private off\nmode enforce\ndirect 192.168.4.42 8888\nlan 192.168.4.42 8888\nlan homeassistant.local 8123\n");
+        std::fs::write(d.join("private"), "on\n").unwrap();
+        assert_eq!(
+            export_snapshot(&d).unwrap(),
+            "private on\nmode enforce\nlan 192.168.4.42 8888\nlan homeassistant.local 8123\n",
+            "Private mode: no entries, the lan hosts still the policy's"
+        );
+        std::fs::write(d.join("policy.yaml"), "mode: enforce\nrules: [\n").unwrap();
+        assert!(export_snapshot(&d).is_err(), "not a policy");
         let _ = std::fs::remove_dir_all(&d);
     }
 }
