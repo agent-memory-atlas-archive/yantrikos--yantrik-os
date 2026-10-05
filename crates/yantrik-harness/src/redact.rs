@@ -34,6 +34,16 @@
 //!   piece the match began in carries the marker, and the rest of the match is taken out of the
 //!   pieces it ran into.
 //! - Left to right, longest needle first at each place, and a match is never matched again.
+//!
+//! # Searching off the lock, applying under it
+//!
+//! A needle is only a digest, so every window of every needle length is hashed in full; nothing
+//! cheaper can rule a window out. That is bounded instead: a store copies its texts out
+//! ([`Prepared`]), the caller adds up [`Search::work`] over everything one `redact` would search,
+//! and refuses the whole of it over [`MAX_WORK`] before anything is hashed or touched. Then
+//! [`Search::find`] runs on the copies, with no lock held, and the store takes its lock only to
+//! apply what was found ([`Found::apply`]), checking each match again against the text as it is by
+//! then.
 
 use std::collections::HashSet;
 
@@ -108,56 +118,169 @@ pub fn validate(needles: &[Needle]) -> Result<(), String> {
     Ok(())
 }
 
-/// Erase every needle from one text. `None` when nothing matched, so the caller leaves it alone.
-pub fn redact(text: &str, needles: &[Needle]) -> Option<(String, usize)> {
-    let (mut pieces, n) = redact_pieces(&[text], needles)?;
-    Some((pieces.remove(0), n))
+/// The most searching one `redact` may cost, everywhere it searches together: the bytes hashed,
+/// each window's bytes plus [`WINDOW_COST`]. Over it, the whole `redact` is refused before
+/// anything is searched or touched ([`TOO_MUCH`]). A needle travels only as a digest, so every
+/// window of every needle length has to be hashed in full; this is what bounds that. About a second
+/// of SHA-256 on this hardware.
+pub const MAX_WORK: u64 = 1 << 30;
+
+/// What every window costs beyond its own bytes: one SHA-256 block of padding and finishing.
+pub const WINDOW_COST: u64 = 64;
+
+/// The refusal when a `redact` would search more than [`MAX_WORK`].
+pub const TOO_MUCH: &str = "too much to search; ask again with fewer or shorter needles";
+
+/// The needles, ready to search with.
+pub struct Search {
+    digests: HashSet<[u8; 32]>,
+    /// Each distinct length, longest first.
+    lengths: Vec<usize>,
 }
 
-/// Erase every needle from `pieces`, matched as one text (see the module docs). `None` when
-/// nothing matched. Otherwise the same number of pieces, and how many places were erased; a piece
-/// no match reached is handed back exactly as it was.
-pub fn redact_pieces(pieces: &[&str], needles: &[Needle]) -> Option<(Vec<String>, usize)> {
-    let digests: HashSet<[u8; 32]> = needles.iter().filter_map(Needle::bytes).collect();
-    let mut lengths: Vec<usize> = needles.iter().map(|n| n.len).filter(|&l| l > 0).collect();
-    lengths.sort_unstable_by(|a, b| b.cmp(a));
-    lengths.dedup();
-    if digests.is_empty() || lengths.is_empty() {
-        return None;
+impl Search {
+    pub fn new(needles: &[Needle]) -> Search {
+        let digests: HashSet<[u8; 32]> = needles.iter().filter_map(Needle::bytes).collect();
+        let mut lengths: Vec<usize> = needles.iter().map(|n| n.len).filter(|&l| l > 0).collect();
+        lengths.sort_unstable_by(|a, b| b.cmp(a));
+        lengths.dedup();
+        Search { digests, lengths }
     }
 
-    let joined: String = pieces.concat();
-    let canon = Canonical::of(&joined);
-    let count = canon.origin.len();
+    fn is_empty(&self) -> bool {
+        self.digests.is_empty() || self.lengths.is_empty()
+    }
 
-    // The matches, as byte spans of `joined`: sorted, never overlapping.
-    let mut spans: Vec<(usize, usize)> = Vec::new();
-    let mut at = 0;
-    'scan: while at < count {
-        for &len in &lengths {
-            if at + len > count {
+    /// What searching `text` will cost, in [`MAX_WORK`]'s units, worked out without hashing.
+    pub fn work(&self, text: &Prepared) -> u64 {
+        if self.is_empty() {
+            return 0;
+        }
+        let offsets = &text.canon.offsets;
+        let count = offsets.len() - 1;
+        // prefix[k] is the sum of offsets[..k], so a run of offsets sums in one subtraction.
+        let mut prefix: Vec<u64> = Vec::with_capacity(offsets.len() + 1);
+        prefix.push(0);
+        for &o in offsets {
+            prefix.push(prefix.last().unwrap() + o as u64);
+        }
+        let mut work: u64 = 0;
+        for &len in &self.lengths {
+            if len > count {
                 continue;
             }
-            let window = &canon.text.as_bytes()[canon.offsets[at]..canon.offsets[at + len]];
-            let digest: [u8; 32] = Sha256::digest(window).into();
-            if digests.contains(&digest) {
-                let span = (canon.origin[at].0, canon.origin[at + len - 1].1);
-                spans.push(span);
-                // On past everything the span took, including the rest of a character it widened
-                // into: what is erased is not matched again.
-                at += len;
-                while at < count && canon.origin[at].0 < span.1 {
-                    at += 1;
-                }
-                continue 'scan;
-            }
+            let windows = (count - len + 1) as u64;
+            // Window `at` is offsets[at + len] - offsets[at] bytes; summed over every `at`.
+            let ends = prefix[count + 1] - prefix[len];
+            let starts = prefix[count - len + 1];
+            work = work.saturating_add(ends - starts).saturating_add(windows * WINDOW_COST);
         }
-        at += 1;
-    }
-    if spans.is_empty() {
-        return None;
+        work
     }
 
+    /// Every match in `text`, left to right, longest needle first at each place, never matching
+    /// what was matched. Takes no lock: `text` is a copy.
+    pub fn find(&self, text: &Prepared) -> Found {
+        let mut hits: Vec<Hit> = Vec::new();
+        if self.is_empty() {
+            return Found { hits };
+        }
+        let canon = &text.canon;
+        let count = canon.origin.len();
+        let mut at = 0;
+        'scan: while at < count {
+            for &len in &self.lengths {
+                if at + len > count {
+                    continue;
+                }
+                let digest: [u8; 32] = Sha256::digest(canon.window(at, len)).into();
+                if self.digests.contains(&digest) {
+                    hits.push(Hit { at, len, digest });
+                    let end = canon.origin[at + len - 1].1;
+                    // On past everything the match's span took, including the rest of a character
+                    // it widened into: what is erased is not matched again.
+                    at += len;
+                    while at < count && canon.origin[at].0 < end {
+                        at += 1;
+                    }
+                    continue 'scan;
+                }
+            }
+            at += 1;
+        }
+        Found { hits }
+    }
+}
+
+/// One text — its pieces, joined — in canonical form: a copy taken out of a store, so it can be
+/// measured and searched without the store's lock.
+pub struct Prepared {
+    canon: Canonical,
+}
+
+impl Prepared {
+    pub fn new<S: AsRef<str>>(pieces: &[S]) -> Prepared {
+        let joined: String = pieces.iter().map(|p| p.as_ref()).collect();
+        Prepared { canon: Canonical::of(&joined) }
+    }
+}
+
+/// What a search found in one text: where in the canonical form, and which needle. No words.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Found {
+    hits: Vec<Hit>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Hit {
+    /// The window's first canonical scalar, and how many.
+    at: usize,
+    len: usize,
+    digest: [u8; 32],
+}
+
+impl Found {
+    pub fn is_empty(&self) -> bool {
+        self.hits.is_empty()
+    }
+
+    /// Erase what was found from `pieces` — the text as it is now, under the store's lock. Each
+    /// match is checked again first: the window at the same place must still hash to the same
+    /// needle, or it is skipped. So only the needles' words are ever replaced, even if the text
+    /// changed since it was searched. `None` when nothing is erased; otherwise the same number of
+    /// pieces (one no match reached comes back exactly as it was) and how many places.
+    pub fn apply(&self, pieces: &[&str]) -> Option<(Vec<String>, usize)> {
+        if self.hits.is_empty() {
+            return None;
+        }
+        let joined: String = pieces.concat();
+        let canon = Canonical::of(&joined);
+        let count = canon.origin.len();
+        let mut spans: Vec<(usize, usize)> = Vec::new();
+        for hit in &self.hits {
+            if hit.at + hit.len > count {
+                continue;
+            }
+            let digest: [u8; 32] = Sha256::digest(canon.window(hit.at, hit.len)).into();
+            if digest != hit.digest {
+                continue;
+            }
+            let span = (canon.origin[hit.at].0, canon.origin[hit.at + hit.len - 1].1);
+            if spans.last().is_some_and(|&(_, end)| span.0 < end) {
+                continue;
+            }
+            spans.push(span);
+        }
+        if spans.is_empty() {
+            return None;
+        }
+        Some((write_back(pieces, &joined, &spans), spans.len()))
+    }
+}
+
+/// The pieces again, each span of `joined` replaced: the marker in the piece the span begins in,
+/// and the rest of the span taken out of the pieces it runs into.
+fn write_back(pieces: &[&str], joined: &str, spans: &[(usize, usize)]) -> Vec<String> {
     let mut out: Vec<String> = Vec::with_capacity(pieces.len());
     let mut first = 0; // the first span that may still reach the current piece
     let mut start = 0;
@@ -179,24 +302,66 @@ pub fn redact_pieces(pieces: &[&str], needles: &[Needle]) -> Option<(Vec<String>
         out.push(kept);
         start = end;
     }
-    Some((out, spans.len()))
+    out
 }
 
-/// Erase every needle from each string inside a JSON value, in place: object values and array
-/// items, never object keys. How many places were erased.
+/// Erase every needle from one text, searching and applying at once. `None` when nothing
+/// matched. For tests and small texts: a store searches with [`Search`] off its lock and applies
+/// with [`Found::apply`] under it, after checking the whole erasure's [`Search::work`].
+pub fn redact(text: &str, needles: &[Needle]) -> Option<(String, usize)> {
+    let (mut pieces, n) = redact_pieces(&[text], needles)?;
+    Some((pieces.remove(0), n))
+}
+
+/// [`redact`] over pieces matched as one text (see the module docs).
+pub fn redact_pieces(pieces: &[&str], needles: &[Needle]) -> Option<(Vec<String>, usize)> {
+    Search::new(needles).find(&Prepared::new(pieces)).apply(pieces)
+}
+
+/// [`redact`] over each string inside a JSON value, in place. How many places were erased.
 pub fn redact_json(value: &mut serde_json::Value, needles: &[Needle]) -> usize {
-    match value {
-        serde_json::Value::String(s) => match redact(s, needles) {
-            Some((text, n)) => {
-                *s = text;
-                n
-            }
-            None => 0,
-        },
-        serde_json::Value::Array(items) => items.iter_mut().map(|v| redact_json(v, needles)).sum(),
-        serde_json::Value::Object(map) => map.values_mut().map(|v| redact_json(v, needles)).sum(),
-        _ => 0,
+    let search = Search::new(needles);
+    let found: Vec<Found> = json_strings(value).iter().map(|s| search.find(&Prepared::new(&[s]))).collect();
+    apply_json(value, &found)
+}
+
+/// The strings inside a JSON value — object values and array items, never object keys — in the
+/// order [`apply_json`] walks them.
+pub fn json_strings(value: &serde_json::Value) -> Vec<String> {
+    fn walk(value: &serde_json::Value, out: &mut Vec<String>) {
+        match value {
+            serde_json::Value::String(s) => out.push(s.clone()),
+            serde_json::Value::Array(items) => items.iter().for_each(|v| walk(v, out)),
+            serde_json::Value::Object(map) => map.values().for_each(|v| walk(v, out)),
+            _ => {}
+        }
     }
+    let mut out = Vec::new();
+    walk(value, &mut out);
+    out
+}
+
+/// Apply `found[i]` to the `i`th string of [`json_strings`], in place. How many places.
+pub fn apply_json(value: &mut serde_json::Value, found: &[Found]) -> usize {
+    fn walk(value: &mut serde_json::Value, found: &[Found], next: &mut usize) -> usize {
+        match value {
+            serde_json::Value::String(s) => {
+                let i = *next;
+                *next += 1;
+                match found.get(i).and_then(|f| f.apply(&[s.as_str()])) {
+                    Some((mut text, n)) => {
+                        *s = text.remove(0);
+                        n
+                    }
+                    None => 0,
+                }
+            }
+            serde_json::Value::Array(items) => items.iter_mut().map(|v| walk(v, found, next)).sum(),
+            serde_json::Value::Object(map) => map.values_mut().map(|v| walk(v, found, next)).sum(),
+            _ => 0,
+        }
+    }
+    walk(value, found, &mut 0)
 }
 
 fn digest_hex(text: &str) -> String {
@@ -248,6 +413,11 @@ impl Canonical {
         // Never index past the text, even if a future lowercasing broke the count above.
         origin.truncate(offsets.len() - 1);
         Canonical { text, offsets, origin }
+    }
+
+    /// The UTF-8 of `len` canonical scalars from `at`.
+    fn window(&self, at: usize, len: usize) -> &[u8] {
+        &self.text.as_bytes()[self.offsets[at]..self.offsets[at + len]]
     }
 }
 
@@ -431,5 +601,30 @@ mod tests {
         // The refusal never repeats the digest it refused.
         let bad = Needle { sha256: format!("{}zz", &Needle::of("x").sha256[..62]), len: 1 };
         assert!(!validate(&[bad.clone()]).unwrap_err().contains(&bad.sha256));
+    }
+
+    #[test]
+    fn the_work_is_every_window_hashed_counted_before_any_is() {
+        let search = Search::new(&[Needle::of("abc"), Needle::of("abcde")]);
+        // 10 ASCII scalars: 8 windows of 3 bytes and 6 of 5.
+        assert_eq!(search.work(&Prepared::new(&["0123456789"])), 8 * (3 + WINDOW_COST) + 6 * (5 + WINDOW_COST));
+        // Counted in bytes: each 'é' is two, so the one window of three is six.
+        assert_eq!(search.work(&Prepared::new(&["\u{e9}\u{e9}\u{e9}"])), 6 + WINDOW_COST);
+        assert_eq!(search.work(&Prepared::new(&["ab"])), 0, "shorter than every needle");
+        // 16 needles of about 4096 over 100 000 scalars is far over the limit.
+        let long: Vec<Needle> = (0..16).map(|i| Needle::of(&"x".repeat(4081 + i))).collect();
+        assert!(Search::new(&long).work(&Prepared::new(&["y".repeat(100_000)])) > MAX_WORK);
+    }
+
+    #[test]
+    fn a_match_is_checked_again_against_the_text_as_it_is_when_applied() {
+        let search = Search::new(&[Needle::of("Priya")]);
+        let found = search.find(&Prepared::new(&["call Priya now"]));
+        // Unchanged, or with more after it: applied.
+        assert_eq!(found.apply(&["call Priya now"]), Some((vec![format!("call {MARKER} now")], 1)));
+        assert_eq!(found.apply(&["call Priya now", ", Priya"]), Some((vec![format!("call {MARKER} now"), ", Priya".to_string()], 1)));
+        // Changed under it: the window no longer hashes to the needle, so nothing is replaced.
+        assert_eq!(found.apply(&["call Maria now"]), None);
+        assert_eq!(found.apply(&["call"]), None);
     }
 }

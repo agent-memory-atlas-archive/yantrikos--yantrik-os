@@ -8,16 +8,30 @@
 //! The run store decides whether it may happen at all (`run_store::erase` has the rule: a question
 //! this run asked, answered with the offered `Erase`, from the harness and session that hold the
 //! run, while the run is in flight or within five minutes of its end, once per question) and
-//! erases its own copy. Only then is the shell's [`Redactor`] asked to erase the agent's pane
+//! erases its own copy. Only then is the shell's [`ShellRedactor`] asked to erase the agent's pane
 //! transcript. The reply says how many places, and where: `{"redacted": n, "where":
 //! ["transcript", "runs"]}`, or `{"refused": why}` with nothing changed.
+//!
+//! # In steps, so nothing is searched under a lock and the search is bounded
+//!
+//! 1. The rule is checked and the run store's texts copied out ([`RunStore::prepare_redact`]); the
+//!    shell copies the agent's ([`ShellRedactor::prepare`]). Each lock is held only to copy.
+//! 2. What searching both would cost is added up; over `redact::MAX_WORK` the whole `redact` is
+//!    refused ("too much to search; …") before anything is hashed or touched.
+//! 3. Both copies are searched, with no lock held.
+//! 4. The run store applies what it found in one `IMMEDIATE` transaction, checking the rule again
+//!    and claiming the question; then the shell applies what it found under its own lock. Each
+//!    match is checked again against the text as it is by then, and skipped if it no longer
+//!    hashes to its needle.
+//!
+//! [`RunStore::prepare_redact`]: crate::run_store::RunStore::prepare_redact
 
 use std::sync::Arc;
 
 use super::{refused, Host};
 use crate::event::{AgentId, Event};
 use crate::protocol;
-use crate::redact::{self, Needle};
+use crate::redact::{self, Needle, Search};
 use crate::run_store::{now_ms, Erasure};
 
 /// What the shell is asked to erase from its own copy of one agent's conversation.
@@ -40,17 +54,30 @@ pub struct ShellErased {
     pub masked: usize,
 }
 
-/// The shell's half of an erasure: given the agent and what to erase, erase it from the agent's
-/// session (in memory and on disk) and say how much. Called without the host's lock held.
-pub type Redactor = Arc<dyn Fn(&AgentId, &ShellErasure<'_>) -> Result<ShellErased, String> + Send + Sync>;
+/// The shell's half of an erasure, in the same steps as the run store's (see the module docs).
+pub trait ShellRedactor: Send + Sync {
+    /// Copy the agent's texts out of the shell's store, holding its lock only to copy.
+    fn prepare(&self, agent: &AgentId) -> Result<Box<dyn ShellPlan>, String>;
+}
+
+/// The shell's copy of one agent's texts, to be measured, searched and then applied.
+pub trait ShellPlan: Send {
+    /// What searching it will cost (`redact::MAX_WORK`'s units).
+    fn work(&self, search: &Search) -> u64;
+    /// Search the copy. No lock is held.
+    fn search(&mut self, search: &Search);
+    /// Apply what was found to the agent's session under the shell's lock, checking each match
+    /// again, and write the session to disk before returning.
+    fn apply(self: Box<Self>, erasure: &ShellErasure<'_>) -> Result<ShellErased, String>;
+}
+
+/// The shell's half, as the host holds it.
+pub type Redactor = Arc<dyn ShellRedactor>;
 
 impl Host {
     /// The same host, asking `redactor` to erase the shell's own copy of a conversation when a
     /// `redact` is accepted. Without one, only the run store is erased, and the reply says so.
-    pub fn with_redactor(
-        mut self,
-        redactor: impl Fn(&AgentId, &ShellErasure<'_>) -> Result<ShellErased, String> + Send + Sync + 'static,
-    ) -> Host {
+    pub fn with_redactor(mut self, redactor: impl ShellRedactor + 'static) -> Host {
         self.redactor = Some(Arc::new(redactor));
         self
     }
@@ -88,33 +115,58 @@ impl Host {
             return Err("a `redact` needs the `request_id` of the question the person answered".to_string());
         }
         redact::validate(&needles)?;
+        let search = Search::new(&needles);
 
+        // 1. The rule, and copies of the texts.
         let erasure = Erasure { run_id, request_id: &request_id, harness, owner: session, needles: &needles };
-        let erased = store.redact(&erasure, now_ms()).map_err(|r| r.to_string())?;
+        let mut runs = store.prepare_redact(&erasure, now_ms()).map_err(|r| r.to_string())?;
+        let agent = AgentId::new(runs.harness(), runs.conversation());
+        let mut shell_failed = None;
+        let mut shell = match &self.redactor {
+            Some(redactor) => match redactor.prepare(&agent) {
+                Ok(plan) => Some(plan),
+                Err(why) => {
+                    tracing::error!(agent = %agent, run = run_id, why = %why, "the shell could not read the transcript to erase");
+                    shell_failed = Some(why);
+                    None
+                }
+            },
+            None => {
+                shell_failed = Some("this desktop keeps no transcript to erase".to_string());
+                None
+            }
+        };
+        // 2. Bounded before anything is hashed.
+        let work = runs.work(&search).saturating_add(shell.as_ref().map_or(0, |plan| plan.work(&search)));
+        if work > redact::MAX_WORK {
+            return Err(redact::TOO_MUCH.to_string());
+        }
+        // 3. Searched with no lock held.
+        runs.search(&search);
+        if let Some(plan) = shell.as_mut() {
+            plan.search(&search);
+        }
+        // 4. Applied: the run store first, its rule checked again; then the shell.
+        let erased = store.apply_redact(&erasure, now_ms(), &runs).map_err(|r| r.to_string())?;
         if !erased.checkpointed {
             tracing::error!(run = run_id, "erased, but the run store's write-ahead log could not be emptied yet");
         }
-        let agent = AgentId::new(&erased.harness, &erased.conversation);
         let mut places = erased.places;
         let mut masked = 0;
         let mut places_in: Vec<&str> = Vec::new();
-        let mut shell_failed = None;
-        match &self.redactor {
-            Some(redactor) => {
-                let asked = ShellErasure { request_id: &request_id, needles: &needles, places_in_runs: erased.places };
-                match redactor(&agent, &asked) {
-                    Ok(done) => {
-                        places += done.places;
-                        masked = done.masked;
-                        places_in.push("transcript");
-                    }
-                    Err(why) => {
-                        tracing::error!(agent = %agent, run = run_id, why = %why, "the run store was erased and the transcript was not");
-                        shell_failed = Some(why);
-                    }
+        if let Some(plan) = shell {
+            let asked = ShellErasure { request_id: &request_id, needles: &needles, places_in_runs: erased.places };
+            match plan.apply(&asked) {
+                Ok(done) => {
+                    places += done.places;
+                    masked = done.masked;
+                    places_in.push("transcript");
+                }
+                Err(why) => {
+                    tracing::error!(agent = %agent, run = run_id, why = %why, "the run store was erased and the transcript was not");
+                    shell_failed = Some(why);
                 }
             }
-            None => shell_failed = Some("this desktop keeps no transcript to erase".to_string()),
         }
         places_in.push("runs");
         if let Err(e) = store.set_redaction_places(run_id, &request_id, places as u64) {
@@ -127,6 +179,9 @@ impl Host {
         }
         if let Some(why) = shell_failed {
             reply["transcript"] = serde_json::json!(why);
+        }
+        if let Some(warning) = erased.warning {
+            reply["warning"] = serde_json::json!(warning);
         }
         Ok(reply)
     }
@@ -143,14 +198,46 @@ mod tests {
     /// What the shell's redactor was asked: the agent, the request, how many needles.
     type Asked = Arc<Mutex<Vec<(AgentId, String, usize)>>>;
 
+    /// A shell that says it erased two places and masked one, and keeps what it was asked. Its
+    /// texts cost `work` to search.
+    struct FakeShell {
+        asked: Asked,
+        work: u64,
+    }
+
+    struct FakePlan {
+        agent: AgentId,
+        asked: Asked,
+        work: u64,
+    }
+
+    impl ShellRedactor for FakeShell {
+        fn prepare(&self, agent: &AgentId) -> Result<Box<dyn ShellPlan>, String> {
+            Ok(Box::new(FakePlan { agent: agent.clone(), asked: self.asked.clone(), work: self.work }))
+        }
+    }
+
+    impl ShellPlan for FakePlan {
+        fn work(&self, _: &Search) -> u64 {
+            self.work
+        }
+
+        fn search(&mut self, _: &Search) {}
+
+        fn apply(self: Box<Self>, e: &ShellErasure<'_>) -> Result<ShellErased, String> {
+            self.asked.lock().unwrap().push((self.agent.clone(), e.request_id.to_string(), e.needles.len()));
+            Ok(ShellErased { places: 2, masked: 1 })
+        }
+    }
+
     fn host_with_shell() -> (Host, Arc<RunStore>, Asked) {
+        host_with_shell_costing(0)
+    }
+
+    fn host_with_shell_costing(work: u64) -> (Host, Arc<RunStore>, Asked) {
         let store = Arc::new(RunStore::in_memory().unwrap());
         let asked: Asked = Arc::default();
-        let log = asked.clone();
-        let host = Host::new(vec![]).with_runs(store.clone()).with_redactor(move |agent, e| {
-            log.lock().unwrap().push((agent.clone(), e.request_id.to_string(), e.needles.len()));
-            Ok(ShellErased { places: 2, masked: 1 })
-        });
+        let host = Host::new(vec![]).with_runs(store.clone()).with_redactor(FakeShell { asked: asked.clone(), work });
         (host, store, asked)
     }
 
@@ -274,5 +361,32 @@ mod tests {
         let _answer = host.send_to(&agent, Turn::new("hi")).unwrap();
         let run = call(&host, protocol::POLL, json!({ "session": session }))["turn_id"].as_u64().unwrap();
         assert!(redact(&host, &session, run, "forget")["refused"].as_str().unwrap().contains("keeps no runs"));
+    }
+
+    #[test]
+    fn too_much_to_search_across_the_runs_and_the_transcript_is_refused_and_changes_nothing() {
+        // The run store's few words are cheap; the shell's transcript takes it over the limit.
+        let (host, store, asked) = host_with_shell_costing(redact::MAX_WORK);
+        let (session, _, run, _reader) = answered(&host, "Erase");
+        let reply = redact(&host, &session, run, "forget");
+        assert_eq!(reply, json!({ "refused": "too much to search; ask again with fewer or shorter needles" }));
+        assert_eq!(reply_text(&store, run), "Your sister is Priya.");
+        assert!(asked.lock().unwrap().is_empty(), "the shell applied nothing");
+        assert!(store.redactions("pi", agent_conversation(&store, run).as_str()).unwrap().is_empty(), "the question is not used up");
+    }
+
+    #[test]
+    fn an_erasure_that_committed_but_could_not_put_secure_delete_back_says_so_and_is_not_refused() {
+        let (host, store, _) = host_with_shell();
+        let (session, _, run, _reader) = answered(&host, "Erase");
+        crate::run_store::FAIL_RESTORE.with(|fail| fail.set(true));
+        let reply = redact(&host, &session, run, "forget");
+        crate::run_store::FAIL_RESTORE.with(|fail| fail.set(false));
+        assert_eq!(
+            reply,
+            json!({ "redacted": 3, "where": ["transcript", "runs"], "masked": 1,
+                    "warning": "secure_delete could not be restored on this connection" })
+        );
+        assert_eq!(reply_text(&store, run), format!("Your sister is {}.", redact::MARKER));
     }
 }

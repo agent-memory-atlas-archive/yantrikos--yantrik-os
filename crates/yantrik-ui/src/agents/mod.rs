@@ -29,6 +29,7 @@
 // The agent catalog — roles work can be handed to — and the reach each role's agent is held to
 // (design/desk-and-mind-2026-09-23.md, section 5).
 pub mod catalog;
+mod erasing;
 pub mod feed;
 pub mod handover;
 pub mod launch;
@@ -42,6 +43,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 pub use model::{AgentId, AgentMeta, ApprovalOutcome, CallState, Event, Provenance, RecipeOrigin, RoleMeta, State, Stream, Tab};
+pub use erasing::Redactor;
 pub use store::{RowKey, Store};
 
 /// The title every popped-out agent window starts with, so the window list can tell an agent's
@@ -69,6 +71,8 @@ pub struct Agents {
     saved: Mutex<Instant>,
     /// Held while sessions are written, and counts erasures: a save taken before an erasure is
     /// stale, and is not written over the erased file (see [`Agents::redact`]).
+    ///
+    /// Lock order, everywhere: `disk` before `store`. Nothing takes `disk` while holding `store`.
     disk: Mutex<u64>,
 }
 
@@ -202,12 +206,17 @@ impl Agents {
             }
             *saved = Instant::now();
         }
-        // Which erasure this save was taken after, read under the store's lock with the save.
-        let (writes, deletes, erasures) = {
-            let mut s = self.lock();
-            let (writes, deletes) = s.take_dirty(&self.dir);
-            (writes, deletes, self.erasures())
-        };
+        self.save_now();
+    }
+
+    /// Write out what changed, now.
+    fn save_now(&self) {
+        // Which erasure this save is taken after, read before the store is: `disk` is never taken
+        // while `store` is held (the lock order, on `Agents::disk`). An erasure that comes between
+        // the two makes this save stale, and it is dropped below; one that came before is in what
+        // the save takes.
+        let erasures = self.erasures();
+        let (writes, deletes) = self.lock().take_dirty(&self.dir);
         if writes.is_empty() && deletes.is_empty() {
             return;
         }
@@ -230,32 +239,6 @@ impl Agents {
 
     fn erasures(&self) -> u64 {
         *self.disk.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// Erase words from `id`'s session at the person's request, once the host has accepted the
-    /// `redact` (see `store/erase.rs` for what is erased and what is only shown erased). The pane
-    /// changes at once, and the session's file is rewritten before this returns: written beside,
-    /// flushed to the disk, renamed over the old one, and the directory flushed. A save the timer
-    /// took before the erasure is never written after it.
-    pub fn redact(
-        &self,
-        id: &AgentId,
-        erasure: &yantrik_harness::host::ShellErasure<'_>,
-    ) -> Result<yantrik_harness::host::ShellErased, String> {
-        // The disk first, then the store: the order every save takes them in.
-        let mut disk = self.disk.lock().unwrap_or_else(|e| e.into_inner());
-        let (done, file) = {
-            let mut s = self.lock();
-            let done = s.redact(id, erasure);
-            *disk += 1;
-            (done, s.file_of(&self.dir, id))
-        };
-        if let Some((path, contents)) = file {
-            store::write_durably(&self.dir, &path, &contents)
-                .map_err(|e| format!("the session's file could not be rewritten: {e}"))?;
-        }
-        drop(disk);
-        Ok(done)
     }
 }
 

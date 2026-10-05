@@ -35,7 +35,9 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBe
 use serde_json::{json, Value};
 
 mod erase;
-pub use erase::{Erased, Erasure, Redaction, Refusal, ERASE_ANSWER, ERASE_WINDOW_MS};
+pub use erase::{Erased, Erasure, Redaction, Refusal, RunPlan, ERASE_ANSWER, ERASE_WINDOW_MS, SECURE_DELETE_WARNING};
+#[cfg(test)]
+pub(crate) use erase::FAIL_RESTORE;
 
 /// Where a run is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

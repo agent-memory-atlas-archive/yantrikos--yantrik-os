@@ -61,7 +61,7 @@ use crate::run_store::{RunError, RunState, RunStore};
 use crate::{Answer, Capabilities, Chunk, Harness, Health, Turn};
 
 mod erase;
-pub use erase::{Redactor, ShellErased, ShellErasure};
+pub use erase::{Redactor, ShellErased, ShellErasure, ShellPlan, ShellRedactor};
 
 /// The summary a call gets when its turn ended before it did.
 pub const INTERRUPTED: &str = "interrupted";

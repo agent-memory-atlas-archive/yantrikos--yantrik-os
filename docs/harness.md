@@ -377,7 +377,18 @@ changes nothing:
 
 One `redact` per question; a second is refused. Accepted, the reply is
 `{"redacted": <places>, "where": ["transcript", "runs"]}` (and `"masked": n` when records were
-masked, below).
+masked, below). If the erasure committed but the run store could not put `secure_delete` back
+afterwards, it still happened, and the reply says so: `"warning": "secure_delete could not be
+restored on this connection"` beside `redacted` and `where`.
+
+A needle is only a digest, so the shell has to hash every window of every needle length in full.
+That is bounded: the bytes it would hash (each window's, plus 64 for the hash's last block),
+across the run store and the transcript together, may be at most 2^30. Over that, the whole
+`redact` is refused with `"too much to search; ask again with fewer or shorter needles"`, before
+anything is searched or changed, and the question is not used up — send it again with fewer or
+shorter needles. The texts are copied out under each store's lock and searched with no lock held;
+each match is checked again against the text as it is when it is applied, and skipped if it no
+longer hashes to its needle.
 
 What it erases is the agent's conversation, in every run of that agent: the person's prompts, the
 agent's reply text and thinking, the questions it asked, the shell's notes, the agent's title and

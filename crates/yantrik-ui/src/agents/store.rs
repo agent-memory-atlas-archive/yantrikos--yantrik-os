@@ -31,6 +31,7 @@ use super::model::*;
 use crate::trail::ToolCall;
 
 mod erase;
+pub use erase::ErasurePlan;
 
 /// How many turns an agent keeps in memory. The oldest go first.
 pub const TURNS_KEPT: usize = 200;

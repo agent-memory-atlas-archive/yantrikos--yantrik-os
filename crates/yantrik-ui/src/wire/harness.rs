@@ -184,7 +184,7 @@ pub fn wire(ui: &App, ctx: &AppContext) {
     };
     // A forget the person answered *Erase* to reaches the agent's pane and its saved session as
     // well as the run store, once the host's rule holds (`redact`, docs/harness.md).
-    let host = host.with_redactor(|agent, erasure| crate::agents::store().redact(agent, erasure));
+    let host = host.with_redactor(crate::agents::Redactor);
     // A mind the person has granted some use of their memory carries its credential with every
     // turn (#447); one with none carries nothing. Judged as `memory_validate` judges it: the
     // person's grants, with the first-party defaults only for the account that attached as the

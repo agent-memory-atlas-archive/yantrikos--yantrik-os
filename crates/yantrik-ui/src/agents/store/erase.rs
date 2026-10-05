@@ -17,40 +17,151 @@
 //! of those holds the words, it gets a mask — the same fields with the marker — and every view
 //! draws the mask instead (`Card::shown`, `Approval::shown_what`, `Agent::shown_refusals`). The
 //! mask keeps no words and no digest; it is keyed by the request the person answered.
+//!
+//! # Searched off the lock
+//!
+//! [`Store::erasure_texts`] copies the texts out under the lock; an [`ErasurePlan`] measures and
+//! searches the copies with no lock held; [`Store::apply_erasure`] takes the lock again only to
+//! replace what was found, checking each match against the text as it is by then.
+
+use std::collections::HashMap;
 
 use yantrik_harness::host::{ShellErased, ShellErasure};
-use yantrik_harness::redact::{redact, redact_json, redact_pieces, Needle};
+use yantrik_harness::redact::{apply_json, json_strings, Found, Prepared, Search};
 
 use super::*;
 
+/// Where one text of an agent's session is, to find it again under the lock.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Place {
+    Title,
+    Status,
+    /// A refusal line, as shown.
+    Refusal(usize),
+    /// Turn `n`'s prompt, its text blocks joined, its thinking joined.
+    Prompt(usize),
+    Text(usize),
+    Thinking(usize),
+    /// One field of item `i` of turn `n`.
+    Item(usize, usize, Field),
+}
+
+/// A field of one item of a turn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Field {
+    Question,
+    Note,
+    /// A card's fields, as its mask starts from; `Arg(k)` is the `k`th string in its arguments.
+    Target,
+    Arg(usize),
+    Preview,
+    Summary,
+    Output,
+    /// An approval's words, as its mask starts from.
+    What,
+    Record,
+}
+
+/// One agent's texts, copied out of the store, to be measured and searched with no lock held.
+pub struct ErasurePlan {
+    pub id: AgentId,
+    texts: Vec<(Place, Prepared)>,
+    found: HashMap<Place, Found>,
+}
+
+impl ErasurePlan {
+    /// The copies (from [`Store::erasure_texts`]) put in canonical form. No lock is needed.
+    pub fn new(id: AgentId, texts: Vec<(Place, Vec<String>)>) -> ErasurePlan {
+        let texts = texts.into_iter().map(|(place, pieces)| (place, Prepared::new(&pieces))).collect();
+        ErasurePlan { id, texts, found: HashMap::new() }
+    }
+
+    /// What searching it will cost (`redact::MAX_WORK`'s units).
+    pub fn cost(&self, search: &Search) -> u64 {
+        self.texts.iter().fold(0u64, |sum, (_, text)| sum.saturating_add(search.work(text)))
+    }
+
+    /// Search the copies.
+    pub fn find(&mut self, search: &Search) {
+        for (place, text) in &self.texts {
+            let found = search.find(text);
+            if !found.is_empty() {
+                self.found.insert(place.clone(), found);
+            }
+        }
+    }
+
+    fn get(&self, place: Place) -> Option<&Found> {
+        self.found.get(&place)
+    }
+}
+
 impl Store {
-    /// Erase `e.needles` from agent `id`'s session in memory, mask the records that keep them,
-    /// and record the erasure. Writing it to disk is the caller's (`Agents::redact`).
-    pub fn redact(&mut self, id: &AgentId, e: &ShellErasure<'_>) -> ShellErased {
+    /// Copies of every text of agent `id`'s session an erasure reaches (see the module docs).
+    /// Empty when the store does not hold it.
+    pub fn erasure_texts(&self, id: &AgentId) -> Vec<(Place, Vec<String>)> {
+        let Some(agent) = self.agent(id) else { return Vec::new() };
+        let mut out = vec![(Place::Title, vec![agent.meta.title.clone()]), (Place::Status, vec![agent.status.clone()])];
+        let refusals = agent.refusals_shown.as_ref().unwrap_or(&agent.refusals);
+        out.extend(refusals.iter().enumerate().map(|(n, line)| (Place::Refusal(n), vec![line.clone()])));
+        for (t, turn) in agent.turns.iter().enumerate() {
+            out.push((Place::Prompt(t), vec![turn.prompt.clone()]));
+            out.push((Place::Text(t), block_texts(&turn.items, false).into_iter().map(|(_, text)| text).collect()));
+            out.push((Place::Thinking(t), block_texts(&turn.items, true).into_iter().map(|(_, text)| text).collect()));
+            for (i, item) in turn.items.iter().enumerate() {
+                let at = |field| Place::Item(t, i, field);
+                match item {
+                    Item::Question(q) => out.push((at(Field::Question), vec![q.prompt.clone()])),
+                    Item::Note(note) => out.push((at(Field::Note), vec![note.clone()])),
+                    Item::Card(card) => {
+                        let base = card_mask(card);
+                        out.push((at(Field::Target), vec![base.target]));
+                        out.extend(json_strings(&base.args).into_iter().enumerate().map(|(k, s)| (at(Field::Arg(k)), vec![s])));
+                        out.push((at(Field::Preview), vec![base.preview]));
+                        out.push((at(Field::Summary), vec![base.summary]));
+                        out.push((at(Field::Output), vec![base.output]));
+                    }
+                    Item::Approval(a) => {
+                        let base = approval_mask(a);
+                        out.push((at(Field::What), vec![base.what]));
+                        out.push((at(Field::Record), vec![base.record]));
+                    }
+                    Item::Text(_) | Item::Thinking(_) => {}
+                }
+            }
+        }
+        out
+    }
+
+    /// Apply what `plan` found to agent `id`'s session in memory, mask the records that keep the
+    /// words, and record the erasure. Each match is checked again against the text as it is now.
+    /// Writing it to disk is the caller's (`Agents::redact`).
+    pub fn apply_erasure(&mut self, id: &AgentId, e: &ShellErasure<'_>, plan: &ErasurePlan) -> ShellErased {
         let Some(i) = self.index(id) else { return ShellErased::default() };
         let now = self.now();
         let agent = &mut self.agents[i];
-        let needles = e.needles;
         let mut done = ShellErased::default();
 
-        done.places += in_place(&mut agent.meta.title, needles);
-        done.places += in_place(&mut agent.status, needles);
-        for turn in &mut agent.turns {
-            done.places += in_place(&mut turn.prompt, needles);
-            done.places += blocks(&mut turn.items, needles, false);
-            done.places += blocks(&mut turn.items, needles, true);
-            for item in &mut turn.items {
+        done.places += in_place(&mut agent.meta.title, plan.get(Place::Title));
+        done.places += in_place(&mut agent.status, plan.get(Place::Status));
+        for (t, turn) in agent.turns.iter_mut().enumerate() {
+            done.places += in_place(&mut turn.prompt, plan.get(Place::Prompt(t)));
+            done.places += blocks(&mut turn.items, plan.get(Place::Text(t)), false);
+            done.places += blocks(&mut turn.items, plan.get(Place::Thinking(t)), true);
+            for (n, item) in turn.items.iter_mut().enumerate() {
+                let at = |field| Place::Item(t, n, field);
                 match item {
-                    Item::Question(q) => done.places += in_place(&mut q.prompt, needles),
-                    Item::Note(note) => done.places += in_place(note, needles),
-                    Item::Card(card) => done.masked += mask_card(card, e.request_id, needles),
-                    Item::Approval(a) => done.masked += mask_approval(a, e.request_id, needles),
+                    Item::Question(q) => done.places += in_place(&mut q.prompt, plan.get(at(Field::Question))),
+                    Item::Note(note) => done.places += in_place(note, plan.get(at(Field::Note))),
+                    Item::Card(card) => done.masked += mask_card(card, e.request_id, plan, t, n),
+                    Item::Approval(a) => done.masked += mask_approval(a, e.request_id, plan, t, n),
                     Item::Text(_) | Item::Thinking(_) => {}
                 }
             }
         }
         let mut shown = agent.refusals_shown.clone().unwrap_or_else(|| agent.refusals.clone());
-        let masked_lines: usize = shown.iter_mut().map(|line| in_place(line, needles)).sum();
+        let masked_lines: usize =
+            shown.iter_mut().enumerate().map(|(n, line)| in_place(line, plan.get(Place::Refusal(n)))).sum();
         if masked_lines > 0 {
             agent.refusals_shown = Some(shown);
             done.masked += masked_lines;
@@ -64,23 +175,30 @@ impl Store {
         self.mark(i);
         done
     }
+
+    /// Copy, search and apply at once, under whatever lock the caller holds: for tests. The shell
+    /// erases through `Agents::redact`, which searches off the lock.
+    pub fn redact(&mut self, id: &AgentId, e: &ShellErasure<'_>) -> ShellErased {
+        let mut plan = ErasurePlan::new(id.clone(), self.erasure_texts(id));
+        plan.find(&Search::new(e.needles));
+        self.apply_erasure(id, e, &plan)
+    }
 }
 
-/// Erase the needles from one string in place. How many places.
-fn in_place(text: &mut String, needles: &[Needle]) -> usize {
-    match redact(text, needles) {
-        Some((erased, n)) => {
-            *text = erased;
+/// Apply `found` to one string in place. How many places.
+fn in_place(text: &mut String, found: Option<&Found>) -> usize {
+    match found.and_then(|f| f.apply(&[text.as_str()])) {
+        Some((mut erased, n)) => {
+            *text = erased.remove(0);
             n
         }
         None => 0,
     }
 }
 
-/// Erase the needles from a turn's text blocks (or its thinking), joined as one text. How many
-/// places.
-fn blocks(items: &mut [Item], needles: &[Needle], thinking: bool) -> usize {
-    let mut kept: Vec<(usize, String)> = Vec::new();
+/// A turn's text blocks (or its thinking), in order: where each is, and its text.
+fn block_texts(items: &[Item], thinking: bool) -> Vec<(usize, String)> {
+    let mut kept = Vec::new();
     for (at, item) in items.iter().enumerate() {
         match item {
             Item::Text(buffer) if !thinking => kept.push((at, buffer.text())),
@@ -88,8 +206,15 @@ fn blocks(items: &mut [Item], needles: &[Needle], thinking: bool) -> usize {
             _ => {}
         }
     }
+    kept
+}
+
+/// Apply `found` to a turn's text blocks (or its thinking), joined as one text. How many places.
+fn blocks(items: &mut [Item], found: Option<&Found>, thinking: bool) -> usize {
+    let Some(found) = found else { return 0 };
+    let kept = block_texts(items, thinking);
     let pieces: Vec<&str> = kept.iter().map(|(_, t)| t.as_str()).collect();
-    let Some((erased, n)) = redact_pieces(&pieces, needles) else { return 0 };
+    let Some((erased, n)) = found.apply(&pieces) else { return 0 };
     for ((at, before), after) in kept.iter().zip(erased) {
         if *before == after {
             continue;
@@ -101,9 +226,9 @@ fn blocks(items: &mut [Item], needles: &[Needle], thinking: bool) -> usize {
     n
 }
 
-/// Mask a card whose fields hold the needles; the card keeps its own. How many places masked.
-fn mask_card(card: &mut Card, request: &str, needles: &[Needle]) -> usize {
-    let mut mask = match &card.mask {
+/// What a card's mask starts from: its mask so far, or its own fields.
+fn card_mask(card: &Card) -> CardMask {
+    match &card.mask {
         Some(mask) => (**mask).clone(),
         None => CardMask {
             request: String::new(),
@@ -113,12 +238,21 @@ fn mask_card(card: &mut Card, request: &str, needles: &[Needle]) -> usize {
             summary: card.summary.clone(),
             output: card.output.bytes.text(),
         },
-    };
-    let n = in_place(&mut mask.target, needles)
-        + redact_json(&mut mask.args, needles)
-        + in_place(&mut mask.preview, needles)
-        + in_place(&mut mask.summary, needles)
-        + in_place(&mut mask.output, needles);
+    }
+}
+
+/// Mask a card whose fields hold what was found; the card keeps its own. How many places masked.
+fn mask_card(card: &mut Card, request: &str, plan: &ErasurePlan, t: usize, i: usize) -> usize {
+    let at = |field| Place::Item(t, i, field);
+    let mut mask = card_mask(card);
+    let args: Vec<Found> = (0..json_strings(&mask.args).len())
+        .map(|k| plan.get(at(Field::Arg(k))).cloned().unwrap_or_default())
+        .collect();
+    let n = in_place(&mut mask.target, plan.get(at(Field::Target)))
+        + apply_json(&mut mask.args, &args)
+        + in_place(&mut mask.preview, plan.get(at(Field::Preview)))
+        + in_place(&mut mask.summary, plan.get(at(Field::Summary)))
+        + in_place(&mut mask.output, plan.get(at(Field::Output)));
     if n > 0 {
         mask.request = request.to_string();
         card.mask = Some(Box::new(mask));
@@ -126,14 +260,20 @@ fn mask_card(card: &mut Card, request: &str, needles: &[Needle]) -> usize {
     n
 }
 
-/// Mask an approval whose words hold the needles; the approval keeps its own.
-fn mask_approval(approval: &mut Approval, request: &str, needles: &[Needle]) -> usize {
-    let mut mask = approval.mask.clone().unwrap_or_else(|| ApprovalMask {
+/// What an approval's mask starts from: its mask so far, or its own words.
+fn approval_mask(approval: &Approval) -> ApprovalMask {
+    approval.mask.clone().unwrap_or_else(|| ApprovalMask {
         request: String::new(),
         what: approval.what.clone(),
         record: approval.record.clone(),
-    });
-    let n = in_place(&mut mask.what, needles) + in_place(&mut mask.record, needles);
+    })
+}
+
+/// Mask an approval whose words hold what was found; the approval keeps its own.
+fn mask_approval(approval: &mut Approval, request: &str, plan: &ErasurePlan, t: usize, i: usize) -> usize {
+    let at = |field| Place::Item(t, i, field);
+    let mut mask = approval_mask(approval);
+    let n = in_place(&mut mask.what, plan.get(at(Field::What))) + in_place(&mut mask.record, plan.get(at(Field::Record)));
     if n > 0 {
         mask.request = request.to_string();
         approval.mask = Some(mask);
@@ -145,7 +285,7 @@ fn mask_approval(approval: &mut Approval, request: &str, needles: &[Needle]) -> 
 mod tests {
     use super::*;
     use serde_json::json;
-    use yantrik_harness::redact::MARKER;
+    use yantrik_harness::redact::{Needle, MARKER};
 
     const SECRET: &str = "Priya";
 
@@ -334,5 +474,30 @@ mod tests {
         let a = s.agent(&pi).unwrap();
         assert!(a.refusals.last().unwrap().contains("only the host applies one"));
         assert!(a.erasures.is_empty());
+    }
+
+    #[test]
+    fn a_large_transcript_searched_for_long_needles_is_measured_over_the_limit_without_searching() {
+        use yantrik_harness::redact::{Search, MAX_WORK};
+        let mut s = Store::with_clock(Box::new(|| 1));
+        let pi = AgentId::new("pi", "c-big");
+        s.open_turn(&pi, "write it all out");
+        for _ in 0..100 {
+            s.text(&pi, &"lorem ipsum dolor sit amet, Priya. ".repeat(100));
+        }
+        s.close_turn(&pi, true);
+        let long: Vec<Needle> = (0..16).map(|i| Needle::of(&"x".repeat(4081 + i))).collect();
+        let started = std::time::Instant::now();
+        let plan = ErasurePlan::new(pi.clone(), s.erasure_texts(&pi));
+        assert!(plan.cost(&Search::new(&long)) > MAX_WORK, "16 needles of about 4096 over the reply");
+        assert!(started.elapsed() < std::time::Duration::from_secs(30), "measured, not searched: {:?}", started.elapsed());
+        // One short needle over the same transcript is well within it, and is applied.
+        let short = [Needle::of("priya")];
+        let mut plan = ErasurePlan::new(pi.clone(), s.erasure_texts(&pi));
+        assert!(plan.cost(&Search::new(&short)) < MAX_WORK);
+        plan.find(&Search::new(&short));
+        let done = s.apply_erasure(&pi, &erasure(&short), &plan);
+        assert!(done.places > 0);
+        assert!(!s.transcript(&pi, 5).unwrap().contains("Priya"));
     }
 }

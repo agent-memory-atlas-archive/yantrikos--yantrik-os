@@ -452,8 +452,10 @@ class Turn:
         asked, answered with the offered `Erase`, from this session, while the turn is open or
         within five minutes of its end, and once per question.
 
-        Returns the desktop's reply: `{"redacted": n, "where": ["transcript", "runs"]}`, or
-        `{"refused": why}` with nothing changed, or `{"unsent": why}` when it was not sent.
+        Returns the desktop's reply: `{"redacted": n, "where": ["transcript", "runs"]}` (with a
+        `"warning"` when it erased but something after the commit went wrong), or
+        `{"refused": why}` with nothing changed — "too much to search; …" means send it again
+        with fewer or shorter texts — or `{"unsent": why}` when it was not sent.
         """
         needles = [needle(t) for t in texts if str(t)]
         if not needles:

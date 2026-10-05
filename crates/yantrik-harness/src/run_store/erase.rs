@@ -23,6 +23,14 @@
 //! does the order of the log. What was erased is recorded in `redactions` as the run, the request
 //! and how many places, with no words and no digest.
 //!
+//! # Searched off the lock
+//!
+//! The rule is checked and the texts are copied out under the store's lock
+//! ([`RunStore::prepare_redact`]); the copies are measured against `redact::MAX_WORK` and
+//! searched with no lock held ([`RunPlan`]); and only then does [`RunStore::apply_redact`] take an
+//! `IMMEDIATE` transaction, check the rule again, claim the question, and replace each match after
+//! checking that it still hashes to its needle in the text as it is now.
+//!
 //! # How it reaches the disk
 //!
 //! `secure_delete` is on for the update, so the space the old text occupied is zeroed rather than
@@ -31,17 +39,23 @@
 //! `runs.db-wal` too. What this cannot reach is below SQLite: the filesystem's own journal, blocks
 //! a truncated file gave back, snapshots and backups.
 
-use rusqlite::{params, OptionalExtension};
+use std::collections::HashMap;
+
+use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
 
 use super::{state_in, RunStore};
-use crate::redact::{self, Needle};
+use crate::redact::{Found, Needle, Prepared, Search, MAX_WORK, TOO_MUCH};
 
 /// The answer that lets a question's words be erased. Exact: the case matters.
 pub const ERASE_ANSWER: &str = "Erase";
 
 /// How long after a run ended its question may still be acted on: five minutes.
 pub const ERASE_WINDOW_MS: i64 = 5 * 60 * 1000;
+
+/// What an accepted erasure says when it committed but `secure_delete` could not be put back as
+/// it was on the store's connection afterwards.
+pub const SECURE_DELETE_WARNING: &str = "secure_delete could not be restored on this connection";
 
 /// What a harness asked to erase, and who is asking.
 #[derive(Debug, Clone)]
@@ -65,6 +79,9 @@ pub struct Erased {
     pub places: usize,
     /// Whether the write-ahead log was emptied. `false` only when another connection held it.
     pub checkpointed: bool,
+    /// Something that went wrong after the erasure committed, so it still happened:
+    /// [`SECURE_DELETE_WARNING`].
+    pub warning: Option<String>,
 }
 
 /// One erasure, as it is kept: no words and no digest.
@@ -93,6 +110,8 @@ pub enum Refusal {
     Expired { run_id: u64, ended_ms_ago: i64 },
     /// Once per question.
     AlreadyErased(String),
+    /// More to search than [`MAX_WORK`].
+    TooMuch,
     Storage(String),
 }
 
@@ -114,6 +133,7 @@ impl std::fmt::Display for Refusal {
                 ERASE_WINDOW_MS / 1000
             ),
             Refusal::AlreadyErased(r) => write!(f, "{r:?} has already been acted on; one redaction per question"),
+            Refusal::TooMuch => f.write_str(TOO_MUCH),
             Refusal::Storage(e) => write!(f, "run store: {e}"),
         }
     }
@@ -134,21 +154,103 @@ impl From<super::RunError> for Refusal {
     }
 }
 
+/// The run store's half of one erasure: its texts, copied out under the store's lock and searched
+/// without it. See [`RunStore::prepare_redact`].
+pub struct RunPlan {
+    harness: String,
+    conversation: String,
+    texts: Vec<(Place, Prepared)>,
+    found: HashMap<Place, Found>,
+}
+
+impl RunPlan {
+    /// The agent whose conversation it is.
+    pub fn harness(&self) -> &str {
+        &self.harness
+    }
+
+    pub fn conversation(&self) -> &str {
+        &self.conversation
+    }
+
+    /// What searching it will cost (see `redact::MAX_WORK`).
+    pub fn work(&self, search: &Search) -> u64 {
+        self.texts.iter().fold(0u64, |sum, (_, text)| sum.saturating_add(search.work(text)))
+    }
+
+    /// Search the copies. No lock is held.
+    pub fn search(&mut self, search: &Search) {
+        for (place, text) in &self.texts {
+            let found = search.find(text);
+            if !found.is_empty() {
+                self.found.insert(place.clone(), found);
+            }
+        }
+    }
+}
+
 impl RunStore {
     /// Erase `e.needles` from the conversation of the agent that ran `e.run_id`, if the acceptance
-    /// rule holds (see the module docs) at `now` (Unix milliseconds). The erasure is recorded with
-    /// the places counted here; [`RunStore::set_redaction_places`] adds the shell's own.
+    /// rule holds (see the module docs) at `now` (Unix milliseconds) and the search is within
+    /// `redact::MAX_WORK`: [`RunStore::prepare_redact`], then the search, then
+    /// [`RunStore::apply_redact`]. The host does the same steps itself, so the shell's own search
+    /// counts towards the same limit.
     pub fn redact(&self, e: &Erasure<'_>, now: i64) -> Result<Erased, Refusal> {
+        let search = Search::new(e.needles);
+        let mut plan = self.prepare_redact(e, now)?;
+        if plan.work(&search) > MAX_WORK {
+            return Err(Refusal::TooMuch);
+        }
+        plan.search(&search);
+        self.apply_redact(e, now, &plan)
+    }
+
+    /// Check the acceptance rule and copy out the texts of the conversation it would erase, under
+    /// the store's lock only for as long as reading takes. Nothing is changed and nothing claimed:
+    /// [`RunStore::apply_redact`] checks the rule again, in its own transaction, before it does
+    /// anything.
+    pub fn prepare_redact(&self, e: &Erasure<'_>, now: i64) -> Result<RunPlan, Refusal> {
+        let (harness, conversation, texts) = self.with_refusal(|db| {
+            let tx = db.transaction()?;
+            let (harness, conversation) = accept(&tx, e, now)?;
+            let texts = texts_of(&tx, &harness, &conversation)?;
+            Ok((harness, conversation, texts))
+        })?;
+        let texts = texts
+            .iter()
+            .map(|text| (text.place.clone(), Prepared::new(text.pieces().as_slice())))
+            .collect();
+        Ok(RunPlan { harness, conversation, texts, found: HashMap::new() })
+    }
+
+    /// Apply what `plan` found, if the acceptance rule still holds at `now`: inside one
+    /// `IMMEDIATE` transaction the rule is checked again, the question is claimed, and each match
+    /// is checked against the text as it is now before it is replaced. Then `secure_delete` is put
+    /// back and the write-ahead log emptied.
+    pub fn apply_redact(&self, e: &Erasure<'_>, now: i64, plan: &RunPlan) -> Result<Erased, Refusal> {
         self.with_refusal(|db| {
             let previous: i64 = db.query_row("PRAGMA secure_delete", [], |r| r.get(0))?;
             db.pragma_update(None, "secure_delete", "ON")?;
-            let outcome = erase_in(db, e, now);
+            let outcome = erase_in(db, e, now, plan);
             let checkpointed = match &outcome {
                 Ok(_) => checkpoint(db),
                 Err(_) => true,
             };
-            db.pragma_update(None, "secure_delete", previous)?;
-            outcome.map(|erased| Erased { checkpointed, ..erased })
+            let restored = restore_secure_delete(db, previous);
+            match (outcome, restored) {
+                (Ok(erased), Ok(())) => Ok(Erased { checkpointed, ..erased }),
+                // It committed: the erasure happened, and the reply must say so.
+                (Ok(erased), Err(err)) => {
+                    tracing::error!(error = %err, "erased, but secure_delete could not be put back on the run store's connection");
+                    Ok(Erased { checkpointed, warning: Some(SECURE_DELETE_WARNING.to_string()), ..erased })
+                }
+                (Err(refusal), restored) => {
+                    if let Err(err) = restored {
+                        tracing::error!(error = %err, "secure_delete could not be put back on the run store's connection");
+                    }
+                    Err(refusal)
+                }
+            }
         })
     }
 
@@ -200,11 +302,12 @@ impl RunStore {
     }
 }
 
-fn erase_in(db: &mut rusqlite::Connection, e: &Erasure<'_>, now: i64) -> Result<Erased, Refusal> {
-    let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+/// The acceptance rule (the module docs), read in `db`: the agent whose conversation would be
+/// erased, or why not. Changes nothing.
+fn accept(db: &Connection, e: &Erasure<'_>, now: i64) -> Result<(String, String), Refusal> {
     let run_id = e.run_id;
-    let state = state_in(&tx, run_id)?;
-    let (harness, conversation, owner): (String, String, String) = tx.query_row(
+    let state = state_in(db, run_id)?;
+    let (harness, conversation, owner): (String, String, String) = db.query_row(
         "SELECT harness, conversation, owner FROM runs WHERE run_id = ?1",
         params![run_id as i64],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
@@ -214,7 +317,7 @@ fn erase_in(db: &mut rusqlite::Connection, e: &Erasure<'_>, now: i64) -> Result<
         return Err(Refusal::NotYours(run_id));
     }
     // (a) a question this run asked.
-    let request: Option<(String, String, Option<String>)> = tx
+    let request: Option<(String, String, Option<String>)> = db
         .query_row(
             "SELECT prompt, state, answer FROM requests WHERE run_id = ?1 AND request_id = ?2",
             params![run_id as i64, e.request_id],
@@ -236,7 +339,7 @@ fn erase_in(db: &mut rusqlite::Connection, e: &Erasure<'_>, now: i64) -> Result<
     }
     // (c) in flight, or ended within the window.
     if state.is_final() {
-        let ended: i64 = tx.query_row(
+        let ended: i64 = db.query_row(
             "SELECT at FROM events WHERE run_id = ?1 AND kind = 'state' ORDER BY seq DESC LIMIT 1",
             params![run_id as i64],
             |r| r.get(0),
@@ -245,7 +348,25 @@ fn erase_in(db: &mut rusqlite::Connection, e: &Erasure<'_>, now: i64) -> Result<
             return Err(Refusal::Expired { run_id, ended_ms_ago: now - ended });
         }
     }
-    // Once per question: the record is the claim.
+    // Once per question.
+    let erased: Option<i64> = db
+        .query_row(
+            "SELECT 1 FROM redactions WHERE run_id = ?1 AND request_id = ?2",
+            params![run_id as i64, e.request_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if erased.is_some() {
+        return Err(Refusal::AlreadyErased(e.request_id.to_string()));
+    }
+    Ok((harness, conversation))
+}
+
+fn erase_in(db: &mut rusqlite::Connection, e: &Erasure<'_>, now: i64, plan: &RunPlan) -> Result<Erased, Refusal> {
+    let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let run_id = e.run_id;
+    let (harness, conversation) = accept(&tx, e, now)?;
+    // The record is the claim, in the same transaction as the rule.
     let claimed = tx.execute(
         "INSERT OR IGNORE INTO redactions (run_id, request_id, places, at) VALUES (?1, ?2, 0, ?3)",
         params![run_id as i64, e.request_id, now],
@@ -254,113 +375,189 @@ fn erase_in(db: &mut rusqlite::Connection, e: &Erasure<'_>, now: i64) -> Result<
         return Err(Refusal::AlreadyErased(e.request_id.to_string()));
     }
 
-    let runs: Vec<i64> = {
-        let mut stmt = tx.prepare("SELECT run_id FROM runs WHERE harness = ?1 AND conversation = ?2 ORDER BY run_id")?;
-        let ids = stmt.query_map(params![harness, conversation], |r| r.get(0))?.collect::<Result<_, _>>()?;
-        ids
-    };
     let mut places = 0;
-    for run in runs {
-        places += erase_run(&tx, run, e.needles)?;
+    if harness == plan.harness && conversation == plan.conversation {
+        for text in texts_of(&tx, &harness, &conversation)? {
+            // A text that was not there when the plan was searched has nothing found in it.
+            let Some(found) = plan.found.get(&text.place) else { continue };
+            let pieces = text.pieces();
+            let Some((erased, n)) = found.apply(&pieces) else { continue };
+            // A question's words are counted once: its `request` event holds the same words.
+            if !matches!(text.place, Place::Question(..)) {
+                places += n;
+            }
+            for (row, (before, after)) in text.rows.iter().zip(pieces.iter().zip(erased)) {
+                if *before != after {
+                    row.write(&tx, after)?;
+                }
+            }
+        }
     }
     tx.execute(
         "UPDATE redactions SET places = ?3 WHERE run_id = ?1 AND request_id = ?2",
         params![run_id as i64, e.request_id, places as i64],
     )?;
     tx.commit()?;
-    Ok(Erased { harness, conversation, places, checkpointed: false })
+    Ok(Erased { harness, conversation, places, checkpointed: false, warning: None })
 }
 
-/// Erase the needles from one run's words. How many places.
-fn erase_run(tx: &rusqlite::Transaction<'_>, run: i64, needles: &[Needle]) -> Result<usize, Refusal> {
-    let rows: Vec<(i64, String, Value)> = {
-        let mut stmt = tx.prepare(
-            "SELECT seq, kind, payload FROM events WHERE run_id = ?1
-             AND kind IN ('text', 'event', 'failure', 'request') ORDER BY seq",
-        )?;
-        let rows = stmt
-            .query_map(params![run], |r| {
-                let payload: String = r.get(2)?;
-                Ok((r.get(0)?, r.get(1)?, serde_json::from_str(&payload).unwrap_or(Value::Null)))
-            })?
-            .collect::<Result<_, _>>()?;
-        rows
-    };
-    let mut places = 0;
-    let mut changed: Vec<(i64, Value)> = Vec::new();
+/// Where one text of a conversation is, so it can be found again inside the transaction.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum Place {
+    /// A run's reply: its `text` chunks, joined.
+    Reply(i64),
+    /// A run's `thinking` deltas, joined.
+    Thinking(i64),
+    /// Why a run failed: the `failure` event at this sequence number.
+    Failure(i64, i64),
+    /// The prompt of the `request` event at this sequence number.
+    Asked(i64, i64),
+    /// The prompt in a question's `requests` row.
+    Question(i64, String),
+}
 
-    // The reply, and the thinking, each joined across its chunks before matching.
-    for (kind, inner) in [("text", None), ("event", Some("thinking"))] {
-        let chunks: Vec<&(i64, String, Value)> = rows
-            .iter()
-            .filter(|(_, k, p)| k == kind && inner.map_or(true, |i| p["kind"] == i))
-            .filter(|(_, _, p)| p["delta"].is_string())
-            .collect();
-        let pieces: Vec<&str> = chunks.iter().map(|(_, _, p)| p["delta"].as_str().unwrap_or_default()).collect();
-        if let Some((erased, n)) = redact::redact_pieces(&pieces, needles) {
-            places += n;
-            for ((seq, _, payload), (before, after)) in chunks.iter().zip(pieces.iter().zip(erased)) {
-                if *before != after {
-                    let mut payload = payload.clone();
-                    payload["delta"] = Value::String(after);
-                    changed.push((*seq, payload));
-                }
+/// One text: the rows it is in, a piece in each.
+struct Text {
+    place: Place,
+    rows: Vec<Row>,
+}
+
+impl Text {
+    fn pieces(&self) -> Vec<&str> {
+        self.rows.iter().map(Row::piece).collect()
+    }
+}
+
+/// A row holding one piece of a text, as a string at `path` inside its JSON.
+struct Row {
+    at: RowAt,
+    value: Value,
+    path: &'static [&'static str],
+}
+
+enum RowAt {
+    Event { run: i64, seq: i64 },
+    Request { run: i64, request_id: String },
+}
+
+impl Row {
+    fn new(at: RowAt, value: Value, path: &'static [&'static str]) -> Option<Row> {
+        let row = Row { at, value, path };
+        if row.string().is_some() {
+            Some(row)
+        } else {
+            None
+        }
+    }
+
+    fn string(&self) -> Option<&str> {
+        let mut at = &self.value;
+        for key in self.path {
+            at = at.get(*key)?;
+        }
+        at.as_str()
+    }
+
+    fn piece(&self) -> &str {
+        self.string().unwrap_or_default()
+    }
+
+    /// Write `text` back as this row's piece.
+    fn write(&self, tx: &Connection, text: String) -> Result<(), Refusal> {
+        let mut value = self.value.clone();
+        let mut at = &mut value;
+        for key in self.path {
+            match at.get_mut(*key) {
+                Some(next) => at = next,
+                None => return Ok(()),
             }
         }
-    }
-    // Why it failed, and what it asked the person: words, not the record of what happened. A
-    // question keeps its id and options; only its prompt is text.
-    for (seq, kind, payload) in &rows {
-        let field: &[&str] = match kind.as_str() {
-            "failure" => &["why"],
-            "request" => &["prompt", "prompt"],
-            _ => continue,
-        };
-        let mut payload = payload.clone();
-        let n = redact_at(&mut payload, field, needles);
-        if n > 0 {
-            places += n;
-            changed.push((*seq, payload));
-        }
-    }
-    for (seq, payload) in changed {
-        tx.execute(
-            "UPDATE events SET payload = ?3 WHERE run_id = ?1 AND seq = ?2",
-            params![run, seq, payload.to_string()],
-        )?;
-    }
-
-    let questions: Vec<(String, String)> = {
-        let mut stmt = tx.prepare("SELECT request_id, prompt FROM requests WHERE run_id = ?1")?;
-        let rows = stmt.query_map(params![run], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_, _>>()?;
-        rows
-    };
-    for (request_id, prompt) in questions {
-        let mut prompt: Value = serde_json::from_str(&prompt).unwrap_or(Value::Null);
-        // Counted once: the `request` event above holds the same words.
-        if redact_at(&mut prompt, &["prompt"], needles) > 0 {
-            tx.execute(
+        *at = Value::String(text);
+        match &self.at {
+            RowAt::Event { run, seq } => tx.execute(
+                "UPDATE events SET payload = ?3 WHERE run_id = ?1 AND seq = ?2",
+                params![run, seq, value.to_string()],
+            )?,
+            RowAt::Request { run, request_id } => tx.execute(
                 "UPDATE requests SET prompt = ?3 WHERE run_id = ?1 AND request_id = ?2",
-                params![run, request_id, prompt.to_string()],
-            )?;
-        }
+                params![run, request_id, value.to_string()],
+            )?,
+        };
+        Ok(())
     }
-    Ok(places)
 }
 
-/// Erase the needles from the string at `path` inside `value`. How many places.
-fn redact_at(value: &mut Value, path: &[&str], needles: &[Needle]) -> usize {
-    let mut at = value;
-    for key in path {
-        match at.get_mut(*key) {
-            Some(next) => at = next,
-            None => return 0,
+/// Every text of one agent's conversation the erasure reaches, in every run of it: the reply and
+/// the thinking (each joined across its chunks), why a run failed, and the prompt of each
+/// question (its `request` event and its `requests` row). Never a tool call, an answer, a state.
+fn texts_of(db: &Connection, harness: &str, conversation: &str) -> Result<Vec<Text>, Refusal> {
+    let runs: Vec<i64> = {
+        let mut stmt = db.prepare("SELECT run_id FROM runs WHERE harness = ?1 AND conversation = ?2 ORDER BY run_id")?;
+        let ids = stmt.query_map(params![harness, conversation], |r| r.get(0))?.collect::<Result<_, _>>()?;
+        ids
+    };
+    let mut texts = Vec::new();
+    for run in runs {
+        let rows: Vec<(i64, String, Value)> = {
+            let mut stmt = db.prepare(
+                "SELECT seq, kind, payload FROM events WHERE run_id = ?1
+                 AND kind IN ('text', 'event', 'failure', 'request') ORDER BY seq",
+            )?;
+            let rows = stmt
+                .query_map(params![run], |r| {
+                    let payload: String = r.get(2)?;
+                    Ok((r.get(0)?, r.get(1)?, serde_json::from_str(&payload).unwrap_or(Value::Null)))
+                })?
+                .collect::<Result<_, _>>()?;
+            rows
+        };
+        let mut reply = Vec::new();
+        let mut thinking = Vec::new();
+        for (seq, kind, payload) in rows {
+            let at = RowAt::Event { run, seq };
+            match kind.as_str() {
+                "text" => reply.extend(Row::new(at, payload, &["delta"])),
+                "event" if payload["kind"] == "thinking" => thinking.extend(Row::new(at, payload, &["delta"])),
+                "failure" => texts.extend(Row::new(at, payload, &["why"]).map(|row| Text { place: Place::Failure(run, seq), rows: vec![row] })),
+                "request" => texts.extend(
+                    Row::new(at, payload, &["prompt", "prompt"]).map(|row| Text { place: Place::Asked(run, seq), rows: vec![row] }),
+                ),
+                _ => {}
+            }
+        }
+        if !reply.is_empty() {
+            texts.push(Text { place: Place::Reply(run), rows: reply });
+        }
+        if !thinking.is_empty() {
+            texts.push(Text { place: Place::Thinking(run), rows: thinking });
+        }
+        let questions: Vec<(String, String)> = {
+            let mut stmt = db.prepare("SELECT request_id, prompt FROM requests WHERE run_id = ?1")?;
+            let rows = stmt.query_map(params![run], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_, _>>()?;
+            rows
+        };
+        for (request_id, prompt) in questions {
+            let prompt: Value = serde_json::from_str(&prompt).unwrap_or(Value::Null);
+            let place = Place::Question(run, request_id.clone());
+            texts.extend(Row::new(RowAt::Request { run, request_id }, prompt, &["prompt"]).map(|row| Text { place, rows: vec![row] }));
         }
     }
-    match at {
-        Value::String(_) => redact::redact_json(at, needles),
-        _ => 0,
+    Ok(texts)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Makes putting `secure_delete` back fail on this thread, as a broken connection would.
+    pub(crate) static FAIL_RESTORE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Put `secure_delete` back as it was before the erasure.
+fn restore_secure_delete(db: &Connection, previous: i64) -> rusqlite::Result<()> {
+    #[cfg(test)]
+    if FAIL_RESTORE.with(|fail| fail.get()) {
+        return Err(rusqlite::Error::InvalidQuery);
     }
+    db.pragma_update(None, "secure_delete", previous)
 }
 
 /// Copy the new pages into the database and empty the write-ahead log. `false` when another
@@ -598,5 +795,61 @@ mod tests {
         assert_eq!(text_of(&store, 1), format!("the code is {MARKER}, keep it"));
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_erasure_that_committed_says_so_even_when_secure_delete_cannot_be_put_back() {
+        let store = store_with(RunStore::in_memory().unwrap(), "Erase");
+        FAIL_RESTORE.with(|fail| fail.set(true));
+        let erased = store.redact(&erasure(1, "forget-1", &needles()), now_ms());
+        FAIL_RESTORE.with(|fail| fail.set(false));
+        let erased = erased.expect("it committed, so it is not a refusal");
+        assert_eq!(erased.warning.as_deref(), Some(SECURE_DELETE_WARNING));
+        assert_eq!(erased.places, 5);
+        assert_eq!(text_of(&store, 1), format!("Noted: {MARKER} lives at {MARKER}."));
+        assert_eq!(store.redactions("mind", "main").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn too_much_to_search_is_refused_before_anything_is_searched_or_touched() {
+        let store = RunStore::in_memory().unwrap();
+        store.start(1, "mind", "main", "s1").unwrap();
+        // Half a megabyte of reply: with 16 needles of 4081 to 4096 characters, every window hashed
+        // in full would be about 33 GB of SHA-256.
+        let chunk = "the quick brown fox jumps over Priya's lazy dog. ".repeat(1_000);
+        for _ in 0..10 {
+            store.append(1, "text", &json!({"delta": chunk})).unwrap();
+        }
+        store.ask(1, "f", &json!({"prompt": "Forget Priya?", "options": ["Keep", "Erase"]})).unwrap();
+        store.answer(1, "f", &json!("Erase")).unwrap();
+        let long: Vec<Needle> = (0..16).map(|i| Needle::of(&"x".repeat(4081 + i))).collect();
+        let started = std::time::Instant::now();
+        assert_eq!(store.redact(&erasure(1, "f", &long), now_ms()), Err(Refusal::TooMuch));
+        assert!(started.elapsed() < std::time::Duration::from_secs(30), "refused without searching: {:?}", started.elapsed());
+        assert_eq!(Refusal::TooMuch.to_string(), "too much to search; ask again with fewer or shorter needles");
+        // Nothing touched, and the question not used up: a smaller one is still taken.
+        assert!(store.redactions("mind", "main").unwrap().is_empty());
+        assert!(text_of(&store, 1).contains("Priya"));
+        let erased = store.redact(&erasure(1, "f", &[Needle::of("Priya")]), now_ms()).unwrap();
+        assert_eq!(erased.places, 10_000 + 1);
+        assert!(!text_of(&store, 1).contains("Priya"));
+    }
+
+    #[test]
+    fn a_plan_searched_before_more_was_said_erases_what_it_found_and_checks_it_again() {
+        let store = store_with(RunStore::in_memory().unwrap(), "Erase");
+        let needles = needles();
+        let search = Search::new(&needles);
+        let e = erasure(1, "forget-1", &needles);
+        let mut plan = store.prepare_redact(&e, now_ms()).unwrap();
+        plan.search(&search);
+        // More of the reply arrives between the search and the transaction.
+        store.append(1, "text", &json!({"delta": " Priya again."})).unwrap();
+        let erased = store.apply_redact(&e, now_ms(), &plan).unwrap();
+        // What was searched is erased; what came after the search was not searched.
+        assert_eq!(text_of(&store, 1), format!("Noted: {MARKER} lives at {MARKER}. Priya again."));
+        assert_eq!(erased.places, 5);
+        // The plan cannot be applied twice: the question is claimed.
+        assert_eq!(store.apply_redact(&e, now_ms(), &plan), Err(Refusal::AlreadyErased("forget-1".into())));
     }
 }
