@@ -16,8 +16,9 @@
 //! make an action disappear. An approval (its `app.action`, what it was for and how it came out)
 //! is shown exactly as it was. A tool call keeps all its words, and only its free text is drawn
 //! with the marker ([`Card::shown`]): its preview and summary, the strings under its free-text
-//! arguments ([`FREE_TEXT_ARGS`]), and its output when that is no longer than
-//! [`MASK_OUTPUT_MAX`]. Its name, its target and every other argument are drawn as they are. The
+//! arguments ([`FREE_TEXT_ARGS`]; none for a command, whose arguments are the action itself), and
+//! its output when that is no longer than [`MASK_OUTPUT_MAX`]. Its name, its target and every
+//! other argument are drawn as they are. The
 //! person — and only the person, in the pane — can show a masked card as it was. The refusal lines
 //! are masked the same way (`Agent::shown_refusals`). A mask keeps no words and no digest; it is
 //! keyed by the request the person answered.
@@ -42,6 +43,16 @@ pub const FREE_TEXT_ARGS: [&str; 14] = [
     "text", "content", "body", "message", "note", "title", "subject", "prompt", "query", "description",
     "summary", "comment", "reply", "answer",
 ];
+
+/// The argument keys of `card` whose strings are free text: none for a command, whose arguments —
+/// the text typed into a terminal, a query, an instruction handed on — are the action itself.
+fn free_args(card: &Card) -> &'static [&'static str] {
+    if card.is_command() {
+        &[]
+    } else {
+        &FREE_TEXT_ARGS
+    }
+}
 
 /// The longest output of a tool call that is searched and drawn masked. A longer one is neither
 /// copied nor searched, and is drawn as it is (docs/harness.md, Limits).
@@ -149,7 +160,7 @@ impl Store {
                     Item::Note(note) => out.push((at(Field::Note), vec![note.clone()])),
                     Item::Card(card) => {
                         let base = card_mask(card);
-                        let args = json_strings_under(&base.args, Some(&FREE_TEXT_ARGS));
+                        let args = json_strings_under(&base.args, Some(free_args(card)));
                         out.extend(args.into_iter().enumerate().map(|(k, s)| (at(Field::Arg(k)), vec![s])));
                         out.push((at(Field::Preview), vec![base.preview]));
                         out.push((at(Field::Summary), vec![base.summary]));
@@ -289,7 +300,7 @@ fn card_size(card: &Card) -> usize {
         Some(mask) => (&mask.args, mask.preview.len(), mask.summary.len(), mask.output.len()),
         None => (&card.args, card.preview.len(), card.summary.len(), card.output.bytes.kept()),
     };
-    let args: usize = json_strings_under(args, Some(&FREE_TEXT_ARGS)).iter().map(String::len).sum();
+    let args: usize = json_strings_under(args, Some(free_args(card))).iter().map(String::len).sum();
     args + preview + summary + if output <= MASK_OUTPUT_MAX { output } else { 0 }
 }
 
@@ -298,11 +309,11 @@ fn card_size(card: &Card) -> usize {
 fn mask_card(card: &mut Card, request: &str, plan: &ErasurePlan, t: usize, i: usize) -> usize {
     let at = |field| Place::Item(t, i, field);
     let mut base = card_mask(card);
-    let args: Vec<Found> = (0..json_strings_under(&base.args, Some(&FREE_TEXT_ARGS)).len())
+    let args: Vec<Found> = (0..json_strings_under(&base.args, Some(free_args(card))).len())
         .map(|k| plan.get(at(Field::Arg(k))).cloned().unwrap_or_default())
         .collect();
     let mut output = base.output.take();
-    let n = apply_json_under(&mut base.args, &args, Some(&FREE_TEXT_ARGS))
+    let n = apply_json_under(&mut base.args, &args, Some(free_args(card)))
         + in_place(&mut base.preview, plan.get(at(Field::Preview)))
         + in_place(&mut base.summary, plan.get(at(Field::Summary)))
         + output.as_mut().map_or(0, |o| in_place(o, plan.get(at(Field::Output))));
@@ -574,5 +585,26 @@ mod tests {
         let (writes, again) = s.take_dirty(&dir);
         assert_eq!(again, vec![file_for(&dir, &gone)]);
         assert!(writes.iter().any(|(path, _)| *path == file_for(&dir, &back)));
+    }
+
+    /// A command's arguments are the action itself — the text typed into a terminal, a query, an
+    /// instruction handed on — so they are never masked; its output may be.
+    #[test]
+    fn a_commands_arguments_are_never_masked() {
+        let mut s = Store::with_clock(Box::new(|| 1));
+        let pi = AgentId::new("pi", "c-cmd");
+        s.open_turn(&pi, "go");
+        s.event(
+            &pi,
+            &Event::ToolStart { call: "t1".into(), name: "terminal.run".into(), target: String::new(), args: json!({"text": "echo Priya"}) },
+            Provenance::Reported,
+        );
+        s.event(&pi, &Event::ToolOutput { call: "t1".into(), stream: Stream::Stdout, delta: "Priya\n".into() }, Provenance::Reported);
+        let needles = [Needle::of(SECRET)];
+        let done = s.redact(&pi, &erasure(&needles));
+        let shown = card(&s, &pi).shown();
+        assert_eq!(shown.args, json!({"text": "echo Priya"}), "what was typed is what was done");
+        assert_eq!(shown.output.all(), format!("{MARKER}\n"));
+        assert_eq!(done.masked, 1, "the output only");
     }
 }

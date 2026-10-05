@@ -61,6 +61,13 @@ pub const MAX_NEEDLES: usize = 16;
 /// The longest one needle may be, in Unicode scalar values.
 pub const MAX_NEEDLE_CHARS: usize = 4096;
 
+/// The shortest one needle may be, in Unicode scalar values after canonicalisation: a shorter one
+/// ("e", "not") would erase too much to be what the person meant.
+pub const MIN_NEEDLE_CHARS: usize = 4;
+
+/// The refusal for a needle under [`MIN_NEEDLE_CHARS`].
+pub const TOO_SHORT: &str = "a needle is too short to erase safely";
+
 /// Words to erase, as their digest: never the words themselves.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Needle {
@@ -97,7 +104,7 @@ pub fn canonical(text: &str) -> String {
 }
 
 /// Whether `needles` may be acted on: between one and [`MAX_NEEDLES`] of them, each a 64-digit
-/// lowercase hex digest and a length from 1 to [`MAX_NEEDLE_CHARS`]. The error says which is wrong
+/// lowercase hex digest and a length from [`MIN_NEEDLE_CHARS`] to [`MAX_NEEDLE_CHARS`]. The error says which is wrong
 /// and never repeats a digest.
 pub fn validate(needles: &[Needle]) -> Result<(), String> {
     if needles.is_empty() {
@@ -111,8 +118,11 @@ pub fn validate(needles: &[Needle]) -> Result<(), String> {
         if needle.sha256.len() != 64 || !lower_hex {
             return Err(format!("needle {i}: `sha256` must be 64 lowercase hex digits"));
         }
-        if !(1..=MAX_NEEDLE_CHARS).contains(&needle.len) {
-            return Err(format!("needle {i}: `len` must be from 1 to {MAX_NEEDLE_CHARS}"));
+        if needle.len < MIN_NEEDLE_CHARS {
+            return Err(TOO_SHORT.to_string());
+        }
+        if needle.len > MAX_NEEDLE_CHARS {
+            return Err(format!("needle {i}: `len` must be from {MIN_NEEDLE_CHARS} to {MAX_NEEDLE_CHARS}"));
         }
     }
     Ok(())
@@ -144,11 +154,50 @@ pub fn question_shown(prompt: &str) -> &str {
     &prompt[..end]
 }
 
-/// Whether every needle occurs, as a window of the canonical form, in `text`: what the person was
-/// shown when they answered *Erase*. A `redact` erases only words the person saw quoted.
-pub fn all_in(text: &str, needles: &[Needle]) -> bool {
-    let shown = Prepared::new(&[text]);
-    needles.iter().all(|needle| !Search::new(std::slice::from_ref(needle)).find(&shown).is_empty())
+/// The quoted spans of a question, as the person was shown it ([`question_shown`]), each in
+/// canonical form: the text between a pair of double quotes, exactly.
+///
+/// - Only double quotes delimit: `"` (U+0022) … `"`, and `“` (U+201C) … `”` (U+201D). Single
+///   quotes, apostrophes, `‘` and `’` never open or close a span.
+/// - Pairing is by type: a span opened by `"` closes at the next `"`, one opened by `“` at the next
+///   `”`. Inside `"…"`, `“` and `”` are ordinary characters; inside `“…”`, `"` is.
+/// - Left to right; spans do not nest; no escapes. An opener with no closer before the end of the
+///   shown prompt makes no span, and the scan goes on from the character after it.
+///
+/// Every span is listed, however short; a needle must also be [`MIN_NEEDLE_CHARS`] long. The same
+/// rule in Python is `quoted_spans` in `harnesses/lib/yantrik_harness.py`; both are held to
+/// `harnesses/tests/fixtures/redact_spans.json`.
+pub fn quoted_spans(prompt: &str) -> Vec<String> {
+    let shown = question_shown(prompt);
+    let mut spans = Vec::new();
+    let mut at = 0;
+    while let Some(c) = shown[at..].chars().next() {
+        let close = match c {
+            '"' => Some('"'),
+            '\u{201c}' => Some('\u{201d}'),
+            _ => None,
+        };
+        let open_end = at + c.len_utf8();
+        if let Some(close) = close {
+            if let Some(len) = shown[open_end..].find(close) {
+                spans.push(canonical(&shown[open_end..open_end + len]));
+                at = open_end + len + close.len_utf8();
+                continue;
+            }
+        }
+        at = open_end;
+    }
+    spans
+}
+
+/// The needles a `redact` answered by this question may carry: one per quoted span
+/// ([`quoted_spans`]) at least [`MIN_NEEDLE_CHARS`] long. A needle must equal one of them exactly.
+pub fn quoted_needles(prompt: &str) -> Vec<Needle> {
+    quoted_spans(prompt)
+        .iter()
+        .filter(|span| span.chars().count() >= MIN_NEEDLE_CHARS)
+        .map(|span| Needle { sha256: digest_hex(span), len: span.chars().count() })
+        .collect()
 }
 
 /// The needles, ready to search with.
@@ -628,7 +677,8 @@ mod tests {
             let needle = Needle::of(text);
             assert_eq!(needle.sha256, f["sha256"].as_str().unwrap(), "sha256 of {text:?}");
             assert_eq!(needle.len as u64, f["len"].as_u64().unwrap(), "len of {text:?}");
-            assert!(validate(&[needle.clone()]).is_ok());
+            // 'É' is one scalar: a needle, but too short to send.
+            assert_eq!(validate(&[needle.clone()]).is_ok(), needle.len >= MIN_NEEDLE_CHARS, "{text:?}");
             // And the shell finds each one in its own text.
             assert_eq!(redact(&format!("<{text}>"), &[needle]), Some((format!("<{MARKER}>"), 1)), "{text:?}");
         }
@@ -636,8 +686,12 @@ mod tests {
 
     #[test]
     fn needles_are_checked_before_anything_is_touched() {
-        assert!(validate(&[Needle::of("x")]).is_ok());
+        assert!(validate(&[Needle::of("xxxx")]).is_ok());
         assert!(validate(&[]).is_err());
+        // "e" or "not" would erase far more than anyone meant.
+        for short in ["e", "not", "\u{c9}"] {
+            assert_eq!(validate(&[Needle::of(short)]), Err(TOO_SHORT.to_string()), "{short:?}");
+        }
         assert!(validate(&vec![Needle::of("x"); MAX_NEEDLES + 1]).is_err());
         let upper = Needle { sha256: Needle::of("x").sha256.to_uppercase(), len: 1 };
         assert!(validate(&[upper]).is_err());
@@ -672,5 +726,42 @@ mod tests {
         // Changed under it: the window no longer hashes to the needle, so nothing is replaced.
         assert_eq!(found.apply(&["call Maria now"]), None);
         assert_eq!(found.apply(&["call"]), None);
+    }
+
+    /// The quoted-span rule both sides must follow, byte for byte:
+    /// `harnesses/tests/fixtures/redact_spans.json`, asserted here and by the Python harness
+    /// library's tests.
+    #[test]
+    fn quoted_spans_match_the_shared_fixtures() {
+        let fixtures: Vec<serde_json::Value> =
+            serde_json::from_str(include_str!("../../../harnesses/tests/fixtures/redact_spans.json")).unwrap();
+        assert!(fixtures.len() >= 9);
+        for f in &fixtures {
+            let question = f["question"].as_str().unwrap();
+            let spans: Vec<String> = f["spans"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
+            assert_eq!(quoted_spans(question), spans, "{}", f["case"]);
+            let short: Vec<&String> = spans.iter().filter(|s| s.chars().count() < MIN_NEEDLE_CHARS).collect();
+            let listed: Vec<String> = f["too_short"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
+            assert_eq!(short.into_iter().cloned().collect::<Vec<_>>(), listed, "{}", f["case"]);
+            // A question may be answered for exactly its long-enough spans, each as one needle.
+            let needles = quoted_needles(question);
+            assert_eq!(needles.len(), spans.len() - listed.len(), "{}", f["case"]);
+            for span in spans.iter().filter(|s| !listed.contains(s)) {
+                assert!(needles.contains(&Needle::of(span)), "{}: {span:?}", f["case"]);
+            }
+        }
+    }
+
+    #[test]
+    fn a_needle_must_be_a_whole_quoted_span_not_a_piece_of_one_or_of_the_rest() {
+        let question = "Forget that you said \u{201c}you will not delete ~/Photos\u{201d}, and \"Priya\"?";
+        let allowed = quoted_needles(question);
+        // Whole spans, in any case, as the person saw them quoted.
+        assert!(allowed.contains(&Needle::of("You will NOT delete ~/Photos")));
+        assert!(allowed.contains(&Needle::of("priya")));
+        // A piece of a span, or words outside every span, are not.
+        for not_quoted in ["not delete", "~/Photos", "Forget that", "you will not"] {
+            assert!(!allowed.contains(&Needle::of(not_quoted)), "{not_quoted:?}");
+        }
     }
 }

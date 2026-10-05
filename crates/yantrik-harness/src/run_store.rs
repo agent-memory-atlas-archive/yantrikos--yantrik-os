@@ -201,6 +201,7 @@ CREATE TABLE IF NOT EXISTS requests (
     asked_at    INTEGER NOT NULL,
     answered_at INTEGER,
     by_option   INTEGER NOT NULL DEFAULT 0,
+    quoted      TEXT,
     PRIMARY KEY (run_id, request_id)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS redactions (
@@ -208,6 +209,7 @@ CREATE TABLE IF NOT EXISTS redactions (
     request_id  TEXT NOT NULL,
     places      INTEGER NOT NULL,
     at          INTEGER NOT NULL,
+    used_up     INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (run_id, request_id)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS redact_too_much (
@@ -245,12 +247,19 @@ impl RunStore {
     fn init(db: Connection) -> Result<RunStore, RunError> {
         db.pragma_update(None, "foreign_keys", "ON")?;
         db.execute_batch(SCHEMA)?;
-        // A store made before answers recorded how they were given: its answers count as typed.
-        let has_by_option = db
-            .prepare("SELECT 1 FROM pragma_table_info('requests') WHERE name = 'by_option'")?
-            .exists([])?;
-        if !has_by_option {
-            db.execute_batch("ALTER TABLE requests ADD COLUMN by_option INTEGER NOT NULL DEFAULT 0")?;
+        // A store made before these columns: its answers count as typed and as quoting nothing,
+        // and its erasures as erasures.
+        for (table, column, kind) in [
+            ("requests", "by_option", "INTEGER NOT NULL DEFAULT 0"),
+            ("requests", "quoted", "TEXT"),
+            ("redactions", "used_up", "INTEGER NOT NULL DEFAULT 0"),
+        ] {
+            let has = db
+                .prepare(&format!("SELECT 1 FROM pragma_table_info('{table}') WHERE name = '{column}'"))?
+                .exists([])?;
+            if !has {
+                db.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {kind}"))?;
+            }
         }
         Ok(RunStore { db: Mutex::new(db) })
     }
@@ -373,23 +382,31 @@ impl RunStore {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let at = now_ms();
             let state = state_in(&tx, run_id)?;
-            let request: Option<String> = tx
+            let request: Option<(String, String)> = tx
                 .query_row(
-                    "SELECT state FROM requests WHERE run_id = ?1 AND request_id = ?2",
+                    "SELECT state, prompt FROM requests WHERE run_id = ?1 AND request_id = ?2",
                     params![run_id as i64, request_id],
-                    |r| r.get(0),
+                    |r| Ok((r.get(0)?, r.get(1)?)),
                 )
                 .optional()?;
-            match request.as_deref() {
+            // What the question quoted, as the person answered it: the digests of its quoted spans,
+            // and no more of its words than the prompt already holds. A `redact` is checked against
+            // this, so a later erasure that rewrites the prompt cannot make new "quoted" words.
+            let quoted = request.as_ref().map(|(_, prompt)| {
+                let prompt: Value = serde_json::from_str(prompt).unwrap_or(Value::Null);
+                let needles = crate::redact::quoted_needles(prompt["prompt"].as_str().unwrap_or_default());
+                serde_json::to_string(&needles).unwrap_or_else(|_| "[]".to_string())
+            });
+            match request.as_ref().map(|(state, _)| state.as_str()) {
                 None => return Err(RunError::NoSuchRequest { run_id, request_id: request_id.to_string() }),
                 Some("answered") => return Err(RunError::AlreadyAnswered { run_id, request_id: request_id.to_string() }),
                 Some(_) if state.is_final() => return Err(RunError::Ended { run_id, state }),
                 Some(_) => {}
             }
             tx.execute(
-                "UPDATE requests SET state = 'answered', answer = ?3, answered_at = ?4, by_option = ?5
+                "UPDATE requests SET state = 'answered', answer = ?3, answered_at = ?4, by_option = ?5, quoted = ?6
                  WHERE run_id = ?1 AND request_id = ?2 AND state = 'pending'",
-                params![run_id as i64, request_id, answer.to_string(), at, by_option],
+                params![run_id as i64, request_id, answer.to_string(), at, by_option, quoted],
             )?;
             let seq = append_in(&tx, run_id, "answer", &json!({"request_id": request_id, "answer": answer}), at)?;
             let pending: i64 = tx.query_row(

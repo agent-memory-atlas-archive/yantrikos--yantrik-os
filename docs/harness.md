@@ -338,9 +338,9 @@ is not a reason to lose the turn:
   must not break an older desktop — and a malformed one of a kind it knows is logged and counted.
 
 **Forgetting: `redact`.** When the person asks a mind to forget something, the mind asks a
-Keep/Erase question (a `request` with `options: ["Keep", "Erase"]`) that **quotes, verbatim, the
-words it will erase** — "Forget “Priya lives at 12 Elm Street”?" — and, on *Erase*, erases its
-own memory. The shell keeps copies of its own — the agent's pane transcript
+Keep/Erase question (a `request` with `options: ["Keep", "Erase"]`) that **contains each text it
+will erase inside double quotes** — `Forget “Priya lives at 12 Elm Street”?` — and, on *Erase*,
+erases its own memory. The shell keeps copies of its own — the agent's pane transcript
 (`~/.local/share/yantrik/agents/<agent>.jsonl`) and the run store (`runs.db`, its WAL included) —
 and `redact` is how the mind asks for those to go too, without the words ever travelling:
 
@@ -353,7 +353,8 @@ Each needle is the SHA-256, as UTF-8, of the words' **canonical form**: NFC firs
 default lowercasing (Rust `str::to_lowercase`; Python `unicodedata.normalize('NFC', t).lower()`).
 `len` is the canonical form's length in Unicode scalar values, counted *after* lowercasing, which
 can change it ('İ' U+0130 lowercases to 'i' + U+0307, two scalars). At most 16 needles; each
-`sha256` is 64 lowercase hex digits and each `len` 1 to 4096. The shell puts each text it holds in
+`sha256` is 64 lowercase hex digits and each `len` 4 to 4096 (a shorter one is refused: `"a needle
+is too short to erase safely"`). The shell puts each text it holds in
 the same canonical form and slides a window of `len` scalar values over it, hashing each window.
 So matching is case-insensitive and over NFC: one needle for "priya" erases "Priya", "PRIYA" and
 "priya", composed and decomposed "é" (or "É") are the same, and a harness sends each text once —
@@ -376,11 +377,23 @@ changes nothing:
 - **(c)** the run is in flight, or ended no more than five minutes ago — so it may follow
   `complete`;
 - **(d)** it comes from the harness and session that hold the run;
-- **(e)** every needle occurs, as a window of the canonical form, in what the person was **shown**
-  of that question: its prompt's first 2000 characters, or the 1999 before the card's ellipsis
-  when it is longer (`{"refused": "a needle is not in the question the person answered"}`
-  otherwise). So the person saw exactly the words that go, and a mind cannot ask "Erase the temp
-  draft?" and then erase the person's own "don't touch ~/Photos".
+- **(e)** every needle **equals one whole quoted span** of that question, as the person was
+  **shown** it when they answered (`{"refused": "a needle is not in the question the person
+  answered"}` otherwise). A quoted span is the text between a pair of double quotes in the shown
+  prompt — its first 2000 characters, or the 1999 before the card's ellipsis when it is longer —
+  in canonical form, at least 4 scalars long:
+  - only double quotes delimit: `"` … `"` (U+0022), and `“` … `”` (U+201C … U+201D). Single
+    quotes, apostrophes, `‘` and `’` never open or close a span, so `"don't share 'x'"` is one span;
+  - pairing is by type: `"` closes at the next `"`, `“` at the next `”`; inside `"…"`, `“` and `”`
+    are ordinary characters, and inside `“…”`, `"` is;
+  - left to right; spans do not nest; no escapes; an opener with no closer in the shown prompt
+    makes no span, and the scan goes on after it.
+
+  So each needle is exactly one quoted span: not a piece of one ("not" out of “you will not delete
+  ~/Photos”), not words outside the quotes. The spans are taken when the answer is recorded and
+  kept as digests (`requests.quoted`), so a later erasure that rewrites the prompt cannot make new
+  quoted words. In Python, `quoted_spans(question)` in `harnesses/lib` follows the same rule; both
+  sides are held to `harnesses/tests/fixtures/redact_spans.json`.
 
 One `redact` per question; a second is refused. Accepted, the reply is
 `{"redacted": <places>, "where": ["transcript", "runs"]}` (and `"masked": n` when records were
@@ -396,7 +409,7 @@ then again, exactly, on the copies. Over it, the whole `redact` is refused with 
 search; ask again with fewer or shorter needles"`, before anything is searched or changed, and the
 question is not used up — send it again with fewer or shorter needles. The third such refusal for
 one question uses it up (`"too much to search, three times; this question can no longer be used
-to erase anything"`). The texts are copied out under each store's lock and searched with no lock
+to erase anything"`), and its record says "Not erased (too much to search)." The texts are copied out under each store's lock and searched with no lock
 held; each match is checked again against the text as it is when it is applied, and skipped if it
 no longer hashes to its needle.
 
@@ -413,7 +426,9 @@ disappear, nor hide one: an approval is shown exactly as it was (its `app.action
 out), and a tool call keeps its name, its target and its arguments in view. Only a tool call's
 **free text** — its preview, its summary, the strings under its free-text arguments (`text`,
 `content`, `body`, `message`, `note`, `title`, `subject`, `prompt`, `query`, `description`,
-`summary`, `comment`, `reply`, `answer`) and its output when that is no longer than 64 KiB — is
+`summary`, `comment`, `reply`, `answer`; none for a command, whose arguments — text typed into a
+terminal, a query, an instruction handed on — are the action itself) and its output when that is
+no longer than 64 KiB — is
 *shown* masked when it holds the words: the pane, `read_agent` and `describe shell` draw it with
 the marker, keyed by the erasure, and the call itself keeps them. In the pane, and only there, the
 person can press "Show what was erased here" on a masked card to see it as it was; nothing a mind

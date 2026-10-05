@@ -43,6 +43,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -73,6 +74,14 @@ EVENT_PIECE_BYTES = 48 * 1024
 # each from 1 to this many characters in canonical form (NFC, then lowercased).
 REDACT_MAX_NEEDLES = 16
 REDACT_MAX_CHARS = 4096
+# ... and at least this many: a shorter text ("e", "not") would erase too much to be what was meant.
+REDACT_MIN_CHARS = 4
+# How much of a question's prompt the person is shown: the card shows this many characters, or
+# the 1999 before its ellipsis when the prompt is longer. A text to erase must be quoted in it.
+QUESTION_CHARS = 2000
+# A quoted span: between straight double quotes, or between curly double quotes. Single quotes and
+# apostrophes never delimit; inside one kind the other kind is an ordinary character; no escapes.
+_QUOTED_SPAN = re.compile('"([^"]*)"|\u201c([^\u201d]*)\u201d')
 # The answer to a Keep/Erase question that lets the desktop erase its copies. Exact.
 ERASE = "Erase"
 # The environment variable the tools a harness starts for a conversation read their agent from.
@@ -241,13 +250,32 @@ def summary_line(text: str, limit: int = 160) -> str:
     return ""
 
 
+def canonical(text: str) -> str:
+    """The form texts are hashed and matched in: NFC, then Unicode default lowercasing."""
+    return unicodedata.normalize("NFC", str(text)).lower()
+
+
+def quoted_spans(question: str) -> List[str]:
+    """The quoted spans of a question as the person is shown it, each in canonical form — the same
+    rule as the desktop's (`redact::quoted_spans`), held to `harnesses/tests/fixtures/
+    redact_spans.json`. A text `turn.redact` may erase must be exactly one of these, at least
+    `REDACT_MIN_CHARS` long: ask "Forget “<the words>”?" quoting each text you will erase.
+
+    Left to right over the shown prompt; a span opened by `"` closes at the next `"`, one opened by
+    “ at the next ”; an opener with no closer in the shown prompt makes no span, and the scan goes
+    on after it; spans do not nest; no escapes."""
+    question = str(question)
+    shown = question if len(question) <= QUESTION_CHARS else question[:QUESTION_CHARS - 1]
+    return [canonical(m.group(1) if m.group(1) is not None else m.group(2)) for m in _QUOTED_SPAN.finditer(shown)]
+
+
 def needle(text: str) -> Dict[str, Any]:
     """Words to erase, as the desktop takes them: the SHA-256 of their canonical form as UTF-8,
     and its length in characters. The canonical form is NFC, then Unicode default lowercasing
     (`unicodedata.normalize('NFC', t).lower()`, Rust's `str::to_lowercase` on the desktop), and the
     length is counted after lowercasing ('İ' becomes two characters). The words themselves never
     leave this process."""
-    canon = unicodedata.normalize("NFC", str(text)).lower()
+    canon = canonical(text)
     return {"sha256": hashlib.sha256(canon.encode("utf-8")).hexdigest(), "len": len(canon)}
 
 
@@ -451,9 +479,10 @@ class Turn:
         erases every case it was written in. The desktop applies it only for a question this run
         asked, answered by pressing the offered `Erase` (a typed "Erase" does not count), from this
         session, while the turn is open or within five minutes of its end, and once per question;
-        and only when every text is quoted, verbatim, in what the person was shown of that question
-        (its first 2000 characters). Ask "Forget <the words>?" quoting exactly what you will erase.
-        The question's own words are erased with them.
+        and only when every text is exactly one quoted span of that question as the person was shown
+        it (`quoted_spans`: inside "…" or “…”, in its first 2000 characters), at least four
+        characters long. Ask "Forget “<the words>”?" quoting exactly what you will erase. The
+        question's own words are erased with them.
 
         Returns the desktop's reply: `{"redacted": n, "where": ["transcript", "runs"]}` (with a
         `"warning"` when it erased but something after the commit went wrong), or
@@ -471,6 +500,8 @@ class Turn:
             return {"unsent": "at most %d texts in one redact" % REDACT_MAX_NEEDLES}
         if any(n["len"] > REDACT_MAX_CHARS for n in needles):
             return {"unsent": "a text to erase is at most %d characters" % REDACT_MAX_CHARS}
+        if any(n["len"] < REDACT_MIN_CHARS for n in needles):
+            return {"unsent": "a needle is too short to erase safely"}
         send = getattr(self.harness, "_redact", None)
         if send is None:
             return {"unsent": "this harness cannot send a redact"}

@@ -21,18 +21,14 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 def _quoted_in(prompt: str, needle: Dict[str, Any]) -> bool:
-    """The host's consent check, played: the needle is a window of the canonical form (NFC, then
-    lowercased) of what the person was shown of the question — its first 2000 characters, or the
-    1999 before the card's ellipsis."""
-    import hashlib
-    import unicodedata
+    """The host's consent check, played: the needle is exactly one quoted span (at least four
+    characters) of the question as the person was shown it."""
+    import yantrik_harness
 
-    shown = prompt if len(prompt) <= 2000 else prompt[:1999]
-    canon = unicodedata.normalize("NFC", shown).lower()
-    size = int(needle.get("len") or 0)
     return any(
-        hashlib.sha256(canon[i:i + size].encode("utf-8")).hexdigest() == needle.get("sha256")
-        for i in range(0, len(canon) - size + 1)
+        yantrik_harness.needle(span) == needle
+        for span in yantrik_harness.quoted_spans(prompt)
+        if len(span) >= yantrik_harness.REDACT_MIN_CHARS
     )
 
 

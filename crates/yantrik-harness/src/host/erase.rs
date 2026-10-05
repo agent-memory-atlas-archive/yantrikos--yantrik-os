@@ -282,7 +282,7 @@ mod tests {
         for delta in ["Your sister is Pri", "ya."] {
             call(host, protocol::CHUNK, json!({ "session": session, "turn_id": run, "delta": delta }));
         }
-        let ask = json!({ "kind": "request", "request_id": "forget", "prompt": "Forget your sister's name, Priya?", "options": ["Keep", "Erase"] });
+        let ask = json!({ "kind": "request", "request_id": "forget", "prompt": "Forget your sister's name, \u{201c}Priya\u{201d}?", "options": ["Keep", "Erase"] });
         assert_eq!(call(host, protocol::EVENT, json!({ "session": session, "turn_id": run, "event": ask })), json!({}));
         host.answer(run, "forget", &json!(answer), pressed).unwrap();
         (session, agent, run, reader)
@@ -440,5 +440,18 @@ mod tests {
         assert_eq!(redact(&host, &session, run, "forget")["refused"], crate::run_store::TOO_MUCH_USED_UP);
         assert!(redact(&host, &session, run, "forget")["refused"].as_str().unwrap().contains("one redaction per question"));
         assert_eq!(reply_text(&store, run), "Your sister is Priya.");
+    }
+
+    #[test]
+    fn a_needle_shorter_than_four_is_refused_as_too_short() {
+        let (host, store, asked) = host_with_shell();
+        let (session, _, run, _reader) = answered(&host, "Erase");
+        for short in ["e", "not"] {
+            let event = json!({ "kind": "redact", "request_id": "forget", "needles": [Needle::of(short)] });
+            let reply = call(&host, protocol::EVENT, json!({ "session": session, "turn_id": run, "event": event }));
+            assert_eq!(reply, json!({ "refused": "a needle is too short to erase safely" }), "{short:?}");
+        }
+        assert_eq!(reply_text(&store, run), "Your sister is Priya.");
+        assert!(asked.lock().unwrap().is_empty());
     }
 }
