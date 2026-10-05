@@ -95,6 +95,7 @@ pub mod installer;
 pub mod installer_disk;
 pub mod installer_locale;
 pub mod installer_ownership;
+pub mod wifi_driver;
 pub mod login;
 pub mod minds_panel;
 pub mod services;
@@ -158,6 +159,8 @@ pub fn wire_all(ui: &App, ctx: &AppContext) {
     decision_model::wire(ui, ctx);
     free_ai::wire(ui, ctx);
     installer::wire(ui, ctx);
+    // The Mac BCM4331's driver, fetched once online: what the first-run screens say meanwhile.
+    wifi_driver::wire(ui, ctx);
     login::wire(ui, ctx);
     // After `login`, which is the other place a secret reaches the vault, and before `callbacks`,
     // which owns the lock screen that closes it.

@@ -658,6 +658,8 @@ export component InstallerProbe inherits Window {
     in property <[InstallerDisk]> disks;
     in property <bool> disks-scanned: true;
     in-out property <string> selected-disk;
+    in property <string> macos-disks;
+    in-out property <string> erase-macos-disk;
     in-out property <string> timezone;
     in-out property <bool> installing;
     in-out property <int> install-progress;
@@ -679,6 +681,7 @@ export component InstallerProbe inherits Window {
     pure callback check-hostname(string) -> string;
     pure callback check-password(string, string) -> string;
     pure callback check-timezone(string) -> string;
+    pure callback is-macos-disk(string, string) -> bool;
 
     screen := InstallerScreen {
         width: 100%; height: 100%;
@@ -698,6 +701,8 @@ export component InstallerProbe inherits Window {
         disks: root.disks;
         disks-scanned: root.disks-scanned;
         selected-disk <=> root.selected-disk;
+        macos-disks: root.macos-disks;
+        erase-macos-disk <=> root.erase-macos-disk;
         timezone <=> root.timezone;
         installing <=> root.installing;
         install-progress <=> root.install-progress;
@@ -714,6 +719,7 @@ export component InstallerProbe inherits Window {
         check-hostname(h) => { return root.check-hostname(h); }
         check-password(p, c) => { return root.check-password(p, c); }
         check-timezone(t) => { return root.check-timezone(t); }
+        is-macos-disk(d, l) => { return root.is-macos-disk(d, l); }
     }
 }
 

@@ -176,6 +176,22 @@ jobs:
       - name: The updater agrees with itself about channel and version
         run: bash deploy/yantrik-os/yantrik-update selftest
 
+      # Intel Macs (the Mac mini 2012). A fake sysfs and dry runs: the Broadcom BCM4331 gets wl
+      # when headers exist and b43 when they do not, each blacklisting the other, nothing is
+      # fetched offline, and a USB dongle is not mistaken for the chip. Then mbpfan's settings:
+      # the Mac mini's 1800-5500 rpm, the SMC's own limits elsewhere, a person's edits kept.
+      - name: A Mac's Wi-Fi driver is fetched, not shipped, and never fights the other driver
+        run: bash deploy/yantrik-os/yantrik-broadcom-wifi selftest
+      - name: A Mac's fans get its own limits
+        run: bash deploy/yantrik-os/yantrik-mac-fans selftest
+      - name: The Mac support stages into a rootfs
+        run: |
+          root="$(mktemp -d)"
+          sh deploy/yantrik-os/stage-mac-support.sh "$root"
+          test -x "$root/usr/lib/yantrik/yantrik-broadcom-wifi"
+          test -L "$root/etc/systemd/system/multi-user.target.wants/yantrik-broadcom-wifi.service"
+          test -f "$root/etc/systemd/system/mbpfan.service.d/yantrik-apple.conf"
+
       # The session's shell supervisor (#247): a crash brings the shell back, a crash loop stops,
       # a logout ends it. Fake shells and a fake display socket; no compositor needed.
       - name: A shell that dies is started again
