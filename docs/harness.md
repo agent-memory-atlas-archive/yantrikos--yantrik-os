@@ -321,6 +321,7 @@ is *doing*, and the Agents view draws each tool call as a card:
 | `status` | `text` | the agent's state line |
 | `usage` | `model`, `input_tokens?`, `output_tokens?`, `cost_usd?` | the details panel; they add up |
 | `request` | `request_id`, `prompt`, `options?` | the agent waits for you, asking `prompt` |
+| `redact` | `request_id`, `needles: [{sha256, len}]` | nothing: the shell erases its copies of the words (below) |
 
 `call` is your own id for the call (pi's `toolCallId`, an OpenAI `tool_call.id`), unique within
 the turn. The types are `crates/yantrik-harness/src/event.rs`. The desktop enforces a lifecycle,
@@ -336,6 +337,57 @@ is not a reason to lose the turn:
 - an event of a kind the desktop does not know is ignored (`{"ignored": …}`) — a newer harness
   must not break an older desktop — and a malformed one of a kind it knows is logged and counted.
 
+**Forgetting: `redact`.** When the person asks a mind to forget something, the mind asks a
+Keep/Erase question (a `request` with `options: ["Keep", "Erase"]`) and, on *Erase*, erases its
+own memory. The shell keeps copies of its own — the agent's pane transcript
+(`~/.local/share/yantrik/agents/<agent>.jsonl`) and the run store (`runs.db`, its WAL included) —
+and `redact` is how the mind asks for those to go too, without the words ever travelling:
+
+```json
+{"kind": "redact", "request_id": "forget-1",
+ "needles": [{"sha256": "<64 lowercase hex>", "len": 5}]}
+```
+
+Each needle is the SHA-256 of the words' NFC form as UTF-8, and their length in Unicode scalar
+values after NFC; at most 16 needles, each 1 to 4096 long. Matching is case-sensitive and over NFC
+(composed and decomposed "é" are the same), with a window of each length slid over the text and
+hashed. A reply arrives in chunks, and the chunks are **joined before matching**: a name split
+across two chunks, or around a tool card, is still found.
+
+The host applies it only when all of these hold, and otherwise answers `{"refused": why}` and
+changes nothing:
+
+- **(a)** `request_id` is a question *this* run asked — send it on the turn that asked;
+- **(b)** the person's stored answer to it is exactly `Erase`, and `Erase` was one of the question's
+  options (a typed "erase", or "Erase" as a free answer, is not);
+- **(c)** the run is in flight, or ended no more than five minutes ago — so it may follow
+  `complete`;
+- **(d)** it comes from the harness and session that hold the run.
+
+One `redact` per question; a second is refused. Accepted, the reply is
+`{"redacted": <places>, "where": ["transcript", "runs"]}` (and `"masked": n` when records were
+masked, below).
+
+What it erases is the agent's conversation, in every run of that agent: the person's prompts, the
+agent's reply text and thinking, the questions it asked, the shell's notes, the agent's title and
+status — each replaced with `[erased at your request]`. What it does **not** erase is the record
+of what happened: tool calls (arguments, output, summary), approvals, the refusal lines, the
+mind audit, answers and options, states, sequence numbers and times. A harness cannot use `redact`
+to make an action disappear. Where one of those records holds the words, it keeps them, and the
+shell *shows* it masked: the pane, `read_agent` and `describe shell` draw the same fields with the
+marker, keyed by the erasure. Each erasure is recorded as the question, how many places and when —
+no words and no digest — and the pane and `describe shell` (`erased`) say "Erased N places at your
+request." The `redact` itself is never logged, kept in the run log or passed to a reader.
+
+On disk: the run store turns on `secure_delete` for the update, commits it in one transaction, then
+runs `wal_checkpoint(TRUNCATE)`, so the old page images leave `runs.db-wal`; the session file is
+written beside, flushed, renamed over and the directory flushed. Neither reaches below the file
+system — its journal, blocks a truncated file gave back, snapshots and backups may still hold the
+old bytes — nor copies the shell does not keep for the agent (the Lens's own chat history).
+
+In `harnesses/lib`, `turn.redact(request_id, texts)` hashes each text locally and sends only the
+needles; it returns the desktop's reply.
+
 **Events are the harness's claims.** The pane marks cards from events as *reported*, apart from
 what the shell verified itself. Keep writing the trail line (`⚙️ …`, below) into the text as
 well: every panel that draws no cards, and every reader of the transcript, still sees the call.
@@ -350,6 +402,8 @@ turn.tool_output(call, delta, stream="stdout")  # cut into pieces under 64 KiB f
 turn.tool_end(call, ok, summary="", exit_code=None)
 turn.thinking(delta); turn.status(text)
 turn.usage(model="", input_tokens=None, output_tokens=None, cost_usd=None)
+turn.ask(prompt, options, request_id=None, timeout=None)   # the person's answer, once
+turn.redact(request_id, texts)                  # after an Erase answer: digests only, never the texts
 ```
 
 and a mind that holds one conversation holds many by being made once per conversation:

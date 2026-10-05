@@ -40,6 +40,7 @@ the "still working" answer.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import socket
@@ -47,6 +48,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
@@ -67,6 +69,12 @@ MAIN = "main"
 # A long output is sent as several `tool_output` events, each well under it.
 MAX_EVENT_BYTES = 64 * 1024
 EVENT_PIECE_BYTES = 48 * 1024
+# What one `redact` may carry (crates/yantrik-harness/src/redact.rs): at most this many needles,
+# each from 1 to this many characters after NFC.
+REDACT_MAX_NEEDLES = 16
+REDACT_MAX_CHARS = 4096
+# The answer to a Keep/Erase question that lets the desktop erase its copies. Exact.
+ERASE = "Erase"
 # The environment variable the tools a harness starts for a conversation read their agent from.
 AGENT_TOKEN_ENV = "YANTRIK_AGENT_TOKEN"
 
@@ -231,6 +239,13 @@ def summary_line(text: str, limit: int = 160) -> str:
         if line:
             return line if len(line) <= limit else line[:limit - 1] + "…"
     return ""
+
+
+def needle(text: str) -> Dict[str, Any]:
+    """Words to erase, as the desktop takes them: the SHA-256 of their NFC form as UTF-8, and
+    their length in characters after NFC. The words themselves never leave this process."""
+    nfc = unicodedata.normalize("NFC", str(text))
+    return {"sha256": hashlib.sha256(nfc.encode("utf-8")).hexdigest(), "len": len(nfc)}
 
 
 def _pieces(text: str, budget: int = EVENT_PIECE_BYTES) -> List[str]:
@@ -422,6 +437,31 @@ class Turn:
         if ask is None:
             return None
         return ask(self, str(prompt), [str(o) for o in (options or [])], request_id, timeout)
+
+    def redact(self, request_id: str, texts: Sequence[str]) -> Dict[str, Any]:
+        """After the person answered `Erase` to this turn's Keep/Erase question `request_id`, ask the
+        desktop to erase the same words from its own copies: the agent's pane transcript and the
+        run store. Erase them from the mind's own memory first; this is the desktop's half.
+
+        Each text is hashed here (`needle`) and only the digest and length are sent. Matching is
+        exact and case-sensitive, so pass each form the words were said in. The desktop applies it
+        only for a question this run asked, answered with the offered `Erase`, from this session,
+        while the turn is open or within five minutes of its end, and once per question.
+
+        Returns the desktop's reply: `{"redacted": n, "where": ["transcript", "runs"]}`, or
+        `{"refused": why}` with nothing changed, or `{"unsent": why}` when it was not sent.
+        """
+        needles = [needle(t) for t in texts if str(t)]
+        if not needles:
+            return {"unsent": "nothing to erase"}
+        if len(needles) > REDACT_MAX_NEEDLES:
+            return {"unsent": "at most %d texts in one redact" % REDACT_MAX_NEEDLES}
+        if any(n["len"] > REDACT_MAX_CHARS for n in needles):
+            return {"unsent": "a text to erase is at most %d characters" % REDACT_MAX_CHARS}
+        send = getattr(self.harness, "_redact", None)
+        if send is None:
+            return {"unsent": "this harness cannot send a redact"}
+        return send(self, str(request_id), needles)
 
     def _event(self, event: Dict[str, Any]) -> bool:
         if self.closed or self.dropped:
@@ -952,6 +992,22 @@ class Harness:
             self.log("the desktop refused a %s event on turn %d: %s"
                      % (event.get("kind"), turn.turn_id, reply["refused"]))
         return True
+
+    def _redact(self, turn: Turn, request_id: str, needles: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """`Turn.redact`: one `redact` event. Sent even after the turn closed — the desktop takes
+        one within five minutes of a run's end. Nothing here logs the needles."""
+        if not self._events_ok:
+            return {"unsent": "this desktop does not take events"}
+        event = {"kind": "redact", "request_id": request_id, "needles": needles}
+        try:
+            reply = self._call(EVENT, {"session": turn.session, "turn_id": turn.turn_id,
+                                       "event": event}) or {}
+        except HarnessError as exc:
+            self.log("redact on turn %d was not delivered: %s" % (turn.turn_id, exc))
+            return {"unsent": str(exc)}
+        if reply.get("refused"):
+            self.log("the desktop refused a redact on turn %d: %s" % (turn.turn_id, reply["refused"]))
+        return reply
 
     def _ask(self, turn: Turn, prompt: str, options: List[str], request_id: Optional[str],
              timeout: Optional[float]) -> Optional[Any]:
