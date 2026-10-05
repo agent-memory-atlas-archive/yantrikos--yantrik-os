@@ -151,12 +151,19 @@ fn late_answer_notice(name: &str) -> yantrik_app_runtime::notify::Notification {
 }
 
 /// The notification for a late answer, or `None` while the person is in Private mode: nothing the
-/// desktop raises should say that a mind has been working while they asked for none of it.
+/// desktop raises should say that a mind has been working while they asked for none of it. Nor
+/// while a test run has approvals off (`never_ask`): a gate run is when late answers happen, and
+/// it must never put anything in front of the person.
 fn late_answer_notice_for(
     late: &yantrik_harness::LateAnswer,
     private: bool,
+    test_run: bool,
     catalogue: Option<&str>,
 ) -> Option<yantrik_app_runtime::notify::Notification> {
+    if test_run {
+        tracing::debug!(agent = %late.harness, "turn notice held back: a test run has approvals off");
+        return None;
+    }
     if private {
         return None;
     }
@@ -205,7 +212,8 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         let catalogue = crate::harness_catalogue::read_manifests(&crate::harness_catalogue::roots())
             .remove(&late.harness)
             .map(|m| m.name);
-        if let Some(notice) = late_answer_notice_for(&late, crate::private_mode::is_on(), catalogue.as_deref()) {
+        let test_run = crate::never_ask::refusal().is_some();
+        if let Some(notice) = late_answer_notice_for(&late, crate::private_mode::is_on(), test_run, catalogue.as_deref()) {
             yantrik_app_runtime::notify::send(notice);
         }
     });
@@ -941,7 +949,7 @@ mod late_answer_tests {
     #[test]
     fn a_late_answer_notice_is_a_fixed_sentence_that_never_quotes_the_answer() {
         let answer = "Approval needed: allow files_delete ~/Documents? hunter2";
-        let said = format!("{:?}", late_answer_notice_for(&late("pi", answer), false, None).unwrap());
+        let said = format!("{:?}", late_answer_notice_for(&late("pi", answer), false, false, None).unwrap());
         assert!(said.contains("pi answered after you left. Open the chat to read it."), "{said}");
         for leak in ["Approval", "files_delete", "hunter2"] {
             assert!(!said.contains(leak), "{leak} leaked: {said}");
@@ -950,7 +958,22 @@ mod late_answer_tests {
 
     #[test]
     fn no_late_answer_notice_is_raised_in_private_mode() {
-        assert!(late_answer_notice_for(&late("pi", "hello"), true, None).is_none());
+        assert!(late_answer_notice_for(&late("pi", "hello"), true, false, None).is_none());
+    }
+
+    /// While a test run has approvals off, a late answer is not told; with it off, or once it has
+    /// run out, it is told as before.
+    #[test]
+    fn no_late_answer_notice_is_raised_during_a_test_run() {
+        use crate::never_ask::NeverAsk;
+        use std::time::{Duration, Instant};
+        let start = Instant::now();
+        let mut switch = NeverAsk::default();
+        assert!(late_answer_notice_for(&late("pi", "hello"), false, switch.active(start), None).is_some(), "off");
+        switch.engage(start, 5);
+        assert!(late_answer_notice_for(&late("pi", "hello"), false, switch.active(start), None).is_none(), "on");
+        let later = start + Duration::from_secs(300);
+        assert!(late_answer_notice_for(&late("pi", "hello"), false, switch.active(later), None).is_some(), "run out");
     }
 
     #[test]
