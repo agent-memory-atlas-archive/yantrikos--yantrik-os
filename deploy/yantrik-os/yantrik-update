@@ -2678,6 +2678,9 @@ Type=oneshot
 RemainAfterExit=yes
 ExecStart=$BIN_DIR/yantrik-update mind-egress apply
 ExecReload=$BIN_DIR/yantrik-update mind-egress apply
+# Stopped (nftables stopped, which flushes the ruleset, or restarted): the table may be gone, so a
+# mind is no longer told it is held. The next start writes it again.
+ExecStop=/bin/rm -f -- $MIND_EGRESS_STATUS
 
 [Install]
 WantedBy=multi-user.target
@@ -3931,6 +3934,9 @@ loopback 127.0.0.1 11434")"
   is "lan_hosts: ... 65 are over the cap: null" 'null' "$(lj "${many}lan h65.lan 80"$'\n')"
   t "lan_hosts: in the file" '"lan_hosts": [{"host": "homeassistant.local", "ports": [8123]}], "loaded_at"' \
     "$(mind_egress_status_text 'status audit false true' "$ok_caps" "$now" "$(lj 'lan homeassistant.local 8123')")"
+
+  t "mind-status: the boot unit removes the file when it stops (nftables stopped flushes the table)" \
+    "ExecStop=/bin/rm -f -- $MIND_EGRESS_STATUS" "$(mind_egress_unit_text)"
 
   # mind_egress_load itself, with stand-ins: the file follows what loaded.
   mkdir -p "$ms/bin" "$ms/run"

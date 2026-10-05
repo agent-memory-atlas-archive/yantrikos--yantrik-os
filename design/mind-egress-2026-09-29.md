@@ -291,7 +291,8 @@ Trust it only if all of these hold, else take egress as not enforced:
 - it parses, `enforced` is true and `version` is one it knows.
 
 A missing file means **not enforced: fail closed**. It is removed when nothing could be loaded
-(and then no mind starts anyway: its unit `Requires=` the boot unit). When it holds, a mind sends
+(and then no mind starts anyway: its unit `Requires=` the boot unit), and when the boot unit
+stops (stopping nftables flushes the ruleset, the table with it). When it holds, a mind sends
 everything through the proxy and leaves resolving names to it; with `dns_allowed` false it must
 not try to resolve anything itself.
 
