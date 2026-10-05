@@ -1918,10 +1918,15 @@ fn tell_the_person(ui: &App, state: &Shared, watch: &mut Watch, waiting_jobs: &[
     if notices.is_empty() {
         return;
     }
+    let test_run = crate::never_ask::refusal().is_some();
     let lens_open = ui.get_lens_open();
     let lens_agent = crate::wire::harness::host().map(|h| feed::main_agent(&h.active_id()));
     let st = state.borrow();
     for notice in notices {
+        if held_for_test(&notice, test_run) {
+            tracing::debug!(agent = %notice.agent().0, "turn notice held back: a test run has approvals off");
+            continue;
+        }
         let agent = notice.agent();
         let on_screen = ui.get_current_screen() == SCREEN && st.selected.as_ref() == Some(agent);
         let in_window = st.windows.get(agent).is_some_and(|p| !p.closed.get());
@@ -1931,6 +1936,13 @@ fn tell_the_person(ui: &App, state: &Shared, watch: &mut Watch, waiting_jobs: &[
         }
         yantrik_app_runtime::notify::send(notice.notification());
     }
+}
+
+/// A turn's ending (finished, could not finish, replied) is not told while a test run has
+/// approvals off (`never_ask`): the turns are the arena's, and a gate must never put anything in
+/// front of the person. The watch has still seen the turn, so it is not told when the run ends.
+fn held_for_test(notice: &Notice, test_run: bool) -> bool {
+    test_run && matches!(notice, Notice::Finished { .. })
 }
 
 /// A window has its own copy of every global, so it takes the shell's theme — dark or light, the
@@ -2319,6 +2331,49 @@ mod tests {
         s.note(&pi, "Stop asked.");
         s.close_turn(&pi, false);
         assert!(watch.changes(&s, &waiting, 0).is_empty());
+    }
+
+    /// While a test run has approvals off, a turn ending is not told to the person; with it off,
+    /// or once it has run out, it is told as before.
+    #[test]
+    fn a_test_run_tells_the_person_of_no_turn_ending() {
+        use crate::never_ask::NeverAsk;
+        use std::time::{Duration, Instant};
+        let mut s = Store::new();
+        let mind = AgentId("yantrik:main".into());
+        let mut watch = Watch::default();
+        assert!(watch.changes(&s, &[], 0).is_empty());
+        let mut turn = |prompt: &str, ok: bool| {
+            s.open_turn(&mind, prompt);
+            s.close_turn(&mind, ok);
+            watch.changes(&s, &[], 0)
+        };
+        let told = |notices: Vec<Notice>, test_run: bool| -> Vec<Notice> {
+            notices.into_iter().filter(|n| !held_for_test(n, test_run)).collect()
+        };
+        let start = Instant::now();
+        let mut switch = NeverAsk::default();
+
+        // Off: replied and could not finish are each told.
+        let off = switch.active(start);
+        assert_eq!(told(turn("reply with one word", true), off).len(), 1, "replied");
+        assert_eq!(told(turn("tidy the photos", false), off).len(), 1, "could not finish");
+
+        // On: neither is.
+        switch.engage(start, 5);
+        let on = switch.active(start);
+        assert!(told(turn("release check: reply yes", true), on).is_empty(), "replied");
+        assert!(told(turn("release check: open blender", false), on).is_empty(), "could not finish");
+
+        // Run out: told again, and a turn held during the run is not told late.
+        let later = switch.active(start + Duration::from_secs(300));
+        assert!(!later, "the switch ends by itself");
+        let back = told(turn("now rename them", true), later);
+        assert!(matches!(&back[..], [Notice::Finished { title, .. }] if title == "now rename them"), "{back:?}");
+
+        // Only a turn's ending is held: a card waiting on the person is not a turn notice.
+        let needs = Notice::NeedsYou { agent: mind.clone(), mind: "yantrik".into(), what: "x".into() };
+        assert!(!held_for_test(&needs, true));
     }
 
     /// A task that goes quiet is said once a turn, in the desktop's words: not every tick, and
