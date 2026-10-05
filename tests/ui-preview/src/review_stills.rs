@@ -8,14 +8,15 @@
 //!   review-still approval          one approval card at its natural height, light
 //!   review-still approval-nightfall  the same card on Nightfall (dark, violet, its palette)
 //!   review-still approval-lens[-nightfall]  the card in the Lens at 1280x800, where it is clamped
+//!   review-still icons-desktop|icons-launcher  the app tiles, dark and light (icon_stills.rs)
 //!
 //! Fixture data only; nothing is acted on.
 use super::*;
 use slint::{ModelRc, SharedString, VecModel};
 
-type Pixels = slint::SharedPixelBuffer<slint::Rgb8Pixel>;
+pub(crate) type Pixels = slint::SharedPixelBuffer<slint::Rgb8Pixel>;
 
-fn save(pixels: &Pixels, path: &str, w: u32, h: u32) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) fn save(pixels: &Pixels, path: &str, w: u32, h: u32) -> Result<(), Box<dyn std::error::Error>> {
     let mut encoder = png::Encoder::new(BufWriter::new(File::create(path)?), w, h);
     encoder.set_color(png::ColorType::Rgb);
     encoder.set_depth(png::BitDepth::Eight);
@@ -25,7 +26,7 @@ fn save(pixels: &Pixels, path: &str, w: u32, h: u32) -> Result<(), Box<dyn std::
 }
 
 /// Render until two frames in a row match: slide-ins and fades have come to rest.
-fn settle(w: &MinimalSoftwareWindow, width: u32, height: u32) -> Pixels {
+pub(crate) fn settle(w: &MinimalSoftwareWindow, width: u32, height: u32) -> Pixels {
     let render = || {
         slint::platform::update_timers_and_animations();
         let mut p = Pixels::new(width, height);
@@ -241,6 +242,7 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str, which: &str) -> Result<(), B
         "approval-nightfall" => approval_card(w, output, true),
         "approval-lens" => approval(w, output, false),
         "approval-lens-nightfall" => approval(w, output, true),
+        "icons-desktop" | "icons-launcher" => super::icon_stills::run(w, output, which),
         other => Err(format!("unknown still {other:?}").into()),
     }
 }

@@ -50,6 +50,7 @@ mod top_bar_tests;
 mod icon_tests;
 mod memory_busy_tests;
 mod review_stills;
+mod icon_stills;
 use slint::{
     platform::{
         software_renderer::{MinimalSoftwareWindow, RepaintBufferType},

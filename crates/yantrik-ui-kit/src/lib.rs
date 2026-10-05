@@ -11,7 +11,10 @@
 // single `@children` on a region no app needed. They are gone.
 
 pub mod lock_shared;
+pub mod app_tile;
 
+#[cfg(test)]
+mod app_icons;
 #[cfg(test)]
 mod colour_roles;
 #[cfg(test)]

@@ -474,6 +474,8 @@ export component AgentsProbe inherits Window {
 // so this is app.slint's App — every screen, the status bar, the taskbar and the panel — filled
 // with fixture data by src/mind_panel_tests.rs. Callbacks are recorded there, never acted on.
 export { App } from "app.slint";
+// Answered by icon_stills.rs with the shell's own rule, so an unknown app's tile has its letter.
+export { AppInitial } from "app_tile.slint";
 export { NetworkState, NetworkRow } from "components/bar/network_state.slint";
 export { OsdWindow } from "osd_window.slint";
 export { TodayState, TodayEvent } from "components/bar/today_state.slint";
