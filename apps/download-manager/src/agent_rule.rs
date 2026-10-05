@@ -42,7 +42,11 @@ mod tests {
                 let _ = std::fs::remove_dir_all(&self.0);
             }
         }
-        let root = std::env::temp_dir().join(format!("yantrik-dl-rule-{}-{}", std::process::id(), dirs.len()));
+        // One folder per call: tests run in parallel, and two homes with the same shape must
+        // not share a folder that the first to finish removes.
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!("yantrik-dl-rule-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         for d in dirs {
             std::fs::create_dir_all(root.join(d)).unwrap();
