@@ -775,18 +775,27 @@ export component ApprovalCard inherits Rectangle {
                     overflow: elide;
                 }
 
-                if root.data.warning != "" : HorizontalLayout {
-                    spacing: Theme.sp-2;
+                // The bar and the sentence placed by hand rather than in a HorizontalLayout: a
+                // wrapping Text in a horizontal layout is measured at its unwrapped width, so the
+                // open-ended warning — four lines — was given one and cut mid-sentence. Here the
+                // Text is told its width, and the box takes the height that width needs.
+                if root.data.warning != "" : Rectangle {
+                    height: warning-text.preferred-height;
                     Rectangle {
+                        x: 0px;
                         width: 3px;
+                        height: parent.height;
                         background: Theme.color-danger;
                     }
-                    Text {
+                    warning-text := Text {
+                        x: 3px + Theme.sp-2;
+                        y: 0px;
+                        width: parent.width - 3px - Theme.sp-2;
                         text: root.data.warning;
                         color: Theme.color-danger;
                         font-size: Theme.fs-caption;
                         wrap: word-wrap;
-                        horizontal-stretch: 1;
+                        vertical-alignment: top;
                     }
                 }
             }

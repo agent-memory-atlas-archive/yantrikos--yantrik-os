@@ -24,13 +24,13 @@ const RUN_RECIPE_PURPOSE: &str = "Start a recipe with its inputs: a built-in one
 
 /// Its first sentence: the one person-facing line the card leads with, exactly as `summary_of`
 /// in crates/yantrik-ui/src/approvals.rs picks it out of the paragraph above.
-const RUN_RECIPE_SUMMARY: &str = "Start a recipe with its inputs: a built-in one by its name or id, or one a mind made.";
+pub(crate) const RUN_RECIPE_SUMMARY: &str = "Start a recipe with its inputs: a built-in one by its name or id, or one a mind made.";
 
-fn lines(rows: &[&str]) -> ModelRc<SharedString> {
+pub(crate) fn lines(rows: &[&str]) -> ModelRc<SharedString> {
     ModelRc::new(VecModel::from(rows.iter().map(|r| SharedString::from(*r)).collect::<Vec<_>>()))
 }
 
-fn message(role: &str, content: &str) -> MessageData {
+pub(crate) fn message(role: &str, content: &str) -> MessageData {
     MessageData {
         role: role.into(),
         content: content.into(),
@@ -41,7 +41,7 @@ fn message(role: &str, content: &str) -> MessageData {
 }
 
 /// The waiting card, as `control_approvals::row_for` hands it to the Lens.
-fn card(summary: &str) -> ApprovalRequest {
+pub(crate) fn card(summary: &str) -> ApprovalRequest {
     ApprovalRequest {
         id: "appr-31".into(),
         agent: "pi:c-7f3a91".into(),
@@ -95,7 +95,7 @@ fn roomy_card(sentence: &str) -> ApprovalRequest {
     }
 }
 
-fn render(w: &MinimalSoftwareWindow, width: u32, height: u32) -> slint::SharedPixelBuffer<slint::Rgb8Pixel> {
+pub(crate) fn render(w: &MinimalSoftwareWindow, width: u32, height: u32) -> slint::SharedPixelBuffer<slint::Rgb8Pixel> {
     slint::platform::update_timers_and_animations();
     let mut pixels = slint::SharedPixelBuffer::<slint::Rgb8Pixel>::new(width, height);
     w.request_redraw();
@@ -105,7 +105,7 @@ fn render(w: &MinimalSoftwareWindow, width: u32, height: u32) -> slint::SharedPi
 
 /// Render until two frames in a row are identical — the card has come to rest. The budget
 /// is a wall, not a sleep: a scene that never settles fails instead of passing by accident.
-fn settle(w: &MinimalSoftwareWindow, width: u32, height: u32) -> slint::SharedPixelBuffer<slint::Rgb8Pixel> {
+pub(crate) fn settle(w: &MinimalSoftwareWindow, width: u32, height: u32) -> slint::SharedPixelBuffer<slint::Rgb8Pixel> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let mut prev = render(w, width, height);
     loop {
@@ -119,7 +119,7 @@ fn settle(w: &MinimalSoftwareWindow, width: u32, height: u32) -> slint::SharedPi
     }
 }
 
-fn save(pixels: &slint::SharedPixelBuffer<slint::Rgb8Pixel>, path: &str, width: u32, height: u32) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) fn save(pixels: &slint::SharedPixelBuffer<slint::Rgb8Pixel>, path: &str, width: u32, height: u32) -> Result<(), Box<dyn std::error::Error>> {
     let mut encoder = png::Encoder::new(BufWriter::new(File::create(path)?), width, height);
     encoder.set_color(png::ColorType::Rgb);
     encoder.set_depth(png::BitDepth::Eight);
@@ -131,7 +131,7 @@ fn save(pixels: &slint::SharedPixelBuffer<slint::Rgb8Pixel>, path: &str, width: 
 /// Scan one button's column from the bottom up — the way a person looks for it — and answer
 /// with the first y whose click fires. Returns None when nothing in the column answers, which
 /// is exactly the #218 failure: the button the person needed was not inside the panel.
-fn scan(w: &MinimalSoftwareWindow, x: f32, top: f32, bottom: f32, mut hit: impl FnMut() -> bool) -> Option<f32> {
+pub(crate) fn scan(w: &MinimalSoftwareWindow, x: f32, top: f32, bottom: f32, mut hit: impl FnMut() -> bool) -> Option<f32> {
     let mut y = bottom;
     while y >= top {
         click(w, x, y);
@@ -145,7 +145,7 @@ fn scan(w: &MinimalSoftwareWindow, x: f32, top: f32, bottom: f32, mut hit: impl 
 
 /// The rows whose pixels differ between two frames inside a box, as (first row, last row, how
 /// many pixels). `None` when nothing differs.
-fn diff_box(a: &[slint::Rgb8Pixel], b: &[slint::Rgb8Pixel], width: u32, xs: (u32, u32), ys: (u32, u32)) -> Option<(u32, u32, u32)> {
+pub(crate) fn diff_box(a: &[slint::Rgb8Pixel], b: &[slint::Rgb8Pixel], width: u32, xs: (u32, u32), ys: (u32, u32)) -> Option<(u32, u32, u32)> {
     let (mut top, mut bottom, mut n) = (u32::MAX, 0u32, 0u32);
     for y in ys.0..ys.1 {
         for x in xs.0..xs.1 {
@@ -162,7 +162,7 @@ fn diff_box(a: &[slint::Rgb8Pixel], b: &[slint::Rgb8Pixel], width: u32, xs: (u32
 
 /// The top edge of the band a button answers on, walked up one pixel at a time from a point
 /// that answered until a click there stops landing on it.
-fn button_top(w: &MinimalSoftwareWindow, x: f32, from: f32, floor: f32, mut count: impl FnMut() -> i32) -> f32 {
+pub(crate) fn button_top(w: &MinimalSoftwareWindow, x: f32, from: f32, floor: f32, mut count: impl FnMut() -> i32) -> f32 {
     let mut top = from;
     while top > floor {
         let before = count();

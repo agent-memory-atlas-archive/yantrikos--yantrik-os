@@ -134,7 +134,7 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                 //
                 // The grade is checked first, because the grade is the one thing the caller
                 // declares that the decision actually turns on.
-                let (grade, grade_note, published_purpose, naming, explained) =
+                let (grade, grade_note, published_purpose, naming, explained, params) =
                     match settle_grade(&app, &action, &grade, &parsed) {
                         Ok(settled) => settled,
                         Err(why) => return Err(why),
@@ -229,6 +229,18 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                         }))
                     }
                     crate::mind_mode::Decision::Ask => {}
+                }
+
+                // A card is going to be raised. A request the card could not show in full is not
+                // asked at all: nothing is raised, nothing is sent to a phone, no pane draws it
+                // (third review of #639 — arguments sized to push Decline and Allow off the
+                // screen, and to hold it there). The request path only: what a grant is bound to,
+                // its single use, its TTL and its spending are the store's and do not change.
+                // "Destructive" is the red button's reading — the settled grade, and the app's
+                // sentence or the caller's, either of which can only add caution.
+                let destructive = approval_wording::destructive(&grade, &format!("{published_purpose} {purpose}"));
+                if let Some(rule) = crate::approval_bounds::refusal(&parsed, params.as_deref(), destructive) {
+                    return Err(crate::approval_bounds::refused(&rule));
                 }
 
                 let mut verified = who_is_asking(&requester);
@@ -749,11 +761,15 @@ fn settle_grade(
     action: &str,
     claimed: &str,
     args: &serde_json::Value,
-) -> Result<(String, String, String, Naming, String), String> {
-    let (published, purpose, naming, explained) = published_detail(app, action, args)?;
+) -> Result<(String, String, String, Naming, String, Option<Vec<String>>), String> {
+    let ((published, purpose, naming, explained), params) = published_detail(app, action, args)?;
     let note = grade_note(claimed, &published);
-    Ok((published, note, purpose, naming, explained))
+    Ok((published, note, purpose, naming, explained, params))
 }
+
+/// What [`published_detail_in`] answers: the grade, the description, the naming index and the
+/// per-call sentence.
+type Detail = (String, String, Naming, String);
 
 /// What the target app itself says one of its actions is graded, what it is for, what the app
 /// says its own ids name, and what it says about one call of it with `args` (#137).
@@ -770,8 +786,8 @@ fn published_detail(
     app: &str,
     action: &str,
     args: &serde_json::Value,
-) -> Result<(String, String, Naming, String), String> {
-    published_detail_in(
+) -> Result<(Detail, Option<Vec<String>>), String> {
+    published_detail_full_in(
         &yantrik_ipc_transport::server::socket_dir(),
         &crate::apps::Catalogue::shared().get(),
         app,
@@ -780,14 +796,31 @@ fn published_detail(
     )
 }
 
-/// [`published_detail`], against a catalogue and a socket directory the caller names.
+/// [`published_detail`], against a catalogue and a socket directory the caller names, without the
+/// parameter names.
 fn published_detail_in(
     dir: &std::path::Path,
     installed: &[crate::apps::DesktopEntry],
     app: &str,
     action: &str,
     args: &serde_json::Value,
-) -> Result<(String, String, Naming, String), String> {
+) -> Result<Detail, String> {
+    published_detail_full_in(dir, installed, app, action, args).map(|(detail, _)| detail)
+}
+
+/// [`published_detail_in`], and the names of the parameters the action publishes, read from the
+/// same `describe` (`parameters.properties`) — or `None` where they are not to hand: the shell's
+/// own surface, read from its registry, which publishes grades and descriptions here and not
+/// parameters, and an app whose describe lists none. A request naming an argument outside them is
+/// one the action's own dispatch would refuse (`check_arguments`), so the card refuses to ask it
+/// (`approval_bounds::refusal`, rule b).
+fn published_detail_full_in(
+    dir: &std::path::Path,
+    installed: &[crate::apps::DesktopEntry],
+    app: &str,
+    action: &str,
+    args: &serde_json::Value,
+) -> Result<(Detail, Option<Vec<String>>), String> {
     let Some(surface) = surface_in(app, installed, dir) else {
         return Err(format!(
             "there is no app called `{app}` on this desktop, so nothing was put in front of the \
@@ -807,7 +840,7 @@ fn published_detail_in(
             .map(|grade| {
                 let purpose =
                     yantrik_app_runtime::control::published_description(action).unwrap_or_default();
-                (grade.to_string(), purpose, Naming::new(), String::new())
+                ((grade.to_string(), purpose, Naming::new(), String::new()), None)
             })
             .ok_or_else(|| {
                 format!(
@@ -844,9 +877,11 @@ fn published_detail_in(
     // trips on the UI thread for one card, and two chances for the grade, the sentence beside it,
     // the names of its ids and whether the action can explain one call of itself to come from
     // different revisions of the same app.
-    let published = reply["actions"]
-        .as_array()
-        .and_then(|list| list.iter().find(|a| a["name"].as_str() == Some(action)))
+    let entry = reply["actions"].as_array().and_then(|list| list.iter().find(|a| a["name"].as_str() == Some(action)));
+    let params: Option<Vec<String>> = entry
+        .and_then(|a| a["parameters"]["properties"].as_object())
+        .map(|props| props.keys().cloned().collect());
+    let published = entry
         .and_then(|a| {
             a["permission"].as_str().map(|grade| {
                 (
@@ -867,7 +902,7 @@ fn published_detail_in(
     // action that just said on the first one that it can explain a call of itself, so no card
     // pays for a question its app cannot answer.
     let explained = if published.2 { explained_or_unsaid(explained_in(&address, action, args)) } else { String::new() };
-    Ok((published.0, published.1, naming_in(&reply), explained))
+    Ok(((published.0, published.1, naming_in(&reply), explained), params))
 }
 
 /// For an action that said it explains each call: its sentence, or — when the sentence did not
@@ -1759,7 +1794,9 @@ pub(crate) fn row_for(card: Card) -> crate::ApprovalRequest {
     // Every argument and the target drawn with its control, bidi and format characters as
     // visible escapes: none can start a line of the card's own or reorder the rest (review of
     // #639, B1). The app's one-line sentence too, which is pinned to one elided line.
-    let args: Vec<slint::SharedString> = card.args.iter().map(|a| approval_wording::visible(a).into()).collect();
+    // Each then cut, after escaping, to the row bound the request was checked against.
+    let args: Vec<slint::SharedString> =
+        card.args.iter().map(|a| crate::approval_bounds::clip_row(&approval_wording::visible(a)).into()).collect();
     let target = approval_wording::visible(&card.target);
     let explained = approval_wording::visible(&card.explained);
     let summary = approval_wording::visible(&card.summary);

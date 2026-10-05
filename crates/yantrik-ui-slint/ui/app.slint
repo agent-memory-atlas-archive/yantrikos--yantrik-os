@@ -169,6 +169,13 @@ export component App inherits Window {
     /// Whether that card is one the Lens's own mind raised, matched on its verified agent: only
     /// then does an open Lens draw it in place of the corner card (sign-off, 4 October, item 6).
     in property <bool> approval-in-lens: false;
+    /// Whether the top-right approval card is drawn (the overlay near the foot of this file), and
+    /// how tall it is: the vault prompt is placed under it by that height, never by a guess.
+    property <bool> approval-corner-shown: root.pending-approvals.length > 0
+        && !(root.lens-open && root.lens-chat-mode && root.current-screen == 1 && root.approval-in-lens)
+        && root.current-screen != 0 && root.current-screen != 2
+        && root.current-screen != 3 && root.current-screen != 32;
+    property <length> approval-corner-height: 0px;
     // How many cards wait in all, the Agents pane's included (pending-approvals holds only the one
     // on screen). The taskbar's Chat button says it (card_watch.rs).
     in property <int> cards-pending: 0;
@@ -3393,11 +3400,7 @@ export component App inherits Window {
         //
         // An open Lens stands in only for a card its own mind raised (`approval-in-lens`); it
         // hosts no other (control_approvals::in_the_lens), so every other card stays here, over it.
-        if root.pending-approvals.length > 0
-            && !(root.lens-open && root.lens-chat-mode && root.current-screen == 1 && root.approval-in-lens)
-            && root.current-screen != 0 && root.current-screen != 2
-            && root.current-screen != 3 && root.current-screen != 32
-            : Rectangle {
+        if root.approval-corner-shown : Rectangle {
             width: 100%;
             height: 100%;
             background: transparent;
@@ -3421,6 +3424,10 @@ export component App inherits Window {
                 width: 404px;
                 height: approval-stack.preferred-height;
                 background: transparent;
+                // Told to the root, so the vault prompt below is placed under the card as tall as
+                // it really is (third review of #639: it assumed 300px and drew over taller cards).
+                init => { root.approval-corner-height = self.height; }
+                changed height => { root.approval-corner-height = self.height; }
 
                 approval-stack := VerticalLayout {
                     spacing: Theme.sp-1;
@@ -3471,12 +3478,16 @@ export component App inherits Window {
             background: transparent;
 
             Rectangle {
-                x: parent.width - 420px;
-                // Below the approval stack when there is one, so neither covers the other. The
-                // 300px is the approval card's bounded worst case — every text on it is clipped
-                // in approvals.rs, so it has one.
-                y: Theme.status-bar-height + Theme.sp-4
-                    + (root.pending-approvals.length > 0 ? 300px : 0px);
+                // Below the approval stack when it is drawn, by the stack's real height, so neither
+                // covers the other — and beside it, to its left, when the space below would put the
+                // prompt under the dock. It used to assume 300px, the card's worst case before the
+                // card pinned every argument; a taller card was drawn under this prompt.
+                property <length> below: Theme.status-bar-height + Theme.sp-4
+                    + (root.approval-corner-shown ? root.approval-corner-height + Theme.sp-2 : 0px);
+                property <bool> fits-below: self.below + vault-stack.preferred-height
+                    <= root.height - Theme.taskbar-height;
+                x: self.fits-below ? parent.width - 420px : parent.width - 840px;
+                y: self.fits-below ? self.below : Theme.status-bar-height + Theme.sp-4;
                 width: 404px;
                 // Same lesson as the approval overlay: take the height from the layout inside,
                 // never from the card, or the box is sized to nothing and the card draws off it.

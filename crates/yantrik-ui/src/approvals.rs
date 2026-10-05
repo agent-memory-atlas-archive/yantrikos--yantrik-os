@@ -104,14 +104,14 @@ const RECORD_TAIL: usize = 4;
 // screen without deciding for the person which part of the sentence they may read.
 
 /// How much of one argument value the card shows before cutting it.
-const ARG_VALUE_CHARS: usize = 60;
+pub(crate) const ARG_VALUE_CHARS: usize = 60;
 
 /// How many arguments the card lists before summarising the rest.
 ///
 /// Eight covers every action on this desktop (the widest is `add_event` at six). A ninth would
 /// be summarised rather than dropped, and the whole set is in `describe shell` regardless — and,
 /// more to the point, in the grant, which is bound to all of them whatever the card had room for.
-const ARG_ROWS: usize = 8;
+pub(crate) const ARG_ROWS: usize = 8;
 
 /// How much of the "what the ids name" line the card shows before it stops.
 ///

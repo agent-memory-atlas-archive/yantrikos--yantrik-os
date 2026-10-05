@@ -1,0 +1,138 @@
+//! The largest approval card a request may make, in both places it is drawn (third security
+//! review of #639). The card pins every argument above its buttons, so a request's arguments are
+//! the card's height; `approval_bounds` in the shell refuses a request whose rows would not fit
+//! and cuts what is drawn to the same limits. This draws a card at those limits — eight
+//! forty-character names, every value carrying control characters drawn as escapes, the rows at
+//! the whole budget, three discrepancies, the open-ended warning, the app's word about the call
+//! and the session row — and presses Decline and Allow where a person would: in the top-right
+//! corner of the whole shell, above the dock, and in the Lens panel, above its reply box. Then the
+//! vault prompt beside it, which must sit under the card rather than on it.
+use super::approval_tests::{button_top, card, diff_box, lines, message, save, scan, settle, RUN_RECIPE_SUMMARY};
+use super::*;
+use slint::{ModelRc, VecModel};
+use std::cell::Cell;
+
+/// `approval_bounds::TOTAL_CHARS` and `KEY_CHARS` in the shell.
+const TOTAL_CHARS: usize = 640;
+const KEY_CHARS: usize = 40;
+
+/// `approvals::OPEN_ENDED_WARNING`, the longest warning a card carries.
+const OPEN_ENDED_WARNING: &str = "What it runs can do anything you can. Allowing it for the session lets any mind or \
+    caller on this desktop run any command through it, until the shell restarts or the mode is lowered.";
+
+/// The card `row_for` makes of a request at the limits: each row escaped, then cut, and the rows
+/// joined and cut to the budget with the cut named.
+fn largest() -> ApprovalRequest {
+    let per_row = TOTAL_CHARS / 8;
+    let rows: Vec<String> = (0..8)
+        .map(|i| {
+            let key = format!("{i}{}", "k".repeat(KEY_CHARS - 1));
+            let value = "<U+0001>".repeat(3) + &"v".repeat(per_row - KEY_CHARS - 2 - 3 * 8);
+            format!("{key}: {value}")
+        })
+        .collect();
+    let joined = rows.join("; ");
+    let exactly = if joined.chars().count() > TOTAL_CHARS {
+        format!("{}\u{2026} ({} characters in full)", joined.chars().take(TOTAL_CHARS).collect::<String>(), joined.chars().count())
+    } else {
+        joined
+    };
+    ApprovalRequest {
+        args: lines(&rows.iter().map(String::as_str).collect::<Vec<_>>()),
+        what: format!("Runs: {exactly}").into(),
+        exactly: exactly.into(),
+        discrepancies: lines(&[
+            "\u{201c}pi\u{201d} is attached here \u{2014} this is not it.",
+            "The caller called this `standard`; the app publishes `sensitive`.",
+            "Its agent token was not issued to it; no agent's pane shows this.",
+        ]),
+        explained: "After this, every command this terminal is given runs as you, with your files and your keys.".into(),
+        warning: OPEN_ENDED_WARNING.into(),
+        can_session: true,
+        ..card(RUN_RECIPE_SUMMARY)
+    }
+}
+
+pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let (width, height) = (1280u32, 800u32);
+    let big = largest();
+
+    // ── The top-right corner of the whole shell ──
+    let shell = App::new()?;
+    shell.set_current_screen(1);
+    let (allowed, denied, sessioned) = (Rc::new(Cell::new(0)), Rc::new(Cell::new(0)), Rc::new(Cell::new(0)));
+    {
+        let (a, d, s) = (allowed.clone(), denied.clone(), sessioned.clone());
+        shell.on_approval_allow(move |_| a.set(a.get() + 1));
+        shell.on_approval_deny(move |_| d.set(d.get() + 1));
+        shell.on_approval_allow_session(move |_| s.set(s.get() + 1));
+    }
+    shell.set_pending_approvals(ModelRc::new(VecModel::from(vec![big.clone()])));
+    shell.show()?;
+    w.set_size(slint::PhysicalSize::new(width, height));
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let alone = settle(w, width, height);
+    save(&alone, output, width, height)?;
+    // The dock starts 48px above the window's foot; a button under it, or under the foot, is a
+    // button nobody can press. The scan starts above the dock, so it never presses the dock.
+    let dock_top = height as f32 - 48.0;
+    let (deny_x, allow_x) = (width as f32 - 320.0, width as f32 - 120.0);
+    let before = denied.get();
+    let deny_y = scan(w, deny_x, 40.0, dock_top - 2.0, || denied.get() > before)
+        .expect("Decline answers inside the window, above the dock, on the largest card a request may make");
+    let before = allowed.get();
+    let allow_y = scan(w, allow_x, 40.0, dock_top - 2.0, || allowed.get() > before)
+        .expect("and Allow does");
+    let before = sessioned.get();
+    let session_y = scan(w, width as f32 - 220.0, deny_y + 8.0, dock_top - 2.0, || sessioned.get() > before)
+        .expect("and the session row under them");
+    let top = button_top(w, deny_x, deny_y, 40.0, || denied.get());
+    println!("corner: Decline at {deny_y} (top {top}), Allow at {allow_y}, the session row at {session_y}, the dock at {dock_top}");
+    assert!(session_y < dock_top, "the whole card is above the dock");
+
+    // ── The vault prompt with it: under the card, never on it ──
+    shell.set_vault_unlock(VaultUnlockRequest {
+        reason: "A mind asked to read a password saved in the vault.".into(),
+        error: "".into(),
+        first_time: false,
+    });
+    let both = settle(w, width, height);
+    save(&both, &output.replace(".png", "-vault.png"), width, height)?;
+    let (vault_top, _, _) = diff_box(alone.as_slice(), both.as_slice(), width, (0, width), (40, height))
+        .expect("the vault prompt is drawn");
+    // Over the card's columns, nothing changes above its last row: the prompt is under the card,
+    // or — when under it would be under the dock — beside it.
+    let over_card = diff_box(alone.as_slice(), both.as_slice(), width, (width - 420, width - 16), (40, height));
+    println!("the vault prompt starts at row {vault_top}; over the card's columns: {over_card:?}");
+    if let Some((top_over_card, _, _)) = over_card {
+        assert!(top_over_card as f32 > session_y + 8.0, "the vault prompt is under the card's last row ({session_y}), at {top_over_card}");
+    }
+    let before = denied.get();
+    scan(w, deny_x, top - 2.0, deny_y + 2.0, || denied.get() > before).expect("Decline still answers with the vault prompt up");
+
+    // ── The Lens panel ──
+    let (panel_top, panel_bottom) = (32.0f32, 760.0f32);
+    let reply_top = panel_bottom - 48.0;
+    let lens = ApprovalLensProbe::new()?;
+    lens.set_messages(ModelRc::new(VecModel::from(vec![message("user", "Open a terminal for me.")])));
+    lens.set_approvals(ModelRc::new(VecModel::from(vec![big])));
+    lens.show()?;
+    w.set_size(slint::PhysicalSize::new(width, height));
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    save(&settle(w, width, height), &output.replace(".png", "-lens.png"), width, height)?;
+    let before = lens.get_denied();
+    let lens_deny = scan(w, 1000.0, panel_top, panel_bottom - 4.0, || lens.get_denied() > before)
+        .expect("Decline answers inside the Lens panel on the largest card");
+    let before = lens.get_allowed();
+    let lens_allow = scan(w, 1180.0, panel_top, panel_bottom - 4.0, || lens.get_allowed() > before)
+        .expect("and Allow does");
+    println!("Lens: Decline at {lens_deny}, Allow at {lens_allow}, the reply box at {reply_top}");
+    assert!(lens_deny < reply_top && lens_allow < reply_top, "both above the reply box, inside the panel");
+
+    println!(
+        "PASS: the largest card a request may make keeps Decline, Allow and the session row above \
+         the dock in the corner (Decline at {deny_y}, the session row at {session_y}) and inside the \
+         Lens panel (Decline at {lens_deny}), and the vault prompt sits under it (from row {vault_top})"
+    );
+    Ok(())
+}

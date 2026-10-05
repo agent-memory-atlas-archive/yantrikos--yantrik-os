@@ -27,6 +27,7 @@
 //! an escape — `\n`, `<U+202E>` — rather than a space: the grant binds the exact bytes, and the
 //! person should see that something is there.
 
+use crate::approval_bounds;
 use crate::approvals::{self, Card, Verified};
 use crate::notification_sender::{bridged_by, one_line, plain};
 use yantrik_ipc_transport::plain_text::is_bidi_control;
@@ -226,8 +227,9 @@ pub struct Consequences {
     /// Every argument exactly as the grant binds it, shown plainly, `; ` between them. Pinned in
     /// full, wrapped, above the buttons whenever the line above cannot carry it — it names a
     /// target, or it is cut at the card's edge — so no part of what the grant binds is ever only
-    /// reachable by scrolling (review of #639). Bounded by `approvals::args_rows`: eight values of
-    /// sixty characters and an "and N more" line.
+    /// reachable by scrolling (review of #639). Bounded twice: a request whose rows would not fit
+    /// is refused before it is asked (`approval_bounds::refusal`), and what is drawn is cut after
+    /// escaping to the same limits (`approval_bounds::ROW_CHARS`, `TOTAL_CHARS`).
     pub exactly: String,
     /// "Undo: not possible, the app says so", the caller-only form, or empty.
     pub undo: String,
@@ -240,7 +242,15 @@ pub struct Consequences {
 pub fn consequences(action: &str, published: Published, said: &str, target: &str, args: &[String]) -> Consequences {
     let verb = verb_said(verb_phrase(action, published).as_deref());
     let none = args.is_empty() || (args.len() == 1 && args[0] == "(no arguments)");
-    let exactly = if none { String::new() } else { args.iter().map(|a| visible(a)).collect::<Vec<_>>().join("; ") };
+    // Escaped value by value, then cut after escaping — each row and all of them together — to the
+    // bounds the request was already checked against (approval_bounds), so the pinned lines are a
+    // fixed size at worst whatever reaches here.
+    let exactly = if none {
+        String::new()
+    } else {
+        let rows: Vec<String> = args.iter().map(|a| approval_bounds::clip_row(&visible(a))).collect();
+        approval_bounds::clip_rows(&rows.join("; "))
+    };
     let target = visible(target.trim());
     let what = match (target.is_empty(), exactly.is_empty()) {
         (false, _) => format!("{verb}: {target}"),
