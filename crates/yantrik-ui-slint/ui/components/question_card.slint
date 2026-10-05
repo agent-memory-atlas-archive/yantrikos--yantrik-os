@@ -28,7 +28,9 @@ export component QuestionCard inherits Rectangle {
     in property <string> closed;
     /// When it was asked ("16:16"): the same question asked twice is two cards, told apart by this.
     in property <string> asked;
-    callback answered(string);
+    // The answer, and whether it is one of the offered answers pressed (true) or one typed (false):
+    // a typed "Erase" is not a pressed one (docs/harness.md, `redact`).
+    callback answered(string, bool);
 
     // Waiting on the person, so its edge is the needs-you amber; once answered or closed it is an
     // ordinary inset. The card's behaviour is unchanged: the answer goes back once, through
@@ -72,7 +74,7 @@ export component QuestionCard inherits Rectangle {
                 label: option;
                 variant: 1;
                 size: 0;
-                clicked => { root.answered(option); }
+                clicked => { root.answered(option, true); }
             }
         }
         if root.waiting && root.options.length > 0 && !root.writing : Rectangle {
@@ -90,7 +92,7 @@ export component QuestionCard inherits Rectangle {
         }
         if root.waiting && (root.options.length == 0 || root.writing) : YInput {
             placeholder: "answer " + root.mind + "…";
-            accepted(text) => { root.answered(text); }
+            accepted(text) => { root.answered(text, false); }
         }
         if root.answer != "" : Text {
             text: "You answered: " + root.answer;

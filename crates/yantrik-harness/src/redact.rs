@@ -131,6 +131,26 @@ pub const WINDOW_COST: u64 = 64;
 /// The refusal when a `redact` would search more than [`MAX_WORK`].
 pub const TOO_MUCH: &str = "too much to search; ask again with fewer or shorter needles";
 
+/// How much of a question's prompt the person is shown: the question card clips to it.
+pub const QUESTION_CHARS: usize = 2000;
+
+/// The part of a question's prompt the person saw: all of it, or, past [`QUESTION_CHARS`], the
+/// characters before the card's ellipsis.
+pub fn question_shown(prompt: &str) -> &str {
+    if prompt.chars().count() <= QUESTION_CHARS {
+        return prompt;
+    }
+    let end = prompt.char_indices().nth(QUESTION_CHARS - 1).map_or(prompt.len(), |(at, _)| at);
+    &prompt[..end]
+}
+
+/// Whether every needle occurs, as a window of the canonical form, in `text`: what the person was
+/// shown when they answered *Erase*. A `redact` erases only words the person saw quoted.
+pub fn all_in(text: &str, needles: &[Needle]) -> bool {
+    let shown = Prepared::new(&[text]);
+    needles.iter().all(|needle| !Search::new(std::slice::from_ref(needle)).find(&shown).is_empty())
+}
+
 /// The needles, ready to search with.
 pub struct Search {
     digests: HashSet<[u8; 32]>,
@@ -149,6 +169,17 @@ impl Search {
 
     fn is_empty(&self) -> bool {
         self.digests.is_empty() || self.lengths.is_empty()
+    }
+
+    /// What searching text of `bytes` raw bytes would cost, about, in [`MAX_WORK`]'s units:
+    /// every byte the start of a window of every needle length. Worked out from lengths alone,
+    /// before anything is copied.
+    pub fn estimate(&self, bytes: u64) -> u64 {
+        if self.is_empty() {
+            return 0;
+        }
+        let per_place: u64 = self.lengths.iter().map(|&len| len as u64 + WINDOW_COST).sum();
+        bytes.saturating_mul(per_place)
     }
 
     /// What searching `text` will cost, in [`MAX_WORK`]'s units, worked out without hashing.
@@ -328,40 +359,55 @@ pub fn redact_json(value: &mut serde_json::Value, needles: &[Needle]) -> usize {
 /// The strings inside a JSON value — object values and array items, never object keys — in the
 /// order [`apply_json`] walks them.
 pub fn json_strings(value: &serde_json::Value) -> Vec<String> {
-    fn walk(value: &serde_json::Value, out: &mut Vec<String>) {
-        match value {
-            serde_json::Value::String(s) => out.push(s.clone()),
-            serde_json::Value::Array(items) => items.iter().for_each(|v| walk(v, out)),
-            serde_json::Value::Object(map) => map.values().for_each(|v| walk(v, out)),
-            _ => {}
-        }
-    }
+    json_strings_under(value, None)
+}
+
+/// [`json_strings`], only those somewhere under an object key in `keys` when it is given.
+pub fn json_strings_under(value: &serde_json::Value, keys: Option<&[&str]>) -> Vec<String> {
     let mut out = Vec::new();
-    walk(value, &mut out);
+    walk_json(value, keys.is_none(), keys.unwrap_or(&[]), &mut |s| out.push(s.clone()));
     out
 }
 
 /// Apply `found[i]` to the `i`th string of [`json_strings`], in place. How many places.
 pub fn apply_json(value: &mut serde_json::Value, found: &[Found]) -> usize {
-    fn walk(value: &mut serde_json::Value, found: &[Found], next: &mut usize) -> usize {
-        match value {
-            serde_json::Value::String(s) => {
-                let i = *next;
-                *next += 1;
-                match found.get(i).and_then(|f| f.apply(&[s.as_str()])) {
-                    Some((mut text, n)) => {
-                        *s = text.remove(0);
-                        n
-                    }
-                    None => 0,
-                }
-            }
-            serde_json::Value::Array(items) => items.iter_mut().map(|v| walk(v, found, next)).sum(),
-            serde_json::Value::Object(map) => map.values_mut().map(|v| walk(v, found, next)).sum(),
-            _ => 0,
+    apply_json_under(value, found, None)
+}
+
+/// [`apply_json`] over the strings of [`json_strings_under`] with the same `keys`.
+pub fn apply_json_under(value: &mut serde_json::Value, found: &[Found], keys: Option<&[&str]>) -> usize {
+    let mut next = 0;
+    let mut places = 0;
+    walk_json_mut(value, keys.is_none(), keys.unwrap_or(&[]), &mut |s| {
+        if let Some((mut text, n)) = found.get(next).and_then(|f| f.apply(&[s.as_str()])) {
+            *s = text.remove(0);
+            places += n;
         }
+        next += 1;
+    });
+    places
+}
+
+fn walk_json(value: &serde_json::Value, inside: bool, keys: &[&str], each: &mut dyn FnMut(&String)) {
+    match value {
+        serde_json::Value::String(s) if inside => each(s),
+        serde_json::Value::Array(items) => items.iter().for_each(|v| walk_json(v, inside, keys, each)),
+        serde_json::Value::Object(map) => {
+            map.iter().for_each(|(k, v)| walk_json(v, inside || keys.contains(&k.as_str()), keys, each))
+        }
+        _ => {}
     }
-    walk(value, found, &mut 0)
+}
+
+fn walk_json_mut(value: &mut serde_json::Value, inside: bool, keys: &[&str], each: &mut dyn FnMut(&mut String)) {
+    match value {
+        serde_json::Value::String(s) if inside => each(s),
+        serde_json::Value::Array(items) => items.iter_mut().for_each(|v| walk_json_mut(v, inside, keys, each)),
+        serde_json::Value::Object(map) => {
+            map.iter_mut().for_each(|(k, v)| walk_json_mut(v, inside || keys.contains(&k.as_str()), keys, each))
+        }
+        _ => {}
+    }
 }
 
 fn digest_hex(text: &str) -> String {

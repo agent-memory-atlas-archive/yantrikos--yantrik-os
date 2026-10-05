@@ -35,7 +35,10 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBe
 use serde_json::{json, Value};
 
 mod erase;
-pub use erase::{Erased, Erasure, Redaction, Refusal, RunPlan, ERASE_ANSWER, ERASE_WINDOW_MS, SECURE_DELETE_WARNING};
+pub use erase::{
+    Erased, Erasure, Redaction, Refusal, RunPlan, RunSize, ERASE_ANSWER, ERASE_WINDOW_MS, NOT_IN_QUESTION,
+    SECURE_DELETE_WARNING, TOO_MUCH_TIMES, TOO_MUCH_USED_UP,
+};
 #[cfg(test)]
 pub(crate) use erase::FAIL_RESTORE;
 
@@ -197,6 +200,7 @@ CREATE TABLE IF NOT EXISTS requests (
     answer      TEXT,
     asked_at    INTEGER NOT NULL,
     answered_at INTEGER,
+    by_option   INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (run_id, request_id)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS redactions (
@@ -204,6 +208,12 @@ CREATE TABLE IF NOT EXISTS redactions (
     request_id  TEXT NOT NULL,
     places      INTEGER NOT NULL,
     at          INTEGER NOT NULL,
+    PRIMARY KEY (run_id, request_id)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS redact_too_much (
+    run_id      INTEGER NOT NULL REFERENCES runs(run_id),
+    request_id  TEXT NOT NULL,
+    times       INTEGER NOT NULL,
     PRIMARY KEY (run_id, request_id)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS runs_by_state ON runs(state);
@@ -235,6 +245,13 @@ impl RunStore {
     fn init(db: Connection) -> Result<RunStore, RunError> {
         db.pragma_update(None, "foreign_keys", "ON")?;
         db.execute_batch(SCHEMA)?;
+        // A store made before answers recorded how they were given: its answers count as typed.
+        let has_by_option = db
+            .prepare("SELECT 1 FROM pragma_table_info('requests') WHERE name = 'by_option'")?
+            .exists([])?;
+        if !has_by_option {
+            db.execute_batch("ALTER TABLE requests ADD COLUMN by_option INTEGER NOT NULL DEFAULT 0")?;
+        }
         Ok(RunStore { db: Mutex::new(db) })
     }
 
@@ -349,7 +366,9 @@ impl RunStore {
 
     /// Apply the person's answer to one request, exactly once. When it was the last question the
     /// run was waiting on, the run is running again. Returns the answer event's sequence number.
-    pub fn answer(&self, run_id: u64, request_id: &str, answer: &Value) -> Result<u64, RunError> {
+    /// `by_option`: the person pressed one of the offered answers rather than typing one; kept,
+    /// because only a pressed *Erase* lets a `redact` act (`RunStore::redact`).
+    pub fn answer(&self, run_id: u64, request_id: &str, answer: &Value, by_option: bool) -> Result<u64, RunError> {
         self.with(|db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let at = now_ms();
@@ -368,9 +387,9 @@ impl RunStore {
                 Some(_) => {}
             }
             tx.execute(
-                "UPDATE requests SET state = 'answered', answer = ?3, answered_at = ?4
+                "UPDATE requests SET state = 'answered', answer = ?3, answered_at = ?4, by_option = ?5
                  WHERE run_id = ?1 AND request_id = ?2 AND state = 'pending'",
-                params![run_id as i64, request_id, answer.to_string(), at],
+                params![run_id as i64, request_id, answer.to_string(), at, by_option],
             )?;
             let seq = append_in(&tx, run_id, "answer", &json!({"request_id": request_id, "answer": answer}), at)?;
             let pending: i64 = tx.query_row(
@@ -568,9 +587,9 @@ mod tests {
         store.ask(1, "approve-a", &json!({"text": "Delete 3 files?"})).unwrap();
         store.ask(2, "approve-a", &json!({"text": "Send the mail?"})).unwrap();
 
-        store.answer(1, "approve-a", &json!("yes")).unwrap();
+        store.answer(1, "approve-a", &json!("yes"), true).unwrap();
         assert_eq!(
-            store.answer(1, "approve-a", &json!("yes")),
+            store.answer(1, "approve-a", &json!("yes"), true),
             Err(RunError::AlreadyAnswered { run_id: 1, request_id: "approve-a".into() })
         );
         let answers = store.events(1, 0, PAGE_MAX).unwrap().events.into_iter().filter(|e| e.kind == "answer").count();
@@ -585,9 +604,9 @@ mod tests {
         // R asks A, the person answers twice, R reaches B: the duplicate must not release B.
         let store = store_with_runs(&[1]);
         store.ask(1, "a", &json!("first?")).unwrap();
-        store.answer(1, "a", &json!("yes")).unwrap();
+        store.answer(1, "a", &json!("yes"), true).unwrap();
         store.ask(1, "b", &json!("second?")).unwrap();
-        assert!(matches!(store.answer(1, "a", &json!("yes")), Err(RunError::AlreadyAnswered { .. })));
+        assert!(matches!(store.answer(1, "a", &json!("yes"), true), Err(RunError::AlreadyAnswered { .. })));
         assert_eq!(store.run(1).unwrap().unwrap().state, RunState::WaitingOnPerson);
         assert_eq!(store.pending_requests(1).unwrap(), vec![("b".to_string(), json!("second?"))]);
     }
@@ -597,9 +616,9 @@ mod tests {
         let store = store_with_runs(&[1]);
         store.ask(1, "a", &json!("?")).unwrap();
         store.ask(1, "b", &json!("?")).unwrap();
-        store.answer(1, "b", &json!(1)).unwrap();
+        store.answer(1, "b", &json!(1), true).unwrap();
         assert_eq!(store.run(1).unwrap().unwrap().state, RunState::WaitingOnPerson);
-        store.answer(1, "a", &json!(2)).unwrap();
+        store.answer(1, "a", &json!(2), true).unwrap();
         assert_eq!(store.run(1).unwrap().unwrap().state, RunState::Running);
     }
 
@@ -608,10 +627,10 @@ mod tests {
         let store = store_with_runs(&[1]);
         store.ask(1, "a", &json!("?")).unwrap();
         assert_eq!(store.ask(1, "a", &json!("?")), Err(RunError::RequestExists { run_id: 1, request_id: "a".into() }));
-        assert_eq!(store.answer(1, "zz", &json!(1)), Err(RunError::NoSuchRequest { run_id: 1, request_id: "zz".into() }));
-        assert_eq!(store.answer(9, "a", &json!(1)), Err(RunError::NoSuchRun(9)));
+        assert_eq!(store.answer(1, "zz", &json!(1), true), Err(RunError::NoSuchRequest { run_id: 1, request_id: "zz".into() }));
+        assert_eq!(store.answer(9, "a", &json!(1), true), Err(RunError::NoSuchRun(9)));
         store.transition(1, RunState::Cancelled).unwrap();
-        assert_eq!(store.answer(1, "a", &json!(1)), Err(RunError::Ended { run_id: 1, state: RunState::Cancelled }));
+        assert_eq!(store.answer(1, "a", &json!(1), true), Err(RunError::Ended { run_id: 1, state: RunState::Cancelled }));
         assert!(store.pending_requests(1).unwrap().is_empty(), "ending a run expires what it waited on");
     }
 
@@ -656,7 +675,7 @@ mod tests {
         assert_eq!(store.run(3).unwrap().unwrap().state, RunState::Done);
         let log = store.events(1, 0, PAGE_MAX).unwrap().events;
         assert_eq!(log[1].payload["delta"], "half an answer", "an orphaned run stays readable");
-        assert!(matches!(store.answer(2, "approve", &json!("yes")), Err(RunError::Ended { state: RunState::Orphaned, .. })));
+        assert!(matches!(store.answer(2, "approve", &json!("yes"), true), Err(RunError::Ended { state: RunState::Orphaned, .. })));
         assert_eq!(store.next_run_id().unwrap(), 4, "a run id never names two runs");
         assert_eq!(store.start(3, "scripted", "c", "conn-2"), Err(RunError::Exists(3)));
         assert_eq!(store.orphan_unfinished().unwrap(), 0);

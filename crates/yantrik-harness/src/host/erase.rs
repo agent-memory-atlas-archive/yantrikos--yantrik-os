@@ -14,10 +14,13 @@
 //!
 //! # In steps, so nothing is searched under a lock and the search is bounded
 //!
-//! 1. The rule is checked and the run store's texts copied out ([`RunStore::prepare_redact`]); the
-//!    shell copies the agent's ([`ShellRedactor::prepare`]). Each lock is held only to copy.
-//! 2. What searching both would cost is added up; over `redact::MAX_WORK` the whole `redact` is
-//!    refused ("too much to search; …") before anything is hashed or touched.
+//! 1. The rule is checked, and what searching would cost is worked out from the raw lengths of the
+//!    texts alone ([`RunStore::redact_size`], [`ShellRedactor::size`]): over `redact::MAX_WORK`
+//!    the whole `redact` is refused ("too much to search; …") before anything is copied, hashed or
+//!    touched. The third such refusal uses the question up.
+//! 2. The run store's texts are copied out ([`RunStore::prepare_redact`]) and the shell copies the
+//!    agent's ([`ShellRedactor::prepare`]), each lock held only to copy; the exact cost of the
+//!    copies is checked against the same limit.
 //! 3. Both copies are searched, with no lock held.
 //! 4. The run store applies what it found in one `IMMEDIATE` transaction, checking the rule again
 //!    and claiming the question; then the shell applies what it found under its own lock. Each
@@ -25,6 +28,7 @@
 //!    hashes to its needle.
 //!
 //! [`RunStore::prepare_redact`]: crate::run_store::RunStore::prepare_redact
+//! [`RunStore::redact_size`]: crate::run_store::RunStore::redact_size
 
 use std::sync::Arc;
 
@@ -56,6 +60,8 @@ pub struct ShellErased {
 
 /// The shell's half of an erasure, in the same steps as the run store's (see the module docs).
 pub trait ShellRedactor: Send + Sync {
+    /// How many raw bytes of text [`ShellRedactor::prepare`] would copy, without copying any.
+    fn size(&self, agent: &AgentId) -> u64;
     /// Copy the agent's texts out of the shell's store, holding its lock only to copy.
     fn prepare(&self, agent: &AgentId) -> Result<Box<dyn ShellPlan>, String>;
 }
@@ -117,10 +123,19 @@ impl Host {
         redact::validate(&needles)?;
         let search = Search::new(&needles);
 
-        // 1. The rule, and copies of the texts.
+        // 1. The rule, and how much there is to search, from lengths alone: nothing is copied yet.
         let erasure = Erasure { run_id, request_id: &request_id, harness, owner: session, needles: &needles };
+        let size = store.redact_size(&erasure, now_ms()).map_err(|r| r.to_string())?;
+        let agent = AgentId::new(&size.harness, &size.conversation);
+        let shell_bytes = self.redactor.as_ref().map_or(0, |redactor| redactor.size(&agent));
+        let too_much = || match store.too_much(&erasure) {
+            Ok(refusal) | Err(refusal) => refusal.to_string(),
+        };
+        if search.estimate(size.bytes.saturating_add(shell_bytes)) > redact::MAX_WORK {
+            return Err(too_much());
+        }
+        // 2. Copies of the texts, each store's lock held only to copy.
         let mut runs = store.prepare_redact(&erasure, now_ms()).map_err(|r| r.to_string())?;
-        let agent = AgentId::new(runs.harness(), runs.conversation());
         let mut shell_failed = None;
         let mut shell = match &self.redactor {
             Some(redactor) => match redactor.prepare(&agent) {
@@ -136,10 +151,10 @@ impl Host {
                 None
             }
         };
-        // 2. Bounded before anything is hashed.
+        // ... and measured exactly before anything is hashed.
         let work = runs.work(&search).saturating_add(shell.as_ref().map_or(0, |plan| plan.work(&search)));
         if work > redact::MAX_WORK {
-            return Err(redact::TOO_MUCH.to_string());
+            return Err(too_much());
         }
         // 3. Searched with no lock held.
         runs.search(&search);
@@ -212,6 +227,10 @@ mod tests {
     }
 
     impl ShellRedactor for FakeShell {
+        fn size(&self, _: &AgentId) -> u64 {
+            self.work
+        }
+
         fn prepare(&self, agent: &AgentId) -> Result<Box<dyn ShellPlan>, String> {
             Ok(Box::new(FakePlan { agent: agent.clone(), asked: self.asked.clone(), work: self.work }))
         }
@@ -248,6 +267,11 @@ mod tests {
     /// A pi agent whose run said "Priya" across two chunks, asked Keep/Erase as `forget`, and was
     /// answered `answer`: (session, agent, run, the reader's answer).
     fn answered(host: &Host, answer: &str) -> (String, AgentId, u64, crate::Answer) {
+        answered_by(host, answer, true)
+    }
+
+    /// [`answered`], the answer pressed (`true`) or typed (`false`).
+    fn answered_by(host: &Host, answer: &str, pressed: bool) -> (String, AgentId, u64, crate::Answer) {
         let session = call(host, protocol::ATTACH, json!({ "id": "pi", "name": "pi", "conversations": true }))["session"]
             .as_str()
             .unwrap()
@@ -258,9 +282,9 @@ mod tests {
         for delta in ["Your sister is Pri", "ya."] {
             call(host, protocol::CHUNK, json!({ "session": session, "turn_id": run, "delta": delta }));
         }
-        let ask = json!({ "kind": "request", "request_id": "forget", "prompt": "Forget your sister's name?", "options": ["Keep", "Erase"] });
+        let ask = json!({ "kind": "request", "request_id": "forget", "prompt": "Forget your sister's name, Priya?", "options": ["Keep", "Erase"] });
         assert_eq!(call(host, protocol::EVENT, json!({ "session": session, "turn_id": run, "event": ask })), json!({}));
-        host.answer(run, "forget", &json!(answer)).unwrap();
+        host.answer(run, "forget", &json!(answer), pressed).unwrap();
         (session, agent, run, reader)
     }
 
@@ -285,10 +309,10 @@ mod tests {
         let (host, store, asked) = host_with_shell();
         let (session, agent, run, reader) = answered(&host, "Erase");
         let reply = redact(&host, &session, run, "forget");
-        assert_eq!(reply, json!({ "redacted": 3, "where": ["transcript", "runs"], "masked": 1 }));
+        assert_eq!(reply, json!({ "redacted": 4, "where": ["transcript", "runs"], "masked": 1 }));
         assert_eq!(reply_text(&store, run), format!("Your sister is {}.", redact::MARKER));
         assert_eq!(*asked.lock().unwrap(), vec![(agent, "forget".to_string(), 1)]);
-        assert_eq!(store.redactions("pi", agent_conversation(&store, run).as_str()).unwrap()[0].places, 3);
+        assert_eq!(store.redactions("pi", agent_conversation(&store, run).as_str()).unwrap()[0].places, 4);
         // Never handed to the reader as an event, and never written to the run's log.
         assert!(!reader.try_iter().any(|c| matches!(c, Chunk::Event(Event::Redact { .. }))));
         assert!(store.events(run, 0, 500).unwrap().events.iter().all(|e| !e.payload.to_string().contains("sha256")));
@@ -332,7 +356,7 @@ mod tests {
         let (session, _, run, _reader) = answered(&host, "Erase");
         call(&host, protocol::COMPLETE, json!({ "session": session, "turn_id": run }));
         assert_eq!(store.run(run).unwrap().unwrap().state, RunState::Done);
-        assert_eq!(redact(&host, &session, run, "forget")["redacted"], 3);
+        assert_eq!(redact(&host, &session, run, "forget")["redacted"], 4);
     }
 
     #[test]
@@ -384,9 +408,37 @@ mod tests {
         crate::run_store::FAIL_RESTORE.with(|fail| fail.set(false));
         assert_eq!(
             reply,
-            json!({ "redacted": 3, "where": ["transcript", "runs"], "masked": 1,
+            json!({ "redacted": 4, "where": ["transcript", "runs"], "masked": 1,
                     "warning": "secure_delete could not be restored on this connection" })
         );
         assert_eq!(reply_text(&store, run), format!("Your sister is {}.", redact::MARKER));
+    }
+
+    #[test]
+    fn a_typed_erase_and_a_needle_the_question_did_not_quote_are_refused_over_the_wire() {
+        let (host, store, asked) = host_with_shell();
+        let (session, _, run, _reader) = answered_by(&host, "Erase", false);
+        assert!(redact(&host, &session, run, "forget")["refused"].as_str().unwrap().contains("typed"));
+        assert_eq!(reply_text(&store, run), "Your sister is Priya.");
+
+        let (host, store, _) = host_with_shell();
+        let (session, _, run, _reader) = answered(&host, "Erase");
+        let event = json!({ "kind": "redact", "request_id": "forget", "needles": [Needle::of("Priya"), Needle::of("sister is")] });
+        let reply = call(&host, protocol::EVENT, json!({ "session": session, "turn_id": run, "event": event }));
+        assert_eq!(reply, json!({ "refused": "a needle is not in the question the person answered" }));
+        assert_eq!(reply_text(&store, run), "Your sister is Priya.");
+        assert!(asked.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_third_too_much_uses_the_question_up() {
+        let (host, store, _) = host_with_shell_costing(redact::MAX_WORK);
+        let (session, _, run, _reader) = answered(&host, "Erase");
+        for _ in 0..2 {
+            assert_eq!(redact(&host, &session, run, "forget")["refused"], redact::TOO_MUCH);
+        }
+        assert_eq!(redact(&host, &session, run, "forget")["refused"], crate::run_store::TOO_MUCH_USED_UP);
+        assert!(redact(&host, &session, run, "forget")["refused"].as_str().unwrap().contains("one redaction per question"));
+        assert_eq!(reply_text(&store, run), "Your sister is Priya.");
     }
 }

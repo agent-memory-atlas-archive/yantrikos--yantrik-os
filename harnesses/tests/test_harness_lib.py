@@ -87,10 +87,21 @@ class Forgetting(Handler):
 
     def answer(self, turn):
         turn.emit("Your sister is Priya.")
-        got = turn.ask("Forget your sister's name?", ["Keep", "Erase"], request_id="forget", timeout=5)
+        # The question quotes, verbatim, what it will ask the desktop to erase.
+        got = turn.ask("Forget your sister's name, Priya, and the Café?", ["Keep", "Erase"], request_id="forget", timeout=5)
         if got == "Erase":
             self.replies.append(turn.redact("forget", ["Priya", "Cafe\u0301"]))
             self.replies.append(turn.redact("forget", ["Priya"]))
+        turn.emit(" ok")
+
+
+class OverReaching(Forgetting):
+    """Asks to forget one thing, and on Erase asks the desktop to erase something it never quoted."""
+
+    def answer(self, turn):
+        got = turn.ask("Forget the temp draft?", ["Keep", "Erase"], request_id="forget", timeout=5)
+        if got == "Erase":
+            self.replies.append(turn.redact("forget", ["temp draft", "don't touch ~/Photos"]))
         turn.emit(" ok")
 
 
@@ -539,6 +550,15 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(needles[1], yantrik_harness.needle("Caf\u00e9"))
         self.assertEqual(needles[1]["len"], 4)
 
+    def test_a_redact_of_words_the_question_never_quoted_is_refused(self):
+        handler = OverReaching()
+        self.start(handler)
+        turn = self.desktop.ask("tidy up")
+        self.assertTrue(wait_for(lambda: (turn, "forget") in self.desktop.questions))
+        self.assertTrue(self.desktop.answer(turn, "forget", "Erase"))
+        self.desktop.wait_closed(turn)
+        self.assertEqual(handler.replies, [{"refused": "a needle is not in the question the person answered"}])
+
     def test_a_keep_answer_sends_no_redact(self):
         handler = Forgetting()
         self.start(handler)
@@ -573,6 +593,8 @@ class ConversationTests(unittest.TestCase):
         self.assertIn("unsent", yantrik_harness.Turn.redact(turn, "r", []))
         self.assertIn("unsent", yantrik_harness.Turn.redact(turn, "r", ["x"] * 17))
         self.assertIn("unsent", yantrik_harness.Turn.redact(turn, "r", ["x" * 4097]))
+        # A lone surrogate cannot be hashed as UTF-8: not sent, not an exception.
+        self.assertIn("unsent", yantrik_harness.Turn.redact(turn, "r", ["Priya" + chr(0xD800)]))
 
     def test_a_desktop_that_cannot_take_a_question_gets_none_at_once(self):
         self.desktop.keeps_runs = False

@@ -395,6 +395,11 @@ impl Capped {
         self.total
     }
 
+    /// The bytes kept: the head and the tail.
+    pub fn kept(&self) -> usize {
+        self.head.len() + self.tail.len()
+    }
+
     /// How much fell between the head and the tail.
     pub fn dropped(&self) -> u64 {
         self.dropped
@@ -1007,29 +1012,6 @@ pub struct Approval {
     pub record: String,
     pub asked: u64,
     pub settled: Option<u64>,
-    /// What it shows after an erasure, when its words held what the person had erased: `what` and
-    /// `record` with the marker. The approval itself is the record of what was allowed and keeps
-    /// its words; every view draws [`Approval::shown_what`] and [`Approval::shown_record`].
-    pub mask: Option<ApprovalMask>,
-}
-
-/// An approval's words as shown after an erasure.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ApprovalMask {
-    /// The erasure that made it.
-    pub request: String,
-    pub what: String,
-    pub record: String,
-}
-
-impl Approval {
-    pub fn shown_what(&self) -> &str {
-        self.mask.as_ref().map_or(&self.what, |m| &m.what)
-    }
-
-    pub fn shown_record(&self) -> &str {
-        self.mask.as_ref().map_or(&self.record, |m| &m.record)
-    }
 }
 
 /// A question the agent asked the person (#25). Answered only through its card, once; the answer

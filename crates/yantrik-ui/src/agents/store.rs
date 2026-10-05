@@ -63,6 +63,8 @@ pub struct Store {
     revision: u64,
     dirty: BTreeSet<AgentId>,
     removed: BTreeSet<AgentId>,
+    /// Files a stale save would have deleted, to delete on the next one (`mark_all_dirty`).
+    pending_deletes: Vec<PathBuf>,
     clock: Box<dyn Fn() -> u64 + Send>,
     /// How many agents it keeps before letting the oldest idle ones go: [`KEEP_AGENTS`].
     keep: usize,
@@ -87,6 +89,7 @@ impl Store {
             revision: 0,
             dirty: BTreeSet::new(),
             removed: BTreeSet::new(),
+            pending_deletes: Vec::new(),
             clock,
             keep: KEEP_AGENTS,
         }
@@ -525,7 +528,6 @@ impl Store {
             record: String::new(),
             asked: now,
             settled: None,
-            mask: None,
         }));
         set_state(agent, State::WaitingForYou, now);
         self.mark(i);
@@ -890,8 +892,8 @@ impl Store {
                         (answer, _) => format!("[asked the person] {} — answered: {answer}", q.prompt),
                     }),
                     Item::Approval(a) => out.push(match a.outcome {
-                        ApprovalOutcome::Pending => format!("[asked the person] {} — waiting for an answer", a.shown_what()),
-                        _ => format!("[asked the person] {} — {}", a.shown_what(), a.shown_record()),
+                        ApprovalOutcome::Pending => format!("[asked the person] {} — waiting for an answer", a.what.as_str()),
+                        _ => format!("[asked the person] {} — {}", a.what.as_str(), a.record.as_str()),
                     }),
                     Item::Card(card) => {
                         let card = card.shown();
@@ -941,7 +943,10 @@ impl Store {
             .filter_map(|id| self.agent(id))
             .map(|agent| (file_for(dir, &agent.meta.id), serialize(agent)))
             .collect();
-        let deletes = removed.iter().map(|id| file_for(dir, id)).collect();
+        let mut deletes: Vec<PathBuf> = std::mem::take(&mut self.pending_deletes);
+        deletes.extend(removed.iter().map(|id| file_for(dir, id)));
+        // A file an agent is held under again is written, not deleted.
+        deletes.retain(|path| !self.agents.iter().any(|a| file_for(dir, &a.meta.id) == *path));
         (writes, deletes)
     }
 
@@ -951,9 +956,12 @@ impl Store {
     }
 
     /// Every agent is written again on the next save: what an older save had taken is stale.
-    pub fn mark_all_dirty(&mut self) {
+    /// `removed` are the files that save would have deleted; each is deleted on the next save
+    /// instead, unless an agent of that id is held again by then.
+    pub fn mark_all_dirty(&mut self, removed: &[PathBuf], dir: &Path) {
         let ids: Vec<AgentId> = self.agents.iter().map(|a| a.meta.id.clone()).collect();
         self.dirty.extend(ids);
+        self.pending_deletes.extend(removed.iter().filter(|path| !self.agents.iter().any(|a| file_for(dir, &a.meta.id) == **path)).cloned());
     }
 
     /// Write every change now. For tests and for shutdown; the shell's timer uses `take_dirty`.
@@ -1512,15 +1520,6 @@ struct ApprovalRecord {
     record: String,
     asked: u64,
     settled: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    mask: Option<ApprovalMaskRecord>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct ApprovalMaskRecord {
-    request: String,
-    what: String,
-    record: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1626,11 +1625,6 @@ fn serialize(agent: &Agent) -> String {
                     record: a.record.clone(),
                     asked: a.asked,
                     settled: a.settled,
-                    mask: a.mask.as_ref().map(|m| ApprovalMaskRecord {
-                        request: m.request.clone(),
-                        what: m.what.clone(),
-                        record: m.record.clone(),
-                    }),
                 }),
                 Item::Card(c) => ItemRecord::Card(CardRecord {
                     call: c.call.clone(),
@@ -1758,7 +1752,6 @@ fn parse(text: &str, now: u64) -> Option<Agent> {
                     request: a.request,
                     what: a.what,
                     asked: a.asked,
-                    mask: a.mask.map(|m| ApprovalMask { request: m.request, what: m.what, record: m.record }),
                 }),
                 ItemRecord::Card(c) => Item::Card(Card {
                     call: c.call,

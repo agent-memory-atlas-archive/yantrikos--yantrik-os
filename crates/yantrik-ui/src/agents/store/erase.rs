@@ -8,18 +8,23 @@
 //!
 //! The words the person and the agent said are replaced with the marker: each prompt, the
 //! agent's text and its thinking (each joined across the turn's blocks before matching, so words
-//! split across chunks or around a card are still found), the questions it asked, the shell's
-//! notes, the title and the status line.
+//! split across chunks or around a card are still found), the questions it asked — the Keep/Erase
+//! question's own prompt included, since it quotes the words —, the shell's notes, the title and
+//! the status line.
 //!
-//! The record of what happened is not touched: a tool call (its arguments, output and summary),
-//! an approval (what was asked and how it came out), the refusal lines and every count and time
-//! stay as they were, because an erasure must not be a way to make an action disappear. Where one
-//! of those holds the words, it gets a mask — the same fields with the marker — and every view
-//! draws the mask instead (`Card::shown`, `Approval::shown_what`, `Agent::shown_refusals`). The
-//! mask keeps no words and no digest; it is keyed by the request the person answered.
+//! The record of what happened is not touched, and never hidden: an erasure must not be a way to
+//! make an action disappear. An approval (its `app.action`, what it was for and how it came out)
+//! is shown exactly as it was. A tool call keeps all its words, and only its free text is drawn
+//! with the marker ([`Card::shown`]): its preview and summary, the strings under its free-text
+//! arguments ([`FREE_TEXT_ARGS`]), and its output when that is no longer than
+//! [`MASK_OUTPUT_MAX`]. Its name, its target and every other argument are drawn as they are. The
+//! person — and only the person, in the pane — can show a masked card as it was. The refusal lines
+//! are masked the same way (`Agent::shown_refusals`). A mask keeps no words and no digest; it is
+//! keyed by the request the person answered.
 //!
 //! # Searched off the lock
 //!
+//! [`Store::erasure_size`] says how much there is to search from lengths alone;
 //! [`Store::erasure_texts`] copies the texts out under the lock; an [`ErasurePlan`] measures and
 //! searches the copies with no lock held; [`Store::apply_erasure`] takes the lock again only to
 //! replace what was found, checking each match against the text as it is by then.
@@ -27,9 +32,20 @@
 use std::collections::HashMap;
 
 use yantrik_harness::host::{ShellErased, ShellErasure};
-use yantrik_harness::redact::{apply_json, json_strings, Found, Prepared, Search};
+use yantrik_harness::redact::{apply_json_under, json_strings_under, Found, Prepared, Search};
 
 use super::*;
+
+/// The arguments of a tool call that are free text — what was said, not what was done — and so
+/// are drawn masked when they hold erased words. Anything under one of these keys, at any depth.
+pub const FREE_TEXT_ARGS: [&str; 14] = [
+    "text", "content", "body", "message", "note", "title", "subject", "prompt", "query", "description",
+    "summary", "comment", "reply", "answer",
+];
+
+/// The longest output of a tool call that is searched and drawn masked. A longer one is neither
+/// copied nor searched, and is drawn as it is (docs/harness.md, Limits).
+pub const MASK_OUTPUT_MAX: usize = 64 * 1024;
 
 /// Where one text of an agent's session is, to find it again under the lock.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -51,15 +67,12 @@ pub enum Place {
 pub enum Field {
     Question,
     Note,
-    /// A card's fields, as its mask starts from; `Arg(k)` is the `k`th string in its arguments.
-    Target,
+    /// A card's free text, as its mask starts from; `Arg(k)` is the `k`th free-text string in
+    /// its arguments.
     Arg(usize),
     Preview,
     Summary,
     Output,
-    /// An approval's words, as its mask starts from.
-    What,
-    Record,
 }
 
 /// One agent's texts, copied out of the store, to be measured and searched with no lock held.
@@ -97,6 +110,27 @@ impl ErasurePlan {
 }
 
 impl Store {
+    /// How many bytes of text [`Store::erasure_texts`] would copy for agent `id`, worked out from
+    /// lengths alone: nothing is copied.
+    pub fn erasure_size(&self, id: &AgentId) -> u64 {
+        let Some(agent) = self.agent(id) else { return 0 };
+        let refusals = agent.refusals_shown.as_ref().unwrap_or(&agent.refusals);
+        let mut bytes = agent.meta.title.len() + agent.status.len() + refusals.iter().map(String::len).sum::<usize>();
+        for turn in &agent.turns {
+            bytes += turn.prompt.len();
+            for item in &turn.items {
+                bytes += match item {
+                    Item::Text(buffer) | Item::Thinking(buffer) => buffer.kept(),
+                    Item::Question(q) => q.prompt.len(),
+                    Item::Note(note) => note.len(),
+                    Item::Card(card) => card_size(card),
+                    Item::Approval(_) => 0,
+                };
+            }
+        }
+        bytes as u64
+    }
+
     /// Copies of every text of agent `id`'s session an erasure reaches (see the module docs).
     /// Empty when the store does not hold it.
     pub fn erasure_texts(&self, id: &AgentId) -> Vec<(Place, Vec<String>)> {
@@ -115,27 +149,24 @@ impl Store {
                     Item::Note(note) => out.push((at(Field::Note), vec![note.clone()])),
                     Item::Card(card) => {
                         let base = card_mask(card);
-                        out.push((at(Field::Target), vec![base.target]));
-                        out.extend(json_strings(&base.args).into_iter().enumerate().map(|(k, s)| (at(Field::Arg(k)), vec![s])));
+                        let args = json_strings_under(&base.args, Some(&FREE_TEXT_ARGS));
+                        out.extend(args.into_iter().enumerate().map(|(k, s)| (at(Field::Arg(k)), vec![s])));
                         out.push((at(Field::Preview), vec![base.preview]));
                         out.push((at(Field::Summary), vec![base.summary]));
-                        out.push((at(Field::Output), vec![base.output]));
+                        if let Some(output) = base.output {
+                            out.push((at(Field::Output), vec![output]));
+                        }
                     }
-                    Item::Approval(a) => {
-                        let base = approval_mask(a);
-                        out.push((at(Field::What), vec![base.what]));
-                        out.push((at(Field::Record), vec![base.record]));
-                    }
-                    Item::Text(_) | Item::Thinking(_) => {}
+                    Item::Approval(_) | Item::Text(_) | Item::Thinking(_) => {}
                 }
             }
         }
         out
     }
 
-    /// Apply what `plan` found to agent `id`'s session in memory, mask the records that keep the
-    /// words, and record the erasure. Each match is checked again against the text as it is now.
-    /// Writing it to disk is the caller's (`Agents::redact`).
+    /// Apply what `plan` found to agent `id`'s session in memory, mask the free text of the cards
+    /// that keep the words, and record the erasure. Each match is checked again against the text
+    /// as it is now. Writing it to disk is the caller's (`Agents::redact`).
     pub fn apply_erasure(&mut self, id: &AgentId, e: &ShellErasure<'_>, plan: &ErasurePlan) -> ShellErased {
         let Some(i) = self.index(id) else { return ShellErased::default() };
         let now = self.now();
@@ -154,8 +185,8 @@ impl Store {
                     Item::Question(q) => done.places += in_place(&mut q.prompt, plan.get(at(Field::Question))),
                     Item::Note(note) => done.places += in_place(note, plan.get(at(Field::Note))),
                     Item::Card(card) => done.masked += mask_card(card, e.request_id, plan, t, n),
-                    Item::Approval(a) => done.masked += mask_approval(a, e.request_id, plan, t, n),
-                    Item::Text(_) | Item::Thinking(_) => {}
+                    // An approval is what was asked and how it came out: never masked.
+                    Item::Approval(_) | Item::Text(_) | Item::Thinking(_) => {}
                 }
             }
         }
@@ -226,57 +257,65 @@ fn blocks(items: &mut [Item], found: Option<&Found>, thinking: bool) -> usize {
     n
 }
 
-/// What a card's mask starts from: its mask so far, or its own fields.
-fn card_mask(card: &Card) -> CardMask {
+/// What a card's mask starts from: its mask so far, or its own free text. The output only when it
+/// is no longer than [`MASK_OUTPUT_MAX`].
+struct CardBase {
+    args: serde_json::Value,
+    preview: String,
+    summary: String,
+    output: Option<String>,
+}
+
+fn card_mask(card: &Card) -> CardBase {
     match &card.mask {
-        Some(mask) => (**mask).clone(),
-        None => CardMask {
-            request: String::new(),
-            target: card.target.clone(),
+        Some(mask) => CardBase {
+            args: mask.args.clone(),
+            preview: mask.preview.clone(),
+            summary: mask.summary.clone(),
+            output: (mask.output.len() <= MASK_OUTPUT_MAX).then(|| mask.output.clone()),
+        },
+        None => CardBase {
             args: card.args.clone(),
             preview: card.preview.clone(),
             summary: card.summary.clone(),
-            output: card.output.bytes.text(),
+            output: (card.output.bytes.kept() <= MASK_OUTPUT_MAX).then(|| card.output.bytes.text()),
         },
     }
 }
 
-/// Mask a card whose fields hold what was found; the card keeps its own. How many places masked.
+/// [`card_mask`]'s size in bytes, without copying it.
+fn card_size(card: &Card) -> usize {
+    let (args, preview, summary, output) = match &card.mask {
+        Some(mask) => (&mask.args, mask.preview.len(), mask.summary.len(), mask.output.len()),
+        None => (&card.args, card.preview.len(), card.summary.len(), card.output.bytes.kept()),
+    };
+    let args: usize = json_strings_under(args, Some(&FREE_TEXT_ARGS)).iter().map(String::len).sum();
+    args + preview + summary + if output <= MASK_OUTPUT_MAX { output } else { 0 }
+}
+
+/// Mask a card whose free text holds what was found; the card keeps its own. Its name, target and
+/// other arguments are never masked. How many places masked.
 fn mask_card(card: &mut Card, request: &str, plan: &ErasurePlan, t: usize, i: usize) -> usize {
     let at = |field| Place::Item(t, i, field);
-    let mut mask = card_mask(card);
-    let args: Vec<Found> = (0..json_strings(&mask.args).len())
+    let mut base = card_mask(card);
+    let args: Vec<Found> = (0..json_strings_under(&base.args, Some(&FREE_TEXT_ARGS)).len())
         .map(|k| plan.get(at(Field::Arg(k))).cloned().unwrap_or_default())
         .collect();
-    let n = in_place(&mut mask.target, plan.get(at(Field::Target)))
-        + apply_json(&mut mask.args, &args)
-        + in_place(&mut mask.preview, plan.get(at(Field::Preview)))
-        + in_place(&mut mask.summary, plan.get(at(Field::Summary)))
-        + in_place(&mut mask.output, plan.get(at(Field::Output)));
+    let mut output = base.output.take();
+    let n = apply_json_under(&mut base.args, &args, Some(&FREE_TEXT_ARGS))
+        + in_place(&mut base.preview, plan.get(at(Field::Preview)))
+        + in_place(&mut base.summary, plan.get(at(Field::Summary)))
+        + output.as_mut().map_or(0, |o| in_place(o, plan.get(at(Field::Output))));
     if n > 0 {
-        mask.request = request.to_string();
-        card.mask = Some(Box::new(mask));
-    }
-    n
-}
-
-/// What an approval's mask starts from: its mask so far, or its own words.
-fn approval_mask(approval: &Approval) -> ApprovalMask {
-    approval.mask.clone().unwrap_or_else(|| ApprovalMask {
-        request: String::new(),
-        what: approval.what.clone(),
-        record: approval.record.clone(),
-    })
-}
-
-/// Mask an approval whose words hold what was found; the approval keeps its own.
-fn mask_approval(approval: &mut Approval, request: &str, plan: &ErasurePlan, t: usize, i: usize) -> usize {
-    let at = |field| Place::Item(t, i, field);
-    let mut mask = approval_mask(approval);
-    let n = in_place(&mut mask.what, plan.get(at(Field::What))) + in_place(&mut mask.record, plan.get(at(Field::Record)));
-    if n > 0 {
-        mask.request = request.to_string();
-        approval.mask = Some(mask);
+        let previous = card.mask.as_ref().map(|m| m.output.clone());
+        card.mask = Some(Box::new(CardMask {
+            request: request.to_string(),
+            target: card.target.clone(),
+            args: base.args,
+            preview: base.preview,
+            summary: base.summary,
+            output: output.or(previous).unwrap_or_else(|| card.output.bytes.text()),
+        }));
     }
     n
 }
@@ -294,8 +333,8 @@ mod tests {
     }
 
     /// An agent whose session holds the secret everywhere it can: the prompt, the reply split
-    /// across two chunks, its thinking, a tool call's arguments and output, an approval, and a
-    /// question.
+    /// across two chunks, its thinking, a tool call's target, arguments and output, and the
+    /// question quoting it; and an approval, which is only ever `app.action`.
     fn session() -> (Store, AgentId) {
         let mut s = Store::with_clock(Box::new(|| 1_000));
         let pi = AgentId::new("pi", "c-1");
@@ -305,12 +344,17 @@ mod tests {
         s.event(&pi, &Event::Thinking { delta: "store Priya".into() }, Provenance::Reported);
         s.event(
             &pi,
-            &Event::ToolStart { call: "t1".into(), name: "os_act".into(), target: "notes".into(), args: json!({"text": "sister: Priya"}) },
+            &Event::ToolStart {
+                call: "t1".into(),
+                name: "os_act".into(),
+                target: "notes/Priya.md".into(),
+                args: json!({"path": "notes/Priya.md", "text": "sister: Priya"}),
+            },
             Provenance::Reported,
         );
         s.event(&pi, &Event::ToolOutput { call: "t1".into(), stream: Stream::Stdout, delta: "saved Priya\n".into() }, Provenance::Reported);
         s.event(&pi, &Event::ToolEnd { call: "t1".into(), ok: true, summary: "noted Priya".into(), exit_code: None }, Provenance::Reported);
-        s.approval_asked(&pi, "appr-1", "notes.write Priya");
+        s.approval_asked(&pi, "appr-1", "notes.write");
         s.approval_answered(&pi, "appr-1", true);
         s.event(
             &pi,
@@ -352,12 +396,16 @@ mod tests {
         assert!(matches!(turn.items.last(), Some(Item::Note(n)) if n == "Erased 9 places at your request."));
 
         let transcript = s.transcript(&pi, 5).unwrap();
-        assert!(!transcript.contains(SECRET), "nothing the pane or read_agent shows holds the words:\n{transcript}");
+        // Nothing read_agent shows holds the words, but the line saying what a call did: its
+        // target is never hidden.
+        for line in transcript.lines().filter(|l| !l.starts_with("[reported call]")) {
+            assert!(!line.contains(SECRET), "{line}\n{transcript}");
+        }
         assert!(transcript.contains("Erased 9 places at your request."));
     }
 
     #[test]
-    fn a_tool_call_and_an_approval_keep_their_words_and_are_shown_masked() {
+    fn a_tool_call_keeps_its_words_and_only_its_free_text_is_shown_masked_and_an_approval_never_is() {
         let (mut s, pi) = session();
         let before_args = card(&s, &pi).args.clone();
         let before_output = card(&s, &pi).output.all();
@@ -372,14 +420,18 @@ mod tests {
         assert_eq!((ap.what.as_str(), ap.outcome), (before_what.as_str(), ApprovalOutcome::Allowed));
         // What is drawn of them is masked, keyed by the erasure.
         let shown = c.shown();
-        assert_eq!(shown.args, json!({"text": format!("sister: {MARKER}")}));
+        assert_eq!(shown.args, json!({"path": "notes/Priya.md", "text": format!("sister: {MARKER}")}));
         assert_eq!(shown.output.all(), format!("saved {MARKER}\n"));
         assert_eq!(shown.summary, format!("noted {MARKER}"));
         assert_eq!((shown.state, shown.call.as_str()), (CallState::Ok, "t1"), "how it went is not touched");
         assert_eq!(c.mask.as_ref().unwrap().request, "forget-1");
-        assert_eq!(ap.shown_what(), format!("notes.write {MARKER}"));
-        // args, output, summary; the approval's words.
-        assert_eq!(done.masked, 4);
+        // What was done is never hidden: the target and the non-free-text arguments are shown as
+        // they are, and the approval is not masked at all.
+        assert_eq!(shown.target, "notes/Priya.md");
+        assert_eq!(shown.args["path"], "notes/Priya.md");
+        assert_eq!(ap.what, "notes.write");
+        // The free-text argument, the output, the summary.
+        assert_eq!(done.masked, 3);
     }
 
     #[test]
@@ -405,10 +457,11 @@ mod tests {
         }
         // Read back, it is still shown masked.
         let back = Store::load(&dir, Box::new(|| 2_000));
-        assert_eq!(card(&back, &pi).shown().args, json!({"text": format!("sister: {MARKER}")}));
-        assert_eq!(approval(&back, &pi).shown_what(), format!("notes.write {MARKER}"));
+        assert_eq!(card(&back, &pi).shown().args, json!({"path": "notes/Priya.md", "text": format!("sister: {MARKER}")}));
+        assert_eq!(approval(&back, &pi).what, "notes.write");
         assert_eq!(back.agent(&pi).unwrap().erasures.len(), 1);
-        assert!(!back.transcript(&pi, 5).unwrap().contains(SECRET));
+        let transcript = back.transcript(&pi, 5).unwrap();
+        assert!(transcript.lines().filter(|l| !l.starts_with("[reported call]")).all(|l| !l.contains(SECRET)), "{transcript}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -499,5 +552,27 @@ mod tests {
         let done = s.apply_erasure(&pi, &erasure(&short), &plan);
         assert!(done.places > 0);
         assert!(!s.transcript(&pi, 5).unwrap().contains("Priya"));
+    }
+
+    /// A save found stale after an erasure is dropped; the files it would have deleted are deleted
+    /// by the next one instead, unless that agent is held again by then.
+    #[test]
+    fn a_stale_save_gives_back_the_deletes_it_took() {
+        let dir = std::env::temp_dir().join("yantrik-erase-stale-save");
+        let mut s = Store::with_clock(Box::new(|| 1));
+        let gone = AgentId::new("pi", "c-gone");
+        let back = AgentId::new("pi", "c-back");
+        s.open_turn(&gone, "one");
+        s.open_turn(&back, "two");
+        let _ = s.take_dirty(&dir);
+        assert!(s.remove_agent(&gone) && s.remove_agent(&back));
+        let (_, deletes) = s.take_dirty(&dir);
+        assert_eq!(deletes.len(), 2);
+        // The agent `back` is held again before the next save: its file is written, not deleted.
+        s.open_turn(&back, "three");
+        s.mark_all_dirty(&deletes, &dir);
+        let (writes, again) = s.take_dirty(&dir);
+        assert_eq!(again, vec![file_for(&dir, &gone)]);
+        assert!(writes.iter().any(|(path, _)| *path == file_for(&dir, &back)));
     }
 }

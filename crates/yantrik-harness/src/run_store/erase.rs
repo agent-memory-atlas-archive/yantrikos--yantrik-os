@@ -6,22 +6,28 @@
 //! all of these hold, and otherwise refuses with the reason and changes nothing:
 //!
 //! - **(a)** the request id names a question *this* run asked (a row in `requests`);
-//! - **(b)** the person's stored answer to it is exactly [`ERASE_ANSWER`], and that was one of
-//!   the question's offered options — a typed "erase" or a free answer does not count;
+//! - **(b)** the person's stored answer to it is exactly [`ERASE_ANSWER`], that was one of the
+//!   question's offered options, and the person pressed it (`requests.by_option`) — a typed
+//!   "erase", a typed "Erase" or a free answer does not count;
 //! - **(c)** the run is still in flight, or ended no more than [`ERASE_WINDOW_MS`] ago;
-//! - **(d)** the redaction comes from the harness and the session that hold the run.
+//! - **(d)** the redaction comes from the harness and the session that hold the run;
+//! - **(e)** every needle is quoted in what the person was shown of the question
+//!   (`redact::question_shown`, `redact::all_in`): they saw exactly the words that go.
 //!
-//! And once per question: a second `redact` for the same request is refused.
+//! And once per question: a second `redact` for the same request is refused, and so is a third
+//! one refused for being too much to search ([`TOO_MUCH_TIMES`]).
 //!
 //! # What it touches
 //!
-//! The words the person and the agent said, in every run of the same agent (harness and
-//! conversation): the reply text (each run's `text` chunks, joined before matching), its thinking
-//! (`thinking` deltas, joined the same way), why a run failed, and the prompt of each question the
-//! agent asked. Never the record of what happened: tool calls and their output, usage, status,
-//! states, owners, answers and options, sequence numbers and times all stay as they are, and so
-//! does the order of the log. What was erased is recorded in `redactions` as the run, the request
-//! and how many places, with no words and no digest.
+//! The words the person and the agent said, in the question's own conversation: every run of the
+//! same agent (harness and conversation) held by the same session. The reply text (each run's
+//! `text` chunks, joined before matching), its thinking (`thinking` deltas, joined the same way),
+//! its `status` lines, why a run failed, the prompt a resumed run carried over, and the prompt of
+//! each question the agent asked — the answered question's own included, in its `requests` row and
+//! its `request` event, since it quotes the words. Never the record of what happened: tool calls
+//! and their output, usage, states, owners, answers and options, sequence numbers and times all
+//! stay as they are, and so does the order of the log. What was erased is recorded in `redactions`
+//! as the run, the request and how many places, with no words and no digest.
 //!
 //! # Searched off the lock
 //!
@@ -45,13 +51,23 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
 
 use super::{state_in, RunStore};
-use crate::redact::{Found, Needle, Prepared, Search, MAX_WORK, TOO_MUCH};
+use crate::redact::{self, Found, Needle, Prepared, Search, MAX_WORK, TOO_MUCH};
 
 /// The answer that lets a question's words be erased. Exact: the case matters.
 pub const ERASE_ANSWER: &str = "Erase";
 
 /// How long after a run ended its question may still be acted on: five minutes.
 pub const ERASE_WINDOW_MS: i64 = 5 * 60 * 1000;
+
+/// How many times a question may be refused for [`Refusal::TooMuch`] before it is used up.
+pub const TOO_MUCH_TIMES: i64 = 3;
+
+/// The refusal that uses a question up: the third time it was too much to search.
+pub const TOO_MUCH_USED_UP: &str =
+    "too much to search, three times; this question can no longer be used to erase anything";
+
+/// The refusal when a needle is not quoted in the question the person answered.
+pub const NOT_IN_QUESTION: &str = "a needle is not in the question the person answered";
 
 /// What an accepted erasure says when it committed but `secure_delete` could not be put back as
 /// it was on the store's connection afterwards.
@@ -106,12 +122,18 @@ pub enum Refusal {
     NotAnswered(String),
     /// (b): it was answered with something other than the offered `Erase`.
     NotErase(String),
+    /// (b): `Erase` was typed, not pressed.
+    Typed(String),
+    /// (e): a needle is not quoted in what the person was shown of the question.
+    NotInQuestion,
     /// (c): the run ended too long ago.
     Expired { run_id: u64, ended_ms_ago: i64 },
     /// Once per question.
     AlreadyErased(String),
     /// More to search than [`MAX_WORK`].
     TooMuch,
+    /// The third [`Refusal::TooMuch`] for one question: it is used up.
+    TooMuchUsedUp,
     Storage(String),
 }
 
@@ -132,8 +154,14 @@ impl std::fmt::Display for Refusal {
                 ended_ms_ago / 1000,
                 ERASE_WINDOW_MS / 1000
             ),
+            Refusal::Typed(r) => write!(
+                f,
+                "the person typed the answer to {r:?} rather than pressing the offered {ERASE_ANSWER:?}, so nothing may be erased"
+            ),
+            Refusal::NotInQuestion => f.write_str(NOT_IN_QUESTION),
             Refusal::AlreadyErased(r) => write!(f, "{r:?} has already been acted on; one redaction per question"),
             Refusal::TooMuch => f.write_str(TOO_MUCH),
+            Refusal::TooMuchUsedUp => f.write_str(TOO_MUCH_USED_UP),
             Refusal::Storage(e) => write!(f, "run store: {e}"),
         }
     }
@@ -152,6 +180,16 @@ impl From<super::RunError> for Refusal {
             other => Refusal::Storage(other.to_string()),
         }
     }
+}
+
+/// How much text an erasure would search in the run store ([`RunStore::redact_size`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunSize {
+    /// The agent whose conversation it is.
+    pub harness: String,
+    pub conversation: String,
+    /// The raw bytes of every text it reaches.
+    pub bytes: u64,
 }
 
 /// The run store's half of one erasure: its texts, copied out under the store's lock and searched
@@ -197,12 +235,56 @@ impl RunStore {
     /// counts towards the same limit.
     pub fn redact(&self, e: &Erasure<'_>, now: i64) -> Result<Erased, Refusal> {
         let search = Search::new(e.needles);
+        let size = self.redact_size(e, now)?;
+        if search.estimate(size.bytes) > MAX_WORK {
+            return Err(self.too_much(e)?);
+        }
         let mut plan = self.prepare_redact(e, now)?;
         if plan.work(&search) > MAX_WORK {
-            return Err(Refusal::TooMuch);
+            return Err(self.too_much(e)?);
         }
         plan.search(&search);
         self.apply_redact(e, now, &plan)
+    }
+
+    /// Check the acceptance rule, and say how much text the erasure would search — the raw bytes
+    /// of every text it reaches — without copying any of it.
+    pub fn redact_size(&self, e: &Erasure<'_>, now: i64) -> Result<RunSize, Refusal> {
+        self.with_refusal(|db| {
+            let tx = db.transaction()?;
+            let (harness, conversation) = accept(&tx, e, now)?;
+            let bytes = size_of(&tx, &harness, &conversation, e.owner)?;
+            Ok(RunSize { harness, conversation, bytes })
+        })
+    }
+
+    /// Count one refusal of `e` for being too much to search. The third uses the question up,
+    /// as an accepted erasure would: its claim is taken with nothing erased. The refusal to give.
+    pub fn too_much(&self, e: &Erasure<'_>) -> Result<Refusal, Refusal> {
+        self.with_refusal(|db| {
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            tx.execute(
+                "INSERT INTO redact_too_much (run_id, request_id, times) VALUES (?1, ?2, 1)
+                 ON CONFLICT (run_id, request_id) DO UPDATE SET times = times + 1",
+                params![e.run_id as i64, e.request_id],
+            )?;
+            let times: i64 = tx.query_row(
+                "SELECT times FROM redact_too_much WHERE run_id = ?1 AND request_id = ?2",
+                params![e.run_id as i64, e.request_id],
+                |r| r.get(0),
+            )?;
+            let refusal = if times >= TOO_MUCH_TIMES {
+                tx.execute(
+                    "INSERT OR IGNORE INTO redactions (run_id, request_id, places, at) VALUES (?1, ?2, 0, ?3)",
+                    params![e.run_id as i64, e.request_id, super::now_ms()],
+                )?;
+                Refusal::TooMuchUsedUp
+            } else {
+                Refusal::TooMuch
+            };
+            tx.commit()?;
+            Ok(refusal)
+        })
     }
 
     /// Check the acceptance rule and copy out the texts of the conversation it would erase, under
@@ -213,7 +295,7 @@ impl RunStore {
         let (harness, conversation, texts) = self.with_refusal(|db| {
             let tx = db.transaction()?;
             let (harness, conversation) = accept(&tx, e, now)?;
-            let texts = texts_of(&tx, &harness, &conversation)?;
+            let texts = texts_of(&tx, &harness, &conversation, e.owner)?;
             Ok((harness, conversation, texts))
         })?;
         let texts = texts
@@ -317,16 +399,27 @@ fn accept(db: &Connection, e: &Erasure<'_>, now: i64) -> Result<(String, String)
         return Err(Refusal::NotYours(run_id));
     }
     // (a) a question this run asked.
-    let request: Option<(String, String, Option<String>)> = db
+    let request: Option<(String, String, Option<String>, bool)> = db
         .query_row(
-            "SELECT prompt, state, answer FROM requests WHERE run_id = ?1 AND request_id = ?2",
+            "SELECT prompt, state, answer, by_option FROM requests WHERE run_id = ?1 AND request_id = ?2",
             params![run_id as i64, e.request_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()?;
-    let Some((prompt, asked_state, answer)) = request else {
+    let Some((prompt, asked_state, answer, by_option)) = request else {
         return Err(Refusal::NoSuchRequest { run_id, request_id: e.request_id.to_string() });
     };
+    // Once per question: checked first, since an erasure took the question's own words too.
+    let erased: Option<i64> = db
+        .query_row(
+            "SELECT 1 FROM redactions WHERE run_id = ?1 AND request_id = ?2",
+            params![run_id as i64, e.request_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if erased.is_some() {
+        return Err(Refusal::AlreadyErased(e.request_id.to_string()));
+    }
     // (b) answered exactly the offered `Erase`.
     if asked_state != "answered" {
         return Err(Refusal::NotAnswered(e.request_id.to_string()));
@@ -336,6 +429,16 @@ fn accept(db: &Connection, e: &Erasure<'_>, now: i64) -> Result<(String, String)
     let offered = prompt["options"].as_array().is_some_and(|o| o.iter().any(|v| v.as_str() == Some(ERASE_ANSWER)));
     if answer.as_str() != Some(ERASE_ANSWER) || !offered {
         return Err(Refusal::NotErase(e.request_id.to_string()));
+    }
+    // ... pressed, not typed.
+    if !by_option {
+        return Err(Refusal::Typed(e.request_id.to_string()));
+    }
+    // (e) every needle is quoted in what the person was shown of the question: they saw exactly
+    // the words that go.
+    let asked = prompt["prompt"].as_str().unwrap_or_default();
+    if !redact::all_in(redact::question_shown(asked), e.needles) {
+        return Err(Refusal::NotInQuestion);
     }
     // (c) in flight, or ended within the window.
     if state.is_final() {
@@ -347,17 +450,6 @@ fn accept(db: &Connection, e: &Erasure<'_>, now: i64) -> Result<(String, String)
         if now - ended > ERASE_WINDOW_MS {
             return Err(Refusal::Expired { run_id, ended_ms_ago: now - ended });
         }
-    }
-    // Once per question.
-    let erased: Option<i64> = db
-        .query_row(
-            "SELECT 1 FROM redactions WHERE run_id = ?1 AND request_id = ?2",
-            params![run_id as i64, e.request_id],
-            |r| r.get(0),
-        )
-        .optional()?;
-    if erased.is_some() {
-        return Err(Refusal::AlreadyErased(e.request_id.to_string()));
     }
     Ok((harness, conversation))
 }
@@ -377,7 +469,7 @@ fn erase_in(db: &mut rusqlite::Connection, e: &Erasure<'_>, now: i64, plan: &Run
 
     let mut places = 0;
     if harness == plan.harness && conversation == plan.conversation {
-        for text in texts_of(&tx, &harness, &conversation)? {
+        for text in texts_of(&tx, &harness, &conversation, e.owner)? {
             // A text that was not there when the plan was searched has nothing found in it.
             let Some(found) = plan.found.get(&text.place) else { continue };
             let pieces = text.pieces();
@@ -414,6 +506,10 @@ enum Place {
     Asked(i64, i64),
     /// The prompt in a question's `requests` row.
     Question(i64, String),
+    /// A `status` line the agent sent, at this sequence number.
+    Status(i64, i64),
+    /// The person's prompt a resumed run carried over, at this sequence number.
+    Resumed(i64, i64),
 }
 
 /// One text: the rows it is in, a piece in each.
@@ -490,10 +586,12 @@ impl Row {
 /// Every text of one agent's conversation the erasure reaches, in every run of it: the reply and
 /// the thinking (each joined across its chunks), why a run failed, and the prompt of each
 /// question (its `request` event and its `requests` row). Never a tool call, an answer, a state.
-fn texts_of(db: &Connection, harness: &str, conversation: &str) -> Result<Vec<Text>, Refusal> {
+fn texts_of(db: &Connection, harness: &str, conversation: &str, owner: &str) -> Result<Vec<Text>, Refusal> {
     let runs: Vec<i64> = {
-        let mut stmt = db.prepare("SELECT run_id FROM runs WHERE harness = ?1 AND conversation = ?2 ORDER BY run_id")?;
-        let ids = stmt.query_map(params![harness, conversation], |r| r.get(0))?.collect::<Result<_, _>>()?;
+        let mut stmt = db.prepare(
+            "SELECT run_id FROM runs WHERE harness = ?1 AND conversation = ?2 AND owner = ?3 ORDER BY run_id",
+        )?;
+        let ids = stmt.query_map(params![harness, conversation, owner], |r| r.get(0))?.collect::<Result<_, _>>()?;
         ids
     };
     let mut texts = Vec::new();
@@ -501,7 +599,7 @@ fn texts_of(db: &Connection, harness: &str, conversation: &str) -> Result<Vec<Te
         let rows: Vec<(i64, String, Value)> = {
             let mut stmt = db.prepare(
                 "SELECT seq, kind, payload FROM events WHERE run_id = ?1
-                 AND kind IN ('text', 'event', 'failure', 'request') ORDER BY seq",
+                 AND kind IN ('text', 'event', 'failure', 'request', 'resumed') ORDER BY seq",
             )?;
             let rows = stmt
                 .query_map(params![run], |r| {
@@ -518,6 +616,12 @@ fn texts_of(db: &Connection, harness: &str, conversation: &str) -> Result<Vec<Te
             match kind.as_str() {
                 "text" => reply.extend(Row::new(at, payload, &["delta"])),
                 "event" if payload["kind"] == "thinking" => thinking.extend(Row::new(at, payload, &["delta"])),
+                "event" if payload["kind"] == "status" => {
+                    texts.extend(Row::new(at, payload, &["text"]).map(|row| Text { place: Place::Status(run, seq), rows: vec![row] }))
+                }
+                "resumed" => texts.extend(
+                    Row::new(at, payload, &["prompt"]).map(|row| Text { place: Place::Resumed(run, seq), rows: vec![row] }),
+                ),
                 "failure" => texts.extend(Row::new(at, payload, &["why"]).map(|row| Text { place: Place::Failure(run, seq), rows: vec![row] })),
                 "request" => texts.extend(
                     Row::new(at, payload, &["prompt", "prompt"]).map(|row| Text { place: Place::Asked(run, seq), rows: vec![row] }),
@@ -549,6 +653,26 @@ fn texts_of(db: &Connection, harness: &str, conversation: &str) -> Result<Vec<Te
 thread_local! {
     /// Makes putting `secure_delete` back fail on this thread, as a broken connection would.
     pub(crate) static FAIL_RESTORE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The raw bytes of every text [`texts_of`] would read, summed by SQLite without reading them out:
+/// an upper bound on the text itself (each is held inside its JSON).
+fn size_of(db: &Connection, harness: &str, conversation: &str, owner: &str) -> Result<u64, Refusal> {
+    let events: i64 = db.query_row(
+        "SELECT COALESCE(SUM(LENGTH(CAST(e.payload AS BLOB))), 0) FROM events e JOIN runs r ON r.run_id = e.run_id
+         WHERE r.harness = ?1 AND r.conversation = ?2 AND r.owner = ?3
+         AND (e.kind IN ('text', 'failure', 'request', 'resumed')
+              OR (e.kind = 'event' AND json_extract(e.payload, '$.kind') IN ('thinking', 'status')))",
+        params![harness, conversation, owner],
+        |r| r.get(0),
+    )?;
+    let questions: i64 = db.query_row(
+        "SELECT COALESCE(SUM(LENGTH(CAST(q.prompt AS BLOB))), 0) FROM requests q JOIN runs r ON r.run_id = q.run_id
+         WHERE r.harness = ?1 AND r.conversation = ?2 AND r.owner = ?3",
+        params![harness, conversation, owner],
+        |r| r.get(0),
+    )?;
+    Ok((events.max(0) as u64).saturating_add(questions.max(0) as u64))
 }
 
 /// Put `secure_delete` back as it was before the erasure.
@@ -599,7 +723,7 @@ mod tests {
         store
             .ask(1, "forget-1", &json!({"prompt": "Forget that Priya lives at 12 Elm Street?", "options": ["Keep", "Erase"]}))
             .unwrap();
-        store.answer(1, "forget-1", &json!(answer)).unwrap();
+        store.answer(1, "forget-1", &json!(answer), true).unwrap();
         store
     }
 
@@ -680,7 +804,7 @@ mod tests {
         let store = RunStore::in_memory().unwrap();
         store.start(1, "mind", "main", "s1").unwrap();
         store.ask(1, "free", &json!({"prompt": "What should I do?", "options": []})).unwrap();
-        store.answer(1, "free", &json!("Erase")).unwrap();
+        store.answer(1, "free", &json!("Erase"), true).unwrap();
         assert_eq!(store.redact(&erasure(1, "free", &n), now_ms()), Err(Refusal::NotErase("free".into())));
         // Not answered yet.
         store.ask(1, "open", &json!({"prompt": "Forget?", "options": ["Keep", "Erase"]})).unwrap();
@@ -736,11 +860,12 @@ mod tests {
         let store = RunStore::in_memory().unwrap();
         store.start(1, "mind", "main", "s1").unwrap();
         store.append(1, "text", &json!({"delta": "We met at Cafe\u{301} Lune"})).unwrap();
-        store.ask(1, "f", &json!({"prompt": "Forget the café?", "options": ["Keep", "Erase"]})).unwrap();
-        store.answer(1, "f", &json!("Erase")).unwrap();
+        store.ask(1, "f", &json!({"prompt": "Forget Café Lune?", "options": ["Keep", "Erase"]})).unwrap();
+        store.answer(1, "f", &json!("Erase"), true).unwrap();
         let composed = [Needle::of("Caf\u{e9} Lune")];
         let erased = store.redact(&erasure(1, "f", &composed), now_ms()).unwrap();
-        assert_eq!(erased.places, 1);
+        // The reply's, and the question's own.
+        assert_eq!(erased.places, 2);
         assert_eq!(text_of(&store, 1), format!("We met at {MARKER}"));
     }
 
@@ -752,7 +877,7 @@ mod tests {
         store.append(1, "text", &json!({"delta": "away-Erase2 and throwaway-erase2. OK?"})).unwrap();
         store.append(1, "event", &json!({"kind": "thinking", "delta": "Keep Throwaway-Erase2 SAFE"})).unwrap();
         store.ask(1, "f", &json!({"prompt": "Forget THROWAWAY-ERASE2?", "options": ["Keep", "Erase"]})).unwrap();
-        store.answer(1, "f", &json!("Erase")).unwrap();
+        store.answer(1, "f", &json!("Erase"), true).unwrap();
         let needle = [Needle::of("throwaway-erase2")];
         let erased = store.redact(&erasure(1, "f", &needle), now_ms()).unwrap();
         assert_eq!(text_of(&store, 1), format!("Code {MARKER}, then {MARKER} and {MARKER}. OK?"));
@@ -779,8 +904,9 @@ mod tests {
         let store = RunStore::open(&path).unwrap();
         store.start(1, "mind", "main", "s1").unwrap();
         store.append(1, "text", &json!({"delta": format!("the code is {stored}, keep it")})).unwrap();
-        store.ask(1, "f", &json!({"prompt": "Forget the code?", "options": ["Keep", "Erase"]})).unwrap();
-        store.answer(1, "f", &json!("Erase")).unwrap();
+        // The question quotes the words, as it must; and it is erased with them.
+        store.ask(1, "f", &json!({"prompt": format!("Forget the code {stored}?"), "options": ["Keep", "Erase"]})).unwrap();
+        store.answer(1, "f", &json!("Erase"), true).unwrap();
         // Any case of the words, in the file's bytes.
         let holds = |file: &std::path::Path| {
             let bytes = std::fs::read(file).unwrap_or_default().to_ascii_lowercase();
@@ -810,19 +936,31 @@ mod tests {
         assert_eq!(store.redactions("mind", "main").unwrap().len(), 1);
     }
 
-    #[test]
-    fn too_much_to_search_is_refused_before_anything_is_searched_or_touched() {
+    /// A run whose reply is half a megabyte, asked a question quoting "Priya" and a run of 1999
+    /// x's, answered Erase.
+    fn big_store() -> RunStore {
         let store = RunStore::in_memory().unwrap();
         store.start(1, "mind", "main", "s1").unwrap();
-        // Half a megabyte of reply: with 16 needles of 4081 to 4096 characters, every window hashed
-        // in full would be about 33 GB of SHA-256.
         let chunk = "the quick brown fox jumps over Priya's lazy dog. ".repeat(1_000);
         for _ in 0..10 {
             store.append(1, "text", &json!({"delta": chunk})).unwrap();
         }
-        store.ask(1, "f", &json!({"prompt": "Forget Priya?", "options": ["Keep", "Erase"]})).unwrap();
-        store.answer(1, "f", &json!("Erase")).unwrap();
-        let long: Vec<Needle> = (0..16).map(|i| Needle::of(&"x".repeat(4081 + i))).collect();
+        let prompt = format!("Forget Priya? {}", "x".repeat(1_980));
+        store.ask(1, "f", &json!({"prompt": prompt, "options": ["Keep", "Erase"]})).unwrap();
+        store.answer(1, "f", &json!("Erase"), true).unwrap();
+        store
+    }
+
+    /// 16 needles of 1965 to 1980 characters, all quoted in the question: over half a megabyte,
+    /// every window hashed in full would be about 16 GB of SHA-256.
+    fn long_needles() -> Vec<Needle> {
+        (0..16).map(|i| Needle::of(&"x".repeat(1_965 + i))).collect()
+    }
+
+    #[test]
+    fn too_much_to_search_is_refused_before_anything_is_searched_or_touched() {
+        let store = big_store();
+        let long = long_needles();
         let started = std::time::Instant::now();
         assert_eq!(store.redact(&erasure(1, "f", &long), now_ms()), Err(Refusal::TooMuch));
         assert!(started.elapsed() < std::time::Duration::from_secs(30), "refused without searching: {:?}", started.elapsed());
@@ -831,8 +969,72 @@ mod tests {
         assert!(store.redactions("mind", "main").unwrap().is_empty());
         assert!(text_of(&store, 1).contains("Priya"));
         let erased = store.redact(&erasure(1, "f", &[Needle::of("Priya")]), now_ms()).unwrap();
+        // The reply's, and the question's own.
         assert_eq!(erased.places, 10_000 + 1);
         assert!(!text_of(&store, 1).contains("Priya"));
+    }
+
+    #[test]
+    fn the_third_refusal_for_too_much_uses_the_question_up() {
+        let store = big_store();
+        let long = long_needles();
+        assert_eq!(store.redact(&erasure(1, "f", &long), now_ms()), Err(Refusal::TooMuch));
+        assert_eq!(store.redact(&erasure(1, "f", &long), now_ms()), Err(Refusal::TooMuch));
+        assert_eq!(store.redact(&erasure(1, "f", &long), now_ms()), Err(Refusal::TooMuchUsedUp));
+        assert_eq!(
+            store.redact(&erasure(1, "f", &[Needle::of("Priya")]), now_ms()),
+            Err(Refusal::AlreadyErased("f".into())),
+            "used up: no more tries"
+        );
+        assert!(text_of(&store, 1).contains("Priya"), "and nothing was erased");
+    }
+
+    #[test]
+    fn a_needle_the_question_did_not_quote_is_refused_and_changes_nothing() {
+        let store = store_with(RunStore::in_memory().unwrap(), "Erase");
+        store.append(1, "text", &json!({"delta": " Don't touch ~/Photos."})).unwrap();
+        let before = payloads(&store, 1);
+        // "Priya" is quoted; "~/Photos" never was.
+        let needles = [Needle::of("Priya"), Needle::of("~/Photos")];
+        assert_eq!(store.redact(&erasure(1, "forget-1", &needles), now_ms()), Err(Refusal::NotInQuestion));
+        assert_eq!(Refusal::NotInQuestion.to_string(), "a needle is not in the question the person answered");
+        assert_eq!(payloads(&store, 1), before);
+        assert!(store.redactions("mind", "main").unwrap().is_empty(), "the question is not used up");
+        // Only what the person was shown counts: past the card's 1999 characters is not quoted.
+        let store = RunStore::in_memory().unwrap();
+        store.start(1, "mind", "main", "s1").unwrap();
+        let prompt = format!("{} Priya", "y".repeat(2_000));
+        store.ask(1, "f", &json!({"prompt": prompt, "options": ["Keep", "Erase"]})).unwrap();
+        store.answer(1, "f", &json!("Erase"), true).unwrap();
+        assert_eq!(store.redact(&erasure(1, "f", &[Needle::of("Priya")]), now_ms()), Err(Refusal::NotInQuestion));
+    }
+
+    #[test]
+    fn a_typed_erase_is_not_a_pressed_one() {
+        let store = RunStore::in_memory().unwrap();
+        store.start(1, "mind", "main", "s1").unwrap();
+        store.append(1, "text", &json!({"delta": "Priya"})).unwrap();
+        store.ask(1, "f", &json!({"prompt": "Forget Priya?", "options": ["Keep", "Erase"]})).unwrap();
+        store.answer(1, "f", &json!("Erase"), false).unwrap();
+        assert_eq!(store.redact(&erasure(1, "f", &[Needle::of("Priya")]), now_ms()), Err(Refusal::Typed("f".into())));
+        assert_eq!(text_of(&store, 1), "Priya");
+    }
+
+    #[test]
+    fn status_lines_and_resumed_prompts_are_erased_and_other_sessions_runs_are_not_searched() {
+        let store = store_with(RunStore::in_memory().unwrap(), "Erase");
+        store.append(1, "event", &json!({"kind": "status", "text": "saving Priya"})).unwrap();
+        store.start(2, "mind", "main", "s1").unwrap();
+        store.append(2, "resumed", &json!({"was": 1, "prompt": "my sister is Priya"})).unwrap();
+        // The same agent's run under an earlier session is outside this question's conversation.
+        store.start(3, "mind", "main", "s0").unwrap();
+        store.append(3, "text", &json!({"delta": "Priya, from before"})).unwrap();
+        store.redact(&erasure(1, "forget-1", &needles()), now_ms()).unwrap();
+        let status = payloads(&store, 1).into_iter().find(|(_, p)| p["kind"] == "status").unwrap();
+        assert_eq!(status.1["text"], format!("saving {MARKER}"));
+        let resumed = payloads(&store, 2).into_iter().find(|(k, _)| k == "resumed").unwrap();
+        assert_eq!(resumed.1["prompt"], format!("my sister is {MARKER}"));
+        assert_eq!(text_of(&store, 3), "Priya, from before");
     }
 
     #[test]

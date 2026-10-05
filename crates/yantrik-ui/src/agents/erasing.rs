@@ -34,11 +34,11 @@ impl Agents {
     /// save the timer took before the erasure is never written after it.
     pub fn apply_erasure(&self, plan: &ErasurePlan, erasure: &ShellErasure<'_>) -> Result<ShellErased, String> {
         // `disk`, then `store`: the lock order (on `Agents::disk`).
-        let mut disk = self.disk.lock().unwrap_or_else(|e| e.into_inner());
+        let disk = self.disk.lock().unwrap_or_else(|e| e.into_inner());
         let (done, file) = {
             let mut s = self.lock();
             let done = s.apply_erasure(&plan.id, erasure, plan);
-            *disk += 1;
+            self.erased.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             (done, s.file_of(&self.dir, &plan.id))
         };
         if let Some((path, contents)) = file {
@@ -54,6 +54,10 @@ impl Agents {
 pub struct Redactor;
 
 impl ShellRedactor for Redactor {
+    fn size(&self, agent: &AgentId) -> u64 {
+        super::store().read(|s| s.erasure_size(agent))
+    }
+
     fn prepare(&self, agent: &AgentId) -> Result<Box<dyn ShellPlan>, String> {
         Ok(Box::new(Plan(super::store().erasure_plan(agent))))
     }

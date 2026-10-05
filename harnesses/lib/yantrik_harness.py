@@ -449,15 +449,22 @@ class Turn:
         Each text is hashed here (`needle`) and only the digest and length are sent. Matching is
         exact after NFC and case-insensitive: pass each text once, in any case, and the desktop
         erases every case it was written in. The desktop applies it only for a question this run
-        asked, answered with the offered `Erase`, from this session, while the turn is open or
-        within five minutes of its end, and once per question.
+        asked, answered by pressing the offered `Erase` (a typed "Erase" does not count), from this
+        session, while the turn is open or within five minutes of its end, and once per question;
+        and only when every text is quoted, verbatim, in what the person was shown of that question
+        (its first 2000 characters). Ask "Forget <the words>?" quoting exactly what you will erase.
+        The question's own words are erased with them.
 
         Returns the desktop's reply: `{"redacted": n, "where": ["transcript", "runs"]}` (with a
         `"warning"` when it erased but something after the commit went wrong), or
         `{"refused": why}` with nothing changed — "too much to search; …" means send it again
         with fewer or shorter texts — or `{"unsent": why}` when it was not sent.
         """
-        needles = [needle(t) for t in texts if str(t)]
+        try:
+            needles = [needle(t) for t in texts if str(t)]
+        except UnicodeEncodeError:
+            # A lone surrogate has no UTF-8, so no digest: nothing the desktop could match.
+            return {"unsent": "a text to erase is not valid Unicode"}
         if not needles:
             return {"unsent": "nothing to erase"}
         if len(needles) > REDACT_MAX_NEEDLES:

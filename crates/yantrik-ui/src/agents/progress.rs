@@ -175,8 +175,10 @@ impl Progress {
         out.push('.');
         if let Some(why) = &self.stuck {
             out.push_str(&format!("\nIt looks stuck: {why}."));
-        } else if let Some(question) = &self.question {
-            out.push_str(&format!("\nIt is waiting for your answer to its question: “{}”", brief(question, 120)));
+        } else if self.question.is_some() {
+            // Never the question's words: this sentence is copied on — into the Lens, and to another
+            // mind in a handover — where an erasure of them could not follow (docs/harness.md).
+            out.push_str("\nIt is waiting for your answer to a question in its pane.");
         } else if self.waiting_on_you {
             out.push_str("\nIt is waiting for you to answer an approval card.");
         } else if let Some(call) = &self.running {
@@ -348,7 +350,8 @@ mod tests {
         assert_eq!((p.stuck.as_deref(), p.stuck_kind.as_ref()), (None, None), "a question waiting is not stuck");
         assert!(p.waiting_on_you, "it waits on the person");
         assert_eq!(p.question.as_deref(), Some("Keep or Erase the three memories about the old address?"));
-        assert!(p.told("Hermes").contains("waiting for your answer to its question: “Keep or Erase"), "{}", p.told("Hermes"));
+        assert!(p.told("Hermes").contains("waiting for your answer to a question in its pane"), "{}", p.told("Hermes"));
+        assert!(!p.told("Hermes").contains("old address"), "the question's words are not copied on");
 
         let silent = agent_with(vec![card("os_act", CallState::Ok, "", 10)], 0, 10);
         let p = of(&silent, 10 + 120).unwrap();

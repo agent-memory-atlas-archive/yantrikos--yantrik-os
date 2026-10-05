@@ -20,6 +20,22 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+def _quoted_in(prompt: str, needle: Dict[str, Any]) -> bool:
+    """The host's consent check, played: the needle is a window of the canonical form (NFC, then
+    lowercased) of what the person was shown of the question — its first 2000 characters, or the
+    1999 before the card's ellipsis."""
+    import hashlib
+    import unicodedata
+
+    shown = prompt if len(prompt) <= 2000 else prompt[:1999]
+    canon = unicodedata.normalize("NFC", shown).lower()
+    size = int(needle.get("len") or 0)
+    return any(
+        hashlib.sha256(canon[i:i + size].encode("utf-8")).hexdigest() == needle.get("sha256")
+        for i in range(0, len(canon) - size + 1)
+    )
+
+
 ROOT = Path(__file__).resolve().parents[2]
 HARNESSES = ROOT / "harnesses"
 for _path in (HARNESSES / "lib", HARNESSES / "deepseek", HARNESSES / "pi"):
@@ -317,6 +333,8 @@ class FakeDesktop:
                     return {"refused": "run %s never asked %r" % (turn_id, rid)}, None
                 if q.get("answer") != "Erase" or "Erase" not in (q.get("options") or []):
                     return {"refused": "the answer was not the offered Erase"}, None
+                if not all(_quoted_in(str(q.get("prompt") or ""), n) for n in event.get("needles") or []):
+                    return {"refused": "a needle is not in the question the person answered"}, None
                 if earlier:
                     return {"refused": "one redaction per question"}, None
                 return {"redacted": len(event.get("needles") or []), "where": ["transcript", "runs"]}, None

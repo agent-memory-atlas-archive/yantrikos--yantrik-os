@@ -69,14 +69,16 @@ fn reply(turn: &Turn) -> (String, Vec<ContentBlock>) {
                 blocks.push(ContentBlock { block_type: "tool".into(), text: call.summary.clone(), call });
             }
             Item::Note(note) => blocks.push(line(note)),
+            // Never the question's words: a bubble is a copy the Lens keeps on screen, which an
+            // erasure of them could not reach. The question itself is in Agents.
             Item::Question(q) => blocks.push(line(&match (q.answer.as_str(), q.closed.as_str()) {
-                ("", "") => format!("Asked you: {}", q.prompt),
-                ("", why) => format!("Asked you: {} (not answered: {why})", q.prompt),
-                (answer, _) => format!("Asked you: {} (you answered: {answer})", q.prompt),
+                ("", "") => "Asked you a question (in Agents)".to_string(),
+                ("", why) => format!("Asked you a question (in Agents; not answered: {why})"),
+                (answer, _) => format!("Asked you a question (in Agents; you answered: {answer})"),
             })),
             Item::Approval(approval) => {
-                let record = approval.shown_record();
-                let record = if record.trim().is_empty() { approval.shown_what() } else { record };
+                let record = approval.record.as_str();
+                let record = if record.trim().is_empty() { approval.what.as_str() } else { record };
                 blocks.push(line(record));
             }
             // Folded in the Agents pane, and not part of what was said.

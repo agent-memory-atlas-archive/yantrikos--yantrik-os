@@ -39,6 +39,7 @@ pub mod reaches;
 pub mod store;
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -69,11 +70,14 @@ pub struct Agents {
     store: Mutex<Store>,
     dir: PathBuf,
     saved: Mutex<Instant>,
-    /// Held while sessions are written, and counts erasures: a save taken before an erasure is
-    /// stale, and is not written over the erased file (see [`Agents::redact`]).
+    /// Held while sessions are written.
     ///
     /// Lock order, everywhere: `disk` before `store`. Nothing takes `disk` while holding `store`.
-    disk: Mutex<u64>,
+    disk: Mutex<()>,
+    /// Counts erasures, bumped under both locks: a save taken before an erasure is stale, and is
+    /// not written over the erased file (see [`Agents::redact`]). Read without a lock, so the UI
+    /// thread's save never waits on an erasure's disk writes.
+    erased: AtomicU64,
 }
 
 static AGENTS: OnceLock<Agents> = OnceLock::new();
@@ -95,7 +99,7 @@ pub fn store() -> &'static Agents {
         #[cfg(test)]
         let store = store.keeping(usize::MAX);
         tracing::info!(agents = store.agents().len(), dir = %dir.display(), "Agents loaded");
-        Agents { store: Mutex::new(store), dir, saved: Mutex::new(Instant::now()), disk: Mutex::new(0) }
+        Agents { store: Mutex::new(store), dir, saved: Mutex::new(Instant::now()), disk: Mutex::new(()), erased: AtomicU64::new(0) }
     })
 }
 
@@ -211,10 +215,9 @@ impl Agents {
 
     /// Write out what changed, now.
     fn save_now(&self) {
-        // Which erasure this save is taken after, read before the store is: `disk` is never taken
-        // while `store` is held (the lock order, on `Agents::disk`). An erasure that comes between
-        // the two makes this save stale, and it is dropped below; one that came before is in what
-        // the save takes.
+        // Which erasure this save is taken after, read before the store is. An erasure bumps it
+        // under the store's lock, so one that comes between the two makes this save stale, and it
+        // is dropped below; one that came before is in what the save takes.
         let erasures = self.erasures();
         let (writes, deletes) = self.lock().take_dirty(&self.dir);
         if writes.is_empty() && deletes.is_empty() {
@@ -224,11 +227,12 @@ impl Agents {
         let _ = std::thread::Builder::new().name("agents-save".into()).spawn(move || {
             let agents = store();
             let disk = agents.disk.lock().unwrap_or_else(|e| e.into_inner());
-            if *disk != erasures {
+            if agents.erasures() != erasures {
                 // An erasure was written since this save was taken: what it holds may be the
-                // words the person had erased. Everything is written again, fresh, next time.
+                // words the person had erased. Everything is written again, fresh, next time,
+                // and the files it would have deleted are deleted then.
                 drop(disk);
-                agents.lock().mark_all_dirty();
+                agents.lock().mark_all_dirty(&deletes, &dir);
                 return;
             }
             if let Err(e) = store::write_all(&dir, &writes, &deletes) {
@@ -238,7 +242,7 @@ impl Agents {
     }
 
     fn erasures(&self) -> u64 {
-        *self.disk.lock().unwrap_or_else(|e| e.into_inner())
+        self.erased.load(Ordering::SeqCst)
     }
 }
 
