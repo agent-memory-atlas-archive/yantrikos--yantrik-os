@@ -190,27 +190,32 @@ impl Policy {
         before - self.rules.len()
     }
 
-    pub fn load(path: &std::path::Path) -> Policy {
-        let refuse_all = Policy { mode: Mode::Enforce, rules: Vec::new() };
+    /// The policy at `path`, as written. No file yet is a new machine, which starts by watching.
+    /// A file that is there and does not read (its mode, not text, not a policy, or a rule the
+    /// person could not have written) is an error, never taken for no policy. The proxy and the
+    /// kernel's direct set (`crate::direct`) read it through this one door.
+    pub fn read(path: &std::path::Path) -> Result<Policy, String> {
         match std::fs::read_to_string(path) {
-            Ok(text) => match serde_yaml::from_str::<Policy>(&text) {
-                Ok(p) if p.rules.iter().all(|r| valid(r).is_ok()) => p,
-                _ => {
-                    // A policy that is there and does not read is not half-used, and not opened
-                    // wide either — audit would let everything through. It refuses everything
-                    // until the person writes it again; the shell says so.
-                    tracing::error!(path = %path.display(), "the egress policy does not read; refusing everything until it is written again");
-                    refuse_all
+            Ok(text) => {
+                let p = serde_yaml::from_str::<Policy>(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+                match p.rules.iter().find_map(|r| valid(r).err()) {
+                    None => Ok(p),
+                    Some(e) => Err(format!("{}: {e}", path.display())),
                 }
-            },
-            // No policy yet: a new machine, which starts by watching. Only that: a policy that is
-            // there and cannot be read (its mode, not text) is not taken for no policy.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Policy::default(),
-            Err(e) => {
-                tracing::error!(path = %path.display(), error = %e, "the egress policy cannot be read; refusing everything");
-                refuse_all
             }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Policy::default()),
+            Err(e) => Err(format!("{}: {e}", path.display())),
         }
+    }
+
+    pub fn load(path: &std::path::Path) -> Policy {
+        Policy::read(path).unwrap_or_else(|e| {
+            // A policy that is there and does not read is not half-used, and not opened wide
+            // either — audit would let everything through. It refuses everything until the
+            // person writes it again; the shell says so.
+            tracing::error!(error = %e, "the egress policy does not read; refusing everything until it is written again");
+            Policy { mode: Mode::Enforce, rules: Vec::new() }
+        })
     }
 }
 

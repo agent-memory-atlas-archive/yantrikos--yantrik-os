@@ -10,8 +10,11 @@
 # once the mind's memory has moved out of the person's home and been counted twice.
 [Unit]
 Description=Yantrik Mind, attached to the desktop as its own account
-After=network-online.target yantrik-egress.service
-Wants=network-online.target yantrik-egress.service
+# yantrik-mind-egress.service (made by yantrik-update) holds this account to the proxy in the
+# kernel: loopback, DNS to the resolvers and the person's direct set, nothing else. The proxy
+# variables below are how well-behaved code reaches it; the kernel rule is the enforcement.
+After=network-online.target yantrik-egress.service yantrik-mind-egress.service
+Wants=network-online.target yantrik-egress.service yantrik-mind-egress.service
 # One owner of the memory file at a time. See yantrik-memory.service.
 Conflicts=yantrik-memory.service
 # Not in the installer's live session.
