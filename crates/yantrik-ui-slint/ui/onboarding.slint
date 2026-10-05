@@ -145,6 +145,9 @@ export component OnboardingScreen inherits Rectangle {
     in property <bool> ai-hw-disk-ok: false;
     in property <bool> ai-hw-network-ok: false;
     in property <bool> ai-hw-runtime-ok: false;
+    // A Wi-Fi chip still waiting for its driver (wifi_note.rs), e.g. a Mac's BCM4331 before the
+    // machine has been on Ethernet. "" when there is nothing to say.
+    in property <string> hw-note: "";
     in property <string> ai-hw-cpu-label: "";
     in property <string> ai-hw-ram-label: "";
     in property <string> ai-hw-gpu-label: "";
@@ -735,6 +738,12 @@ export component OnboardingScreen inherits Rectangle {
                                 horizontal-stretch: 1;
                                 vertical-alignment: center;
                             }
+                        }
+                        if root.hw-note != "" : Text {
+                            text: root.hw-note;
+                            color: Theme.amber;
+                            font-size: Theme.fs-caption;
+                            wrap: word-wrap;
                         }
 
                         // Local Runtimes

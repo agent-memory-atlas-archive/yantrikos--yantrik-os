@@ -229,10 +229,21 @@ apt-get install -y -qq \
     pciutils usbutils || true
 
 # ── Firmware (non-free, for real hardware) ──
+# firmware-misc-nonfree also carries tigon/tg357766.bin, the firmware of the Mac mini 2012's
+# Broadcom BCM57766 Ethernet, which is how that Mac first gets online.
+# firmware-brcm80211: the Broadcom chips the free brcmfmac drives (BCM43602 and BCM4350 in the
+# Macs of 2015 on, and many PC cards). Redistributable, unlike the BCM4331's, which
+# yantrik-broadcom-wifi fetches on the machine instead (stage-mac-support.sh below).
 for pkg in firmware-linux-free firmware-misc-nonfree firmware-realtek \
-           firmware-iwlwifi firmware-amd-graphics; do
+           firmware-iwlwifi firmware-amd-graphics firmware-brcm80211; do
     apt-get install -y -qq "$pkg" 2>/dev/null || true
 done
+
+# ── Intel Macs: fan control ──
+# mbpfan drives the fans through applesmc from coretemp's readings; without it nothing on Linux
+# asks the SMC for more air. stage-mac-support.sh makes it run only on Apple hardware. No
+# `|| true`: a Mac whose fan is never raised is the failure this is here to prevent.
+apt-get install -y -qq mbpfan
 
 # ── VirtualBox guest support ──
 apt-get install -y -qq virtualbox-guest-utils 2>/dev/null || true
@@ -374,6 +385,29 @@ case "$MISE_SAYS" in
     *) fail "mise ${MISE_VERSION} does not run inside the image (it said: ${MISE_SAYS:-nothing})" ;;
 esac
 ok "mise ${MISE_VERSION} (sha256 checked) in /usr/local/bin"
+
+# ── Intel Macs (the Mac mini 2012 is the first real machine this image runs on) ──
+# Fan control, and the Broadcom BCM4331 Wi-Fi driver fetched from Debian on the machine once it
+# is online: neither the wl module nor Broadcom's b43 firmware may be redistributed in a public
+# image, so neither is in it. See yantrik-broadcom-wifi for the whole reasoning.
+sudo sh "$SCRIPT_DIR/stage-mac-support.sh" "$ROOTFS" \
+    || fail "stage-mac-support.sh failed — the image would not drive a Mac's fans or Wi-Fi"
+sudo chroot "$ROOTFS" systemctl enable mbpfan.service \
+    || fail "could not enable mbpfan.service"
+for required in usr/lib/yantrik/yantrik-broadcom-wifi usr/lib/yantrik/yantrik-mac-fans \
+                etc/systemd/system/multi-user.target.wants/yantrik-broadcom-wifi.service \
+                etc/systemd/system/mbpfan.service.d/yantrik-apple.conf \
+                etc/NetworkManager/dispatcher.d/90-yantrik-broadcom-wifi; do
+    [ -e "$ROOTFS/$required" ] || fail "$required missing from the image"
+done
+sudo chroot "$ROOTFS" bash -n /usr/lib/yantrik/yantrik-broadcom-wifi \
+    || fail "yantrik-broadcom-wifi does not parse"
+# Neither of these may ever be in a published image (see above).
+if sudo chroot "$ROOTFS" dpkg-query -W -f='${db:Status-Status}\n' broadcom-sta-dkms firmware-b43-installer 2>/dev/null \
+        | grep -qx installed; then
+    fail "broadcom-sta-dkms or firmware-b43-installer is installed in the image — it cannot be published"
+fi
+ok "Intel Mac support: mbpfan (Apple hardware only), BCM4331 Wi-Fi fetched on first network"
 
 # ═══════════════════════════════════════════════════════════════
 # STEP 3: Create yantrik user + directory structure

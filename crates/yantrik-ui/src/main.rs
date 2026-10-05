@@ -61,6 +61,8 @@ mod control_levels;
 mod control_levels_actions;
 mod control_theme;
 mod installer_rules;
+/// What the first-run screens say about a Wi-Fi chip still waiting for its driver (Mac BCM4331).
+mod wifi_note;
 mod control_update;
 mod control_files;
 mod control_screen;

@@ -233,13 +233,14 @@ fn measure_install_target() -> (bool, String) {
 }
 
 /// The disk the wizard will install to unless the person picks another: the
-/// installer's own listing, whose first candidate its picker preselects
-/// (`wire::installer`), sized with `lsblk -b`. The listing is run here rather
+/// installer's own listing and its own preselection (`wire::installer::preselect`,
+/// which never picks a disk holding macOS), sized with `lsblk -b`. The listing is run here rather
 /// than read off the picker's selection property because the scan and the
 /// picker are populated on separate threads, and UI properties are not ours
 /// to read from this one.
 fn first_install_candidate() -> Option<(String, Option<u64>)> {
-    let disk = super::installer::detect_disks().into_iter().next()?;
+    let disks = super::installer::detect_disks();
+    let disk = super::installer::preselect(&disks)?;
     Some((disk.name.clone(), disk_size_bytes(&disk.name)))
 }
 

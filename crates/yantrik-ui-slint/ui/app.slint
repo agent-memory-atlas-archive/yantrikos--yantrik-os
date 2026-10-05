@@ -1279,6 +1279,12 @@ export component App inherits Window {
     in property <[InstallerDisk]> onboard-disks: [];
     in property <bool> onboard-disks-scanned: false;
     in-out property <string> onboard-selected-disk: "";
+    // The listed disks that hold macOS, space-separated (installer_rules::disk_in_list), and the
+    // one the person confirmed may be erased anyway. Never preselected (installer_rules.rs).
+    in property <string> onboard-macos-disks: "";
+    in-out property <string> onboard-erase-macos-disk: "";
+    // A Wi-Fi chip still waiting for its driver (wifi_note.rs); "" when there is nothing to say.
+    in property <string> onboard-hw-note: "";
     in property <[KeyboardChoice]> onboard-keyboards: [];
     in-out property <string> onboard-keyboard: "us";
     in-out property <string> onboard-timezone: "";
@@ -1294,6 +1300,7 @@ export component App inherits Window {
     pure callback installer-check-hostname(string) -> string;
     pure callback installer-check-password(string, string) -> string;
     pure callback installer-check-timezone(string) -> string;
+    pure callback installer-is-macos-disk(string, string) -> bool;
 
     // The onboarding form, mirrored up to the window so the control surface can read and fill
     // it. `OnboardingScreen` lives inside a conditional element, so Rust cannot reach into it;
@@ -1485,6 +1492,7 @@ export component App inherits Window {
             ambient-interval-ms: root.ambient-interval-ms;
             companion-name: root.settings-companion-name;
             after-install: root.onboard-after-install;
+            hw-note: root.onboard-hw-note;
             // AI hardware scan properties
             ai-hw-cpu-ok: root.onboard-ai-hw-cpu-ok;
             ai-hw-ram-ok: root.onboard-ai-hw-ram-ok;
@@ -1559,6 +1567,9 @@ export component App inherits Window {
             disks: root.onboard-disks;
             disks-scanned: root.onboard-disks-scanned;
             selected-disk <=> root.onboard-selected-disk;
+            macos-disks: root.onboard-macos-disks;
+            erase-macos-disk <=> root.onboard-erase-macos-disk;
+            hw-note: root.onboard-hw-note;
             encrypt <=> root.onboard-encrypt;
             timezone <=> root.onboard-timezone;
             installing <=> root.onboard-installing;
@@ -1577,6 +1588,7 @@ export component App inherits Window {
             check-hostname(hostname) => { return root.installer-check-hostname(hostname); }
             check-password(password, confirm) => { return root.installer-check-password(password, confirm); }
             check-timezone(timezone) => { return root.installer-check-timezone(timezone); }
+            is-macos-disk(disk, list) => { return root.installer-is-macos-disk(disk, list); }
         }
 
         // Lock screen

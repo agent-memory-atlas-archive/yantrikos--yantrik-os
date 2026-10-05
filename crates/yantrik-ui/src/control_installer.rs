@@ -118,6 +118,7 @@ const FIELDS: &[&str] = &[
     "keyboard",
     "timezone",
     "disk",
+    "erase_macos",
     "encrypt",
 ];
 
@@ -131,6 +132,7 @@ fn canonical_field(field: &str) -> String {
         "layout" | "keyboard_layout" | "keymap" => "keyboard",
         "tz" | "time_zone" | "zone" => "timezone",
         "encryption" | "encrypted" | "luks" => "encrypt",
+        "erase_macos_disk" | "confirm_erase_macos" => "erase_macos",
         other => other,
     }
     .to_string()
@@ -147,6 +149,7 @@ fn disks(ui: &App) -> Vec<serde_json::Value> {
                 "model": d.model.to_string(),
                 "contents": d.contents.to_string(),
                 "has_data": d.has_data,
+                "holds_macos": d.holds_macos,
             })
         })
         .collect()
@@ -178,6 +181,8 @@ pub fn blocked_by(ui: &App) -> Option<String> {
             .iter()
             .filter_map(|d| d["name"].as_str().map(String::from))
             .collect(),
+        macos_disks: ui.get_onboard_macos_disks().to_string(),
+        erase_macos: ui.get_onboard_erase_macos_disk().to_string(),
     };
     form.problem(Path::new("/usr/share/zoneinfo"))
 }
@@ -192,6 +197,10 @@ struct Form {
     timezone: String,
     selected_disk: String,
     disks: Vec<String>,
+    /// The listed disks holding macOS, space-separated, as the screens hold them.
+    macos_disks: String,
+    /// The disk confirmed as erasable although it holds macOS.
+    erase_macos: String,
 }
 
 impl Form {
@@ -221,6 +230,11 @@ impl Form {
             } else {
                 format!("no disk chosen; this machine has: {}", self.disks.join(", "))
             });
+        }
+        if let Some(why) =
+            installer_rules::disk_problem(&self.selected_disk, &self.macos_disks, &self.erase_macos)
+        {
+            return Some(format!("disk: {why}; to erase it, set erase_macos to `{}`", self.selected_disk));
         }
         if let Some(why) = installer_rules::timezone_problem(&self.timezone, zoneinfo) {
             return Some(format!("timezone: {}", lower(why)));
@@ -252,6 +266,7 @@ pub fn state(ui: &App) -> serde_json::Value {
             "keyboard": ui.get_onboard_keyboard().to_string(),
             "timezone": ui.get_onboard_timezone().to_string(),
             "encrypt": ui.get_onboard_encrypt(),
+            "erase_macos": ui.get_onboard_erase_macos_disk().to_string(),
             "companion_name": ui.get_onboard_input_companion().to_string(),
             "location": ui.get_onboard_input_location().to_string(),
             "password_set": !pw.is_empty(),
@@ -366,7 +381,8 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
             )
             .arg(Param::text("field").describe(
                 "full_name, username, password, password_confirm, hostname, keyboard, timezone, disk, \
-                 encrypt (true or false; on unless turned off)",
+                 encrypt (true or false; on unless turned off), erase_macos (the chosen disk's name, \
+                 when it holds macOS and may be erased; empty to withdraw)",
             ))
             .arg(Param::text("value")),
             move |args| {
@@ -451,6 +467,23 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                             });
                         }
                         ui.set_onboard_selected_disk(want.into());
+                    }
+                    // The Disk screen's "Erase macOS on /dev/sdX". The value is that disk's name,
+                    // typed again: a yes/no could be carried over to a disk it was never about.
+                    "erase_macos" => {
+                        let want = value.trim().trim_start_matches("/dev/");
+                        if !want.is_empty() {
+                            let macos = ui.get_onboard_macos_disks().to_string();
+                            if !installer_rules::disk_in_list(want, &macos) {
+                                return Err(format!("`{want}` is not a disk here that holds macOS"));
+                            }
+                            if want != ui.get_onboard_selected_disk().as_str() {
+                                return Err(format!(
+                                    "`{want}` is not the chosen disk; choose it with the disk field first"
+                                ));
+                            }
+                        }
+                        ui.set_onboard_erase_macos_disk(want.into());
                     }
                     // The Disk screen's "Encrypt with my password". Only a plain yes or no: a
                     // value misread as "off" would leave a disk readable by whoever takes it.
@@ -656,6 +689,8 @@ mod tests {
             timezone: "Europe/Berlin".into(),
             selected_disk: "sda".into(),
             disks: vec!["sda".into(), "nvme0n1".into()],
+            macos_disks: String::new(),
+            erase_macos: String::new(),
         }
     }
 
@@ -688,6 +723,19 @@ mod tests {
             }),
             "no disk to install to was found"
         );
+        // A disk holding macOS needs its own confirmation, naming it.
+        let mac = with(&|f| f.macos_disks = "sda".into());
+        assert!(mac.starts_with("disk: /dev/sda holds macOS"), "{mac}");
+        assert!(mac.contains("set erase_macos to `sda`"), "{mac}");
+        assert!(with(&|f| {
+            f.macos_disks = "sda".into();
+            f.erase_macos = "nvme0n1".into();
+        })
+        .starts_with("disk:"));
+        let mut confirmed = ready_form(&zi);
+        confirmed.macos_disks = "sda".into();
+        confirmed.erase_macos = "sda".into();
+        assert_eq!(confirmed.problem(&zi), None);
         // Asked in the order the screens ask: the account before the disk before the clock.
         assert!(with(&|f| {
             f.username = String::new();

@@ -51,6 +51,7 @@ fn run_at(
     ui.on_check_password(move |p, c| problem(rules::password_problem(&p, &c)));
     let zi = zoneinfo.clone();
     ui.on_check_timezone(move |t| problem(rules::timezone_problem(&t, &zi)));
+    ui.on_is_macos_disk(|d, l| rules::disk_in_list(&d, &l));
 
     let layouts: Vec<KeyboardChoice> = rules::layout_choices("us")
         .into_iter()
@@ -64,6 +65,7 @@ fn run_at(
             model: "VBOX HARDDISK".into(),
             contents: "3 partitions (vfat, ntfs)".into(),
             has_data: true,
+            holds_macos: false,
         },
         InstallerDisk {
             name: "nvme0n1".into(),
@@ -71,6 +73,7 @@ fn run_at(
             model: "Samsung SSD 980".into(),
             contents: "Empty".into(),
             has_data: false,
+            holds_macos: false,
         },
     ])));
     ui.set_selected_disk("sda".into());
@@ -175,12 +178,33 @@ fn run_at(
         press_up(width as f32 / 2.0 - 200.0, &|| ui.get_selected_disk() == "nvme0n1"),
         "the second disk can be chosen"
     );
+    // A disk holding macOS: chosen only by the person, and erased only once they tick the box
+    // that names it (installer_rules::disk_problem).
+    ui.set_selected_disk("sda".into());
+    ui.set_macos_disks("sda".into());
+    save("disk-macos")?;
+    ui.set_erase_macos_disk("sda".into());
+    save("disk-macos-confirmed")?;
+    ui.set_macos_disks("".into());
+    ui.set_erase_macos_disk("".into());
     ui.set_selected_disk("sda".into());
     assert!(press_up(forward_x, &|| ui.get_step() == 3), "Next moves on to Review");
 
     // ── Review ──
     save("review")?;
     assert!(ui.get_can_install());
+    ui.set_macos_disks("sda".into());
+    settle();
+    assert!(!ui.get_can_install(), "macOS on the chosen disk blocks Install until confirmed");
+    ui.set_erase_macos_disk("nvme0n1".into());
+    settle();
+    assert!(!ui.get_can_install(), "a confirmation for another disk is no confirmation");
+    ui.set_erase_macos_disk("sda".into());
+    settle();
+    assert!(ui.get_can_install(), "confirmed, the macOS disk may be erased");
+    ui.set_macos_disks("".into());
+    ui.set_erase_macos_disk("".into());
+    settle();
     ui.set_timezone("Mars/Olympus".into());
     settle();
     assert!(!ui.get_can_install(), "a zone the system does not know blocks Install");

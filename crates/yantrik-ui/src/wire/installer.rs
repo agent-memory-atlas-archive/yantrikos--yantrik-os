@@ -49,6 +49,11 @@ pub fn wire(ui: &App, _ctx: &AppContext) {
         let timezone = timezone.to_string();
         let target_disk = target_disk.to_string();
         let weak = ui_weak.clone();
+        // Read here, on the UI thread: the disk whose macOS the person agreed to erase, if any.
+        let erase_macos_disk = ui_weak
+            .upgrade()
+            .map(|ui| ui.get_onboard_erase_macos_disk().to_string())
+            .unwrap_or_default();
 
         std::thread::spawn(move || {
             tracing::info!(
@@ -98,6 +103,7 @@ pub fn wire(ui: &App, _ctx: &AppContext) {
                 keyboard,
                 timezone,
                 target_disk: target_disk.clone(),
+                erase_macos_disk,
                 encrypt,
                 partition_scheme: "auto".into(),
                 ai_provider,
@@ -187,6 +193,7 @@ fn wire_rules(ui: &App) {
     ui.on_installer_check_timezone(move |tz| {
         problem(installer_rules::timezone_problem(&tz, std::path::Path::new("/usr/share/zoneinfo")))
     });
+    ui.on_installer_is_macos_disk(|disk, list| installer_rules::disk_in_list(&disk, &list));
 }
 
 /// What the installer finds before anyone asks: the disks, the keyboard in use, and where the
@@ -209,13 +216,17 @@ fn prepare(ui: &App) {
         let disks = detect_disks();
         let _ = slint::invoke_from_event_loop(move || {
             let Some(ui) = weak.upgrade() else { return };
-            // The first disk is preselected: on the machine most people install on there is
-            // exactly one, and the Disk screen says plainly that it will be erased.
-            if let Some(first) = disks.first() {
+            // A disk is preselected: on the machine most people install on there is exactly
+            // one, and the Disk screen says plainly that it will be erased. Never one that holds
+            // macOS (installer_rules::default_disk): on a Mac kept on macOS, the external disk.
+            if let Some(first) = preselect(&disks) {
                 if ui.get_onboard_selected_disk().is_empty() {
                     ui.set_onboard_selected_disk(first.name.clone().into());
                 }
             }
+            let macos: Vec<&str> =
+                disks.iter().filter(|d| d.holds_macos).map(|d| d.name.as_str()).collect();
+            ui.set_onboard_macos_disks(macos.join(" ").into());
             let rows: Vec<InstallerDisk> = disks
                 .iter()
                 .map(|d| InstallerDisk {
@@ -224,6 +235,7 @@ fn prepare(ui: &App) {
                     model: d.model.clone().into(),
                     contents: d.contents.clone().into(),
                     has_data: d.has_data,
+                    holds_macos: d.holds_macos,
                 })
                 .collect();
             ui.set_onboard_disks(ModelRc::new(VecModel::from(rows)));
@@ -259,6 +271,8 @@ pub struct InstallerState {
     /// IANA zone from the Review screen, e.g. "Europe/Berlin". Empty means UTC.
     pub timezone: String,
     pub target_disk: String,      // e.g. "sda"
+    /// The disk the person confirmed may be erased although it holds macOS. Empty: none.
+    pub erase_macos_disk: String,
     /// LUKS2 on the root with the password as its passphrase (#400 step b).
     pub encrypt: bool,
     pub partition_scheme: String,  // "auto" or "manual"
@@ -302,6 +316,16 @@ pub fn run_install(state: &InstallerState, progress: ProgressFn) -> Result<Optio
     }
 
     tracing::info!(disk = %disk, "Installer: target disk resolved");
+
+    // A Mac's system disk is erased only on a confirmation that names it, however the install
+    // was asked for: the screens, the control surface, or anything that went round both. Read
+    // off the disk itself, now, not off a listing made minutes ago.
+    if disk_holds_macos(&disk) {
+        if let Some(why) = installer_rules::disk_problem(&disk_name, &disk_name, &state.erase_macos_disk) {
+            return Err(why);
+        }
+        tracing::warn!(disk = %disk, "Installer: erasing a disk that holds macOS, as confirmed");
+    }
 
     // Detect boot mode: EFI if /sys/firmware/efi exists, BIOS otherwise
     let is_efi = std::path::Path::new("/sys/firmware/efi").exists();
@@ -465,16 +489,23 @@ fn install_to_target(
         // bootloader in a directory nothing had been told to look in. The machine installed
         // cleanly, reported 100%, rebooted, and came straight back up on the installation
         // media — the firmware had no entry for the disk and no fallback file to find.
-        tracing::info!("Installer: installing GRUB for EFI");
-        let named = chroot_cmd(
-            mount_dir,
-            &[
-                "grub-install",
-                "--target=x86_64-efi",
-                "--efi-directory=/boot/efi",
-                "--bootloader-id=yantrik",
-            ],
-        );
+        //
+        // A USB disk gets no entry: it may move between ports and machines, and on a Mac kept
+        // on macOS an entry would put it ahead of the internal disk for as long as it stays in
+        // NVRAM. It boots through the removable path wherever it is plugged in; on a Mac, hold
+        // Option at the chime and pick "EFI Boot".
+        let external = disk_is_external(disk);
+        tracing::info!(external, "Installer: installing GRUB for EFI");
+        let mut named_args = vec![
+            "grub-install",
+            "--target=x86_64-efi",
+            "--efi-directory=/boot/efi",
+            "--bootloader-id=yantrik",
+        ];
+        if external {
+            named_args.push("--no-nvram");
+        }
+        let named = chroot_cmd(mount_dir, &named_args);
         if let Err(e) = named {
             // Firmware that will not take a new entry is normal enough — a locked-down board,
             // or efivars mounted read-only. It costs us the named entry, not the install,
@@ -540,7 +571,18 @@ fn install_to_target(
     );
 
     progress(85, "Updating GRUB configuration...");
+    // grub-mkconfig names the root by UUID only once udev has made its /dev/disk/by-uuid link,
+    // and falls back to root=/dev/sdX before that. Freshly formatted partitions may not have one
+    // yet, so wait for udev, then check what it wrote.
+    let _ = run_cmd("udevadm", &["settle"]);
     chroot_cmd(mount_dir, &["update-grub"])?;
+    let grub_cfg = run_cmd("cat", &[&format!("{mount_dir}/boot/grub/grub.cfg")])?;
+    if let Some(line) = installer_rules::root_by_device(&grub_cfg) {
+        return Err(format!(
+            "the boot menu names the root by its device, not its UUID, so the disk would not \
+             boot from another port: {line}"
+        ));
+    }
 
     // ── Step 13: Remove installer autostart from installed system ─
     progress(90, "Finalizing installed system...");
@@ -932,55 +974,69 @@ fn installed_providers_yaml(state: &InstallerState) -> Option<String> {
     serde_yaml::to_string(&store).ok()
 }
 
-/// Auto-detect the installation target disk.
-/// Picks the first non-removable, non-CD block device (excludes loop, sr, fd).
+/// Auto-detect the installation target disk: the one the Disk screen would preselect, from the
+/// same listing, so a caller that names no disk gets the disk a person would have been offered.
+/// Never one that holds macOS, and never the installer's own stick.
+///
+/// This used to have a fallback of its own that took "any disk that's not the live media",
+/// which on a Mac is the internal disk with macOS on it.
 fn auto_detect_disk() -> Result<String, String> {
-    let output = Command::new("lsblk")
-        .args(["-dn", "-o", "NAME,TYPE,RO,RM", "-e", "7,11"])
+    let disks = detect_disks();
+    match preselect(&disks) {
+        Some(d) => {
+            tracing::info!(disk = %d.name, "Installer: auto-detected target disk");
+            Ok(d.name.clone())
+        }
+        None if disks.is_empty() => Err("No suitable disk found. Ensure a hard disk is attached.".into()),
+        None => Err(format!(
+            "Every disk here holds macOS ({}); choose one and confirm that it may be erased.",
+            disks.iter().map(|d| d.name.as_str()).collect::<Vec<_>>().join(", ")
+        )),
+    }
+}
+
+/// The disk chosen before anyone chooses: installer_rules::default_disk over the listing.
+pub(crate) fn preselect(disks: &[DiskInfo]) -> Option<&DiskInfo> {
+    let pairs: Vec<(&str, bool)> = disks.iter().map(|d| (d.name.as_str(), d.holds_macos)).collect();
+    let name = installer_rules::default_disk(&pairs)?;
+    disks.iter().find(|d| d.name == name)
+}
+
+/// Whether `/dev/<disk>` carries an HFS+ or APFS filesystem anywhere on it, asked of the disk
+/// now. Unknown (lsblk failed) is no: the listing's own answer has already been shown.
+fn disk_holds_macos(disk: &str) -> bool {
+    Command::new("lsblk")
+        .args(["-nro", "FSTYPE", disk])
         .env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
         .output()
-        .map_err(|e| format!("lsblk failed: {e}"))?;
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .any(|l| installer_rules::is_macos_fstype(l.trim()))
+        })
+        .unwrap_or(false)
+}
 
-    let text = String::from_utf8_lossy(&output.stdout);
-    for line in text.lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 4 { continue; }
-        let name = parts[0];
-        let dtype = parts[1];
-        let ro = parts[2];
-        let rm = parts[3];
-
-        // Only disk type, not read-only, not removable
-        if dtype != "disk" { continue; }
-        if ro == "1" || rm == "1" { continue; }
-        // Skip loop, sr (CD), fd (floppy)
-        if name.starts_with("loop") || name.starts_with("sr") || name.starts_with("fd") {
-            continue;
-        }
-
-        tracing::info!(disk = name, "Installer: auto-detected target disk");
-        return Ok(name.to_string());
-    }
-
-    // Fallback: try any disk that's not the live media
-    // Live media is usually sr0 or the device mounted at /run/live/medium
-    let fallback = Command::new("lsblk")
-        .args(["-dn", "-o", "NAME", "-e", "7,11"])
+/// Whether `/dev/<disk>` is on USB or marked removable: a disk that may be plugged in anywhere.
+fn disk_is_external(disk: &str) -> bool {
+    Command::new("lsblk")
+        .args(["-dno", "TRAN,RM", disk])
         .env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
         .output()
-        .map_err(|e| format!("lsblk fallback: {e}"))?;
+        .map(|o| external_from_lsblk(&String::from_utf8_lossy(&o.stdout)))
+        .unwrap_or(false)
+}
 
-    let text = String::from_utf8_lossy(&fallback.stdout);
-    for line in text.lines() {
-        let name = line.trim();
-        if name.is_empty() || name.starts_with("sr") || name.starts_with("loop") || name.starts_with("fd") {
-            continue;
-        }
-        tracing::info!(disk = name, "Installer: fallback disk detected");
-        return Ok(name.to_string());
+/// `lsblk -dno TRAN,RM` for one disk: `usb 0`, `sata 0`, `nvme 0`, or just `1` when the
+/// transport is unknown and the column is blank.
+fn external_from_lsblk(out: &str) -> bool {
+    let words: Vec<&str> = out.split_whitespace().collect();
+    match words.as_slice() {
+        ["usb", ..] => true,
+        [_, rm] => *rm == "1",
+        [rm] => *rm == "1",
+        _ => false,
     }
-
-    Err("No suitable disk found. Ensure a hard disk is attached.".into())
 }
 
 /// Get a single partition device name by number.
@@ -1182,6 +1238,9 @@ pub(crate) struct DiskInfo {
     contents: String,
     /// Anything at all is on it — erasing it loses something. Unknown counts as yes.
     has_data: bool,
+    /// An HFS+ or APFS filesystem is on it: a Mac's system. Never preselected, and erased only
+    /// on a confirmation that names it (installer_rules::disk_problem).
+    pub(crate) holds_macos: bool,
 }
 
 /// Detect available disks and return structured info. Also what the onboarding
@@ -1191,7 +1250,7 @@ pub(crate) fn detect_disks() -> Vec<DiskInfo> {
     // Not `-d`: the partitions under each disk are what say whether it holds anything, and
     // "this disk has a Windows partition on it" is the one thing worth knowing before erasing it.
     let output = Command::new("lsblk")
-        .args(["-J", "-o", "NAME,SIZE,MODEL,TYPE,RO,RM,FSTYPE", "-e", "7,11"])
+        .args(["-J", "-o", "NAME,SIZE,MODEL,TYPE,RO,RM,FSTYPE,TRAN,MOUNTPOINT", "-e", "7,11"])
         .env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
         .output();
 
@@ -1210,8 +1269,13 @@ pub(crate) fn detect_disks() -> Vec<DiskInfo> {
     disks
 }
 
-/// The install candidates in `lsblk -J` output: whole, writable, fixed disks, each with a line
-/// about what is on it. Kept apart from running lsblk so it can be tested on fixture text.
+/// The install candidates in `lsblk -J` output: whole, writable disks, each with a line about
+/// what is on it. Kept apart from running lsblk so it can be tested on fixture text.
+///
+/// Removable and USB disks are candidates: an external USB SSD is how a Mac kept on macOS gets
+/// Yantrik OS, and many USB SSD enclosures report themselves removable. What is excluded is the
+/// installer's own medium — anything carrying an ISO 9660 filesystem, or mounted where live-boot
+/// mounts it — which is what "not removable" used to stand in for.
 fn disks_from_lsblk(json: &str) -> Vec<DiskInfo> {
     let Ok(json) = serde_json::from_str::<serde_json::Value>(json) else { return Vec::new() };
     let Some(devices) = json["blockdevices"].as_array() else { return Vec::new() };
@@ -1227,7 +1291,7 @@ fn disks_from_lsblk(json: &str) -> Vec<DiskInfo> {
 
     let mut disks = Vec::new();
     for dev in devices {
-        if dev["type"].as_str() != Some("disk") || flag(&dev["ro"]) || flag(&dev["rm"]) {
+        if dev["type"].as_str() != Some("disk") || flag(&dev["ro"]) {
             continue;
         }
         let name = dev["name"].as_str().unwrap_or("").to_string();
@@ -1235,13 +1299,30 @@ fn disks_from_lsblk(json: &str) -> Vec<DiskInfo> {
             continue;
         }
         let size = dev["size"].as_str().unwrap_or("?").to_string();
+        // A card reader with no card in it.
+        if size == "0B" {
+            continue;
+        }
         let model = dev["model"].as_str().unwrap_or("").trim().to_string();
         let model = if model.is_empty() { "Disk".to_string() } else { model };
+        // Said, so the external disk is told apart from the internal one at a glance.
+        let model = if dev["tran"].as_str() == Some("usb") { format!("USB · {model}") } else { model };
 
         let parts: Vec<&serde_json::Value> = dev["children"]
             .as_array()
             .map(|c| c.iter().filter(|p| p["type"].as_str() == Some("part")).collect())
             .unwrap_or_default();
+        let mut on_disk = std::iter::once(dev).chain(parts.iter().copied());
+        let install_medium = on_disk.any(|v| {
+            v["fstype"].as_str() == Some("iso9660")
+                || v["mountpoint"].as_str() == Some("/run/live/medium")
+        });
+        if install_medium {
+            continue;
+        }
+        let holds_macos = std::iter::once(dev)
+            .chain(parts.iter().copied())
+            .any(|v| v["fstype"].as_str().is_some_and(installer_rules::is_macos_fstype));
         let mut kinds: Vec<String> = Vec::new();
         for p in &parts {
             if let Some(fs) = p["fstype"].as_str().filter(|f| !f.is_empty()) {
@@ -1263,7 +1344,8 @@ fn disks_from_lsblk(json: &str) -> Vec<DiskInfo> {
                 }
             }
         };
-        disks.push(DiskInfo { name, size, model, contents, has_data });
+        let contents = if holds_macos { format!("macOS · {contents}") } else { contents };
+        disks.push(DiskInfo { name, size, model, contents, has_data, holds_macos });
     }
     disks
 }
@@ -1293,6 +1375,7 @@ fn detect_disks_fallback() -> Vec<DiskInfo> {
             // Nothing here can say what is on it, so it is not claimed to be empty.
             contents: "contents unknown".to_string(),
             has_data: true,
+            holds_macos: disk_holds_macos(&format!("/dev/{name}")),
         });
     }
     disks
@@ -1439,7 +1522,7 @@ llm:
     fn the_disk_list_says_what_each_disk_holds() {
         let disks = disks_from_lsblk(LSBLK);
         let names: Vec<&str> = disks.iter().map(|d| d.name.as_str()).collect();
-        assert_eq!(names, ["sda", "nvme0n1"], "removable media and the CD are not candidates");
+        assert_eq!(names, ["sda", "nvme0n1"], "the installer's own stick and the CD are not candidates");
 
         assert_eq!(disks[0].contents, "3 partitions (vfat, ntfs)");
         assert!(disks[0].has_data);
@@ -1456,9 +1539,59 @@ llm:
             {"name":"sdb","size":"8G","model":"Flash","type":"disk","ro":"0","rm":"1","fstype":null}
         ]}"#;
         let disks = disks_from_lsblk(old);
-        assert_eq!(disks.len(), 1);
+        // A removable disk is a candidate now (an empty flash drive here); only the install
+        // medium is not.
+        assert_eq!(disks.len(), 2);
         assert_eq!(disks[0].contents, "A whole-disk filesystem (ext4)");
         assert!(disks[0].has_data);
+        assert_eq!(disks[1].name, "sdb");
+        assert!(!disks[1].has_data);
+    }
+
+    /// A Mac mini kept on macOS: the internal disk with APFS, an external USB SSD, and the
+    /// Yantrik stick it booted from (a dd'ed hybrid ISO, mounted by live-boot).
+    const MAC_MINI: &str = r#"{"blockdevices": [
+        {"name":"sda","size":"931.5G","model":"APPLE HDD HTS541010A9E662","type":"disk","ro":false,"rm":false,"fstype":null,"tran":"sata","mountpoint":null,
+         "children":[
+            {"name":"sda1","size":"200M","type":"part","ro":false,"rm":false,"fstype":"vfat","mountpoint":null},
+            {"name":"sda2","size":"931.3G","type":"part","ro":false,"rm":false,"fstype":"apfs","mountpoint":null}
+         ]},
+        {"name":"sdb","size":"465.8G","model":"Samsung PSSD T7","type":"disk","ro":false,"rm":true,"fstype":null,"tran":"usb","mountpoint":null,
+         "children":[
+            {"name":"sdb1","size":"465.8G","type":"part","ro":false,"rm":true,"fstype":"exfat","mountpoint":null}
+         ]},
+        {"name":"sdc","size":"28.9G","model":"Flash Drive","type":"disk","ro":false,"rm":true,"fstype":"iso9660","tran":"usb","mountpoint":null,
+         "children":[
+            {"name":"sdc1","size":"3.1G","type":"part","ro":false,"rm":true,"fstype":"iso9660","mountpoint":"/run/live/medium"},
+            {"name":"sdc2","size":"2.8M","type":"part","ro":false,"rm":true,"fstype":"vfat","mountpoint":null}
+         ]},
+        {"name":"sdd","size":"0B","model":"SD Card Reader","type":"disk","ro":false,"rm":true,"fstype":null,"tran":"usb","mountpoint":null}
+    ]}"#;
+
+    #[test]
+    fn on_a_mac_the_external_disk_is_offered_and_macos_is_never_preselected() {
+        let disks = disks_from_lsblk(MAC_MINI);
+        let names: Vec<&str> = disks.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["sda", "sdb"], "the boot stick and an empty card reader are not candidates");
+        assert!(disks[0].holds_macos);
+        assert!(disks[0].contents.starts_with("macOS · "), "{}", disks[0].contents);
+        assert!(!disks[1].holds_macos);
+        assert_eq!(disks[1].model, "USB · Samsung PSSD T7");
+        assert_eq!(preselect(&disks).map(|d| d.name.as_str()), Some("sdb"));
+
+        // With only the Mac's own disk, nothing is chosen for the person.
+        let only_mac: Vec<DiskInfo> = disks.into_iter().filter(|d| d.holds_macos).collect();
+        assert!(preselect(&only_mac).is_none());
+    }
+
+    #[test]
+    fn a_usb_or_removable_disk_is_external() {
+        assert!(external_from_lsblk("usb 0\n"));
+        assert!(external_from_lsblk("usb 1"));
+        assert!(external_from_lsblk("1"), "a removable disk with no transport named");
+        assert!(!external_from_lsblk("sata 0"));
+        assert!(!external_from_lsblk("nvme 0"));
+        assert!(!external_from_lsblk(""));
     }
 
     #[test]

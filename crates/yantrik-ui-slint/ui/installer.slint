@@ -28,6 +28,7 @@ export struct InstallerDisk {
     model: string,
     contents: string,   // what is on it now, in words: "Empty", "3 partitions (ext4, ntfs)"
     has-data: bool,     // anything at all is on it, so erasing it loses something
+    holds-macos: bool,  // an HFS+ or APFS volume: a Mac's system, erased only on confirmation
 }
 
 export struct KeyboardChoice {
@@ -187,6 +188,8 @@ export component InstallerScreen inherits Rectangle {
     in-out property <bool> keyboard-open: false;
     // Leave the installer for the live desktop.
     callback try-first();
+    // A Wi-Fi chip still waiting for its driver (wifi_note.rs); "" when there is nothing to say.
+    in property <string> hw-note;
 
     // ── You ──
     in-out property <string> full-name;
@@ -206,6 +209,14 @@ export component InstallerScreen inherits Rectangle {
     // False until the disk scan has answered, so "no disks" is not said while still looking.
     in property <bool> disks-scanned: false;
     in-out property <string> selected-disk;
+    // The listed disks holding macOS, space-separated, and the one the person confirmed may be
+    // erased anyway. The confirmation names a disk, so choosing another withdraws it.
+    in property <string> macos-disks;
+    in-out property <string> erase-macos-disk;
+    pure callback is-macos-disk(/* disk */ string, /* macos-disks */ string) -> bool;
+    property <bool> selected-holds-macos: root.is-macos-disk(root.selected-disk, root.macos-disks);
+    property <bool> macos-confirmed: root.selected-disk != "" && root.erase-macos-disk == root.selected-disk;
+    out property <bool> disk-ok: root.selected-disk != "" && (!root.selected-holds-macos || root.macos-confirmed);
     // LUKS2 on the root with the password as its passphrase (#400 step b). On unless unticked.
     in-out property <bool> encrypt: true;
 
@@ -246,7 +257,7 @@ export component InstallerScreen inherits Rectangle {
     // Published (`out`) so the headless UI checks can assert on the same verdicts the buttons use.
     out property <bool> you-ok: root.full-name-error == "" && root.username-error == ""
         && root.hostname-error == "" && root.password-error == "";
-    out property <bool> can-install: root.you-ok && root.selected-disk != ""
+    out property <bool> can-install: root.you-ok && root.disk-ok
         && root.timezone-error == "" && !root.installing;
 
     // Seconds since Install was pressed, and until the automatic restart.
@@ -450,6 +461,16 @@ export component InstallerScreen inherits Rectangle {
                     OnboardField {
                         width: 420px;
                         placeholder: "Type here to try the layout";
+                    }
+
+                    // E.g. a Mac's Broadcom Wi-Fi, whose driver arrives over Ethernet.
+                    if root.hw-note != "" : Text {
+                        width: 420px;
+                        text: root.hw-note;
+                        color: Theme.amber;
+                        font-size: Theme.fs-caption;
+                        wrap: word-wrap;
+                        horizontal-alignment: center;
                     }
 
                     Rectangle { height: Theme.sp-2; }
@@ -666,6 +687,59 @@ export component InstallerScreen inherits Rectangle {
                         }
                     }
 
+                    // A Mac's own system disk is never chosen for anyone (installer_rules.rs). When
+                    // the person chooses it, erasing macOS is its own tick, naming the disk.
+                    if root.selected-holds-macos : Rectangle {
+                        height: macos-layout.preferred-height;
+                        border-radius: Theme.r-md;
+                        background: Theme.amber.transparentize(92%);
+                        border-width: 1px;
+                        border-color: root.macos-confirmed ? Theme.amber : Theme.amber.transparentize(70%);
+                        macos-layout := HorizontalLayout {
+                            padding: Theme.sp-3;
+                            spacing: Theme.sp-3;
+                            VerticalLayout {
+                                alignment: start;
+                                padding-top: 2px;
+                                Rectangle {
+                                    width: 16px; height: 16px;
+                                    border-radius: 4px;
+                                    border-width: 1.5px;
+                                    border-color: root.macos-confirmed ? Theme.amber : Theme.border-strong;
+                                    background: root.macos-confirmed ? Theme.amber.transparentize(80%) : transparent;
+                                    if root.macos-confirmed : Icon {
+                                        commands: Icons.check;
+                                        size: 12px;
+                                        tint: Theme.amber;
+                                    }
+                                }
+                            }
+                            VerticalLayout {
+                                horizontal-stretch: 1;
+                                spacing: 2px;
+                                Text {
+                                    text: "Erase macOS on /dev/" + root.selected-disk;
+                                    color: Theme.text-primary;
+                                    font-size: Theme.fs-body;
+                                    font-weight: 500;
+                                    wrap: word-wrap;
+                                }
+                                Text {
+                                    text: "This disk holds a Mac's system (HFS+ or APFS). To keep macOS, choose another disk, such as an external USB drive.";
+                                    color: Theme.amber;
+                                    font-size: Theme.fs-caption;
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.erase-macos-disk = root.macos-confirmed ? "" : root.selected-disk;
+                            }
+                        }
+                    }
+
                     // What Install will do to it, said before anyone is asked to agree to it.
                     Rectangle {
                         height: warn-row.preferred-height;
@@ -759,7 +833,7 @@ export component InstallerScreen inherits Rectangle {
                         }
                         PillButton {
                             label: "Next";
-                            enabled: root.selected-disk != "";
+                            enabled: root.disk-ok;
                             clicked => { root.step = 3; }
                         }
                     }

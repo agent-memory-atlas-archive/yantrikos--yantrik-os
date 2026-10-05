@@ -58,14 +58,44 @@ fi
 ok "User: $USERNAME ($FULLNAME) @ $HOSTNAME, $TIMEZONE"
 
 # ── 2. Disk selection ──
+# TRAN says which disk is the external USB one: on a Mac kept on macOS, that is usually the one
+# to install to. The stick this installer booted from is not offered at all.
 step "Select installation disk"
+LIVE_DISK=""
+LIVE_SRC=$(findmnt -n -o SOURCE /run/live/medium 2>/dev/null || true)
+[ -n "$LIVE_SRC" ] && LIVE_DISK=$(lsblk -no PKNAME "$LIVE_SRC" 2>/dev/null | head -1)
+[ -n "$LIVE_SRC" ] && [ -z "$LIVE_DISK" ] && LIVE_DISK=$(basename "$LIVE_SRC")
+# A Mac's own system: HFS+ (macOS up to 10.12) or APFS (10.13 on).
+holds_macos() { lsblk -nro FSTYPE "/dev/$1" 2>/dev/null | grep -qxE 'hfsplus|apfs'; }
 echo -e "  ${B}Available disks:${N}"
-lsblk -d -o NAME,SIZE,MODEL | grep -v loop | grep -v sr | sed 's/^/  /'
+printf "  %-10s %-8s %-6s %s\n" NAME SIZE BUS "MODEL / CONTENTS"
+for d in $(lsblk -dn -e 7,11 -o NAME,TYPE | awk '$2 == "disk" { print $1 }'); do
+    [ "$d" = "$LIVE_DISK" ] && continue
+    note=""
+    holds_macos "$d" && note="  <- macOS is on this disk"
+    printf "  %-10s %-8s %-6s %s%s\n" "$d" "$(lsblk -dno SIZE "/dev/$d" | tr -d ' ')" \
+        "$(lsblk -dno TRAN "/dev/$d" | tr -d ' ')" "$(lsblk -dno MODEL "/dev/$d" | sed 's/ *$//')" "$note"
+done
 echo
-echo -n "  Target disk (e.g., sda): "; read -r TARGET_DISK
+echo -n "  Target disk (e.g., sdb): "; read -r TARGET_DISK
 [ -z "$TARGET_DISK" ] && { echo -e "${R}No disk specified.${N}"; exit 1; }
+TARGET_DISK="${TARGET_DISK#/dev/}"
 DISK="/dev/$TARGET_DISK"
 [ -b "$DISK" ] || { echo -e "${R}$DISK is not a block device.${N}"; exit 1; }
+[ "$TARGET_DISK" = "$LIVE_DISK" ] && { echo -e "${R}$DISK is the installer's own stick.${N}"; exit 1; }
+# Erasing macOS is never something a typo does: the disk's name, typed again, is the answer.
+if holds_macos "$TARGET_DISK"; then
+    echo -e "  ${A}$DISK holds macOS. Installing here erases it. To keep macOS, choose another disk${N}"
+    echo -e "  ${A}(an external USB SSD, for instance).${N}"
+    echo -n "  Type the disk's name ($TARGET_DISK) to erase macOS on it: "; read -r MACOS_OK
+    [ "$MACOS_OK" = "$TARGET_DISK" ] || { echo "  Nothing was changed."; exit 1; }
+fi
+# A disk on USB is a disk that may move between ports and machines: it gets no NVRAM boot entry
+# on this machine, and boots through the removable-media path (\EFI\BOOT\BOOTX64.EFI) wherever
+# it is plugged in. On a Mac, hold Option at the chime and pick "EFI Boot".
+EXTERNAL=false
+[ "$(lsblk -dno TRAN "$DISK" | tr -d ' ')" = "usb" ] && EXTERNAL=true
+[ "$(cat "/sys/block/$TARGET_DISK/removable" 2>/dev/null)" = "1" ] && EXTERNAL=true
 
 # ── 2b. Everything, once, before anything is destroyed ──
 # The disk was the only thing confirmed before this, so a mistyped username was
@@ -140,8 +170,17 @@ chroot "$M" apt-get autoremove -y 2>/dev/null || true
 ok "Live-boot removed"
 
 # ── 8. Fstab ──
-echo "LABEL=YANTRIK  /  ext4  defaults,noatime  0  1" > "$M/etc/fstab"
-$IS_EFI && [ -n "$EFI_PART" ] && echo "$EFI_PART  /boot/efi  vfat  defaults  0  2" >> "$M/etc/fstab"
+# By UUID, never /dev/sdX: a USB disk is sdb in one port and sdc in another, and the EFI line used
+# to name the device, so the same disk failed to mount /boot/efi after moving ports. Not by label
+# either: the live stick or a second Yantrik disk can carry the same one.
+ROOT_UUID=$(blkid -s UUID -o value "$ROOT_PART")
+[ -n "$ROOT_UUID" ] || { echo -e "${R}Could not read the UUID of $ROOT_PART.${N}"; exit 1; }
+echo "UUID=$ROOT_UUID  /  ext4  defaults,noatime  0  1" > "$M/etc/fstab"
+if $IS_EFI && [ -n "$EFI_PART" ]; then
+    EFI_UUID=$(blkid -s UUID -o value "$EFI_PART")
+    [ -n "$EFI_UUID" ] || { echo -e "${R}Could not read the UUID of $EFI_PART.${N}"; exit 1; }
+    echo "UUID=$EFI_UUID  /boot/efi  vfat  umask=0077  0  2" >> "$M/etc/fstab"
+fi
 
 # ── 9. Hostname ──
 echo "$HOSTNAME" > "$M/etc/hostname"
@@ -283,13 +322,33 @@ step "Installing bootloader..."
 printf 'GRUB_DEFAULT=0\nGRUB_TIMEOUT=3\nGRUB_DISTRIBUTOR="Yantrik OS"\nGRUB_CMDLINE_LINUX_DEFAULT="quiet splash"\nGRUB_CMDLINE_LINUX=""\n' > "$M/etc/default/grub"
 
 if $IS_EFI; then
+    # Two installs, as the desktop installer does (crates/yantrik-ui/src/wire/installer.rs). The
+    # named one, with a firmware boot entry for an internal disk; then \EFI\BOOT\BOOTX64.EFI, the
+    # removable-media path every UEFI tries when it has no entry, and the only one Apple's firmware
+    # needs. This used to run only the first, with --no-nvram, which left a disk no firmware would
+    # boot.
+    NVRAM_FLAG=""
+    $EXTERNAL && NVRAM_FLAG="--no-nvram"
     chroot "$M" grub-install --target=x86_64-efi --efi-directory=/boot/efi \
-        --bootloader-id=yantrik --no-nvram 2>/dev/null || true
+        --bootloader-id=yantrik $NVRAM_FLAG \
+        || chroot "$M" grub-install --target=x86_64-efi --efi-directory=/boot/efi \
+            --bootloader-id=yantrik --no-nvram \
+        || true
+    chroot "$M" grub-install --target=x86_64-efi --efi-directory=/boot/efi --removable
+    [ -f "$M/boot/efi/EFI/BOOT/BOOTX64.EFI" ] \
+        || { echo -e "${R}No EFI/BOOT/BOOTX64.EFI on the EFI partition; this disk would not boot.${N}" >&2; exit 1; }
 else
-    chroot "$M" grub-install --target=i386-pc "$DISK" 2>/dev/null || true
+    chroot "$M" grub-install --target=i386-pc "$DISK"
 fi
+# The kernel line must find the root by UUID too, or the disk boots in one USB port and not the
+# next. grub-mkconfig falls back to root=/dev/sdX when udev has not made the by-uuid link yet.
+udevadm settle 2>/dev/null || true
 chroot "$M" update-grub
-ok "GRUB installed"
+if grep -qE 'root=/dev/(sd|nvme|vd|hd|mmcblk)' "$M/boot/grub/grub.cfg"; then
+    echo -e "${R}grub.cfg names the root by device, not UUID; it would not boot from another port.${N}" >&2
+    exit 1
+fi
+ok "GRUB installed$($IS_EFI && echo ' (EFI, with the removable-media fallback)')"
 
 # ── 16. Regenerate initramfs (without live-boot hooks) ──
 chroot "$M" update-initramfs -u 2>/dev/null || true
