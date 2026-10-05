@@ -10,7 +10,7 @@
 //! | variable | default | |
 //! |---|---|---|
 //! | `EGRESS_LISTEN` | `127.0.0.1:7450` | the endpoint door, where the mind's `HTTPS_PROXY` points: `lan` rules apply |
-//! | `EGRESS_PUBLIC_LISTEN` | `127.0.0.1:7451` | the public door, for anything fetched for someone else: the internet only (`door`) |
+//! | `EGRESS_PUBLIC_LISTEN` | `127.0.0.1:7451` | the public door, for anything fetched for someone else: the internet only (`door`). Pinned: any other value is refused ([`PUBLIC_DOOR`]) |
 //! | `EGRESS_STATE` | `/var/lib/yantrik-egress` | the policy, the ledger, Private mode |
 //! | `EGRESS_CONTROL` | `/run/yantrik-egress/control` | the desktop's socket |
 //! | `EGRESS_SERVE_UID` | the uid of `yantrik-mind` | the one account served |
@@ -47,6 +47,25 @@ use std::time::Duration;
 
 /// How often the ledger is written when it changed.
 const FLUSH: Duration = Duration::from_secs(30);
+
+/// The public door's one address. Pinned, not configured: the kernel's table lets the mind reach
+/// this port (`MIND_LOOPBACK_PORTS` in `yantrik-update`) and the Mind's status file names it
+/// (`public_proxy`), so a drop-in that moved it would send untrusted fetches to a port this proxy
+/// does not serve, and anything else that bound it would get them.
+const PUBLIC_DOOR: &str = "127.0.0.1:7451";
+
+/// The public door from `EGRESS_PUBLIC_LISTEN`: unset, empty or [`PUBLIC_DOOR`] itself; anything
+/// else is refused and the proxy does not start.
+fn public_door(value: Option<&str>) -> Result<SocketAddr, String> {
+    let pinned: SocketAddr = PUBLIC_DOOR.parse().map_err(|e| format!("{PUBLIC_DOOR}: {e}"))?;
+    match value.filter(|v| !v.is_empty()) {
+        None => Ok(pinned),
+        Some(v) if v.parse::<SocketAddr>().ok() == Some(pinned) => Ok(pinned),
+        Some(v) => Err(format!(
+            "EGRESS_PUBLIC_LISTEN is {v}, but the public door is pinned to {PUBLIC_DOOR}: the kernel's table and the Mind's status file name that port"
+        )),
+    }
+}
 
 fn env(name: &str, default: &str) -> String {
     std::env::var(name).ok().filter(|v| !v.is_empty()).unwrap_or_else(|| default.to_string())
@@ -135,7 +154,7 @@ fn main() {
 
 async fn run() -> Result<(), String> {
     let listen = loopback("EGRESS_LISTEN", "127.0.0.1:7450")?;
-    let public_listen = loopback("EGRESS_PUBLIC_LISTEN", "127.0.0.1:7451")?;
+    let public_listen = public_door(std::env::var("EGRESS_PUBLIC_LISTEN").ok().as_deref())?;
     if public_listen == listen {
         return Err("EGRESS_PUBLIC_LISTEN must not be EGRESS_LISTEN: the two doors are two ports".into());
     }
@@ -201,4 +220,20 @@ fn loopback(name: &str, default: &str) -> Result<SocketAddr, String> {
         return Err(format!("{name} must be a loopback address: this proxy is for this machine's mind only"));
     }
     Ok(addr)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_public_door_is_pinned() {
+        let pinned: SocketAddr = PUBLIC_DOOR.parse().unwrap();
+        for v in [None, Some(""), Some("127.0.0.1:7451")] {
+            assert_eq!(public_door(v), Ok(pinned), "{v:?}");
+        }
+        for v in ["127.0.0.1:7452", "127.0.0.2:7451", "[::1]:7451", "0.0.0.0:7451", "localhost:7451", "7451"] {
+            assert!(public_door(Some(v)).is_err(), "{v}");
+        }
+    }
 }

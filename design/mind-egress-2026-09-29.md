@@ -176,12 +176,19 @@ which the table lets out. The mind's unit sets `HTTPS_PROXY`, `HTTP_PROXY` and `
 
 ### Two doors
 
-(5 Oct 2026.) The proxy listens on two loopback ports, each configured in its unit the same way:
+(5 Oct 2026.) The proxy listens on two loopback ports, each set in its unit the same way:
 
 | door | address | variable | `lan` rules |
 |---|---|---|---|
 | **endpoint door** | `127.0.0.1:7450` | `EGRESS_LISTEN` | honoured, as above |
 | **public door** | `127.0.0.1:7451` | `EGRESS_PUBLIC_LISTEN` | never |
+
+The public door is **pinned**. `yantrik-egress` refuses to start with `EGRESS_PUBLIC_LISTEN` set to
+anything but `127.0.0.1:7451` (`PUBLIC_DOOR` in `main.rs`), because the kernel table's loopback
+set and the status file's `public_proxy` name that port (`EGRESS_PUBLIC_DOOR` in `yantrik-update`,
+from which both are made). A drop-in that moved it would otherwise send untrusted fetches to a
+port the proxy does not serve, and to whatever else bound it. The selftest checks that the
+updater, the unit and the proxy's pin agree, and that the binary refuses another address.
 
 **Why.** The proxy grants the local network on the *name asked for*: a `lan` rule for
 `gpu.example.ts.net:11434` lets any request for that name through. Security reviews found
@@ -197,7 +204,11 @@ sees, so the fix is at the OS: only the Mind's own endpoint clients get the door
 the ledger, the refusal of addresses that are never a destination. On top of that:
 
 - a host that any `lan` rule names, exactly or by `*.domain`, is refused **on every port**, before
-  it is looked up. A `lan` rule can never let a request through this door.
+  it is looked up. A `lan` rule can never let a request through this door. The rule's host is
+  read as the request's is (lowercase, no trailing dot), and an address rule is compared as an
+  address, so `2001:470:0::1` names `[2001:470::1]` and `203.0.113.9` names
+  `[::ffff:203.0.113.9]`. A new rule cannot be written with a trailing dot; a `policy.yaml` that
+  already has one is read with the dot taken off (see section 3).
 - what the name resolves to must be the internet. The local network, every range in
   `private_ranges.json` (CGNAT and Tailscale, ULA, NAT64, 6to4, Teredo, the documentation
   ranges, …), loopback, link-local, this machine's own addresses, and IPv4 written as IPv6
@@ -255,6 +266,13 @@ The kernel table lets the mind account reach both ports on `127.0.0.1` (`MIND_LO
   button that lets minds reach a LAN service by address (web search, #656) should write exactly
   such a rule, in either mode. In the same way, `{host: 127.0.0.1, ports: [11434], lan: true}`
   opens a local Ollama to the mind (a **loopback entry**); without it the mind cannot reach one.
+
+  A host is written one way: lowercase, with no trailing dot, as a request's host is made, so a
+  rule and the request it names compare as text. A rule with a trailing dot is refused when it is
+  written (and a seeded URL's host loses its dot first). A `policy.yaml` from before that check
+  is **read with the dot taken off**, not refused whole: that is the name the status file's
+  `lan_hosts` already published and the public door refuses, while refusing the policy would
+  refuse everything and the next seed or allow would be saved over the person's other rules.
 
 - **Seeded rules.** Until the person can write `lan` rules from the desktop, every
   `yantrik-update reconcile` (and `apply`) seeds them for the LAN services this machine is already
@@ -316,14 +334,14 @@ the file only; the directory stays.
 
 ```json
 {"enforced": true, "table": "inet yantrik_mind_egress", "proxy": "http://127.0.0.1:7450",
- "public_proxy": "127.0.0.1:7451", "proxy_refuses_private": true, "mode": "audit", "private": false, "dns_allowed": true,
+ "public_proxy": "http://127.0.0.1:7451", "proxy_refuses_private": true, "mode": "audit", "private": false, "dns_allowed": true,
  "lan_hosts": [{"host": "192.168.4.42", "ports": [8888]}, {"host": "homeassistant.local", "ports": [8123]}],
  "loaded_at": 1759600000, "version": 3}
 ```
 
 - `proxy`: the endpoint door, as a URL. It honours `lan` rules (see "Two doors").
-- `public_proxy`: the public door, as `host:port` (`127.0.0.1:7451`), with no scheme: use it as
-  `http://127.0.0.1:7451`. It is set only when the installed `yantrik-egress capabilities`
+- `public_proxy`: the public door, as a URL like `proxy` (`http://127.0.0.1:7451`); use it as it
+  is. It is set only when the installed `yantrik-egress capabilities`
   prints `public-door`, read from the binary at each apply like `proxy_refuses_private`. It is
   **`null`** from a proxy without one, and then every untrusted fetch keeps the `lan_hosts` checks
   below.
