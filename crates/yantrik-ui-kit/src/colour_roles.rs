@@ -324,10 +324,10 @@ fn the_ink_on_an_accent_fill_reads_on_every_accent() {
     dark_inks.extend(themes.iter().filter(|t| t.1).map(|t| (t.0.clone(), t.2.clone())));
 
     // A dark preset is its swatch, and its hover step is accent-light's dark half. The light
-    // presets are the hexes written into `accent` itself.
+    // presets are the light halves of the `resolved-` tokens that `accent` reads.
     let rest: Vec<String> = presets.lines().filter(|l| l.contains("property <color> swatch-")).flat_map(hexes).collect();
     let hover: Vec<String> = hexes(token(presets, "accent-light")).into_iter().step_by(2).collect();
-    let light = hexes(token(presets, "accent"));
+    let light: Vec<String> = presets.lines().filter(|l| l.contains("property <color> resolved-")).flat_map(hexes).collect();
     assert_eq!((rest.len(), hover.len(), light.len()), (3, 3, 3), "three presets, read in each form");
 
     for (whose, ink) in &dark_inks {

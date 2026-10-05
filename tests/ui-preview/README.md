@@ -161,6 +161,9 @@ headless window. There are no assertions: these are pictures.
 
 - `appearance`: Settings → Appearance, light, soft-blue accent (also writes `-scrolled`).
 - `quick-settings`: the whole shell with Quick Settings open, light, laptop shape.
+  `quick-settings-dark` is the same in dark, to hold beside it.
+- `lens-composer`, `lens-composer-dark`: the chat panel's composer with the line saying where the
+  words go and the "Mode:" chip, at 1280×800.
 - `app-header`: Calendar at 1280×800 with an ordinary day, light.
 - `approval`: one ApprovalCard at its natural height (440 wide, on the Lens panel's ground), light.
 - `approval-nightfall`: the same card on Nightfall: dark, violet (accent index 2) and its palette

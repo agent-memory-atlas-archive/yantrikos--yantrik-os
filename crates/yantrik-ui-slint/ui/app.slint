@@ -363,6 +363,9 @@ export component App inherits Window {
     in-out property <string> lens-input-text: "";
     in property <[LensResult]> lens-results: [];
     in property <bool> lens-chat-mode: false;
+    // Where words typed in the chat go, under the composer: "Yantrik Mind · deepseek-v4.1-flash ·
+    // online, via Ollama Cloud". From runs_on (wire/runs_on_card.rs); "" when it is not known.
+    in property <string> lens-destination: "";
     in property <[LensResult]> lens-suggestions: [];
     in property <[LensResult]> lens-recents: [];
 
@@ -1653,6 +1656,7 @@ export component App inherits Window {
             lens-input-text <=> root.lens-input-text;
             lens-results: root.lens-results;
             lens-chat-mode: root.lens-chat-mode;
+            lens-destination: root.lens-destination;
             lens-suggestions: root.lens-suggestions;
             lens-recents: root.lens-recents;
             // Chat

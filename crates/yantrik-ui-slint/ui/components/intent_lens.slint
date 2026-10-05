@@ -1095,6 +1095,9 @@ export component IntentLens inherits Rectangle {
     in property <string> mode-label: "Ask";
     // Where the mind runs, as the header says it: "Built-in mind" or "Attached mind".
     in property <string> identity: "";
+    // Where the composer's words go ("Yantrik Mind · deepseek-v4.1-flash · online, via Ollama
+    // Cloud"), drawn under it; "" when the shell does not know, and then nothing is drawn.
+    in property <string> destination: "";
     callback mode-clicked();
     callback mind-clicked();
     // "View desk": bring Mind View, the mind's own desk, in front.
@@ -2226,6 +2229,7 @@ export component IntentLens inherits Rectangle {
                 composer := ChatComposer {
                     mind-name: root.mind-name;
                     mode-label: root.mode-label;
+                    destination: root.destination;
                     run-active: root.is-generating || root.live-runs > 0;
                     mic => { root.mic-pressed(); }
                     mode-clicked => { root.mode-clicked(); }

@@ -33,6 +33,11 @@ export component DesktopHome inherits Rectangle {
     callback configure-mind();
 
     property <int> columns: max(2, min(6, floor((self.width - 48px) / 104px)));
+    // The box says where its words go: it opens the chat with the mind that answers, and that
+    // mind may be an online model. The answering mind by name; the Mind's until the harness host
+    // has said who is answering.
+    property <string> ask-words: "Message "
+        + (root.mind-name == "" || root.mind-name == "no mind" ? "Yantrik Mind" : root.mind-name);
 
     Flickable {
         width: 100%; height: 100%;
@@ -78,7 +83,7 @@ export component DesktopHome inherits Rectangle {
                 border-color: search-touch.has-hover || search-focus.has-focus ? Theme.accent : Theme.glass-border-strong;
                 animate border-color { duration: Theme.dur-fast; }
                 accessible-role: button;
-                accessible-label: "Ask, search, or open anything";
+                accessible-label: root.ask-words;
                 accessible-action-default => { root.search(); }
                 search-focus := FocusScope {
                     key-pressed(e) => {
@@ -91,7 +96,7 @@ export component DesktopHome inherits Rectangle {
                     padding: 18px;
                     spacing: 14px;
                     Icon { commands: Icons.search; size: 21px; tint: Theme.accent; y: (parent.height - self.height) / 2; }
-                    Text { text: "Ask, search, or open anything"; color: Theme.text-primary; font-size: Theme.fs-title-2; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+                    Text { text: root.ask-words; color: Theme.text-primary; font-size: Theme.fs-title-2; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
                     // The compositor's Super+K (config/labwc/rc.xml) — the key that works from
                     // inside any app; the ask bar chip in desktop.slint says why.
                     if root.width > 440px : Rectangle {

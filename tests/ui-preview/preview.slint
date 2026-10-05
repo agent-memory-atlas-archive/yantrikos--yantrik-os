@@ -420,6 +420,8 @@ export component ChatProbe inherits Window {
     in property <int> live-runs: 0;
     in property <int> waiting-runs: 0;
     in property <string> mind-name: "Yantrik Mind";
+    // The composer's "where the words go" line; "" (no line) unless a scene sets it.
+    in property <string> destination: "";
     in-out property <string> sent;
     in-out property <int> sends: 0;
     in-out property <int> mode-clicks: 0;
@@ -438,6 +440,7 @@ export component ChatProbe inherits Window {
         chat-mode: true;
         mind-name: root.mind-name;
         identity: "Attached mind";
+        destination: root.destination;
         can-open-in-agents: true;
         messages: root.messages;
         approvals: root.approvals;

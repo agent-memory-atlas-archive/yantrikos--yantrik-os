@@ -42,6 +42,8 @@ run target/ui-validation/colour-system.png 720 360 verify-colour-system
 run target/ui-validation/icons.png 720 400 verify-icons
 run target/ui-validation/bar-overlays.png 1280 800 verify-bar-overlays
 run target/ui-validation/cheat-sheet.png 1280 800 verify-cheat-sheet
+run target/ui-validation/settings-verify.png 1280 800 verify-settings
+run target/ui-validation/settings-verify-compact.png 800 600 verify-settings
 run target/ui-validation/quick-settings.png 1280 800 verify-quick-settings
 run target/ui-validation/osd.png 1280 800 verify-osd
 run target/ui-validation/battery.png 1280 800 verify-battery

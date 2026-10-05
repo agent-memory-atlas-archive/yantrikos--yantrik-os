@@ -966,7 +966,7 @@ pub fn publish(
                 // service — and so a mind can see what it has already said.
                 .with("notifications", crate::wire::notifications::describe_summary())
                 // The ask bar, so "is the Lens up, and what is in it" is a read rather than a
-                // screenshot. `open_lens` answers from these same two properties.
+                // screenshot. `open_lens` and `close_lens` answer from these same properties.
                 .with(
                     "lens",
                     serde_json::json!({
@@ -974,6 +974,12 @@ pub fn publish(
                         // What the person is typing, before they have sent it: theirs alone.
                         "text": if agent_reading { String::new() } else { ui.get_lens_input_text().to_string() },
                         "chat": ui.get_lens_chat_mode(),
+                        // Where words typed there go, as the composer's line says it; "" when
+                        // the shell does not know.
+                        "destination": ui.get_lens_destination().to_string(),
+                        // The action that puts it away, as every other overlay says; "" when
+                        // there is nothing up to put away.
+                        "close_with": if ui.get_lens_open() { "close_lens" } else { "" },
                     }),
                 )
                 // The launcher, for the same reason. `open_app name=launchpad` opened it under
@@ -1031,6 +1037,7 @@ pub fn publish(
     let profile_ui = ui_for.clone();
     let ask_ui = ui_for.clone();
     let lens_ui = ui_for.clone();
+    let lens_close_ui = ui_for.clone();
     let pin_ui = ui_for.clone();
     let pin_catalogue = ctx.installed_apps.clone();
     let read_ui = ui_for.clone();
@@ -1448,6 +1455,31 @@ pub fn publish(
                     "lens_open": ui.get_lens_open(),
                     "screen": screen_name(ui.get_current_screen()),
                     "text": ui.get_lens_input_text().to_string(),
+                }))
+            },
+        )
+        .action(
+            // Putting the Lens away, chat panel and all: Escape and the panel's close button, for a
+            // caller that is not at the keyboard. `open_lens` had no way back, so a mind that
+            // opened the Lens left it standing over the desktop until a person closed it.
+            //
+            // `safe`: it hides a panel. The conversation is kept, a draft in the field is kept,
+            // nothing is sent. The answer is the state read back after the calls.
+            Action::new(
+                "close_lens",
+                "Put away the ask bar (the Lens) and its chat panel, as Escape does. The conversation and anything typed are kept; nothing is sent",
+            )
+            .risk("safe"),
+            move |_args| {
+                let ui = lens_close_ui()?;
+                let was = ui.get_lens_open();
+                // The pair desktop.slint's own close runs: the flag, then the shell's callback,
+                // which clears the results and leaves chat mode.
+                ui.set_lens_open(false);
+                ui.invoke_close_lens();
+                Ok(serde_json::json!({
+                    "lens_open": ui.get_lens_open(),
+                    "closed": was,
                 }))
             },
         )
@@ -2489,6 +2521,26 @@ mod window_action_tests {
             handler.contains("showing[\"note\"]"),
             "when the raise fails, the answer has to say so in words: the screen DID change, so \
              this is not an error, but it is not visible either. Handler as written:\n{handler}"
+        );
+    }
+
+    /// What a pointer can do, a mind can ask for: Escape puts the Lens away, so `close_lens` does,
+    /// by the same pair desktop.slint runs, and describe names it the way it names every
+    /// overlay's close.
+    #[test]
+    fn the_lens_has_a_close_beside_its_open() {
+        let src = source();
+        let from = src.find("Action::new(\n                \"close_lens\"").expect("the shell publishes `close_lens`");
+        let rest = &src[from..];
+        let close = &rest[..rest.find(".action(").unwrap()];
+        assert!(close.contains(".risk(\"safe\")"), "putting a panel away is safe:\n{close}");
+        assert!(
+            close.contains("ui.set_lens_open(false);") && close.contains("ui.invoke_close_lens();"),
+            "the flag and the shell's own close callback, as Escape runs them:\n{close}"
+        );
+        assert!(
+            src.contains("\"close_with\": if ui.get_lens_open() { \"close_lens\" } else { \"\" }"),
+            "describe's lens entry names its close, like the other overlays"
         );
     }
 
