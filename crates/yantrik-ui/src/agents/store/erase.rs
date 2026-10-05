@@ -182,11 +182,11 @@ mod tests {
         (s, pi)
     }
 
-    fn card(s: &Store, id: &AgentId) -> &Card {
+    fn card<'a>(s: &'a Store, id: &AgentId) -> &'a Card {
         s.agent(id).unwrap().cards().next().unwrap()
     }
 
-    fn approval(s: &Store, id: &AgentId) -> &Approval {
+    fn approval<'a>(s: &'a Store, id: &AgentId) -> &'a Approval {
         s.agent(id).unwrap().turns[0].items.iter().find_map(|i| if let Item::Approval(a) = i { Some(a) } else { None }).unwrap()
     }
 
@@ -247,7 +247,7 @@ mod tests {
         let (mut s, pi) = session();
         let needles = [Needle::of(SECRET)];
         s.redact(&pi, &erasure(&needles));
-        let dir = std::env::temp_dir().join(format!("yantrik-erase-ui-{}-{}", std::process::id(), model::now()));
+        let dir = std::env::temp_dir().join(format!("yantrik-erase-ui-{}-{}", std::process::id(), crate::agents::model::now()));
         let (path, contents) = s.file_of(&dir, &pi).unwrap();
         write_durably(&dir, &path, &contents).unwrap();
         assert!(!path.with_extension("jsonl.partial").exists());

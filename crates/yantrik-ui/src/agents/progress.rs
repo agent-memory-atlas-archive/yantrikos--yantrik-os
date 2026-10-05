@@ -242,6 +242,8 @@ mod tests {
             usage: Usage::default(),
             refused: 0,
             refusals: Vec::new(),
+            refusals_shown: None,
+            erasures: Vec::new(),
             approvals_asked: 0,
             approvals_answered: 0,
             pending_approvals: Vec::new(),
