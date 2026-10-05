@@ -6,7 +6,8 @@ vendored in glyphs/) filled, at 62% of the tile. Written:
 
   crates/yantrik-ui-kit/assets/app-icons/<id>.svg            the tile, drawn at 256
   crates/yantrik-ui-kit/assets/app-icons/<size>/<id>.png     rendered by resvg at each size
-  crates/yantrik-ui-kit/assets/app-icons/<size>/_plate.png   the neutral plate (unknown apps)
+  crates/yantrik-ui-kit/assets/app-icons/<size>/_plate-light.png, _plate-dark.png
+                                                             the neutral plate (unknown apps)
   crates/yantrik-ui-kit/assets/app-icons/<size>/_mask.png    the squircle in white (hover)
   crates/yantrik-ui-kit/assets/app-icons/fingerprint.txt     what this run read (fingerprint.py)
   crates/yantrik-ui-kit/slint/app_icons.slint                AppIcons: id and size to image
@@ -38,11 +39,14 @@ from glyph_map import GLYPHS  # noqa: E402
 SIZES = (32, 48, 64, 96, 128, 256)
 OUT = Path("crates/yantrik-ui-kit/assets/app-icons")
 SLINT = Path("crates/yantrik-ui-kit/slint/app_icons.slint")
-# The neutral plate, and the ink of the initial on it: a pale grey with no hue, so an app we know
-# nothing about claims no category, and light where every app of ours is a colour, so it never
-# reads as Settings' slate. A theme's own icon sits on it as a logo sits on a white card.
-PLATE = ("#f4f5f8", "#d3d7de")
-PLATE_INK = "#4a5160"
+# The neutral plates, one per theme: (top, bottom), the 1px rim as (colour, opacity), and the ink
+# of the initial on it. No hue, so an app we know nothing about claims no category. In the light
+# theme it is a pale card a theme's own logo sits on; in the dark theme a pale tile flashed in
+# the dock, so it is a dim graphite there with a lighter rim, quieter than any app of ours.
+PLATES = {
+    "light": (("#f4f5f8", "#d3d7de"), ("#000000", 0.14), "#4a5160"),
+    "dark": (("#4b5561", "#39414b"), ("#5d6874", 1.0), "#ffffff"),
+}
 
 
 def glyph(name: str) -> str:
@@ -66,10 +70,12 @@ def build() -> dict[Path, bytes]:
             group = template.glyph_group(size, body, app.ink, dx, dy)
             files[OUT / str(size) / f"{app.id}.png"] = snap.render(template.tile(size, top, bottom, group, app.ink))
     for size in SIZES:
-        files[OUT / str(size) / "_plate.png"] = snap.render(template.tile(size, *PLATE, edge=True))
+        for theme, (colours, rim, _) in PLATES.items():
+            files[OUT / str(size) / f"_plate-{theme}.png"] = snap.render(template.tile(size, *colours, edge=rim))
         files[OUT / str(size) / "_mask.png"] = snap.render(template.mask(size))
     files[OUT / "fingerprint.txt"] = fingerprint.text(HERE, apps).encode()
-    files[SLINT] = slint_map.source([a.id for a in apps], SIZES, PLATE_INK).encode()
+    inks = {theme: ink for theme, (_, _, ink) in PLATES.items()}
+    files[SLINT] = slint_map.source([a.id for a in apps], SIZES, inks).encode()
     return files
 
 

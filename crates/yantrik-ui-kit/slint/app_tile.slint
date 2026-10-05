@@ -26,7 +26,11 @@
 //   * anything else: the neutral plate with the app's initial. No colour, because we do not know
 //     what it is and a guessed hue would imply a category; and not a generic window glyph,
 //     because a row of identical windows tells nobody which is which.
+//
+// The plate follows the theme, unlike the art: a pale card in the light theme, and a dim
+// graphite with a lighter rim in the dark one, where a pale tile flashed in the dock (#642).
 import { AppIcons } from "app_icons.slint";
+import { ThemeMode } from "theme.slint";
 
 /// The letter on an unknown app's tile. Slint cannot take a string apart, so each window that
 /// draws tiles answers this from Rust (`yantrik_ui_kit::app_tile::initial`); unanswered, the
@@ -63,7 +67,7 @@ export component AppTile inherits Rectangle {
     opacity: root.dimmed ? 0.7 : 1.0;
 
     Image {
-        source: root.art ? AppIcons.art(root.app-id, root.px) : AppIcons.plate(root.px);
+        source: root.art ? AppIcons.art(root.app-id, root.px) : AppIcons.plate(root.px, ThemeMode.dark);
         width: root.size;
         height: root.size;
     }
@@ -77,7 +81,7 @@ export component AppTile inherits Rectangle {
     }
     if !root.art && !root.has-icon : Text {
         text: AppInitial.of(root.app-id);
-        color: AppIcons.plate-ink;
+        color: AppIcons.plate-ink(ThemeMode.dark);
         font-size: round(root.size * 0.46 / 1px) * 1px;
         font-weight: 600;
         width: root.size;

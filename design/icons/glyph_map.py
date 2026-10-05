@@ -48,7 +48,9 @@ GLYPHS = {
     "personality": "smiley",
     "skills": "lightning",
     "permissions": "shield-check",
-    "settings": "gear-six",
+    # Ours, not Phosphor's (glyphs/README.md): every Phosphor gear has round, shallow teeth that
+    # merge into a flower at 32px.
+    "settings": "settings-gear",
     "about": "info",
     "launchpad": "squares-four",
 }

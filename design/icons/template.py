@@ -65,10 +65,11 @@ def _shadow(size: int, ink: str) -> str:
             f'stdDeviation="{_num(blur)}" flood-color="#000" flood-opacity="{opacity}"/></filter>')
 
 
-def tile(size: int, top: str, bottom: str, glyph: str = "", ink: str = "#ffffff", edge: bool = False) -> str:
-    """A whole tile at `size` px. `glyph` is a glyph_group(), or "" for a bare plate. `edge`
-    draws a faint 1px rim all round, for a light tile that would otherwise melt into a light
-    surface."""
+def tile(size: int, top: str, bottom: str, glyph: str = "", ink: str = "#ffffff",
+         edge: tuple[str, float] | None = None) -> str:
+    """A whole tile at `size` px. `glyph` is a glyph_group(), or "" for a bare plate. `edge`,
+    a (colour, opacity), draws a 1px rim all round: the neutral plates' outline, which is what
+    keeps them from melting into the surface they sit on."""
     shape = squircle(size)
     rim = 2  # stroked on the outline and clipped to it, so 1px shows inside
     parts = [
@@ -91,7 +92,7 @@ def tile(size: int, top: str, bottom: str, glyph: str = "", ink: str = "#ffffff"
         f'<rect width="{size}" height="{size}" fill="url(#bg)"/>',
         f'<use href="#q" fill="none" stroke="url(#hi)" stroke-width="{rim}"/>',
         f'<use href="#q" fill="none" stroke="url(#lo)" stroke-width="{rim}"/>',
-        f'<use href="#q" fill="none" stroke="#000" stroke-opacity="0.14" stroke-width="{rim}"/>'
+        f'<use href="#q" fill="none" stroke="{edge[0]}" stroke-opacity="{edge[1]}" stroke-width="{rim}"/>'
         if edge else "",
         f'<g filter="url(#s)">{glyph}</g>' if glyph else "",
         "</g>",

@@ -26,20 +26,25 @@ def _url(path: str) -> str:
     return f'@image-url("../assets/app-icons/{path}")'
 
 
-def source(ids: list[str], sizes: tuple[int, ...], plate_ink: str) -> str:
+def source(ids: list[str], sizes: tuple[int, ...], plate_inks: dict[str, str]) -> str:
     has = "\n            || ".join(f'id == "{i}"' for i in ids)
     out = [HEADER, "export global AppIcons {"]
-    out.append("    /// The colour of an unknown app's initial on the neutral plate.")
-    out.append(f"    out property <color> plate-ink: {plate_ink};\n")
+    out.append("    /// The colour of an unknown app's initial on the neutral plate, in either theme.")
+    out.append("    public pure function plate-ink(dark: bool) -> color {")
+    out.append(f"        return dark ? {plate_inks['dark']} : {plate_inks['light']};\n    }}\n")
     out.append("    /// Whether there is art for this app id: every app AppColor gives a colour.")
     out.append(f"    public pure function has(id: string) -> bool {{\n        return {has};\n    }}\n")
     out.append("    /// An app's tile at `px` physical pixels.")
     out.append("    public pure function art(id: string, px: int) -> image {")
     out.append(f"        return {_chain(sizes, 'root.art-{s}(id)')};\n    }}\n")
     out.append("    /// The neutral plate: the same squircle and light with no colour and no glyph, for an")
-    out.append("    /// app we have no art for (its initial goes on it) and behind a theme's own icon.")
-    out.append("    public pure function plate(px: int) -> image {")
-    out.append(f"        return {_chain(sizes, _url('{s}/_plate.png'))};\n    }}\n")
+    out.append("    /// app we have no art for (its initial goes on it) and behind a theme's own icon. Pale")
+    out.append("    /// in the light theme, a dim graphite in the dark one.")
+    out.append("    public pure function plate(px: int, dark: bool) -> image {")
+    out.append("        return dark ? root.plate-dark(px) : root.plate-light(px);\n    }\n")
+    for theme in ("light", "dark"):
+        out.append(f"    pure function plate-{theme}(px: int) -> image {{")
+        out.append(f"        return {_chain(sizes, _url('{s}/_plate-' + theme + '.png'))};\n    }}\n")
     out.append("    /// The squircle in white, laid over a tile at low opacity for hover.")
     out.append("    public pure function mask(px: int) -> image {")
     out.append(f"        return {_chain(sizes, _url('{s}/_mask.png'))};\n    }}")

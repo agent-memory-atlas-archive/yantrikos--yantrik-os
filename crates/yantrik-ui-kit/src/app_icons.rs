@@ -60,7 +60,7 @@ fn every_app_has_art_at_every_size() {
     let apps = table();
     assert!(apps.len() >= 30, "read the colour table, found {} apps", apps.len());
     let mut names: Vec<String> = apps.iter().map(|a| a.0.clone()).collect();
-    names.extend(["_plate".into(), "_mask".into()]);
+    names.extend(["_plate-light".into(), "_plate-dark".into(), "_mask".into()]);
     for name in &names {
         for size in SIZES {
             let path = icons().join(format!("{size}/{name}.png"));
@@ -73,8 +73,9 @@ fn every_app_has_art_at_every_size() {
     }
 }
 
-/// AppIcons offers exactly the generated art: every app at every size, each size's plate and
-/// mask, and the empty image an unknown id falls through to. Nothing it names is missing.
+/// AppIcons offers exactly the generated art: every app at every size, each size's two plates
+/// (light and dark) and mask, and the empty image an unknown id falls through to. Nothing it
+/// names is missing.
 #[test]
 fn the_slint_mapping_offers_exactly_the_art() {
     let src = read(&Path::new(env!("CARGO_MANIFEST_DIR")).join("slint/app_icons.slint"));
@@ -86,7 +87,7 @@ fn the_slint_mapping_offers_exactly_the_art() {
         }
     }
     let urls: Vec<&str> = src.split("@image-url(\"").skip(1).map(|s| &s[..s.find('"').unwrap()]).collect();
-    assert_eq!(urls.len(), SIZES.len() * (apps.len() + 3), "one image per app and size, a plate, a mask and an empty fallback per size");
+    assert_eq!(urls.len(), SIZES.len() * (apps.len() + 4), "one image per app and size, two plates, a mask and an empty fallback per size");
     for url in urls.iter().filter(|u| !u.is_empty()) {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("slint").join(url);
         assert!(path.is_file(), "the mapping names {url}, which is not there");

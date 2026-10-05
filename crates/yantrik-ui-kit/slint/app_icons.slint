@@ -8,8 +8,10 @@
 // 64px art, never a smaller picture stretched.
 
 export global AppIcons {
-    /// The colour of an unknown app's initial on the neutral plate.
-    out property <color> plate-ink: #4a5160;
+    /// The colour of an unknown app's initial on the neutral plate, in either theme.
+    public pure function plate-ink(dark: bool) -> color {
+        return dark ? #ffffff : #4a5160;
+    }
 
     /// Whether there is art for this app id: every app AppColor gives a colour.
     public pure function has(id: string) -> bool {
@@ -62,14 +64,28 @@ export global AppIcons {
     }
 
     /// The neutral plate: the same squircle and light with no colour and no glyph, for an
-    /// app we have no art for (its initial goes on it) and behind a theme's own icon.
-    public pure function plate(px: int) -> image {
-        return px <= 32 ? @image-url("../assets/app-icons/32/_plate.png")
-             : px <= 48 ? @image-url("../assets/app-icons/48/_plate.png")
-             : px <= 64 ? @image-url("../assets/app-icons/64/_plate.png")
-             : px <= 96 ? @image-url("../assets/app-icons/96/_plate.png")
-             : px <= 128 ? @image-url("../assets/app-icons/128/_plate.png")
-             : @image-url("../assets/app-icons/256/_plate.png");
+    /// app we have no art for (its initial goes on it) and behind a theme's own icon. Pale
+    /// in the light theme, a dim graphite in the dark one.
+    public pure function plate(px: int, dark: bool) -> image {
+        return dark ? root.plate-dark(px) : root.plate-light(px);
+    }
+
+    pure function plate-light(px: int) -> image {
+        return px <= 32 ? @image-url("../assets/app-icons/32/_plate-light.png")
+             : px <= 48 ? @image-url("../assets/app-icons/48/_plate-light.png")
+             : px <= 64 ? @image-url("../assets/app-icons/64/_plate-light.png")
+             : px <= 96 ? @image-url("../assets/app-icons/96/_plate-light.png")
+             : px <= 128 ? @image-url("../assets/app-icons/128/_plate-light.png")
+             : @image-url("../assets/app-icons/256/_plate-light.png");
+    }
+
+    pure function plate-dark(px: int) -> image {
+        return px <= 32 ? @image-url("../assets/app-icons/32/_plate-dark.png")
+             : px <= 48 ? @image-url("../assets/app-icons/48/_plate-dark.png")
+             : px <= 64 ? @image-url("../assets/app-icons/64/_plate-dark.png")
+             : px <= 96 ? @image-url("../assets/app-icons/96/_plate-dark.png")
+             : px <= 128 ? @image-url("../assets/app-icons/128/_plate-dark.png")
+             : @image-url("../assets/app-icons/256/_plate-dark.png");
     }
 
     /// The squircle in white, laid over a tile at low opacity for hover.
