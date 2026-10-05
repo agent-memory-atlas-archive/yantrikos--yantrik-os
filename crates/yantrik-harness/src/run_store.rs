@@ -24,6 +24,8 @@
 //!   ending it expires whatever it was still waiting for.
 //! - Run ids keep counting across restarts: [`RunStore::next_run_id`] is where the host's counter
 //!   starts, so a run id never names two runs.
+//! - The text of a conversation can be erased at the person's request, and only then: see
+//!   [`RunStore::redact`] for the rule and for what is and is not touched.
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -31,6 +33,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde_json::{json, Value};
+
+mod erase;
+pub use erase::{Erased, Erasure, Redaction, Refusal, ERASE_ANSWER, ERASE_WINDOW_MS};
 
 /// Where a run is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -192,6 +197,13 @@ CREATE TABLE IF NOT EXISTS requests (
     answered_at INTEGER,
     PRIMARY KEY (run_id, request_id)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS redactions (
+    run_id      INTEGER NOT NULL REFERENCES runs(run_id),
+    request_id  TEXT NOT NULL,
+    places      INTEGER NOT NULL,
+    at          INTEGER NOT NULL,
+    PRIMARY KEY (run_id, request_id)
+) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS runs_by_state ON runs(state);
 ";
 
@@ -200,7 +212,7 @@ pub struct RunStore {
     db: Mutex<Connection>,
 }
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
 }
 
