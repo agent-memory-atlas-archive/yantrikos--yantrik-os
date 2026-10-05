@@ -659,7 +659,16 @@ fn publish_control(app: &DownloadManagerApp, engine: Engine) {
             Action::new("retry", "Start a failed download again from the beginning")
                 .defers()
                 .arg(Param::integer("id")),
-            reporting(engine.clone(), window.clone(), |engine, id| engine.retry(id)),
+            // An agent retries only what did not finish: `retry` deletes the file first, and on a
+            // finished download that is a file the person already has.
+            reporting(engine.clone(), window.clone(), |engine, id| {
+                if yantrik_app_runtime::control::agent_is_calling()
+                    && engine.get(id).is_some_and(|d| d.status == Status::Completed)
+                {
+                    return Err(format!("download {id} finished; an agent may not delete it to fetch it again"));
+                }
+                engine.retry(id)
+            }),
         )
         .action(
             Action::new("verify", "Hash a finished file again and compare it with a checksum")
