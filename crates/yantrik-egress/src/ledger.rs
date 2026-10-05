@@ -1,9 +1,11 @@
 //! Where the mind went: every destination, counted.
 //!
 //! What Settings shows in the audit week ("Where the Mind connects"), and what a refusal in
-//! guarded or enforce turns into (in guarded nothing public is refused, so only the home network,
-//! private ranges and this machine are ever proposals): a destination with refusals and no rule is a proposal, one per host and
-//! port however many times it was tried. Kept to a fixed number of destinations — the least
+//! guarded or enforce turns into: a destination with refusals and no rule is a proposal, one per
+//! host and port however many times it was tried. A refusal no rule could ever answer is never a
+//! proposal ([`Outcome::Barred`]: a name that did not resolve, a sinkhole's 0.0.0.0, loopback, this
+//! machine), so in guarded, where nothing public is refused, only the home network and the private
+//! ranges are ever proposals. Kept to a fixed number of destinations — the least
 //! recently seen goes first — so a mind trying a million names cannot grow it without end.
 
 use std::collections::HashMap;
@@ -22,6 +24,9 @@ pub struct Seen {
     /// Let through because the policy, or the rule, was only watching.
     pub audited: u64,
     pub refused: u64,
+    /// Of the refusals, those no rule could answer ([`Outcome::Barred`]).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub barred: u64,
     /// Unix seconds.
     pub first: u64,
     pub last: u64,
@@ -33,11 +38,32 @@ pub struct Seen {
     pub why: String,
 }
 
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
     Allowed,
     Audited,
     Refused,
+    /// Refused, and no rule could change that: the name did not resolve, or it leads only to an
+    /// address that is never a destination. Counted as refused, never a proposal.
+    Barred,
+}
+
+impl Outcome {
+    /// What `verdict` for a destination that resolved to `place` is counted as.
+    pub fn of(verdict: &crate::policy::Verdict, place: crate::policy::Place, private: bool) -> Outcome {
+        use crate::policy::{Place, Verdict};
+        match verdict {
+            Verdict::Allow { audit: true } => Outcome::Audited,
+            Verdict::Allow { audit: false } => Outcome::Allowed,
+            // Private mode's refusal is the person's to lift, not the address's.
+            Verdict::Refuse(_) if place == Place::Forbidden && !private => Outcome::Barred,
+            Verdict::Refuse(_) => Outcome::Refused,
+        }
+    }
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -63,8 +89,9 @@ impl Ledger {
         match outcome {
             Outcome::Allowed => s.allowed += 1,
             Outcome::Audited => s.audited += 1,
-            Outcome::Refused => {
+            Outcome::Refused | Outcome::Barred => {
                 s.refused += 1;
+                s.barred += u64::from(outcome == Outcome::Barred);
                 s.why = why.chars().take(300).collect();
             }
         }
@@ -81,11 +108,12 @@ impl Ledger {
         v
     }
 
-    /// What the person has not answered: destinations refused, with no rule for them now.
+    /// What the person has not answered: destinations refused in a way a rule could answer, with
+    /// no rule for them now.
     pub fn proposals(&self, policy: &crate::policy::Policy) -> Vec<Seen> {
         self.list()
             .into_iter()
-            .filter(|s| s.refused > 0 && !policy.rules.iter().any(|r| r.matches(&s.host, s.port)))
+            .filter(|s| s.refused > s.barred && !policy.rules.iter().any(|r| r.matches(&s.host, s.port)))
             .collect()
     }
 
@@ -133,20 +161,39 @@ mod tests {
 
     #[test]
     fn in_guarded_a_public_host_is_never_a_proposal_and_a_lan_one_is() {
-        use crate::policy::{place_of, Verdict};
+        use crate::policy::{place_of, Place, Verdict};
         let p = Policy { mode: Mode::Guarded, rules: vec![] };
         let mut l = Ledger::default();
-        for (host, ip) in [("example.com", "93.184.215.14"), ("nas.lan", "192.168.4.20")] {
-            let outcome = match p.decide(host, 443, false, place_of(ip.parse().unwrap()), false) {
-                Verdict::Allow { audit: false } => Outcome::Allowed,
-                Verdict::Allow { audit: true } => Outcome::Audited,
-                Verdict::Refuse(_) => Outcome::Refused,
+        // As the proxy counts them: a name that did not resolve leads nowhere (`Place::Forbidden`
+        // for the count); otherwise the place its address is.
+        let dests: [(&str, u16, Option<&str>); 6] = [
+            ("example.com", 443, Some("93.184.215.14")),
+            ("nas.lan", 443, Some("192.168.4.20")),
+            ("nonexistent.invalid", 443, None),
+            ("sink.example.com", 443, Some("0.0.0.0")),
+            ("127.0.0.1", 7450, Some("127.0.0.1")),
+            ("[2a02:8070:abcd:1::20]", 445, None),
+        ];
+        for (host, port, ip) in dests {
+            let place = match (host, ip) {
+                // A home device on the ISP's global prefix: the local network (`crate::local::place`).
+                ("[2a02:8070:abcd:1::20]", _) => Place::Lan,
+                (_, Some(ip)) => place_of(ip.parse().unwrap()),
+                (_, None) => Place::Forbidden,
             };
-            l.record(host, 443, outcome, false, false, "", 1);
+            let verdict = p.decide(host, port, false, place, false);
+            l.record(host, port, Outcome::of(&verdict, place, false), place == Place::Lan, false, "", 1);
         }
-        let hosts: Vec<String> = l.proposals(&p).into_iter().map(|s| s.host).collect();
-        assert_eq!(hosts, ["nas.lan"], "nothing public was refused");
+        let mut hosts: Vec<String> = l.proposals(&p).into_iter().map(|s| s.host).collect();
+        hosts.sort();
+        assert_eq!(hosts, ["[2a02:8070:abcd:1::20]", "nas.lan"], "nothing public, unresolvable, sinkholed or forbidden is a proposal");
         assert_eq!(l.list().iter().find(|s| s.host == "example.com").map(|s| (s.allowed, s.audited)), Some((1, 0)), "recorded, not watched");
+        for host in ["nonexistent.invalid", "sink.example.com", "127.0.0.1"] {
+            let s = l.list().into_iter().find(|s| s.host == host).unwrap();
+            assert_eq!((s.refused, s.barred), (1, 1), "{host}: still counted as refused");
+        }
+        // Private mode's refusals are the person's, and stay proposals as before.
+        assert_eq!(Outcome::of(&Verdict::Refuse("private".into()), Place::Forbidden, true), Outcome::Refused);
     }
 
     #[test]

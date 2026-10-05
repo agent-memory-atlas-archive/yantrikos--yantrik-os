@@ -6,9 +6,11 @@
 //! - **audit** — every destination on the internet is let through and counted, so a person can see
 //!   where the mind goes before deciding anything. Where every machine starts.
 //! - **guarded** — "home network closed, internet open": every destination on the internet is let
-//!   through and counted as allowed, not watched; the local network, private ranges, loopback and
+//!   through and counted as allowed, not watched; the local network (every prefix this machine is
+//!   on and its routers, whatever their range: `crate::local::place`), private ranges, loopback and
 //!   this machine are decided exactly as in enforce. The kernel refuses the mind DNS, as in
-//!   enforce: this proxy resolves.
+//!   enforce: this proxy resolves. A rule still decides for the host it names: a tunnel-only rule
+//!   (`http: false`) refuses plain http to that host, which with no rule would be let through.
 //! - **enforce** — only what a rule allows; everything else is refused and becomes a proposal.
 //!
 //! Private mode refuses everything, whatever the policy says. (A rule has no mode of its own: in an

@@ -144,7 +144,7 @@ mod tests {
     /// name that also gives the internet is reached there only.
     #[test]
     fn a_name_is_judged_by_the_addresses_it_resolved_to() {
-        let own: Vec<std::net::IpAddr> = vec!["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()];
+        let own = crate::local::Net { own: vec!["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()], ..Default::default() };
         let at = |ips: &[&str]| ips.iter().map(|i| std::net::SocketAddr::new(i.parse().unwrap(), 443)).collect::<Vec<_>>();
         for ips in [
             &["10.0.0.7"][..], &["127.0.0.1"], &["::1"], &["169.254.169.254"], &["100.64.0.7"], &["fd00::5"],

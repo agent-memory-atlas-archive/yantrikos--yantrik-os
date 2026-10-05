@@ -6,15 +6,21 @@
 //!
 //! | `op` | with | does |
 //! |---|---|---|
-//! | `status` | — | the mode, Private mode, the rules, and `modes`: each mode's word and the plain words the desktop shows for it, the least strict first, one marked recommended |
+//! | `status` | — | the mode, Private mode, the rules, `kernel_current`, and `modes`: each mode's word and the plain words the desktop shows for it, the least strict first, one marked recommended |
 //! | `seen` | — | every destination, most recent first |
 //! | `proposals` | — | destinations refused with no rule for them |
-//! | `mode` | `mode`: `audit` / `guarded` / `enforce` | switches the whole policy |
+//! | `mode` | `mode`: `audit` / `guarded` / `enforce` | switches the whole policy; answers `kernel_current` |
 //! | `private` | `on` | the person's Private mode |
 //! | `allow` | `rule` | adds or replaces a rule |
 //! | `seed` | `rules` | root only: replaces the seeded rules (`crate::seed`), never the person's |
 //! | `remove` | `host` | removes that host's rules |
 //! | `forget` | `host`, `port` | drops a destination from the ledger (the person said No) |
+//!
+//! `kernel_current` is whether the kernel's table has caught up with the mode and Private mode
+//! (`State::kernel_current`): the proxy follows a switch at once, the kernel a moment later, when
+//! `yantrik-mind-egress.path` has run `apply`. Until then the mind's DNS and the status file are
+//! still the old mode's. `null`: no status file to read. A desktop can ask `status` again until it
+//! is `true`.
 
 use std::sync::{Arc, Mutex};
 
@@ -47,6 +53,7 @@ pub fn handle(state: &Mutex<State>, request: &Value, root: bool) -> Value {
             "mode": s.policy.mode,
             "private": s.private,
             "rules": s.policy.rules,
+            "kernel_current": s.kernel_current(),
             "modes": Mode::ALL.map(|m| json!({ "mode": m, "label": m.label(), "recommended": m.recommended() })),
         }),
         "seen" => json!({ "ok": true, "seen": s.ledger.list() }),
@@ -57,7 +64,9 @@ pub fn handle(state: &Mutex<State>, request: &Value, root: bool) -> Value {
         "mode" => match serde_json::from_value::<Mode>(request["mode"].clone()) {
             Ok(m) => {
                 s.policy.mode = m;
-                saved(s.save_policy())
+                let mut answer = saved(s.save_policy());
+                answer["kernel_current"] = json!(s.kernel_current());
+                answer
             }
             Err(_) => json!({ "ok": false, "error": "mode is `audit`, `guarded` or `enforce`" }),
         },

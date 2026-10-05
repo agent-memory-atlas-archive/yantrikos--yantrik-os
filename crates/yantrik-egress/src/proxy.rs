@@ -8,7 +8,9 @@
 //!    the name; on the public door, whether a `lan` rule names it — `crate::door`) — a lookup is
 //!    a message to whoever serves the name, so nothing is resolved that may not be reached;
 //! 4. the name is resolved here, the mind resolves nothing itself, and every address it gave is
-//!    classed: this machine's own, loopback and the like go nowhere;
+//!    classed: this machine's own, loopback and the like go nowhere; an address on a prefix this
+//!    machine is on, or one of its routers, is the local network whatever its range
+//!    (`crate::local::place`);
 //! 5. the door's verdict (the public door: the internet only), then the policy's, counted
 //!    either way;
 //! 6. the connection, then bytes both ways until either end closes or both are quiet for
@@ -28,7 +30,7 @@ use tokio::sync::Semaphore;
 
 use crate::door::Door;
 use crate::ledger::Outcome;
-use crate::policy::{place_of, Place, Verdict};
+use crate::policy::{Place, Verdict};
 use crate::request::{self, Target};
 use crate::state::State;
 
@@ -50,6 +52,26 @@ pub struct Proxy {
     pub local: SocketAddr,
     /// Which door this listener is.
     pub door: Door,
+    /// The network around it, and how names are looked up.
+    pub world: World,
+}
+
+/// What the proxy asks of the machine around it: the kernel's word on its network (read on every
+/// connection, so a network change is seen by the next one), and, for a test, names it answers
+/// itself.
+#[derive(Clone, Copy)]
+pub struct World {
+    pub net: fn() -> Option<crate::local::Net>,
+    /// `Some` is the answer (empty: did not resolve); `None` asks the system's resolver.
+    pub names: fn(&str) -> Option<Vec<IpAddr>>,
+}
+
+fn system_names(_: &str) -> Option<Vec<IpAddr>> {
+    None
+}
+
+impl World {
+    pub const REAL: World = World { net: crate::local::addresses, names: system_names };
 }
 
 /// Serve one listener. `open` is shared by both doors: [`MOST_OPEN`] is for the proxy as a whole.
@@ -188,51 +210,61 @@ async fn one(proxy: &Proxy, stream: &mut TcpStream, peer: SocketAddr) -> Result<
         Target::Http { host, port, .. } => (host.clone(), *port, true),
     };
 
-    // 3. What needs no lookup.
+    // 3. What needs no lookup. An address that is never a destination is refused as that, in
+    // every mode: no rule could reach it, so it is never a proposal.
+    let net = (proxy.world.net)();
+    if net.is_none() {
+        tracing::warn!("this machine's own addresses could not be read; every local-network address is refused");
+    }
+    let literal = host.parse::<IpAddr>().ok().map(|ip| classify(&[SocketAddr::new(ip, port)], net.as_ref()).0);
     let early = {
         let Ok(s) = proxy.state.lock() else { return Err("state poisoned") };
-        s.policy.before_resolve(&host, port, http, s.private).or_else(|| proxy.door.before_resolve(&s.policy, &host))
+        match s.policy.before_resolve(&host, port, http, s.private).or_else(|| proxy.door.before_resolve(&s.policy, &host)) {
+            Some(Verdict::Refuse(_)) if literal == Some(Place::Forbidden) && !s.private => {
+                Some((s.policy.decide(&host, port, http, Place::Forbidden, false), Outcome::Barred))
+            }
+            v => v.map(|v| (v, Outcome::Refused)),
+        }
     };
-    if let Some(Verdict::Refuse(why)) = early {
+    if let Some((Verdict::Refuse(why), outcome)) = early {
         tracing::info!(door = proxy.door.name(), host, port, why, "refused");
-        proxy.record(&host, port, Outcome::Refused, false, http, &why);
+        proxy.record(&host, port, outcome, false, http, &why);
         let _ = reply(stream, 403, &why).await;
         return Err("refused before resolving");
     }
 
     // 4. Resolved here — or not at all, for an address — and every address classed.
-    let addrs: Vec<SocketAddr> = match host.parse::<IpAddr>() {
-        Ok(ip) => vec![SocketAddr::new(ip, port)],
-        Err(_) => match tokio::time::timeout(RESOLVE_TIME, tokio::net::lookup_host((host.as_str(), port))).await {
+    let addrs: Vec<SocketAddr> = match (host.parse::<IpAddr>(), (proxy.world.names)(&host)) {
+        (Ok(ip), _) => vec![SocketAddr::new(ip, port)],
+        (Err(_), Some(ips)) => ips.into_iter().map(|ip| SocketAddr::new(ip, port)).collect(),
+        (Err(_), None) => match tokio::time::timeout(RESOLVE_TIME, tokio::net::lookup_host((host.as_str(), port))).await {
             Ok(Ok(a)) => a.collect(),
             _ => Vec::new(),
         },
     };
     if addrs.is_empty() {
+        // Counted, but never a proposal: no rule makes a name resolve.
         let why = format!("{host} did not resolve");
         tracing::info!(door = proxy.door.name(), host, port, why, "refused");
-        proxy.record(&host, port, Outcome::Refused, false, http, &why);
+        proxy.record(&host, port, Outcome::Barred, false, http, &why);
         let _ = reply(stream, 502, &why).await;
         return Err("did not resolve");
     }
-    let own = crate::local::addresses();
-    if own.is_none() {
-        tracing::warn!("this machine's own addresses could not be read; every local-network address is refused");
-    }
-    let (place, usable) = classify(&addrs, own.as_deref());
+    let (place, usable) = classify(&addrs, net.as_ref());
 
     // 5. The verdict: the door's, then the policy's. Private mode is the policy's word, first.
-    let verdict = {
+    let (verdict, private) = {
         let Ok(s) = proxy.state.lock() else { return Err("state poisoned") };
-        match s.policy.decide(&host, port, http, place, s.private) {
+        let verdict = match s.policy.decide(&host, port, http, place, s.private) {
             Verdict::Refuse(why) => Verdict::Refuse(why),
             allow => proxy.door.after_resolve(&host, place).unwrap_or(allow),
-        }
+        };
+        (verdict, s.private)
     };
-    let (outcome, why) = match &verdict {
-        Verdict::Allow { audit: true } => (Outcome::Audited, ""),
-        Verdict::Allow { audit: false } => (Outcome::Allowed, ""),
-        Verdict::Refuse(why) => (Outcome::Refused, why.as_str()),
+    let outcome = Outcome::of(&verdict, place, private);
+    let why = match &verdict {
+        Verdict::Refuse(why) => why.as_str(),
+        Verdict::Allow { .. } => "",
     };
     proxy.record(&host, port, outcome, place == Place::Lan, http, why);
     tracing::info!(door = proxy.door.name(), host, port, ?outcome, why, "decided");
@@ -298,17 +330,12 @@ async fn one(proxy: &Proxy, stream: &mut TcpStream, peer: SocketAddr) -> Result<
     Ok(())
 }
 
-/// Where `addrs` lead, and which of them to connect to. Nothing that is never a destination (this
-/// machine's own `own` included); a name that gives both kinds is reached at its internet
-/// addresses only, so the verdict is for the place it is actually reached at.
-pub fn classify(addrs: &[SocketAddr], own: Option<&[IpAddr]>) -> (Place, Vec<SocketAddr>) {
-    let class = |a: &SocketAddr| {
-        if crate::local::is_own(a.ip(), own) {
-            Place::Forbidden
-        } else {
-            place_of(a.ip())
-        }
-    };
+/// Where `addrs` lead from this machine on `net`, and which of them to connect to. Nothing that
+/// is never a destination (this machine's own addresses included); an address on one of its
+/// prefixes, or one of its routers, is the local network; a name that gives both kinds is reached
+/// at its internet addresses only, so the verdict is for the place it is actually reached at.
+pub fn classify(addrs: &[SocketAddr], net: Option<&crate::local::Net>) -> (Place, Vec<SocketAddr>) {
+    let class = |a: &SocketAddr| crate::local::place(a.ip(), net);
     let usable: Vec<SocketAddr> = addrs.iter().copied().filter(|a| class(a) != Place::Forbidden).collect();
     let place = if usable.is_empty() {
         Place::Forbidden

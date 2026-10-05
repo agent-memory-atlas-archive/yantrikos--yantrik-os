@@ -315,6 +315,37 @@ The kernel table lets the mind account reach both ports on `127.0.0.1` (`MIND_LO
   answers them as `modes`): *Watch only: everything allowed and recorded* (audit); *Home network
   closed, internet open* (guarded, Recommended); *Only places I approve* (enforce).
 
+- **The home network is more than the private ranges.** A dual-stack home gives every device a
+  global IPv6 address from the ISP's prefix (the NAS at `2a02:8070:abcd:1::20`), and some homes and
+  most servers sit on a public IPv4 subnet. So the proxy reads, with this machine's own addresses
+  (`getifaddrs`), the prefix each interface is on (its netmask) and every router in the kernel's
+  route tables (`/proc/self/net/route` and `ipv6_route`), on every connection, so a network
+  change is seen by the next one. An address on one of those prefixes, or a router's, is the
+  local network, whatever range it is in (`local::place`): in every mode and on both doors, only
+  a `lan` rule reaches it, on the endpoint door only. An address carried inside another (mapped,
+  NAT64, 6to4) is judged by the one it carries.
+
+  **Known limit: the router's public address.** A request to the home's own public WAN IPv4
+  address hairpins back through the router (often to its admin page). That address is on no
+  interface of this machine, and finding it means asking something outside ("what is my IP?"),
+  which the proxy never does. To the proxy it is the internet: allowed in guarded and audit,
+  reached in enforce only by a rule. A router that answers its admin page on the WAN side is
+  exposed to the whole internet anyway.
+
+- **A tunnel-only rule is stricter for plain http (guarded).** In guarded, a host no rule names
+  is reached over plain `http://` and tunnels alike. A rule for it decides instead: a rule with
+  `http: false` (say `api.x.ai:443`, tunnels only) refuses a plain-http request to that host on
+  that port, which with no rule would have been allowed. That is the rule doing what it says; to
+  allow plain http too, the rule says `http: true`.
+
+- **The kernel follows a switch a moment later.** The proxy decides by the new mode the moment
+  the control socket's `mode` returns. The kernel's table (DNS above all) and the status file
+  follow when `yantrik-mind-egress.path` sees `policy.yaml` change and runs `apply`, normally
+  well under a second; until then they are still the old mode's, which is never wider than the
+  mode being left. The `mode` answer, and every `status` answer, carry `kernel_current`: whether
+  the status file names this mode and Private mode and was written no earlier than the policy
+  file (`null` when there is no status file). A desktop can ask again until it is `true`.
+
 ### 4. Asking, instead of silently failing
 
 When the mind connects somewhere no rule allows, the proxy refuses at once with `403` and a body
@@ -326,6 +357,13 @@ version 2. The shell shows the proposal as an ordinary approval card:
 A phone can answer the card like any other, since cards reach channels. Only the person's answer
 writes a rule. This is OpenShell's Policy Advisor, done through the approvals we already have.
 Repeated attempts to one host make one card, not a stream.
+
+A refusal no rule could answer is counted (as `refused`, and as `barred` in the ledger) but is
+never a proposal, in any mode: a name that did not resolve (a typo, a dead link), a name that
+resolves only to an address that is never a destination (a Pi-hole's `0.0.0.0` for a blocked
+tracker, `127.0.0.1`), and a literal one (`127.0.0.1:7450`). Asking the person about those would
+be a question whose Yes changes nothing. In enforce, a name with no rule is still refused before
+it is looked up, so it is a proposal as before: a rule could answer it.
 
 ### 5. What a mind may rely on
 

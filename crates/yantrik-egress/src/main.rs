@@ -205,7 +205,7 @@ async fn run() -> Result<(), String> {
     for (addr, door) in [(listen, door::Door::Endpoint), (public_listen, door::Door::Public)] {
         let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| format!("{addr}: {e}"))?;
         let local = listener.local_addr().map_err(|e| e.to_string())?;
-        doors.push((listener, Arc::new(proxy::Proxy { state: state.clone(), serve_uid, local, door })));
+        doors.push((listener, Arc::new(proxy::Proxy { state: state.clone(), serve_uid, local, door, world: proxy::World::REAL })));
     }
     let (public, endpoint) = (doors.pop().ok_or("no public door")?, doors.pop().ok_or("no endpoint door")?);
     tokio::join!(proxy::serve(endpoint.0, endpoint.1, open.clone()), proxy::serve(public.0, public.1, open));

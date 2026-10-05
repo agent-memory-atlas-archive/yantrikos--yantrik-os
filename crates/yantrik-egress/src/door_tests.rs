@@ -2,8 +2,12 @@
 //! `CONNECT` and an absolute-form `GET` on each. Nothing here is reached: an allowed request ends
 //! in 502 (the address did not answer, or the name did not resolve) or a tunnel, a refused one in
 //! 403 before any connection is made — which is the difference under test.
+//!
+//! The proxy sees this machine's real network plus a home on a global IPv6 prefix and a public
+//! IPv4 subnet ([`home`]), and answers a few names itself ([`names`]); every other name goes to the
+//! system's resolver.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -13,7 +17,8 @@ use tokio::net::{TcpListener, TcpStream};
 use crate::door::Door;
 use crate::ledger::Seen;
 use crate::policy::{Mode, Policy, Rule};
-use crate::proxy::{self, Proxy};
+use crate::local::Net;
+use crate::proxy::{self, Proxy, World};
 use crate::state::State;
 
 struct Doors {
@@ -24,6 +29,30 @@ struct Doors {
 
 fn lan(host: &str, ports: &[u16]) -> Rule {
     Rule { host: host.into(), ports: ports.to_vec(), http: true, lan: true, why: "one of the Mind's endpoints".into(), seeded: true }
+}
+
+/// This machine's network, and on it: the ISP's global prefix 2a02:8070:abcd:1::/64, a public IPv4
+/// subnet 81.2.69.160/28, and two routers outside both, 81.2.69.1 and 2a02:8070:abcd::1.
+fn home() -> Option<Net> {
+    let mut net = crate::local::addresses()
+        .unwrap_or_else(|| Net { own: vec!["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()], ..Net::default() });
+    net.links.push(("2a02:8070:abcd:1::".parse().unwrap(), 64));
+    net.links.push(("81.2.69.160".parse().unwrap(), 28));
+    net.gateways.extend(["81.2.69.1".parse::<IpAddr>().unwrap(), "2a02:8070:abcd::1".parse().unwrap()]);
+    Some(net)
+}
+
+fn names(host: &str) -> Option<Vec<IpAddr>> {
+    let ips: &[&str] = match host {
+        "nas.home.example" => &["2a02:8070:abcd:1::20"],
+        "printer.home.example" => &["81.2.69.170"],
+        "router.home.example" => &["81.2.69.1"],
+        // A Pi-hole's answer for a blocked name.
+        "sink.example.com" => &["0.0.0.0"],
+        "nonexistent.invalid" => &[],
+        _ => return None,
+    };
+    Some(ips.iter().map(|i| i.parse().unwrap()).collect())
 }
 
 async fn start(name: &str, policy: Policy) -> Doors {
@@ -40,7 +69,7 @@ async fn start(name: &str, policy: Policy) -> Doors {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let local = listener.local_addr().unwrap();
         at.push(local);
-        tokio::spawn(proxy::serve(listener, Arc::new(Proxy { state: state.clone(), serve_uid, local, door }), open.clone()));
+        tokio::spawn(proxy::serve(listener, Arc::new(Proxy { state: state.clone(), serve_uid, local, door, world: World { net: home, names } }), open.clone()));
     }
     Doors { endpoint: at[0], public: at[1], state }
 }
@@ -173,6 +202,77 @@ async fn guarded_lets_the_internet_through_both_doors_and_never_the_home_network
     assert_eq!(both(d.endpoint, "192.0.2.7:22").await, [403, 403], "endpoint: not its port");
     let proposals: Vec<String> = { let s = d.state.lock().unwrap(); s.ledger.proposals(&s.policy) }.into_iter().map(|s| s.host).collect();
     assert!(!proposals.iter().any(|h| h == "1.1.1.1"), "nothing public is a proposal: {proposals:?}");
+}
+
+fn proposals(d: &Doors) -> Vec<String> {
+    let s = d.state.lock().unwrap();
+    s.ledger.proposals(&s.policy).into_iter().map(|s| s.host).collect()
+}
+
+/// A home device on the ISP's global IPv6 prefix, on a public IPv4 subnet this machine is on, or
+/// the router itself, is the home network: refused without a lan rule in every mode, and on the
+/// public door always.
+#[tokio::test]
+async fn a_home_device_on_a_global_prefix_or_the_router_is_the_home_network() {
+    let home_devices = [
+        "nas.home.example:445", "[2a02:8070:abcd:1::20]:445", "[2a02:8070:abcd:1::99]:5000", "printer.home.example:631",
+        "81.2.69.170:631", "[::ffff:81.2.69.170]:631", "[64:ff9b::5102:45aa]:631", "router.home.example:80", "81.2.69.1:80",
+        "[2a02:8070:abcd::1]:443",
+    ];
+    for mode in Mode::ALL {
+        let d = start(&format!("home-{mode:?}"), Policy { mode, rules: vec![] }).await;
+        for door in [d.endpoint, d.public] {
+            for authority in home_devices {
+                assert_eq!(both(door, authority).await, [403, 403], "{mode:?}: {authority}");
+            }
+        }
+        if mode != Mode::Enforce {
+            let s = seen(&d, "nas.home.example", 445);
+            assert!(s.lan && s.why.contains("local network"), "{mode:?}: counted as the home network: {s:?}");
+            assert!(proposals(&d).iter().any(|h| h == "nas.home.example"), "{mode:?}: and asked about");
+        }
+    }
+    // In guarded, a rule without lan does not open it; one with lan does, on the endpoint door only.
+    let mut p = Policy { mode: Mode::Guarded, rules: vec![] };
+    p.allow(Rule { host: "nas.home.example".into(), ports: vec![445], http: true, lan: false, why: "files".into(), seeded: false }).unwrap();
+    let d = start("home-guarded-rule", p).await;
+    for door in [d.endpoint, d.public] {
+        assert_eq!(both(door, "nas.home.example:445").await, [403, 403], "a rule without lan");
+    }
+    let mut p = Policy { mode: Mode::Guarded, rules: vec![] };
+    p.seed(vec![lan("nas.home.example", &[445])]).unwrap();
+    let d = start("home-guarded-lan", p).await;
+    assert_eq!(both(d.endpoint, "nas.home.example:445").await, [502, 502], "endpoint: the lan rule");
+    assert_eq!(both(d.public, "nas.home.example:445").await, [403, 403], "public: never");
+    // The internet is still the internet.
+    for code in both(d.public, "1.1.1.1:9").await {
+        assert_ne!(code, 403);
+    }
+}
+
+/// What no rule could reach is counted but never asked about: a name that did not resolve, one
+/// that resolves to a sinkhole's 0.0.0.0, and this machine's own ports.
+#[tokio::test]
+async fn what_no_rule_could_reach_is_never_a_proposal() {
+    for mode in Mode::ALL {
+        let d = start(&format!("barred-{mode:?}"), Policy { mode, rules: vec![] }).await;
+        let want = if mode == Mode::Enforce { 403 } else { 502 };
+        assert_eq!(both(d.endpoint, "nonexistent.invalid:443").await, [want, want], "{mode:?}");
+        for authority in ["sink.example.com:443", "127.0.0.1:7450", "[::1]:7450", "0.0.0.0:443"] {
+            assert_eq!(both(d.endpoint, authority).await, [403, 403], "{mode:?}: {authority}");
+        }
+        assert_eq!(both(d.endpoint, "192.168.4.42:8080").await, [403, 403], "{mode:?}");
+        let mut want = vec!["192.168.4.42"];
+        if mode == Mode::Enforce {
+            // Refused unresolved, for want of a rule: a rule could answer these.
+            want.extend(["nonexistent.invalid", "sink.example.com"]);
+        }
+        let mut got = proposals(&d);
+        got.sort();
+        want.sort();
+        assert_eq!(got, want, "{mode:?}");
+        assert_eq!(seen(&d, "127.0.0.1", 7450).refused, 2, "{mode:?}: still counted");
+    }
 }
 
 #[tokio::test]
