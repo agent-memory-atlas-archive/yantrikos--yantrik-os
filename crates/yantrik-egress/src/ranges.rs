@@ -37,6 +37,30 @@ fn ranges() -> &'static Ranges {
     })
 }
 
+/// Whether `ip` is in one of `cidrs` (`"10.0.0.0/8"`, `"fc00::/7"`), each of its own family.
+pub fn in_cidrs(ip: IpAddr, cidrs: &[&str]) -> bool {
+    cidrs.iter().any(|c| match ip {
+        IpAddr::V4(v4) => c.parse_v4().is_some_and(|(n, l)| l == 0 || (u32::from(v4) ^ n) >> (32 - l) == 0),
+        IpAddr::V6(v6) => c.parse_v6().is_some_and(|(n, l)| l == 0 || (u128::from(v6) ^ n) >> (128 - l) == 0),
+    })
+}
+
+trait Cidr {
+    fn parse_v4(&self) -> Option<(u32, u32)>;
+    fn parse_v6(&self) -> Option<(u128, u32)>;
+}
+
+impl Cidr for &str {
+    fn parse_v4(&self) -> Option<(u32, u32)> {
+        let (n, l) = self.split_once('/')?;
+        Some((u32::from(n.parse::<std::net::Ipv4Addr>().ok()?), l.parse().ok().filter(|l| *l <= 32)?))
+    }
+    fn parse_v6(&self) -> Option<(u128, u32)> {
+        let (n, l) = self.split_once('/')?;
+        Some((u128::from(n.parse::<std::net::Ipv6Addr>().ok()?), l.parse().ok().filter(|l| *l <= 128)?))
+    }
+}
+
 /// Whether `ip` is in one of the ranges. An IPv4 address written as IPv6 (`::ffff:a.b.c.d`) is
 /// judged by the IPv4 one.
 pub fn special(ip: IpAddr) -> bool {
@@ -58,6 +82,24 @@ pub fn special(ip: IpAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The twin: yantrik-mind's `deploy/private_ranges.json` at 55842db ("Every browser script
+    /// guarded, WebSockets fail closed, 6to4 and Teredo refused, …"). sha256 of each array as
+    /// compact JSON (`["0.0.0.0/8","10.0.0.0/8",…]`), there and here. A change to this copy fails
+    /// here; change the Mind's file in the same breath and pin its new hashes.
+    const TWIN_V4_SHA256: &str = "d9d605b737d44aee91f44b885949fd9e810124906b7b1933ef9141d456b5b8cc";
+    const TWIN_V6_SHA256: &str = "d65a0b3dc0bdc058a9eeccef63966f2645305fc0ddd7e28d86dabdea5046ee5a";
+
+    #[test]
+    fn the_list_is_its_twins() {
+        use sha2::{Digest, Sha256};
+        let list: List = serde_json::from_str(include_str!("../private_ranges.json")).unwrap();
+        let hash = |v: &Vec<String>| {
+            Sha256::digest(serde_json::to_string(v).unwrap().as_bytes()).iter().map(|b| format!("{b:02x}")).collect::<String>()
+        };
+        assert_eq!(hash(&list.v4), TWIN_V4_SHA256, "v4 drifted from yantrik-mind deploy/private_ranges.json");
+        assert_eq!(hash(&list.v6), TWIN_V6_SHA256, "v6 drifted from yantrik-mind deploy/private_ranges.json");
+    }
 
     #[test]
     fn the_list_reads_and_holds_what_is_not_the_internet() {

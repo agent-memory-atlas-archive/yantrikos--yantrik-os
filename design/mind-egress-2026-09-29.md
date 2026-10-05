@@ -203,6 +203,31 @@ which the table lets out. The mind's unit sets `HTTPS_PROXY`, `HTTP_PROXY` and `
   such a rule, in either mode. In the same way, `{host: 127.0.0.1, ports: [11434], lan: true}`
   opens a local Ollama to the mind (a **loopback entry**); without it the mind cannot reach one.
 
+- **Seeded rules.** Until the person can write `lan` rules from the desktop, every
+  `yantrik-update reconcile` (and `apply`) seeds them for the LAN services this machine is already
+  set up to use, so an upgrade does not cut a model on the home GPU box, Home Assistant, a SearXNG
+  or a Tailscale peer. Sources are only files the person or root owns, **never the mind's own
+  settings** (a mind must not shape its own policy): `/opt/yantrik/config.yaml` (`api_base_url`,
+  the providers' `base_url`, the fallback's), the desktop owner's `~/.config/yantrik/settings.yaml`
+  (the web search URL) and `providers.yaml`, read as the owner, and root's
+  `/etc/yantrik/mind-person.env` (`YM_SEARXNG_URL`, `YM_HA_URL`, `YM_LOCAL_OLLAMA_URL`,
+  `YM_OLLAMA_LOCAL_URL`, `YM_NIM_BASE_URL`, `YM_FACE_ML_URL`, `YM_CRITIC_URL`, `YM_WEFT_URL`,
+  `YM_IMMICH_URL`). Each URL whose host is not the internet (a literal private address, a name
+  under `.local`, `.home.arpa`, `.internal` or `.lan`, or a name that resolves only to private
+  addresses, Tailscale's included) becomes `{host, ports: [port], http: scheme == http, lan: true,
+  why: "seeded from <source>"}`, marked `seeded`. The proxy's own code makes the plan
+  (`yantrik-egress seed-plan`, as its account, with the one list of ranges); root checks it again
+  and hands it to the control socket's `seed` op, which only root may use and which replaces the
+  seeded rules and never the person's own. A loopback URL is never seeded (opening one is the
+  person's call, section 1). The reconcile prints `seeded N lan rule(s): …`. A person who removes
+  a seeded rule sees it come back while its source still names it; changing the source is what
+  takes it away.
+- **The ranges have a twin.** `crates/yantrik-egress/private_ranges.json` is a copy of the Mind's
+  `deploy/private_ranges.json`; a test pins the sha256 of both arrays to the Mind's file at
+  55842db, so a change on either side fails until both are changed. The direct-entry ranges are
+  written twice too (`DIRECT_RANGES` in `direct.rs`, the updater's root check), and the updater's
+  selftest holds them equal.
+
 - **Two modes.** The whole policy starts in **audit**: everything is let through, and every
   destination is counted. After a week, Settings → Minds → *Where the Mind connects* shows what it
   reached, and how often, with Allow / Block beside each. Moving to **enforce** is a switch the

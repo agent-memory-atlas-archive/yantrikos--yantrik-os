@@ -17,6 +17,8 @@
 //!
 //! `yantrik-egress direct [STATE_DIR]` prints the direct set instead and exits: where the kernel
 //! lets the mind account connect without this proxy (`direct`, `yantrik-update mind-egress`).
+//! `yantrik-egress seed-plan` reads `<source> <url>` lines and prints which become seeded `lan`
+//! rules (`seed`, `yantrik-update`'s seeding).
 
 mod control;
 mod direct;
@@ -27,6 +29,7 @@ mod policy;
 mod proxy;
 mod ranges;
 mod request;
+mod seed;
 mod state;
 
 use std::net::SocketAddr;
@@ -65,8 +68,18 @@ fn main() {
             }
             return;
         }
+        Some("seed-plan") if args.len() == 1 => {
+            use std::io::Read;
+            let mut input = String::new();
+            if std::io::stdin().take(64 * 1024).read_to_string(&mut input).is_err() {
+                eprintln!("yantrik-egress seed-plan: stdin is not text");
+                std::process::exit(1);
+            }
+            print!("{}", seed::plan_text(&input));
+            return;
+        }
         Some(_) => {
-            eprintln!("usage: yantrik-egress            the proxy, configured by its unit's environment\n       yantrik-egress direct [DIR]   print the direct set from the policy in DIR");
+            eprintln!("usage: yantrik-egress            the proxy, configured by its unit's environment\n       yantrik-egress direct [DIR]   print the direct set from the policy in DIR\n       yantrik-egress seed-plan      <source> <url> lines on stdin: which become seeded lan rules");
             std::process::exit(2);
         }
     }

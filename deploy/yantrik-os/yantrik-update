@@ -782,6 +782,7 @@ from it. Change it with: yantrik-update set-channel nightly" ;;
     reconcile_mind_units || true
     reconcile_private_dirs || true
     private_config || true
+    reconcile_egress_seeds || true
     reconcile_mind_egress || true
     return 0
   fi
@@ -2030,6 +2031,185 @@ Environment=EGRESS_OWNER_UID=$owner_uid"
     systemctl restart yantrik-egress.service >/dev/null 2>&1 || warn "yantrik-egress.service did not start"
   else
     systemctl start yantrik-egress.service >/dev/null 2>&1 || warn "yantrik-egress.service did not start"
+  fi
+  reconcile_egress_seeds
+  return 0
+}
+
+# ── Seeded lan rules ─────────────────────────────────────────────────────────────────────
+#
+# The egress proxy refuses every address that is not the internet without a rule that says `lan`,
+# in every mode (crates/yantrik-egress/src/policy.rs). Until the person can write such rules from
+# the desktop, the LAN services this machine is already set up to use would stop at the upgrade:
+# a model on the home GPU box, Home Assistant, a SearXNG, a Tailscale peer. So each reconcile seeds
+# them, from configuration the person or root owns and never from the mind's own settings (a mind
+# must not shape its own policy):
+#   * $PREFIX/config.yaml: the model endpoints (api_base_url, providers' base_url, the fallback's);
+#   * the desktop owner's ~/.config/yantrik/settings.yaml (the web search URL) and providers.yaml,
+#     read as the owner;
+#   * /etc/yantrik/mind-person.env, root's: SEED_ENV_KEYS.
+# Each URL whose host leads to the local network or another private range becomes
+# `{host, ports: [port], http: scheme == http, lan: true, why: "seeded from <source>"}`, marked
+# seeded. The proxy's own code decides which (`yantrik-egress seed-plan`, as the proxy's account:
+# one list of ranges, and names looked up); root checks the plan again here and hands it to the
+# control socket's `seed` op, which root alone may use and which replaces the seeded rules and never
+# the person's own. A literal LAN address then is a direct entry too; a name stays on the proxy.
+EGRESS_CONTROL_SOCKET=/run/yantrik-egress/control
+MIND_PERSON_ENV=/etc/yantrik/mind-person.env
+SEED_ENV_KEYS="YM_SEARXNG_URL YM_HA_URL YM_LOCAL_OLLAMA_URL YM_OLLAMA_LOCAL_URL YM_NIM_BASE_URL YM_FACE_ML_URL YM_CRITIC_URL YM_WEFT_URL YM_IMMICH_URL"
+
+# `<label>:<yaml|env>:<path>` files, each opened without following a link and read only when it
+# is a regular file owned by one of the uids in argv[1]; prints `<label>:<key> <url>` for the keys
+# that name endpoints. Only URLs ever leave it, never a key or a secret beside them.
+PY_SEED_CANDIDATES='
+import os, re, stat, sys
+owners = {int(u) for u in sys.argv[1].split(",") if u}
+env_keys = sys.argv[2].split()
+yaml_re = re.compile(r"^\s*(?:-\s+)?(api_base_url|base_url|searxng_url)\s*:\s*[\"\x27]?(https?://[^\"\x27\s#]+)")
+env_re = re.compile(r"^\s*(?:export\s+)?(" + "|".join(re.escape(k) for k in env_keys) + r")\s*=\s*[\"\x27]?(https?://[^\"\x27\s#]+)")
+out = []
+for spec in sys.argv[3:]:
+    label, kind, path = spec.split(":", 2)
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        continue
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid not in owners or st.st_size > 1048576:
+            continue
+        text = os.read(fd, 1048576).decode("utf-8", "replace")
+    finally:
+        os.close(fd)
+    pattern = yaml_re if kind == "yaml" else env_re
+    for line in text.split("\n"):
+        m = pattern.match(line)
+        if m:
+            e = "%s:%s %s" % (label, m.group(1), m.group(2))
+            if e not in out:
+                out.append(e)
+for e in out[:32]:
+    print(e)
+'
+
+# The plan `yantrik-egress seed-plan` printed (stdin), checked again, then either printed as the
+# rules it makes (argv[1] = "-") or handed to the control socket at argv[1]. Prints one line of
+# what was seeded and one of what was not; exits 1, saying why, when it cannot.
+PY_SEED_APPLY='
+import ipaddress, json, re, socket, sys
+most = 16
+name_re = re.compile(r"^(?=.{1,253}$)[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$")
+source_re = re.compile(r"^[A-Za-z0-9_.:-]{1,80}$")
+rules, skipped = [], []
+for line in sys.stdin.read().split("\n"):
+    f = line.split(" ")
+    if f == [""]:
+        continue
+    if f[0] == "skip" and len(f) >= 4:
+        skipped.append("%s (%s): %s" % (f[2], f[1], " ".join(f[3:])))
+        continue
+    if f[0] != "seed" or len(f) != 5 or f[3] not in ("http", "https") or not source_re.match(f[4]):
+        print("the seeding plan has a line that is not a seed: nothing was seeded")
+        sys.exit(1)
+    host, port = f[1], f[2]
+    if "%" in host:
+        print("the seeding plan names an address with a scope id: nothing was seeded")
+        sys.exit(1)
+    try:
+        ip = ipaddress.ip_address(host)
+        if ip.is_global or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified:
+            skipped.append("%s (%s): not a private address to this check" % (ip, f[4]))
+            continue
+    except ValueError:
+        if not name_re.match(host):
+            print("the seeding plan names a host that is not one: nothing was seeded")
+            sys.exit(1)
+    if not (port.isascii() and port.isdigit() and len(port) <= 5 and 1 <= int(port) <= 65535):
+        print("the seeding plan names a port that is not 1-65535: nothing was seeded")
+        sys.exit(1)
+    rule = {"host": host, "ports": [int(port)], "http": f[3] == "http", "lan": True, "why": "seeded from " + f[4]}
+    if not any(r["host"] == host and r["ports"] == rule["ports"] for r in rules):
+        rules.append(rule)
+if len(rules) > most:
+    print("%d seeds, more than %d: nothing was seeded" % (len(rules), most))
+    sys.exit(1)
+if sys.argv[1] == "-":
+    print(json.dumps(rules))
+else:
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(10)
+        s.connect(sys.argv[1])
+        s.sendall((json.dumps({"op": "seed", "rules": rules}) + "\n").encode())
+        buf = b""
+        while not buf.endswith(b"\n") and len(buf) < 1048576:
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+        answer = json.loads(buf.decode("utf-8", "replace") or "{}")
+    except (OSError, ValueError) as e:
+        print("the egress proxy did not take the seeds (%s)" % type(e).__name__)
+        sys.exit(1)
+    if not answer.get("ok"):
+        print("the egress proxy refused the seeds: %s" % str(answer.get("error", "?"))[:200])
+        sys.exit(1)
+    rules = answer.get("seeded") or []
+print("seeded %d lan rule(s)%s" % (len(rules), (": " + ", ".join("%s:%s (%s)" % (r["host"], r["ports"][0], r["why"][len("seeded from "):]) for r in rules)) if rules else ""))
+if skipped:
+    print("not seeded: " + "; ".join(skipped))
+'
+
+# `<source> <url>` lines from the person's and root's own configuration. Arguments, so the
+# selftest can hand it a tree of its own: config.yaml, the owner's home and uid, mind-person.env.
+seed_candidates() { # <config.yaml> <owner home> <owner uid> <owner gid> <mind-person.env>
+  local cfg="$1" home="$2" ouid="$3" ogid="$4" penv="$5" py setpriv roots=0
+  py="$(command -v python3)" || return 1
+  # Run as root (every real run), root's files are root's. Run as anyone else (the selftest), it
+  # reads only what that account could read anyway, and its own files stand in for root's.
+  [ "$(id -u)" = 0 ] || roots="0,$(id -u)"
+  # config.yaml is the person's until it is split (#397 c), or root's: either may have written it.
+  "$py" -I -c "$PY_SEED_CANDIDATES" "$roots,$ouid" "" "config.yaml:yaml:$cfg"
+  "$py" -I -c "$PY_SEED_CANDIDATES" "$roots" "$SEED_ENV_KEYS" "mind-person.env:env:$penv"
+  [ -n "$home" ] && [ -n "$ouid" ] || return 0
+  set -- "settings.yaml:yaml:$home/.config/yantrik/settings.yaml" "providers.yaml:yaml:$home/.config/yantrik/providers.yaml"
+  if [ "$(id -u)" = 0 ]; then
+    # The person's own files, read as the person: their home is theirs to arrange.
+    setpriv="$(command -v setpriv)" || return 0
+    env -i "$setpriv" --reuid="$ouid" --regid="$ogid" --clear-groups --no-new-privs -- \
+      "$py" -I -c "$PY_SEED_CANDIDATES" "$ouid" "" "$@" 9>&-
+  elif [ "$(id -u)" = "$ouid" ]; then
+    "$py" -I -c "$PY_SEED_CANDIDATES" "$ouid" "" "$@"
+  fi
+}
+
+# Seed, as root, through the running proxy. Says what it seeded in the reconcile's output.
+reconcile_egress_seeds() {
+  [ "$(id -u)" = 0 ] || return 0
+  tree_is_roots || return 0
+  [ -x "$BIN_DIR/yantrik-egress" ] || return 0
+  local owner home="" ouid="" ogid="" euid egid candidates plan result i
+  owner="$(desktop_owner)"
+  case "$owner" in
+    ''|root|*[!a-z0-9_-]*) ;;
+    *) home="$(getent passwd "$owner" | cut -d: -f6)"; ouid="$(id -u "$owner" 2>/dev/null)"; ogid="$(id -g "$owner" 2>/dev/null)" ;;
+  esac
+  case "$ouid:$ogid" in *[!0-9:]*|0:*) home=""; ouid=""; ogid="" ;; esac
+  euid="$(id -u yantrik-egress 2>/dev/null)"; egid="$(id -g yantrik-egress 2>/dev/null)"
+  case "$euid:$egid" in :*|*:|0:*|*:0|*[!0-9:]*) return 0 ;; esac
+  candidates="$(seed_candidates "$PREFIX/config.yaml" "$home" "$ouid" "$ogid" "$MIND_PERSON_ENV")"
+  plan="$(printf '%s\n' "$candidates" | env -i "$(command -v setpriv)" --reuid="$euid" --regid="$egid" \
+    --clear-groups --no-new-privs -- "$BIN_DIR/yantrik-egress" seed-plan 2>/dev/null 9>&-)" \
+    || { warn "could not plan the seeded lan rules; the LAN services this machine uses may be refused to the mind"; return 0; }
+  # The proxy may be starting (reconcile_egress just restarted it).
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    [ -S "$EGRESS_CONTROL_SOCKET" ] && break
+    sleep 0.5
+  done
+  if result="$(printf '%s\n' "$plan" | python3 -I -c "$PY_SEED_APPLY" "$EGRESS_CONTROL_SOCKET")"; then
+    printf '%s\n' "$result" | while IFS= read -r line; do info "$line"; done
+  else
+    warn "$result"
   fi
   return 0
 }
@@ -3561,8 +3741,85 @@ loopback 127.0.0.1 11434")"
     t "mind-egress: ... and checks the table is loaded before it starts" "nft list table inet yantrik_mind_egress" "$(grep '^ExecStartPre=+' "$mind_unit")"
   fi
 
+  # The direct-set ranges are written twice, in the proxy (direct.rs, DIRECT_RANGES) and in the
+  # root check above (PY_MIND_DIRECT): the two must be the same list.
+  local direct_rs; direct_rs="$(dirname "$0")/../../crates/yantrik-egress/src/direct.rs"
+  if [ -f "$direct_rs" ]; then
+    is "mind-egress: the root check takes exactly the ranges the proxy makes direct entries from" \
+      "$(grep 'pub const DIRECT_RANGES' "$direct_rs" | grep -oE '"[0-9a-f.:]+/[0-9]+"' | tr -d '"' | sort | tr '\n' ' ')" \
+      "$(printf '%s\n' "$PY_MIND_DIRECT" | grep -oE '"[0-9a-f.:]+/[0-9]+"' | tr -d '"' | sort | tr '\n' ' ')"
+  fi
+
+  # Seeded lan rules: the endpoints the person and root configured, never the mind's own.
+  local sd="$root/seed" cands plan
+  mkdir -p "$sd/opt" "$sd/home/.config/yantrik" "$sd/etc" "$sd/mind/.config"
+  printf '%s\n' 'llm:' '  backend: api' '  api_base_url: "http://192.168.4.35:11434/v1"' '  api_key: sk-not-for-the-plan' \
+    '  fallback:' '    api_base_url: "http://127.0.0.1:8341/v1"' '  providers:' '    - id: openai' \
+    '      base_url: https://api.openai.com/v1' > "$sd/opt/config.yaml"
+  printf '%s\n' 'web_search:' '  service: searxng' '  searxng_url: http://192.168.4.42:8888' > "$sd/home/.config/yantrik/settings.yaml"
+  printf '%s\n' 'providers:' '  - base_url: "http://gpu.lan:11434/v1"' '    api_key: "sk-also-not"' > "$sd/home/.config/yantrik/providers.yaml"
+  printf '%s\n' 'YM_HA_URL=http://homeassistant.local:8123' 'export YM_SEARXNG_URL="http://192.168.4.42:8888"' \
+    'YM_SOMETHING_ELSE=http://10.9.9.9:80' > "$sd/etc/mind-person.env"
+  printf '%s\n' 'YM_SEARXNG_URL=http://192.168.77.77:8888' 'YM_LOCAL_OLLAMA_URL=http://192.168.77.78:11434' > "$sd/mind/.config/yantrik-mind.env"
+  cands="$(seed_candidates "$sd/opt/config.yaml" "$sd/home" "$(id -u)" "$(id -g)" "$sd/etc/mind-person.env")"
+  t "seed: config.yaml's model endpoint is a candidate" "config.yaml:api_base_url http://192.168.4.35:11434/v1" "$cands"
+  t "seed: ... and its providers'" "config.yaml:base_url https://api.openai.com/v1" "$cands"
+  t "seed: the person's web search URL" "settings.yaml:searxng_url http://192.168.4.42:8888" "$cands"
+  t "seed: the person's providers" "providers.yaml:base_url http://gpu.lan:11434/v1" "$cands"
+  t "seed: mind-person.env's named keys" "mind-person.env:YM_HA_URL http://homeassistant.local:8123" "$cands"
+  is "seed: ... and only those" "no" "$(printf '%s' "$cands" | grep -q 10.9.9.9 && echo yes || echo no)"
+  is "seed: no key or secret ever leaves the files" "no" "$(printf '%s' "$cands" | grep -q 'sk-' && echo yes || echo no)"
+  is "seed: the mind's own settings are never read" "no" "$(printf '%s' "$cands" | grep -q '192.168.77' && echo yes || echo no)"
+  is "seed: ... nor named by the seeding at all" "0" \
+    "$(declare -f seed_candidates reconcile_egress_seeds | grep -c 'yantrik-mind\|/var/lib/yantrik-mind\|YM_ENV_PATH')"
+  ln -s "$sd/opt/config.yaml" "$sd/opt/linked.yaml"
+  is "seed: a file that is a link is not followed" "" "$(seed_candidates "$sd/opt/linked.yaml" "" "" "" "$sd/none")"
+
+  # The root check of a plan, without the proxy: a stand-in plan.
+  plan="$(printf '%s\n' 'seed 192.168.4.35 11434 http config.yaml:api_base_url' 'seed homeassistant.local 8123 http mind-person.env:YM_HA_URL' \
+    'seed 8.8.8.8 443 https config.yaml:base_url' 'skip config.yaml:base_url api.openai.com public')"
+  res="$(printf '%s\n' "$plan" | python3 -I -c "$PY_SEED_APPLY" -)"
+  t "seed: a LAN endpoint in the plan is seeded, http as it was" '{"host": "192.168.4.35", "ports": [11434], "http": true, "lan": true, "why": "seeded from config.yaml:api_base_url"}' "$res"
+  t "seed: ... a .local name too" '"host": "homeassistant.local"' "$res"
+  is "seed: a public address in the plan is not, whatever the plan says" "no" "$(printf '%s' "$res" | grep -q '"8.8.8.8"' && echo yes || echo no)"
+  t "seed: ... and says so" "8.8.8.8 (config.yaml:base_url): not a private address to this check" "$res"
+  t "seed: what the plan skipped is said too" "api.openai.com (config.yaml:base_url): public" "$res"
+  local badplan
+  for badplan in 'seed *.lan 80 http x' 'seed 192.168.4.35 0 http x' 'seed fd00::5%eth0 80 http x' 'seed a.lan 80 ftp x' \
+                 'seed a.lan 80 http has space' 'allow a.lan 80 http x' 'seed Bad_Host.lan 80 http x'; do
+    is "seed: a plan with '$badplan' seeds nothing" "1" "$(printf '%s\n' "$badplan" | python3 -I -c "$PY_SEED_APPLY" - >/dev/null; echo $?)"
+  done
+  is "seed: more than 16 seeds is none" "1" \
+    "$(for i in $(seq 1 17); do echo "seed 10.0.0.$i 80 http x"; done | python3 -I -c "$PY_SEED_APPLY" - >/dev/null; echo $?)"
+
+  # Handed to the control socket as one `seed` op, nothing else (a stand-in proxy records it). That
+  # a re-seed keeps the person's own rules is the proxy's: policy::tests and control::tests.
+  ( python3 -I -c '
+import json, socket, sys
+s = socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(1); s.settimeout(10)
+c, _ = s.accept(); buf = b""
+while not buf.endswith(b"\n"):
+    buf += c.recv(65536)
+open(sys.argv[2], "wb").write(buf)
+req = json.loads(buf)
+c.sendall((json.dumps({"ok": True, "seeded": req["rules"]}) + "\n").encode())' "$sd/control" "$sd/request" & )
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do [ -S "$sd/control" ] && break; sleep 0.1; done
+  res="$(printf '%s\n' "$plan" | python3 -I -c "$PY_SEED_APPLY" "$sd/control")"
+  is "seed: one request, the seed op with the checked rules only" "seed 2 192.168.4.35,homeassistant.local" \
+    "$(python3 -I -c 'import json,sys; r=json.load(open(sys.argv[1])); print(r["op"], len(r["rules"]), ",".join(x["host"] for x in r["rules"]))' "$sd/request" 2>&1)"
+  t "seed: the reconcile says what was seeded" "seeded 2 lan rule(s): 192.168.4.35:11434 (config.yaml:api_base_url), homeassistant.local:8123 (mind-person.env:YM_HA_URL)" "$res"
+
   # The real reader, from a real policy file, when one is handed over (CI does, after cargo build).
   if [ -n "${YANTRIK_EGRESS_BIN:-}" ] && [ -x "${YANTRIK_EGRESS_BIN:-}" ]; then
+    plan="$(printf '%s\n' "$cands" | "$YANTRIK_EGRESS_BIN" seed-plan)"
+    res="$(printf '%s\n' "$plan" | python3 -I -c "$PY_SEED_APPLY" -)"
+    t "seed (real planner): a LAN api_base_url is seeded" '"host": "192.168.4.35", "ports": [11434], "http": true' "$res"
+    t "seed (real planner): ... the person's SearXNG" '"host": "192.168.4.42", "ports": [8888]' "$res"
+    t "seed (real planner): ... a .lan and a .local name" '"host": "gpu.lan"' "$res"
+    t "seed (real planner): ... " '"host": "homeassistant.local"' "$res"
+    is "seed (real planner): a public one is not" "no" "$(printf '%s' "$res" | grep -q '"api.openai.com"' && echo yes || echo no)"
+    is "seed (real planner): nor this machine's own llama-server (loopback is the person's to open)" "no" \
+      "$(printf '%s' "$res" | grep -q '"127.0.0.1"' && echo yes || echo no)"
     local st="$me/state" ans rc
     mkdir -p "$st"
     printf '%s\n' 'mode: enforce' 'rules:' \

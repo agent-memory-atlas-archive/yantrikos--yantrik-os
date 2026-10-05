@@ -45,19 +45,16 @@ fn literal(host: &str) -> Option<IpAddr> {
     })
 }
 
-/// Whether `ip` may be in the direct set: an IPv4 address on the local network (10/8, 172.16/12,
-/// 192.168/16, and 100.64/10, which is CGNAT and Tailscale's), or a unique-local IPv6 one
-/// (fc00::/7). Only these: an address that is "local" only because of the IPv4 address carried
-/// inside it (NAT64, 6to4) leaves this machine as a packet to a router. The updater accepts
-/// exactly these ranges again, as root.
+/// The ranges a direct entry may be in: the local network (10/8, 172.16/12, 192.168/16, and
+/// 100.64/10, which is CGNAT and Tailscale's) and unique-local IPv6 (fc00::/7). Only these: an
+/// address that is "local" only because of the IPv4 address carried inside it (NAT64, 6to4) leaves
+/// this machine as a packet to a router. The updater accepts exactly these again, as root
+/// (PY_MIND_DIRECT in deploy/yantrik-os/yantrik-update); its selftest holds the two lists equal,
+/// so keep this one on one line.
+pub const DIRECT_RANGES: [&str; 5] = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "fc00::/7"];
+
 fn direct_address(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            let o = v4.octets();
-            v4.is_private() || (o[0] == 100 && (64..128).contains(&o[1]))
-        }
-        IpAddr::V6(v6) => (v6.segments()[0] & 0xfe00) == 0xfc00,
-    }
+    crate::ranges::in_cidrs(ip, &DIRECT_RANGES)
 }
 
 /// What a rule makes in the kernel's table, if anything.
@@ -119,7 +116,7 @@ mod tests {
     use crate::policy::{Mode, Rule};
 
     fn rule(host: &str, ports: &[u16], lan: bool) -> Rule {
-        Rule { host: host.into(), ports: ports.to_vec(), http: true, lan, why: "because".into() }
+        Rule { host: host.into(), ports: ports.to_vec(), http: true, lan, why: "because".into(), seeded: false }
     }
 
     #[test]
