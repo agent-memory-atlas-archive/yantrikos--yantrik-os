@@ -98,11 +98,14 @@ impl<'a> Published<'a> {
 }
 
 /// `text` with every control, bidi and format character drawn as a visible escape: `\n`, `\r`,
-/// `\t`, and `<U+XXXX>` for the rest. Nothing else changes, so what is shown is what was sent.
+/// `\t`, and `<U+XXXX>` for the rest — and a backslash as `\\`, so a `\n` the caller typed reads
+/// `\\n` and cannot pass for a newline it sent. Nothing else changes, so what is shown is what was
+/// sent.
 pub fn visible(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
         match c {
+            '\\' => out.push_str("\\\\"),
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
@@ -220,9 +223,11 @@ pub struct Consequences {
     /// One line pinned above the buttons: "Deletes: <the app's name for the target>", else
     /// "Deletes: <the arguments>". Empty for a call with neither.
     pub what: String,
-    /// Every argument exactly as the grant binds it, shown plainly, `; ` between them: drawn in
-    /// full on the card's face whenever the pinned line cannot carry it (it names a target, or
-    /// it is cut at the card's edge).
+    /// Every argument exactly as the grant binds it, shown plainly, `; ` between them. Pinned in
+    /// full, wrapped, above the buttons whenever the line above cannot carry it — it names a
+    /// target, or it is cut at the card's edge — so no part of what the grant binds is ever only
+    /// reachable by scrolling (review of #639). Bounded by `approvals::args_rows`: eight values of
+    /// sixty characters and an "and N more" line.
     pub exactly: String,
     /// "Undo: not possible, the app says so", the caller-only form, or empty.
     pub undo: String,

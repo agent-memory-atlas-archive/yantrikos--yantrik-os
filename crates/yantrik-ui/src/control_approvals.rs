@@ -915,44 +915,13 @@ fn explained_in(address: &str, action: &str, args: &serde_json::Value) -> String
 /// one wrapped paragraph and never the app's own layout. The length bound is the store's
 /// (`EXPLAINED_CHARS`, applied in `Store::request`), so the cut names the true length once.
 fn sanitised_explanation(raw: &str) -> String {
-    /// Unicode's format characters (general category Cf), none of which draws anything. Among
-    /// them the bidi controls — the embeds and overrides (U+202A–U+202E), the isolates
-    /// (U+2066–U+2069), the directional marks (U+200E, U+200F) and the Arabic letter mark
-    /// (U+061C) — which change how the rest of a line reads; and the other invisibles a line can
-    /// hide words behind: zero-width spaces and joiners, the word joiner and invisible
-    /// operators, the byte-order mark, the soft hyphen, the interlinear annotation marks and the
-    /// tag characters.
-    fn is_format_character(c: char) -> bool {
-        matches!(
-            c,
-            '\u{00AD}'
-                | '\u{0600}'..='\u{0605}'
-                | '\u{061C}'
-                | '\u{06DD}'
-                | '\u{070F}'
-                | '\u{0890}'..='\u{0891}'
-                | '\u{08E2}'
-                | '\u{180E}'
-                | '\u{200B}'..='\u{200F}'
-                | '\u{202A}'..='\u{202E}'
-                | '\u{2060}'..='\u{2064}'
-                | '\u{2066}'..='\u{206F}'
-                | '\u{FEFF}'
-                | '\u{FFF9}'..='\u{FFFB}'
-                | '\u{110BD}'
-                | '\u{110CD}'
-                | '\u{13430}'..='\u{1343F}'
-                | '\u{1BCA0}'..='\u{1BCA3}'
-                | '\u{1D173}'..='\u{1D17A}'
-                | '\u{E0001}'
-                | '\u{E0020}'..='\u{E007F}'
-        )
-    }
-
+    // Unicode's format characters (general category Cf), none of which draws anything — the bidi
+    // controls among them change how the rest of a line reads, and the other invisibles hide
+    // words — from the one shared list (`approvals::is_format_char`; review of #639).
     let mut out = String::with_capacity(raw.len());
     let mut gap = false;
     for c in raw.chars() {
-        if is_format_character(c) || (c.is_control() && !c.is_whitespace()) {
+        if approvals::is_format_char(c) || (c.is_control() && !c.is_whitespace()) {
             continue; // dropped without a trace: nothing invisible survives the label
         }
         if c.is_whitespace() {
@@ -1823,11 +1792,13 @@ pub(crate) fn row_for(card: Card) -> crate::ApprovalRequest {
         },
         // One model entry per sentence, one single-line `Text` per entry, for the same reason
         // the arguments are a list: the card's height has to be arithmetic.
+        // Escaped like the arguments: `grade_note` quotes the caller's own grade string, and a
+        // newline in it must not draw a line in the pinned red row (review of #639).
         discrepancies: ModelRc::new(VecModel::from(
             card.verified
                 .discrepancies
-                .into_iter()
-                .map(slint::SharedString::from)
+                .iter()
+                .map(|d| slint::SharedString::from(approval_wording::visible(d)))
                 .collect::<Vec<_>>(),
         )),
         app: card.app.into(),
@@ -3508,7 +3479,11 @@ mod target_line_tests {
         let row = super::row_for(Card {
             id: "appr-10".into(),
             requester: "pi".into(),
-            verified: Verified::default(),
+            // `grade_note` quotes the caller's own grade string.
+            verified: Verified {
+                discrepancies: vec!["Caller said `x\nUndo: possible`; the app publishes `dangerous`.".into()],
+                ..Verified::default()
+            },
             app: "system-monitor".into(),
             action: "kill_process".into(),
             grade: "dangerous".into(),
@@ -3529,6 +3504,8 @@ mod target_line_tests {
         });
         let mut lines: Vec<String> = vec![row.what.to_string(), row.exactly.to_string(), row.target.to_string(), row.explained.to_string()];
         lines.extend(row.args.iter().map(|a| a.to_string()));
+        lines.extend(row.discrepancies.iter().map(|d| d.to_string()));
+        assert!(row.discrepancies.row_data(0).unwrap().contains("x\\nUndo: possible"), "the discrepancy's newline is shown");
         for line in &lines {
             assert!(
                 !line.chars().any(|c| c.is_control() || yantrik_ipc_transport::plain_text::is_bidi_control(c) || c == '\u{2028}'),

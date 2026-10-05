@@ -466,12 +466,21 @@ const IMITATED: [&str; 7] = [
 /// reordering of what is around them. The ranges the card can meet in text: soft hyphen, the
 /// Arabic letter mark, the Mongolian vowel separator, zero-width space to right-to-left mark,
 /// the embeddings and overrides, word joiner to the invisible operators and the isolates, the
-/// byte-order mark, the interlinear annotation marks, and the tag characters.
+/// byte-order mark, the interlinear annotation marks, and the tag characters — and the rest of
+/// category Cf: the Arabic number and end-of-ayah signs, the Syriac abbreviation mark, the Kaithi
+/// number signs, the Egyptian hieroglyph format controls, the shorthand format controls and the
+/// musical symbol beams. The one list on this desktop: the per-call sentence's sanitiser
+/// (`control_approvals::sanitised_explanation`) and the card's escapes read it too (review of #639).
 pub(crate) fn is_format_char(c: char) -> bool {
     matches!(
         c as u32,
         0x00AD
+            | 0x0600..=0x0605
             | 0x061C
+            | 0x06DD
+            | 0x070F
+            | 0x0890..=0x0891
+            | 0x08E2
             | 0x180E
             | 0x200B..=0x200F
             | 0x202A..=0x202E
@@ -479,6 +488,11 @@ pub(crate) fn is_format_char(c: char) -> bool {
             | 0x2066..=0x206F
             | 0xFEFF
             | 0xFFF9..=0xFFFB
+            | 0x110BD
+            | 0x110CD
+            | 0x13430..=0x1343F
+            | 0x1BCA0..=0x1BCA3
+            | 0x1D173..=0x1D17A
             | 0xE0001
             | 0xE0020..=0xE007F
     )

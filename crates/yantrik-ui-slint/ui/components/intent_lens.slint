@@ -200,13 +200,15 @@ export component ApprovalCard inherits Rectangle {
     // was already at its bottom — and a person could not answer the card at all.
     //
     // So whoever draws the card says how tall it may be, and the card keeps that promise by
-    // making ONE part of itself yield: the middle — the whole sentence, the exact name, the
-    // app's word about this call, every argument in full, Details and source — which scrolls.
-    // Above it a floor is pinned, each line elided rather than scrolled away: who is asking (the
-    // fact and the claim), any discrepancy, and the action's sentence. Below it what changes, the
-    // undo line, the warning and the buttons are pinned, each a bounded line or two (review of
-    // #639, S1; on main the pinned identity rows alone outgrew the Lens's 240px and pushed the
-    // buttons out of the card, over the transcript). Every host passes a limit: the Lens its
+    // making ONE part of itself yield: the middle — the whole sentence and the whole of the app's
+    // word about this call when their pinned lines were cut, the exact name, the agent, Details
+    // and source — which scrolls. Above it a floor is pinned, each line elided rather than
+    // scrolled away: who is asking (the fact and the claim), any discrepancy, and the action's
+    // sentence. Below it are pinned what changes — with every argument the grant binds, in full,
+    // whenever the one-line summary of them cannot carry it — the first line of the app's word
+    // about the call, the undo line, the warning and the buttons (review of #639; on main the
+    // pinned identity rows alone outgrew the Lens's 240px and pushed the buttons out of the
+    // card, over the transcript). Nothing the grant covers is ever only reachable by scrolling. Every host passes a limit: the Lens its
     // panel's arithmetic, the top-right corner the screen between the bars (about 684px at
     // 1280×800). Only an agent's pane, which scrolls itself, leaves the out-of-reach default.
     // Not called `max-height`: that name belongs to the Rectangle this inherits from, where it
@@ -512,23 +514,11 @@ export component ApprovalCard inherits Rectangle {
                 }
             }
 
-            // What the app says about THIS call, with these arguments (#137): on the card's face,
-            // in the app's name, because some calls cannot be judged from their arguments alone
-            // (review of #639, S2). Already sanitised and bounded in the shell, and escaped.
-            if root.data.explained != "" : Text {
+            // The whole of what the app says about THIS call (#137), when its pinned first line
+            // below had to cut it.
+            if root.data.explained != "" && explained-line.preferred-width > explained-line.width : Text {
                 width: parent.width;
-                text: "The app says about this call: " + root.data.explained;
-                color: Theme.text-primary;
-                font-size: Theme.fs-body;
-                wrap: word-wrap;
-            }
-
-            // Every argument, exactly as the grant binds it, shown plainly — whenever the pinned
-            // line below does not already carry all of it: it names a target instead, or it is cut
-            // at the card's edge. Escaped value by value before they were joined.
-            if root.data.exactly != "" && (root.data.target != "" || what-line.preferred-width > what-line.width) : Text {
-                width: parent.width;
-                text: "Exactly: " + root.data.exactly;
+                text: explained-line.text;
                 color: Theme.text-primary;
                 font-size: Theme.fs-body;
                 wrap: word-wrap;
@@ -736,11 +726,15 @@ export component ApprovalCard inherits Rectangle {
 
             // ── What changes: pinned above the buttons ──
             //
-            // One line that says what the call acts on, cut at the card's edge if it must be (the
-            // whole of it is then in the section above), the undo line in the warning's red, and
-            // the warning when there is one the undo line does not already say. Each is text the
-            // shell bounded and escaped, so this block's height is a known handful of lines
-            // however long the arguments are (review of #639, S1).
+            // One line that says what the call acts on; when that line names a target, or is cut
+            // at the card's edge, every argument the grant binds, in full and wrapped — never in
+            // the part that scrolls, so nothing the grant covers is out of reach while Allow can be
+            // pressed (re-review of #639: "…temporary files now &…" over a red Run command, with
+            // "rm -rf ~/x" scrolled to nowhere). The arguments are bounded in the shell (eight
+            // values of sixty characters and an "and N more" line) and escaped value by value, and
+            // the card grows past its limit rather than drop a pinned line. Then the first line of
+            // the app's word about this call, the undo line in the warning's red, and the warning
+            // when there is one the undo line does not already say.
             changes := VerticalLayout {
                 spacing: Theme.sp-1;
 
@@ -752,6 +746,25 @@ export component ApprovalCard inherits Rectangle {
                     overflow: elide;
                     visible: root.data.what != "";
                     height: root.data.what != "" ? self.preferred-height : 0px;
+                }
+                if root.data.exactly != "" && (root.data.target != "" || what-line.preferred-width > what-line.width) : Text {
+                    width: parent.width;
+                    text: "Exactly: " + root.data.exactly;
+                    color: Theme.text-primary;
+                    font-size: Theme.fs-body;
+                    wrap: word-wrap;
+                }
+                // What the app says about THIS call, with these arguments (#137), in the app's
+                // name: some calls cannot be judged from their arguments alone (review of #639,
+                // S2). Its first line, pinned; the whole of it is in the section above when cut.
+                explained-line := Text {
+                    text: "The app says about this call: " + root.data.explained;
+                    color: Theme.text-primary;
+                    font-size: Theme.fs-body;
+                    wrap: no-wrap;
+                    overflow: elide;
+                    visible: root.data.explained != "";
+                    height: root.data.explained != "" ? self.preferred-height : 0px;
                 }
                 if root.data.undo != "" : Text {
                     text: root.data.undo;

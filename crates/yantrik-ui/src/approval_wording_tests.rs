@@ -120,7 +120,15 @@ fn no_argument_or_target_can_draw_a_line_or_reorder_the_rest() {
     // The target — an event title can come from an invitation — the same.
     let c = consequences("delete_event", app(DELETE_EVENT), DELETE_EVENT, "id 01a0 is \u{201c}Lunch\nUndo: possible\u{201d}", &["id: 01a0".into()]);
     assert!(!c.what.contains('\n') && c.what.contains("Lunch\\nUndo: possible"), "{}", c.what);
-    assert_eq!(visible("C:\\Users\ttab"), "C:\\Users\\ttab", "a tab is drawn as an escape, other text as it is");
+    assert_eq!(visible("C:\\Users\ttab"), "C:\\\\Users\\ttab", "a backslash and a tab are escapes, other text as it is");
+    // A `\n` the caller typed is not the newline it might have sent.
+    assert_ne!(visible("a\\nb"), visible("a\nb"));
+    assert_eq!(visible("a\\nb"), "a\\\\nb");
+    // The shared Cf list reaches the rest of the category (review of #639).
+    for c in ['\u{0600}', '\u{06DD}', '\u{070F}', '\u{0890}', '\u{08E2}', '\u{110BD}', '\u{13430}', '\u{1BCA0}', '\u{1D173}'] {
+        assert!(approvals::is_format_char(c), "{c:?}");
+        assert_eq!(visible(&format!("a{c}b")), format!("a<U+{:04X}>b", c as u32));
+    }
 }
 
 /// The verified fact first, built from the walk's structured findings; the self-declared name

@@ -272,7 +272,11 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     // The worst case for the floor: eight arguments at their longest, the session row under the
     // buttons, a discrepancy and the app's word about the call. The arguments may only yield;
     // the identity line, the claim, the discrepancy, the sentence and the buttons are all drawn.
-    let long: Vec<String> = (0..8).map(|i| format!("argument{i}: {}", "v".repeat(60))).collect();
+    // The last one ends "wv", so its tail can be changed to "vw" — the same glyphs, the same
+    // width — without moving a line break, and the change is found where the tail is drawn.
+    let long: Vec<String> = (0..8)
+        .map(|i| if i == 7 { format!("argument{i}: {}wv", "v".repeat(58)) } else { format!("argument{i}: {}", "v".repeat(60)) })
+        .collect();
     let crowded = ApprovalRequest {
         args: lines(&long.iter().map(String::as_str).collect::<Vec<_>>()),
         what: format!("Runs: {}", long.join("; ")).into(),
@@ -297,6 +301,42 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     );
     let runs = row_drawn_above(crowded.clone(), &|c: &mut ApprovalRequest| c.what = format!("Ends: {}", long.join("; ")).into(), "the pinned \"Runs:\" line, eight long arguments");
     assert!(who.1 < claim.0 && claim.1 < doubt.0 && doubt.1 < said.0 && said.1 < runs.0, "fact, claim, discrepancy, sentence, then what changes: {who:?} {claim:?} {doubt:?} {said:?} {runs:?}");
+    // Re-review of #639: every argument the grant binds is on screen while Allow can be pressed —
+    // the last one's last character included, not scrolled to nowhere behind a cut line.
+    let mut last = long.clone();
+    last[7] = format!("argument7: {}vw", "v".repeat(58));
+    let tail = row_drawn_above(
+        crowded.clone(),
+        &|c: &mut ApprovalRequest| {
+            c.exactly = last.join("; ").into();
+            c.what = format!("Runs: {}", last.join("; ")).into();
+        },
+        "the last argument's tail, eight long arguments",
+    );
+    assert!(tail.0 > runs.0, "it is in the pinned arguments under the summary line: {tail:?}");
+    // The command a mind could hide behind a cut line: its dangerous end is drawn.
+    let rm = ApprovalRequest {
+        app: "shell".into(),
+        action: "agent_run".into(),
+        summary: "Run one command line in a fresh terminal of your own.".into(),
+        args: lines(&["command: echo cleaning temporary files now && rm -rf ~/x"]),
+        what: "Runs: command: echo cleaning temporary files now && rm -rf ~/x".into(),
+        exactly: "command: echo cleaning temporary files now && rm -rf ~/x".into(),
+        destructive: true,
+        confirm_label: "Run command".into(),
+        discrepancies: lines(&["The caller called this `standard`; the app publishes `sensitive`."]),
+        ..card(RUN_RECIPE_SUMMARY)
+    };
+    row_drawn_above(
+        rm.clone(),
+        &|c: &mut ApprovalRequest| {
+            c.what = "Runs: command: echo cleaning temporary files now && rm -rf ~/y".into();
+            c.exactly = "command: echo cleaning temporary files now && rm -rf ~/y".into();
+        },
+        "\"rm -rf ~/x\" at the end of the command",
+    );
+    ui.set_approvals(ModelRc::new(VecModel::from(vec![rm])));
+    save(&settle(w, width, height), &output.replace(".png", "-rm.png"), width, height)?;
     ui.set_approvals(ModelRc::new(VecModel::from(vec![crowded])));
     save(&settle(w, width, height), &output.replace(".png", "-eight-args.png"), width, height)?;
     let before = ui.get_allowed();
