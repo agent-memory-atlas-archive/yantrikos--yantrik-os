@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 use super::{expand, is_protected};
 
 /// The answer for `asked`, with `~` meaning `home`: `exists` true (with `kind`, `size`,
-/// `modified`), false with reason `not_found`, or "unknown" with reason `outside`, `protected`,
+/// `modified`, and `real`/`via_link`: where it resolved, and whether a link took it there), false with reason `not_found`, or "unknown" with reason `outside`, `protected`,
 /// `not_allowed`, `broken_link`, `hard_link` or `not_a_path`.
 pub fn stat(asked: &str, home: &Path) -> Value {
     let Some(path) = expand(asked.trim(), home) else {
@@ -54,7 +54,7 @@ pub fn stat(asked: &str, home: &Path) -> Value {
                     return unknown(asked, "protected");
                 }
                 if probe == path {
-                    return describe(&path, &real);
+                    return describe(&path, &real, through_a_link(&path, home));
                 }
                 return not_found(&path);
             }
@@ -72,8 +72,10 @@ pub fn stat(asked: &str, home: &Path) -> Value {
     }
 }
 
-/// What is at `real`, which `path` resolved to inside the home.
-fn describe(path: &Path, real: &Path) -> Value {
+/// What is at `real`, which `path` resolved to inside the home. `real` and `via_link` let a mind
+/// that cannot look for itself tell a file the person named from a link to somewhere else in the
+/// home: only the resolved path is the file that will be read.
+fn describe(path: &Path, real: &Path, via_link: bool) -> Value {
     match std::fs::metadata(real) {
         // A file with a second name is the same bytes as whatever that name is, and the other
         // name may be anywhere on the filesystem, ~/.ssh or /etc included: no link to follow
@@ -98,11 +100,20 @@ fn describe(path: &Path, real: &Path) -> Value {
                 "kind": kind,
                 "size": if meta.is_file() { Some(meta.len()) } else { None },
                 "modified": modified,
+                "real": real.to_string_lossy(),
+                "via_link": via_link,
             })
         }
         Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => not_found(path),
         Err(_) => unknown(&path.to_string_lossy(), "not_allowed"),
     }
+}
+
+/// Whether any part of `path` below `home` is a link: the file it names is then somewhere else.
+fn through_a_link(path: &Path, home: &Path) -> bool {
+    path.ancestors()
+        .take_while(|p| p.starts_with(home) && *p != home)
+        .any(|p| p.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink()))
 }
 
 #[cfg(unix)]

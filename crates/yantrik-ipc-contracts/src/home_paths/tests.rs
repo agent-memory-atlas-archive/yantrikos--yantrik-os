@@ -53,6 +53,22 @@ fn what_is_there_is_described() {
 }
 
 #[test]
+fn where_a_path_really_resolves_is_said_and_whether_a_link_took_it_there() {
+    let (_d, home) = home();
+    let v = stat("~/notes/today.txt", &home);
+    assert_eq!(v["real"], home.join("notes/today.txt").to_str().unwrap());
+    assert_eq!(v["via_link"], false);
+    symlink(home.join("notes/today.txt"), home.join("alias.txt")).unwrap();
+    symlink(home.join("notes"), home.join("shelf")).unwrap();
+    for asked in ["~/alias.txt", "~/shelf/today.txt"] {
+        let v = stat(asked, &home);
+        assert_eq!(v["exists"], true, "{asked}");
+        assert_eq!(v["real"], home.join("notes/today.txt").to_str().unwrap(), "{asked}");
+        assert_eq!(v["via_link"], true, "{asked}");
+    }
+}
+
+#[test]
 fn missing_is_false_and_says_so() {
     let (_d, home) = home();
     let v = stat("~/notes/tomorrow.txt", &home);
