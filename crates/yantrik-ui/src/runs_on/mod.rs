@@ -100,26 +100,29 @@ impl RunsOn {
         }
     }
 
-    /// Where words typed to this mind go, for the line under the chat composer:
-    /// "Yantrik Mind · deepseek-v4.1-flash · online, via Ollama Cloud";
-    /// "Yantrik Companion · qwen3.5:9b · on this machine". Empty when the provider is not known:
-    /// the line is an observed fact or nothing, never a guess.
+    /// Where words typed to this mind go, for the row above the chat composer's Send:
+    /// "Sends message text to: Ollama Cloud · deepseek-v4.1-flash";
+    /// "Stays on this machine · qwen3.5:9b". It says what leaves the machine (the message text;
+    /// the composer carries no attachments) and to whom. Empty when the provider is not known:
+    /// the line is an observed fact or nothing, never a guess (review of the UI overhaul by GPT-6
+    /// Astra, A).
     pub fn destination(&self) -> String {
-        let place = match &self.provider {
+        let to = |whom: String| format!("Sends message text to: {whom}");
+        let said = match &self.provider {
             _ if self.set_in == SetIn::Nowhere => return String::new(),
             ProviderRef::NotReported => return String::new(),
             // A local runtime named by the desktop's own address is this machine. Named only in a
             // mind's words ("ollama:qwen3.5:9b") it could be on any machine, so no place is said.
-            ProviderRef::Known(p) if p.kind == yantrik_ml::ProviderKind::Local && self.reported => format!("via {}", p.display_name),
-            ProviderRef::Known(p) if p.kind == yantrik_ml::ProviderKind::Local => "on this machine".to_string(),
-            ProviderRef::Known(p) => format!("online, via {}", p.display_name),
-            ProviderRef::Local(host) if identity::is_loopback(host) => "on this machine".to_string(),
-            ProviderRef::Local(host) => format!("on this network, at {host}"),
-            ProviderRef::Custom(host) => format!("online, via {host}"),
+            ProviderRef::Known(p) if p.kind == yantrik_ml::ProviderKind::Local && self.reported => to(p.display_name.to_string()),
+            ProviderRef::Known(p) if p.kind == yantrik_ml::ProviderKind::Local => "Stays on this machine".to_string(),
+            ProviderRef::Known(p) => to(p.display_name.to_string()),
+            ProviderRef::Local(host) if identity::is_loopback(host) => "Stays on this machine".to_string(),
+            ProviderRef::Local(host) => to(format!("{host}, on this network")),
+            ProviderRef::Custom(host) => to(host.to_string()),
         };
         match self.model.as_deref().filter(|m| !m.is_empty()) {
-            Some(m) => format!("{} \u{b7} {m} \u{b7} {place}", self.name),
-            None => format!("{} \u{b7} {place}", self.name),
+            Some(m) => format!("{said} \u{b7} {m}"),
+            None => said,
         }
     }
 

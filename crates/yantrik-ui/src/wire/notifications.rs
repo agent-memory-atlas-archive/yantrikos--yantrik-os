@@ -1199,10 +1199,24 @@ fn notify_companion_thought(text: &str) -> bool {
     let (title, body) = title_and_body(&cleaned);
     notify::send(
         notify::Notification::new("Yantrik Companion", title)
-            .body(body)
+            .body(reflection_body(&body))
             .urgency(Urgency::Low),
     );
     true
+}
+
+/// What kind of words an unprompted companion thought is, said on the card before the words
+/// themselves: nobody asked for it and a model wrote it (review of the UI overhaul by GPT-6
+/// Astra, E). In the body, so the toast, Today and the centre all carry it and none can drop it.
+const REFLECTION_TAG: &str = "AI-generated reflection";
+
+/// The body of an unprompted thought's notification, led by its tag.
+fn reflection_body(body: &str) -> String {
+    if body.is_empty() {
+        REFLECTION_TAG.to_string()
+    } else {
+        format!("{REFLECTION_TAG} \u{b7} {body}")
+    }
 }
 
 /// How much of a thought the body keeps. The store's bound is 2,000 (`MAX_BODY`); an unprompted
@@ -1277,6 +1291,17 @@ pub fn describe_summary() -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
+    /// An unprompted thought says what kind of words it is, first, whether or not it has a body.
+    #[test]
+    fn a_reflection_is_tagged_as_one() {
+        assert_eq!(super::reflection_body("Your 9:30 overlaps the standup."), "AI-generated reflection \u{b7} Your 9:30 overlaps the standup.");
+        assert_eq!(super::reflection_body(""), "AI-generated reflection");
+        let src = include_str!("notifications.rs");
+        let filer = &src[src.find(concat!("fn notify_companion_", "thought(")).unwrap()..];
+        let filer = &filer[..filer.find("\n}\n").unwrap()];
+        assert!(filer.contains(".body(reflection_body(&body))"), "the thought poster tags what it files");
+    }
+
     use super::*;
 
     fn situation(builtin: bool, in_flight: bool, lens: bool) -> ProactiveSituation {
