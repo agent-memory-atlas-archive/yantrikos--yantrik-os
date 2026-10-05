@@ -85,6 +85,12 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked
 
+      # The kernel's direct set for the mind account is read from the person's policy by the
+      # proxy's own code (`yantrik-egress direct`). The updater's selftest runs it on real policy
+      # files here, where it has just been built.
+      - name: The mind's direct set comes from the person's policy
+        run: YANTRIK_EGRESS_BIN=target/debug/yantrik-egress bash deploy/yantrik-os/yantrik-update selftest
+
   shell-scripts:
     name: shell scripts
     runs-on: ubuntu-latest
@@ -174,7 +180,20 @@ jobs:
       # where the update channel comes from, and that `.version` is written from the same string
       # as the BUILD marker — the pair that gave a machine two answers about its own version.
       - name: The updater agrees with itself about channel and version
-        run: bash deploy/yantrik-os/yantrik-update selftest
+        run: YANTRIK_NFT_OUT="$RUNNER_TEMP/mind-egress-nft" bash deploy/yantrik-os/yantrik-update selftest
+
+      # The tables the updater makes to hold the mind account to its egress proxy (with entries,
+      # in Private mode, and its fail-closed fallback), put to nft itself. `-c` checks the whole
+      # transaction in the kernel and commits nothing; it needs root for the netlink socket.
+      - name: nft accepts the mind's egress tables
+        run: |
+          sudo apt-get update > /dev/null
+          sudo apt-get install -y --no-install-recommends nftables > /dev/null
+          ls "$RUNNER_TEMP"/mind-egress-nft/*.nft > /dev/null
+          for f in "$RUNNER_TEMP"/mind-egress-nft/*.nft; do
+            echo "nft -c -f $(basename "$f")"
+            sudo nft -c -f "$f"
+          done
 
       # Intel Macs (the Mac mini 2012). A fake sysfs and dry runs: the Broadcom BCM4331 gets wl
       # when headers exist and b43 when they do not, each blacklisting the other, nothing is

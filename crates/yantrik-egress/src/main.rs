@@ -14,14 +14,22 @@
 //! | `EGRESS_CONTROL` | `/run/yantrik-egress/control` | the desktop's socket |
 //! | `EGRESS_SERVE_UID` | the uid of `yantrik-mind` | the one account served |
 //! | `EGRESS_OWNER_UID` | — | the desktop's owner, who may use the control socket beside root |
+//!
+//! `yantrik-egress direct [STATE_DIR]` prints the direct set instead and exits: where the kernel
+//! lets the mind account connect without this proxy (`direct`, `yantrik-update mind-egress`).
+//! `yantrik-egress seed-plan` reads `<source> <url>` lines and prints which become seeded `lan`
+//! rules (`seed`, `yantrik-update`'s seeding).
 
 mod control;
+mod direct;
 mod ledger;
 mod local;
 mod peer;
 mod policy;
 mod proxy;
+mod ranges;
 mod request;
+mod seed;
 mod state;
 
 use std::net::SocketAddr;
@@ -45,10 +53,45 @@ fn uid_of_user(name: &str) -> Option<u32> {
     (!pw.is_null()).then(|| unsafe { (*pw).pw_uid })
 }
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
-async fn main() {
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        None => {}
+        Some("direct") if args.len() <= 2 => {
+            let dir = args.get(1).map(PathBuf::from).unwrap_or_else(|| PathBuf::from(env("EGRESS_STATE", "/var/lib/yantrik-egress")));
+            match direct::export(&dir) {
+                Ok(text) => print!("{text}"),
+                Err(e) => {
+                    eprintln!("yantrik-egress direct: {e}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
+        Some("seed-plan") if args.len() == 1 => {
+            use std::io::Read;
+            let mut input = String::new();
+            if std::io::stdin().take(64 * 1024).read_to_string(&mut input).is_err() {
+                eprintln!("yantrik-egress seed-plan: stdin is not text");
+                std::process::exit(1);
+            }
+            print!("{}", seed::plan_text(&input));
+            return;
+        }
+        Some(_) => {
+            eprintln!("usage: yantrik-egress            the proxy, configured by its unit's environment\n       yantrik-egress direct [DIR]   print the direct set from the policy in DIR\n       yantrik-egress seed-plan      <source> <url> lines on stdin: which become seeded lan rules");
+            std::process::exit(2);
+        }
+    }
     tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env()).init();
-    if let Err(e) = run().await {
+    let runtime = match tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build() {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(error = %e, "yantrik-egress could not start its runtime");
+            std::process::exit(1);
+        }
+    };
+    if let Err(e) = runtime.block_on(run()) {
         tracing::error!(error = %e, "yantrik-egress stopped");
         std::process::exit(1);
     }

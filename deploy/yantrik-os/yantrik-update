@@ -24,6 +24,7 @@
 #   yantrik-update set-channel nightly|beta|stable           change the channel, once, here
 #   yantrik-update reconcile                                 base packages the image ships and this machine lacks
 #   yantrik-update migrate-minds                             move Yantrik Mind into its own account (#411), memory counted twice
+#   yantrik-update mind-egress apply                         hold the mind account to its egress proxy, in the kernel (root)
 #   yantrik-update selftest                                  offline checks of the two above
 #
 # It reads its defaults from /opt/yantrik/update.conf (CHANNEL=, HOST=, SCHEME=) when present.
@@ -612,6 +613,7 @@ cmd_migrate_ownership() {
   install_sudo_rule && remove_blanket_sudo || rc=$?
   reconcile_minds
   reconcile_devtools_guard
+  reconcile_mind_egress
   return "$rc"
 }
 
@@ -776,9 +778,12 @@ from it. Change it with: yantrik-update set-channel nightly" ;;
     reconcile_podman_socket || true
     reconcile_sudo_rule || true
     reconcile_minds || true
+    reconcile_mind_egress_units || true
     reconcile_mind_units || true
     reconcile_private_dirs || true
     private_config || true
+    reconcile_egress_seeds || true
+    reconcile_mind_egress || true
     return 0
   fi
 
@@ -2027,6 +2032,622 @@ Environment=EGRESS_OWNER_UID=$owner_uid"
   else
     systemctl start yantrik-egress.service >/dev/null 2>&1 || warn "yantrik-egress.service did not start"
   fi
+  reconcile_egress_seeds
+  return 0
+}
+
+# ── Seeded lan rules ─────────────────────────────────────────────────────────────────────
+#
+# The egress proxy refuses every address that is not the internet without a rule that says `lan`,
+# in every mode (crates/yantrik-egress/src/policy.rs). Until the person can write such rules from
+# the desktop, the LAN services this machine is already set up to use would stop at the upgrade:
+# a model on the home GPU box, Home Assistant, a SearXNG, a Tailscale peer. So each reconcile seeds
+# them, from configuration the person or root owns and never from the mind's own settings (a mind
+# must not shape its own policy):
+#   * $PREFIX/config.yaml: the model endpoints (api_base_url, providers' base_url, the fallback's);
+#   * the desktop owner's ~/.config/yantrik/settings.yaml (the web search URL) and providers.yaml,
+#     read as the owner;
+#   * /etc/yantrik/mind-person.env, root's: SEED_ENV_KEYS.
+# Each URL whose host leads to the local network or another private range becomes
+# `{host, ports: [port], http: scheme == http, lan: true, why: "seeded from <source>"}`, marked
+# seeded. The proxy's own code decides which (`yantrik-egress seed-plan`, as the proxy's account:
+# one list of ranges, and names looked up); root checks the plan again here and hands it to the
+# control socket's `seed` op, which root alone may use and which replaces the seeded rules and never
+# the person's own. A literal LAN address then is a direct entry too; a name stays on the proxy.
+EGRESS_CONTROL_SOCKET=/run/yantrik-egress/control
+MIND_PERSON_ENV=/etc/yantrik/mind-person.env
+SEED_ENV_KEYS="YM_SEARXNG_URL YM_HA_URL YM_LOCAL_OLLAMA_URL YM_OLLAMA_LOCAL_URL YM_NIM_BASE_URL YM_FACE_ML_URL YM_CRITIC_URL YM_WEFT_URL YM_IMMICH_URL"
+
+# `<label>:<yaml|env>:<path>` files, each opened without following a link and read only when it
+# is a regular file owned by one of the uids in argv[1]; prints `<label>:<key> <url>` for the keys
+# that name endpoints. Only URLs ever leave it, never a key or a secret beside them.
+PY_SEED_CANDIDATES='
+import os, re, stat, sys
+owners = {int(u) for u in sys.argv[1].split(",") if u}
+env_keys = sys.argv[2].split()
+yaml_re = re.compile(r"^\s*(?:-\s+)?(api_base_url|base_url|searxng_url)\s*:\s*[\"\x27]?(https?://[^\"\x27\s#]+)")
+env_re = re.compile(r"^\s*(?:export\s+)?(" + "|".join(re.escape(k) for k in env_keys) + r")\s*=\s*[\"\x27]?(https?://[^\"\x27\s#]+)")
+out = []
+for spec in sys.argv[3:]:
+    label, kind, path = spec.split(":", 2)
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        continue
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid not in owners or st.st_size > 1048576:
+            continue
+        text = os.read(fd, 1048576).decode("utf-8", "replace")
+    finally:
+        os.close(fd)
+    pattern = yaml_re if kind == "yaml" else env_re
+    for line in text.split("\n"):
+        m = pattern.match(line)
+        if m:
+            e = "%s:%s %s" % (label, m.group(1), m.group(2))
+            if e not in out:
+                out.append(e)
+for e in out[:32]:
+    print(e)
+'
+
+# The plan `yantrik-egress seed-plan` printed (stdin), checked again, then either printed as the
+# rules it makes (argv[1] = "-") or handed to the control socket at argv[1]. Prints one line of
+# what was seeded and one of what was not; exits 1, saying why, when it cannot.
+PY_SEED_APPLY='
+import ipaddress, json, re, socket, sys
+most = 16
+name_re = re.compile(r"^(?=.{1,253}$)[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$")
+source_re = re.compile(r"^[A-Za-z0-9_.:-]{1,80}$")
+rules, skipped = [], []
+for line in sys.stdin.read().split("\n"):
+    f = line.split(" ")
+    if f == [""]:
+        continue
+    if f[0] == "skip" and len(f) >= 4:
+        skipped.append("%s (%s): %s" % (f[2], f[1], " ".join(f[3:])))
+        continue
+    if f[0] != "seed" or len(f) != 5 or f[3] not in ("http", "https") or not source_re.match(f[4]):
+        print("the seeding plan has a line that is not a seed: nothing was seeded")
+        sys.exit(1)
+    host, port = f[1], f[2]
+    if "%" in host:
+        print("the seeding plan names an address with a scope id: nothing was seeded")
+        sys.exit(1)
+    try:
+        ip = ipaddress.ip_address(host)
+        if ip.is_global or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified:
+            skipped.append("%s (%s): not a private address to this check" % (ip, f[4]))
+            continue
+    except ValueError:
+        if not name_re.match(host):
+            print("the seeding plan names a host that is not one: nothing was seeded")
+            sys.exit(1)
+    if not (port.isascii() and port.isdigit() and len(port) <= 5 and 1 <= int(port) <= 65535):
+        print("the seeding plan names a port that is not 1-65535: nothing was seeded")
+        sys.exit(1)
+    rule = {"host": host, "ports": [int(port)], "http": f[3] == "http", "lan": True, "why": "seeded from " + f[4]}
+    if not any(r["host"] == host and r["ports"] == rule["ports"] for r in rules):
+        rules.append(rule)
+if len(rules) > most:
+    print("%d seeds, more than %d: nothing was seeded" % (len(rules), most))
+    sys.exit(1)
+if sys.argv[1] == "-":
+    print(json.dumps(rules))
+else:
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(10)
+        s.connect(sys.argv[1])
+        s.sendall((json.dumps({"op": "seed", "rules": rules}) + "\n").encode())
+        buf = b""
+        while not buf.endswith(b"\n") and len(buf) < 1048576:
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+        answer = json.loads(buf.decode("utf-8", "replace") or "{}")
+    except (OSError, ValueError) as e:
+        print("the egress proxy did not take the seeds (%s)" % type(e).__name__)
+        sys.exit(1)
+    if not answer.get("ok"):
+        print("the egress proxy refused the seeds: %s" % str(answer.get("error", "?"))[:200])
+        sys.exit(1)
+    rules = answer.get("seeded") or []
+print("seeded %d lan rule(s)%s" % (len(rules), (": " + ", ".join("%s:%s (%s)" % (r["host"], r["ports"][0], r["why"][len("seeded from "):]) for r in rules)) if rules else ""))
+if skipped:
+    print("not seeded: " + "; ".join(skipped))
+'
+
+# `<source> <url>` lines from the person's and root's own configuration. Arguments, so the
+# selftest can hand it a tree of its own: config.yaml, the owner's home and uid, mind-person.env.
+seed_candidates() { # <config.yaml> <owner home> <owner uid> <owner gid> <mind-person.env>
+  local cfg="$1" home="$2" ouid="$3" ogid="$4" penv="$5" py setpriv roots=0
+  py="$(command -v python3)" || return 1
+  # Run as root (every real run), root's files are root's. Run as anyone else (the selftest), it
+  # reads only what that account could read anyway, and its own files stand in for root's.
+  [ "$(id -u)" = 0 ] || roots="0,$(id -u)"
+  # config.yaml is the person's until it is split (#397 c), or root's: either may have written it.
+  "$py" -I -c "$PY_SEED_CANDIDATES" "$roots,$ouid" "" "config.yaml:yaml:$cfg"
+  "$py" -I -c "$PY_SEED_CANDIDATES" "$roots" "$SEED_ENV_KEYS" "mind-person.env:env:$penv"
+  [ -n "$home" ] && [ -n "$ouid" ] || return 0
+  set -- "settings.yaml:yaml:$home/.config/yantrik/settings.yaml" "providers.yaml:yaml:$home/.config/yantrik/providers.yaml"
+  if [ "$(id -u)" = 0 ]; then
+    # The person's own files, read as the person: their home is theirs to arrange.
+    setpriv="$(command -v setpriv)" || return 0
+    env -i "$setpriv" --reuid="$ouid" --regid="$ogid" --clear-groups --no-new-privs -- \
+      "$py" -I -c "$PY_SEED_CANDIDATES" "$ouid" "" "$@" 9>&-
+  elif [ "$(id -u)" = "$ouid" ]; then
+    "$py" -I -c "$PY_SEED_CANDIDATES" "$ouid" "" "$@"
+  fi
+}
+
+# Seed, as root, through the running proxy. Says what it seeded in the reconcile's output.
+reconcile_egress_seeds() {
+  [ "$(id -u)" = 0 ] || return 0
+  tree_is_roots || return 0
+  [ -x "$BIN_DIR/yantrik-egress" ] || return 0
+  local owner home="" ouid="" ogid="" euid egid candidates plan result i
+  owner="$(desktop_owner)"
+  case "$owner" in
+    ''|root|*[!a-z0-9_-]*) ;;
+    *) home="$(getent passwd "$owner" | cut -d: -f6)"; ouid="$(id -u "$owner" 2>/dev/null)"; ogid="$(id -g "$owner" 2>/dev/null)" ;;
+  esac
+  case "$ouid:$ogid" in *[!0-9:]*|0:*) home=""; ouid=""; ogid="" ;; esac
+  euid="$(id -u yantrik-egress 2>/dev/null)"; egid="$(id -g yantrik-egress 2>/dev/null)"
+  case "$euid:$egid" in :*|*:|0:*|*:0|*[!0-9:]*) return 0 ;; esac
+  candidates="$(seed_candidates "$PREFIX/config.yaml" "$home" "$ouid" "$ogid" "$MIND_PERSON_ENV")"
+  plan="$(printf '%s\n' "$candidates" | env -i "$(command -v setpriv)" --reuid="$euid" --regid="$egid" \
+    --clear-groups --no-new-privs -- "$BIN_DIR/yantrik-egress" seed-plan 2>/dev/null 9>&-)" \
+    || { warn "could not plan the seeded lan rules; the LAN services this machine uses may be refused to the mind"; return 0; }
+  # The proxy may be starting (reconcile_egress just restarted it).
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    [ -S "$EGRESS_CONTROL_SOCKET" ] && break
+    sleep 0.5
+  done
+  if result="$(printf '%s\n' "$plan" | python3 -I -c "$PY_SEED_APPLY" "$EGRESS_CONTROL_SOCKET")"; then
+    printf '%s\n' "$result" | while IFS= read -r line; do info "$line"; done
+  else
+    warn "$result"
+  fi
+  return 0
+}
+
+# ── The mind's way out, held by the kernel ──────────────────────────────────────────────
+#
+# The egress proxy only governs what is sent to it. The mind's unit points HTTPS_PROXY and the
+# rest at it, and that is advice: anything running as yantrik-mind (the Mind, a plugin, a tool it
+# spawned, a program that ignores proxy variables) could connect anywhere directly, past the
+# person's policy, enforce mode and Private mode. Now the kernel holds the account to it, the same
+# shape as the DevTools guard: an output chain for `meta skuid <yantrik-mind>` that lets through
+#   * on loopback, only the ports the mind always needs (MIND_LOOPBACK_PORTS: the proxy, the memory
+#     server, the bundled llama-server) and the ones the person opened to it with a rule
+#     `{host: 127.0.0.1 or ::1, ports, lan: true}` (a local Ollama on 11434). Everything else on
+#     this machine (`fib daddr type local`: loopback, and its own LAN address) is refused: a local
+#     model server or anything bound to 0.0.0.0 would otherwise be a way out past the proxy;
+#   * DNS, in audit only: to this machine's resolvers (/etc/resolv.conf, read when the table is
+#     made) and a stub on loopback. In enforce and in Private mode the proxy resolves for the
+#     mind and the account may not ask at all, so a query cannot carry anything out;
+#   * the direct set: LAN services the person allowed by address — a policy rule with `lan: true`
+#     whose host is a literal address on the local network, one entry per port, TCP only;
+# and refuses everything else, counted (a TCP reset, or ICMP admin-prohibited).
+#
+# The entries and the mode come only from the person's policy (/var/lib/yantrik-egress/policy.yaml,
+# changed only through the proxy's control socket, by root and the desktop's owner), never from
+# anything the mind account can write. They are read by the proxy's own code (`yantrik-egress
+# direct`), run as the proxy's account, so the policy is never parsed as root and root never opens a
+# file in a directory another account owns; root checks every line it prints again here. Private
+# mode empties the entries and refuses DNS. A policy that does not read, an answer that does not
+# check, or more than MIND_EGRESS_MAX entries is no entries and no DNS (fail closed), never the
+# previous ones.
+#
+# Who loads it: never the proxy, which stays unprivileged. `yantrik-update mind-egress apply`, as
+# root, from three units this updater writes: yantrik-mind-egress.service at boot (after nftables,
+# before the network and before the mind; PartOf nftables.service like the DevTools guard, so a
+# reload of the ruleset puts it back), and yantrik-mind-egress.path, which runs
+# yantrik-mind-egress-refresh.service whenever the policy, Private mode or resolv.conf changes.
+# The mind's unit Requires= the boot unit and checks the table is there before it starts, so no
+# mind runs unguarded: a machine without nft has no mind (fail closed).
+MIND_EGRESS_NFT=/etc/yantrik/mind-egress.nft
+MIND_EGRESS_UNIT=/etc/systemd/system/yantrik-mind-egress.service
+MIND_EGRESS_REFRESH_UNIT=/etc/systemd/system/yantrik-mind-egress-refresh.service
+MIND_EGRESS_PATH_UNIT=/etc/systemd/system/yantrik-mind-egress.path
+EGRESS_STATE=/var/lib/yantrik-egress
+MIND_EGRESS_MAX=64
+# 127.0.0.1 ports every mind may reach: the egress proxy (7450), the memory server (7440,
+# YM_MEMORY_SERVER) and the bundled llama-server fallback (8341). The Mind's other loopback
+# listeners are off in its unit (YM_CTL 8077, YM_WEB, YM_WEBUI) and its sandboxes run in network
+# namespaces of their own; anything else is the person's to open with a rule.
+MIND_LOOPBACK_PORTS="7440, 7450, 8341"
+
+# What `yantrik-egress direct` printed, checked again: `private on|off`, `mode audit|enforce`, then
+# `direct <ip> <port>` lines (a literal address on the local network: 10/8, 172.16/12,
+# 192.168/16, 100.64/10 which is CGNAT and Tailscale, fc00::/7) and `loopback <ip> <port>` lines
+# (127.0.0.1 or ::1), no scope ids, ports 1-65535. Prints `state private|audit|enforce`, then one
+# `<direct|loopback> <4|6> <ip> <port>` per entry; anything else is an error (exit 1, one line
+# saying why), and the caller loads no entries and no DNS.
+PY_MIND_DIRECT='
+import ipaddress, sys
+most = int(sys.argv[1])
+lan4 = [ipaddress.ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10")]
+ula = ipaddress.ip_network("fc00::/7")
+loop = (ipaddress.ip_address("127.0.0.1"), ipaddress.ip_address("::1"))
+def no(why):
+    print(why)
+    sys.exit(1)
+lines = [l for l in sys.stdin.read().split("\n") if l != ""]
+if len(lines) < 2 or lines[0] not in ("private on", "private off"):
+    no("it did not say whether Private mode is on")
+if lines[1] not in ("mode audit", "mode enforce"):
+    no("it did not say the policy mode")
+if lines[0] == "private on":
+    print("state private")
+    sys.exit(0)
+seen = []
+for l in lines[2:]:
+    f = l.split(" ")
+    if len(f) != 3 or f[0] not in ("direct", "loopback"):
+        no("a line that is not an entry")
+    if "%" in f[1]:
+        no("an entry with a scope id")
+    try:
+        ip = ipaddress.ip_address(f[1])
+    except ValueError:
+        no("an entry whose host is not a literal address")
+    if ip.version == 6 and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped
+    if f[0] == "direct" and not (any(ip in n for n in lan4) if ip.version == 4 else ip in ula):
+        no("a direct entry outside the local network (%s)" % ip)
+    if f[0] == "loopback" and ip not in loop:
+        no("a loopback entry that is not 127.0.0.1 or ::1 (%s)" % ip)
+    p = f[2]
+    if not (p.isascii() and p.isdigit() and len(p) <= 5 and 1 <= int(p) <= 65535):
+        no("an entry whose port is not 1-65535")
+    e = (f[0], ip.version, int(ip), int(p), str(ip))
+    if e not in seen:
+        seen.append(e)
+if len(seen) > most:
+    no("%d entries, more than the %d the table holds" % (len(seen), most))
+print("state " + lines[1].split(" ")[1])
+for kind, v, _, port, ip in sorted(seen):
+    print(kind, v, ip, port)
+'
+
+# The resolvers a resolv.conf names, as `resolver <4|6> <ip>`: literal addresses only, a zone dropped,
+# loopback left out (a loopback stub has its own rule), the first three (glibc asks no more).
+PY_MIND_RESOLVERS='
+import ipaddress, sys
+try:
+    text = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+except OSError:
+    text = ""
+out = []
+for line in text.split("\n"):
+    f = line.split()
+    if len(f) < 2 or f[0] != "nameserver":
+        continue
+    try:
+        ip = ipaddress.ip_address(f[1].split("%")[0])
+    except ValueError:
+        continue
+    if ip.version == 6 and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped
+    if ip.is_loopback or ip.is_unspecified or ip.is_multicast:
+        continue
+    e = "resolver %d %s" % (ip.version, ip)
+    if e not in out:
+        out.append(e)
+for e in out[:3]:
+    print(e)
+'
+
+# Elements for an nft set from checked lines (`<kind> <4|6> <ip> [<port>]`): those of <kind> and
+# the family, joined. <form> is `ip.port` (address . port), `ip` or `port`.
+nft_elements() { # <lines> <kind> <4|6> <form>
+  printf '%s\n' "$1" | awk -v k="$2" -v v="$3" -v form="$4" '
+    $1 == k && $2 == v {
+      e = (form == "ip.port") ? $3 " . " $4 : (form == "ip") ? $3 : $4
+      printf "%s%s", (n++ ? ", " : ""), e
+    }'
+}
+
+nft_set_elements() { # <elements>: the line that fills a set, or nothing for an empty one
+  [ -n "$1" ] && printf '\t\telements = { %s }' "$1"
+  return 0
+}
+
+# The table, from checked parts only: a numeric uid, entries and resolvers PY_MIND_* printed,
+# whether DNS is let out (`dns` or `nodns`), and a note of printable text that goes into a comment.
+mind_egress_text() { # <uid> <entry lines> <resolver lines> <dns|nodns> <note>
+  local d4 d6 l4 l6 r4="" r6="" dns_rules
+  d4="$(nft_elements "$2" direct 4 ip.port)"; d6="$(nft_elements "$2" direct 6 ip.port)"
+  l4="$(nft_elements "$2" loopback 4 port)"; l6="$(nft_elements "$2" loopback 6 port)"
+  l4="$MIND_LOOPBACK_PORTS${l4:+, $l4}"
+  if [ "$4" = dns ]; then
+    r4="$(nft_elements "$3" resolver 4 ip)"; r6="$(nft_elements "$3" resolver 6 ip)"
+    dns_rules='		meta l4proto { tcp, udp } th dport 53 oifname "lo" counter name "dns" accept
+		meta l4proto { tcp, udp } th dport 53 ip daddr @resolvers4 counter name "dns" accept
+		meta l4proto { tcp, udp } th dport 53 ip6 daddr @resolvers6 counter name "dns" accept'
+  else
+    dns_rules='		meta l4proto tcp th dport 53 counter name "dns" reject with tcp reset
+		meta l4proto udp th dport 53 counter name "dns" reject with icmpx admin-prohibited'
+  fi
+  cat <<EOF
+# Yantrik OS: where the mind account (yantrik-mind, uid $1) may connect, held by the kernel.
+# Its way out is the person's egress proxy on loopback (yantrik-egress, 127.0.0.1:7450), which
+# applies their policy and Private mode. Beside it: the memory server and the loopback services
+# the person opened, DNS (audit only), and the direct set (LAN services the person allowed by
+# address: a policy rule with lan: true whose host is a literal address). Everything else from
+# the account is refused, and counted: nft list counters table inet yantrik_mind_egress
+# Entries: $5
+# DNS: $([ "$4" = dns ] && echo "to the resolvers and a loopback stub (audit)" || echo "refused (enforce, Private mode, or no policy)")
+# Made by yantrik-update mind-egress apply from /var/lib/yantrik-egress; edits here are put back.
+table inet yantrik_mind_egress
+delete table inet yantrik_mind_egress
+table inet yantrik_mind_egress {
+	counter refused {
+	}
+	counter dns {
+	}
+	counter direct {
+	}
+	set resolvers4 {
+		type ipv4_addr
+$(nft_set_elements "$r4")
+	}
+	set resolvers6 {
+		type ipv6_addr
+$(nft_set_elements "$r6")
+	}
+	set loopback4 {
+		type inet_service
+$(nft_set_elements "$l4")
+	}
+	set loopback6 {
+		type inet_service
+$(nft_set_elements "$l6")
+	}
+	set direct4 {
+		type ipv4_addr . inet_service
+$(nft_set_elements "$d4")
+	}
+	set direct6 {
+		type ipv6_addr . inet_service
+$(nft_set_elements "$d6")
+	}
+	chain output {
+		type filter hook output priority filter; policy accept;
+		# A positive match and a jump: a packet with no socket (the kernel's own replies, IPv6
+		# neighbour discovery) has no owner, and must not fall into the refusals below.
+		meta skuid $1 jump mind
+	}
+	chain mind {
+		# Answers on loopback to connections someone else opened to the account (a server of the
+		# mind's own, such as its memory server): the reply leaves from the server's port, not to it.
+		oifname "lo" ct direction reply accept
+$dns_rules
+		ip daddr 127.0.0.1 tcp dport @loopback4 accept
+		ip6 daddr ::1 tcp dport @loopback6 accept
+		fib daddr type local meta l4proto tcp counter name "refused" reject with tcp reset
+		fib daddr type local counter name "refused" reject with icmpx admin-prohibited
+		ip daddr . tcp dport @direct4 counter name "direct" accept
+		ip6 daddr . tcp dport @direct6 counter name "direct" accept
+		limit rate 6/minute burst 12 packets log prefix "yantrik-mind-egress refused: " level info
+		meta l4proto tcp counter name "refused" reject with tcp reset
+		counter name "refused" reject with icmpx admin-prohibited
+	}
+}
+EOF
+}
+
+# A file put in place whole: written beside it, then renamed over it, so a reader (nft at boot, a
+# person) sees the old table or the new one, never half of one; a link planted at the path is
+# replaced, never followed. The content comes on stdin.
+write_file_atomic() { # <path>
+  local tmp
+  tmp="$(mktemp "$(dirname "$1")/.$(basename "$1").XXXXXX")" || return 1
+  if cat > "$tmp" && chmod 0644 "$tmp" && mv -f -T "$tmp" "$1"; then
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
+# Write the table for <uid> to <out> from what the policy reader answered (<status> its exit,
+# <answer> what it printed) and <resolv.conf>; print one line saying what it holds and why. Pure
+# apart from <out>: the selftest drives it with stand-in answers.
+mind_egress_render() { # <uid> <status> <answer> <resolv.conf> <out>
+  local uid="$1" status="$2" answer="$3" resolv="$4" out="$5" parsed state="" entries="" note dns=nodns resolvers=""
+  case "$uid" in ''|0|*[!0-9]*) printf 'not an account to hold: %s\n' "$uid" | LC_ALL=C tr -c '[:print:]\n' '?'; return 1 ;; esac
+  if [ "$status" != 0 ]; then
+    note="NONE, the egress policy could not be read: $(printf '%s\n' "$answer" | head -1 | cut -c1-200)"
+  elif parsed="$(printf '%s\n' "$answer" | python3 -I -c "$PY_MIND_DIRECT" "$MIND_EGRESS_MAX")"; then
+    state="$(printf '%s\n' "$parsed" | head -1)"; state="${state#state }"
+    entries="$(printf '%s\n' "$parsed" | sed 1d)"
+    case "$state" in
+      private) note="NONE, Private mode is on" ;;
+      *) note="$(printf '%s' "$entries" | grep -c .) from the person's lan rules ($state)"
+         [ "$state" = audit ] && dns=dns ;;
+    esac
+  else
+    note="NONE, the policy reader's answer was refused: ${parsed:-it could not be checked}"
+  fi
+  note="$(printf '%s' "$note" | LC_ALL=C tr -c '[:print:]' '?')"
+  [ "$dns" = dns ] && { resolvers="$(python3 -I -c "$PY_MIND_RESOLVERS" "$resolv")" || resolvers=""; }
+  mind_egress_text "$uid" "$entries" "$resolvers" "$dns" "$note" | write_file_atomic "$out" || return 1
+  printf 'entries: %s; DNS %s\n' "$note" "$([ "$dns" = dns ] && echo allowed || echo refused)"
+}
+
+# Ask the proxy's own code for the entries, as the proxy's account. Prints its answer (or why there
+# is none) and returns its status.
+mind_egress_ask() {
+  local euid egid setpriv errf answer rc
+  euid="$(id -u yantrik-egress 2>/dev/null)"; egid="$(id -g yantrik-egress 2>/dev/null)"
+  case "$euid:$egid" in
+    :*|*:|0:*|*:0|*[!0-9:]*) echo "there is no egress account (yantrik-egress)"; return 1 ;;
+  esac
+  [ -x "$BIN_DIR/yantrik-egress" ] && tree_is_roots \
+    || { echo "the egress proxy is not installed in a tree only root writes"; return 1; }
+  setpriv="$(command -v setpriv 2>/dev/null)" || { echo "no setpriv to read the policy as yantrik-egress"; return 1; }
+  errf="$(mktemp)" || return 1
+  # Not the lock's descriptor (9): the reader has no business holding it.
+  answer="$(env -i "$setpriv" --reuid="$euid" --regid="$egid" --clear-groups --no-new-privs -- \
+    "$BIN_DIR/yantrik-egress" direct "$EGRESS_STATE" 2>"$errf" 9>&-)"
+  rc=$?
+  [ "$rc" = 0 ] || answer="$(head -1 "$errf")"
+  rm -f "$errf"
+  printf '%s\n' "$answer"
+  return "$rc"
+}
+
+# Make the table from the policy and load it. Fails closed: a table that does not load is replaced
+# by one with no entries and no DNS, never left at what was there before.
+mind_egress_load() {
+  local nft uid answer rc result errf
+  nft="$(command -v nft 2>/dev/null)"
+  [ -n "$nft" ] || { warn "no nft on this machine; the mind account cannot be held to its egress proxy, so no mind starts"; return 1; }
+  uid="$(id -u yantrik-mind 2>/dev/null)"
+  case "$uid" in ''|0|*[!0-9]*) info "no mind account here; nothing to hold to the egress proxy"; return 0 ;; esac
+  install -d -o root -g root -m 0755 /etc/yantrik
+  answer="$(mind_egress_ask)"; rc=$?
+  errf="$(mktemp)" || return 1
+  if result="$(mind_egress_render "$uid" "$rc" "$answer" /etc/resolv.conf "$MIND_EGRESS_NFT")" \
+     && "$nft" -f "$MIND_EGRESS_NFT" 2>"$errf"; then
+    rm -f "$errf"
+    case "$result" in
+      *"Private mode is on"*|*"from the person's"*) info "the mind account reaches out only through the egress proxy; $result" ;;
+      *) warn "the mind account reaches out only through the egress proxy; $result" ;;
+    esac
+    return 0
+  fi
+  warn "the mind's egress table did not load ($(head -3 "$errf" | tr '\n' ' ')); loading it with no entries and no DNS"
+  rm -f "$errf"
+  mind_egress_text "$uid" "" "" nodns "NONE, the table made from the policy did not load" | write_file_atomic "$MIND_EGRESS_NFT"
+  if mind_egress_text "$uid" "" "" nodns "NONE, the table made from the policy did not load" | "$nft" -f -; then
+    return 0
+  fi
+  warn "could not load the mind's egress table at all; the mind account is NOT held to the egress proxy"
+  return 1
+}
+
+cmd_mind_egress() {
+  [ "${1:-}" = apply ] || fail "usage: yantrik-update mind-egress apply"
+  [ "$(id -u)" = 0 ] || fail "mind-egress apply runs as root (its units run it at boot and when the egress policy changes)"
+  # One at a time: the boot unit, the path unit and an update can all ask at once.
+  if command -v flock >/dev/null 2>&1 && exec 9>/run/yantrik-mind-egress.lock; then
+    flock 9
+  fi
+  mind_egress_load
+}
+
+mind_egress_unit_text() {
+  cat <<EOF
+# Made by yantrik-update: the mind account (yantrik-mind) reaches out only through the person's
+# egress proxy, held by the kernel (table inet yantrik_mind_egress). Loaded before the network and
+# before the mind, and again whenever nftables is reloaded. yantrik-mind.service Requires= this.
+[Unit]
+Description=Yantrik OS: the mind account reaches out only through the egress proxy
+DefaultDependencies=no
+After=local-fs.target nftables.service
+Before=network-pre.target yantrik-egress.service yantrik-mind.service shutdown.target
+Wants=network-pre.target
+Conflicts=shutdown.target
+PartOf=nftables.service
+ReloadPropagatedFrom=nftables.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=$BIN_DIR/yantrik-update mind-egress apply
+ExecReload=$BIN_DIR/yantrik-update mind-egress apply
+
+[Install]
+WantedBy=multi-user.target
+WantedBy=nftables.service
+EOF
+}
+
+mind_egress_refresh_text() {
+  cat <<EOF
+# Made by yantrik-update: run by yantrik-mind-egress.path when the person's egress policy, their
+# Private mode or this machine's resolvers change.
+[Unit]
+Description=Yantrik OS: the mind's way out follows the person's egress policy
+After=yantrik-mind-egress.service
+
+[Service]
+Type=oneshot
+ExecStart=$BIN_DIR/yantrik-update mind-egress apply
+EOF
+}
+
+# The resolv.conf itself and, when it is a link (NetworkManager, systemd-resolved), the file it
+# leads to as well: an atomic replace of the target is a change the link's watch may not see.
+mind_egress_path_text() { # [resolv.conf target]
+  cat <<EOF
+# Made by yantrik-update: the mind's egress table follows the person's policy, Private mode and
+# this machine's resolvers.
+[Unit]
+Description=Yantrik OS: watch the egress policy for the mind's way out
+
+[Path]
+PathChanged=$EGRESS_STATE/policy.yaml
+PathChanged=$EGRESS_STATE/private
+PathChanged=/etc/resolv.conf
+EOF
+  case "${1:-}" in
+    /etc/resolv.conf|'') ;;
+    /*) printf 'PathChanged=%s\n' "$1" ;;
+  esac
+  cat <<EOF
+Unit=yantrik-mind-egress-refresh.service
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+# The units, written and on. Before the mind's unit is (re)started: it Requires= the boot unit.
+reconcile_mind_egress_units() {
+  [ "$(id -u)" = 0 ] || return 0
+  tree_is_roots || return 0
+  getent passwd yantrik-mind >/dev/null 2>&1 || return 0
+  command -v systemctl >/dev/null 2>&1 && [ -d /etc/systemd/system ] || return 0
+  local changed=0 resolv_target dest text
+  resolv_target="$(readlink -f /etc/resolv.conf 2>/dev/null)"
+  case "$resolv_target" in *[!A-Za-z0-9/._-]*) resolv_target="" ;; esac
+  for dest in "$MIND_EGRESS_UNIT" "$MIND_EGRESS_REFRESH_UNIT" "$MIND_EGRESS_PATH_UNIT"; do
+    case "$dest" in
+      "$MIND_EGRESS_UNIT") text="$(mind_egress_unit_text)" ;;
+      "$MIND_EGRESS_REFRESH_UNIT") text="$(mind_egress_refresh_text)" ;;
+      *) text="$(mind_egress_path_text "$resolv_target")" ;;
+    esac
+    if [ "$(cat "$dest" 2>/dev/null)" != "$text" ]; then
+      printf '%s\n' "$text" | write_file_atomic "$dest" && changed=1
+    fi
+  done
+  [ "$changed" = 1 ] && systemctl daemon-reload >/dev/null 2>&1
+  systemctl enable yantrik-mind-egress.service yantrik-mind-egress.path >/dev/null 2>&1 \
+    || warn "could not enable the mind's egress units; no mind starts until they are"
+  [ "$changed" = 1 ] && systemctl restart yantrik-mind-egress.path >/dev/null 2>&1
+  systemctl start yantrik-mind-egress.path >/dev/null 2>&1 \
+    || warn "could not start yantrik-mind-egress.path; a change to the egress policy reaches the kernel at the next update or boot"
+  systemctl start yantrik-mind-egress.service >/dev/null 2>&1 \
+    || warn "yantrik-mind-egress.service did not start; no mind starts until it does (journalctl -u yantrik-mind-egress)"
+  return 0
+}
+
+reconcile_mind_egress() {
+  [ "$(id -u)" = 0 ] || return 0
+  tree_is_roots || { warn "the tree is not root's yet; the mind account is not held to its egress proxy (yantrik-update migrate-ownership)"; return 0; }
+  getent passwd yantrik-mind >/dev/null 2>&1 || return 0
+  command -v nft >/dev/null 2>&1 \
+    || { warn "no nft on this machine; the mind account cannot be held to its egress proxy, so no mind starts"; return 0; }
+  reconcile_mind_egress_units
+  # Loaded on every run, like the DevTools guard: a `flush ruleset` takes the table away while the
+  # unit still reads active, and the load is one atomic transaction.
+  ( cmd_mind_egress apply ) || true
   return 0
 }
 
@@ -2310,8 +2931,10 @@ cmd_migrate_minds() {
   elevate "$@"
   reconcile_minds
   reconcile_devtools_guard
+  reconcile_mind_egress_units
   reconcile_mind_units
   reconcile_egress
+  reconcile_mind_egress
   # Before the mind runs as an account of its own: from then on a directory anyone can write is
   # one the mind can write.
   reconcile_private_dirs
@@ -2385,8 +3008,10 @@ cmd_reconcile() {
   reconcile_sudo_rule
   reconcile_minds
   reconcile_devtools_guard
+  reconcile_mind_egress_units
   reconcile_mind_units
   reconcile_egress
+  reconcile_mind_egress
   reconcile_private_dirs
   private_config
   reconcile_registries
@@ -2992,6 +3617,270 @@ with tarfile.open(sys.argv[1], "w") as t:
     printf '  skip install-mind checks: no zstd here\n'
   fi
 
+  # M. The mind account's way out, held by the kernel: the table made from what the policy reader
+  #    (`yantrik-egress direct`) answered. Stand-in answers here; the real reader below when the
+  #    caller hands one over (YANTRIK_EGRESS_BIN, a built yantrik-egress). No root, no nft.
+  local me="$root/mind-egress" tbl res
+  mkdir -p "$me"
+  printf '# made by NetworkManager\nnameserver 192.168.4.1\nnameserver 127.0.0.53\nnameserver fe80::1%%wlan0\n; nameserver 9.9.9.9\nnameserver not-an-address\nnameserver 192.168.4.1\nsearch lan\n' > "$me/resolv.conf"
+  tbl="$me/mind-egress.nft"
+  me_render() { # me_render <answer> [status] [uid]: the result line; the table is in $tbl
+    mind_egress_render "${3:-998}" "${2:-0}" "$1" "$me/resolv.conf" "$tbl"
+  }
+  me_has() { grep -qF -- "$1" "$tbl" && echo yes || echo no; }
+  me_set() { # the elements line of one set, or nothing
+    sed -n "/set $1 {/,/^	}/p" "$tbl" | sed -n 's/^		elements = { \(.*\) }$/\1/p'
+  }
+  me_none() { # no direct entries, no person-opened loopback ports, no resolvers, DNS refused
+    if [ -z "$(me_set direct4)$(me_set direct6)$(me_set loopback6)$(me_set resolvers4)$(me_set resolvers6)" ] \
+       && [ "$(me_set loopback4)" = "$MIND_LOOPBACK_PORTS" ] && [ "$(me_has 'dport 53 counter name "dns" reject')" = yes ] \
+       && [ "$(me_has 'counter name "dns" accept')" = no ]; then
+      echo none
+    else
+      echo some
+    fi
+  }
+
+  res="$(me_render "$(printf 'private off\nmode audit\ndirect 192.168.4.42 8888\ndirect fd00::5 443\ndirect ::ffff:10.0.0.7 11434\ndirect 192.168.4.42 8888\nloopback 127.0.0.1 11434\n')")"
+  is "mind-egress: literal LAN and loopback entries go in, each once" \
+    "entries: 4 from the person's lan rules (audit); DNS allowed" "$res"
+  is "mind-egress: ... IPv4 direct, as address . port, sorted" "10.0.0.7 . 11434, 192.168.4.42 . 8888" "$(me_set direct4)"
+  is "mind-egress: ... IPv6 direct in its own set" "fd00::5 . 443" "$(me_set direct6)"
+  is "mind-egress: ... loopback: the mind's own ports and the one the person opened" "$MIND_LOOPBACK_PORTS, 11434" "$(me_set loopback4)"
+  is "mind-egress: ... no ::1 port unless the person opens one" "" "$(me_set loopback6)"
+  t "mind-egress: the mind's uid goes in as a number, on a positive match" "meta skuid 998 jump mind" "$(cat "$tbl")"
+  is "mind-egress: ... and nothing else is matched on an owner" "1" "$(grep -c 'skuid' "$tbl")"
+  is "mind-egress: loopback is not let through whole" "no" "$(me_has 'oifname "lo" accept')"
+  t "mind-egress: ... only its ports on 127.0.0.1" "ip daddr 127.0.0.1 tcp dport @loopback4 accept" "$(cat "$tbl")"
+  t "mind-egress: ... and answers on loopback from servers of its own" 'oifname "lo" ct direction reply accept' "$(cat "$tbl")"
+  t "mind-egress: ... and the rest of this machine (its LAN address too) is refused" \
+    'fib daddr type local meta l4proto tcp counter name "refused" reject with tcp reset' "$(cat "$tbl")"
+  is "mind-egress: ... before the direct set" "yes" \
+    "$([ "$(grep -n 'fib daddr type local meta' "$tbl" | cut -d: -f1)" -lt "$(grep -n '@direct4' "$tbl" | cut -d: -f1)" ] && echo yes || echo no)"
+  t "mind-egress: everything else is refused, TCP with a reset" 'meta l4proto tcp counter name "refused" reject with tcp reset' "$(cat "$tbl")"
+  t "mind-egress: ... and the rest admin-prohibited, counted" 'counter name "refused" reject with icmpx admin-prohibited' "$(cat "$tbl")"
+  is "mind-egress: audit: DNS to the resolvers resolv.conf names" "192.168.4.1" "$(me_set resolvers4)"
+  is "mind-egress: ... an IPv6 one without its zone" "fe80::1" "$(me_set resolvers6)"
+  t "mind-egress: ... and a loopback stub, counted" 'meta l4proto { tcp, udp } th dport 53 oifname "lo" counter name "dns" accept' "$(cat "$tbl")"
+  is "mind-egress: ... the stub before the loopback ports" "yes" \
+    "$([ "$(grep -n 'oifname "lo" counter name "dns"' "$tbl" | cut -d: -f1)" -lt "$(grep -n '@loopback4 accept' "$tbl" | cut -d: -f1)" ] && echo yes || echo no)"
+  is "mind-egress: ... a loopback resolver is not listed (the stub has its own rule)" "no" "$(me_has 127.0.0.53)"
+  is "mind-egress: ... nor a commented-out one" "no" "$(me_has 9.9.9.9)"
+  is "mind-egress: the table replaces itself in one transaction" "yes" \
+    "$(grep -qx 'delete table inet yantrik_mind_egress' "$tbl" && echo yes || echo no)"
+  me_render "$(printf 'private off\nmode audit\n')" >/dev/null
+  is "mind-egress: an empty set is declared without elements, not with an empty list" "no" "$(me_has 'elements = {  }')"
+
+  res="$(me_render "$(printf 'private off\nmode enforce\ndirect 192.168.4.42 8888\nloopback 127.0.0.1 11434\n')")"
+  is "mind-egress: enforce keeps the entries and refuses DNS" "entries: 2 from the person's lan rules (enforce); DNS refused" "$res"
+  is "mind-egress: ... no resolvers" "" "$(me_set resolvers4)$(me_set resolvers6)"
+  t "mind-egress: ... DNS anywhere, a loopback stub included, refused and counted" 'meta l4proto udp th dport 53 counter name "dns" reject with icmpx admin-prohibited' "$(cat "$tbl")"
+  is "mind-egress: ... before anything is let through" "yes" \
+    "$([ "$(grep -n 'dport 53 counter name "dns" reject with tcp reset' "$tbl" | cut -d: -f1)" -lt "$(grep -n '@loopback4 accept' "$tbl" | cut -d: -f1)" ] && echo yes || echo no)"
+
+  res="$(me_render "$(printf 'private on\nmode audit\ndirect 192.168.4.42 8888\nloopback 127.0.0.1 11434\n')")"
+  is "mind-egress: Private mode: no entries and no DNS, even in audit" "entries: NONE, Private mode is on; DNS refused" "$res"
+  is "mind-egress: ... whatever the reader also printed" "none" "$(me_none)"
+  t "mind-egress: ... and says so in the file" "# Entries: NONE, Private mode is on" "$(cat "$tbl")"
+
+  local bad
+  for bad in 'direct searx.lan 8888' 'direct 8.8.8.8 443' 'direct 127.0.0.1 7440' 'direct 2606:4700::1111 443' \
+             'direct 64:ff9b::c0a8:414 80' 'direct 2001:0:4136:e378::1 80' 'direct 192.168.4.42 0' \
+             'direct 192.168.4.42 65536' 'direct 192.168.4.42 http' 'direct 192.168.4.42' 'allow 192.168.4.42 8888' \
+             'direct 192.168.004.042 8888' 'direct fd00::5%eth0 443' 'loopback 127.0.0.2 11434' \
+             'loopback 192.168.4.42 11434' 'loopback ::1%lo 11434'; do
+    me_render "$(printf 'private off\nmode audit\ndirect 10.0.0.9 80\n%s\n' "$bad")" > "$me/res"
+    is "mind-egress: an answer with '$bad' loads no entries and no DNS, not the rest of it" "none" "$(me_none)"
+  done
+  t "mind-egress: ... and says why" "NONE, the policy reader's answer was refused" "$(cat "$me/res")"
+  res="$(me_render "$(printf 'mode audit\ndirect 192.168.4.42 8888\n')")"
+  t "mind-egress: an answer that does not say whether Private mode is on is refused" "did not say whether Private mode is on" "$res"
+  is "mind-egress: ... none" "none" "$(me_none)"
+  res="$(me_render "$(printf 'private off\ndirect 192.168.4.42 8888\n')")"
+  t "mind-egress: an answer that does not say the policy mode is refused" "did not say the policy mode" "$res"
+  is "mind-egress: ... none" "none" "$(me_none)"
+  res="$(me_render 'policy.yaml: rules[0]: unknown field `program`' 1)"
+  t "mind-egress: a policy that does not read is no entries and no DNS" "NONE, the egress policy could not be read: policy.yaml" "$res"
+  is "mind-egress: ... not the previous ones" "none" "$(me_none)"
+
+  local i many="private off
+mode audit"
+  for i in $(seq 1 "$MIND_EGRESS_MAX"); do many="$many
+direct 10.0.$((i / 200)).$((i % 200 + 1)) 80"; done
+  res="$(me_render "$many")"
+  is "mind-egress: $MIND_EGRESS_MAX entries fit" "entries: $MIND_EGRESS_MAX from the person's lan rules (audit); DNS allowed" "$res"
+  res="$(me_render "$many
+loopback 127.0.0.1 11434")"
+  t "mind-egress: one over the cap (loopback ones count) is no entries" "more than the $MIND_EGRESS_MAX the table holds" "$res"
+  is "mind-egress: ... none" "none" "$(me_none)"
+
+  # Written whole: a failed render leaves the last table as it was, a link planted at the path is
+  # replaced rather than written through, and nothing is left beside it.
+  me_render "$(printf 'private off\nmode audit\ndirect 192.168.4.42 8888\n')" >/dev/null
+  local before; before="$(cat "$tbl")"
+  me_render "$(printf 'private off\nmode audit\n')" 0 0 >/dev/null 2>&1
+  is "mind-egress: a uid that is not an account's (0) writes nothing" "$before" "$(cat "$tbl")"
+  me_render "$(printf 'private off\nmode audit\n')" 0 'x;y' >/dev/null 2>&1
+  is "mind-egress: ... nor one that is not a number" "$before" "$(cat "$tbl")"
+  printf 'the person'"'"'s file\n' > "$me/victim"
+  rm -f "$tbl"; ln -s "$me/victim" "$tbl"
+  me_render "$(printf 'private off\nmode audit\n')" >/dev/null
+  is "mind-egress: a link at the path is replaced, not written through" "the person's file" "$(cat "$me/victim")"
+  is "mind-egress: ... by a plain file" "file" "$([ -f "$tbl" ] && [ ! -L "$tbl" ] && echo file || echo other)"
+  is "mind-egress: ... and no temporary file is left beside it" "" "$(find "$me" -name '.mind-egress.nft.*')"
+
+  # The path unit watches where resolv.conf really is, too.
+  t "mind-egress: the path unit watches the policy and Private mode" "PathChanged=/var/lib/yantrik-egress/private" "$(mind_egress_path_text /run/NetworkManager/resolv.conf)"
+  t "mind-egress: ... and a linked resolv.conf's target" "PathChanged=/run/NetworkManager/resolv.conf" "$(mind_egress_path_text /run/NetworkManager/resolv.conf)"
+  is "mind-egress: ... and not resolv.conf twice when it is no link" "1" "$(mind_egress_path_text /etc/resolv.conf | grep -c resolv.conf)"
+
+  # The mind's unit will not run unguarded (the shipped file, when this runs from a checkout).
+  local mind_unit; mind_unit="$(dirname "$0")/../../config/systemd/yantrik-mind.service"
+  if [ -f "$mind_unit" ]; then
+    is "mind-egress: the mind's unit requires the table's unit" "yes" "$(grep -qx 'Requires=yantrik-mind-egress.service' "$mind_unit" && echo yes || echo no)"
+    t "mind-egress: ... and checks the table is loaded before it starts" "nft list table inet yantrik_mind_egress" "$(grep '^ExecStartPre=+' "$mind_unit")"
+  fi
+
+  # The direct-set ranges are written twice, in the proxy (direct.rs, DIRECT_RANGES) and in the
+  # root check above (PY_MIND_DIRECT): the two must be the same list.
+  local direct_rs; direct_rs="$(dirname "$0")/../../crates/yantrik-egress/src/direct.rs"
+  if [ -f "$direct_rs" ]; then
+    is "mind-egress: the root check takes exactly the ranges the proxy makes direct entries from" \
+      "$(grep 'pub const DIRECT_RANGES' "$direct_rs" | grep -oE '"[0-9a-f.:]+/[0-9]+"' | tr -d '"' | sort | tr '\n' ' ')" \
+      "$(printf '%s\n' "$PY_MIND_DIRECT" | grep -oE '"[0-9a-f.:]+/[0-9]+"' | tr -d '"' | sort | tr '\n' ' ')"
+  fi
+
+  # Seeded lan rules: the endpoints the person and root configured, never the mind's own.
+  local sd="$root/seed" cands plan
+  mkdir -p "$sd/opt" "$sd/home/.config/yantrik" "$sd/etc" "$sd/mind/.config"
+  printf '%s\n' 'llm:' '  backend: api' '  api_base_url: "http://192.168.4.35:11434/v1"' '  api_key: sk-not-for-the-plan' \
+    '  fallback:' '    api_base_url: "http://127.0.0.1:8341/v1"' '  providers:' '    - id: openai' \
+    '      base_url: https://api.openai.com/v1' > "$sd/opt/config.yaml"
+  printf '%s\n' 'web_search:' '  service: searxng' '  searxng_url: http://192.168.4.42:8888' > "$sd/home/.config/yantrik/settings.yaml"
+  printf '%s\n' 'providers:' '  - base_url: "http://gpu.lan:11434/v1"' '    api_key: "sk-also-not"' > "$sd/home/.config/yantrik/providers.yaml"
+  printf '%s\n' 'YM_HA_URL=http://homeassistant.local:8123' 'export YM_SEARXNG_URL="http://192.168.4.42:8888"' \
+    'YM_SOMETHING_ELSE=http://10.9.9.9:80' > "$sd/etc/mind-person.env"
+  printf '%s\n' 'YM_SEARXNG_URL=http://192.168.77.77:8888' 'YM_LOCAL_OLLAMA_URL=http://192.168.77.78:11434' > "$sd/mind/.config/yantrik-mind.env"
+  cands="$(seed_candidates "$sd/opt/config.yaml" "$sd/home" "$(id -u)" "$(id -g)" "$sd/etc/mind-person.env")"
+  t "seed: config.yaml's model endpoint is a candidate" "config.yaml:api_base_url http://192.168.4.35:11434/v1" "$cands"
+  t "seed: ... and its providers'" "config.yaml:base_url https://api.openai.com/v1" "$cands"
+  t "seed: the person's web search URL" "settings.yaml:searxng_url http://192.168.4.42:8888" "$cands"
+  t "seed: the person's providers" "providers.yaml:base_url http://gpu.lan:11434/v1" "$cands"
+  t "seed: mind-person.env's named keys" "mind-person.env:YM_HA_URL http://homeassistant.local:8123" "$cands"
+  is "seed: ... and only those" "no" "$(printf '%s' "$cands" | grep -q 10.9.9.9 && echo yes || echo no)"
+  is "seed: no key or secret ever leaves the files" "no" "$(printf '%s' "$cands" | grep -q 'sk-' && echo yes || echo no)"
+  is "seed: the mind's own settings are never read" "no" "$(printf '%s' "$cands" | grep -q '192.168.77' && echo yes || echo no)"
+  is "seed: ... nor named by the seeding at all" "0" \
+    "$(declare -f seed_candidates reconcile_egress_seeds | grep -c 'yantrik-mind\|/var/lib/yantrik-mind\|YM_ENV_PATH')"
+  ln -s "$sd/opt/config.yaml" "$sd/opt/linked.yaml"
+  is "seed: a file that is a link is not followed" "" "$(seed_candidates "$sd/opt/linked.yaml" "" "" "" "$sd/none")"
+
+  # The root check of a plan, without the proxy: a stand-in plan.
+  plan="$(printf '%s\n' 'seed 192.168.4.35 11434 http config.yaml:api_base_url' 'seed homeassistant.local 8123 http mind-person.env:YM_HA_URL' \
+    'seed 8.8.8.8 443 https config.yaml:base_url' 'skip config.yaml:base_url api.openai.com public')"
+  res="$(printf '%s\n' "$plan" | python3 -I -c "$PY_SEED_APPLY" -)"
+  t "seed: a LAN endpoint in the plan is seeded, http as it was" '{"host": "192.168.4.35", "ports": [11434], "http": true, "lan": true, "why": "seeded from config.yaml:api_base_url"}' "$res"
+  t "seed: ... a .local name too" '"host": "homeassistant.local"' "$res"
+  is "seed: a public address in the plan is not, whatever the plan says" "no" "$(printf '%s' "$res" | grep -q '"8.8.8.8"' && echo yes || echo no)"
+  t "seed: ... and says so" "8.8.8.8 (config.yaml:base_url): not a private address to this check" "$res"
+  t "seed: what the plan skipped is said too" "api.openai.com (config.yaml:base_url): public" "$res"
+  local badplan
+  for badplan in 'seed *.lan 80 http x' 'seed 192.168.4.35 0 http x' 'seed fd00::5%eth0 80 http x' 'seed a.lan 80 ftp x' \
+                 'seed a.lan 80 http has space' 'allow a.lan 80 http x' 'seed Bad_Host.lan 80 http x'; do
+    is "seed: a plan with '$badplan' seeds nothing" "1" "$(printf '%s\n' "$badplan" | python3 -I -c "$PY_SEED_APPLY" - >/dev/null; echo $?)"
+  done
+  is "seed: more than 16 seeds is none" "1" \
+    "$(for i in $(seq 1 17); do echo "seed 10.0.0.$i 80 http x"; done | python3 -I -c "$PY_SEED_APPLY" - >/dev/null; echo $?)"
+
+  # Handed to the control socket as one `seed` op, nothing else (a stand-in proxy records it). That
+  # a re-seed keeps the person's own rules is the proxy's: policy::tests and control::tests.
+  ( python3 -I -c '
+import json, socket, sys
+s = socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(1); s.settimeout(10)
+c, _ = s.accept(); buf = b""
+while not buf.endswith(b"\n"):
+    buf += c.recv(65536)
+open(sys.argv[2], "wb").write(buf)
+req = json.loads(buf)
+c.sendall((json.dumps({"ok": True, "seeded": req["rules"]}) + "\n").encode())' "$sd/control" "$sd/request" & )
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do [ -S "$sd/control" ] && break; sleep 0.1; done
+  res="$(printf '%s\n' "$plan" | python3 -I -c "$PY_SEED_APPLY" "$sd/control")"
+  is "seed: one request, the seed op with the checked rules only" "seed 2 192.168.4.35,homeassistant.local" \
+    "$(python3 -I -c 'import json,sys; r=json.load(open(sys.argv[1])); print(r["op"], len(r["rules"]), ",".join(x["host"] for x in r["rules"]))' "$sd/request" 2>&1)"
+  t "seed: the reconcile says what was seeded" "seeded 2 lan rule(s): 192.168.4.35:11434 (config.yaml:api_base_url), homeassistant.local:8123 (mind-person.env:YM_HA_URL)" "$res"
+
+  # The real reader, from a real policy file, when one is handed over (CI does, after cargo build).
+  if [ -n "${YANTRIK_EGRESS_BIN:-}" ] && [ -x "${YANTRIK_EGRESS_BIN:-}" ]; then
+    plan="$(printf '%s\n' "$cands" | "$YANTRIK_EGRESS_BIN" seed-plan)"
+    res="$(printf '%s\n' "$plan" | python3 -I -c "$PY_SEED_APPLY" -)"
+    t "seed (real planner): a LAN api_base_url is seeded" '"host": "192.168.4.35", "ports": [11434], "http": true' "$res"
+    t "seed (real planner): ... the person's SearXNG" '"host": "192.168.4.42", "ports": [8888]' "$res"
+    t "seed (real planner): ... a .lan and a .local name" '"host": "gpu.lan"' "$res"
+    t "seed (real planner): ... " '"host": "homeassistant.local"' "$res"
+    is "seed (real planner): a public one is not" "no" "$(printf '%s' "$res" | grep -q '"api.openai.com"' && echo yes || echo no)"
+    is "seed (real planner): nor this machine's own llama-server (loopback is the person's to open)" "no" \
+      "$(printf '%s' "$res" | grep -q '"127.0.0.1"' && echo yes || echo no)"
+    local st="$me/state" ans rc
+    mkdir -p "$st"
+    printf '%s\n' 'mode: enforce' 'rules:' \
+      '  - {host: "192.168.4.42", ports: [8888], http: true, lan: true, why: SearXNG on the LAN}' \
+      '  - {host: "fd00::5", ports: [443, 8443], lan: true, why: a ULA service}' \
+      '  - {host: "searx.lan", ports: [8888], http: true, lan: true, why: a name goes through the proxy}' \
+      '  - {host: "192.168.4.43", ports: [22], why: not lan}' \
+      '  - {host: "1.1.1.1", ports: [443], lan: true, why: public}' \
+      '  - {host: "127.0.0.1", ports: [11434], http: true, lan: true, why: Ollama on this machine}' > "$st/policy.yaml"
+    ans="$("$YANTRIK_EGRESS_BIN" direct "$st" 2>&1)"; rc=$?
+    res="$(me_render "$ans" "$rc")"
+    is "mind-egress (real reader): only literal LAN and loopback addresses in lan rules" "entries: 4 from the person's lan rules (enforce); DNS refused" "$res"
+    is "mind-egress (real reader): ... the IPv4 one" "192.168.4.42 . 8888" "$(me_set direct4)"
+    is "mind-egress (real reader): ... the IPv6 ones" "fd00::5 . 443, fd00::5 . 8443" "$(me_set direct6)"
+    is "mind-egress (real reader): ... the loopback one" "$MIND_LOOPBACK_PORTS, 11434" "$(me_set loopback4)"
+    is "mind-egress (real reader): ... no name, no rule without lan, no public address" "no no no" \
+      "$(me_has searx.lan) $(me_has 192.168.4.43) $(me_has 1.1.1.1)"
+    printf 'on\n' > "$st/private"
+    ans="$("$YANTRIK_EGRESS_BIN" direct "$st" 2>&1)"; rc=$?
+    is "mind-egress (real reader): Private mode" "entries: NONE, Private mode is on; DNS refused" "$(me_render "$ans" "$rc")"
+    is "mind-egress (real reader): ... none" "none" "$(me_none)"
+    rm -f "$st/private"
+    printf 'mode: audit\nrules:\n  - {host: "192.168.4.42", ports: [8888], lan: true, why: x}\n' > "$st/policy.yaml"
+    ans="$("$YANTRIK_EGRESS_BIN" direct "$st" 2>&1)"; rc=$?
+    is "mind-egress (real reader): audit lets DNS out" "entries: 1 from the person's lan rules (audit); DNS allowed" "$(me_render "$ans" "$rc")"
+    printf 'mode: audit\nrules:\n  - {host: "192.168.4.42", ports: [0], lan: true, why: x}\n' > "$st/policy.yaml"
+    ans="$("$YANTRIK_EGRESS_BIN" direct "$st" 2>&1)"; rc=$?
+    t "mind-egress (real reader): a policy with a rule nobody could have written is no entries" \
+      "NONE, the egress policy could not be read" "$(me_render "$ans" "$rc")"
+    is "mind-egress (real reader): ... none" "none" "$(me_none)"
+  else
+    printf '  skip mind-egress checks against the real policy reader: set YANTRIK_EGRESS_BIN to a built yantrik-egress\n'
+  fi
+
+  # The tables above, for nft itself: kept for the caller when it asks (CI checks them with
+  # `sudo nft -c -f`), and checked here in a network namespace of our own when nft and user
+  # namespaces are both at hand.
+  local variants="$me/variants" nftbin f
+  mkdir -p "$variants"
+  me_render "$(printf 'private off\nmode audit\ndirect 192.168.4.42 8888\ndirect fd00::5 443\nloopback 127.0.0.1 11434\nloopback ::1 11434\n')" >/dev/null && cp "$tbl" "$variants/audit.nft"
+  me_render "$(printf 'private off\nmode enforce\ndirect 192.168.4.42 8888\n')" >/dev/null && cp "$tbl" "$variants/enforce.nft"
+  me_render "$(printf 'private on\nmode enforce\n')" >/dev/null && cp "$tbl" "$variants/private.nft"
+  mind_egress_text 998 "" "" nodns "NONE, the table made from the policy did not load" > "$variants/fallback.nft"
+  if [ -n "${YANTRIK_NFT_OUT:-}" ]; then
+    mkdir -p "$YANTRIK_NFT_OUT" && cp "$variants"/*.nft "$YANTRIK_NFT_OUT"/
+  fi
+  nftbin="$(command -v nft 2>/dev/null || true)"
+  if [ -n "$nftbin" ] && command -v unshare >/dev/null 2>&1 \
+     && printf 'table inet yantrik_probe {\n}\n' | unshare -rn "$nftbin" -c -f - >/dev/null 2>&1; then
+    for f in "$variants"/*.nft; do
+      if unshare -rn "$nftbin" -c -f "$f" > "$me/nft.err" 2>&1; then
+        printf '  %sok%s   mind-egress: nft accepts the %s table\n' "$c_grn" "$c_off" "$(basename "$f" .nft)"
+      else
+        printf '  %sFAIL%s mind-egress: nft refuses the %s table: %s\n' "$c_red" "$c_off" "$(basename "$f" .nft)" "$(tr '\n' ' ' < "$me/nft.err")"
+        fails=$((fails + 1))
+      fi
+    done
+  else
+    printf '  skip mind-egress nft syntax check: no nft, or no user namespace to run it in\n'
+  fi
+
   # The blanket sudo rules taken away once the narrow one is in place (#397), cloud-init's included.
   local sd="$root/sudoers.d"; mkdir -p "$sd"
   printf '# written by the image\nyantrik ALL=(ALL) NOPASSWD: ALL\n' > "$sd/image"
@@ -3024,6 +3913,7 @@ usage() {
     "  set-channel nightly|beta|stable           change the channel (writes $CONF)" \
     "  reconcile                                 install base packages the image ships and this lacks" \
     "  install-mind BUNDLE SHA256                put a Yantrik Mind bundle in place, and prove it attaches" \
+    "  mind-egress apply                         hold the mind account to its egress proxy (root; its units run it)" \
     "  selftest                                  offline checks, no network" \
     "" \
     "check exits 0 up to date · 10 update available · 11 channel not published ·" \
@@ -3043,6 +3933,7 @@ case "$CMD" in
   reconcile) cmd_reconcile ;;
   migrate-minds) cmd_migrate_minds "$@" ;;
   install-mind) cmd_install_mind "$@" ;;
+  mind-egress) cmd_mind_egress "$@" ;;
   migrate-ownership) cmd_migrate_ownership ;;
   selftest) cmd_selftest ;;
   # Printed from a function rather than `sed -n '20,30p' "$0"`, which quietly printed whatever

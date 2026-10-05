@@ -23,8 +23,7 @@ impl State {
         State {
             policy: Policy::load(&dir.join("policy.yaml")),
             ledger: Ledger::load(&dir.join("seen.json")),
-            // Can't tell (the directory unreadable): private. Only "it is not there" is off.
-            private: dir.join("private").try_exists().unwrap_or(true),
+            private: private_at(dir),
             dir: dir.to_path_buf(),
         }
     }
@@ -58,6 +57,12 @@ impl State {
     }
 }
 
+/// Whether the person's Private mode is on, by its marker in `dir`. Can't tell (the directory
+/// unreadable): private. Only "it is not there" is off.
+pub fn private_at(dir: &Path) -> bool {
+    dir.join("private").try_exists().unwrap_or(true)
+}
+
 /// A new file beside the old at 0600, renamed over it.
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let tmp = path.with_extension(format!("tmp{}", std::process::id()));
@@ -89,7 +94,7 @@ mod tests {
         let mut s = State::load(&d);
         assert!(!s.private);
         s.policy.mode = Mode::Enforce;
-        s.policy.allow(Rule { host: "api.x.ai".into(), ports: vec![443], http: false, lan: false, why: "the model".into() }).unwrap();
+        s.policy.allow(Rule { host: "api.x.ai".into(), ports: vec![443], http: false, lan: false, why: "the model".into(), seeded: false }).unwrap();
         s.save_policy().unwrap();
         s.ledger.record("api.x.ai", 443, Outcome::Allowed, false, false, "", 5);
         s.save_ledger().unwrap();

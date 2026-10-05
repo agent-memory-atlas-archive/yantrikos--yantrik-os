@@ -12,6 +12,7 @@
 //! | `mode` | `mode`: `audit` / `enforce` | switches the whole policy |
 //! | `private` | `on` | the person's Private mode |
 //! | `allow` | `rule` | adds or replaces a rule |
+//! | `seed` | `rules` | root only: replaces the seeded rules (`crate::seed`), never the person's |
 //! | `remove` | `host` | removes that host's rules |
 //! | `forget` | `host`, `port` | drops a destination from the ledger (the person said No) |
 
@@ -30,8 +31,8 @@ pub fn admitted(uid: u32, owner: Option<u32>) -> bool {
     uid == 0 || owner == Some(uid)
 }
 
-/// Answer one request.
-pub fn handle(state: &Mutex<State>, request: &Value) -> Value {
+/// Answer one request. `root`: the caller is root, the only one that may seed.
+pub fn handle(state: &Mutex<State>, request: &Value, root: bool) -> Value {
     let Ok(mut s) = state.lock() else {
         return json!({ "ok": false, "error": "the proxy's state is poisoned" });
     };
@@ -70,6 +71,17 @@ pub fn handle(state: &Mutex<State>, request: &Value) -> Value {
             },
             Err(e) => json!({ "ok": false, "error": format!("not a rule: {e}") }),
         },
+        "seed" if !root => json!({ "ok": false, "error": "only root seeds rules (yantrik-update)" }),
+        "seed" => match serde_json::from_value::<Vec<Rule>>(request["rules"].clone()) {
+            Ok(rules) => match s.policy.seed(rules) {
+                Ok(added) => match s.save_policy() {
+                    Ok(()) => json!({ "ok": true, "seeded": added }),
+                    Err(e) => json!({ "ok": false, "error": format!("could not be saved: {e}") }),
+                },
+                Err(e) => json!({ "ok": false, "error": e }),
+            },
+            Err(e) => json!({ "ok": false, "error": format!("not rules: {e}") }),
+        },
         "remove" => {
             let host = request["host"].as_str().unwrap_or_default();
             let n = s.policy.remove(host);
@@ -84,7 +96,7 @@ pub fn handle(state: &Mutex<State>, request: &Value) -> Value {
             s.ledger.forget(host, port);
             json!({ "ok": true })
         }
-        _ => json!({ "ok": false, "error": format!("`{op}` is not an op here: status, seen, proposals, mode, private, allow, remove, forget") }),
+        _ => json!({ "ok": false, "error": format!("`{op}` is not an op here: status, seen, proposals, mode, private, allow, seed, remove, forget") }),
     }
 }
 
@@ -108,7 +120,7 @@ pub async fn serve(listener: tokio::net::UnixListener, state: Arc<Mutex<State>>,
                     json!({ "ok": false, "error": "the request is too long" })
                 } else {
                     match serde_json::from_str::<Value>(&line) {
-                        Ok(req) => handle(&state, &req),
+                        Ok(req) => handle(&state, &req, uid == Some(0)),
                         Err(_) => json!({ "ok": false, "error": "not JSON" }),
                     }
                 };
@@ -144,19 +156,36 @@ mod tests {
     #[test]
     fn the_person_switches_the_mode_adds_rules_and_turns_private_mode() {
         let s = state("ops");
-        assert_eq!(handle(&s, &json!({"op":"status"}))["mode"], "audit");
-        assert_eq!(handle(&s, &json!({"op":"mode","mode":"enforce"}))["ok"], true);
-        assert_eq!(handle(&s, &json!({"op":"mode","mode":"wide-open"}))["ok"], false);
-        let r = handle(&s, &json!({"op":"allow","rule":{"host":"api.x.ai","ports":[443],"why":"the model"}}));
+        assert_eq!(handle(&s, &json!({"op":"status"}), false)["mode"], "audit");
+        assert_eq!(handle(&s, &json!({"op":"mode","mode":"enforce"}), false)["ok"], true);
+        assert_eq!(handle(&s, &json!({"op":"mode","mode":"wide-open"}), false)["ok"], false);
+        let r = handle(&s, &json!({"op":"allow","rule":{"host":"api.x.ai","ports":[443],"why":"the model"}}), false);
         assert_eq!(r["ok"], true, "{r}");
-        assert_eq!(handle(&s, &json!({"op":"allow","rule":{"host":"*","ports":[443],"why":"all"}}))["ok"], false);
-        assert_eq!(handle(&s, &json!({"op":"allow","rule":{"host":"a.com","ports":[443],"why":"x","extra":1}}))["ok"], false, "no unknown keys");
-        let st = handle(&s, &json!({"op":"status"}));
+        assert_eq!(handle(&s, &json!({"op":"allow","rule":{"host":"*","ports":[443],"why":"all"}}), false)["ok"], false);
+        assert_eq!(handle(&s, &json!({"op":"allow","rule":{"host":"a.com","ports":[443],"why":"x","extra":1}}), false)["ok"], false, "no unknown keys");
+        let st = handle(&s, &json!({"op":"status"}), false);
         assert_eq!(st["mode"], "enforce");
         assert_eq!(st["rules"].as_array().unwrap().len(), 1);
-        assert_eq!(handle(&s, &json!({"op":"private","on":true}))["ok"], true);
-        assert_eq!(handle(&s, &json!({"op":"status"}))["private"], true);
-        assert_eq!(handle(&s, &json!({"op":"remove","host":"api.x.ai"}))["removed"], 1);
-        assert_eq!(handle(&s, &json!({"op":"nonsense"}))["ok"], false);
+        assert_eq!(handle(&s, &json!({"op":"private","on":true}), false)["ok"], true);
+        assert_eq!(handle(&s, &json!({"op":"status"}), false)["private"], true);
+        assert_eq!(handle(&s, &json!({"op":"remove","host":"api.x.ai"}), false)["removed"], 1);
+        assert_eq!(handle(&s, &json!({"op":"nonsense"}), false)["ok"], false);
+    }
+
+    #[test]
+    fn only_root_seeds_and_a_seed_keeps_the_persons_rules() {
+        let s = state("seed");
+        handle(&s, &json!({"op":"allow","rule":{"host":"api.x.ai","ports":[443],"why":"the model"}}), false);
+        let seed = json!({"op":"seed","rules":[{"host":"192.168.4.35","ports":[11434],"http":true,"lan":true,"why":"seeded from config.yaml"}]});
+        assert_eq!(handle(&s, &seed, false)["ok"], false, "the desktop's owner does not seed");
+        let r = handle(&s, &seed, true);
+        assert_eq!(r["ok"], true, "{r}");
+        assert_eq!(r["seeded"][0]["seeded"], true);
+        let rules = handle(&s, &json!({"op":"status"}), false)["rules"].clone();
+        assert_eq!(rules.as_array().unwrap().len(), 2);
+        assert_eq!(handle(&s, &json!({"op":"seed","rules":[]}), true)["ok"], true);
+        let rules = handle(&s, &json!({"op":"status"}), false)["rules"].clone();
+        assert_eq!(rules.as_array().unwrap().len(), 1, "the seed is gone, the person's rule stays: {rules}");
+        assert_eq!(rules[0]["host"], "api.x.ai");
     }
 }
