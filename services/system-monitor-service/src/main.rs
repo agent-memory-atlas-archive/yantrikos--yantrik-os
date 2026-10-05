@@ -124,8 +124,7 @@ fn describe_view() -> Result<View, ServiceError> {
     // Top few by CPU: the question "what is this machine doing" is almost always "what is using
     // it", and a full process table is the transcript an agent was told to avoid. From the last
     // sample when there is a recent one (recent.rs): taking a new one costs half a second.
-    let (top, sampled_ago) =
-        recent::busiest(|| read_processes("cpu", recent::SHOWN as u32).unwrap_or_default());
+    let (top, sampled_ago) = recent::busiest();
     // The window's status row, in the same words: what was measured, which limits were checked,
     // and which were reached. A window that is closed must not leave a caller with less.
     let status = MachineStatus::assess(
