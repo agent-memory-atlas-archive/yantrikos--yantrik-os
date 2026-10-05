@@ -208,9 +208,12 @@ export component ApprovalCard inherits Rectangle {
     // whenever the one-line summary of them cannot carry it — the first line of the app's word
     // about the call, the undo line, the warning and the buttons (review of #639; on main the
     // pinned identity rows alone outgrew the Lens's 240px and pushed the buttons out of the
-    // card, over the transcript). Nothing the grant covers is ever only reachable by scrolling. Every host passes a limit: the Lens its
-    // panel's arithmetic, the top-right corner the screen between the bars (about 684px at
-    // 1280×800). Only an agent's pane, which scrolls itself, leaves the out-of-reach default.
+    // card, over the transcript). The card is never taller than this limit and the buttons are
+    // always inside it: when even the pinned lines do not fit, everything above the buttons
+    // scrolls as one and Allow waits until its end has been in view (fourth review of #639; see
+    // `allow-ready`). Every host passes a limit: the Lens its panel's arithmetic, the top-right
+    // corner the screen between the bars (about 684px at 1280×800, 484px at 800×600). Only an
+    // agent's pane, which scrolls itself, leaves the out-of-reach default.
     // Not called `max-height`: that name belongs to the Rectangle this inherits from, where it
     // is a layout constraint, and Slint refuses to let a component shadow a built-in property.
     in property <length> height-limit: 10000px;
@@ -218,6 +221,10 @@ export component ApprovalCard inherits Rectangle {
     // Details and source: closed by default for a sensitive request, open for a dangerous one
     // (sign-off item 4). A press is remembered for the request it was made on, so a card that
     // takes this one's place starts at its own grade's default.
+    // The request whose whole content has been in view: set when the section above the buttons,
+    // having had to scroll, reaches its end. Allow waits for it (see `allow-ready`). Per request
+    // id, like the disclosure below, so the next card in this place starts over.
+    property <string> read-id: "";
     property <string> toggled-id: "";
     property <bool> toggled-open: false;
     property <bool> details-open: root.toggled-id == root.data.id ? root.toggled-open
@@ -311,7 +318,7 @@ export component ApprovalCard inherits Rectangle {
         Rectangle { horizontal-stretch: 1; }
     }
 
-    if root.waiting : Rectangle {
+    if root.waiting : card := Rectangle {
         border-radius: Theme.chat-radius;
         // Opaque, not glass: this card is drawn over whatever screen is up, and a question about
         // something that cannot be undone must not have another window's words showing through it.
@@ -321,10 +328,27 @@ export component ApprovalCard inherits Rectangle {
         border-color: root.grade-edge;
         drop-shadow-blur: 18px;
         drop-shadow-color: Theme.overlay-shadow;
-        // As tall as the body. The body keeps the promise to the panel by letting its middle
-        // yield (below); when even the floor — the pinned lines and the buttons — is taller than
-        // the panel allows, the card is taller than the limit rather than drawing its buttons
-        // outside itself, which is what it did on main (review of #639, S1).
+
+        // ── Never taller than its host allows, and the buttons always inside it ──
+        //
+        // Fourth review of #639: at 800×600 the largest card a request may make put its buttons
+        // under the window's edge — a card nobody can answer, held in front by card_watch until it
+        // expires. Whatever the size, Decline and Allow are pinned at the foot, and everything
+        // above them gets the room that is left (`above-room`).
+        //
+        // Three cases. Everything fits: nothing scrolls and Allow is live at once. The pinned lines
+        // fit and the middle does not: the middle scrolls, as it always has, and Allow is live —
+        // every argument the grant binds is on screen. Even the pinned lines do not fit: all of it
+        // scrolls as one, and Allow stays disabled until that scroll has been to its end, so the
+        // person has had every argument in view before they can allow it (`allow-ready`). Decline
+        // is always live.
+        property <length> above-room: max(0px, root.height-limit - decide.preferred-height
+            - 2 * Theme.sp-2 - Theme.sp-2);
+        property <bool> overflowing: above-content.preferred-height > self.above-room + 0.5px;
+        property <bool> allow-ready: !self.overflowing || root.read-id == root.data.id;
+        // A new request in this card starts at its top, however far the last one was scrolled.
+        property <string> card-id: root.data.id;
+        changed card-id => { above-flick.viewport-y = 0px; }
         height: card-body.preferred-height;
 
         card-body := VerticalLayout {
@@ -334,12 +358,30 @@ export component ApprovalCard inherits Rectangle {
             padding-bottom: Theme.sp-2;
             spacing: Theme.sp-2;
 
-            // ── The floor, pinned on top: who is asking and what the action is ──
+            // Everything above the buttons. As tall as it likes up to `above-room`, past which it
+            // scrolls; reaching its end is what makes Allow live when it had to scroll.
+            Rectangle {
+                height: min(above-content.preferred-height, card.above-room);
+                clip: true;
+
+                above-flick := Flickable {
+                    viewport-width: self.width;
+                    viewport-height: above-content.preferred-height;
+                    changed viewport-y => {
+                        if (self.viewport-y <= self.height - self.viewport-height + 1px) {
+                            root.read-id = root.data.id;
+                        }
+                    }
+
+                    above-content := VerticalLayout {
+                        spacing: Theme.sp-2;
+
+            // ── The floor: who is asking and what the action is ──
             //
-            // Each one line, cut at the card's edge when it must be — never scrolled away, however
-            // little room the panel gives (review of #639, S1). The labels that say what kind of
-            // line each is ("verified", "unverified") are their own Texts beside the cut one, so
-            // the cut can only ever eat the caller's words or the program's name, never the label.
+            // Each one line, cut at the card's edge when it must be — never scrolled away while the
+            // pinned lines fit (review of #639, S1). The labels that say what kind of line each is
+            // ("verified", "unverified") are their own Texts beside the cut one, so the cut can
+            // only ever eat the caller's words or the program's name, never the label.
             pinned-floor := VerticalLayout {
                 spacing: Theme.sp-1;
 
@@ -461,17 +503,15 @@ export component ApprovalCard inherits Rectangle {
 
             // ── The middle: everything that may yield ──
             //
-            // The one part of the card that gives way when the card may not be as tall as it
-            // likes: its height is what is left of `height-limit` once the floor above and below,
-            // the card's padding and its three gaps are subtracted (2×sp-2 and 3×sp-2 are exactly
-            // those), and it scrolls. Where the card has room it is precisely as tall as its
-            // content and nothing scrolls. In the Lens at 1280×800 it is all that yields: the
-            // floor above, what changes and the buttons below stay whole.
+            // The part that gives way first: its height is what is left of `above-room` once the
+            // floor and what changes are subtracted, with the two gaps between them, and it
+            // scrolls on its own. Where the card has room it is precisely as tall as its content
+            // and nothing scrolls. When it is down to nothing and the rest still does not fit, the
+            // whole section above the buttons scrolls instead (see `overflowing`).
             Rectangle {
                 height: min(mid.preferred-height,
-                            max(0px, root.height-limit - pinned-floor.preferred-height
-                                - changes.preferred-height - decide.preferred-height
-                                - 2 * Theme.sp-2 - 3 * Theme.sp-2));
+                            max(0px, card.above-room - pinned-floor.preferred-height
+                                - changes.preferred-height - 2 * Theme.sp-2));
                 clip: true;
 
                 // A Flickable has no preferred height of its own, so the sizing Rectangle is
@@ -730,9 +770,9 @@ export component ApprovalCard inherits Rectangle {
             // at the card's edge, every argument the grant binds, in full and wrapped — never in
             // the part that scrolls, so nothing the grant covers is out of reach while Allow can be
             // pressed (re-review of #639: "…temporary files now &…" over a red Run command, with
-            // "rm -rf ~/x" scrolled to nowhere). The arguments are bounded in the shell (eight
-            // values of sixty characters and an "and N more" line) and escaped value by value, and
-            // the card grows past its limit rather than drop a pinned line. Then the first line of
+            // "rm -rf ~/x" scrolled to nowhere). The arguments are bounded in the shell and
+            // escaped value by value; when even these lines do not fit, the whole section scrolls
+            // and Allow waits until its end has been in view. Then the first line of
             // the app's word about this call, the undo line in the warning's red, and the warning
             // when there is one the undo line does not already say.
             changes := VerticalLayout {
@@ -800,6 +840,10 @@ export component ApprovalCard inherits Rectangle {
                 }
             }
 
+                    }   // above-content
+                }   // above-flick
+            }   // everything above the buttons
+
             // Pinned bottom: the answer.
             decide := VerticalLayout {
                 spacing: Theme.sp-2;
@@ -826,10 +870,15 @@ export component ApprovalCard inherits Rectangle {
                     clicked => { root.deny(); }
                 }
 
+                // Disabled — dimmed, and pressing it does nothing — while the request has had to
+                // scroll and its end has not yet been in view (`allow-ready`, fourth review of
+                // #639). Decline never is.
                 YButton {
                     label: root.data.confirm-label != "" ? root.data.confirm-label : "Allow once";
                     variant: root.data.destructive ? 3 : 0;
                     pointer-only: true;
+                    disabled: !card.allow-ready;
+                    tooltip: card.allow-ready ? "" : "Scroll to read the whole request first";
                     horizontal-stretch: 1;
                     clicked => { root.allow(); }
                 }
@@ -863,12 +912,16 @@ export component ApprovalCard inherits Rectangle {
                 Rectangle {
                     height: 30px;
                     border-radius: Theme.r-md;
-                    background: session-ta.has-hover ? Theme.hover-fill : transparent;
+                    background: session-ta.has-hover && card.allow-ready ? Theme.hover-fill : transparent;
                     border-width: 1px;
                     border-color: Theme.border-subtle;
+                    opacity: card.allow-ready ? 1.0 : 0.45;
 
+                    // A standing yes is a yes: held back with Allow until the whole request has
+                    // been in view.
                     session-ta := TouchArea {
-                        mouse-cursor: pointer;
+                        enabled: card.allow-ready;
+                        mouse-cursor: card.allow-ready ? pointer : default;
                         clicked => { root.allow-session(); }
                     }
                     Text {

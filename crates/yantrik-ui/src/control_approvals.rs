@@ -236,10 +236,12 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                 // (third review of #639 — arguments sized to push Decline and Allow off the
                 // screen, and to hold it there). The request path only: what a grant is bound to,
                 // its single use, its TTL and its spending are the store's and do not change.
-                // "Destructive" is the red button's reading — the settled grade, and the app's
-                // sentence or the caller's, either of which can only add caution.
-                let destructive = approval_wording::destructive(&grade, &format!("{published_purpose} {purpose}"));
-                if let Some(rule) = crate::approval_bounds::refusal(&parsed, params.as_deref(), destructive) {
+                // Whether the card must show its arguments whole is the store's own reading
+                // (`approvals::shown_whole`): the settled grade, and the app's sentence or the
+                // caller's — cannot be undone, or runs whatever it is given — either of which can
+                // only add caution.
+                let whole = approvals::shown_whole(&grade, &format!("{published_purpose} {purpose}"));
+                if let Some(rule) = crate::approval_bounds::refusal(&parsed, params.as_deref(), whole) {
                     return Err(crate::approval_bounds::refused(&rule));
                 }
 
@@ -1296,6 +1298,7 @@ fn who_is_calling(claimed: &str) -> approvals::Verified {
         agent: String::new(),
         // The rule `CallerIdentity::line` uses for its terminal prefix, kept as a fact.
         from_terminal: identity.attached_mind.is_none() && identity.via_shell,
+        raised_by_desktop: false,
     }
 }
 
@@ -1957,8 +1960,17 @@ fn publish(ui: &App, cards: Vec<Card>, pane: &str, lens: &str) {
     // Whether the card in front is the Lens's own: only then does an open Lens stand in for the
     // top-right card. A card the Lens does not host stays in the corner, over the Lens.
     ui.set_approval_in_lens(front.is_some_and(|c| in_the_lens(c, lens)));
-    ui.set_pending_approvals(ModelRc::new(VecModel::from(in_front)));
-    ui.set_approvals(ModelRc::new(VecModel::from(shown)));
+    // Written into the models already on screen, row by row, whenever the same requests are
+    // there: this runs every second while a card waits, and a new model makes Slint rebuild the
+    // card — which dropped how far the person had scrolled, whether they had read to the end
+    // (what Allow waits for when the card has to scroll), and Details and "show more" (fourth
+    // review of #639). A new model only when the requests themselves change.
+    if let Some(model) = crate::models::update(ui.get_pending_approvals(), in_front, |r| r.id.clone()) {
+        ui.set_pending_approvals(model);
+    }
+    if let Some(model) = crate::models::update(ui.get_approvals(), shown, |r| r.id.clone()) {
+        ui.set_approvals(model);
+    }
     ui.set_approvals_waiting(waiting.saturating_sub(1) as i32);
 
     // Nothing is waiting any more — by a decision, or because it expired unanswered. Either way
@@ -2761,6 +2773,7 @@ mod control_approvals_tests {
             ],
             agent: String::new(),
             from_terminal: false,
+            raised_by_desktop: false,
         }));
         assert!(known.verified.contains("pid 696"), "{}", known.verified);
         // Both disagreements survive. Concatenating them into one elided row would have shown
@@ -3046,6 +3059,10 @@ mod control_approvals_tests {
         let src = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/control_approvals.rs")).unwrap();
         let src = src.split("#[cfg(test)]").next().unwrap();
         assert!(src.contains("!lens.is_empty() && card.verified.agent == lens"), "the Lens matches by the verified agent alone");
+        // The once-a-second republish writes into the models on screen rather than replacing
+        // them, so a card a person is reading — scrolled, read to its end — is not rebuilt.
+        assert!(src.contains("crate::models::update(ui.get_pending_approvals(), in_front"), "the corner card is updated in place");
+        assert!(src.contains("crate::models::update(ui.get_approvals(), shown"), "the Lens's cards are updated in place");
     }
 
     /// Everything that clears the selected run also closes the pane, so `detail_open` cannot
@@ -3552,6 +3569,49 @@ mod target_line_tests {
         assert!(row.what.contains("x\\nUndo: possible"), "{}", row.what);
         assert!(row.exactly.contains("2210\\nUndo") && row.exactly.contains("a<U+202E>b"), "{}", row.exactly);
         assert_eq!(row.confirm_label.as_str(), "Kill process");
+    }
+
+    /// Review of #639, should-fix 1, end to end on the real action: `agent_run` is graded
+    /// `sensitive` and is no red-button card, but it runs whatever it is given, so a command longer
+    /// than the sixty characters an ordinary card shows is shown whole — `rm -rf ~/x` and all —
+    /// under an "Allow once", and one longer than a card shows whole is not asked about.
+    #[test]
+    fn a_long_agent_run_command_is_shown_whole_or_not_asked() {
+        use crate::approvals::{Store, Verified};
+        use slint::Model;
+        let spec = crate::control_agent_terminal::specs().into_iter().find(|a| a.name == "agent_run").expect("agent_run");
+        let command = "echo cleaning the temporary build files now, one moment please && rm -rf ~/x";
+        assert!(command.chars().count() > 60);
+        let params = vec!["command".to_string(), "cwd".to_string(), "wait".to_string()];
+        let whole = crate::approvals::shown_whole(spec.permission, &spec.description);
+        assert!(whole, "agent_run is open-ended");
+        assert!(crate::approval_bounds::refusal(&serde_json::json!({ "command": command }), Some(&params), whole).is_none());
+        let too_long = format!("echo {} && rm -rf ~/x", "x".repeat(240));
+        assert!(crate::approval_bounds::refusal(&serde_json::json!({ "command": too_long }), Some(&params), whole).is_some());
+
+        let mut store = Store::new();
+        let now = std::time::Instant::now();
+        store
+            .request(
+                "pi",
+                Verified::default(),
+                "shell",
+                "agent_run",
+                serde_json::json!({ "command": command }),
+                spec.permission,
+                &spec.description,
+                "",
+                "",
+                now,
+                "10:00",
+            )
+            .expect("asked");
+        let card = store.cards(now).pop().expect("the card");
+        let row = super::row_for(card);
+        assert!(row.exactly.contains("rm -rf ~/x") && !row.exactly.contains("characters in full"), "{}", row.exactly);
+        assert!(row.args.iter().any(|a| a.ends_with("rm -rf ~/x")), "the argument box too");
+        assert_eq!(row.confirm_label.as_str(), "Allow once");
+        assert!(!row.destructive);
     }
 }
 

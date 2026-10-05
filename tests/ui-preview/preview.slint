@@ -375,8 +375,9 @@ export component LensAnswerProbe inherits Window {
 // fixture data by src/approval_tests.rs, which presses the buttons by scanning for them the
 // way a person would and asserts where they answered.
 export component ApprovalLensProbe inherits Window {
-    width: 1280px;
-    height: 800px;
+    // Preferred, not fixed: the approval fit scene draws it at 800×600 and 1280×720 as well.
+    preferred-width: 1280px;
+    preferred-height: 800px;
     default-font-family: Theme.font-ui;
     background: Theme.bg-deep;
     in property <[MessageData]> messages;

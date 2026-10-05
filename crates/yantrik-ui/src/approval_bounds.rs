@@ -26,15 +26,16 @@ use crate::approvals;
 /// or two (`pid`, `channel`, `args_json`).
 pub const KEY_CHARS: usize = 40;
 
-/// The longest one argument row may be once escaped: `key: value`, a forty-character key and a
-/// value the card shows in full.
-pub const ROW_CHARS: usize = 120;
+/// The longest one argument row may be once escaped: `key: value`, a forty-character key and the
+/// longest value a card that shows its arguments whole carries.
+pub const ROW_CHARS: usize = KEY_CHARS + 2 + approvals::WHOLE_VALUE_CHARS;
 
 /// What all the rows together may come to once escaped. Eight sixty-character values under short
 /// names (the most `args_rows` shows of ordinary arguments, ~580 characters) fit under it; at the
-/// card's 14px on its ~380px width it is about twelve lines (~220px), which with every other
-/// pinned line at its worst — three discrepancies, the open-ended warning, the session row — keeps
-/// the card inside the top-right corner's ~684px and its buttons inside the Lens panel.
+/// card's 14px on its ~380px width it is about twelve lines (~220px). The card itself keeps its
+/// buttons inside whatever room its host gives it, at any screen size — it scrolls the rest and
+/// holds Allow until the end has been in view (intent_lens.slint, `allow-ready`); this bound is
+/// what keeps that rare.
 pub const TOTAL_CHARS: usize = 640;
 
 /// Why a request cannot be put in front of a person in full, or `None` when it can.
@@ -43,12 +44,12 @@ pub const TOTAL_CHARS: usize = 640;
 /// - (b) an argument the app does not publish, when the app publishes its parameters — the
 ///   action's own dispatch would refuse the call anyway (`check_arguments`);
 /// - (c) the rows, escaped, longer than [`TOTAL_CHARS`] together;
-/// - (d) on a destructive card (graded dangerous, or it cannot be undone — the reading the red
-///   button is drawn from), a value that the card would cut: its escaped form is longer than the
-///   value bound `args_rows` cuts at. A cut is acceptable on an ordinary card, under its "(N
-///   characters in full)" marker; on a card whose action cannot be taken back, the cut-off part
-///   is exactly where `; rm -rf ~` goes.
-pub fn refusal(args: &serde_json::Value, params: Option<&[String]>, destructive: bool) -> Option<String> {
+/// - (d) on a card that shows its arguments whole (`whole`: graded dangerous, cannot be undone, or
+///   runs whatever it is given — `approvals::shown_whole`), more than `ARG_ROWS` arguments, or a
+///   value longer than `approvals::WHOLE_VALUE_CHARS` once escaped. Such a card has no "and N
+///   more" and no "(N characters in full)": a cut-off part is exactly where `; rm -rf ~` goes, so
+///   it is shown whole or not asked about. An ordinary card keeps the cut under its marker.
+pub fn refusal(args: &serde_json::Value, params: Option<&[String]>, whole: bool) -> Option<String> {
     if let Some(map) = args.as_object() {
         let mut keys: Vec<&String> = map.keys().collect();
         keys.sort();
@@ -65,25 +66,34 @@ pub fn refusal(args: &serde_json::Value, params: Option<&[String]>, destructive:
                 }
             }
         }
-        if destructive {
+        if whole {
+            if keys.len() > approvals::ARG_ROWS {
+                return Some(format!(
+                    "there are {} arguments, and a card for an action that cannot be taken back or runs whatever it is \
+                     given shows every one of them or none (at most {})",
+                    keys.len(),
+                    approvals::ARG_ROWS
+                ));
+            }
             for key in &keys {
-                let value = &map[*key];
-                let shown = match value {
+                let shown = match &map[*key] {
                     serde_json::Value::String(s) => s.clone(),
                     other => other.to_string(),
                 };
                 let escaped = visible(&shown).chars().count();
-                if escaped > approvals::ARG_VALUE_CHARS {
+                if escaped > approvals::WHOLE_VALUE_CHARS {
                     return Some(format!(
-                        "`{key}` is {escaped} characters as the card would draw it, and on a card for an action \
-                         that cannot be taken back a value is shown whole or not asked about (at most {})",
-                        approvals::ARG_VALUE_CHARS
+                        "`{key}` is {escaped} characters as the card would draw it, and on a card for an action that \
+                         cannot be taken back or runs whatever it is given a value is shown whole or not asked about \
+                         (at most {})",
+                        approvals::WHOLE_VALUE_CHARS
                     ));
                 }
             }
         }
     }
-    let total: usize = approvals::args_rows(args).iter().map(|row| visible(row).chars().count()).sum();
+    let value_chars = if whole { approvals::WHOLE_VALUE_CHARS } else { approvals::ARG_VALUE_CHARS };
+    let total: usize = approvals::args_rows_with(args, value_chars).iter().map(|row| visible(row).chars().count()).sum();
     if total > TOTAL_CHARS {
         return Some(format!("the arguments come to {total} characters as the card would draw them, past the {TOTAL_CHARS} a card shows"));
     }

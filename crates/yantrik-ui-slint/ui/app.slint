@@ -3486,8 +3486,12 @@ export component App inherits Window {
                     + (root.approval-corner-shown ? root.approval-corner-height + Theme.sp-2 : 0px);
                 property <bool> fits-below: self.below + vault-stack.preferred-height
                     <= root.height - Theme.taskbar-height;
-                x: self.fits-below ? parent.width - 420px : parent.width - 840px;
-                y: self.fits-below ? self.below : Theme.status-bar-height + Theme.sp-4;
+                // Beside only when there is a whole column for it left of the card: on a narrow
+                // screen (800px wide puts "beside" at -40px, and clamping it would lay it over the
+                // card) it stays below, where nothing covers the card's buttons.
+                property <bool> beside: !self.fits-below && parent.width - 840px >= Theme.sp-4;
+                x: self.beside ? parent.width - 840px : parent.width - 420px;
+                y: self.beside ? Theme.status-bar-height + Theme.sp-4 : self.below;
                 width: 404px;
                 // Same lesson as the approval overlay: take the height from the layout inside,
                 // never from the card, or the box is sized to nothing and the card draws off it.

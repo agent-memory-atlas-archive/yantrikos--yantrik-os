@@ -2246,6 +2246,7 @@ mod mind_mode_tests {
                 discrepancies: Vec::new(),
                 agent: String::new(),
                 from_terminal: false,
+                raised_by_desktop: false,
             },
             app: "files".into(),
             action: "move".into(),

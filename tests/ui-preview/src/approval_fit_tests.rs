@@ -1,15 +1,22 @@
-//! The largest approval card a request may make, in both places it is drawn (third security
-//! review of #639). The card pins every argument above its buttons, so a request's arguments are
-//! the card's height; `approval_bounds` in the shell refuses a request whose rows would not fit
-//! and cuts what is drawn to the same limits. This draws a card at those limits — eight
-//! forty-character names, every value carrying control characters drawn as escapes, the rows at
-//! the whole budget, three discrepancies, the open-ended warning, the app's word about the call
-//! and the session row — and presses Decline and Allow where a person would: in the top-right
-//! corner of the whole shell, above the dock, and in the Lens panel, above its reply box. Then the
-//! vault prompt beside it, which must sit under the card rather than on it.
+//! The largest approval card a request may make, in both places it is drawn, at any window size
+//! (third and fourth security reviews of #639). `approval_bounds` in the shell refuses a request
+//! whose rows would not fit and cuts what is drawn to the same limits; the card itself never grows
+//! past the room its host gives it, keeps Decline and Allow inside that room, and — when even its
+//! pinned lines do not fit — scrolls everything above the buttons and holds Allow until the end
+//! has been in view.
+//!
+//! This draws a card at the request limits — eight forty-character names, every value carrying
+//! control characters drawn as escapes, the rows at the whole budget, three discrepancies, the
+//! open-ended warning, the app's word about the call and the session row — in the top-right corner
+//! of the whole shell and in the Lens panel, at the window size it is given (validate.sh runs
+//! 800×600, 1280×720 and 1280×800). Decline answers inside the window, above the dock, and inside
+//! the panel. Where the card had to scroll, Allow is disabled — a click on it grants nothing —
+//! until the card has been scrolled to its end, and then it answers. At 800×600 the corner card has
+//! to scroll. Then the vault prompt beside it, which must not lie over the card.
 use super::approval_tests::{button_top, card, diff_box, lines, message, save, scan, settle, RUN_RECIPE_SUMMARY};
 use super::*;
-use slint::{ModelRc, VecModel};
+use slint::platform::WindowEvent;
+use slint::{Model, ModelRc, VecModel};
 use std::cell::Cell;
 
 /// `approval_bounds::TOTAL_CHARS` and `KEY_CHARS` in the shell.
@@ -22,7 +29,7 @@ const OPEN_ENDED_WARNING: &str = "What it runs can do anything you can. Allowing
 
 /// The card `row_for` makes of a request at the limits: each row escaped, then cut, and the rows
 /// joined and cut to the budget with the cut named.
-fn largest() -> ApprovalRequest {
+pub(crate) fn largest() -> ApprovalRequest {
     let per_row = TOTAL_CHARS / 8;
     let rows: Vec<String> = (0..8)
         .map(|i| {
@@ -38,6 +45,7 @@ fn largest() -> ApprovalRequest {
         joined
     };
     ApprovalRequest {
+        id: "appr-largest".into(),
         args: lines(&rows.iter().map(String::as_str).collect::<Vec<_>>()),
         what: format!("Runs: {exactly}").into(),
         exactly: exactly.into(),
@@ -53,8 +61,61 @@ fn largest() -> ApprovalRequest {
     }
 }
 
-pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let (width, height) = (1280u32, 800u32);
+/// Scroll the section above a card's buttons to its end with the wheel, the way a person reads
+/// on: a few turns over a point inside it.
+pub(crate) fn read_to_end(w: &MinimalSoftwareWindow, x: f32, y: f32, width: u32, height: u32) {
+    for _ in 0..12 {
+        w.dispatch_event(WindowEvent::PointerScrolled {
+            position: slint::LogicalPosition::new(x, y),
+            delta_x: 0.0,
+            delta_y: -240.0,
+        });
+        settle(w, width, height);
+    }
+}
+
+/// Where a card's buttons are, and how its Allow behaved: (Decline's y, Allow's y, whether Allow
+/// had to wait for the end).
+struct Answered {
+    deny_y: f32,
+    allow_y: f32,
+    waited: bool,
+}
+
+/// Find Decline by scanning its column from `bottom` up; press Allow on the same row. If that
+/// grants nothing, the card must have had to scroll: read it to its end and press again, which
+/// must grant. Panics with `place` in the message if Decline is not found inside `top..bottom`.
+#[allow(clippy::too_many_arguments)]
+fn answer(
+    w: &MinimalSoftwareWindow,
+    place: &str,
+    (deny_x, allow_x, read_x, read_y): (f32, f32, f32, f32),
+    (top, bottom): (f32, f32),
+    (width, height): (u32, u32),
+    denied: &dyn Fn() -> i32,
+    allowed: &dyn Fn() -> i32,
+) -> Answered {
+    let before = denied();
+    let deny_y = scan(w, deny_x, top, bottom, || denied() > before)
+        .unwrap_or_else(|| panic!("{place}: Decline answers inside {top}..{bottom}"));
+    let btn_top = button_top(w, deny_x, deny_y, top, denied);
+    let allow_y = btn_top + 14.0;
+    let before = allowed();
+    click(w, allow_x, allow_y);
+    let waited = allowed() == before;
+    if waited {
+        // Disabled until the end has been in view: the click granted nothing. Read on, and it does.
+        read_to_end(w, read_x, read_y, width, height);
+        let before = allowed();
+        click(w, allow_x, allow_y);
+        assert!(allowed() > before, "{place}: Allow answers once the card has been read to its end");
+    }
+    println!("{place}: Decline at {deny_y} (button from {btn_top}), Allow at {allow_y}{}", if waited { ", after reading to the end" } else { "" });
+    Answered { deny_y, allow_y, waited }
+}
+
+pub fn run(w: &MinimalSoftwareWindow, output: &str, width: u32, height: u32) -> Result<(), Box<dyn std::error::Error>> {
+    let (fw, fh) = (width as f32, height as f32);
     let big = largest();
 
     // ── The top-right corner of the whole shell ──
@@ -75,22 +136,35 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     save(&alone, output, width, height)?;
     // The dock starts 48px above the window's foot; a button under it, or under the foot, is a
     // button nobody can press. The scan starts above the dock, so it never presses the dock.
-    let dock_top = height as f32 - 48.0;
-    let (deny_x, allow_x) = (width as f32 - 320.0, width as f32 - 120.0);
-    let before = denied.get();
-    let deny_y = scan(w, deny_x, 40.0, dock_top - 2.0, || denied.get() > before)
-        .expect("Decline answers inside the window, above the dock, on the largest card a request may make");
+    let dock_top = fh - 48.0;
+    let corner = answer(
+        w,
+        &format!("corner at {width}×{height}"),
+        (fw - 320.0, fw - 120.0, fw - 220.0, 140.0),
+        (40.0, dock_top - 2.0),
+        (width, height),
+        &|| denied.get(),
+        &|| allowed.get(),
+    );
+    assert!(corner.deny_y < dock_top && corner.allow_y < dock_top, "the buttons are above the dock");
+    if (width, height) == (800, 600) {
+        assert!(corner.waited, "at 800×600 the largest card has to scroll, and Allow waits for its end");
+    }
+    // The shell republishes a waiting card every second, written into the model on screen
+    // (`models::update`): what was read stays read, and Allow stays live through it.
+    shell.get_pending_approvals().set_row_data(0, big.clone());
+    settle(w, width, height);
     let before = allowed.get();
-    let allow_y = scan(w, allow_x, 40.0, dock_top - 2.0, || allowed.get() > before)
-        .expect("and Allow does");
+    click(w, fw - 120.0, corner.allow_y);
+    assert!(allowed.get() > before, "a republish in place keeps the card read and Allow live");
+    // The session row is a standing yes: it answers only once the card has been read (it has now).
     let before = sessioned.get();
-    let session_y = scan(w, width as f32 - 220.0, deny_y + 8.0, dock_top - 2.0, || sessioned.get() > before)
-        .expect("and the session row under them");
-    let top = button_top(w, deny_x, deny_y, 40.0, || denied.get());
-    println!("corner: Decline at {deny_y} (top {top}), Allow at {allow_y}, the session row at {session_y}, the dock at {dock_top}");
-    assert!(session_y < dock_top, "the whole card is above the dock");
+    let session_y = scan(w, fw - 220.0, corner.deny_y + 8.0, dock_top - 2.0, || sessioned.get() > before)
+        .expect("the session row answers under the buttons, above the dock");
+    save(&settle(w, width, height), &output.replace(".png", "-read.png"), width, height)?;
 
-    // ── The vault prompt with it: under the card, never on it ──
+    // ── The vault prompt with it: never over the card ──
+    let without = settle(w, width, height);
     shell.set_vault_unlock(VaultUnlockRequest {
         reason: "A mind asked to read a password saved in the vault.".into(),
         error: "".into(),
@@ -98,20 +172,18 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     });
     let both = settle(w, width, height);
     save(&both, &output.replace(".png", "-vault.png"), width, height)?;
-    let (vault_top, _, _) = diff_box(alone.as_slice(), both.as_slice(), width, (0, width), (40, height))
-        .expect("the vault prompt is drawn");
+    diff_box(without.as_slice(), both.as_slice(), width, (0, width), (40, height)).expect("the vault prompt is drawn");
     // Over the card's columns, nothing changes above its last row: the prompt is under the card,
-    // or — when under it would be under the dock — beside it.
-    let over_card = diff_box(alone.as_slice(), both.as_slice(), width, (width - 420, width - 16), (40, height));
-    println!("the vault prompt starts at row {vault_top}; over the card's columns: {over_card:?}");
+    // or — when under it would be under the dock and there is room — beside it.
+    let over_card = diff_box(without.as_slice(), both.as_slice(), width, (width - 420, width - 16), (40, height));
     if let Some((top_over_card, _, _)) = over_card {
         assert!(top_over_card as f32 > session_y + 8.0, "the vault prompt is under the card's last row ({session_y}), at {top_over_card}");
     }
     let before = denied.get();
-    scan(w, deny_x, top - 2.0, deny_y + 2.0, || denied.get() > before).expect("Decline still answers with the vault prompt up");
+    scan(w, fw - 320.0, corner.deny_y - 12.0, corner.deny_y + 4.0, || denied.get() > before).expect("Decline still answers with the vault prompt up");
 
-    // ── The Lens panel ──
-    let (panel_top, panel_bottom) = (32.0f32, 760.0f32);
+    // ── The Lens panel, right-docked 440px wide between the bars ──
+    let (panel_top, panel_bottom) = (48.0f32, fh - 60.0);
     let reply_top = panel_bottom - 48.0;
     let lens = ApprovalLensProbe::new()?;
     lens.set_messages(ModelRc::new(VecModel::from(vec![message("user", "Open a terminal for me.")])));
@@ -120,19 +192,25 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     w.set_size(slint::PhysicalSize::new(width, height));
     std::thread::sleep(std::time::Duration::from_millis(300));
     save(&settle(w, width, height), &output.replace(".png", "-lens.png"), width, height)?;
-    let before = lens.get_denied();
-    let lens_deny = scan(w, 1000.0, panel_top, panel_bottom - 4.0, || lens.get_denied() > before)
-        .expect("Decline answers inside the Lens panel on the largest card");
-    let before = lens.get_allowed();
-    let lens_allow = scan(w, 1180.0, panel_top, panel_bottom - 4.0, || lens.get_allowed() > before)
-        .expect("and Allow does");
-    println!("Lens: Decline at {lens_deny}, Allow at {lens_allow}, the reply box at {reply_top}");
-    assert!(lens_deny < reply_top && lens_allow < reply_top, "both above the reply box, inside the panel");
+    let in_lens = answer(
+        w,
+        &format!("Lens at {width}×{height}"),
+        (fw - 340.0, fw - 130.0, fw - 230.0, 160.0),
+        (panel_top, reply_top - 2.0),
+        (width, height),
+        &|| lens.get_denied(),
+        &|| lens.get_allowed(),
+    );
+    assert!(in_lens.deny_y < reply_top && in_lens.allow_y < reply_top, "both above the reply box, inside the panel");
 
     println!(
-        "PASS: the largest card a request may make keeps Decline, Allow and the session row above \
-         the dock in the corner (Decline at {deny_y}, the session row at {session_y}) and inside the \
-         Lens panel (Decline at {lens_deny}), and the vault prompt sits under it (from row {vault_top})"
+        "PASS at {width}×{height}: the largest card a request may make keeps Decline and Allow inside the \
+         window above the dock (corner, Decline at {}{}) and inside the Lens panel (Decline at {}{}); \
+         a click on a waiting Allow granted nothing; the vault prompt lies over none of it",
+        corner.deny_y,
+        if corner.waited { ", Allow after reading to the end" } else { "" },
+        in_lens.deny_y,
+        if in_lens.waited { ", Allow after reading to the end" } else { "" },
     );
     Ok(())
 }

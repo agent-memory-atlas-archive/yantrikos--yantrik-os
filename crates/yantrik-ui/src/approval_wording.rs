@@ -293,6 +293,11 @@ pub struct Identity {
 /// argv (`exec -a` writes it; review of #639, N2). The program is named by its executable's file
 /// name, as `Verified::who` names it; the bridged desktop is "a program yantrik-ui started".
 pub fn identity(verified: &Verified) -> Identity {
+    // A card the shell raised itself, for a recipe step: a structured fact the shell set where it
+    // built the card, never read from the line (fourth review of #639).
+    if verified.raised_by_desktop {
+        return Identity { fact: "This desktop (a recipe step)".to_string(), tag: "verified" };
+    }
     if verified.pid <= 0 {
         return Identity { fact: "A program this machine could not identify".to_string(), tag: "nothing verified" };
     }

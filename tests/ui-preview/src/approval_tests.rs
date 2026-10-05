@@ -9,7 +9,8 @@
 //! the buttons stay whole under it; `run` checks each of those is drawn above the buttons in the
 //! Lens, and checks the rest at the card's natural height.
 use super::*;
-use slint::{ModelRc, SharedString, VecModel};
+use super::approval_fit_tests::read_to_end;
+use slint::{Model, ModelRc, SharedString, VecModel};
 
 /// What `shell` publishes for `run_recipe` (crates/yantrik-ui/src/control_recipes.rs) — the
 /// longest description any app publishes, and the card this defect was hit with.
@@ -201,21 +202,35 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     // sits under the buttons and answers first — the scan keeps going until the button itself
     // does. Deny is the left half of the card's content, Allow the right.
     let (deny_x, allow_x) = (panel_left + 100.0, panel_left + 280.0);
+    let read_at = (panel_left + 200.0, 170.0);
+    let empty = || ModelRc::new(VecModel::from(Vec::<ApprovalRequest>::new()));
     let before = ui.get_denied();
     let deny_y = scan(w, deny_x, panel_top, panel_bottom - 4.0, || ui.get_denied() > before)
         .expect("Deny answers a click inside the panel — the longest card is answerable (#218)");
+    // Fourth review of #639: the card is never taller than the Lens allows, and when even its
+    // pinned lines do not fit beside its buttons the section above them scrolls and Allow — and
+    // the session row, a standing yes — wait until it has been read to its end. A press before
+    // then grants nothing.
+    let top = button_top(w, deny_x, deny_y, panel_top, || ui.get_denied());
+    let before = ui.get_allowed();
+    click(w, allow_x, top + 14.0);
+    let waited = ui.get_allowed() == before;
+    if waited {
+        assert_eq!(ui.get_sessioned(), 0, "the session row waits with Allow");
+        read_to_end(w, read_at.0, read_at.1, width, height);
+    }
     let before = ui.get_allowed();
     let allow_y = scan(w, allow_x, panel_top, panel_bottom - 4.0, || ui.get_allowed() > before)
         .expect("Allow answers a click inside the panel (#218)");
+    println!("the longest card: Allow {}", if waited { "waited until the card was read to its end" } else { "was live at once" });
     // On main before the sign-off this failed: the pinned identity rows alone outgrew the Lens's
     // 240px, the buttons and the session row were pushed out of the card, and a transcript
-    // bubble sat on the session row. Now only the provenance at the top yields.
+    // bubble sat on the session row.
     assert!(ui.get_sessioned() >= 1, "the session row under the buttons answers too");
     assert!((allow_y - deny_y).abs() <= 4.0, "Deny and Allow are one row: {deny_y} against {allow_y}");
 
     // The band the button actually answers on, to the pixel. The #218 card left a 3px sliver of
     // this row inside the panel — a sliver is not a button, and a whole one is 32px tall.
-    let top = button_top(w, deny_x, deny_y, panel_top, || ui.get_denied());
     let mut bottom = deny_y;
     while bottom < panel_bottom {
         let before = ui.get_denied();
@@ -230,33 +245,62 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     assert!(bottom <= reply_top, "the button ends above the reply box, inside the Lens: its lowest answer is {bottom}, the reply box starts at {reply_top}");
     assert!(allow_y >= panel_top && allow_y <= reply_top, "Allow is inside the Lens too, at {allow_y}");
 
-    // ── Sign-off item 6, and review of #639 S1: the floor is never scrolled away ──
+    // ── Sign-off item 6, and review of #639 S1: what the card shows at rest ──
     //
-    // The Lens gives a card 240px at 1280×800. Above the part that yields, who is asking and the
-    // action's sentence are pinned, one line each; below it what changes, the undo line, the
-    // warning and the buttons. Each is checked to be drawn whole, inside the panel and above the
-    // top of the button band, by changing its words for others of the same length and finding
-    // where the frame changed: a clipped line changes a sliver, a scrolled-away one nothing.
+    // The Lens gives a card 240px at 1280×800. Each line is checked to be drawn whole, inside the
+    // panel and above the top of the button band, by changing its words for others of the same
+    // length and finding where the frame changed: a clipped line changes a sliver, a line out of
+    // view changes nothing. Each card starts fresh (the list is emptied first), at its top.
     let xs = (panel_left as u32 + 16, 1264);
     let ys = (panel_top as u32, reply_top as u32);
-    let row_drawn_above = |base: ApprovalRequest, change: &dyn Fn(&mut ApprovalRequest), what: &str| -> (u32, u32) {
-        ui.set_approvals(ModelRc::new(VecModel::from(vec![base.clone()])));
-        let a = settle(w, width, height);
-        let before = ui.get_denied();
-        let deny = scan(w, deny_x, panel_top, panel_bottom - 4.0, || ui.get_denied() > before)
-            .unwrap_or_else(|| panic!("{what}: Decline answers inside the panel"));
-        let btn = button_top(w, deny_x, deny, panel_top, || ui.get_denied());
-        let mut changed = base;
-        change(&mut changed);
-        ui.set_approvals(ModelRc::new(VecModel::from(vec![changed])));
-        let b = settle(w, width, height);
-        let (t, bt, n) = diff_box(a.as_slice(), b.as_slice(), width, xs, ys)
-            .unwrap_or_else(|| panic!("{what} is not drawn anywhere in the Lens"));
+    let check = |a: &[slint::Rgb8Pixel], b: &[slint::Rgb8Pixel], btn: f32, what: &str| -> (u32, u32) {
+        let (t, bt, n) = diff_box(a, b, width, xs, ys).unwrap_or_else(|| panic!("{what} is not drawn anywhere in the Lens"));
         println!("{what}: drawn on rows {t}..{bt} ({n} pixels), the buttons start at {btn}");
         assert!(bt - t >= 7, "{what} is a whole line of type, not a clipped sliver: rows {t}..{bt}");
         assert!((bt as f32) < btn - 2.0, "{what} ends above the buttons: row {bt}, buttons at {btn}");
         assert!(t as f32 > panel_top, "{what} is inside the panel");
         (t, bt)
+    };
+    // Shown fresh, its buttons found: (the frame, the top of the button band).
+    let fresh = |base: &ApprovalRequest, what: &str| -> (slint::SharedPixelBuffer<slint::Rgb8Pixel>, f32) {
+        ui.set_approvals(empty());
+        settle(w, width, height);
+        ui.set_approvals(ModelRc::new(VecModel::from(vec![base.clone()])));
+        let a = settle(w, width, height);
+        let before = ui.get_denied();
+        let deny = scan(w, deny_x, panel_top, panel_bottom - 4.0, || ui.get_denied() > before)
+            .unwrap_or_else(|| panic!("{what}: Decline answers inside the panel"));
+        (a, button_top(w, deny_x, deny, panel_top, || ui.get_denied()))
+    };
+    let row_drawn_above = |base: ApprovalRequest, change: &dyn Fn(&mut ApprovalRequest), what: &str| -> (u32, u32) {
+        let (a, btn) = fresh(&base, what);
+        let mut changed = base;
+        change(&mut changed);
+        ui.set_approvals(ModelRc::new(VecModel::from(vec![changed])));
+        let b = settle(w, width, height);
+        check(a.as_slice(), b.as_slice(), btn, what)
+    };
+    // The same, for a card that has to scroll: Allow is pressed first and must grant nothing; the
+    // card is read to its end; the line is then found drawn; and Allow then answers. The change
+    // is written into the model on screen, row by row, the way the shell's once-a-second
+    // republish writes it (`models::update` in control_approvals::publish) — so the card is not
+    // rebuilt, and what was read stays read.
+    let drawn_once_read = |base: ApprovalRequest, change: &dyn Fn(&mut ApprovalRequest), what: &str| -> (u32, u32) {
+        let (_, btn) = fresh(&base, what);
+        let before = ui.get_allowed();
+        click(w, allow_x, btn + 14.0);
+        assert_eq!(ui.get_allowed(), before, "{what}: the card has to scroll, and Allow grants nothing before its end");
+        read_to_end(w, read_at.0, read_at.1, width, height);
+        let a = settle(w, width, height);
+        let mut changed = base;
+        change(&mut changed);
+        ui.get_approvals().set_row_data(0, changed);
+        let b = settle(w, width, height);
+        let found = check(a.as_slice(), b.as_slice(), btn, what);
+        let before = ui.get_allowed();
+        click(w, allow_x, btn + 14.0);
+        assert!(ui.get_allowed() > before, "{what}: once read to its end, Allow answers");
+        found
     };
     let deleting = super::review_stills::delete_card();
     let what = row_drawn_above(deleting.clone(), &|c: &mut ApprovalRequest| c.what = "Removes: id: sweep-demo-not-real".into(), "the \"Deletes:\" line");
@@ -269,15 +313,17 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
         "the warning",
     );
 
-    // The worst case for the floor: eight arguments at their longest, the session row under the
-    // buttons, a discrepancy and the app's word about the call. The arguments may only yield;
-    // the identity line, the claim, the discrepancy, the sentence and the buttons are all drawn.
+    // Eight arguments at their longest, the session row under the buttons, a discrepancy and the
+    // app's word about the call: more than the Lens's 240px holds beside the buttons. At rest the
+    // card shows who is asking and what the action is, from its top; the arguments are reached by
+    // scrolling, and Allow waits until they have all been in view.
     // The last one ends "wv", so its tail can be changed to "vw" — the same glyphs, the same
     // width — without moving a line break, and the change is found where the tail is drawn.
     let long: Vec<String> = (0..8)
         .map(|i| if i == 7 { format!("argument{i}: {}wv", "v".repeat(58)) } else { format!("argument{i}: {}", "v".repeat(60)) })
         .collect();
     let crowded = ApprovalRequest {
+        id: "appr-crowded".into(),
         args: lines(&long.iter().map(String::as_str).collect::<Vec<_>>()),
         what: format!("Runs: {}", long.join("; ")).into(),
         exactly: long.join("; ").into(),
@@ -299,13 +345,12 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
         &|c: &mut ApprovalRequest| c.summary = "Begin a recipe with its inputs: a built-in one by its name or id, or one a mind made.".into(),
         "the action's sentence, eight long arguments",
     );
-    let runs = row_drawn_above(crowded.clone(), &|c: &mut ApprovalRequest| c.what = format!("Ends: {}", long.join("; ")).into(), "the pinned \"Runs:\" line, eight long arguments");
-    assert!(who.1 < claim.0 && claim.1 < doubt.0 && doubt.1 < said.0 && said.1 < runs.0, "fact, claim, discrepancy, sentence, then what changes: {who:?} {claim:?} {doubt:?} {said:?} {runs:?}");
-    // Re-review of #639: every argument the grant binds is on screen while Allow can be pressed —
-    // the last one's last character included, not scrolled to nowhere behind a cut line.
+    assert!(who.1 < claim.0 && claim.1 < doubt.0 && doubt.1 < said.0, "fact, claim, discrepancy, then the sentence: {who:?} {claim:?} {doubt:?} {said:?}");
+    // Every argument the grant binds is in view before Allow can be pressed — the last one's last
+    // character included.
     let mut last = long.clone();
     last[7] = format!("argument7: {}vw", "v".repeat(58));
-    let tail = row_drawn_above(
+    drawn_once_read(
         crowded.clone(),
         &|c: &mut ApprovalRequest| {
             c.exactly = last.join("; ").into();
@@ -313,34 +358,38 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
         },
         "the last argument's tail, eight long arguments",
     );
-    assert!(tail.0 > runs.0, "it is in the pinned arguments under the summary line: {tail:?}");
-    // The command a mind could hide behind a cut line: its dangerous end is drawn.
+    // The command a mind could hide behind a cut line: its dangerous end is drawn before Allow
+    // can be pressed. (The card `row_for` makes of a real agent_run call is checked in the
+    // shell's own tests: a_long_agent_run_command_is_shown_whole_or_not_asked.)
     let rm = ApprovalRequest {
+        id: "appr-rm".into(),
         app: "shell".into(),
         action: "agent_run".into(),
         summary: "Run one command line in a fresh terminal of your own.".into(),
-        args: lines(&["command: echo cleaning temporary files now && rm -rf ~/x"]),
-        what: "Runs: command: echo cleaning temporary files now && rm -rf ~/x".into(),
-        exactly: "command: echo cleaning temporary files now && rm -rf ~/x".into(),
-        destructive: true,
-        confirm_label: "Run command".into(),
+        args: lines(&["command: echo cleaning the temporary build files now, one moment please && rm -rf ~/x"]),
+        what: "Runs: command: echo cleaning the temporary build files now, one moment please && rm -rf ~/x".into(),
+        exactly: "command: echo cleaning the temporary build files now, one moment please && rm -rf ~/x".into(),
+        warning: "What it runs can do anything you can. Allowing it for the session lets any mind or caller on this desktop run any command through it, until the shell restarts or the mode is lowered.".into(),
         discrepancies: lines(&["The caller called this `standard`; the app publishes `sensitive`."]),
         ..card(RUN_RECIPE_SUMMARY)
     };
-    row_drawn_above(
-        rm.clone(),
-        &|c: &mut ApprovalRequest| {
-            c.what = "Runs: command: echo cleaning temporary files now && rm -rf ~/y".into();
-            c.exactly = "command: echo cleaning temporary files now && rm -rf ~/y".into();
-        },
-        "\"rm -rf ~/x\" at the end of the command",
-    );
+    let rm_changed = |c: &mut ApprovalRequest| {
+        c.what = "Runs: command: echo cleaning the temporary build files now, one moment please && rm -rf ~/y".into();
+        c.exactly = "command: echo cleaning the temporary build files now, one moment please && rm -rf ~/y".into();
+    };
+    drawn_once_read(rm.clone(), &rm_changed, "\"rm -rf ~/x\" at the end of the command");
+    ui.set_approvals(empty());
+    settle(w, width, height);
     ui.set_approvals(ModelRc::new(VecModel::from(vec![rm])));
     save(&settle(w, width, height), &output.replace(".png", "-rm.png"), width, height)?;
+    ui.set_approvals(empty());
+    settle(w, width, height);
     ui.set_approvals(ModelRc::new(VecModel::from(vec![crowded])));
     save(&settle(w, width, height), &output.replace(".png", "-eight-args.png"), width, height)?;
+    read_to_end(w, read_at.0, read_at.1, width, height);
+    save(&settle(w, width, height), &output.replace(".png", "-eight-args-read.png"), width, height)?;
     let before = ui.get_allowed();
-    scan(w, allow_x, panel_top, panel_bottom - 4.0, || ui.get_allowed() > before).expect("Allow answers with eight long arguments");
+    scan(w, allow_x, panel_top, panel_bottom - 4.0, || ui.get_allowed() > before).expect("Allow answers with eight long arguments, once read");
     let before = ui.get_sessioned();
     scan(w, panel_left + 200.0, panel_top, panel_bottom - 4.0, || ui.get_sessioned() > before).expect("and the session row too");
 

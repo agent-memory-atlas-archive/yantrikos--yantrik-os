@@ -144,6 +144,15 @@ fn the_verified_fact_leads_and_the_claim_follows() {
     for nothing in [Verified::default(), Verified { line: "could not be identified".into(), ..Verified::default() }] {
         assert_eq!(identity(&nothing).tag, "nothing verified");
     }
+    // A card the shell raised itself (the recipe executor's hand_off) has no pid and is no
+    // stranger: the desktop is asking.
+    let desktop = Verified { line: "the shell's recipe executor, for the Council recipe (r-1)".into(), raised_by_desktop: true, ..Verified::default() };
+    assert_eq!(identity(&desktop), Identity { fact: "This desktop (a recipe step)".into(), tag: "verified" });
+    // And only the flag makes it so: the same words in the line do not.
+    let pretender = Verified { line: "This desktop (a recipe step)".into(), ..Verified::default() };
+    assert_eq!(identity(&pretender).tag, "nothing verified");
+    let src = include_str!("control_agents.rs");
+    assert!(src.contains("raised_by_desktop: true,"), "the recipe executor's card says the desktop raised it");
     // Review of #639, N2: an argv set with `exec -a` cannot make a program read as a terminal's
     // or as the attached mind. The line is not read at all.
     let argv = Verified { line: "a program started from a terminal: x (pid 77) \u{b7} the attached mind".into(), pid: 77, exe: "/tmp/x".into(), ..Verified::default() };

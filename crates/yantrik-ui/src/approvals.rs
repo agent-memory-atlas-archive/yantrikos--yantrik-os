@@ -267,6 +267,11 @@ pub struct Verified {
     /// words come from the walk, not from re-reading a line whose label is the caller's argv
     /// (security review of #639, N2). Display only.
     pub from_terminal: bool,
+    /// The shell raised this card itself — its recipe executor, for a step that started with
+    /// nobody at the desk — so there is no caller on a socket to verify, and nothing to doubt: the
+    /// desktop is asking. Set only where the shell builds the card (`control_agents`), never from
+    /// a request. Display only (fourth review of #639).
+    pub raised_by_desktop: bool,
 }
 
 impl Verified {
@@ -276,6 +281,9 @@ impl Verified {
     /// request gave itself. For the shell's own "… is asking to …" notification, which goes out
     /// as `Yantrik` (security review of #614).
     pub fn who(&self) -> String {
+        if self.raised_by_desktop {
+            return "this desktop".to_string();
+        }
         if !self.attached_mind.trim().is_empty() {
             return self.attached_mind.trim().to_string();
         }
@@ -677,12 +685,31 @@ pub fn canonical(value: &serde_json::Value) -> String {
 /// known height. Neither bound hides anything in silence: a cut value names its true length and
 /// a cut list names how many are left.
 pub fn args_rows(value: &serde_json::Value) -> Vec<String> {
+    args_rows_with(value, ARG_VALUE_CHARS)
+}
+
+/// How much of one value a card that must show its arguments whole carries (see [`shown_whole`]).
+/// A request with a longer value for such a card is refused before it is asked
+/// (`approval_bounds::refusal`), so on a card that was asked nothing is cut at this bound.
+pub(crate) const WHOLE_VALUE_CHARS: usize = 240;
+
+/// Whether a card shows its arguments whole or not at all: graded `dangerous`, or the app's
+/// sentence (or the caller's, which can only add caution) says it cannot be undone or runs
+/// whatever it is given. The red button's reading, and the open-ended one beside it — a command
+/// cut at sixty characters is where `&& rm -rf ~/x` goes (fourth review of #639). Display only.
+pub fn shown_whole(grade: &str, said: &str) -> bool {
+    grade == "dangerous" || unrecoverable(said) || open_ended(said)
+}
+
+/// [`args_rows`] with the value bound named: [`ARG_VALUE_CHARS`] for an ordinary card,
+/// [`WHOLE_VALUE_CHARS`] for one that shows its arguments whole.
+pub fn args_rows_with(value: &serde_json::Value, value_chars: usize) -> Vec<String> {
     let Some(map) = value.as_object() else {
         // Not an object. Show it rather than hiding it: a caller that sent something odd should
         // not get a card that looks empty.
         return match value {
             serde_json::Value::Null => vec!["(no arguments)".to_string()],
-            other => vec![clip(&other.to_string(), ARG_VALUE_CHARS)],
+            other => vec![clip(&other.to_string(), value_chars)],
         };
     };
     if map.is_empty() {
@@ -702,7 +729,7 @@ pub fn args_rows(value: &serde_json::Value) -> Vec<String> {
                 serde_json::Value::String(s) => s.clone(),
                 other => other.to_string(),
             };
-            format!("{key}: {}", clip(&shown, ARG_VALUE_CHARS))
+            format!("{key}: {}", clip(&shown, value_chars))
         })
         .collect();
     if keys.len() > ARG_ROWS {
@@ -1150,7 +1177,13 @@ impl Store {
                 purpose: clip_at_word(&record.published, PURPOSE_CHARS),
                 caller_says: record.caller_says(),
                 summary: summary_of(&record.published),
-                args: args_rows(&record.args),
+                // Whole, wrapped, on a card whose action cannot be undone or runs whatever it is
+                // given; cut with its length named on any other.
+                args: if shown_whole(&record.grade, &record.said()) {
+                    args_rows_with(&record.args, WHOLE_VALUE_CHARS)
+                } else {
+                    args_rows(&record.args)
+                },
                 // At a word, not at the bound: a cut in the middle of the name is the
                 // `PURPOSE_CHARS` mistake rebuilt — "13:0" and "13:00… " are not the same
                 // sentence about when the appointment is.
@@ -1397,6 +1430,7 @@ mod approvals_tests {
             discrepancies: Vec::new(),
             agent: String::new(),
             from_terminal: false,
+            raised_by_desktop: false,
         }
     }
 

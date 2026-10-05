@@ -60,16 +60,30 @@ fn rows_too_long_to_draw_are_refused() {
 }
 
 /// (d), and the pre-existing hole it closes: `echo … ; rm -rf ~` padded past the sixty characters
-/// a card shows of a value hid its end everywhere on the card.
+/// a card shows of a value hid its end everywhere on the card. A card whose action cannot be taken
+/// back or runs whatever it is given shows a value whole — up to 240 characters drawn, so ordinary
+/// file names, container ids and event titles are asked about — and refuses anything longer.
 #[test]
-fn a_destructive_card_shows_a_value_whole_or_is_not_asked() {
+fn a_card_that_must_show_its_arguments_whole_shows_them_whole_or_is_not_asked() {
     assert!(PADDED_RM.chars().count() > approvals::ARG_VALUE_CHARS);
-    let why = refusal(&json!({ "command": PADDED_RM }), None, true).expect("(d) refused on a destructive card");
-    assert!(why.contains("cannot be taken back"), "{why}");
-    // Escapes count: twenty newlines are forty characters drawn.
-    assert!(refusal(&json!({ "command": "\n".repeat(31) }), None, true).is_some());
-    assert!(refusal(&json!({ "command": "rm -rf ~/x" }), None, true).is_none());
-    // The same value on an ordinary card is asked about, and shown cut under its marker.
+    // Whole: asked about, and the end is on the card.
+    assert!(refusal(&json!({ "command": PADDED_RM }), None, true).is_none());
+    let rows = approvals::args_rows_with(&json!({ "command": PADDED_RM }), approvals::WHOLE_VALUE_CHARS);
+    assert!(rows[0].ends_with("rm -rf ~") && !rows[0].contains("characters in full"), "{rows:?}");
+    // A 64-character container id, the kind sixty characters refused.
+    assert!(refusal(&json!({ "container": "f".repeat(64) }), None, true).is_none());
+    // Padded past what a card shows whole: refused, never cut.
+    let padded = format!("echo {} ; rm -rf ~", "x".repeat(approvals::WHOLE_VALUE_CHARS));
+    let why = refusal(&json!({ "command": padded }), None, true).expect("(d) refused");
+    assert!(why.contains("shown whole or not asked about"), "{why}");
+    // Escapes count: 121 newlines are 242 characters drawn.
+    assert!(refusal(&json!({ "command": "\n".repeat(121) }), None, true).is_some());
+    assert!(refusal(&json!({ "command": "\n".repeat(120) }), None, true).is_none());
+    // No "and N more" on such a card: more than eight arguments is refused.
+    let nine: serde_json::Map<String, serde_json::Value> = (0..9).map(|i| (format!("a{i}"), json!("x"))).collect();
+    assert!(refusal(&serde_json::Value::Object(nine.clone()), None, true).expect("refused").contains("every one of them or none"));
+    assert!(refusal(&serde_json::Value::Object(nine), None, false).is_none(), "an ordinary card summarises the ninth");
+    // The padded value on an ordinary card is asked about, and shown cut under its marker.
     assert!(refusal(&json!({ "command": PADDED_RM }), None, false).is_none());
     let rows = approvals::args_rows(&json!({ "command": PADDED_RM }));
     assert!(rows[0].contains("characters in full)") && !rows[0].contains("rm -rf ~"), "{rows:?}");
@@ -77,6 +91,17 @@ fn a_destructive_card_shows_a_value_whole_or_is_not_asked() {
     assert!(c.exactly.contains("characters in full)"), "the marker reaches the card: {}", c.exactly);
     // And the refusal says why, in one sentence.
     assert!(refused("x").starts_with("this request is too long to put in front of a person in full, so nothing was asked: "));
+}
+
+/// Which cards must show their arguments whole: the red button's cards, and open-ended ones —
+/// `agent_run` is graded `sensitive` and was neither (review of #639, should-fix 1).
+#[test]
+fn open_ended_cards_show_their_arguments_whole_too() {
+    let open = format!("Run a command. {}", yantrik_ipc_contracts::control_surface::OPEN_ENDED);
+    assert!(approvals::shown_whole("sensitive", &open));
+    assert!(approvals::shown_whole("dangerous", "End a process."));
+    assert!(approvals::shown_whole("sensitive", "Take an event off the calendar. It is not recoverable"));
+    assert!(!approvals::shown_whole("sensitive", "Move files."));
 }
 
 /// Defence in depth: whatever reaches the card is cut after escaping, keys included, so its worst
