@@ -282,7 +282,9 @@ the file only; the directory stays.
   address included. A mind fetching on behalf of anything untrusted (a URL from a web page, a
   tool's argument) must refuse these hosts itself, on any port (`*.domain` covers every name under
   it), and every literal address that is not the internet. Read by the proxy's own code as its
-  account (`yantrik-egress lan-hosts`), never parsed by root from the YAML; checked again as root.
+  account (`yantrik-egress snapshot`, which prints the table's entries and these hosts from one
+  read of the policy, so the table and this list never describe two policies; `lan-hosts` from a
+  proxy older than it), never parsed by root from the YAML; checked again as root.
   It lists the policy, so Private mode does not empty it (the proxy refuses everything then anyway).
   **`null`** when it could not be read (no policy reader, a policy that does not read, an answer
   that did not check) or there are more than 64 hosts: a reader must then take **every name it

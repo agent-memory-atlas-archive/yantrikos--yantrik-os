@@ -104,21 +104,25 @@ pub fn entries(policy: &Policy) -> Vec<Entry> {
 /// (the kernel lets the mind ask DNS only in audit), then the entries, none in Private mode.
 pub fn export(dir: &Path) -> Result<String, String> {
     let policy = Policy::read(&dir.join("policy.yaml"))?;
+    Ok(direct_text(&policy, crate::state::private_at(dir)))
+}
+
+fn direct_text(policy: &Policy, private: bool) -> String {
     let mode = match policy.mode {
         Mode::Audit => "audit",
         Mode::Enforce => "enforce",
     };
-    if crate::state::private_at(dir) {
-        return Ok(format!("private on\nmode {mode}\n"));
+    if private {
+        return format!("private on\nmode {mode}\n");
     }
     let mut out = format!("private off\nmode {mode}\n");
-    for e in entries(&policy) {
+    for e in entries(policy) {
         match e {
             Entry::Direct(ip, port) => out.push_str(&format!("direct {ip} {port}\n")),
             Entry::Loopback(ip, port) => out.push_str(&format!("loopback {ip} {port}\n")),
         }
     }
-    Ok(out)
+    out
 }
 
 /// Every host a `lan` rule names, lowercased and without a trailing dot, each once with all its
@@ -145,12 +149,23 @@ pub fn lan_hosts(policy: &Policy) -> Vec<(String, Vec<u16>)> {
 /// a line. A policy that does not read is an error, as for [`export`].
 pub fn export_lan_hosts(dir: &Path) -> Result<String, String> {
     let policy = Policy::read(&dir.join("policy.yaml"))?;
+    Ok(lan_hosts_text(&policy))
+}
+
+fn lan_hosts_text(policy: &Policy) -> String {
     let mut out = String::new();
-    for (host, ports) in lan_hosts(&policy) {
+    for (host, ports) in lan_hosts(policy) {
         let ports: Vec<String> = ports.iter().map(u16::to_string).collect();
         out.push_str(&format!("lan {host} {}\n", ports.join(",")));
     }
-    Ok(out)
+    out
+}
+
+/// What `yantrik-egress snapshot` prints: [`export`] then [`export_lan_hosts`], both from one read
+/// of the policy, so the table and the status file's `lan_hosts` describe the same policy.
+pub fn export_snapshot(dir: &Path) -> Result<String, String> {
+    let policy = Policy::read(&dir.join("policy.yaml"))?;
+    Ok(direct_text(&policy, crate::state::private_at(dir)) + &lan_hosts_text(&policy))
 }
 
 #[cfg(test)]
@@ -287,6 +302,31 @@ mod tests {
         assert_eq!(export_lan_hosts(&d).unwrap(), "lan 192.168.4.42 8080,8888\nlan homeassistant.local 8123\n", "Private mode: still the policy's");
         std::fs::write(d.join("policy.yaml"), "mode: enforce\nrules: [\n").unwrap();
         assert!(export_lan_hosts(&d).is_err(), "not a policy");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_snapshot_is_both_exports_from_one_read() {
+        let d = std::env::temp_dir().join(format!("yantrik-egress-snapshot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        assert_eq!(export_snapshot(&d).unwrap(), "private off\nmode audit\n", "no policy: audit, nothing direct, no lan hosts");
+        std::fs::write(
+            d.join("policy.yaml"),
+            "mode: enforce\nrules:\n  - host: homeassistant.local\n    ports: [8123]\n    lan: true\n    why: HA\n  - host: 192.168.4.42\n    ports: [8888]\n    http: true\n    lan: true\n    why: SearXNG\n",
+        )
+        .unwrap();
+        let both = export(&d).unwrap() + &export_lan_hosts(&d).unwrap();
+        assert_eq!(export_snapshot(&d).unwrap(), both);
+        assert_eq!(both, "private off\nmode enforce\ndirect 192.168.4.42 8888\nlan 192.168.4.42 8888\nlan homeassistant.local 8123\n");
+        std::fs::write(d.join("private"), "on\n").unwrap();
+        assert_eq!(
+            export_snapshot(&d).unwrap(),
+            "private on\nmode enforce\nlan 192.168.4.42 8888\nlan homeassistant.local 8123\n",
+            "Private mode: no entries, the lan hosts still the policy's"
+        );
+        std::fs::write(d.join("policy.yaml"), "mode: enforce\nrules: [\n").unwrap();
+        assert!(export_snapshot(&d).is_err(), "not a policy");
         let _ = std::fs::remove_dir_all(&d);
     }
 }

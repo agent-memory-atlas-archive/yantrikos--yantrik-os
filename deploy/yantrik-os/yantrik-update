@@ -2628,12 +2628,13 @@ mind_egress_lan_hosts() {
   mind_egress_as_proxy lan-hosts "$EGRESS_STATE" 2>/dev/null
 }
 
-# Ask the proxy's own code for the entries, as the proxy's account. Prints its answer (or why there
-# is none) and returns its status.
-mind_egress_ask() {
+# Ask the proxy's own code for the entries (`direct`, or `snapshot`: the entries then the lan hosts
+# from one read of the policy), as the proxy's account. Prints its answer (or why there is none) and
+# returns its status.
+mind_egress_ask() { # [direct|snapshot]
   local errf answer rc
   errf="$(mktemp)" || return 1
-  answer="$(mind_egress_as_proxy direct "$EGRESS_STATE" 2>"$errf")"
+  answer="$(mind_egress_as_proxy "${1:-direct}" "$EGRESS_STATE" 2>"$errf")"
   rc=$?
   [ "$rc" = 0 ] || answer="$(head -1 "$errf")"
   rm -f "$errf"
@@ -2651,8 +2652,18 @@ mind_egress_load() {
   uid="$(id -u yantrik-mind 2>/dev/null)"
   case "$uid" in ''|0|*[!0-9]*) rm -f -- "$MIND_EGRESS_STATUS"; info "no mind account here; nothing to hold to the egress proxy"; return 0 ;; esac
   install -d -o root -g root -m 0755 /etc/yantrik
-  answer="$(mind_egress_ask)"; rc=$?
-  lan="$(mind_egress_lan_hosts)"; lan="$(mind_egress_lan_json "$?" "$lan")"
+  # One read of the policy for the table and lan_hosts, so the two never mix two policies; a
+  # proxy older than `snapshot` (its usage, exit 2) is asked twice.
+  answer="$(mind_egress_ask snapshot)"; rc=$?
+  if [ "$rc" = 2 ]; then
+    answer="$(mind_egress_ask direct)"; rc=$?
+    lan="$(mind_egress_lan_hosts)"; lan="$(mind_egress_lan_json "$?" "$lan")"
+  elif [ "$rc" = 0 ]; then
+    lan="$(mind_egress_lan_json 0 "$(printf '%s\n' "$answer" | grep '^lan ')")"
+    answer="$(printf '%s\n' "$answer" | grep -v '^lan ')"
+  else
+    lan=null
+  fi
   errf="$(mktemp)" || return 1
   if result="$(mind_egress_render "$uid" "$rc" "$answer" /etc/resolv.conf "$MIND_EGRESS_NFT")" \
      && "$nft" -f "$MIND_EGRESS_NFT" 2>"$errf"; then
@@ -3986,7 +3997,12 @@ loopback 127.0.0.1 11434")"
       ML_LAN="${ML_LAN-lan homeassistant.local 8123}" ML_LAN_RC="${ML_LAN_RC:-0}"
       id() { if [ "${2:-}" = yantrik-mind ]; then echo 998; else command id "$@"; fi; }
       install() { :; }
-      mind_egress_ask() { printf '%s\n' "$ML_ANSWER"; }
+      mind_egress_ask() { # a proxy with `snapshot` unless ML_OLD; ML_LAN then from its lan-hosts
+        case "$1:${ML_OLD:-}" in
+          snapshot:?*) echo usage; return 2 ;;
+          snapshot:) printf '%s\n' "$ML_ANSWER"; [ "$ML_LAN_RC" = 0 ] && printf '%s\n' "$ML_LAN"; return "$ML_LAN_RC" ;;
+        esac
+        printf '%s\n' "$ML_ANSWER"; }
       mind_egress_capabilities() { printf '%s\n' "$ML_CAPS"; }
       mind_egress_lan_hosts() { printf '%s\n' "$ML_LAN"; return "$ML_LAN_RC"; }
       mind_egress_load ) >/dev/null 2>&1
@@ -4003,8 +4019,22 @@ loopback 127.0.0.1 11434")"
   ml_run all "$(printf 'private off\nmode audit\n')"
   is "mind-status: lan_hosts from the proxy's reader, version 2" '[{"host": "homeassistant.local", "ports": [8123]}] 2' \
     "$(ms_field lan_hosts) $(ms_field version)"
-  ML_LAN='policy.yaml: bad' ML_LAN_RC=1 ml_run all "$(printf 'private off\nmode audit\n')"
+  is "mind-status: ... from the one snapshot read, the entries without its lan lines" "$(printf 'private off\nmode audit\n')" \
+    "$( ( ML_ANSWER="$(printf 'private off\nmode audit\n')" ML_LAN='lan homeassistant.local 8123' ML_LAN_RC=0
+          mind_egress_ask() { [ "$1" = snapshot ] || return 3; printf '%s\n%s\n' "$ML_ANSWER" "$ML_LAN"; }
+          mind_egress_lan_hosts() { echo 'lan asked.twice 1'; }
+          mind_egress_render() { printf '%s\n' "$3" > "$ms/rendered"; return 1; }
+          export PATH="$ms/bin:$PATH" NFT_LOADS=none MIND_EGRESS_NFT="$ms/mind-egress.nft" MIND_EGRESS_STATUS="$ms/unused.json"
+          id() { if [ "${2:-}" = yantrik-mind ]; then echo 998; else command id "$@"; fi; }
+          install() { :; }; mind_egress_capabilities() { :; }
+          mind_egress_load ) >/dev/null 2>&1; cat "$ms/rendered")"
+  ML_OLD=1 ml_run all "$(printf 'private off\nmode audit\n')"
+  is "mind-status: ... a proxy older than snapshot: asked twice, lan_hosts still read" '[{"host": "homeassistant.local", "ports": [8123]}] audit' \
+    "$(ms_field lan_hosts) $(ms_field mode)"
+  ML_OLD=1 ML_LAN='policy.yaml: bad' ML_LAN_RC=1 ml_run all "$(printf 'private off\nmode audit\n')"
   is "mind-status: ... unreadable: null, and the file still written" 'null audit' "$(ms_field lan_hosts) $(ms_field mode)"
+  ML_LAN_RC=1 ml_run all "$(printf 'policy.yaml: bad\n')"
+  is "mind-status: ... the snapshot unreadable: the fallback table, lan_hosts null" 'null fallback' "$(ms_field lan_hosts) $(ms_field mode)"
   ML_LAN='' ml_run all "$(printf 'private on\nmode enforce\n')"
   is "mind-status: ... none: an empty list" '[] True' "$(ms_field lan_hosts) $(ms_field private)"
   ml_run fallback "$(printf 'private off\nmode audit\n')"
