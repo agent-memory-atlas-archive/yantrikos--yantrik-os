@@ -2245,6 +2245,7 @@ mod mind_mode_tests {
                 attached_mind: "Hermes Agent".into(),
                 discrepancies: Vec::new(),
                 agent: String::new(),
+                from_terminal: false,
             },
             app: "files".into(),
             action: "move".into(),

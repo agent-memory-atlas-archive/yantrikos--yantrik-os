@@ -261,6 +261,12 @@ pub struct Verified {
     /// the request says. It decides which agent's pane draws the card (design decision 4), and the
     /// card names it. The token itself is never kept here, or anywhere a card or a log can show it.
     pub agent: String,
+    /// A bare shell stood between the socket and the program `line` names, and the program is no
+    /// attached mind: the walk's own finding (`CallerIdentity::via_shell`), by the same rule that
+    /// prefixes `line` with "a program started from a terminal". Carried as a flag so the card's
+    /// words come from the walk, not from re-reading a line whose label is the caller's argv
+    /// (security review of #639, N2). Display only.
+    pub from_terminal: bool,
 }
 
 impl Verified {
@@ -1376,6 +1382,7 @@ mod approvals_tests {
             attached_mind: "Hermes Agent".into(),
             discrepancies: Vec::new(),
             agent: String::new(),
+            from_terminal: false,
         }
     }
 

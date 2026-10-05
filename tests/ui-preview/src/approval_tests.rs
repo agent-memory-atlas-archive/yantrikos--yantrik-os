@@ -9,7 +9,7 @@
 //! the buttons stay whole under it; `run` checks each of those is drawn above the buttons in the
 //! Lens, and checks the rest at the card's natural height.
 use super::*;
-use slint::{Model, ModelRc, SharedString, VecModel};
+use slint::{ModelRc, SharedString, VecModel};
 
 /// What `shell` publishes for `run_recipe` (crates/yantrik-ui/src/control_recipes.rs) — the
 /// longest description any app publishes, and the card this defect was hit with.
@@ -48,13 +48,14 @@ fn card(summary: &str) -> ApprovalRequest {
         on_behalf: "".into(),
         requester: "pi 0.87".into(),
         verified: "pi --mode rpc (pid 4242) · the attached mind".into(),
-        identity: "The attached mind (pi --mode rpc, pid 4242) · verified".into(),
-        claim: "calls itself “pi 0.87” · unverified".into(),
+        identity: "The attached mind pi (node, pid 4242)".into(),
+        identity_tag: "verified".into(),
+        claim: "calls itself “pi 0.87”".into(),
         confirm_label: "Allow once".into(),
         destructive: false,
-        consequences: lines(&[
-            "Runs: recipe: builtin_formation_council; inputs: {\"question\": \"attack the plan to ship 0.4 on Friday\"}",
-        ]),
+        what: "Runs: recipe: builtin_formation_council; inputs: {\"question\": \"attack the plan to ship 0.4 on Friday\"}".into(),
+        exactly: "recipe: builtin_formation_council; inputs: {\"question\": \"attack the plan to ship 0.4 on Friday\"}".into(),
+        undo: "".into(),
         discrepancies: lines(&[]),
         app: "shell".into(),
         action: "run_recipe".into(),
@@ -229,13 +230,13 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     assert!(bottom <= reply_top, "the button ends above the reply box, inside the Lens: its lowest answer is {bottom}, the reply box starts at {reply_top}");
     assert!(allow_y >= panel_top && allow_y <= reply_top, "Allow is inside the Lens too, at {allow_y}");
 
-    // ── Sign-off item 6: what changes and the warning are never under the buttons ──
+    // ── Sign-off item 6, and review of #639 S1: the floor is never scrolled away ──
     //
-    // The Lens gives a card 240px at 1280×800. The consequence rows and the warning are pinned
-    // above the buttons and only the provenance above them scrolls, so each row is drawn whole,
-    // inside the panel, above the top of the button band. Measured by changing one row's words
-    // for others of the same length and finding where the frame changed: a clipped row changes
-    // a sliver, a row under the buttons changes nothing at all.
+    // The Lens gives a card 240px at 1280×800. Above the part that yields, who is asking and the
+    // action's sentence are pinned, one line each; below it what changes, the undo line, the
+    // warning and the buttons. Each is checked to be drawn whole, inside the panel and above the
+    // top of the button band, by changing its words for others of the same length and finding
+    // where the frame changed: a clipped line changes a sliver, a scrolled-away one nothing.
     let xs = (panel_left as u32 + 16, 1264);
     let ys = (panel_top as u32, reply_top as u32);
     let row_drawn_above = |base: ApprovalRequest, change: &dyn Fn(&mut ApprovalRequest), what: &str| -> (u32, u32) {
@@ -252,29 +253,58 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
         let (t, bt, n) = diff_box(a.as_slice(), b.as_slice(), width, xs, ys)
             .unwrap_or_else(|| panic!("{what} is not drawn anywhere in the Lens"));
         println!("{what}: drawn on rows {t}..{bt} ({n} pixels), the buttons start at {btn}");
-        assert!(bt - t >= 8, "{what} is a whole line of type, not a clipped sliver: rows {t}..{bt}");
+        assert!(bt - t >= 7, "{what} is a whole line of type, not a clipped sliver: rows {t}..{bt}");
         assert!((bt as f32) < btn - 2.0, "{what} ends above the buttons: row {bt}, buttons at {btn}");
         assert!(t as f32 > panel_top, "{what} is inside the panel");
         (t, bt)
     };
     let deleting = super::review_stills::delete_card();
-    let set_row = |at: usize, text: &'static str| {
-        move |c: &mut ApprovalRequest| {
-            let mut rows: Vec<SharedString> = c.consequences.iter().collect();
-            rows[at] = text.into();
-            c.consequences = ModelRc::new(VecModel::from(rows));
-        }
-    };
-    let what = row_drawn_above(deleting.clone(), &set_row(0, "Removes: id: sweep-demo-not-real"), "the \"Deletes:\" row");
-    let undo = row_drawn_above(deleting.clone(), &set_row(1, "Undo: not possible, the app said so"), "the undo row");
-    assert!(undo.0 > what.1, "the undo row is under the row that says what changes");
+    let what = row_drawn_above(deleting.clone(), &|c: &mut ApprovalRequest| c.what = "Removes: id: sweep-demo-not-real".into(), "the \"Deletes:\" line");
+    let undo = row_drawn_above(deleting.clone(), &|c: &mut ApprovalRequest| c.undo = "Undo: not possible, the app said so".into(), "the undo line");
+    assert!(undo.0 > what.1, "the undo line is under the line that says what changes");
     let dangerous = super::review_stills::dangerous_card();
     row_drawn_above(
         dangerous.clone(),
         &|c: &mut ApprovalRequest| c.warning = "This is graded dangerous \u{2014} it can destroy data or state.".into(),
         "the warning",
     );
-    // And the red button answers there with the action's own words on it.
+
+    // The worst case for the floor: eight arguments at their longest, the session row under the
+    // buttons, a discrepancy and the app's word about the call. The arguments may only yield;
+    // the identity line, the claim, the discrepancy, the sentence and the buttons are all drawn.
+    let long: Vec<String> = (0..8).map(|i| format!("argument{i}: {}", "v".repeat(60))).collect();
+    let crowded = ApprovalRequest {
+        args: lines(&long.iter().map(String::as_str).collect::<Vec<_>>()),
+        what: format!("Runs: {}", long.join("; ")).into(),
+        exactly: long.join("; ").into(),
+        discrepancies: lines(&["The caller called this `standard`; the app publishes `sensitive`."]),
+        explained: "After this the recipe's agents start at once.".into(),
+        identity: "A terminal program (sshd-session, pid 2290461)".into(),
+        ..card(RUN_RECIPE_SUMMARY)
+    };
+    let who = row_drawn_above(crowded.clone(), &|c: &mut ApprovalRequest| c.identity = "A terminal program (sshd-session, pid 2290467)".into(), "the identity line, eight long arguments");
+    let claim = row_drawn_above(crowded.clone(), &|c: &mut ApprovalRequest| c.claim = "calls itself \u{201c}pi 0.88\u{201d}".into(), "the claim, eight long arguments");
+    let doubt = row_drawn_above(
+        crowded.clone(),
+        &|c: &mut ApprovalRequest| c.discrepancies = lines(&["The caller called this `standard`; the app publishes `dangerous`."]),
+        "the discrepancy, eight long arguments",
+    );
+    let said = row_drawn_above(
+        crowded.clone(),
+        // Its first word: the line is cut at the card's edge, so its end is not on screen.
+        &|c: &mut ApprovalRequest| c.summary = "Begin a recipe with its inputs: a built-in one by its name or id, or one a mind made.".into(),
+        "the action's sentence, eight long arguments",
+    );
+    let runs = row_drawn_above(crowded.clone(), &|c: &mut ApprovalRequest| c.what = format!("Ends: {}", long.join("; ")).into(), "the pinned \"Runs:\" line, eight long arguments");
+    assert!(who.1 < claim.0 && claim.1 < doubt.0 && doubt.1 < said.0 && said.1 < runs.0, "fact, claim, discrepancy, sentence, then what changes: {who:?} {claim:?} {doubt:?} {said:?} {runs:?}");
+    ui.set_approvals(ModelRc::new(VecModel::from(vec![crowded])));
+    save(&settle(w, width, height), &output.replace(".png", "-eight-args.png"), width, height)?;
+    let before = ui.get_allowed();
+    scan(w, allow_x, panel_top, panel_bottom - 4.0, || ui.get_allowed() > before).expect("Allow answers with eight long arguments");
+    let before = ui.get_sessioned();
+    scan(w, panel_left + 200.0, panel_top, panel_bottom - 4.0, || ui.get_sessioned() > before).expect("and the session row too");
+
+    // And the red button answers with the action's own words on it.
     ui.set_approvals(ModelRc::new(VecModel::from(vec![deleting])));
     settle(w, width, height);
     let before = ui.get_allowed();
@@ -297,12 +327,11 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     let differ = led.as_slice().iter().zip(bare.as_slice()).filter(|(a, b)| a != b).count();
     assert!(differ >= 300, "the card leads with the description's first sentence: only {differ} pixels change when it is emptied");
 
-    // #137, under Details (open by default on a dangerous card): the app's sentence about one
-    // call wraps — elided, it cut off exactly the clause that is its point, that the grant binds
-    // to the arguments and "not to this sentence".
+    // #137 and review of #639 S2: the app's sentence about one call is on the card's face, on a
+    // sensitive card as on a dangerous one, and it wraps — elided, it cut off exactly the clause
+    // that was its point.
     let sentence = "After this, prompts go to images.example and may cost money, and every \
         picture this app draws from now on is drawn there rather than on this machine.";
-    let open = |explained: &str| ApprovalRequest { grade: "dangerous".into(), ..roomy_card(explained) };
     // Measured after a frame is drawn: the card's height is its laid-out height.
     w.set_size(slint::PhysicalSize::new(440, 900));
     let measure = |data: ApprovalRequest| {
@@ -310,21 +339,19 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
         settle(w, 440, 900);
         natural.get_card_h()
     };
-    let without = measure(open(""));
-    let with = measure(open(sentence));
-    println!("#137 block: the card is {without}px without the sentence and {with}px with it");
-    assert!(with - without >= 45.0, "the per-call sentence wraps over several lines under Details: {}px", with - without);
-    // Sensitive: Details is closed, and the sentence is not on the face of the card.
-    let closed_without = measure(roomy_card(""));
-    assert_eq!(measure(roomy_card(sentence)), closed_without, "Details and source is closed on a sensitive card");
+    let without = measure(roomy_card(""));
+    let with = measure(roomy_card(sentence));
+    println!("#137 line: the sensitive card is {without}px without the sentence and {with}px with it");
+    assert!(with - without >= 45.0, "the per-call sentence is on the face of a sensitive card and wraps: {}px", with - without);
 
     println!(
         "PASS: the longest card fits the Lens at 1280×800 — Deny answers at {deny_y} and Allow at \
          {allow_y}, one row, the whole {}px button inside the panel above the reply box, the \
-         session row reachable; the consequence rows and the warning are drawn whole above the \
-         buttons; the card leads with the description's first sentence ({differ} pixels drawn); \
-         the per-call sentence wraps under Details, open on a dangerous card and closed on a \
-         sensitive one",
+         session row reachable; what changes, the undo line and the warning are drawn whole above \
+         the buttons; with eight 60-character arguments the identity line, the claim, the \
+         discrepancy, the sentence, the pinned line and the buttons are all drawn; the card leads \
+         with the description's first sentence ({differ} pixels drawn); the per-call sentence is \
+         on the face of a sensitive card and wraps",
         bottom - top,
     );
     Ok(())

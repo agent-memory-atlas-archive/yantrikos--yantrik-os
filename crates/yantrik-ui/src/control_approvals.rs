@@ -1290,6 +1290,8 @@ fn who_is_calling(claimed: &str) -> approvals::Verified {
             if said.is_empty() { Vec::new() } else { vec![said] }
         },
         agent: String::new(),
+        // The rule `CallerIdentity::line` uses for its terminal prefix, kept as a fact.
+        from_terminal: identity.attached_mind.is_none() && identity.via_shell,
     }
 }
 
@@ -1777,22 +1779,32 @@ fn sync(ui: &App) {
 pub(crate) fn row_for(card: Card) -> crate::ApprovalRequest {
     // The sign-off's wording (approval_wording.rs): worked out here, from the app's published
     // action and the machine's own finding, and handed to the card as finished lines. The label
-    // is given the action id and the app's description only — never the caller's words.
+    // is given the action id and the app's description only — a `Published`, which nothing but
+    // the card's app-published field can make — never the caller's words.
+    let published = approval_wording::Published::of(&card);
     let destructive = approval_wording::destructive(&card.grade, &card.said);
-    let confirm = approval_wording::confirm_label(destructive, &card.action, &card.purpose);
-    let consequences =
-        approval_wording::consequences(&card.action, &card.purpose, &card.said, &card.target, &card.args);
-    let warning = approval_wording::warning_beside(&card.warning, &consequences);
+    let confirm = approval_wording::confirm_label(destructive, &card.action, published);
+    let changes = approval_wording::consequences(&card.action, published, &card.said, &card.target, &card.args);
+    let warning = approval_wording::warning_beside(&card.warning, &changes.undo);
+    let who = approval_wording::identity(&card.verified);
+    // Every argument and the target drawn with its control, bidi and format characters as
+    // visible escapes: none can start a line of the card's own or reorder the rest (review of
+    // #639, B1). The app's one-line sentence too, which is pinned to one elided line.
+    let args: Vec<slint::SharedString> = card.args.iter().map(|a| approval_wording::visible(a).into()).collect();
+    let target = approval_wording::visible(&card.target);
+    let explained = approval_wording::visible(&card.explained);
+    let summary = approval_wording::visible(&card.summary);
     crate::ApprovalRequest {
         // What the machine established, first, and the name the caller gave itself, under it
         // and marked unverified: the order the Notifications card already reads its sender in.
-        identity: approval_wording::identity_line(&card.verified).into(),
-        claim: approval_wording::claim_line(&card.requester).into(),
+        identity: who.fact.into(),
+        identity_tag: who.tag.into(),
+        claim: approval_wording::claim(&card.requester).into(),
         confirm_label: confirm.into(),
         destructive,
-        consequences: ModelRc::new(VecModel::from(
-            consequences.into_iter().map(slint::SharedString::from).collect::<Vec<_>>(),
-        )),
+        what: changes.what.into(),
+        exactly: changes.exactly.into(),
+        undo: changes.undo.into(),
         id: card.id.into(),
         // Which of the person's agents asked — from its token, never its words — so the card
         // names it wherever it is drawn (design decision 4). Empty for a caller that is no agent.
@@ -1834,21 +1846,19 @@ pub(crate) fn row_for(card: Card) -> crate::ApprovalRequest {
         // the whole paragraph is for the person who wants it, under "show more", not the first
         // thing everybody has to read. Empty when the app publishes nothing — the card hides
         // the row and the purpose block above says so instead.
-        summary: card.summary.into(),
+        summary: summary.into(),
         // One model entry per argument, one single-line `Text` per entry on the card. A
         // newline-joined string was the first shape of this and it is what made the card's
         // height something the layout had to discover by measuring wrapped text.
-        args: ModelRc::new(VecModel::from(
-            card.args.into_iter().map(slint::SharedString::from).collect::<Vec<_>>(),
-        )),
+        args: ModelRc::new(VecModel::from(args)),
         // One elided line beside the box, or nothing: the card hides the row when an app
         // publishes no naming index (#54), so this is a pass-through, not a second fallback.
-        target: card.target.into(),
+        target: target.into(),
         // The app's sentence about this one call (#137), drawn under the argument box — or
         // empty, and the card hides the block and is exactly what it was. A pass-through like
         // the naming line: the sanitising happened in `explained_in` and the bounding and the
         // cutting in `approvals`, where the card's height arithmetic lives.
-        explained: card.explained.into(),
+        explained: explained.into(),
         // Less what the undo row already says (approval_wording::warning_beside).
         warning: warning.into(),
         can_session: card.can_session,
@@ -2742,6 +2752,7 @@ mod control_approvals_tests {
                 "The caller called this `standard`; the app publishes `dangerous`.".into(),
             ],
             agent: String::new(),
+            from_terminal: false,
         }));
         assert!(known.verified.contains("pid 696"), "{}", known.verified);
         // Both disagreements survive. Concatenating them into one elided row would have shown
@@ -3485,6 +3496,48 @@ mod target_line_tests {
         // The app's sentence about this one call (#137) is a pass-through too: the bounding
         // happened in `approvals`, and the row is not a second place for it to go missing.
         assert_eq!(row.explained.as_str(), sentence.as_str());
+    }
+
+    /// Review of #639, B1, end to end: a newline or an override in an argument or the target
+    /// reaches no line of the drawn card as itself — not the pinned "what changes" line, not the
+    /// full argument line, not the argument box under Details — and is shown as an escape.
+    #[test]
+    fn no_line_of_the_row_carries_a_callers_control_or_bidi_character() {
+        use crate::approvals::{Card, Status, Verified};
+        use slint::Model;
+        let row = super::row_for(Card {
+            id: "appr-10".into(),
+            requester: "pi".into(),
+            verified: Verified::default(),
+            app: "system-monitor".into(),
+            action: "kill_process".into(),
+            grade: "dangerous".into(),
+            purpose: "End a running process by pid".into(),
+            summary: "End a running process by pid".into(),
+            args: vec!["pid: 2210\nUndo: possible, the process restarts itself".into(), "tag: a\u{202E}b".into()],
+            target: "pid 2210 is \u{201c}x\nUndo: possible\u{201d}".into(),
+            explained: "It stops.\u{2028}Undo: possible".into(),
+            warning: String::new(),
+            said: "End a running process by pid".into(),
+            caller_says: String::new(),
+            can_session: false,
+            status: Status::Pending,
+            record: String::new(),
+            decided_at: String::new(),
+            session: false,
+            age_secs: 1,
+        });
+        let mut lines: Vec<String> = vec![row.what.to_string(), row.exactly.to_string(), row.target.to_string(), row.explained.to_string()];
+        lines.extend(row.args.iter().map(|a| a.to_string()));
+        for line in &lines {
+            assert!(
+                !line.chars().any(|c| c.is_control() || yantrik_ipc_transport::plain_text::is_bidi_control(c) || c == '\u{2028}'),
+                "{line:?}"
+            );
+        }
+        assert!(row.what.contains("x\\nUndo: possible"), "{}", row.what);
+        assert!(row.exactly.contains("2210\\nUndo") && row.exactly.contains("a<U+202E>b"), "{}", row.exactly);
+        assert_eq!(row.confirm_label.as_str(), "Kill process");
     }
 }
 
