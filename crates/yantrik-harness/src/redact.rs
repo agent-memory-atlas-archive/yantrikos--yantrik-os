@@ -155,37 +155,60 @@ pub fn question_shown(prompt: &str) -> &str {
 }
 
 /// The quoted spans of a question, as the person was shown it ([`question_shown`]), each in
-/// canonical form: the text between a pair of double quotes, exactly.
+/// canonical form. See [`quoted_texts`] for the rule.
+pub fn quoted_spans(prompt: &str) -> Vec<String> {
+    quoted_texts(prompt).into_iter().map(canonical).collect()
+}
+
+/// What a straight quote may open after: whitespace, the start of the text, or one of these.
+const OPENS_AFTER: [char; 3] = ['(', '[', '{'];
+
+/// What a straight quote may close before: whitespace, the end of the text, or one of these.
+const CLOSES_BEFORE: [char; 9] = ['.', ',', ';', ':', '!', '?', ')', ']', '}'];
+
+/// The quoted spans of a question as the person was shown it ([`question_shown`]), as written:
+/// the text between a pair of double quotes, exactly, where the quotes read as a pair.
 ///
-/// - Only double quotes delimit: `"` (U+0022) … `"`, and `“` (U+201C) … `”` (U+201D). Single
-///   quotes, apostrophes, `‘` and `’` never open or close a span.
-/// - Pairing is by type: a span opened by `"` closes at the next `"`, one opened by `“` at the next
-///   `”`. Inside `"…"`, `“` and `”` are ordinary characters; inside `“…”`, `"` is.
-/// - Left to right; spans do not nest; no escapes. An opener with no closer before the end of the
-///   shown prompt makes no span, and the scan goes on from the character after it.
+/// - Only double quotes delimit. Single quotes, apostrophes, `‘` and `’` never open or close a span.
+/// - A straight `"` (U+0022) opens only at the start of the text, or after whitespace or one of
+///   `( [ {`; it closes at the next `"`, and only when that one is followed by whitespace, one of
+///   `. , ; : ! ? ) ] }`, or the end of the text. Inside `"…"`, `“` and `”` are ordinary.
+/// - `“` (U+201C) opens and `”` (U+201D) closes, at the next `”`, wherever they are; `”…“` (curly
+///   quotes used backwards) is never a span. Inside `“…”`, `"` is ordinary.
+/// - A span whose text starts or ends with whitespace is no span.
+/// - Left to right; spans do not nest; no escapes. Where an opener makes no span (no closer, a
+///   closer in the wrong place, or the whitespace rule), the scan goes on from the character after
+///   it. "Whitespace" is Unicode `White_Space` (`char::is_whitespace`).
 ///
 /// Every span is listed, however short; a needle must also be [`MIN_NEEDLE_CHARS`] long. The same
 /// rule in Python is `quoted_spans` in `harnesses/lib/yantrik_harness.py`; both are held to
 /// `harnesses/tests/fixtures/redact_spans.json`.
-pub fn quoted_spans(prompt: &str) -> Vec<String> {
+pub fn quoted_texts(prompt: &str) -> Vec<&str> {
     let shown = question_shown(prompt);
+    let chars: Vec<(usize, char)> = shown.char_indices().collect();
     let mut spans = Vec::new();
-    let mut at = 0;
-    while let Some(c) = shown[at..].chars().next() {
+    let mut i = 0;
+    while i < chars.len() {
+        let (at, c) = chars[i];
         let close = match c {
-            '"' => Some('"'),
+            '"' if i == 0 || chars[i - 1].1.is_whitespace() || OPENS_AFTER.contains(&chars[i - 1].1) => Some('"'),
             '\u{201c}' => Some('\u{201d}'),
             _ => None,
         };
-        let open_end = at + c.len_utf8();
         if let Some(close) = close {
-            if let Some(len) = shown[open_end..].find(close) {
-                spans.push(canonical(&shown[open_end..open_end + len]));
-                at = open_end + len + close.len_utf8();
-                continue;
+            if let Some(j) = (i + 1..chars.len()).find(|&j| chars[j].1 == close) {
+                let closes = close != '"'
+                    || chars.get(j + 1).map_or(true, |&(_, n)| n.is_whitespace() || CLOSES_BEFORE.contains(&n));
+                let text = &shown[at + c.len_utf8()..chars[j].0];
+                let trimmed = !text.starts_with(char::is_whitespace) && !text.ends_with(char::is_whitespace);
+                if closes && trimmed {
+                    spans.push(text);
+                    i = j + 1;
+                    continue;
+                }
             }
         }
-        at = open_end;
+        i += 1;
     }
     spans
 }

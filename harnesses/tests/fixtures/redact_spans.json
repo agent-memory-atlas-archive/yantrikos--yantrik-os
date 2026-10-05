@@ -84,5 +84,57 @@
     "too_short": [
       "abc"
     ]
+  },
+  {
+    "case": "probe: an inch mark is not an opener",
+    "question": "Forget 27\" don't touch ~/Photos \"Priya\"?",
+    "spans": [
+      "priya"
+    ],
+    "too_short": []
+  },
+  {
+    "case": "probe: curly quotes used backwards are never a span",
+    "question": "Forget \u201dPriya\u201c and \u201dx\u201c",
+    "spans": [],
+    "too_short": []
+  },
+  {
+    "case": "probe: doubled quotes",
+    "question": "Forget \"\"Priya\" do not delete \"Elm\"",
+    "spans": [
+      "elm"
+    ],
+    "too_short": [
+      "elm"
+    ]
+  },
+  {
+    "case": "a straight quote opens after an opening bracket and closes before a closing one",
+    "question": "Forget (\"Priya\") now",
+    "spans": [
+      "priya"
+    ],
+    "too_short": []
+  },
+  {
+    "case": "a straight quote does not close before a letter",
+    "question": "Forget \"Priya\"s code\" now",
+    "spans": [],
+    "too_short": []
+  },
+  {
+    "case": "a span starting or ending with whitespace is no span",
+    "question": "Forget \" Priya\" or \"Elm \" or \u201c Oak\u201d.",
+    "spans": [],
+    "too_short": []
+  },
+  {
+    "case": "no-break space is whitespace",
+    "question": "Forget \u00a0\"Priya\"\u00a0now",
+    "spans": [
+      "priya"
+    ],
+    "too_short": []
   }
 ]

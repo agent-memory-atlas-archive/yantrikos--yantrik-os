@@ -16,6 +16,7 @@ export struct QuestionRequest {
     prompt: string,
     options: [string], // the answers offered as buttons; none: a free answer
     asked: string,     // when it was asked, "16:16"
+    removes: string,   // for a Keep/Erase question, what Erase removes, as the shell parsed it
 }
 
 export component QuestionCard inherits Rectangle {
@@ -28,6 +29,10 @@ export component QuestionCard inherits Rectangle {
     in property <string> closed;
     /// When it was asked ("16:16"): the same question asked twice is two cards, told apart by this.
     in property <string> asked;
+    /// For a Keep/Erase question: what pressing Erase will remove from this conversation, worked
+    /// out by the shell from the prompt's quoted spans (never the agent's words about it), one per
+    /// line — so the person sees exactly what goes, whatever the quote marks look like.
+    in property <string> removes;
     // The answer, and whether it is one of the offered answers pressed (true) or one typed (false):
     // a typed "Erase" is not a pressed one (docs/harness.md, `redact`).
     callback answered(string, bool);
@@ -66,6 +71,20 @@ export component QuestionCard inherits Rectangle {
             text: root.prompt;
             color: Theme.text-primary;
             wrap: word-wrap;
+        }
+        // The shell's own line, set apart from the agent's words above it.
+        if root.waiting && root.removes != "" : Rectangle {
+            background: Theme.bg-input;
+            border-radius: 4px;
+            VerticalLayout {
+                padding: Theme.sp-2;
+                Text {
+                    text: root.removes;
+                    color: Theme.text-primary;
+                    font-size: Theme.fs-caption;
+                    wrap: word-wrap;
+                }
+            }
         }
         if root.answer == "" && root.closed == "" && root.options.length > 0 : HorizontalLayout {
             spacing: Theme.sp-2;

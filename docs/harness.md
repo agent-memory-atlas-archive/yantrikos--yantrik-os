@@ -382,18 +382,36 @@ changes nothing:
   answered"}` otherwise). A quoted span is the text between a pair of double quotes in the shown
   prompt — its first 2000 characters, or the 1999 before the card's ellipsis when it is longer —
   in canonical form, at least 4 scalars long:
-  - only double quotes delimit: `"` … `"` (U+0022), and `“` … `”` (U+201C … U+201D). Single
-    quotes, apostrophes, `‘` and `’` never open or close a span, so `"don't share 'x'"` is one span;
-  - pairing is by type: `"` closes at the next `"`, `“` at the next `”`; inside `"…"`, `“` and `”`
-    are ordinary characters, and inside `“…”`, `"` is;
-  - left to right; spans do not nest; no escapes; an opener with no closer in the shown prompt
-    makes no span, and the scan goes on after it.
+  - only double quotes delimit. Single quotes, apostrophes, `‘` and `’` never open or close a
+    span, so `"don't share 'x'"` is one span;
+  - a straight `"` (U+0022) **opens** only at the start of the text, or right after whitespace or
+    one of `(` `[` `{`; it closes at the **next** `"`, and only if that one is followed by
+    whitespace, one of `.` `,` `;` `:` `!` `?` `)` `]` `}`, or the end of the shown prompt. Inside
+    `"…"`, `“` and `”` are ordinary characters;
+  - `“` (U+201C) opens and `”` (U+201D) closes, at the next `”`; curly quotes used backwards,
+    `”…“`, are never a span. Inside `“…”`, `"` is ordinary;
+  - a span whose text **starts or ends with whitespace** is no span;
+  - left to right; spans do not nest; no escapes; wherever an opener makes no span (no closer, a
+    closer in the wrong place, or the whitespace rule), the scan goes on from the character after
+    it. Whitespace is Unicode `White_Space`.
+
+  So `Forget 27" don't touch ~/Photos "Priya"?` quotes only `Priya`; `Forget ”Priya“ and ”x“`
+  quotes nothing; `Forget ""Priya" do not delete "Elm"` quotes only `Elm` (which, at three
+  scalars, is too short to erase).
 
   So each needle is exactly one quoted span: not a piece of one ("not" out of “you will not delete
   ~/Photos”), not words outside the quotes. The spans are taken when the answer is recorded and
   kept as digests (`requests.quoted`), so a later erasure that rewrites the prompt cannot make new
   quoted words. In Python, `quoted_spans(question)` in `harnesses/lib` follows the same rule; both
   sides are held to `harnesses/tests/fixtures/redact_spans.json`.
+
+  **The card shows what Erase removes.** On a Keep/Erase question (one of its answers is exactly
+  `Erase`), the question card — in the Agents pane and in the Lens — draws, under the mind's words
+  and set apart from them, a line the **shell** makes from those same quoted spans: `Erase
+  removes:` and then each span of at least 4 scalars on its own line in `“…”` (control and bidi
+  characters drawn as escapes), the first four and then `and N more`; or `Erase removes nothing
+  from this conversation` when there are none. Whatever the quote marks look like, the person
+  sees exactly the spans a `redact` may carry before pressing Erase.
 
 One `redact` per question; a second is refused. Accepted, the reply is
 `{"redacted": <places>, "where": ["transcript", "runs"]}` (and `"masked": n` when records were

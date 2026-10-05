@@ -43,7 +43,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 import socket
 import subprocess
 import sys
@@ -79,9 +78,15 @@ REDACT_MIN_CHARS = 4
 # How much of a question's prompt the person is shown: the card shows this many characters, or
 # the 1999 before its ellipsis when the prompt is longer. A text to erase must be quoted in it.
 QUESTION_CHARS = 2000
-# A quoted span: between straight double quotes, or between curly double quotes. Single quotes and
-# apostrophes never delimit; inside one kind the other kind is an ordinary character; no escapes.
-_QUOTED_SPAN = re.compile('"([^"]*)"|\u201c([^\u201d]*)\u201d')
+# Unicode White_Space, exactly (Rust's `char::is_whitespace`; Python's `str.isspace` differs).
+_WHITE_SPACE = frozenset(
+    [chr(c) for c in range(0x09, 0x0E)] + ["\u0020", "\u0085", "\u00a0", "\u1680"]
+    + [chr(c) for c in range(0x2000, 0x200B)] + ["\u2028", "\u2029", "\u202f", "\u205f", "\u3000"]
+)
+# A straight double quote opens only at the start, after whitespace or after one of these ...
+_OPENS_AFTER = frozenset("([{")
+# ... and closes only before whitespace, the end, or one of these.
+_CLOSES_BEFORE = frozenset(".,;:!?)]}")
 # The answer to a Keep/Erase question that lets the desktop erase its copies. Exact.
 ERASE = "Erase"
 # The environment variable the tools a harness starts for a conversation read their agent from.
@@ -257,16 +262,43 @@ def canonical(text: str) -> str:
 
 def quoted_spans(question: str) -> List[str]:
     """The quoted spans of a question as the person is shown it, each in canonical form — the same
-    rule as the desktop's (`redact::quoted_spans`), held to `harnesses/tests/fixtures/
+    rule as the desktop's (`redact::quoted_texts`), held to `harnesses/tests/fixtures/
     redact_spans.json`. A text `turn.redact` may erase must be exactly one of these, at least
     `REDACT_MIN_CHARS` long: ask "Forget “<the words>”?" quoting each text you will erase.
 
-    Left to right over the shown prompt; a span opened by `"` closes at the next `"`, one opened by
-    “ at the next ”; an opener with no closer in the shown prompt makes no span, and the scan goes
-    on after it; spans do not nest; no escapes."""
+    Over the shown prompt (its first 2000 characters, or the 1999 before the card's ellipsis):
+    - only double quotes delimit; single quotes, apostrophes, ‘ and ’ never do;
+    - a straight `"` opens only at the start, or after whitespace or one of `( [ {`; it closes at the
+      next `"`, and only when that one is followed by whitespace, one of `. , ; : ! ? ) ] }`, or the
+      end; inside it, “ and ” are ordinary;
+    - “ opens and ” closes, at the next ”; a backwards ”…“ is never a span; inside, `"` is ordinary;
+    - a span whose text starts or ends with whitespace is no span;
+    - left to right, no nesting, no escapes; where an opener makes no span, the scan goes on from
+      the character after it. Whitespace is Unicode White_Space."""
     question = str(question)
     shown = question if len(question) <= QUESTION_CHARS else question[:QUESTION_CHARS - 1]
-    return [canonical(m.group(1) if m.group(1) is not None else m.group(2)) for m in _QUOTED_SPAN.finditer(shown)]
+    spans: List[str] = []
+    i = 0
+    while i < len(shown):
+        c = shown[i]
+        close = None
+        if c == '"' and (i == 0 or shown[i - 1] in _WHITE_SPACE or shown[i - 1] in _OPENS_AFTER):
+            close = '"'
+        elif c == "\u201c":
+            close = "\u201d"
+        if close is not None:
+            j = shown.find(close, i + 1)
+            if j != -1:
+                after = shown[j + 1] if j + 1 < len(shown) else None
+                closes = close != '"' or after is None or after in _WHITE_SPACE or after in _CLOSES_BEFORE
+                text = shown[i + 1:j]
+                trimmed = not text or (text[0] not in _WHITE_SPACE and text[-1] not in _WHITE_SPACE)
+                if closes and trimmed:
+                    spans.append(canonical(text))
+                    i = j + 1
+                    continue
+        i += 1
+    return spans
 
 
 def needle(text: str) -> Dict[str, Any]:

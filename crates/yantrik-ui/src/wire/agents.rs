@@ -1346,7 +1346,36 @@ fn lens_question(agent: &str, mind: &str, q: &crate::agents::model::Question) ->
                 .collect::<Vec<_>>(),
         )),
         asked: clock(q.asked).into(),
+        removes: erase_removes(q).into(),
     }
+}
+
+/// How many of a Keep/Erase question's quoted spans the card lists before "and N more".
+const REMOVES_SHOWN: usize = 4;
+
+/// For a Keep/Erase question (one of its answers is exactly "Erase"): what pressing Erase lets a
+/// `redact` remove, as the shell parses the prompt the person sees — its quoted spans of at least
+/// the needle minimum, each escaped so a control or bidi character cannot hide in it, one per line.
+/// Drawn on the card under the agent's words, so the person sees exactly what goes, whatever the
+/// quote marks look like. "" for any other question.
+fn erase_removes(q: &crate::agents::model::Question) -> String {
+    use yantrik_harness::redact::{canonical, quoted_texts, MIN_NEEDLE_CHARS};
+    if !q.options.iter().any(|o| o == "Erase") {
+        return String::new();
+    }
+    let spans: Vec<&str> =
+        quoted_texts(&q.prompt).into_iter().filter(|s| canonical(s).chars().count() >= MIN_NEEDLE_CHARS).collect();
+    if spans.is_empty() {
+        return "Erase removes nothing from this conversation".to_string();
+    }
+    let mut out = String::from("Erase removes:");
+    for span in spans.iter().take(REMOVES_SHOWN) {
+        out.push_str(&format!("\n\u{201c}{}\u{201d}", crate::approval_wording::visible(span)));
+    }
+    if spans.len() > REMOVES_SHOWN {
+        out.push_str(&format!("\nand {} more", spans.len() - REMOVES_SHOWN));
+    }
+    out
 }
 
 /// `s` drawn in at most `n` characters.
@@ -1374,6 +1403,7 @@ fn question_of(q: &crate::agents::model::Question, key: String) -> AgentItemData
         answer: q.answer.as_str().into(),
         explain: q.closed.as_str().into(),
         asked: clock(q.asked).into(),
+        removes: erase_removes(q).into(),
         ..Default::default()
     }
 }
@@ -1583,6 +1613,7 @@ fn card_of(c: &Card, key: String, open: bool, revealed: bool) -> AgentItemData {
         styled: Default::default(),
         masked,
         revealed: masked && revealed,
+        removes: Default::default(),
     }
 }
 
@@ -2895,6 +2926,36 @@ mod first_prompt_attribution_tests {
         let slint = read("../yantrik-ui-slint/ui/agents.slint");
         assert!(slint.contains("root.item.sent-by == \"\" ? \"you\" : root.item.sent-by"), "the pane draws the sender");
         assert!(!slint.contains("text: \"you\";"), "and no longer hardcodes it for every prompt");
+    }
+
+    /// A Keep/Erase card says, in the shell's words, exactly what Erase removes: the spans the
+    /// shell parsed, whatever the quote marks look like — the same on the pane's card and the Lens's.
+    #[test]
+    fn a_keep_erase_card_shows_what_erase_removes_as_the_shell_parsed_it() {
+        let ask = |prompt: &str, options: &[&str]| crate::agents::model::Question {
+            request: "forget".into(),
+            prompt: prompt.into(),
+            options: options.iter().map(|o| o.to_string()).collect(),
+            answer: String::new(),
+            closed: String::new(),
+            asked: 0,
+        };
+        let keep_erase = ["Keep", "Erase"];
+        let removes = |prompt: &str| erase_removes(&ask(prompt, &keep_erase));
+        assert_eq!(removes("Forget \"Priya\" and \u{201c}12 Elm Street\u{201d}?"), "Erase removes:\n\u{201c}Priya\u{201d}\n\u{201c}12 Elm Street\u{201d}");
+        // The reviewer's probes: only what visibly reads as quoted, or nothing.
+        assert_eq!(removes("Forget 27\" don't touch ~/Photos \"Priya\"?"), "Erase removes:\n\u{201c}Priya\u{201d}");
+        assert_eq!(removes("Forget \u{201d}Priya\u{201c} and \u{201d}x\u{201c}"), "Erase removes nothing from this conversation");
+        assert_eq!(removes("Forget \"\"Priya\" do not delete \"Elm\""), "Erase removes nothing from this conversation", "\"Elm\" is under four");
+        // At most four, then how many more; a control or bidi character is drawn as an escape.
+        let many = removes("\"aaaa\" \"bbbb\" \"cccc\" \"dddd\" \"eeee\" \"ffff\"");
+        assert!(many.ends_with("\u{201c}dddd\u{201d}\nand 2 more"), "{many}");
+        assert_eq!(removes("Forget \"Pri\u{202e}ya\"?"), "Erase removes:\n\u{201c}Pri<U+202E>ya\u{201d}");
+        // Not a Keep/Erase question: nothing to say.
+        assert_eq!(erase_removes(&ask("Forget \"Priya\"?", &["Yes", "No"])), "");
+        // The pane's card and the Lens's card carry the same line.
+        let q = ask("Forget \"Priya\"?", &keep_erase);
+        assert_eq!(question_of(&q, "t1.0".into()).removes, lens_question("hermes:main", "Hermes", &q).removes);
     }
 
     #[test]

@@ -82,6 +82,8 @@ export struct AgentItemData {
     // marker. `revealed`: the person asked, in this pane, to see it as it was.
     masked: bool,
     revealed: bool,
+    // For a Keep/Erase question: what Erase removes, as the shell parsed it from the prompt.
+    removes: string,
     answer: string,
     asked: string,
 }
@@ -469,6 +471,7 @@ component ItemView inherits Rectangle {
             answer: root.item.answer;
             closed: root.item.explain;
             asked: root.item.asked;
+            removes: root.item.removes;
             answered(a, pressed) => { AgentsState.answer-question(AgentsState.header.id, root.item.request, a, pressed); }
         }
 

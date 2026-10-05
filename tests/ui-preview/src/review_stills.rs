@@ -12,6 +12,7 @@
 //!   review-still approval-dangerous[-nightfall]  a dangerous card, Details and source open
 //!   review-still approval-lens[-nightfall]  the card in the Lens at 1280x800, where it is clamped
 //!   review-still icons-desktop|icons-launcher  the app tiles, dark and light (icon_stills.rs)
+//!   review-still question-erase    a Keep/Erase question in the Lens, with the shell's "Erase removes" line
 //!
 //! Fixture data only; nothing is acted on.
 use super::*;
@@ -255,6 +256,32 @@ fn lens_composer(w: &MinimalSoftwareWindow, output: &str, dark: bool) -> Result<
     save(&settle(w, 1280, 800), output, 1280, 800)
 }
 
+/// A mind's Keep/Erase question in the Lens: its own words, and under them the shell's line saying
+/// exactly what Erase removes. The prompt is one of the review's probes — an inch mark before the
+/// quoted name — so the still shows that only the visibly quoted "Priya" is listed. The line is
+/// the text `wire::agents::erase_removes` makes for this prompt.
+fn question_erase(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let ui = ChatProbe::new()?;
+    ui.global::<ThemeMode>().set_dark(false);
+    ui.global::<AccentPreset>().set_index(0);
+    ui.set_messages(ModelRc::new(VecModel::from(Vec::<MessageData>::new())));
+    let options: Vec<SharedString> = vec!["Keep".into(), "Erase".into()];
+    ui.set_questions(ModelRc::new(VecModel::from(vec![QuestionRequest {
+        agent: "yantrik-mind:main".into(),
+        mind: "Yantrik Mind".into(),
+        request: "forget-1".into(),
+        prompt: "You asked me to forget your sister's name. The 27\" monitor note stays. Forget \"Priya\"?".into(),
+        options: ModelRc::new(VecModel::from(options)),
+        asked: "16:16".into(),
+        removes: "Erase removes:\n\u{201c}Priya\u{201d}".into(),
+    }])));
+    ui.show()?;
+    w.set_size(slint::PhysicalSize::new(1280, 800));
+    settle(w, 1280, 800);
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    save(&settle(w, 1280, 800), output, 1280, 800)
+}
+
 fn app_header(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::error::Error>> {
     let ui = CalendarStillProbe::new()?;
     ui.global::<ThemeMode>().set_dark(false);
@@ -308,6 +335,7 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str, which: &str) -> Result<(), B
         "approval-lens" => approval(w, output, false),
         "approval-lens-nightfall" => approval(w, output, true),
         "icons-desktop" | "icons-launcher" => super::icon_stills::run(w, output, which),
+        "question-erase" => question_erase(w, output),
         other => Err(format!("unknown still {other:?}").into()),
     }
 }
