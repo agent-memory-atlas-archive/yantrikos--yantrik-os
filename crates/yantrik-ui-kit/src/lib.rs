@@ -16,6 +16,8 @@ pub mod app_tile;
 #[cfg(test)]
 mod app_icons;
 #[cfg(test)]
+mod app_labels;
+#[cfg(test)]
 mod colour_roles;
 #[cfg(test)]
 mod slint_source;

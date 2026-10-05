@@ -13,6 +13,7 @@
 import { Theme } from "theme.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { YButton } from "components/y_button.slint";
+import { AppLabel } from "app_label.slint";
 
 // A row under MINDS: the mind itself, or one of its live task agents.
 export struct WorkNavData {
@@ -271,20 +272,23 @@ export component DeskCard inherits Rectangle {
                     alignment: center;
                     MindMark { size: Theme.wr-mark-s; }
                 }
+                // The desk's name is a tile's label, and the pair is centred by a whole-pixel
+                // offset so it lands on whole pixels (see AppLabel): (44 - 16 - 14) / 2 is 7px.
+                // If one of the three tokens changes, keep that difference even.
                 VerticalLayout {
-                    alignment: center;
+                    alignment: start;
+                    padding-top: (Theme.wr-header-h - Theme.lh-label - Theme.wr-desk-task-h) / 2;
                     horizontal-stretch: 1;
-                    Text {
+                    AppLabel {
                         text: root.desk.via == "" ? root.desk.mind : root.desk.via + " · " + root.desk.mind;
-                        color: Theme.text-primary;
-                        font-size: Theme.fs-caption;
-                        font-weight: Theme.fw-headline;
-                        overflow: elide;
+                        align: left;
                     }
                     Text {
+                        height: Theme.wr-desk-task-h;
                         text: root.desk.task;
                         color: Theme.text-secondary;
                         font-size: Theme.fs-micro;
+                        vertical-alignment: top;
                         overflow: elide;
                     }
                 }

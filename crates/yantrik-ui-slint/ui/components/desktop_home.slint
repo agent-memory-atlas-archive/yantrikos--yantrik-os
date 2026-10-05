@@ -8,6 +8,7 @@
 import { Theme } from "theme.slint";
 import { Icon, Icons } from "icon.slint";
 import { AppTile } from "app_tile.slint";
+import { AppLabel } from "app_label.slint";
 import { DockItem } from "app_dock.slint";
 import { LensResult } from "intent_lens.slint";
 import { YButton } from "y_button.slint";
@@ -146,10 +147,12 @@ export component DesktopHome inherits Rectangle {
                     }
                     if root.pins.length > 0 : Rectangle {
                         height: ceil(root.pins.length / root.columns) * 98px;
+                        // Each column starts on a whole pixel: the card's width rarely divides by the
+                        // column count, and a name centred in a column at a fraction is drawn there.
                         for item[i] in root.pins : Rectangle {
-                            x: mod(i, root.columns) * (parent.width / root.columns);
+                            x: Math.round(mod(i, root.columns) * parent.width / root.columns / 1px) * 1px;
                             y: floor(i / root.columns) * 98px;
-                            width: parent.width / root.columns;
+                            width: Math.floor(parent.width / root.columns / 1px) * 1px;
                             height: 94px;
                             border-radius: Theme.r-lg;
                             background: pin-touch.has-hover ? Theme.hover-fill-strong : transparent;
@@ -181,7 +184,7 @@ export component DesktopHome inherits Rectangle {
                                         hovered: pin-touch.has-hover;
                                     }
                                 }
-                                Text { text: item.label; color: Theme.text-primary; font-size: Theme.fs-caption; horizontal-alignment: center; overflow: elide; }
+                                AppLabel { text: item.label; }
                                 Rectangle { width: 12px; height: 3px; x: (parent.width - self.width) / 2; border-radius: 1.5px; background: item.is-running ? Theme.accent : transparent; }
                             }
                         }
