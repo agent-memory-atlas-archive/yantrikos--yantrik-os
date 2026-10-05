@@ -221,7 +221,7 @@ async fn one(proxy: &Proxy, stream: &mut TcpStream, peer: SocketAddr) -> Result<
         let Ok(s) = proxy.state.lock() else { return Err("state poisoned") };
         match s.policy.before_resolve(&host, port, http, s.private).or_else(|| proxy.door.before_resolve(&s.policy, &host)) {
             Some(Verdict::Refuse(_)) if literal == Some(Place::Forbidden) && !s.private => {
-                Some((s.policy.decide(&host, port, http, Place::Forbidden, false), Outcome::Barred))
+                Some((s.policy.decide(&host, port, http, Place::Forbidden, false), Outcome::Never))
             }
             v => v.map(|v| (v, Outcome::Refused)),
         }
@@ -246,7 +246,7 @@ async fn one(proxy: &Proxy, stream: &mut TcpStream, peer: SocketAddr) -> Result<
         // Counted, but never a proposal: no rule makes a name resolve.
         let why = format!("{host} did not resolve");
         tracing::info!(door = proxy.door.name(), host, port, why, "refused");
-        proxy.record(&host, port, Outcome::Barred, false, http, &why);
+        proxy.record(&host, port, Outcome::Never, false, http, &why);
         let _ = reply(stream, 502, &why).await;
         return Err("did not resolve");
     }

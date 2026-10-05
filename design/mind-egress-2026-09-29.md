@@ -358,7 +358,7 @@ A phone can answer the card like any other, since cards reach channels. Only the
 writes a rule. This is OpenShell's Policy Advisor, done through the approvals we already have.
 Repeated attempts to one host make one card, not a stream.
 
-A refusal no rule could answer is counted (as `refused`, and as `barred` in the ledger) but is
+A refusal no rule could answer is counted (as `refused`, and as `never` in the ledger) but is
 never a proposal, in any mode: a name that did not resolve (a typo, a dead link), a name that
 resolves only to an address that is never a destination (a Pi-hole's `0.0.0.0` for a blocked
 tracker, `127.0.0.1`), and a literal one (`127.0.0.1:7450`). Asking the person about those would
