@@ -34,16 +34,26 @@ proxy's policy, not a hole in the kernel's). As built (`/etc/yantrik/mind-egress
 ```
 table inet yantrik_mind_egress {
   counter refused {}  counter dns {}  counter direct {}
-  set resolvers4 { type ipv4_addr; … }            set resolvers6 { type ipv6_addr; … }
-  set direct4 { type ipv4_addr . inet_service; … } set direct6 { type ipv6_addr . inet_service; … }
+  set resolvers4 { type ipv4_addr; … }             set resolvers6 { type ipv6_addr; … }      # audit only
+  set loopback4 { type inet_service; 7440, 7450, 8341, … } set loopback6 { type inet_service; … }
+  set direct4 { type ipv4_addr . inet_service; … }  set direct6 { type ipv6_addr . inet_service; … }
   chain output {
     type filter hook output priority filter; policy accept;
     meta skuid <yantrik-mind> jump mind
   }
   chain mind {
-    oifname "lo" accept                                    # the proxy, the memory server, a local model
+    oifname "lo" ct direction reply accept                 # answers from the mind's own servers
+    # audit:
+    meta l4proto { tcp, udp } th dport 53 oifname "lo" counter name "dns" accept
     meta l4proto { tcp, udp } th dport 53 ip daddr @resolvers4 counter name "dns" accept
     meta l4proto { tcp, udp } th dport 53 ip6 daddr @resolvers6 counter name "dns" accept
+    # enforce, Private mode, or no readable policy, instead:
+    #   meta l4proto tcp th dport 53 counter name "dns" reject with tcp reset
+    #   meta l4proto udp th dport 53 counter name "dns" reject with icmpx admin-prohibited
+    ip daddr 127.0.0.1 tcp dport @loopback4 accept
+    ip6 daddr ::1 tcp dport @loopback6 accept
+    fib daddr type local meta l4proto tcp counter name "refused" reject with tcp reset
+    fib daddr type local counter name "refused" reject with icmpx admin-prohibited
     ip daddr . tcp dport @direct4 counter name "direct" accept
     ip6 daddr . tcp dport @direct6 counter name "direct" accept
     limit rate 6/minute burst 12 packets log prefix "yantrik-mind-egress refused: " level info
@@ -56,50 +66,71 @@ table inet yantrik_mind_egress {
 - **A positive match and a jump.** A packet with no socket (a kernel reply, IPv6 neighbour
   discovery) has no owner; `meta skuid != N return` would let such a packet fall into the
   refusals for every account on the machine. Only packets the mind account owns enter `mind`.
-- **Resolvers** are the ones `/etc/resolv.conf` names when the table is made (the first three,
-  loopback left out because loopback is let through whole, a zone dropped). systemd-resolved's
-  127.0.0.53 is loopback.
-- **The direct set** is the only way past the proxy, and it comes only from the person's policy
-  (section 3), never from anything the mind account can write. An entry is a rule with
-  `lan: true` whose host is a **literal address on the local network** (10/8, 172.16/12,
-  192.168/16, 100.64/10, fc00::/7), one entry per port, TCP only. A host name never makes an entry:
-  it keeps going through the proxy, which decides on the address it resolves to. A public address
-  never does either: the internet is reached through the proxy, where it is counted. Private mode
-  empties the set, so Private mode still cuts everything but loopback and DNS.
+- **Loopback is a list, not a hole.** On 127.0.0.1 the mind reaches the proxy (7450), the memory
+  server (7440) and the bundled llama-server (8341), and the ports the person opened to it with a
+  rule `{host: 127.0.0.1 (or ::1), ports: [11434], lan: true}`: a **loopback entry**, a local
+  Ollama the usual one. Everything else on this machine is refused (`fib daddr type local`, which
+  is loopback and also the machine's own LAN address, routed over `lo`). A local model server is a
+  real way out otherwise: Ollama pulls and pushes models by name, so `/api/pull` with
+  `evil.tld/<data>/m` carries data past enforce and Private mode, and anything bound to 0.0.0.0
+  answers on the LAN address. The Mind's other loopback listeners are off in its unit (`YM_CTL`
+  8077, `YM_WEB`, `YM_WEBUI`), its code sandboxes run in network namespaces of their own, and the
+  desktop and harnesses are unix sockets. Replies from a server of the mind's own back to whoever
+  connected to it on loopback are let through (`ct direction reply`).
+- **DNS only in audit.** In audit the mind may ask the resolvers `/etc/resolv.conf` names when the
+  table is made (the first three, a zone dropped) and a stub on loopback (systemd-resolved's
+  127.0.0.53, dnsmasq), counted. In enforce, in Private mode and when the policy does not read, it
+  may not ask at all: the proxy resolves for the mind, and classifies what a name resolves to
+  (section 2), so a query has nothing to do but carry data out.
+- **The direct set** is the only way past the proxy off this machine, and it comes only from the
+  person's policy (section 3), never from anything the mind account can write. An entry is a rule
+  with `lan: true` whose host is a **literal address on the local network** (10/8, 172.16/12,
+  192.168/16, 100.64/10 which is CGNAT and Tailscale, fc00::/7), one entry per port, TCP only. A
+  host name never makes an entry: it keeps going through the proxy, which decides on the address it
+  resolves to. A public address never does either: the internet is reached through the proxy,
+  where it is counted. Private mode empties the direct set and the loopback entries, and refuses
+  DNS, so Private mode leaves the mind its proxy (which refuses everything) and its memory.
 - **Who loads it.** Not the proxy, which stays unprivileged (no `CAP_NET_ADMIN`). `yantrik-update
-  mind-egress apply`, as root: it asks the proxy's own code for the set (`yantrik-egress direct`,
-  run as `yantrik-egress` with `setpriv`, so the policy is parsed by the code that enforces it and
-  never as root, and root never opens a file in a directory another account owns), checks every
-  line again (literal LAN addresses, ports 1–65535, at most 64 entries), writes the file whole
-  (beside it, renamed over it) and loads it with `nft -f`, one transaction. Three units, written by
-  the updater: `yantrik-mind-egress.service` at boot (after nftables, before the network, the
-  proxy and the mind; `PartOf=nftables.service`, so a reload of the ruleset puts it back),
+  mind-egress apply`, as root: it asks the proxy's own code for the entries and the mode
+  (`yantrik-egress direct`, run as `yantrik-egress` with `setpriv`, so the policy is parsed by the
+  code that enforces it and never as root, and root never opens a file in a directory another
+  account owns), checks every line again (literal LAN or loopback addresses, no scope ids, ports
+  1–65535, at most 64 entries), writes the file whole (beside it, renamed over it) and loads it
+  with `nft -f`, one transaction. Three units, written by the updater: `yantrik-mind-egress.service`
+  at boot (after nftables, before the network, the proxy and the mind; `PartOf=nftables.service`),
   `yantrik-mind-egress.path`, which runs `yantrik-mind-egress-refresh.service` when `policy.yaml`,
-  the `private` marker or `/etc/resolv.conf` changes, and every `yantrik-update reconcile`/`apply`.
+  the `private` marker, `/etc/resolv.conf` or the file it links to changes, and every
+  `yantrik-update reconcile`/`apply`.
+- **No mind runs unguarded.** `yantrik-mind.service` `Requires=` the boot unit, so a failed load
+  keeps the mind from starting and stopping or restarting nftables stops or restarts the mind with
+  it; and its `ExecStartPre` checks the table is loaded, so a hand `nft flush ruleset` keeps it
+  from starting again. A machine without nft has no mind: that is intended, it fails closed.
 - **Fail closed.** A policy that does not read, an answer that does not check, or more than 64
-  entries loads the table with an **empty** direct set, never the previous one; the file's comment
-  and the journal say why. A table that does not load is replaced by one with nothing direct and
-  no DNS (loopback only).
+  entries loads the table with **no** entries and no DNS, never the previous ones; the file's
+  comment and the journal say why. A table that does not load is replaced by one with no entries
+  and no DNS.
 
 Why `skuid` rather than `IPAddressDeny=` in the unit: it covers every process of the account,
 including one a harness starts outside the unit's cgroup, and it filters by port as well as
 address. It is also written by the updater as root and put back on every update, like the DevTools
-guard. Nothing the mind can change.
+guard. Nothing the mind can change. (`RestrictNamespaces=` is not set on the mind's unit: its code
+sandboxes are `unshare --user --net`. A network namespace of its own has no way out, and anything
+that gives one a way out from the host, like pasta, runs as the account and meets this table.)
 
 **What it does not close:**
-- **DNS.** The mind may send queries to the system's resolvers, and a query is a message: a name
-  under a domain someone controls carries data out to whoever serves it (a DNS tunnel), slowly.
-  Closing it means refusing DNS to the account outright, which the proxy makes possible (it
-  resolves for the mind); the `dns` counter shows whether the Mind resolves anything at all
-  before that is decided.
-- **Loopback services.** Everything on loopback is let through, and so is this machine's own LAN
-  address (it is routed over `lo`). A service there that forwards (an open proxy, a model server
-  that pulls from the internet, anything bound to 0.0.0.0) is a way out the table cannot see. The
-  DevTools and VNC ports are already closed to the account by the DevTools guard.
+- **DNS in audit.** A query under a domain someone controls carries data out to whoever serves it
+  (a DNS tunnel), slowly. In audit the mind may still ask; the `dns` counter shows how much.
+- **The services it may reach on loopback.** The proxy, the memory server, the llama-server and
+  what the person opened. One the person opens is theirs to judge: a local Ollama opened to the
+  mind can pull and push models by name again.
 - **Direct entries are not counted by the proxy.** What the person allowed by address is reached
   without it; the `direct` counter counts packets, not destinations.
-- **A flush.** `nft flush ruleset` by root removes the table until nftables is reloaded (which
-  puts it back) or the next update or boot.
+- **A reload of the ruleset.** `systemctl reload nftables` runs `flush ruleset` and then this table's
+  own reload: for the 100–300 ms between them the running mind is not held. (A restart or stop of
+  nftables stops the mind with it; a hand `nft flush ruleset` leaves it running unheld until the
+  next update, boot or nftables reload, and keeps it from starting again.) Including the table in
+  `/etc/nftables.conf` would close the gap, at the cost of one broken file taking the whole
+  firewall down with it; not done.
 
 ### 2. One way out: `yantrik-egress`
 
@@ -118,16 +149,22 @@ which the table lets out. The mind's unit sets `HTTPS_PROXY`, `HTTP_PROXY` and `
 - **DNS.** The mind need resolve nothing itself; the proxy resolves the name in each `CONNECT`,
   and only once the name may be reached. With Private mode on, or in enforce without a rule, the
   name is refused unresolved: a lookup is itself a message to whoever serves the name. (The kernel
-  table still lets the account ask the system's resolvers directly; see its residuals in
-  section 1.) Programs that honour proxy variables need no change: curl, Python
+  table lets the account ask the system's resolvers itself in audit only; in enforce and Private
+  mode it may not ask at all. See section 1.) Programs that honour proxy variables need no change: curl, Python
   requests/httpx, Node's undici with a proxy agent, and Go all send `CONNECT` by name. A program
   that ignores them fails, which is default deny working.
 - **Never a destination.** Loopback, link-local (the cloud metadata address), unspecified,
   multicast, IPv4 hidden in IPv6 forms that lead to those, and every address this machine has.
   A service bound to 0.0.0.0 answers on the machine's LAN address too, and a name that resolves
   to either must not be a way past the loopback guards.
-- **The local network.** In enforce, only a rule with `lan: true` reaches it. Audit lets it
-  through, marked, as it lets everything through: the mind reaches the LAN today anyway.
+- **The local network, and every address that is not the internet.** Only a rule with
+  `lan: true` reaches it, **in every mode, audit included** (5 Oct 2026; audit used to let it
+  through, marked). "Not the internet" is the list in `crates/yantrik-egress/private_ranges.json`,
+  a copy of the Mind's own `deploy/private_ranges.json`: RFC 1918, CGNAT and Tailscale
+  (100.64/10), loopback, link-local, multicast, the documentation and benchmark ranges, NAT64,
+  6to4 and Teredo. A name is classified by what it resolves to. So the Mind need not resolve a name
+  itself to guard against reaching the LAN when it is behind this proxy, which is what lets the
+  kernel refuse it DNS in enforce and Private mode. An audit refusal is a proposal like any other.
 - **What it cannot see.** Because it opens no TLS, it cannot see a request whose TLS names a
   different site from the `CONNECT` (domain fronting) on a shared CDN. Host-level policy stops a
   new destination; it does not make an allowed CDN a single site.
@@ -163,7 +200,8 @@ which the table lets out. The mind's unit sets `HTTPS_PROXY`, `HTTP_PROXY` and `
   in enforce. That is what a LAN service needs when a program that reaches it does not honour
   proxy variables. Written as a name (`gpu.lan`), the same rule stays proxy-only. A Settings
   button that lets minds reach a LAN service by address (web search, #656) should write exactly
-  such a rule, in either mode.
+  such a rule, in either mode. In the same way, `{host: 127.0.0.1, ports: [11434], lan: true}`
+  opens a local Ollama to the mind (a **loopback entry**); without it the mind cannot reach one.
 
 - **Two modes.** The whole policy starts in **audit**: everything is let through, and every
   destination is counted. After a week, Settings → Minds → *Where the Mind connects* shows what it
@@ -215,7 +253,8 @@ Repeated attempts to one host make one card, not a stream.
 5. **Version 2:** rules per program, pinned by digest.
 
 A test for each step, and the release gate on VM 520 checks both sides:
-- a connect from the mind account to `1.1.1.1:443`, and to UDP port 53 anywhere but the
-  resolvers, is refused; one to a direct entry is let out; another account is untouched;
+- a connect from the mind account to `1.1.1.1:443`, to a loopback port it was not given, and to
+  UDP port 53 (anywhere in enforce; anywhere but the resolvers in audit) is refused; one to a
+  direct entry is let out; another account is untouched;
 - a `CONNECT` to an allowed host succeeds;
 - a `CONNECT` to an unlisted host returns 403 and makes one card.

@@ -1,25 +1,31 @@
 //! The direct set: where the mind account may connect without this proxy.
 //!
 //! The kernel holds the mind account to its way out (`yantrik-update mind-egress apply`, the
-//! table `inet yantrik_mind_egress`): loopback, where this proxy listens; DNS to the machine's
-//! resolvers; and this set. Everything else from the account is refused, whatever the program
-//! does with its proxy variables.
+//! table `inet yantrik_mind_egress`): this proxy and the memory server on loopback; DNS to the
+//! machine's resolvers in audit only; and these entries. Everything else from the account is
+//! refused, whatever the program does with its proxy variables.
 //!
-//! The set comes only from the person's policy, which only root and the desktop's owner can
+//! The entries come only from the person's policy, which only root and the desktop's owner can
 //! change (the control socket), never from anything the mind account can write. An entry is a
-//! rule that says `lan` and whose host is a literal address on the local network, one entry per
-//! port: a LAN service the person allowed by address, which a program that ignores proxy variables
-//! may then reach. A name never makes an entry; it keeps going through this proxy, which decides
-//! on the address it resolves to. Neither does a public address: the internet is reached through
-//! the proxy, where it is counted. In Private mode the set is empty.
+//! rule that says `lan` and whose host is a literal address, one entry per port:
+//! - on the local network: a **direct** entry, a LAN service the person allowed by address, which
+//!   a program that ignores proxy variables may then reach;
+//! - 127.0.0.1 or ::1: a **loopback** entry, a service on this machine opened to the mind (a local
+//!   Ollama on 11434).
 //!
-//! `yantrik-egress direct [STATE_DIR]` prints it, run by the updater as this proxy's own account
+//! A name never makes an entry; it keeps going through this proxy, which decides on the address it
+//! resolves to. Neither does a public address: the internet is reached through the proxy, where it
+//! is counted. In Private mode there are none.
+//!
+//! `yantrik-egress direct [STATE_DIR]` prints them, run by the updater as this proxy's own account
 //! (so the policy is read by the code that enforces it, never parsed as root):
 //!
 //! ```text
 //! private off
+//! mode enforce
 //! direct 192.168.4.42 8888
 //! direct fd00::5 443
+//! loopback 127.0.0.1 11434
 //! ```
 //!
 //! A policy that does not read is an error (exit 1), and the updater loads an empty set for it.
@@ -28,49 +34,81 @@
 use std::net::IpAddr;
 use std::path::Path;
 
-use crate::policy::{place_of, Place, Policy};
+use crate::policy::{Mode, Policy};
 
-/// The address a rule names, if its host is a literal one that may be in the direct set: an IPv4
-/// address on the local network (10/8, 172.16/12, 192.168/16, 100.64/10), or a unique-local IPv6
-/// one (fc00::/7). An IPv4 address written as IPv6 (`::ffff:a.b.c.d`) is the IPv4 one, which is
-/// what the kernel sees on the wire.
-fn direct_address(host: &str) -> Option<IpAddr> {
-    let ip = match host.parse::<IpAddr>().ok()? {
+/// The literal address a rule's host names, an IPv4 address written as IPv6 (`::ffff:a.b.c.d`)
+/// taken as the IPv4 one, which is what the kernel sees on the wire.
+fn literal(host: &str) -> Option<IpAddr> {
+    Some(match host.parse::<IpAddr>().ok()? {
         IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(IpAddr::V6(v6)),
         v4 => v4,
-    };
-    let ok = match ip {
-        IpAddr::V4(_) => place_of(ip) == Place::Lan,
-        // Only fc00::/7 itself: an address that is "local" only because of the IPv4 address
-        // carried inside it (NAT64, 6to4) leaves this machine as a packet to a router.
-        IpAddr::V6(v6) => (v6.segments()[0] & 0xfe00) == 0xfc00,
-    };
-    ok.then_some(ip)
+    })
 }
 
-/// Every (address, port) the policy lets the mind reach directly, sorted, each once.
-pub fn entries(policy: &Policy) -> Vec<(IpAddr, u16)> {
-    let mut out: Vec<(IpAddr, u16)> = policy
-        .rules
-        .iter()
-        .filter(|r| r.lan)
-        .filter_map(|r| direct_address(&r.host).map(|ip| (ip, r)))
-        .flat_map(|(ip, r)| r.ports.iter().filter(|p| **p != 0).map(move |p| (ip, *p)))
-        .collect();
+/// Whether `ip` may be in the direct set: an IPv4 address on the local network (10/8, 172.16/12,
+/// 192.168/16, and 100.64/10, which is CGNAT and Tailscale's), or a unique-local IPv6 one
+/// (fc00::/7). Only these: an address that is "local" only because of the IPv4 address carried
+/// inside it (NAT64, 6to4) leaves this machine as a packet to a router. The updater accepts
+/// exactly these ranges again, as root.
+fn direct_address(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            v4.is_private() || (o[0] == 100 && (64..128).contains(&o[1]))
+        }
+        IpAddr::V6(v6) => (v6.segments()[0] & 0xfe00) == 0xfc00,
+    }
+}
+
+/// What a rule makes in the kernel's table, if anything.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Entry {
+    /// A LAN service the person allowed by address, reached without the proxy.
+    Direct(IpAddr, u16),
+    /// A service on this machine's loopback (127.0.0.1 or ::1 exactly) the person opened to the
+    /// mind, beyond the ones it always has (the proxy, the memory server): a local Ollama on 11434
+    /// is the usual one. Without a rule, a local model server would be a way out past Private mode
+    /// and enforce (Ollama pulls and pushes models by name, to any registry).
+    Loopback(IpAddr, u16),
+}
+
+/// Every entry the policy makes, sorted, each once: rules that say `lan` and name a literal
+/// address on the local network (direct) or 127.0.0.1 / ::1 (loopback), one per port.
+pub fn entries(policy: &Policy) -> Vec<Entry> {
+    let mut out: Vec<Entry> = Vec::new();
+    for r in policy.rules.iter().filter(|r| r.lan) {
+        let Some(ip) = literal(&r.host) else { continue };
+        let make: fn(IpAddr, u16) -> Entry = if direct_address(ip) {
+            Entry::Direct
+        } else if ip == IpAddr::from([127, 0, 0, 1]) || ip == IpAddr::from(std::net::Ipv6Addr::LOCALHOST) {
+            Entry::Loopback
+        } else {
+            continue;
+        };
+        out.extend(r.ports.iter().filter(|p| **p != 0).map(|p| make(ip, *p)));
+    }
     out.sort();
     out.dedup();
     out
 }
 
-/// What `yantrik-egress direct` prints for the state in `dir`.
+/// What `yantrik-egress direct` prints for the state in `dir`: Private mode, the policy's mode
+/// (the kernel lets the mind ask DNS only in audit), then the entries, none in Private mode.
 pub fn export(dir: &Path) -> Result<String, String> {
     let policy = Policy::read(&dir.join("policy.yaml"))?;
+    let mode = match policy.mode {
+        Mode::Audit => "audit",
+        Mode::Enforce => "enforce",
+    };
     if crate::state::private_at(dir) {
-        return Ok("private on\n".into());
+        return Ok(format!("private on\nmode {mode}\n"));
     }
-    let mut out = String::from("private off\n");
-    for (ip, port) in entries(&policy) {
-        out.push_str(&format!("direct {ip} {port}\n"));
+    let mut out = format!("private off\nmode {mode}\n");
+    for e in entries(&policy) {
+        match e {
+            Entry::Direct(ip, port) => out.push_str(&format!("direct {ip} {port}\n")),
+            Entry::Loopback(ip, port) => out.push_str(&format!("loopback {ip} {port}\n")),
+        }
     }
     Ok(out)
 }
@@ -97,18 +135,39 @@ mod tests {
                 rule("*.home.arpa", &[443], true),
                 // Not `lan`: the person did not say the local network.
                 rule("192.168.4.43", &[22], false),
-                // Public, loopback, link-local, NAT64: never direct.
+                // Public, other loopback, link-local, NAT64, Teredo: never an entry.
                 rule("1.1.1.1", &[443], true),
-                rule("127.0.0.1", &[7440], true),
+                rule("127.0.0.2", &[7440], true),
                 rule("169.254.169.254", &[80], true),
                 rule("64:ff9b::c0a8:414", &[80], true),
+                rule("2001:0:4136:e378::1", &[80], true),
                 rule("2606:4700::1111", &[443], true),
                 // The same entry twice is one entry.
                 rule("192.168.4.42", &[8888], true),
+                // Loopback, exactly 127.0.0.1 or ::1, and only with lan.
+                rule("127.0.0.1", &[11434], true),
+                rule("::1", &[8341], true),
+                rule("127.0.0.1", &[22], false),
             ],
         };
-        let got: Vec<String> = entries(&p).iter().map(|(ip, port)| format!("{ip} {port}")).collect();
-        assert_eq!(got, ["10.0.0.7 11434", "192.168.4.42 8080", "192.168.4.42 8888", "fd00::5 443"]);
+        let got: Vec<String> = entries(&p)
+            .iter()
+            .map(|e| match e {
+                Entry::Direct(ip, port) => format!("direct {ip} {port}"),
+                Entry::Loopback(ip, port) => format!("loopback {ip} {port}"),
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                "direct 10.0.0.7 11434",
+                "direct 192.168.4.42 8080",
+                "direct 192.168.4.42 8888",
+                "direct fd00::5 443",
+                "loopback 127.0.0.1 11434",
+                "loopback ::1 8341"
+            ]
+        );
     }
 
     #[test]
@@ -116,17 +175,17 @@ mod tests {
         let d = std::env::temp_dir().join(format!("yantrik-egress-direct-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
-        assert_eq!(export(&d).unwrap(), "private off\n", "no policy: nothing direct");
+        assert_eq!(export(&d).unwrap(), "private off\nmode audit\n", "no policy: a new machine audits, nothing direct");
 
         std::fs::write(
             d.join("policy.yaml"),
-            "mode: enforce\nrules:\n  - host: 192.168.4.42\n    ports: [8888]\n    http: true\n    lan: true\n    why: SearXNG\n  - host: api.x.ai\n    ports: [443]\n    why: the model\n",
+            "mode: enforce\nrules:\n  - host: 192.168.4.42\n    ports: [8888]\n    http: true\n    lan: true\n    why: SearXNG\n  - host: api.x.ai\n    ports: [443]\n    why: the model\n  - host: 127.0.0.1\n    ports: [11434]\n    lan: true\n    why: Ollama here\n",
         )
         .unwrap();
-        assert_eq!(export(&d).unwrap(), "private off\ndirect 192.168.4.42 8888\n");
+        assert_eq!(export(&d).unwrap(), "private off\nmode enforce\ndirect 192.168.4.42 8888\nloopback 127.0.0.1 11434\n");
 
         std::fs::write(d.join("private"), "on\n").unwrap();
-        assert_eq!(export(&d).unwrap(), "private on\n", "Private mode: nothing direct");
+        assert_eq!(export(&d).unwrap(), "private on\nmode enforce\n", "Private mode: no entries");
         std::fs::remove_file(d.join("private")).unwrap();
 
         std::fs::write(d.join("policy.yaml"), "mode: enforce\nrules:\n  - host: 192.168.4.42\n    ports: [0]\n    lan: true\n    why: x\n").unwrap();

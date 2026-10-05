@@ -3,8 +3,8 @@
 //! Rules name a host (exactly, or `*.domain` for every name under it) and the ports it may be
 //! reached on, and say why. The whole policy is in one of two modes:
 //!
-//! - **audit** — every destination is let through and counted, so a person can see where the mind
-//!   goes before deciding anything. Where every machine starts.
+//! - **audit** — every destination on the internet is let through and counted, so a person can see
+//!   where the mind goes before deciding anything. Where every machine starts.
 //! - **enforce** — only what a rule allows; everything else is refused and becomes a proposal.
 //!
 //! Private mode refuses everything, whatever the policy says. (A rule has no mode of its own: in an
@@ -13,9 +13,11 @@
 //! Some addresses are never a destination, in any mode: loopback, link-local (the cloud metadata
 //! address is one), unspecified, multicast and broadcast. The mind reaches this machine through
 //! the mind door, and a name that resolves to 127.0.0.1 must not turn this proxy into a way past
-//! the loopback guards; neither is any address of this machine's own (`crate::local`). In
-//! enforce, an address on the local network is reached only by a rule that says `lan`; audit lets
-//! it through, marked, as it lets everything through.
+//! the loopback guards; neither is any address of this machine's own (`crate::local`). An address
+//! that is not the internet — the local network, and every private or special-use range in
+//! `crate::ranges` (CGNAT and Tailscale, NAT64, 6to4, Teredo, …) — is reached only by a rule that
+//! says `lan`, in every mode, audit included: the Mind leaves that classification to this proxy
+//! instead of resolving names itself.
 //!
 //! Nothing is looked up before it may be reached ([`Policy::before_resolve`]): with Private mode
 //! on, or in enforce without a rule, the name is refused unresolved — a lookup is itself a message
@@ -89,7 +91,17 @@ pub enum Place {
     Forbidden,
 }
 
+/// Where `ip` leads. Never a destination: see the module's notes. Not the internet (`Lan`): the
+/// local network, and every other private or special-use range (`crate::ranges`: CGNAT and
+/// Tailscale's 100.64/10, the documentation and benchmark ranges, NAT64, 6to4, Teredo, …).
 pub fn place_of(ip: IpAddr) -> Place {
+    match base_place(ip) {
+        Place::Internet if crate::ranges::special(ip) => Place::Lan,
+        p => p,
+    }
+}
+
+fn base_place(ip: IpAddr) -> Place {
     match ip {
         IpAddr::V4(v4) => {
             let o = v4.octets();
@@ -167,6 +179,12 @@ impl Policy {
                 Verdict::Refuse(format!("{host} resolved to an address on the local network, which its rule does not allow."))
             }
             (mode, Some(_)) => Verdict::Allow { audit: mode == Mode::Audit },
+            // Not the internet, in audit too: only a rule that says `lan` reaches it. The Mind
+            // leaves this to the proxy when it is behind one, instead of resolving names itself.
+            (Mode::Audit, None) if place == Place::Lan => Verdict::Refuse(format!(
+                "{host} is on the local network or a private address, which the mind reaches only by a rule that says so. \
+                 The person has been asked."
+            )),
             (Mode::Audit, None) => Verdict::Allow { audit: true },
             (Mode::Enforce, None) => Verdict::Refuse(format!(
                 "{host}:{port} is not a place the person has allowed the mind to connect. They have been asked; \
@@ -290,6 +308,26 @@ mod tests {
         p.allow(r).unwrap();
         assert_eq!(p.rules.len(), 1, "the same host and ports are replaced, not added twice");
         assert_eq!(p.decide("gpu.lan", 11434, true, Place::Lan, false), Verdict::Allow { audit: false });
+    }
+
+    #[test]
+    fn audit_refuses_what_is_not_the_internet_without_a_lan_rule() {
+        let mut p = Policy::default();
+        for ip in ["192.168.4.42", "100.100.1.1", "2001:0:4136:e378::1", "2002:c0a8:42::1", "64:ff9b::808:808", "198.18.0.9"] {
+            let place = place_of(ip.parse().unwrap());
+            assert_eq!(place, Place::Lan, "{ip}");
+            assert!(matches!(p.decide(ip, 8888, true, place, false), Verdict::Refuse(_)), "audit, no rule: {ip} refused");
+        }
+        assert!(matches!(p.decide("searx.lan", 8888, true, Place::Lan, false), Verdict::Refuse(_)), "a name that resolves there too");
+        p.allow(rule("searx.lan", &[8888])).unwrap();
+        assert!(matches!(p.decide("searx.lan", 8888, false, Place::Lan, false), Verdict::Refuse(_)), "a rule without lan is not enough");
+        let mut r = rule("192.168.4.42", &[8888]);
+        r.lan = true;
+        r.http = true;
+        p.allow(r).unwrap();
+        assert_eq!(p.decide("192.168.4.42", 8888, true, Place::Lan, false), Verdict::Allow { audit: true }, "a lan rule reaches it");
+        assert!(matches!(p.decide("192.168.4.42", 22, false, Place::Lan, false), Verdict::Refuse(_)), "only on its ports");
+        assert_eq!(p.decide("example.com", 443, false, Place::Internet, false), Verdict::Allow { audit: true }, "the internet still audits");
     }
 
     #[test]

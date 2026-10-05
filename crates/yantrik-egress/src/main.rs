@@ -25,6 +25,7 @@ mod local;
 mod peer;
 mod policy;
 mod proxy;
+mod ranges;
 mod request;
 mod state;
 
