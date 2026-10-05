@@ -103,6 +103,7 @@ pub mod free_ai;
 
 use crate::app_context::AppContext;
 use crate::App;
+use slint::ComponentHandle;
 
 /// Wire all Slint callbacks. Called once from main().
 pub fn wire_all(ui: &App, ctx: &AppContext) {
@@ -119,6 +120,8 @@ pub fn wire_all(ui: &App, ctx: &AppContext) {
     network::wire(ui);
     lens::wire(ui, ctx);
     navigate::wire(ui, ctx);
+    // The letter on the tile of an app there is no art and no theme icon for (AppTile).
+    ui.global::<crate::AppInitial>().on_of(|id| yantrik_ui_kit::app_tile::initial(&id).into());
     dock::wire(ui, ctx);
     power::wire(ui, ctx);
     audio::wire(ui, ctx);

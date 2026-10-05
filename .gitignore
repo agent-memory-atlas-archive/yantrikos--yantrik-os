@@ -70,6 +70,9 @@ lib.long-type-*.txt
 # ...and the titlebar buttons, for the same reason: generated, tiny, and the window has no
 # close button without them.
 !config/labwc/*.png
+# ...and the app tiles (design/icons/generate.py): the shell embeds them, and committing them is
+# what lets it build without Python or resvg.
+!crates/yantrik-ui-kit/assets/app-icons/*/*.png
 
 # Secrets
 google_client_*

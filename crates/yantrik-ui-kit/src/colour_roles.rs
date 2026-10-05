@@ -100,7 +100,7 @@ fn a_done_recipe_step_is_neutral() {
 
 /// The hue of `#rrggbb` (alpha after it ignored), in degrees, or None for a grey, which has no
 /// hue to collide with anything.
-fn hue(hex: &str) -> Option<f32> {
+pub(crate) fn hue(hex: &str) -> Option<f32> {
     let h = hex.trim_start_matches('#');
     let channel = |at: usize| u8::from_str_radix(h.get(at..at + 2)?, 16).ok().map(|v| v as f32 / 255.0);
     let (r, g, b) = (channel(0)?, channel(2)?, channel(4)?);
@@ -132,7 +132,7 @@ fn hexes(text: &str) -> Vec<String> {
 }
 
 /// The two hue families that already mean something: amber is "needs you", teal is a mind.
-fn in_a_reserved_family(hex: &str) -> Option<&'static str> {
+pub(crate) fn in_a_reserved_family(hex: &str) -> Option<&'static str> {
     match hue(hex)? {
         h if (30.0..=50.0).contains(&h) => Some("amber (needs you)"),
         h if (160.0..=190.0).contains(&h) => Some("teal (a mind)"),

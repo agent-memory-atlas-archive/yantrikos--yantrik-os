@@ -76,7 +76,8 @@ export global AppColor {
     // icon is an object with its own colour, like a real one on a real desk, and does not
     // change because the surface around it did. Each is dark enough to hold a white glyph at
     // 3:1 or better, except the three light hues (lime, yellow, amber), which carry a dark
-    // glyph instead — see `on-tile`.
+    // glyph instead — see `on-tile`. AppTile's pre-rendered art is generated from these and from
+    // `hue-for-app` (design/icons/generate.py): change one and run it, or the kit's tests fail.
     out property <color> tile-blue:    #2f6fe4;
     out property <color> tile-sky:     #2f8ae8;
     out property <color> tile-azure:   #1492c2;

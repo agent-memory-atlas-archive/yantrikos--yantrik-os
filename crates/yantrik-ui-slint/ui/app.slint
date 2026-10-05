@@ -10,6 +10,8 @@
 import { Theme, ThemeMode, ThemeOverrides, AccentPreset } from "theme.slint";
 // A window frame's glyph wears its app's colour from the one table, not the minds' teal.
 import { AppColor } from "components/app_color.slint";
+// The letter on an unknown app's tile, answered from Rust (wire/mod.rs).
+export { AppInitial } from "app_tile.slint";
 import { GroundedDock, DockButton, DockWindow } from "components/grounded_dock.slint";
 import { StatusBar } from "components/status_bar.slint";
 import { ShellOverlays } from "components/shell_overlays.slint";

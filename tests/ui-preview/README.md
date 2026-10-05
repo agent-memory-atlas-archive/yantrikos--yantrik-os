@@ -169,6 +169,10 @@ headless window. There are no assertions: these are pictures.
 - `approval-nightfall`: the same card on Nightfall: dark, violet (accent index 2) and its palette
   overrides from `themes/nightfall.toml`, applied as `wire/theme.rs` applies them.
 - `approval-lens`, `approval-lens-nightfall`: the card in the Lens at 1280×800, where its details are clamped.
+- `icons-desktop`: the whole shell's desktop at 1280×800 — the workspace row's 48px tiles and the
+  dock's 32px ones, including a third-party app with a theme icon and one with neither — dark,
+  then light (`-light`), and the dock alone at 4x, pixel for pixel (`-dock-zoom`).
+- `icons-launcher`: the Apps launcher open over the desktop, every tile at 48px, dark and light.
 
 ```sh
 cargo run --manifest-path tests/ui-preview/Cargo.toml --profile fast -- target/light-appearance.png 1280 800 review-still appearance

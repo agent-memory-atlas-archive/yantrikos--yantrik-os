@@ -109,9 +109,11 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str, width: u32, height: u32) -> 
     assert_eq!(behind.as_slice()[5 * width as usize + 5], one_page.as_slice()[5 * width as usize + 5], "no dimming layer");
     let mid = y0 + cell_h / 2.0;
     assert_eq!(at(&behind, card_x - 3.0, mid), at(&one_page, card_x - 3.0, mid), "the card is no wider than 640");
-    // Cell 0 is Terminal: its tile is Terminal's green (AppColor.tile-green), above the glyph.
+    // Cell 0 is Terminal: its tile is Terminal's green (AppColor.tile-green, lit from above in the
+    // pre-rendered art, so a strong green rather than one exact value), above the glyph.
     let tile = at(&one_page, x0 + cell_w / 2.0, y0 + 12.0 + 5.0);
-    assert_eq!((tile.r, tile.g, tile.b), (0x22, 0xa1, 0x52), "cell 0 wears Terminal's tile, not a grey box");
+    let low = tile.r.min(tile.b);
+    assert!(tile.g > tile.r && tile.g > tile.b && tile.g - low > 60, "cell 0 wears Terminal's green tile, not a grey box: {tile:?}");
     // Cell 1 is selected: ringed (its edge is not cell 0's hairline) and raised (its fill is not).
     let x1 = x0 + cell_w + 12.0;
     assert_ne!(at(&one_page, x1 + 0.5, mid), at(&one_page, x0 + 0.5, mid), "the selected cell has the accent ring");
