@@ -19,7 +19,8 @@
 //! lets the mind account connect without this proxy (`direct`, `yantrik-update mind-egress`).
 //! `yantrik-egress seed-plan` reads `<source> <url>` lines and prints which become seeded `lan`
 //! rules (`seed`, `yantrik-update`'s seeding). `yantrik-egress capabilities` prints what this
-//! build promises, one word a line (`policy::CAPABILITIES`).
+//! build promises, one word a line (`policy::CAPABILITIES`). `yantrik-egress lan-hosts
+//! [STATE_DIR]` prints every host a `lan` rule names, with its ports (`direct`).
 
 mod control;
 mod direct;
@@ -69,6 +70,17 @@ fn main() {
             }
             return;
         }
+        Some("lan-hosts") if args.len() <= 2 => {
+            let dir = args.get(1).map(PathBuf::from).unwrap_or_else(|| PathBuf::from(env("EGRESS_STATE", "/var/lib/yantrik-egress")));
+            match direct::export_lan_hosts(&dir) {
+                Ok(text) => print!("{text}"),
+                Err(e) => {
+                    eprintln!("yantrik-egress lan-hosts: {e}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
         Some("seed-plan") if args.len() == 1 => {
             use std::io::Read;
             let mut input = String::new();
@@ -86,7 +98,7 @@ fn main() {
             return;
         }
         Some(_) => {
-            eprintln!("usage: yantrik-egress            the proxy, configured by its unit's environment\n       yantrik-egress direct [DIR]   print the direct set from the policy in DIR\n       yantrik-egress seed-plan      <source> <url> lines on stdin: which become seeded lan rules\n       yantrik-egress capabilities   print what this build promises, one word a line");
+            eprintln!("usage: yantrik-egress            the proxy, configured by its unit's environment\n       yantrik-egress direct [DIR]   print the direct set from the policy in DIR\n       yantrik-egress lan-hosts [DIR] print every host a lan rule names, with its ports\n       yantrik-egress seed-plan      <source> <url> lines on stdin: which become seeded lan rules\n       yantrik-egress capabilities   print what this build promises, one word a line");
             std::process::exit(2);
         }
     }

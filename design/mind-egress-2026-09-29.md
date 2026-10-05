@@ -257,7 +257,8 @@ itself and renamed into place, so a link planted at the path is replaced, never 
 ```json
 {"enforced": true, "table": "inet yantrik_mind_egress", "proxy": "http://127.0.0.1:7450",
  "proxy_refuses_private": true, "mode": "audit", "private": false, "dns_allowed": true,
- "loaded_at": 1759600000, "version": 1}
+ "lan_hosts": [{"host": "192.168.4.42", "ports": [8888]}, {"host": "homeassistant.local", "ports": [8123]}],
+ "loaded_at": 1759600000, "version": 2}
 ```
 
 - `mode`: `audit` or `enforce`, the policy's; `fallback` when the policy could not be read or its
@@ -267,7 +268,21 @@ itself and renamed into place, so a link planted at the path is replaced, never 
 - `proxy_refuses_private`: the installed `yantrik-egress capabilities` prints
   `refuses-private-all-modes`, so the proxy refuses private and special ranges without a `lan`
   rule in audit too. Read from the binary at each apply, never assumed; false from an older proxy.
-- `loaded_at`: unix seconds of the load. `version`: this layout; a reader refuses one it does not know.
+- `lan_hosts`: every host a `lan` rule names, seeded or the person's — names, `*.domain`
+  patterns and literal addresses — lowercased, without a trailing dot, sorted, each once with its
+  ports. The proxy grants the local network on the **name asked for** (`Policy::decide` matches a
+  `lan` rule by the requested host), so a name here reaches whatever it resolves to, a private
+  address included. A mind fetching on behalf of anything untrusted (a URL from a web page, a
+  tool's argument) must refuse these hosts itself, on any port (`*.domain` covers every name under
+  it), and every literal address that is not the internet. Read by the proxy's own code as its
+  account (`yantrik-egress lan-hosts`), never parsed by root from the YAML; checked again as root.
+  It lists the policy, so Private mode does not empty it (the proxy refuses everything then anyway).
+  **`null`** when it could not be read (no policy reader, a policy that does not read, an answer
+  that did not check) or there are more than 64 hosts: a reader must then take **every name it
+  has not resolved itself as possibly the local network** and refuse it on the untrusted path —
+  fail closed, never treat `null` as an empty list. `[]` means there are no `lan` rules.
+- `loaded_at`: unix seconds of the load. `version`: this layout (2 adds `lan_hosts`); a reader
+  refuses one it does not know.
 
 Trust it only if all of these hold, else take egress as not enforced:
 - `/run/yantrik` is owned by uid 0 and is not group- or world-writable;

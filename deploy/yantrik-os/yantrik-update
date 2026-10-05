@@ -2256,6 +2256,8 @@ MIND_EGRESS_PATH_UNIT=/etc/systemd/system/yantrik-mind-egress.path
 MIND_EGRESS_STATUS=/run/yantrik/mind-egress.json
 EGRESS_STATE=/var/lib/yantrik-egress
 MIND_EGRESS_MAX=64
+# The most hosts the status file lists in lan_hosts; past it, null (a mind then fails closed).
+MIND_LAN_HOSTS_MAX=64
 # 127.0.0.1 ports every mind may reach: the egress proxy (7450), the memory server (7440,
 # YM_MEMORY_SERVER) and the bundled llama-server fallback (8341). The Mind's other loopback
 # listeners are off in its unit (YM_CTL 8077, YM_WEB, YM_WEBUI) and its sandboxes run in network
@@ -2314,6 +2316,47 @@ if len(seen) > most:
 print("state " + lines[1].split(" ")[1])
 for kind, v, _, port, ip in sorted(seen):
     print(kind, v, ip, port)
+'
+
+# Check what `yantrik-egress lan-hosts` printed (argv: the most hosts, its exit status; stdin: its
+# answer) and print lan_hosts for the status file: a JSON list of {"host", "ports"}, sorted, each
+# host once (lowercased, no trailing dot) with its ports merged and sorted. Prints `null` instead
+# when the reader failed, a line is not `lan <host> <port>[,<port>…]` with a host a rule could
+# name, or there are more hosts than the most: a mind then takes every name as possibly the LAN.
+PY_MIND_LAN_HOSTS='
+import json, re, sys
+most, rc = int(sys.argv[1]), sys.argv[2]
+def null():
+    print("null")
+    sys.exit(0)
+if rc != "0":
+    null()
+try:
+    text = sys.stdin.buffer.read(1 << 20).decode("ascii")
+except UnicodeDecodeError:
+    null()
+hosts = {}
+for l in text.split("\n"):
+    if l == "":
+        continue
+    f = l.split(" ")
+    if len(f) != 3 or f[0] != "lan":
+        null()
+    h = f[1].lower()
+    if h.endswith("."):
+        h = h[:-1]
+    name = h[2:] if h.startswith("*.") else h
+    if not re.fullmatch(r"[a-z0-9.:-]{1,253}", name) or not re.search(r"[.:]", name):
+        null()
+    ports = set()
+    for p in f[2].split(","):
+        if not re.fullmatch(r"[1-9][0-9]{0,4}", p) or int(p) > 65535:
+            null()
+        ports.add(int(p))
+    hosts.setdefault(h, set()).update(ports)
+if len(hosts) > most:
+    null()
+print(json.dumps([{"host": h, "ports": sorted(p)} for h, p in sorted(hosts.items())]))
 '
 
 # The resolvers a resolv.conf names, as `resolver <4|6> <ip>`: literal addresses only, a zone dropped,
@@ -2489,9 +2532,10 @@ mind_egress_render() { # <uid> <status> <answer> <resolv.conf> <out>
 # What the mind may rely on (design/mind-egress-2026-09-29.md): /run/yantrik/mind-egress.json,
 # written by root only once a table is loaded and removed when none is, so a mind that finds no
 # such file (or one it cannot trust) fails closed. From a `status` line mind_egress_render
-# printed, and the proxy's `yantrik-egress capabilities`; any other input is refused.
-mind_egress_status_text() { # <status line> <capabilities> <loaded at>
-  local refuses=false word mode private dns rest
+# printed, the proxy's `yantrik-egress capabilities`, and lan_hosts as mind_egress_lan_json made
+# it (null when not given); any other input is refused.
+mind_egress_status_text() { # <status line> <capabilities> <loaded at> [lan_hosts JSON]
+  local refuses=false word mode private dns rest lan="${4:-null}"
   printf '%s\n' "$2" | grep -qx 'refuses-private-all-modes' && refuses=true
   read -r word mode private dns rest <<<"$1"
   [ "$word" = status ] && [ -z "$rest" ] || return 1
@@ -2500,17 +2544,25 @@ mind_egress_status_text() { # <status line> <capabilities> <loaded at>
     *) return 1 ;;
   esac
   case "$3" in ''|*[!0-9]*) return 1 ;; esac
-  printf '{"enforced": true, "table": "inet yantrik_mind_egress", "proxy": "http://127.0.0.1:7450", "proxy_refuses_private": %s, "mode": "%s", "private": %s, "dns_allowed": %s, "loaded_at": %s, "version": 1}\n' \
-    "$refuses" "$mode" "$private" "$dns" "$3"
+  case "$lan" in null|'['*']') ;; *) return 1 ;; esac
+  case "$lan" in *$'\n'*) return 1 ;; esac
+  printf '{"enforced": true, "table": "inet yantrik_mind_egress", "proxy": "http://127.0.0.1:7450", "proxy_refuses_private": %s, "mode": "%s", "private": %s, "dns_allowed": %s, "lan_hosts": %s, "loaded_at": %s, "version": 2}\n' \
+    "$refuses" "$mode" "$private" "$dns" "$lan" "$3"
+}
+
+# lan_hosts for the status file from what `yantrik-egress lan-hosts` answered (<status> its exit,
+# <answer> what it printed), checked again as root (PY_MIND_LAN_HOSTS); null if anything is off.
+mind_egress_lan_json() { # <status> <answer>
+  printf '%s\n' "$2" | python3 -I -c "$PY_MIND_LAN_HOSTS" "$MIND_LAN_HOSTS_MAX" "$1" 2>/dev/null || echo null
 }
 
 # Put the status file in place whole (write_file_atomic: a link planted at it is replaced, not
 # followed), in a directory only its writer may change: made 0755 if missing, and refused if it
 # is a link, someone else's, or group or world writable. The file is the writer's (root's), 0644.
-mind_egress_status_write() { # <path> <status line> <capabilities>
+mind_egress_status_write() { # <path> <status line> <capabilities> <lan_hosts JSON>
   local dir text
   dir="$(dirname "$1")"
-  text="$(mind_egress_status_text "$2" "$3" "$(date +%s)")" || { rm -f -- "$1"; return 1; }
+  text="$(mind_egress_status_text "$2" "$3" "$(date +%s)" "$4")" || { rm -f -- "$1"; return 1; }
   [ -L "$dir" ] && { rm -f -- "$1"; return 1; }
   [ -d "$dir" ] || mkdir -m 0755 -- "$dir" || return 1
   if [ -L "$dir" ] || [ "$(stat -c %u -- "$dir")" != "$(id -u)" ] || [ $(( 0$(stat -c %a -- "$dir") & 022 )) != 0 ]; then
@@ -2539,6 +2591,12 @@ mind_egress_capabilities() {
   mind_egress_as_proxy capabilities 2>/dev/null | head -20
 }
 
+# Every host a lan rule names, read by the proxy's own code as its account (never parsed as root);
+# its exit status is the reader's.
+mind_egress_lan_hosts() {
+  mind_egress_as_proxy lan-hosts "$EGRESS_STATE" 2>/dev/null
+}
+
 # Ask the proxy's own code for the entries, as the proxy's account. Prints its answer (or why there
 # is none) and returns its status.
 mind_egress_ask() {
@@ -2556,18 +2614,19 @@ mind_egress_ask() {
 # by one with no entries and no DNS, never left at what was there before. The status file says
 # what loaded, written only after it did; with no table loaded it is removed.
 mind_egress_load() {
-  local nft uid answer rc result errf
+  local nft uid answer rc result errf lan
   nft="$(command -v nft 2>/dev/null)"
   [ -n "$nft" ] || { rm -f -- "$MIND_EGRESS_STATUS"; warn "no nft on this machine; the mind account cannot be held to its egress proxy, so no mind starts"; return 1; }
   uid="$(id -u yantrik-mind 2>/dev/null)"
   case "$uid" in ''|0|*[!0-9]*) rm -f -- "$MIND_EGRESS_STATUS"; info "no mind account here; nothing to hold to the egress proxy"; return 0 ;; esac
   install -d -o root -g root -m 0755 /etc/yantrik
   answer="$(mind_egress_ask)"; rc=$?
+  lan="$(mind_egress_lan_hosts)"; lan="$(mind_egress_lan_json "$?" "$lan")"
   errf="$(mktemp)" || return 1
   if result="$(mind_egress_render "$uid" "$rc" "$answer" /etc/resolv.conf "$MIND_EGRESS_NFT")" \
      && "$nft" -f "$MIND_EGRESS_NFT" 2>"$errf"; then
     rm -f "$errf"
-    mind_egress_status_write "$MIND_EGRESS_STATUS" "$(printf '%s\n' "$result" | sed -n 2p)" "$(mind_egress_capabilities)" \
+    mind_egress_status_write "$MIND_EGRESS_STATUS" "$(printf '%s\n' "$result" | sed -n 2p)" "$(mind_egress_capabilities)" "$lan" \
       || warn "could not write $MIND_EGRESS_STATUS; a mind will take its egress as not enforced"
     result="$(printf '%s\n' "$result" | head -1)"
     case "$result" in
@@ -2580,7 +2639,7 @@ mind_egress_load() {
   rm -f "$errf"
   mind_egress_text "$uid" "" "" nodns "NONE, the table made from the policy did not load" | write_file_atomic "$MIND_EGRESS_NFT"
   if mind_egress_text "$uid" "" "" nodns "NONE, the table made from the policy did not load" | "$nft" -f -; then
-    mind_egress_status_write "$MIND_EGRESS_STATUS" "status fallback false false" "$(mind_egress_capabilities)" \
+    mind_egress_status_write "$MIND_EGRESS_STATUS" "status fallback false false" "$(mind_egress_capabilities)" "$lan" \
       || warn "could not write $MIND_EGRESS_STATUS; a mind will take its egress as not enforced"
     return 0
   fi
@@ -3818,19 +3877,19 @@ loopback 127.0.0.1 11434")"
     me_render "$1" >/dev/null
     mind_egress_status_text "$(sed -n 2p "$me/out")" "${2-$ok_caps}" "$now"
   }
-  is "mind-status: audit" "$js"'true, "mode": "audit", "private": false, "dns_allowed": true, "loaded_at": 1759600000, "version": 1}' \
+  is "mind-status: audit" "$js"'true, "mode": "audit", "private": false, "dns_allowed": true, "lan_hosts": null, "loaded_at": 1759600000, "version": 2}' \
     "$(ms_text "$(printf 'private off\nmode audit\ndirect 192.168.4.42 8888\n')")"
-  is "mind-status: enforce" "$js"'true, "mode": "enforce", "private": false, "dns_allowed": false, "loaded_at": 1759600000, "version": 1}' \
+  is "mind-status: enforce" "$js"'true, "mode": "enforce", "private": false, "dns_allowed": false, "lan_hosts": null, "loaded_at": 1759600000, "version": 2}' \
     "$(ms_text "$(printf 'private off\nmode enforce\ndirect 192.168.4.42 8888\n')")"
-  is "mind-status: Private mode, audit underneath: no DNS" "$js"'true, "mode": "audit", "private": true, "dns_allowed": false, "loaded_at": 1759600000, "version": 1}' \
+  is "mind-status: Private mode, audit underneath: no DNS" "$js"'true, "mode": "audit", "private": true, "dns_allowed": false, "lan_hosts": null, "loaded_at": 1759600000, "version": 2}' \
     "$(ms_text "$(printf 'private on\nmode audit\n')")"
-  is "mind-status: Private mode, enforce underneath" "$js"'true, "mode": "enforce", "private": true, "dns_allowed": false, "loaded_at": 1759600000, "version": 1}' \
+  is "mind-status: Private mode, enforce underneath" "$js"'true, "mode": "enforce", "private": true, "dns_allowed": false, "lan_hosts": null, "loaded_at": 1759600000, "version": 2}' \
     "$(ms_text "$(printf 'private on\nmode enforce\n')")"
-  is "mind-status: the fallback table (an answer that was refused)" "$js"'true, "mode": "fallback", "private": false, "dns_allowed": false, "loaded_at": 1759600000, "version": 1}' \
+  is "mind-status: the fallback table (an answer that was refused)" "$js"'true, "mode": "fallback", "private": false, "dns_allowed": false, "lan_hosts": null, "loaded_at": 1759600000, "version": 2}' \
     "$(ms_text "$(printf 'private off\nmode audit\ndirect 8.8.8.8 443\n')")"
   is "mind-status: ... and a policy that does not read" "fallback" \
     "$(me_render 'policy.yaml: bad' 1 >/dev/null; sed -n 2p "$me/out" | cut -d' ' -f2)"
-  is "mind-status: the text is JSON" "audit False True 1" \
+  is "mind-status: the text is JSON" "audit False True 2" \
     "$(ms_text "$(printf 'private off\nmode audit\n')" | python3 -I -c 'import json,sys; d=json.load(sys.stdin); print(d["mode"], d["private"], d["dns_allowed"], d["version"])')"
   t "mind-status: proxy_refuses_private from the proxy's capabilities, not assumed: none said" \
     '"proxy_refuses_private": false,' "$(ms_text "$(printf 'private off\nmode audit\n')" '')"
@@ -3846,6 +3905,32 @@ loopback 127.0.0.1 11434")"
   done
   is "mind-status: ... nor a time that is not a number" "[refused]" \
     "$(mind_egress_status_text 'status audit false true' "$ok_caps" '1;2' || echo '[refused]')"
+  is "mind-status: ... nor lan_hosts that is not a list or null" "[refused]" \
+    "$(mind_egress_status_text 'status audit false true' "$ok_caps" "$now" '"x"' || echo '[refused]')"
+
+  # lan_hosts: every host a lan rule names, seeded or the person's, names and literals, so a mind
+  # fetching for an untrusted caller refuses them itself (the proxy grants lan on the name).
+  lj() { mind_egress_lan_json "${2:-0}" "$1"; }
+  is "lan_hosts: seeded name rules" '[{"host": "gpu.example.ts.net", "ports": [11434]}, {"host": "homeassistant.local", "ports": [8123]}]' \
+    "$(lj "$(printf 'lan homeassistant.local 8123\nlan gpu.example.ts.net 11434\n')")"
+  is "lan_hosts: the person's rules and literals, sorted, lowercased, no trailing dot, ports merged" \
+    '[{"host": "*.home.arpa", "ports": [443]}, {"host": "192.168.4.42", "ports": [8080, 8888]}, {"host": "fd00::5", "ports": [443]}, {"host": "searx.lan", "ports": [80, 8888]}]' \
+    "$(lj "$(printf 'lan SearX.LAN. 8888\nlan 192.168.4.42 8888,8080\nlan fd00::5 443\nlan searx.lan 80,8888\nlan *.home.arpa 443\n')")"
+  is "lan_hosts: no lan rules is an empty list, not null" '[]' "$(lj '')"
+  is "lan_hosts: the reader failed (a policy that does not read): null" 'null' "$(lj 'policy.yaml: bad' 1)"
+  is "lan_hosts: ... an older proxy with no lan-hosts (usage, exit 2): null" 'null' "$(lj 'usage: yantrik-egress' 2)"
+  local lbad
+  for lbad in 'lan homeassistant.local' 'lan homeassistant.local 0' 'lan homeassistant.local 65536' 'lan homeassistant.local 08123' \
+              'lan home"assistant.local 8123' 'lan localhost 8123' 'direct 192.168.4.42 8888' 'lan a.b 1 x' 'lan a.b 1,,2'; do
+    is "lan_hosts: a line '$lbad' is null, not a list without it" 'null' "$(lj "$lbad")"
+  done
+  local many="" i
+  for i in $(seq 1 64); do many="$many$(printf 'lan h%d.lan 80' "$i")"$'\n'; done
+  is "lan_hosts: 64 hosts are listed" '64' "$(lj "$many" | python3 -I -c 'import json,sys; print(len(json.load(sys.stdin)))')"
+  is "lan_hosts: ... the same host twice is one" '64' "$(lj "${many}lan h1.lan 81"$'\n' | python3 -I -c 'import json,sys; print(len(json.load(sys.stdin)))')"
+  is "lan_hosts: ... 65 are over the cap: null" 'null' "$(lj "${many}lan h65.lan 80"$'\n')"
+  t "lan_hosts: in the file" '"lan_hosts": [{"host": "homeassistant.local", "ports": [8123]}], "loaded_at"' \
+    "$(mind_egress_status_text 'status audit false true' "$ok_caps" "$now" "$(lj 'lan homeassistant.local 8123')")"
 
   # mind_egress_load itself, with stand-ins: the file follows what loaded.
   mkdir -p "$ms/bin" "$ms/run"
@@ -3856,13 +3941,15 @@ loopback 127.0.0.1 11434")"
   ml_run() { # ml_run <all|fallback|none> <answer> [caps]: mind_egress_load with stand-ins
     ( export PATH="$ms/bin:$PATH" NFT_LOADS="$1"
       MIND_EGRESS_NFT="$ms/mind-egress.nft" MIND_EGRESS_STATUS="$sp" ML_ANSWER="$2" ML_CAPS="${3-$ok_caps}"
+      ML_LAN="${ML_LAN-lan homeassistant.local 8123}" ML_LAN_RC="${ML_LAN_RC:-0}"
       id() { if [ "${2:-}" = yantrik-mind ]; then echo 998; else command id "$@"; fi; }
       install() { :; }
       mind_egress_ask() { printf '%s\n' "$ML_ANSWER"; }
       mind_egress_capabilities() { printf '%s\n' "$ML_CAPS"; }
+      mind_egress_lan_hosts() { printf '%s\n' "$ML_LAN"; return "$ML_LAN_RC"; }
       mind_egress_load ) >/dev/null 2>&1
   }
-  ms_field() { python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$sp" "$1" 2>/dev/null || echo '[no file]'; }
+  ms_field() { python3 -I -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))[sys.argv[2]]) if sys.argv[2] == "lan_hosts" else json.load(open(sys.argv[1]))[sys.argv[2]])' "$sp" "$1" 2>/dev/null || echo '[no file]'; }
   ml_run all "$(printf 'private off\nmode audit\n')"
   is "mind-status: written once the table loads" "audit True True" "$(ms_field mode) $(ms_field enforced) $(ms_field dns_allowed)"
   is "mind-status: ... in a directory made root's way (0755), the file 0644" "755 644" "$(stat -c %a "$(dirname "$sp")") $(stat -c %a "$sp")"
@@ -3871,6 +3958,13 @@ loopback 127.0.0.1 11434")"
     "$(t0="$(ms_field loaded_at)"; [ "$t0" -le "$(date +%s)" ] && [ "$t0" -gt $(( $(date +%s) - 60 )) ] && echo yes || echo no)"
   ml_run all "$(printf 'private off\nmode audit\n')" ''
   is "mind-status: ... proxy_refuses_private from the installed proxy" "False" "$(ms_field proxy_refuses_private)"
+  ml_run all "$(printf 'private off\nmode audit\n')"
+  is "mind-status: lan_hosts from the proxy's reader, version 2" '[{"host": "homeassistant.local", "ports": [8123]}] 2' \
+    "$(ms_field lan_hosts) $(ms_field version)"
+  ML_LAN='policy.yaml: bad' ML_LAN_RC=1 ml_run all "$(printf 'private off\nmode audit\n')"
+  is "mind-status: ... unreadable: null, and the file still written" 'null audit' "$(ms_field lan_hosts) $(ms_field mode)"
+  ML_LAN='' ml_run all "$(printf 'private on\nmode enforce\n')"
+  is "mind-status: ... none: an empty list" '[] True' "$(ms_field lan_hosts) $(ms_field private)"
   ml_run fallback "$(printf 'private off\nmode audit\n')"
   is "mind-status: the policy's table did not load, the fallback did: fallback, no DNS" "fallback False True" \
     "$(ms_field mode) $(ms_field dns_allowed) $(ms_field enforced)"
@@ -3986,7 +4080,14 @@ c.sendall((json.dumps({"ok": True, "seeded": req["rules"]}) + "\n").encode())' "
     is "mind-egress (real reader): ... the loopback one" "$MIND_LOOPBACK_PORTS, 11434" "$(me_set loopback4)"
     is "mind-egress (real reader): ... no name, no rule without lan, no public address" "no no no" \
       "$(me_has searx.lan) $(me_has 192.168.4.43) $(me_has 1.1.1.1)"
+    ans="$("$YANTRIK_EGRESS_BIN" lan-hosts "$st" 2>/dev/null)"; rc=$?
+    is "lan_hosts (real reader): every lan rule, names and literals, never one without lan" \
+      '[{"host": "1.1.1.1", "ports": [443]}, {"host": "127.0.0.1", "ports": [11434]}, {"host": "192.168.4.42", "ports": [8888]}, {"host": "fd00::5", "ports": [443, 8443]}, {"host": "searx.lan", "ports": [8888]}]' \
+      "$(mind_egress_lan_json "$rc" "$ans")"
     printf 'on\n' > "$st/private"
+    ans="$("$YANTRIK_EGRESS_BIN" lan-hosts "$st" 2>/dev/null)"; rc=$?
+    is "lan_hosts (real reader): ... Private mode does not change it" '5' \
+      "$(mind_egress_lan_json "$rc" "$ans" | python3 -I -c 'import json,sys; print(len(json.load(sys.stdin)))')"
     ans="$("$YANTRIK_EGRESS_BIN" direct "$st" 2>&1)"; rc=$?
     is "mind-egress (real reader): Private mode" "entries: NONE, Private mode is on; DNS refused" "$(me_render "$ans" "$rc")"
     is "mind-egress (real reader): ... none" "none" "$(me_none)"
@@ -3999,6 +4100,8 @@ c.sendall((json.dumps({"ok": True, "seeded": req["rules"]}) + "\n").encode())' "
     t "mind-egress (real reader): a policy with a rule nobody could have written is no entries" \
       "NONE, the egress policy could not be read" "$(me_render "$ans" "$rc")"
     is "mind-egress (real reader): ... none" "none" "$(me_none)"
+    ans="$("$YANTRIK_EGRESS_BIN" lan-hosts "$st" 2>/dev/null)"; rc=$?
+    is "lan_hosts (real reader): ... and lan_hosts null" 'null' "$(mind_egress_lan_json "$rc" "$ans")"
     t "mind-status (real proxy): it says it refuses private ranges in every mode" '"proxy_refuses_private": true,' \
       "$(mind_egress_status_text 'status audit false true' "$("$YANTRIK_EGRESS_BIN" capabilities)" "$now")"
   else
