@@ -14,6 +14,8 @@
 //! every private or special-use range, loopback and this machine are refused. The rest — the
 //! head, Private mode, audit and enforce, the ledger, the connection — is the same code for both.
 
+use std::net::IpAddr;
+
 use crate::policy::{host_matches, Place, Policy, Verdict};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,7 +40,7 @@ impl Door {
             return None;
         }
         let host = host.trim_end_matches('.').to_ascii_lowercase();
-        policy.rules.iter().any(|r| r.lan && host_matches(&r.host, &host)).then(|| {
+        policy.rules.iter().any(|r| r.lan && names(&r.host, &host)).then(|| {
             Verdict::Refuse(format!(
                 "{host} is one of the Mind's own endpoints (a rule that says lan names it); the public door never reaches it."
             ))
@@ -55,6 +57,18 @@ impl Door {
     }
 }
 
+/// Whether a rule's host names `host` (already lowercased, without a trailing dot). The rule's
+/// host is made the same way, so a rule written `GPU.example.` names `gpu.example`, as it does in
+/// the status file's `lan_hosts` (`crate::direct::lan_hosts`); an address is compared as an
+/// address, so `2001:470:0::1` names `[2001:470::1]` and `1.2.3.4` names `[::ffff:1.2.3.4]`.
+fn names(rule_host: &str, host: &str) -> bool {
+    let pattern = rule_host.trim_end_matches('.').to_ascii_lowercase();
+    match (pattern.parse::<IpAddr>(), host.parse::<IpAddr>()) {
+        (Ok(a), Ok(b)) => a.to_canonical() == b.to_canonical(),
+        _ => host_matches(&pattern, host),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -67,6 +81,12 @@ mod tests {
     fn policy(mode: Mode) -> Policy {
         let mut p = Policy { mode, rules: vec![] };
         p.seed(vec![lan("gpu.example.ts.net", &[11434]), lan("*.home.arpa", &[8123]), lan("192.168.4.42", &[8888])]).unwrap();
+        // Written as `valid` no longer lets a rule be, but as a policy could hold them before: a
+        // trailing dot, and an IPv6 address not in its canonical form.
+        p.rules.push(lan("nas.example.ts.net.", &[445]));
+        p.rules.push(lan("*.lab.example.", &[80]));
+        p.rules.push(lan("2001:470:0:0::1", &[8080]));
+        p.rules.push(lan("203.0.113.9", &[9000]));
         p
     }
 
@@ -74,13 +94,17 @@ mod tests {
     fn the_public_door_refuses_every_host_a_lan_rule_names_on_every_port() {
         for mode in [Mode::Audit, Mode::Enforce] {
             let p = policy(mode);
-            for host in ["gpu.example.ts.net", "GPU.Example.ts.net.", "ha.home.arpa", "a.b.home.arpa", "192.168.4.42"] {
-                for port in [11434, 8123, 8888, 443, 80, 1] {
+            for host in [
+                "gpu.example.ts.net", "GPU.Example.ts.net.", "ha.home.arpa", "a.b.home.arpa", "192.168.4.42",
+                "nas.example.ts.net", "NAS.example.ts.net.", "x.lab.example", "2001:470::1", "2001:0470:0000::0001",
+                "203.0.113.9", "::ffff:203.0.113.9", "::ffff:192.168.4.42",
+            ] {
+                for port in [11434, 8123, 8888, 445, 8080, 9000, 443, 80, 1] {
                     assert!(matches!(Door::Public.before_resolve(&p, host), Some(Verdict::Refuse(_))), "{mode:?} {host}:{port}");
                 }
                 assert_eq!(Door::Endpoint.before_resolve(&p, host), None, "the endpoint door leaves it to the policy");
             }
-            for host in ["example.com", "home.arpa", "evilhome.arpa", "gpu.example.ts.net.evil.com"] {
+            for host in ["example.com", "home.arpa", "evilhome.arpa", "gpu.example.ts.net.evil.com", "lab.example", "2001:470::2", "203.0.113.8"] {
                 assert_eq!(Door::Public.before_resolve(&p, host), None, "{host} is not named by a lan rule");
             }
         }

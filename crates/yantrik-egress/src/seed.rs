@@ -65,7 +65,7 @@ pub fn parse_url(url: &str) -> Result<(bool, String, u16), &'static str> {
             _ => return Err("a port that is not 1-65535"),
         },
     };
-    let host = host.to_ascii_lowercase();
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
     if host.is_empty() || host.contains('%') {
         return Err("no host, or an address with a scope id");
     }
@@ -182,6 +182,7 @@ mod tests {
             plan_of(&[
                 ("config.yaml", "http://192.168.4.35:11434/v1"),
                 ("settings.yaml", "http://homeassistant.local:8123"),
+                ("settings.yaml", "http://HomeAssistant.local.:8124"),
                 ("mind-person.env:YM_OLLAMA_LOCAL_URL", "http://gpu.example.ts.net:11434"),
                 ("providers.yaml", "https://[fd00::5]/v1"),
                 ("config.yaml", "https://api.openai.com/v1"),
@@ -198,6 +199,7 @@ mod tests {
             [
                 "seed 192.168.4.35 11434 true seeded from config.yaml",
                 "seed homeassistant.local 8123 true seeded from settings.yaml",
+                "seed homeassistant.local 8124 true seeded from settings.yaml",
                 "seed gpu.example.ts.net 11434 true seeded from mind-person.env:YM_OLLAMA_LOCAL_URL",
                 "seed fd00::5 443 false seeded from providers.yaml",
                 "skip api.openai.com public",
