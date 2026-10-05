@@ -12,7 +12,7 @@
 //! refused before it is looked up, so a `lan` rule can never let it through; and what is
 //! resolved must be the internet (`crate::policy::place_of`, `crate::ranges`): the local network,
 //! every private or special-use range, loopback and this machine are refused. The rest — the
-//! head, Private mode, audit and enforce, the ledger, the connection — is the same code for both.
+//! head, Private mode, audit, guarded and enforce, the ledger, the connection — is the same code for both.
 
 use std::net::IpAddr;
 
@@ -92,7 +92,7 @@ mod tests {
 
     #[test]
     fn the_public_door_refuses_every_host_a_lan_rule_names_on_every_port() {
-        for mode in [Mode::Audit, Mode::Enforce] {
+        for mode in Mode::ALL {
             let p = policy(mode);
             for host in [
                 "gpu.example.ts.net", "GPU.Example.ts.net.", "ha.home.arpa", "a.b.home.arpa", "192.168.4.42",

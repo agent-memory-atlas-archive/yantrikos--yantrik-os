@@ -305,6 +305,16 @@ The kernel table lets the mind account reach both ports on `127.0.0.1` (`MIND_LO
   person turns. (A rule has no mode of its own: in an allow-list a rule that only watched would
   let through exactly what one in force does.)
 
+- **A third mode, between them (5 October 2026).** **guarded** — *Home network closed, internet
+  open*, the one Settings marks Recommended — lets every destination on the internet through with
+  no rule, counted as allowed (not as watching), and decides the local network, private ranges,
+  loopback and this machine exactly as enforce does: only a `lan` rule opens a LAN host, on the
+  endpoint door only. The kernel refuses the account DNS, as in enforce; the proxy resolves. So
+  nothing public is ever refused in guarded, and nothing public becomes a proposal. Strictness:
+  audit < guarded < enforce. The words the person chooses from (the control socket's `status`
+  answers them as `modes`): *Watch only: everything allowed and recorded* (audit); *Home network
+  closed, internet open* (guarded, Recommended); *Only places I approve* (enforce).
+
 ### 4. Asking, instead of silently failing
 
 When the mind connects somewhere no rule allows, the proxy refuses at once with `403` and a body
@@ -346,10 +356,10 @@ the file only; the directory stays.
   **`null`** from a proxy without one, and then every untrusted fetch keeps the `lan_hosts` checks
   below.
 
-- `mode`: `audit` or `enforce`, the policy's; `fallback` when the policy could not be read or its
+- `mode`: `audit`, `guarded` or `enforce`, the policy's; `fallback` when the policy could not be read or its
   answer was refused and the loaded table holds loopback only (`private` and `dns_allowed` false).
 - `private`: Private mode is on; the table has no entries and refuses DNS.
-- `dns_allowed`: the account may send DNS (audit, not Private). Otherwise every lookup is refused.
+- `dns_allowed`: the account may send DNS (audit, not Private; never in guarded). Otherwise every lookup is refused.
 - `proxy_refuses_private`: the installed `yantrik-egress capabilities` prints
   `refuses-private-all-modes`, so the proxy refuses private and special ranges without a `lan`
   rule in audit too. Read from the binary at each apply, never assumed; false from an older proxy.
@@ -369,7 +379,11 @@ the file only; the directory stays.
   has not resolved itself as possibly the local network** and refuse it on the untrusted path —
   fail closed, never treat `null` as an empty list. `[]` means there are no `lan` rules.
 - `loaded_at`: unix seconds of the load. `version`: this layout (2 adds `lan_hosts`; 3 adds
-  `public_proxy`). A reader refuses one it does not know.
+  `public_proxy`; 4 is the mode `guarded`). A reader refuses one it does not know.
+- **Version 4.** Written only when `mode` is `guarded`; the same fields as version 3, of the same
+  types. audit, enforce and fallback are still written as version 3. So a version 3 reader, which
+  knows audit and enforce only, refuses a guarded file and fails closed rather than reading a mode
+  it does not know. A reader that accepts 4 must accept `guarded` with `dns_allowed` false.
 - **Version 3 and version 2 readers.** Version 3 only adds `public_proxy`. Every version 2 field
   is still there, with the same name, type and meaning; the selftest checks that. A version 2
   reader keeps working by ignoring the new field, **once it accepts `version` 3 as well as 2**. A

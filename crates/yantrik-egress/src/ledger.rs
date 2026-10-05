@@ -1,7 +1,8 @@
 //! Where the mind went: every destination, counted.
 //!
 //! What Settings shows in the audit week ("Where the Mind connects"), and what a refusal in
-//! enforce turns into: a destination with refusals and no rule is a proposal, one per host and
+//! guarded or enforce turns into (in guarded nothing public is refused, so only the home network,
+//! private ranges and this machine are ever proposals): a destination with refusals and no rule is a proposal, one per host and
 //! port however many times it was tried. Kept to a fixed number of destinations — the least
 //! recently seen goes first — so a mind trying a million names cannot grow it without end.
 
@@ -128,6 +129,24 @@ mod tests {
         assert_eq!(l.proposals(&p).len(), 1, "fifty tries, one card");
         p.allow(Rule { host: "new.example".into(), ports: vec![443], http: false, lan: false, why: "asked".into(), seeded: false }).unwrap();
         assert!(l.proposals(&p).is_empty());
+    }
+
+    #[test]
+    fn in_guarded_a_public_host_is_never_a_proposal_and_a_lan_one_is() {
+        use crate::policy::{place_of, Verdict};
+        let p = Policy { mode: Mode::Guarded, rules: vec![] };
+        let mut l = Ledger::default();
+        for (host, ip) in [("example.com", "93.184.215.14"), ("nas.lan", "192.168.4.20")] {
+            let outcome = match p.decide(host, 443, false, place_of(ip.parse().unwrap()), false) {
+                Verdict::Allow { audit: false } => Outcome::Allowed,
+                Verdict::Allow { audit: true } => Outcome::Audited,
+                Verdict::Refuse(_) => Outcome::Refused,
+            };
+            l.record(host, 443, outcome, false, false, "", 1);
+        }
+        let hosts: Vec<String> = l.proposals(&p).into_iter().map(|s| s.host).collect();
+        assert_eq!(hosts, ["nas.lan"], "nothing public was refused");
+        assert_eq!(l.list().iter().find(|s| s.host == "example.com").map(|s| (s.allowed, s.audited)), Some((1, 0)), "recorded, not watched");
     }
 
     #[test]

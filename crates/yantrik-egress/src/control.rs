@@ -6,10 +6,10 @@
 //!
 //! | `op` | with | does |
 //! |---|---|---|
-//! | `status` | — | the mode, Private mode, the rules |
+//! | `status` | — | the mode, Private mode, the rules, and `modes`: each mode's word and the plain words the desktop shows for it, the least strict first, one marked recommended |
 //! | `seen` | — | every destination, most recent first |
 //! | `proposals` | — | destinations refused with no rule for them |
-//! | `mode` | `mode`: `audit` / `enforce` | switches the whole policy |
+//! | `mode` | `mode`: `audit` / `guarded` / `enforce` | switches the whole policy |
 //! | `private` | `on` | the person's Private mode |
 //! | `allow` | `rule` | adds or replaces a rule |
 //! | `seed` | `rules` | root only: replaces the seeded rules (`crate::seed`), never the person's |
@@ -47,6 +47,7 @@ pub fn handle(state: &Mutex<State>, request: &Value, root: bool) -> Value {
             "mode": s.policy.mode,
             "private": s.private,
             "rules": s.policy.rules,
+            "modes": Mode::ALL.map(|m| json!({ "mode": m, "label": m.label(), "recommended": m.recommended() })),
         }),
         "seen" => json!({ "ok": true, "seen": s.ledger.list() }),
         "proposals" => {
@@ -58,7 +59,7 @@ pub fn handle(state: &Mutex<State>, request: &Value, root: bool) -> Value {
                 s.policy.mode = m;
                 saved(s.save_policy())
             }
-            Err(_) => json!({ "ok": false, "error": "mode is `audit` or `enforce`" }),
+            Err(_) => json!({ "ok": false, "error": "mode is `audit`, `guarded` or `enforce`" }),
         },
         "private" => match request["on"].as_bool() {
             Some(on) => saved(s.set_private(on)),
@@ -138,8 +139,12 @@ pub async fn serve(listener: tokio::net::UnixListener, state: Arc<Mutex<State>>,
 mod tests {
     use super::*;
 
+    fn dir(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("yantrik-egress-control-{name}-{}", std::process::id()))
+    }
+
     fn state(name: &str) -> Mutex<State> {
-        let d = std::env::temp_dir().join(format!("yantrik-egress-control-{name}-{}", std::process::id()));
+        let d = dir(name);
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         Mutex::new(State::load(&d))
@@ -170,6 +175,35 @@ mod tests {
         assert_eq!(handle(&s, &json!({"op":"status"}), false)["private"], true);
         assert_eq!(handle(&s, &json!({"op":"remove","host":"api.x.ai"}), false)["removed"], 1);
         assert_eq!(handle(&s, &json!({"op":"nonsense"}), false)["ok"], false);
+    }
+
+    #[test]
+    fn guarded_is_a_mode_the_person_can_choose_and_it_is_saved() {
+        let s = state("guarded");
+        let r = handle(&s, &json!({"op":"mode","mode":"guarded"}), false);
+        assert_eq!(r["ok"], true, "{r}");
+        assert_eq!(handle(&s, &json!({"op":"status"}), false)["mode"], "guarded");
+        let dir = dir("guarded");
+        assert_eq!(crate::policy::Policy::read(&dir.join("policy.yaml")).unwrap().mode, Mode::Guarded, "written to the policy file");
+        assert_eq!(State::load(&dir).policy.mode, Mode::Guarded, "and read back after a restart");
+    }
+
+    #[test]
+    fn the_modes_are_offered_in_plain_words_the_least_strict_first() {
+        let s = state("modes");
+        let st = handle(&s, &json!({"op":"status"}), false);
+        let got: Vec<(String, String, bool)> = st["modes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| (m["mode"].as_str().unwrap().into(), m["label"].as_str().unwrap().into(), m["recommended"].as_bool().unwrap()))
+            .collect();
+        let want = [
+            ("audit", "Watch only: everything allowed and recorded", false),
+            ("guarded", "Home network closed, internet open", true),
+            ("enforce", "Only places I approve", false),
+        ];
+        assert_eq!(got, want.map(|(m, l, r)| (m.to_string(), l.to_string(), r)));
     }
 
     #[test]

@@ -85,7 +85,7 @@ fn seen(d: &Doors, host: &str, port: u16) -> Seen {
 
 #[tokio::test]
 async fn the_public_door_refuses_every_host_a_lan_rule_names() {
-    for mode in [Mode::Audit, Mode::Enforce] {
+    for mode in Mode::ALL {
         let mut p = Policy { mode, rules: vec![] };
         p.seed(vec![lan("192.0.2.7", &[8888]), lan("gpu.example.invalid", &[11434]), lan("*.home.invalid", &[8123])]).unwrap();
         let d = start(&format!("lan-{mode:?}"), p).await;
@@ -153,10 +153,35 @@ async fn the_public_door_lets_the_internet_through() {
 }
 
 #[tokio::test]
+async fn guarded_lets_the_internet_through_both_doors_and_never_the_home_network() {
+    let mut p = Policy { mode: Mode::Guarded, rules: vec![] };
+    p.seed(vec![lan("192.0.2.7", &[8888])]).unwrap();
+    let d = start("guarded", p).await;
+    for door in [d.public, d.endpoint] {
+        for code in both(door, "1.1.1.1:9").await {
+            assert_ne!(code, 403, "the internet needs no rule in guarded");
+        }
+        for authority in ["127.0.0.1:8080", "10.0.0.7:8080", "192.168.4.42:8080", "[fd00::5]:8080", "169.254.169.254:80"] {
+            assert_eq!(both(door, authority).await, [403, 403], "no rule: {authority}");
+        }
+    }
+    let s = seen(&d, "1.1.1.1", 9);
+    assert_eq!((s.allowed, s.audited, s.refused), (4, 0, 0), "counted as allowed, not watched");
+    // The lan rule opens its host on the endpoint door only.
+    assert_eq!(both(d.endpoint, "192.0.2.7:8888").await, [502, 502], "endpoint: the lan rule");
+    assert_eq!(both(d.public, "192.0.2.7:8888").await, [403, 403], "public: never");
+    assert_eq!(both(d.endpoint, "192.0.2.7:22").await, [403, 403], "endpoint: not its port");
+    let proposals: Vec<String> = { let s = d.state.lock().unwrap(); s.ledger.proposals(&s.policy) }.into_iter().map(|s| s.host).collect();
+    assert!(!proposals.iter().any(|h| h == "1.1.1.1"), "nothing public is a proposal: {proposals:?}");
+}
+
+#[tokio::test]
 async fn private_mode_closes_both_doors() {
-    let d = start("private-mode", Policy::default()).await;
-    d.state.lock().unwrap().private = true;
-    for door in [d.endpoint, d.public] {
-        assert_eq!(both(door, "1.1.1.1:9").await, [403, 403]);
+    for mode in Mode::ALL {
+        let d = start(&format!("private-mode-{mode:?}"), Policy { mode, rules: vec![] }).await;
+        d.state.lock().unwrap().private = true;
+        for door in [d.endpoint, d.public] {
+            assert_eq!(both(door, "1.1.1.1:9").await, [403, 403], "{mode:?}");
+        }
     }
 }

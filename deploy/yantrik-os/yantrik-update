@@ -2300,11 +2300,11 @@ EGRESS_PUBLIC_DOOR=127.0.0.1:7451
 # anything else is the person's to open with a rule.
 MIND_LOOPBACK_PORTS="7440, 7450, ${EGRESS_PUBLIC_DOOR##*:}, 8341"
 
-# What `yantrik-egress direct` printed, checked again: `private on|off`, `mode audit|enforce`, then
+# What `yantrik-egress direct` printed, checked again: `private on|off`, `mode audit|guarded|enforce`, then
 # `direct <ip> <port>` lines (a literal address on the local network: 10/8, 172.16/12,
 # 192.168/16, 100.64/10 which is CGNAT and Tailscale, fc00::/7) and `loopback <ip> <port>` lines
-# (127.0.0.1 or ::1), no scope ids, ports 1-65535. Prints `state private|audit|enforce`, then one
-# `<direct|loopback> <4|6> <ip> <port>` per entry (`state private <audit|enforce>` and nothing
+# (127.0.0.1 or ::1), no scope ids, ports 1-65535. Prints `state private|audit|guarded|enforce`, then one
+# `<direct|loopback> <4|6> <ip> <port>` per entry (`state private <audit|guarded|enforce>` and nothing
 # after it in Private mode); anything else is an error (exit 1, one line saying why), and the
 # caller loads no entries and no DNS.
 PY_MIND_DIRECT='
@@ -2319,7 +2319,7 @@ def no(why):
 lines = [l for l in sys.stdin.read().split("\n") if l != ""]
 if len(lines) < 2 or lines[0] not in ("private on", "private off"):
     no("it did not say whether Private mode is on")
-if lines[1] not in ("mode audit", "mode enforce"):
+if lines[1] not in ("mode audit", "mode guarded", "mode enforce"):
     no("it did not say the policy mode")
 if lines[0] == "private on":
     print("state private " + lines[1].split(" ")[1])
@@ -2459,11 +2459,11 @@ mind_egress_text() { # <uid> <entry lines> <resolver lines> <dns|nodns> <note>
 # Its way out is the person's egress proxy on loopback (yantrik-egress: 127.0.0.1:7450, the endpoint
 # door, and 127.0.0.1:7451, the public door, which never reaches the local network), which
 # applies their policy and Private mode. Beside it: the memory server and the loopback services
-# the person opened, DNS (audit only), and the direct set (LAN services the person allowed by
+# the person opened, DNS (audit only: in guarded and enforce the proxy resolves), and the direct set (LAN services the person allowed by
 # address: a policy rule with lan: true whose host is a literal address). Everything else from
 # the account is refused, and counted: nft list counters table inet yantrik_mind_egress
 # Entries: $5
-# DNS: $([ "$4" = dns ] && echo "to the resolvers and a loopback stub (audit)" || echo "refused (enforce, Private mode, or no policy)")
+# DNS: $([ "$4" = dns ] && echo "to the resolvers and a loopback stub (audit)" || echo "refused (guarded, enforce, Private mode, or no policy)")
 # Made by yantrik-update mind-egress apply from /var/lib/yantrik-egress; edits here are put back.
 table inet yantrik_mind_egress
 delete table inet yantrik_mind_egress
@@ -2538,7 +2538,7 @@ write_file_atomic() { # <path>
 
 # Write the table for <uid> to <out> from what the policy reader answered (<status> its exit,
 # <answer> what it printed) and <resolv.conf>; print one line saying what it holds and why, then
-# `status <audit|enforce|fallback> <private true|false> <dns true|false>` for the status file
+# `status <audit|guarded|enforce|fallback> <private true|false> <dns true|false>` for the status file
 # (fallback: the answer gave no entries to trust, so the table holds loopback only). Pure apart
 # from <out>: the selftest drives it with stand-in answers.
 mind_egress_render() { # <uid> <status> <answer> <resolv.conf> <out>
@@ -2551,8 +2551,9 @@ mind_egress_render() { # <uid> <status> <answer> <resolv.conf> <out>
     state="$(printf '%s\n' "$parsed" | head -1)"; state="${state#state }"
     entries="$(printf '%s\n' "$parsed" | sed 1d)"
     case "$state" in
-      "private audit"|"private enforce") note="NONE, Private mode is on"; mode="${state#private }"; private=true ;;
-      audit|enforce) note="$(printf '%s' "$entries" | grep -c .) from the person's lan rules ($state)"
+      "private audit"|"private guarded"|"private enforce") note="NONE, Private mode is on"; mode="${state#private }"; private=true ;;
+      # DNS for audit only: guarded and enforce let the proxy resolve, so a name is never a way out.
+      audit|guarded|enforce) note="$(printf '%s' "$entries" | grep -c .) from the person's lan rules ($state)"
          mode="$state"; [ "$state" = audit ] && dns=dns ;;
       *) note="NONE, the policy reader's answer was refused: a state it does not have"; entries="" ;;
     esac
@@ -2572,7 +2573,10 @@ mind_egress_render() { # <uid> <status> <answer> <resolv.conf> <out>
 # printed, the proxy's `yantrik-egress capabilities`, and lan_hosts as mind_egress_lan_json made
 # it (null when not given); any other input is refused. public_proxy is the public door as a URL,
 # like proxy (http://$EGRESS_PUBLIC_DOOR), set only when the proxy says it has one (`public-door`),
-# else null. Version 3 adds it and changes nothing a version 2 reader reads.
+# else null. Version 3 adds it and changes nothing a version 2 reader reads. Version 4 is the mode
+# guarded ("home network closed, internet open": no DNS, as enforce), written only when the mode is
+# guarded, so a version 3 reader, which knows audit and enforce, refuses the file (fails closed)
+# instead of reading a mode it does not know; audit and enforce are still written as version 3.
 mind_egress_status_text() { # <status line> <capabilities> <loaded at> [lan_hosts JSON]
   local refuses=false public=null word mode private dns rest lan="${4:-null}"
   printf '%s\n' "$2" | grep -qx 'refuses-private-all-modes' && refuses=true
@@ -2580,14 +2584,16 @@ mind_egress_status_text() { # <status line> <capabilities> <loaded at> [lan_host
   read -r word mode private dns rest <<<"$1"
   [ "$word" = status ] && [ -z "$rest" ] || return 1
   case "$mode:$private:$dns" in
-    audit:false:true|audit:true:false|enforce:false:false|enforce:true:false|fallback:false:false) ;;
+    audit:false:true|audit:true:false|guarded:false:false|guarded:true:false|enforce:false:false|enforce:true:false|fallback:false:false) ;;
     *) return 1 ;;
   esac
+  local version=3
+  [ "$mode" = guarded ] && version=4
   case "$3" in ''|*[!0-9]*) return 1 ;; esac
   case "$lan" in null|'['*']') ;; *) return 1 ;; esac
   case "$lan" in *$'\n'*) return 1 ;; esac
-  printf '{"enforced": true, "table": "inet yantrik_mind_egress", "proxy": "http://127.0.0.1:7450", "public_proxy": %s, "proxy_refuses_private": %s, "mode": "%s", "private": %s, "dns_allowed": %s, "lan_hosts": %s, "loaded_at": %s, "version": 3}\n' \
-    "$public" "$refuses" "$mode" "$private" "$dns" "$lan" "$3"
+  printf '{"enforced": true, "table": "inet yantrik_mind_egress", "proxy": "http://127.0.0.1:7450", "public_proxy": %s, "proxy_refuses_private": %s, "mode": "%s", "private": %s, "dns_allowed": %s, "lan_hosts": %s, "loaded_at": %s, "version": %s}\n' \
+    "$public" "$refuses" "$mode" "$private" "$dns" "$lan" "$3" "$version"
 }
 
 # lan_hosts for the status file from what `yantrik-egress lan-hosts` answered (<status> its exit,
@@ -3855,6 +3861,18 @@ with tarfile.open(sys.argv[1], "w") as t:
   is "mind-egress: ... before anything is let through" "yes" \
     "$([ "$(grep -n 'dport 53 counter name "dns" reject with tcp reset' "$tbl" | cut -d: -f1)" -lt "$(grep -n '@loopback4 accept' "$tbl" | cut -d: -f1)" ] && echo yes || echo no)"
 
+  res="$(me_render "$(printf 'private off\nmode guarded\ndirect 192.168.4.42 8888\nloopback 127.0.0.1 11434\n')")"
+  is "mind-egress: guarded keeps the entries and refuses DNS, as enforce" "entries: 2 from the person's lan rules (guarded); DNS refused" "$res"
+  is "mind-egress: ... no resolvers" "" "$(me_set resolvers4)$(me_set resolvers6)"
+  is "mind-egress: ... no DNS accept anywhere, a loopback stub included" "0" "$(grep -c 'dport 53.*accept' "$tbl")"
+  t "mind-egress: ... DNS refused and counted" 'meta l4proto udp th dport 53 counter name "dns" reject with icmpx admin-prohibited' "$(cat "$tbl")"
+  is "mind-egress: ... the direct set as enforce has it" "192.168.4.42 . 8888" "$(me_set direct4)"
+  res="$(me_render "$(printf 'private on\nmode guarded\ndirect 192.168.4.42 8888\n')")"
+  is "mind-egress: Private mode over guarded: no entries and no DNS" "entries: NONE, Private mode is on; DNS refused" "$res"
+  is "mind-egress: ... none" "none" "$(me_none)"
+  res="$(me_render "$(printf 'private off\nmode guard\n')")"
+  t "mind-egress: a mode that only starts like guarded is refused" "did not say the policy mode" "$res"
+
   res="$(me_render "$(printf 'private on\nmode audit\ndirect 192.168.4.42 8888\nloopback 127.0.0.1 11434\n')")"
   is "mind-egress: Private mode: no entries and no DNS, even in audit" "entries: NONE, Private mode is on; DNS refused" "$res"
   is "mind-egress: ... whatever the reader also printed" "none" "$(me_none)"
@@ -3944,6 +3962,18 @@ loopback 127.0.0.1 11434")"
     "$(ms_text "$(printf 'private on\nmode audit\n')")"
   is "mind-status: Private mode, enforce underneath" "$js"'true, "mode": "enforce", "private": true, "dns_allowed": false, "lan_hosts": null, "loaded_at": 1759600000, "version": 3}' \
     "$(ms_text "$(printf 'private on\nmode enforce\n')")"
+  is "mind-status: guarded: no DNS, version 4" "$js"'true, "mode": "guarded", "private": false, "dns_allowed": false, "lan_hosts": null, "loaded_at": 1759600000, "version": 4}' \
+    "$(ms_text "$(printf 'private off\nmode guarded\ndirect 192.168.4.42 8888\n')")"
+  is "mind-status: Private mode, guarded underneath" "$js"'true, "mode": "guarded", "private": true, "dns_allowed": false, "lan_hosts": null, "loaded_at": 1759600000, "version": 4}' \
+    "$(ms_text "$(printf 'private on\nmode guarded\n')")"
+  is "mind-status: version 4 is guarded's alone: audit, enforce and the fallback stay version 3" "3 3 3 3 3" \
+    "$(for l in 'status audit false true' 'status audit true false' 'status enforce false false' 'status enforce true false' 'status fallback false false'; do
+         mind_egress_status_text "$l" "$ok_caps" "$now" | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["version"])'; done | tr '\n' ' ' | sed 's/ $//')"
+  is "mind-status: ... and version 4 has every version 3 field, of the same type" \
+    "enforced:bool table:str proxy:str public_proxy:str proxy_refuses_private:bool mode:str private:bool dns_allowed:bool lan_hosts:list loaded_at:int version:int" \
+    "$(mind_egress_status_text 'status guarded false false' "$ok_caps" "$now" '[]' | python3 -I -c '
+import json, sys
+d = json.load(sys.stdin); print(" ".join("%s:%s" % (k, type(v).__name__) for k, v in d.items()))')"
   is "mind-status: the fallback table (an answer that was refused)" "$js"'true, "mode": "fallback", "private": false, "dns_allowed": false, "lan_hosts": null, "loaded_at": 1759600000, "version": 3}' \
     "$(ms_text "$(printf 'private off\nmode audit\ndirect 8.8.8.8 443\n')")"
   is "mind-status: ... and a policy that does not read" "fallback" \
@@ -3995,7 +4025,8 @@ d = json.load(sys.stdin); print(d["public_proxy"], d["proxy"].split(":")[0])')"
       "$(grep '^const PUBLIC_DOOR' "$egress_main")"
   fi
   local bad
-  for bad in 'status audit true true' 'status enforce false true' 'status fallback false true' 'status audit false true x' \
+  for bad in 'status audit true true' 'status enforce false true' 'status guarded false true' 'status guarded true true' \
+             'status guard false false' 'status fallback false true' 'status audit false true x' \
              'status aud false true' 'state audit false true' 'status * false true' ''; do
     is "mind-status: a status line '$bad' writes no text" "[refused]" \
       "$(mind_egress_status_text "$bad" "$ok_caps" "$now" || echo '[refused]')"
@@ -4249,6 +4280,11 @@ c.sendall((json.dumps({"ok": True, "seeded": req["rules"]}) + "\n").encode())' "
     printf 'mode: audit\nrules:\n  - {host: "192.168.4.42", ports: [8888], lan: true, why: x}\n' > "$st/policy.yaml"
     ans="$("$YANTRIK_EGRESS_BIN" direct "$st" 2>&1)"; rc=$?
     is "mind-egress (real reader): audit lets DNS out" "entries: 1 from the person's lan rules (audit); DNS allowed" "$(me_render "$ans" "$rc")"
+    printf 'mode: guarded\nrules:\n  - {host: "192.168.4.42", ports: [8888], lan: true, why: x}\n' > "$st/policy.yaml"
+    ans="$("$YANTRIK_EGRESS_BIN" direct "$st" 2>&1)"; rc=$?
+    is "mind-egress (real reader): guarded keeps the lan entry and refuses DNS" "entries: 1 from the person's lan rules (guarded); DNS refused" "$(me_render "$ans" "$rc")"
+    is "mind-status (real reader): ... and the status file says guarded, version 4" "guarded False False 4" \
+      "$(mind_egress_status_text "$(sed -n 2p "$me/out")" "$ok_caps" "$now" | python3 -I -c 'import json,sys; d=json.load(sys.stdin); print(d["mode"], d["private"], d["dns_allowed"], d["version"])')"
     # A rule written with a trailing dot before the proxy refused one is read without it on
     # upgrade, not taken for a policy that does not read.
     printf 'mode: audit\nrules:\n  - {host: "192.168.4.42.", ports: [8888], lan: true, why: x}\n' > "$st/policy.yaml"
@@ -4282,6 +4318,7 @@ c.sendall((json.dumps({"ok": True, "seeded": req["rules"]}) + "\n").encode())' "
   mkdir -p "$variants"
   me_render "$(printf 'private off\nmode audit\ndirect 192.168.4.42 8888\ndirect fd00::5 443\nloopback 127.0.0.1 11434\nloopback ::1 11434\n')" >/dev/null && cp "$tbl" "$variants/audit.nft"
   me_render "$(printf 'private off\nmode enforce\ndirect 192.168.4.42 8888\n')" >/dev/null && cp "$tbl" "$variants/enforce.nft"
+  me_render "$(printf 'private off\nmode guarded\ndirect 192.168.4.42 8888\nloopback 127.0.0.1 11434\n')" >/dev/null && cp "$tbl" "$variants/guarded.nft"
   me_render "$(printf 'private on\nmode enforce\n')" >/dev/null && cp "$tbl" "$variants/private.nft"
   mind_egress_text 998 "" "" nodns "NONE, the table made from the policy did not load" > "$variants/fallback.nft"
   if [ -n "${YANTRIK_NFT_OUT:-}" ]; then
