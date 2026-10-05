@@ -281,6 +281,15 @@ component TerminalCells inherits Rectangle {
 
 component ItemView inherits Rectangle {
     in property <AgentItemData> item;
+    // How tall an approval card here may be: the pane's own scroller's visible height, less what
+    // sits around the card inside it. Every host passes it, so the card in a pane takes the same
+    // three cases as in the Lens and the corner (intent_lens.slint, `height-limit`): the whole
+    // card fits in view at once, and when its pinned lines do not, Allow waits until the card's
+    // own scroll has been to its end. Without it the card was as tall as it liked, the gate never
+    // applied, and the pane's scroll could put the arguments out of view with Allow still on
+    // screen. A host that forgot it would leave 0px: a card that scrolls in no room and so never
+    // allows, which fails closed (Decline stays live).
+    in property <length> card-limit;
     VerticalLayout {
         padding-top: 2px;
         padding-bottom: 2px;
@@ -452,6 +461,7 @@ component ItemView inherits Rectangle {
         // an agent says can draw these buttons.
         if root.item.kind == "approval" : ApprovalCard {
             data: root.item.approval;
+            height-limit: root.card-limit;
             allow => { AgentsState.approval-allow(root.item.approval.id); }
             allow-session => { AgentsState.approval-allow-session(root.item.approval.id); }
             deny => { AgentsState.approval-deny(root.item.approval.id); }
@@ -604,6 +614,8 @@ export component AgentSession inherits Rectangle {
                         padding-right: 6px;
                         for item in AgentsState.items : ItemView {
                             item: item;
+                            // The scroller's height, less the item's own 2px above and below.
+                            card-limit: flick.height - 4px;
                         }
                     }
                 }
@@ -1016,6 +1028,9 @@ component TaskDetail inherits Rectangle {
                         spacing: 6px;
                         for item in AgentsState.items : ItemView {
                             item: item;
+                            // The scroller's height, less the column's 24px padding above and
+                            // below and the item's own 2px.
+                            card-limit: flick.height - 2 * 24px - 4px;
                         }
                     }
                     // A word to the mind, to the agent this run belongs to.

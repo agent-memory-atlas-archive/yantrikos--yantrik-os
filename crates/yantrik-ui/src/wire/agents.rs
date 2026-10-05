@@ -2257,6 +2257,19 @@ mod tests {
         assert!(!this.contains("approvals::grant") && !this.contains("approvals::deny("), "and grants nothing itself");
     }
 
+    /// A pane's card is limited by the pane's own visible height, so the read gate holds there as
+    /// in the Lens: every host of an item passes the limit, and the card reads it.
+    #[test]
+    fn a_panes_card_is_limited_by_the_panes_visible_height() {
+        let slint = read("../yantrik-ui-slint/ui/agents.slint");
+        let card = &slint[slint.find("if root.item.kind == \"approval\" : ApprovalCard {").unwrap()..];
+        let card = &card[..card.find('}').unwrap()];
+        assert!(card.contains("height-limit: root.card-limit;"), "the pane's card takes the pane's limit");
+        let hosts = slint.matches(": ItemView {").count();
+        assert!(hosts >= 2, "the session and the run's detail both host items");
+        assert_eq!(slint.matches("card-limit: flick.height").count(), hosts, "every host passes its scroller's height");
+    }
+
     /// The Lens's "open in Agents" is wired from its header to the shell, through every layer.
     #[test]
     fn the_lens_offers_open_in_agents_and_the_shell_answers_it() {
