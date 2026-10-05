@@ -37,6 +37,19 @@ jobs:
       # main next door, main moved past Cargo.lock, and every run was red for a reason that had
       # nothing to do with the commit being tested.
 
+      # The same swap the ISO build has (iso.yml, #606): rustc holds ~14 GB compiling the
+      # generated UI crate and a hosted runner has 16 GB. The test job was killed four times on
+      # 4 October (exit 143, "the runner has received a shutdown signal", no test failure) as the
+      # shell's UI grew. Swap on the runner's scratch disk lets the peak spill instead.
+      - name: Swap for the generated UI crate
+        run: |
+          sudo swapoff -a || true
+          sudo fallocate -l 12G /mnt/yantrik-swap
+          sudo chmod 600 /mnt/yantrik-swap
+          sudo mkswap /mnt/yantrik-swap > /dev/null
+          sudo swapon /mnt/yantrik-swap
+          free -h
+
       # The native libraries the workspace links against, found by looking for the -sys crates
       # in Cargo.lock rather than by guessing: alsa-sys, libudev-sys, openssl-sys,
       # speech-dispatcher-sys, wayland-sys. Slint's winit backend adds xkbcommon and fontconfig.
