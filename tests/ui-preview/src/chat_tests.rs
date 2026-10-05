@@ -81,9 +81,9 @@ fn approval(decision: &str, record: &str, decided_at: &str) -> ApprovalRequest {
         can_session: true,
         decision: decision.into(),
         record: record.into(),
-        identity: "The attached mind pi (node, pid 4242)".into(),
-        identity_tag: "verified".into(),
-        claim: "calls itself \u{201c}pi 0.87\u{201d}".into(),
+        identity: "Caller process confirmed: node \u{b7} PID 4242 \u{b7} the attached mind pi".into(),
+        identity_tag: "".into(),
+        claim: "Claimed name: \u{201c}pi 0.87\u{201d}".into(),
         confirm_label: "Allow once".into(),
         what: "Moves: from: ~/Pictures/2024; to: ~/Pictures/By date".into(),
         exactly: "from: ~/Pictures/2024; to: ~/Pictures/By date".into(),
@@ -114,6 +114,15 @@ fn shift_enter(w: &MinimalSoftwareWindow) {
     w.dispatch_event(WindowEvent::KeyPressed { text: Key::Shift.into() });
     key(w, Key::Return);
     w.dispatch_event(WindowEvent::KeyReleased { text: Key::Shift.into() });
+}
+
+/// Empty the focused field from the keyboard: Ctrl+A, then Backspace. Whatever an earlier step put
+/// there (step 3's starter fills the composer), wherever the field happens to be drawn.
+fn clear_field(w: &MinimalSoftwareWindow) {
+    w.dispatch_event(WindowEvent::KeyPressed { text: Key::Control.into() });
+    key(w, "a");
+    w.dispatch_event(WindowEvent::KeyReleased { text: Key::Control.into() });
+    key(w, Key::Backspace);
 }
 
 fn wheel(w: &MinimalSoftwareWindow, delta_y: f32) {
@@ -279,6 +288,23 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     }
     assert!(filled, "a starter puts words in the composer");
     assert_eq!(ui.get_sends(), 0, "and never sends them by itself");
+    // The person thinks better of it: select all and delete, and the box is as it was. Without
+    // this the starter's words stayed in the box for the rest of the scene, and the "hello" typed
+    // in section 5 went out as "Help me plan hello". The app was right (the scene had chosen
+    // "Plan something"); the scene never put the box back.
+    w.dispatch_event(WindowEvent::KeyPressed { text: Key::Control.into() });
+    key(w, "a");
+    w.dispatch_event(WindowEvent::KeyReleased { text: Key::Control.into() });
+    key(w, Key::Backspace);
+    // The box only: the starter keeps its hover fill under the pointer that pressed it.
+    let composer_rows = |p: &Pixels| -> Vec<slint::Rgb8Pixel> {
+        (H as usize - 172..H as usize - 60)
+            .flat_map(|row| p.as_slice()[row * W as usize + PANEL_X as usize..row * W as usize + PANEL_X as usize + 440].to_vec())
+            .collect()
+    };
+    let (before, after) = (composer_rows(&empty), composer_rows(&settle(w)));
+    let changed = before.iter().zip(&after).filter(|(a, b)| a != b).count();
+    assert!(changed < 150, "select all and delete empties the box a starter filled ({changed} pixels differ)");
 
     // ── 4. Following the bottom, and the New reply pill ──
     let model = Rc::new(VecModel::from(
@@ -340,11 +366,16 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     settle(w);
     assert!(!ui.get_following());
     crate::click(w, PANEL_X + 150.0, 690.0);
+    // Step 3's starter left its words in the box (a starter fills and never sends); a person
+    // clears them before writing their own.
+    clear_field(w);
+    settle(w);
     for c in "hello".chars() {
         key(w, c.to_string());
     }
     key(w, Key::Return);
     settle(w);
+    // Exactly what was typed: no starter's words in front of it.
     assert_eq!((ui.get_sends(), ui.get_sent().as_str()), (1, "hello"), "Enter sends the message");
     assert!(ui.get_following(), "and sending a message goes to the bottom, where the reply will be");
     for c in "a".chars() {
