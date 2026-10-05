@@ -11,9 +11,10 @@
 //! the Settings card reads. The files on the machine are written on a worker after the answer
 //! (labwc is asked to reload there, with a timeout), and the answer says so.
 //!
-//! `set_dark_style` is `standard`: it flips the appearance the tile flips, through the same
-//! callback (`toggle-dark-mode`, wired in `wire::settings`), which saves `dark_mode`. It touches
-//! no file outside the shell and one click puts it back. `describe shell` reports the mode under
+//! `set_dark_style` is `sensitive`: it flips the appearance the tile flips, through the same
+//! callback (`toggle-dark-mode`, wired in `wire::settings`), which saves `dark_mode`, so it is
+//! still in force after a restart. That is the #48 rule (docs/app-control.md) `set_theme` and
+//! `set_do_not_disturb` are graded by. `describe shell` reports the mode under
 //! `settings.dark`. Named for the tile ("Dark style"), not `set_dark_mode`: an action whose name
 //! says "mode" reads as a change to what a mind may do, and control_approvals' guard holds that
 //! name for `set_mind_mode` alone.
@@ -55,7 +56,7 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
              Settings → Appearance do. The theme stays; its own palette shows in dark and gives way to the stock light \
              colours. Answers with the mode now in use, which `describe shell` reports under `settings.dark`.",
         )
-        .risk("standard")
+        .risk("sensitive")
         .arg(Param::flag("dark").describe("true for dark, false for light")),
         move |args| {
             let ui = dark_weak.upgrade().ok_or_else(|| "the shell is gone".to_string())?;
@@ -109,12 +110,13 @@ mod tests {
         }
     }
 
-    /// Dark mode is a standard setting, set through the tile's own callback and nothing beside it.
+    /// Dark mode is a setting a restart reads back (sensitive, by the #48 rule), set through the
+    /// tile's own callback and nothing beside it.
     #[test]
-    fn dark_mode_is_standard_and_goes_through_the_tiles_callback() {
+    fn dark_mode_is_sensitive_and_goes_through_the_tiles_callback() {
         let action = &SOURCE[SOURCE.find("\"set_dark_style\",").expect("set_dark_style is declared")..];
         let action = &action[..action.find("/// What was done").unwrap()];
-        assert!(action.contains(".risk(\"standard\")"), "set_dark_style must be standard");
+        assert!(action.contains(".risk(\"sensitive\")"), "set_dark_style saves a setting, so it is sensitive");
         assert!(action.contains("ui.invoke_toggle_dark_mode()"), "the same path the tile and Settings take");
         assert!(!action.contains("set_dark("), "no second path beside the tile's");
         for blocking in ["Command::new", "std::fs::", "sleep("] {
