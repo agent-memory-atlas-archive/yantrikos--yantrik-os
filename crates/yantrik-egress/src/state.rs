@@ -55,22 +55,21 @@ impl State {
     }
 
     /// Whether the kernel's table follows the policy as it is now: the status file names this
-    /// mode and this Private mode, and was written no earlier than the policy file. The proxy
-    /// follows a switch at once; the kernel when the policy file's path unit has run `apply`, so
-    /// for a moment after a switch this is `false`. `None`: there is no status file to read.
+    /// mode and this Private mode, and was written after the policy file. The proxy follows a
+    /// switch at once; the kernel when the policy file's path unit has run `apply`, so for a
+    /// moment after a switch this is `false`. `None`: there is no status file to read.
+    ///
+    /// "After" is by the two files' modification times, to the nanosecond: `apply` stamps
+    /// `loaded_at` and writes the file in the same step, but `loaded_at` is whole seconds (the
+    /// status file's version 3 says so), and a rule allowed in the second an apply finished would
+    /// look caught up by it.
     pub fn kernel_current(&self) -> Option<bool> {
         let status: serde_json::Value = serde_json::from_slice(&std::fs::read(&self.mind_status).ok()?).ok()?;
-        let loaded_at = status["loaded_at"].as_u64()?;
-        let written = std::fs::metadata(self.dir.join("policy.yaml"))
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map_or(0, |d| d.as_secs());
-        Some(
-            status["mode"].as_str() == Some(self.policy.mode.word())
-                && status["private"].as_bool() == Some(self.private)
-                && loaded_at >= written,
-        )
+        status["loaded_at"].as_u64()?;
+        let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+        let loaded = modified(&self.mind_status)?;
+        let caught_up = modified(&self.dir.join("policy.yaml")).is_none_or(|written| written < loaded);
+        Some(status["mode"].as_str() == Some(self.policy.mode.word()) && status["private"].as_bool() == Some(self.private) && caught_up)
     }
 
     pub fn set_private(&mut self, on: bool) -> std::io::Result<()> {
@@ -115,6 +114,7 @@ mod tests {
     use super::*;
     use crate::ledger::Outcome;
     use crate::policy::{Mode, Rule};
+    use std::time::Duration;
 
     #[test]
     fn what_it_holds_survives_a_restart() {
@@ -145,18 +145,24 @@ mod tests {
         let mut s = State::load(&d);
         s.mind_status = d.join("mind-egress.json");
         assert_eq!(s.kernel_current(), None, "no status file");
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-        let status = |mode: &str, at: u64| {
-            std::fs::write(d.join("mind-egress.json"), format!(r#"{{"mode": "{mode}", "private": false, "loaded_at": {at}, "version": 3}}"#)).unwrap()
+        let status = |mode: &str| {
+            std::fs::write(d.join("mind-egress.json"), format!(r#"{{"mode": "{mode}", "private": false, "loaded_at": 1759600000, "version": 3}}"#)).unwrap()
         };
-        status("audit", now);
+        let at = |file: &str, t: std::time::SystemTime| std::fs::File::options().write(true).open(d.join(file)).unwrap().set_modified(t).unwrap();
+        status("audit");
         assert_eq!(s.kernel_current(), Some(true), "audit, and no policy file yet");
         s.policy.mode = Mode::Guarded;
         s.save_policy().unwrap();
         assert_eq!(s.kernel_current(), Some(false), "switched; the kernel still has audit");
-        status("guarded", now - 3600);
-        assert_eq!(s.kernel_current(), Some(false), "a status file older than the policy");
-        status("guarded", now + 1);
+        status("guarded");
+        let t = std::time::SystemTime::now();
+        at("policy.yaml", t);
+        at("mind-egress.json", t + Duration::from_millis(400));
+        assert_eq!(s.kernel_current(), Some(true), "applied 0.4 s after the switch");
+        // A rule allowed 0.3 s after that apply, in the same second: not loaded yet.
+        at("policy.yaml", t + Duration::from_millis(700));
+        assert_eq!(s.kernel_current(), Some(false), "a policy written after the status file, within its second");
+        at("mind-egress.json", t + Duration::from_millis(900));
         assert_eq!(s.kernel_current(), Some(true));
         s.private = true;
         assert_eq!(s.kernel_current(), Some(false), "Private mode is not in the kernel yet");

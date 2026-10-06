@@ -6,7 +6,7 @@
 //!
 //! | `op` | with | does |
 //! |---|---|---|
-//! | `status` | — | the mode, Private mode, the rules, `kernel_current`, and `modes`: each mode's word and the plain words the desktop shows for it, the least strict first, one marked recommended |
+//! | `status` | — | the mode, Private mode, the rules, `kernel_current`, `wide_links`, and `modes`: each mode's word and the plain words the desktop shows for it, the least strict first, one marked recommended |
 //! | `seen` | — | every destination, most recent first |
 //! | `proposals` | — | destinations refused with no rule for them |
 //! | `mode` | `mode`: `audit` / `guarded` / `enforce` | switches the whole policy; answers `kernel_current` |
@@ -15,6 +15,10 @@
 //! | `seed` | `rules` | root only: replaces the seeded rules (`crate::seed`), never the person's |
 //! | `remove` | `host` | removes that host's rules |
 //! | `forget` | `host`, `port` | drops a destination from the ledger (the person said No) |
+//!
+//! `wide_links` lists the prefixes this machine's interfaces are on that are wider than /16 (IPv4)
+//! or /32 (IPv6): all of each is the local network, so a rule for a host in one needs `lan: true`
+//! (`null` when the network cannot be read).
 //!
 //! `kernel_current` is whether the kernel's table has caught up with the mode and Private mode
 //! (`State::kernel_current`): the proxy follows a switch at once, the kernel a moment later, when
@@ -54,6 +58,7 @@ pub fn handle(state: &Mutex<State>, request: &Value, root: bool) -> Value {
             "private": s.private,
             "rules": s.policy.rules,
             "kernel_current": s.kernel_current(),
+            "wide_links": crate::local::addresses().map(|n| n.wide()),
             "modes": Mode::ALL.map(|m| json!({ "mode": m, "label": m.label(), "recommended": m.recommended() })),
         }),
         "seen" => json!({ "ok": true, "seen": s.ledger.list() }),

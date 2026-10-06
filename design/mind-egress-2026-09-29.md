@@ -318,12 +318,39 @@ The kernel table lets the mind account reach both ports on `127.0.0.1` (`MIND_LO
 - **The home network is more than the private ranges.** A dual-stack home gives every device a
   global IPv6 address from the ISP's prefix (the NAS at `2a02:8070:abcd:1::20`), and some homes and
   most servers sit on a public IPv4 subnet. So the proxy reads, with this machine's own addresses
-  (`getifaddrs`), the prefix each interface is on (its netmask) and every router in the kernel's
-  route tables (`/proc/self/net/route` and `ipv6_route`), on every connection, so a network
-  change is seen by the next one. An address on one of those prefixes, or a router's, is the
-  local network, whatever range it is in (`local::place`): in every mode and on both doors, only
-  a `lan` rule reaches it, on the endpoint door only. An address carried inside another (mapped,
-  NAT64, 6to4) is judged by the one it carries.
+  (`getifaddrs`), what the kernel says the home network is (`local::Net::build`):
+  - the prefix each interface is on (its netmask);
+  - every prefix routed straight out of an interface with no router (`/proc/self/net/route` and
+    `ipv6_route`). A DHCPv6-only network (M=1, A=0) gives a /128 address, and its /64 exists only
+    as such a route. Such a route counts only when it is no wider than /48 (IPv6) or /16 (IPv4),
+    is not the /0 default, and does not leave through a point-to-point or tun device
+    (`IFF_POINTOPOINT`, or `ARPHRD_NONE` in `/sys/class/net/<dev>/type`). So a full-tunnel VPN's
+    `0.0.0.0/1` and `128.0.0.0/1 dev tun0` never make the internet the home network. A wider
+    public route is skipped, and logged once;
+  - the /56 around each global IPv6 address of this machine. When the ISP delegates a /56 and
+    the router puts the cameras on `…:2::/64` while the desktop is on `…:1::/64`, the camera is
+    the home network too. At worst this refuses a neighbour of the ISP's, which a `lan` rule then
+    names;
+  - every router a route sends through.
+
+  An address on one of those prefixes, or a router's, is the local network, whatever range it is
+  in (`local::place`): in every mode and on both doors, only a `lan` rule reaches it, on the
+  endpoint door only. An address carried inside another (mapped, NAT64, 6to4) is judged by the
+  one it carries.
+
+  The network is read after the name is resolved, and is at most a second old (`local::Watch`):
+  one `getifaddrs` and two small reads a second at most, however many connections, and a network
+  change is seen within a second. When a read fails, the last one that did not is used. When no
+  read ever has, nothing is reached: `503`, saying the network could not be read, counted as
+  refused (a rule might answer it once it reads), except an address that its range alone says is
+  never a destination.
+
+  **A wide public prefix on an interface.** All of a prefix an interface is on is the local
+  network, however wide: a server put on `44.1.2.3/8` has all of 44/8 as its neighbours. That
+  fails closed, but a rule without `lan` for a host in it, which reached it before, now refuses
+  it ("its rule does not allow"), and is never proposed, because a rule covers it. Such a rule
+  now needs `lan: true`. The proxy logs each such prefix once, and the control socket's `status`
+  lists them as `wide_links`: public prefixes wider than /16 (IPv4) or /32 (IPv6).
 
   **Known limit: the router's public address.** A request to the home's own public WAN IPv4
   address hairpins back through the router (often to its admin page). That address is on no
@@ -343,8 +370,10 @@ The kernel table lets the mind account reach both ports on `127.0.0.1` (`MIND_LO
   follow when `yantrik-mind-egress.path` sees `policy.yaml` change and runs `apply`, normally
   well under a second; until then they are still the old mode's, which is never wider than the
   mode being left. The `mode` answer, and every `status` answer, carry `kernel_current`: whether
-  the status file names this mode and Private mode and was written no earlier than the policy
-  file (`null` when there is no status file). A desktop can ask again until it is `true`.
+  the status file names this mode and Private mode and was written after the policy file, by the
+  two files' modification times to the nanosecond (`null` when there is no status file). The
+  status file's `loaded_at` is whole seconds, so a rule allowed in the same second an apply
+  finished would look loaded by it. A desktop can ask again until it is `true`.
 
 ### 4. Asking, instead of silently failing
 

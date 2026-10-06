@@ -56,6 +56,10 @@ fn names(host: &str) -> Option<Vec<IpAddr>> {
 }
 
 async fn start(name: &str, policy: Policy) -> Doors {
+    start_on(name, policy, home).await
+}
+
+async fn start_on(name: &str, policy: Policy, net: fn() -> Option<Net>) -> Doors {
     let dir = std::env::temp_dir().join(format!("yantrik-egress-doors-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -64,12 +68,13 @@ async fn start(name: &str, policy: Policy) -> Doors {
     // SAFETY: getuid cannot fail.
     let serve_uid = unsafe { libc::getuid() };
     let open = Arc::new(tokio::sync::Semaphore::new(proxy::MOST_OPEN));
+    let net = Arc::new(crate::local::Watch::new(net, crate::local::Watch::FRESH));
     let mut at = Vec::new();
     for door in [Door::Endpoint, Door::Public] {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let local = listener.local_addr().unwrap();
         at.push(local);
-        tokio::spawn(proxy::serve(listener, Arc::new(Proxy { state: state.clone(), serve_uid, local, door, world: World { net: home, names } }), open.clone()));
+        tokio::spawn(proxy::serve(listener, Arc::new(Proxy { state: state.clone(), serve_uid, local, door, net: net.clone(), world: World { names } }), open.clone()));
     }
     Doors { endpoint: at[0], public: at[1], state }
 }
@@ -289,5 +294,28 @@ async fn private_mode_closes_both_doors() {
         for door in [d.endpoint, d.public] {
             assert_eq!(both(door, "1.1.1.1:9").await, [403, 403], "{mode:?}");
         }
+    }
+}
+
+/// A network that was never read: nothing is reached, on either door, in any mode — a 503 that
+/// says why, counted as refused (a rule might answer it once the network reads), not as never.
+#[tokio::test]
+async fn with_no_network_ever_read_nothing_is_reached() {
+    fn none() -> Option<Net> {
+        None
+    }
+    for mode in Mode::ALL {
+        // A rule for it, so enforce gets as far as the lookup too.
+        let rule = Rule { host: "1.1.1.1".into(), ports: vec![443], http: true, lan: false, why: "x".into(), seeded: false };
+        let d = start_on(&format!("nonet-{mode:?}"), Policy { mode, rules: vec![rule] }, none).await;
+        for door in [d.endpoint, d.public] {
+            assert_eq!(both(door, "1.1.1.1:443").await, [503, 503], "{mode:?}");
+        }
+        let s = seen(&d, "1.1.1.1", 443);
+        assert_eq!((s.refused, s.never), (4, 0), "{mode:?}");
+        // Loopback is never a destination by its range alone.
+        assert_eq!(both(d.endpoint, "127.0.0.1:7450").await, [403, 403], "{mode:?}");
+        let s = seen(&d, "127.0.0.1", 7450);
+        assert_eq!(s.never, s.refused, "{mode:?}");
     }
 }
