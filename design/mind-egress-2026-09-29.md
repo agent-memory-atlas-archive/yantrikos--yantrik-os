@@ -320,18 +320,25 @@ The kernel table lets the mind account reach both ports on `127.0.0.1` (`MIND_LO
   most servers sit on a public IPv4 subnet. So the proxy reads, with this machine's own addresses
   (`getifaddrs`), what the kernel says the home network is (`local::Net::build`):
   - the prefix each interface is on (its netmask);
-  - every prefix routed straight out of an interface with no router (`/proc/self/net/route` and
-    `ipv6_route`). A DHCPv6-only network (M=1, A=0) gives a /128 address, and its /64 exists only
+  - every prefix routed straight out of an interface with no router, in every routing table, IPv4
+    and IPv6: one netlink dump (`RTM_GETROUTE`, `NLM_F_DUMP`, no table asked for; `netlink.rs`),
+    so a policy-routed host's on-link prefix in `table 100`, or a VRF's, counts. Only unicast
+    routes are routes; the `local` table's own addresses and broadcasts, and the refusals, are
+    not. When netlink will not answer, `/proc/self/net/route` (IPv4's main table only) and
+    `ipv6_route`, and that is logged. A DHCPv6-only network (M=1, A=0) gives a /128 address, and its /64 exists only
     as such a route. Such a route counts only when it is no wider than /48 (IPv6) or /16 (IPv4),
     is not the /0 default, and does not leave through a point-to-point or tun device
     (`IFF_POINTOPOINT`, or `ARPHRD_NONE` in `/sys/class/net/<dev>/type`). So a full-tunnel VPN's
     `0.0.0.0/1` and `128.0.0.0/1 dev tun0` never make the internet the home network. A wider
     public route is skipped, and logged once;
-  - the /56 around each global IPv6 address of this machine. When the ISP delegates a /56 and
-    the router puts the cameras on `…:2::/64` while the desktop is on `…:1::/64`, the camera is
-    the home network too. At worst this refuses a neighbour of the ISP's, which a `lan` rule then
-    names;
-  - every router a route sends through.
+  - the /56 around each global IPv6 address of this machine on a shared network (not on a
+    point-to-point or tun device: a VPN's address says nothing of who is near). When the ISP
+    delegates a /56 and the router puts the cameras on `…:2::/64` while the desktop is on
+    `…:1::/64`, the camera is the home network too. At worst this refuses a neighbour of the
+    ISP's (a VPS, or a pool that hands each customer a /64 of a shared /56), which a `lan` rule
+    then names. It is a guess, so it is said: the control socket's `status` lists these /56s as
+    `assumed_links`, and the refusal of an address that is the home network only by one says so;
+  - every router a route sends through, in any table.
 
   An address on one of those prefixes, or a router's, is the local network, whatever range it is
   in (`local::place`): in every mode and on both doors, only a `lan` rule reaches it, on the
@@ -339,8 +346,14 @@ The kernel table lets the mind account reach both ports on `127.0.0.1` (`MIND_LO
   one it carries.
 
   The network is read after the name is resolved, and is at most a second old (`local::Watch`):
-  one `getifaddrs` and two small reads a second at most, however many connections, and a network
-  change is seen within a second. When a read fails, the last one that did not is used. When no
+  one `getifaddrs` and one route dump a second at most, however many connections, and a network
+  change is seen within a second. Within that second, a network that just came up brought this
+  machine a new address: a connection that leaves from an address the read did not know
+  (`getsockname`) has the network read again, and when its destination is now the local network
+  or this machine, the verdict on that place counts — a refusal closes it before a byte goes
+  through, and a network that cannot be read then closes it too. When a read fails — the
+  addresses, or the routes (any error but a missing IPv6 table, and netlink failing with no
+  `/proc` to fall back on) — the last one that did not is used. When no
   read ever has, nothing is reached: `503`, saying the network could not be read, counted as
   refused (a rule might answer it once it reads), except an address that its range alone says is
   never a destination.
@@ -370,10 +383,16 @@ The kernel table lets the mind account reach both ports on `127.0.0.1` (`MIND_LO
   follow when `yantrik-mind-egress.path` sees `policy.yaml` change and runs `apply`, normally
   well under a second; until then they are still the old mode's, which is never wider than the
   mode being left. The `mode` answer, and every `status` answer, carry `kernel_current`: whether
-  the status file names this mode and Private mode and was written after the policy file, by the
-  two files' modification times to the nanosecond (`null` when there is no status file). The
-  status file's `loaded_at` is whole seconds, so a rule allowed in the same second an apply
-  finished would look loaded by it. A desktop can ask again until it is `true`.
+  the status file names this mode and Private mode and was made from this policy file or a later
+  one (`null` when there is no status file). `apply` takes `policy.yaml`'s modification time
+  (`stat -c %.9Y`) before it reads the policy, and once the table is loaded sets the status
+  file's to it (`touch -d`); the proxy compares the two to the nanosecond, status no older than
+  policy. When the policy changed while it loaded (its inode or time is not the one taken), `apply`
+  loads again, three times more at most — the path unit may not run for a change made while it
+  was running — and a policy still changing then leaves the status file older than it, so
+  `kernel_current` stays `false` until the next change is loaded. The status file's `loaded_at`
+  is whole seconds and the time of the load, so it is not used. A desktop can ask again until it
+  is `true`.
 
 ### 4. Asking, instead of silently failing
 

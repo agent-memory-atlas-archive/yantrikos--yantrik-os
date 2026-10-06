@@ -2655,10 +2655,47 @@ mind_egress_ask() { # [direct|snapshot]
   return "$rc"
 }
 
+# policy.yaml as one load reads it: its inode and its modification time to the nanosecond, or
+# nothing when there is none. The proxy writes it by rename, so a new policy is a new inode even
+# within one tick of the kernel's coarse file clock.
+mind_egress_policy_stamp() {
+  stat -c '%i %.9Y' -- "$EGRESS_STATE/policy.yaml" 2>/dev/null
+}
+
+# Give the status file the policy's time from before the snapshot it was made from (touch -d), so
+# the proxy can tell which policy the kernel holds: a status file no older than policy.yaml was
+# made from it (yantrik-egress's State::kernel_current).
+mind_egress_status_time() { # <seconds.nanoseconds>
+  case "$1" in ''|*[!0-9.]*|*.*.*) return 0 ;; esac
+  [ -f "$MIND_EGRESS_STATUS" ] && [ ! -L "$MIND_EGRESS_STATUS" ] && touch -c -d "@$1" -- "$MIND_EGRESS_STATUS"
+}
+
+# Make the table from the policy and load it, and again when the policy changed while it loaded:
+# the path unit may not run for a change made while it was running, and the status file would
+# otherwise speak for a policy older than the one in place. Three times more at most; a policy
+# still changing then is left to the next change, and the status file (older than it) says the
+# kernel has not caught up.
+mind_egress_load() {
+  local stamp after rc again=0
+  while :; do
+    stamp="$(mind_egress_policy_stamp)"
+    mind_egress_load_once "${stamp#* }"; rc=$?
+    after="$(mind_egress_policy_stamp)"
+    [ "$after" = "$stamp" ] && return "$rc"
+    again=$((again + 1))
+    if [ "$again" -gt 3 ]; then
+      warn "the egress policy kept changing while it was loaded; the kernel holds an older one until it next changes"
+      return "$rc"
+    fi
+    info "the egress policy changed while it was loaded; loading it again"
+  done
+}
+
 # Make the table from the policy and load it. Fails closed: a table that does not load is replaced
 # by one with no entries and no DNS, never left at what was there before. The status file says
-# what loaded, written only after it did; with no table loaded it is removed.
-mind_egress_load() {
+# what loaded, written only after it did, with the policy's time from before the snapshot
+# (<policy time>); with no table loaded it is removed.
+mind_egress_load_once() { # <policy time>
   local nft uid answer rc result errf lan
   nft="$(command -v nft 2>/dev/null)"
   [ -n "$nft" ] || { rm -f -- "$MIND_EGRESS_STATUS"; warn "no nft on this machine; the mind account cannot be held to its egress proxy, so no mind starts"; return 1; }
@@ -2681,8 +2718,11 @@ mind_egress_load() {
   if result="$(mind_egress_render "$uid" "$rc" "$answer" /etc/resolv.conf "$MIND_EGRESS_NFT")" \
      && "$nft" -f "$MIND_EGRESS_NFT" 2>"$errf"; then
     rm -f "$errf"
-    mind_egress_status_write "$MIND_EGRESS_STATUS" "$(printf '%s\n' "$result" | sed -n 2p)" "$(mind_egress_capabilities)" "$lan" \
-      || warn "could not write $MIND_EGRESS_STATUS; a mind will take its egress as not enforced"
+    if mind_egress_status_write "$MIND_EGRESS_STATUS" "$(printf '%s\n' "$result" | sed -n 2p)" "$(mind_egress_capabilities)" "$lan"; then
+      mind_egress_status_time "${1:-}"
+    else
+      warn "could not write $MIND_EGRESS_STATUS; a mind will take its egress as not enforced"
+    fi
     result="$(printf '%s\n' "$result" | head -1)"
     case "$result" in
       *"Private mode is on"*|*"from the person's"*) info "the mind account reaches out only through the egress proxy; $result" ;;
@@ -4071,12 +4111,22 @@ d = json.load(sys.stdin); print(d["public_proxy"], d["proxy"].split(":")[0])')"
     'echo "Error: the stand-in nft refuses" >&2; exit 1' > "$ms/bin/nft"
   chmod +x "$ms/bin/nft"
   ml_run() { # ml_run <all|fallback|none> <answer> [caps]: mind_egress_load with stand-ins
-    ( export PATH="$ms/bin:$PATH" NFT_LOADS="$1"
+    ( export PATH="$ms/bin:$PATH" NFT_LOADS="$1" EGRESS_STATE="${ML_STATE:-$ms/no-state}"
       MIND_EGRESS_NFT="$ms/mind-egress.nft" MIND_EGRESS_STATUS="$sp" ML_ANSWER="$2" ML_CAPS="${3-$ok_caps}"
       ML_LAN="${ML_LAN-lan homeassistant.local 8123}" ML_LAN_RC="${ML_LAN_RC:-0}"
       id() { if [ "${2:-}" = yantrik-mind ]; then echo 998; else command id "$@"; fi; }
       install() { :; }
       mind_egress_ask() { # a proxy with `snapshot` unless ML_OLD; ML_LAN then from its lan-hosts
+        # ML_EDITS: the first that many snapshots, the person changes the policy (a new file, a
+        # new time) just after it is read, while the table is still loading.
+        if [ "$1" = snapshot ] && [ -z "${ML_OLD:-}" ]; then
+          echo x >> "$ms/asks"
+          if [ "$(wc -l < "$ms/asks")" -le "${ML_EDITS:-0}" ]; then
+            printf 'mode: guarded\n' > "$EGRESS_STATE/policy.yaml.new"
+            touch -d "@$((now + $(wc -l < "$ms/asks"))).25" "$EGRESS_STATE/policy.yaml.new"
+            mv -f "$EGRESS_STATE/policy.yaml.new" "$EGRESS_STATE/policy.yaml"
+          fi
+        fi
         case "$1:${ML_OLD:-}" in
           snapshot:?*) echo usage; return 2 ;;
           snapshot:) printf '%s\n' "$ML_ANSWER"; [ "$ML_LAN_RC" = 0 ] && printf '%s\n' "$ML_LAN"; return "$ML_LAN_RC" ;;
@@ -4123,6 +4173,27 @@ d = json.load(sys.stdin); print(d["public_proxy"], d["proxy"].split(":")[0])')"
   is "mind-status: nothing loaded: the file is removed" "absent" "$([ -e "$sp" ] || [ -L "$sp" ] || echo absent)"
   ml_run none "$(printf 'private off\nmode audit\n')"
   is "mind-status: ... and not made" "absent" "$([ -e "$sp" ] || [ -L "$sp" ] || echo absent)"
+
+  # Which policy the status file was made from: its time is the policy's from before the snapshot.
+  mkdir -p "$ms/state"
+  printf 'mode: audit\n' > "$ms/state/policy.yaml"
+  touch -d "@$now.123456789" "$ms/state/policy.yaml"
+  : > "$ms/asks"
+  ML_STATE="$ms/state" ml_run all "$(printf 'private off\nmode audit\n')"
+  is "mind-status: the file has the time of the policy it was made from, to the nanosecond" "1 $now.123456789" \
+    "$(wc -l < "$ms/asks") $(stat -c %.9Y "$sp")"
+  : > "$ms/asks"
+  ML_STATE="$ms/state" ML_EDITS=1 ml_run all "$(printf 'private off\nmode audit\n')"
+  is "mind-status: a policy edit made mid-apply is loaded again, and the file then has its time" "2 yes" \
+    "$(wc -l < "$ms/asks") $([ "$(stat -c %.9Y "$sp")" = "$(stat -c %.9Y "$ms/state/policy.yaml")" ] && [ "$(stat -c %.9Y "$sp")" = "$((now + 1)).250000000" ] && echo yes || echo no)"
+  : > "$ms/asks"
+  ML_STATE="$ms/state" ML_EDITS=99 ml_run all "$(printf 'private off\nmode audit\n')"
+  is "mind-status: ... a policy that keeps changing: loaded four times at most, and the file stays older than it" "4 yes" \
+    "$(wc -l < "$ms/asks") $([ "$(stat -c %Y "$sp")" -lt "$(stat -c %Y "$ms/state/policy.yaml")" ] && echo yes || echo no)"
+  : > "$ms/asks"
+  ml_run all "$(printf 'private off\nmode audit\n')"
+  is "mind-status: ... no policy file: loaded once, the file's own time" "1 yes" \
+    "$(wc -l < "$ms/asks") $([ "$(stat -c %Y "$sp")" -ge "$(( $(date +%s) - 60 ))" ] && echo yes || echo no)"
 
   # Whole, by rename: a reader holding the old file keeps the old file, and nothing is left beside it.
   ml_run all "$(printf 'private off\nmode enforce\n')"

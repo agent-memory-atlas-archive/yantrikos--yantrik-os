@@ -55,20 +55,22 @@ impl State {
     }
 
     /// Whether the kernel's table follows the policy as it is now: the status file names this
-    /// mode and this Private mode, and was written after the policy file. The proxy follows a
-    /// switch at once; the kernel when the policy file's path unit has run `apply`, so for a
-    /// moment after a switch this is `false`. `None`: there is no status file to read.
+    /// mode and this Private mode, and was made from this policy file or a later one. The proxy
+    /// follows a switch at once; the kernel when the policy file's path unit has run `apply`, so
+    /// for a moment after a switch this is `false`. `None`: there is no status file to read.
     ///
-    /// "After" is by the two files' modification times, to the nanosecond: `apply` stamps
-    /// `loaded_at` and writes the file in the same step, but `loaded_at` is whole seconds (the
-    /// status file's version 3 says so), and a rule allowed in the second an apply finished would
-    /// look caught up by it.
+    /// "Made from" is by the two files' modification times, to the nanosecond: `apply` takes the
+    /// policy file's before it reads the policy, and sets the status file's to it once the table
+    /// is loaded (`touch -d`), so a status file no older than the policy file was made from it. A
+    /// policy written while an apply was loading an older one is newer than that status file —
+    /// and has `apply` load again. Not `loaded_at`: it is whole seconds (the status file's
+    /// version 3 says so), and the time of the load, not of the policy loaded.
     pub fn kernel_current(&self) -> Option<bool> {
         let status: serde_json::Value = serde_json::from_slice(&std::fs::read(&self.mind_status).ok()?).ok()?;
         status["loaded_at"].as_u64()?;
         let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
         let loaded = modified(&self.mind_status)?;
-        let caught_up = modified(&self.dir.join("policy.yaml")).is_none_or(|written| written < loaded);
+        let caught_up = modified(&self.dir.join("policy.yaml")).is_none_or(|written| written <= loaded);
         Some(status["mode"].as_str() == Some(self.policy.mode.word()) && status["private"].as_bool() == Some(self.private) && caught_up)
     }
 
@@ -157,8 +159,13 @@ mod tests {
         status("guarded");
         let t = std::time::SystemTime::now();
         at("policy.yaml", t);
+        at("mind-egress.json", t);
+        assert_eq!(s.kernel_current(), Some(true), "made from this policy: apply set its time to the policy's");
+        at("policy.yaml", t + Duration::from_nanos(1));
+        assert_eq!(s.kernel_current(), Some(false), "a policy written a nanosecond later is not loaded yet");
+        at("policy.yaml", t);
         at("mind-egress.json", t + Duration::from_millis(400));
-        assert_eq!(s.kernel_current(), Some(true), "applied 0.4 s after the switch");
+        assert_eq!(s.kernel_current(), Some(true), "an apply that set no time: written 0.4 s after the switch");
         // A rule allowed 0.3 s after that apply, in the same second: not loaded yet.
         at("policy.yaml", t + Duration::from_millis(700));
         assert_eq!(s.kernel_current(), Some(false), "a policy written after the status file, within its second");

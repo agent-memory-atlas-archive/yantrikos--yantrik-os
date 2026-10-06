@@ -15,13 +15,23 @@
 //!   network gives a /128 address and the /64 only as such a route) — no wider than /48 (IPv6) or
 //!   /16 (IPv4), never the /0 default, and never out of a point-to-point or tun device, so a VPN's
 //!   `0.0.0.0/1 dev tun0` never makes the internet the home network;
-//! - the /56 around each global IPv6 address of this machine, which covers the other /64s of a
-//!   prefix the ISP delegated (the camera on `…:2::/64` while the desktop is on `…:1::/64`) and at
-//!   worst refuses a neighbour the rules then name with `lan: true`;
+//! - the /56 around each global IPv6 address of this machine on a shared network (not a
+//!   point-to-point or tun device: a VPN's address says nothing of who is near), which covers the
+//!   other /64s of a prefix the ISP delegated (the camera on `…:2::/64` while the desktop is on
+//!   `…:1::/64`) and at worst refuses a neighbour the rules then name with `lan: true`. It is a
+//!   guess, so it is said: in the control socket's `status` (`assumed_links`) and in the refusal
+//!   of an address that is the home network only by it ([`Net::assumed`]);
 //! - every router a route sends through.
 //!
+//! The routes are every table's, IPv4 and IPv6, asked over netlink (`crate::netlink`); when
+//! netlink will not answer, `/proc/self/net/route` (IPv4's main table only) and `ipv6_route`, and
+//! that is logged.
+//!
 //! Read with the addresses ([`Watch`]): at most a second old, so a network change is seen within
-//! a second; a read that fails keeps the last one that did not.
+//! a second; a read that fails — the addresses, or the routes (any error but a missing IPv6
+//! table) — keeps the last one that did not. A connection that leaves from an address the read
+//! did not know has the network read again then (`crate::proxy`), so a new network is not the
+//! internet for that second.
 //!
 //! Known limit: the router's public WAN address (a request to it hairpins to its admin page)
 //! cannot be known here without asking something outside, and nothing is asked; it is the
@@ -41,8 +51,11 @@ pub struct Net {
     pub own: Vec<IpAddr>,
     /// Every prefix that is the local network, as an address on it and its length.
     pub links: Vec<(IpAddr, u8)>,
-    /// Every router a route sends through (`/proc/self/net/route` and `ipv6_route`).
+    /// Every router a route sends through, in any table.
     pub gateways: Vec<IpAddr>,
+    /// The /56 around each global IPv6 address of this machine on a shared network, as that
+    /// address and 56: the local network by a guess, not by anything the kernel said.
+    pub assumed: Vec<(IpAddr, u8)>,
 }
 
 /// An address on an interface, and the length of the prefix it is on (none for a /0).
@@ -88,7 +101,7 @@ fn log_once(key: String, what: &str) {
     static SAID: Mutex<Option<HashSet<String>>> = Mutex::new(None);
     let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
     if said.get_or_insert_with(HashSet::new).insert(key.clone()) {
-        tracing::warn!(prefix = key, "{what}");
+        tracing::warn!(about = key, "{what}");
     }
 }
 
@@ -111,8 +124,8 @@ impl Net {
                 net.links.push((a.ip, len));
             }
             if let IpAddr::V6(v6) = a.ip {
-                if place_of(a.ip) == Place::Internet && devs.get(&a.dev) != Some(&Dev::Loopback) && v6.to_ipv4_mapped().is_none() {
-                    net.links.push((a.ip, DELEGATED_V6));
+                if place_of(a.ip) == Place::Internet && devs.get(&a.dev) == Some(&Dev::Shared) && v6.to_ipv4_mapped().is_none() {
+                    net.assumed.push((a.ip, DELEGATED_V6));
                 }
             }
         }
@@ -152,7 +165,17 @@ impl Net {
         net.links.dedup();
         net.gateways.sort();
         net.gateways.dedup();
+        net.assumed.sort();
+        net.assumed.dedup();
         net
+    }
+
+    /// The /56s taken as the local network by a guess ([`Net::assumed`]), written as prefixes.
+    pub fn assumed_links(&self) -> Vec<String> {
+        let mut out: Vec<String> = self.assumed.iter().map(|(ip, len)| prefix(*ip, *len)).collect();
+        out.sort();
+        out.dedup();
+        out
     }
 
     /// The prefixes of the internet wider than /16 (IPv4) or /32 (IPv6) taken as the local
@@ -233,12 +256,46 @@ pub fn addresses() -> Option<Net> {
             *kind = Dev::PointToPoint;
         }
     }
+    let name = |index: u32| {
+        let mut buf = [0 as libc::c_char; libc::IF_NAMESIZE];
+        // SAFETY: a buffer of IF_NAMESIZE, as if_indextoname asks; read only when it wrote a name.
+        let p = unsafe { libc::if_indextoname(index, buf.as_mut_ptr()) };
+        (!p.is_null()).then(|| unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) }.to_string_lossy().into_owned())
+    };
+    let routes = route_tables(|| crate::netlink::dump(&name), |p| std::fs::read_to_string(p))?;
+    Some(Net::build(&addrs, &devs, &routes))
+}
+
+/// The routes in every table, from `dump` (netlink) — or, when it fails, from the `/proc` files
+/// `read` reads, which hold IPv4's main table only. `None` when neither said: a failed read, so
+/// the last good network is kept rather than one with no routes and no routers. A missing IPv6
+/// table is no IPv6, not a failure; a missing IPv4 one is no fallback.
+pub fn route_tables(dump: impl FnOnce() -> std::io::Result<Vec<Route>>, read: impl Fn(&str) -> std::io::Result<String>) -> Option<Vec<Route>> {
+    let e = match dump() {
+        Ok(r) => return Some(r),
+        Err(e) => e,
+    };
+    log_once(
+        "route-dump".into(),
+        &format!("the kernel would not dump its routes over netlink ({e}); reading /proc, which lists IPv4's main table only"),
+    );
     // Through `self`: the unit's `ProcSubset=pid` hides `/proc/net`, which is only a link to it.
-    // A table that cannot be read gives no routes; the interfaces' prefixes still cover the
-    // usual home.
-    let v4 = std::fs::read_to_string("/proc/self/net/route").unwrap_or_default();
-    let v6 = std::fs::read_to_string("/proc/self/net/ipv6_route").unwrap_or_default();
-    Some(Net::build(&addrs, &devs, &routes(&v4, &v6)))
+    let v4 = match read("/proc/self/net/route") {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(error = %e, "this machine's routes could not be read, over netlink or from /proc");
+            return None;
+        }
+    };
+    let v6 = match read("/proc/self/net/ipv6_route") {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            tracing::warn!(error = %e, "this machine's IPv6 routes could not be read");
+            return None;
+        }
+    };
+    Some(routes(&v4, &v6))
 }
 
 #[cfg(not(unix))]
@@ -268,7 +325,8 @@ fn prefix_len(addr: IpAddr, mask: IpAddr) -> Option<u8> {
     (len > 0 && len <= width && bits.checked_shl(len).unwrap_or(0) == 0).then_some(len as u8)
 }
 
-/// The routes in the kernel's tables, `/proc/net/route`- and `ipv6_route`-shaped: those that are
+/// The routes in the kernel's tables, `/proc/net/route`- and `ipv6_route`-shaped (when netlink
+/// would not answer): those that are
 /// up and not a refusal (unreachable, prohibit, blackhole).
 pub fn routes(v4: &str, v6: &str) -> Vec<Route> {
     const RTF_UP: u32 = 0x1;
@@ -354,6 +412,18 @@ impl Watch {
             }
         }
     }
+
+    /// The network read now, however fresh the last read is; `None` when this read failed (the
+    /// last good one is still kept for [`Watch::now`]).
+    pub fn refresh(&self) -> Option<Net> {
+        let mut last = self.last.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(net) = (self.read)() else {
+            tracing::warn!("this machine's network could not be read again");
+            return None;
+        };
+        *last = Some((Instant::now(), net.clone()));
+        Some(net)
+    }
 }
 
 impl Net {
@@ -371,7 +441,21 @@ impl Net {
                 forms.push(IpAddr::V4(Ipv4Addr::new(b[2], b[3], b[4], b[5])));
             }
         }
-        forms.iter().any(|&a| self.gateways.contains(&a) || self.links.iter().any(|&(net, len)| within(a, net, len)))
+        forms.iter().any(|&a| self.gateways.contains(&a) || self.links.iter().chain(&self.assumed).any(|&(net, len)| within(a, net, len)))
+    }
+
+    /// When `ip` is the local network only by a guessed /56 ([`Net::assumed`]): which, said so a
+    /// refusal of it can say why.
+    pub fn assumed(&self, ip: IpAddr) -> Option<String> {
+        let by = self.assumed.iter().find(|&&(net, len)| within(ip, net, len))?;
+        let known = Net { assumed: Vec::new(), ..self.clone() };
+        (!known.on_link(ip)).then(|| {
+            format!(
+                "{ip} is the home network only by a guess: it is in {}, the /56 around this machine's {}; a rule with `lan: true` reaches it.",
+                prefix(by.0, by.1),
+                by.0
+            )
+        })
     }
 }
 
@@ -606,6 +690,7 @@ mod tests {
             own: vec!["127.0.0.1".parse().unwrap(), "2a02:8070:abcd:1::5".parse().unwrap()],
             links: vec![("2a02:8070:abcd:1::5".parse().unwrap(), 64), ("81.2.69.165".parse().unwrap(), 28)],
             gateways: vec!["81.2.69.1".parse().unwrap(), "2a02:8070:abcd::1".parse().unwrap()],
+            ..Net::default()
         };
         for ip in [
             "2a02:8070:abcd:1::20", "2a02:8070:abcd:1:ffff::1", "81.2.69.170", "::ffff:81.2.69.170", "64:ff9b::5102:45aa",
@@ -618,5 +703,85 @@ mod tests {
         }
         assert_eq!(place("2a02:8070:abcd:1::5".parse().unwrap(), Some(&net)), Place::Forbidden, "this machine");
         assert_eq!(place("192.168.4.20".parse().unwrap(), Some(&net)), Place::Lan, "the private ranges as before");
+    }
+
+    /// A policy-routed host: an on-link /24 only in table 100, a router only in table 200 (both
+    /// from a netlink dump, `crate::netlink::tests::fixture`). Both are the home network; the
+    /// /1 out of tun0 in wg-quick's table is not.
+    #[test]
+    fn routes_and_routers_in_every_table_are_the_home_network() {
+        let mut r = Vec::new();
+        assert!(crate::netlink::parse(&crate::netlink::tests::fixture(), 7, &crate::netlink::tests::names, &mut r).unwrap());
+        let net = Net::build(
+            &[addr("lo", "127.0.0.1", 8), addr("eth0", "192.168.1.10", 24), addr("tun0", "10.66.0.2", 32)],
+            &devs(&[("lo", Dev::Loopback), ("eth0", Dev::Shared), ("eth1", Dev::Shared), ("tun0", Dev::PointToPoint)]),
+            &r,
+        );
+        for lan in ["81.2.69.9", "87.1.1.1", "2a02:8070:abcd:1::20", "10.0.0.1"] {
+            assert_eq!(place(ip(lan), Some(&net)), Place::Lan, "{lan}");
+        }
+        for out in ["81.2.70.9", "87.1.1.2", "1.1.1.1", "70.1.1.1", "93.184.215.7", "2606:4700::1111"] {
+            assert_eq!(place(ip(out), Some(&net)), Place::Internet, "{out}");
+        }
+        assert!(net.gateways.contains(&ip("fe80::2")), "an IPv4 route's IPv6 router (RTA_VIA)");
+        assert!(!net.gateways.contains(&ip("10.0.0.2")), "a dead next hop is no router");
+    }
+
+    /// A route table that cannot be read is a failed read, not a table with no routes: the
+    /// network is not taken without its routers. Only a missing IPv6 table (no IPv6) is empty.
+    #[test]
+    fn a_route_table_that_cannot_be_read_is_a_failed_read() {
+        use std::io::{Error, ErrorKind};
+        let nl_down = || Err(Error::from_raw_os_error(libc::EAFNOSUPPORT));
+        let v4 = "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\neth0\t00000000\t0101A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0\n";
+        let files = |v4_err: Option<i32>, v6_err: Option<i32>| {
+            move |p: &str| match (p.ends_with("/route"), v4_err, v6_err) {
+                (true, Some(e), _) | (false, _, Some(e)) => Err(Error::from_raw_os_error(e)),
+                (true, None, _) => Ok(v4.to_string()),
+                (false, _, None) => Ok(String::new()),
+            }
+        };
+        let from_netlink = vec![on("81.2.69.0", 24, "eth0")];
+        assert_eq!(route_tables(|| Ok(from_netlink.clone()), files(Some(libc::EMFILE), None)), Some(from_netlink), "netlink, not /proc");
+        assert_eq!(route_tables(nl_down, files(None, Some(libc::ENOENT))).map(|r| r.len()), Some(1), "/proc; no IPv6 is no IPv6 routes");
+        assert_eq!(route_tables(nl_down, files(Some(libc::EMFILE), None)), None, "IPv4's table unreadable");
+        assert_eq!(route_tables(nl_down, files(None, Some(libc::EACCES))), None, "IPv6's table unreadable");
+        assert_eq!(route_tables(nl_down, files(Some(libc::ENOENT), None)), None, "netlink failed and no /proc to fall back on");
+        assert_eq!(Error::from_raw_os_error(libc::ENOENT).kind(), ErrorKind::NotFound);
+
+        // And Watch then keeps the last good network, routers and all.
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static ROUTES: AtomicBool = AtomicBool::new(true);
+        fn read() -> Option<Net> {
+            let ok = ROUTES.load(Ordering::SeqCst);
+            let routes = route_tables(|| if ok { Ok(vec![via("81.2.69.1", "eth0")]) } else { Err(Error::from_raw_os_error(libc::EMFILE)) }, |_| {
+                Err(Error::from_raw_os_error(libc::EMFILE))
+            })?;
+            Some(Net::build(&[addr("lo", "127.0.0.1", 8)], &devs(&[("eth0", Dev::Shared)]), &routes))
+        }
+        let w = Watch::new(read, Duration::ZERO);
+        assert_eq!(w.now().unwrap().gateways, vec![ip("81.2.69.1")]);
+        ROUTES.store(false, Ordering::SeqCst);
+        assert_eq!(w.now().unwrap().gateways, vec![ip("81.2.69.1")], "the last good one, with its router");
+        assert!(w.refresh().is_none(), "a read now says it failed");
+    }
+
+    /// The /56 is a guess, so it is said, and only made on a shared network: not around a VPN's
+    /// global address on a point-to-point or tun device.
+    #[test]
+    fn the_guessed_56_is_said_and_not_made_for_a_tunnel() {
+        let net = Net::build(
+            &[addr("lo", "::1", 128), addr("eth0", "2a02:8070:abcd:1::5", 64), addr("wg0", "2a0c:1111:2222:3::9", 128), addr("tun0", "2a0c:3333:4444:5::9", 64)],
+            &devs(&[("lo", Dev::Loopback), ("eth0", Dev::Shared), ("wg0", Dev::PointToPoint), ("tun0", Dev::PointToPoint)]),
+            &[],
+        );
+        assert_eq!(net.assumed_links(), vec!["2a02:8070:abcd::/56".to_string()]);
+        assert_eq!(place(ip("2a0c:1111:2222:4::1"), Some(&net)), Place::Internet, "not the /56 around wg0's address");
+        assert_eq!(place(ip("2a0c:3333:4444:6::1"), Some(&net)), Place::Internet, "nor tun0's");
+        assert_eq!(place(ip("2a02:8070:abcd:2::30"), Some(&net)), Place::Lan);
+        let why = net.assumed(ip("2a02:8070:abcd:2::30")).expect("Lan only by the /56");
+        assert!(why.contains("2a02:8070:abcd::/56") && why.contains("2a02:8070:abcd:1::5") && why.contains("lan: true"), "{why}");
+        assert_eq!(net.assumed(ip("2a02:8070:abcd:1::20")), None, "on eth0's own /64: not a guess");
+        assert_eq!(net.assumed(ip("2606:4700::1111")), None);
     }
 }

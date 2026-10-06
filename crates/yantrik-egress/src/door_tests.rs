@@ -319,3 +319,84 @@ async fn with_no_network_ever_read_nothing_is_reached() {
         assert_eq!(s.never, s.refused, "{mode:?}");
     }
 }
+
+/// A home device that is the home network only by the /56 guessed around this machine's global
+/// IPv6 address: refused without a `lan` rule, and the refusal says that is why.
+#[tokio::test]
+async fn a_refusal_by_the_guessed_56_says_so() {
+    fn guessed() -> Option<Net> {
+        let mut net = home()?;
+        net.assumed.push(("2a02:8070:abcd:1::5".parse().unwrap(), 56));
+        Some(net)
+    }
+    let d = start_on("assumed", Policy { mode: Mode::Guarded, rules: vec![] }, guessed).await;
+    assert_eq!(both(d.endpoint, "[2a02:8070:abcd:2::30]:443").await, [403, 403]);
+    let s = seen(&d, "2a02:8070:abcd:2::30", 443);
+    assert!(s.lan && s.why.contains("2a02:8070:abcd::/56") && s.why.contains("lan: true"), "{s:?}");
+    // On this machine's own /64, it is not a guess, and not said to be.
+    assert_eq!(both(d.endpoint, "[2a02:8070:abcd:1::20]:443").await, [403, 403]);
+    assert!(!seen(&d, "2a02:8070:abcd:1::20", 443).why.contains("/56"));
+}
+
+/// A network that came up after the last read (at most a second old) brings a new address of
+/// this machine and its prefix. A connection that leaves from that address has the network read
+/// again, and is judged on it: a destination that is now the home network, or this machine, is
+/// refused before a byte goes through; the internet is still the internet.
+#[test]
+fn a_connection_from_an_address_the_read_did_not_know_is_judged_again() {
+    use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+    use crate::ledger::Outcome;
+    use crate::local::Watch;
+    use crate::policy::Place;
+    static STAGE: AtomicU8 = AtomicU8::new(0);
+    static READS: AtomicUsize = AtomicUsize::new(0);
+    fn read() -> Option<Net> {
+        READS.fetch_add(1, Ordering::SeqCst);
+        let lo: IpAddr = "127.0.0.1".parse().unwrap();
+        match STAGE.load(Ordering::SeqCst) {
+            0 => Some(Net { own: vec![lo], ..Net::default() }),
+            1 => Some(Net { own: vec![lo, "88.1.1.5".parse().unwrap()], links: vec![("88.1.1.0".parse().unwrap(), 24)], ..Net::default() }),
+            _ => None,
+        }
+    }
+    let watch = Arc::new(Watch::new(read, Duration::from_secs(3600)));
+    let before = watch.now().unwrap();
+    STAGE.store(1, Ordering::SeqCst);
+    let proxy = |name: &str, policy: Policy| {
+        let dir = std::env::temp_dir().join(format!("yantrik-egress-late-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let state = Arc::new(Mutex::new(State::load(&dir)));
+        state.lock().unwrap().policy = policy;
+        Proxy { state, serve_uid: 0, local: "127.0.0.1:0".parse().unwrap(), door: Door::Endpoint, net: watch.clone(), world: World { names } }
+    };
+    let at = |a: &str| -> SocketAddr { a.parse().unwrap() };
+    let (lo, new) = (Some("127.0.0.1".parse().unwrap()), Some("88.1.1.5".parse().unwrap()));
+    let p = proxy("guarded", Policy { mode: Mode::Guarded, rules: vec![] });
+
+    // From an address the read knew: nothing changed for this connection, and nothing is read.
+    assert!(proxy::after_connect(&p, "88.1.1.10", 443, false, Place::Internet, &before, at("88.1.1.10:443"), lo).is_ok());
+    assert_eq!(READS.load(Ordering::SeqCst), 1, "not read again");
+
+    // From the new address: read again, and 88.1.1.10 is now the home network.
+    let late = proxy::after_connect(&p, "88.1.1.10", 443, false, Place::Internet, &before, at("88.1.1.10:443"), new).unwrap_err();
+    assert_eq!((late.code, late.place, late.outcome), (403, Place::Lan, Outcome::Refused), "{late:?}");
+    assert!(late.why.contains("local network") && late.why.contains("changed while connecting"), "{}", late.why);
+    assert_eq!(READS.load(Ordering::SeqCst), 2);
+    // And this machine's new address is never a destination.
+    let late = proxy::after_connect(&p, "88.1.1.5", 443, false, Place::Internet, &before, at("88.1.1.5:443"), new).unwrap_err();
+    assert_eq!((late.code, late.place, late.outcome), (403, Place::Forbidden, Outcome::Never), "{late:?}");
+    // The internet is still the internet.
+    assert!(proxy::after_connect(&p, "1.1.1.1", 443, false, Place::Internet, &before, at("1.1.1.1:443"), new).is_ok());
+
+    // A rule that says `lan` reaches it on the network as it is now: the connection stands.
+    let mut policy = Policy { mode: Mode::Guarded, rules: vec![] };
+    policy.seed(vec![lan("88.1.1.10", &[443])]).unwrap();
+    let p = proxy("guarded-lan", policy);
+    assert!(proxy::after_connect(&p, "88.1.1.10", 443, false, Place::Internet, &before, at("88.1.1.10:443"), new).is_ok());
+
+    // A network that cannot be read again then: where it leads cannot be told.
+    STAGE.store(2, Ordering::SeqCst);
+    let late = proxy::after_connect(&p, "1.1.1.1", 443, false, Place::Internet, &before, at("1.1.1.1:443"), new).unwrap_err();
+    assert_eq!((late.code, late.outcome), (503, Outcome::Refused), "{late:?}");
+}

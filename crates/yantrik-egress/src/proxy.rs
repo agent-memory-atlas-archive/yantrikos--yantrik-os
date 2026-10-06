@@ -14,7 +14,10 @@
 //!    when it cannot be read and never was, nothing is reached (503);
 //! 5. the door's verdict (the public door: the internet only), then the policy's, counted
 //!    either way;
-//! 6. the connection, then bytes both ways until either end closes or both are quiet for
+//! 6. the connection — left at once if it leaves from an address the network read did not know
+//!    (a network that came up in the last second), when the network read again then makes the
+//!    destination the local network or this machine and the verdict on that is a refusal
+//!    ([`after_connect`]) — then bytes both ways until either end closes or both are quiet for
 //!    [`IDLE`]. A plain-HTTP request forwards exactly the body its head declared, and no second
 //!    request after it.
 
@@ -275,38 +278,49 @@ async fn one(proxy: &Proxy, stream: &mut TcpStream, peer: SocketAddr) -> Result<
     let (place, usable) = classify(&addrs, Some(&net));
 
     // 5. The verdict: the door's, then the policy's. Private mode is the policy's word, first.
-    let (verdict, private) = {
-        let Ok(s) = proxy.state.lock() else { return Err("state poisoned") };
-        let verdict = match s.policy.decide(&host, port, http, place, s.private) {
-            Verdict::Refuse(why) => Verdict::Refuse(why),
-            allow => proxy.door.after_resolve(&host, place).unwrap_or(allow),
-        };
-        (verdict, s.private)
+    let (verdict, private) = verdict(proxy, &host, port, http, place);
+    // The local network only by the /56 guessed around this machine's address: said, so the
+    // person knows why, and what opens it.
+    let verdict = match verdict {
+        Verdict::Refuse(why) if place == Place::Lan && !private => match usable.iter().map(|a| net.assumed(a.ip())).collect::<Option<Vec<_>>>() {
+            Some(by) if !by.is_empty() => Verdict::Refuse(format!("{} {why}", by[0])),
+            _ => Verdict::Refuse(why),
+        },
+        v => v,
     };
-    let outcome = Outcome::of(&verdict, place, private);
-    let why = match &verdict {
-        Verdict::Refuse(why) => why.as_str(),
-        Verdict::Allow { .. } => "",
-    };
-    proxy.record(&host, port, outcome, place == Place::Lan, http, why);
-    tracing::info!(door = proxy.door.name(), host, port, ?outcome, why, "decided");
-    if let Verdict::Refuse(why) = verdict {
-        let _ = reply(stream, 403, &why).await;
+    if let Verdict::Refuse(why) = &verdict {
+        let outcome = Outcome::of(&verdict, place, private);
+        proxy.record(&host, port, outcome, place == Place::Lan, http, why);
+        tracing::info!(door = proxy.door.name(), host, port, ?outcome, why, "decided");
+        let _ = reply(stream, 403, why).await;
         return Err("refused");
     }
 
-    // 6. The connection.
+    // 6. The connection, counted once it is made, or found not to be.
     let mut upstream = None;
     for addr in &usable {
         if let Ok(Ok(s)) = tokio::time::timeout(CONNECT_TIME, TcpStream::connect(addr)).await {
-            upstream = Some(s);
+            upstream = Some((s, *addr));
             break;
         }
     }
-    let Some(mut upstream) = upstream else {
+    let outcome = Outcome::of(&verdict, place, private);
+    let Some((mut upstream, to)) = upstream else {
+        proxy.record(&host, port, outcome, place == Place::Lan, http, "");
+        tracing::info!(door = proxy.door.name(), host, port, ?outcome, "decided");
         let _ = reply(stream, 502, &format!("{host}:{port} did not answer")).await;
         return Err("upstream did not answer");
     };
+    let from = upstream.local_addr().map(|a| a.ip()).ok();
+    if let Err(late) = after_connect(proxy, &host, port, http, place, &net, to, from) {
+        drop(upstream);
+        proxy.record(&host, port, late.outcome, late.place == Place::Lan, http, &late.why);
+        tracing::warn!(door = proxy.door.name(), host, port, outcome = ?late.outcome, why = late.why, "refused once connected");
+        let _ = reply(stream, late.code, &late.why).await;
+        return Err("refused once connected");
+    }
+    proxy.record(&host, port, outcome, place == Place::Lan, http, "");
+    tracing::info!(door = proxy.door.name(), host, port, ?outcome, "decided");
     keepalive(stream);
     keepalive(&upstream);
 
@@ -350,6 +364,59 @@ async fn one(proxy: &Proxy, stream: &mut TcpStream, peer: SocketAddr) -> Result<
         }
     }
     Ok(())
+}
+
+/// The door's verdict, then the policy's, on `host` reached at `place`; and whether Private mode
+/// is on.
+fn verdict(proxy: &Proxy, host: &str, port: u16, http: bool, place: Place) -> (Verdict, bool) {
+    let Ok(s) = proxy.state.lock() else {
+        return (Verdict::Refuse("the proxy's state is poisoned".into()), true);
+    };
+    let verdict = match s.policy.decide(host, port, http, place, s.private) {
+        Verdict::Refuse(why) => Verdict::Refuse(why),
+        allow => proxy.door.after_resolve(host, place).unwrap_or(allow),
+    };
+    (verdict, s.private)
+}
+
+/// A connection refused after it was made: the answer, and how it is counted.
+#[derive(Debug)]
+pub struct Late {
+    pub code: u16,
+    pub why: String,
+    pub outcome: Outcome,
+    pub place: Place,
+}
+
+/// Whether a connection made to `to`, judged `place` on `net`, still stands. The network was read
+/// at most a second before; a network that came up since brought a new address of this machine
+/// and its prefix, which `net` does not know. The connection says so: it left from `from`. Then
+/// the network is read again and `to` judged on it, and when it is now the local network or this
+/// machine, the verdict on that place is the one that counts — a refusal ends the connection
+/// before a byte has gone through it. A network that cannot be read again then ends it too: where
+/// it leads cannot be told.
+#[allow(clippy::too_many_arguments)]
+pub fn after_connect(proxy: &Proxy, host: &str, port: u16, http: bool, place: Place, net: &crate::local::Net, to: SocketAddr, from: Option<IpAddr>) -> Result<(), Late> {
+    if from.is_some_and(|f| crate::local::is_own(f, Some(&net.own))) {
+        return Ok(());
+    }
+    let Some(now) = proxy.net.refresh() else {
+        let why = "this machine's network changed while connecting and could not be read again, so where this leads cannot be told; try again";
+        return Err(Late { code: 503, why: why.into(), outcome: Outcome::Refused, place });
+    };
+    let (moved, _) = classify(&[to], Some(&now));
+    if moved == place || moved == Place::Internet {
+        return Ok(());
+    }
+    match verdict(proxy, host, port, http, moved) {
+        (Verdict::Allow { .. }, _) => Ok(()),
+        (Verdict::Refuse(why), private) => {
+            let refusal = Verdict::Refuse(format!("{why} (this machine's network changed while connecting)"));
+            let outcome = Outcome::of(&refusal, moved, private);
+            let Verdict::Refuse(why) = refusal else { return Ok(()) };
+            Err(Late { code: 403, why, outcome, place: moved })
+        }
+    }
 }
 
 /// Where `addrs` lead from this machine on `net`, and which of them to connect to. Nothing that

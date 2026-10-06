@@ -32,6 +32,7 @@ mod door;
 mod door_tests;
 mod ledger;
 mod local;
+mod netlink;
 mod peer;
 mod policy;
 mod proxy;
