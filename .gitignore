@@ -121,6 +121,10 @@ test_*.py
 !templates/python-surface/tests/test_*.py
 !adapters/libreoffice/tests/test_*.py
 !docs/sdk/samples/test_*.py
+# ...nor the CI workflow's own tests. They hold the jobs in ci.yml to their promises, and the
+# rule above kept the suite out of the very pull request that adds the job one of them checks —
+# the commit would have carried the workflow change and silently dropped the thing guarding it.
+!tests/ci-config/test_*.py
 
 # Brainstorm outputs
 brainstorm_*.py
