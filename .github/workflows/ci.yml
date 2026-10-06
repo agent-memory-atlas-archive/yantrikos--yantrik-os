@@ -182,6 +182,13 @@ jobs:
       - name: The updater agrees with itself about channel and version
         run: YANTRIK_NFT_OUT="$RUNNER_TEMP/mind-egress-nft" bash deploy/yantrik-os/yantrik-update selftest
 
+      # The boot test's check that no real network address ships: config.yaml and update.conf
+      # name no private address, the updater only ranges in CIDR and its marked selftest's made-up
+      # fixtures, and nothing anywhere is on the developer's LAN. Held here against the updater in
+      # this tree, so a fixture from a real network fails a pull request, not a nightly ISO.
+      - name: The updater ships no real network address
+        run: python3 deploy/yantrik-os/private-addresses-selftest.py
+
       # The tables the updater makes to hold the mind account to its egress proxy (with entries,
       # in Private mode, and its fail-closed fallback), put to nft itself. `-c` checks the whole
       # transaction in the kernel and commits nothing; it needs root for the netlink socket.
