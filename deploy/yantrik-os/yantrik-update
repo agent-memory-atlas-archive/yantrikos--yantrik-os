@@ -3373,6 +3373,12 @@ cmd_install_mind() {
   return 1
 }
 
+# YANTRIK-SELFTEST-BEGIN
+# From this marker to its closing twin below, everything is the selftest and its test data. The boot
+# test (deploy/yantrik-os/private_addresses.py) lets a private host address stand only between the
+# two markers, or as a network written in CIDR, and fails if either marker goes missing. Every fixture
+# address here is made up: none is an address of anyone's real network.
+
 # ── selftest ────────────────────────────────────────────────────────────────────────────
 #
 # No network, no /opt, no machine. It runs THIS script against a scratch $YANTRIK_PREFIX and
@@ -3795,7 +3801,7 @@ with tarfile.open(sys.argv[1], "w") as t:
   #    caller hands one over (YANTRIK_EGRESS_BIN, a built yantrik-egress). No root, no nft.
   local me="$root/mind-egress" tbl res
   mkdir -p "$me"
-  printf '# made by NetworkManager\nnameserver 192.168.4.1\nnameserver 127.0.0.53\nnameserver fe80::1%%wlan0\n; nameserver 9.9.9.9\nnameserver not-an-address\nnameserver 192.168.4.1\nsearch lan\n' > "$me/resolv.conf"
+  printf '# made by NetworkManager\nnameserver 192.168.77.1\nnameserver 127.0.0.53\nnameserver fe80::1%%wlan0\n; nameserver 9.9.9.9\nnameserver not-an-address\nnameserver 192.168.77.1\nsearch lan\n' > "$me/resolv.conf"
   tbl="$me/mind-egress.nft"
   me_render() { # me_render <answer> [status] [uid]: the result line; the table is in $tbl, all it said in $me/out
     mind_egress_render "${3:-998}" "${2:-0}" "$1" "$me/resolv.conf" "$tbl" > "$me/out"
@@ -3815,10 +3821,10 @@ with tarfile.open(sys.argv[1], "w") as t:
     fi
   }
 
-  res="$(me_render "$(printf 'private off\nmode audit\ndirect 192.168.4.42 8888\ndirect fd00::5 443\ndirect ::ffff:10.0.0.7 11434\ndirect 192.168.4.42 8888\nloopback 127.0.0.1 11434\n')")"
+  res="$(me_render "$(printf 'private off\nmode audit\ndirect 192.168.77.42 8888\ndirect fd00::5 443\ndirect ::ffff:10.0.0.7 11434\ndirect 192.168.77.42 8888\nloopback 127.0.0.1 11434\n')")"
   is "mind-egress: literal LAN and loopback entries go in, each once" \
     "entries: 4 from the person's lan rules (audit); DNS allowed" "$res"
-  is "mind-egress: ... IPv4 direct, as address . port, sorted" "10.0.0.7 . 11434, 192.168.4.42 . 8888" "$(me_set direct4)"
+  is "mind-egress: ... IPv4 direct, as address . port, sorted" "10.0.0.7 . 11434, 192.168.77.42 . 8888" "$(me_set direct4)"
   is "mind-egress: ... IPv6 direct in its own set" "fd00::5 . 443" "$(me_set direct6)"
   is "mind-egress: ... loopback: the mind's own ports and the one the person opened" "$MIND_LOOPBACK_PORTS, 11434" "$(me_set loopback4)"
   is "mind-egress: ... no ::1 port unless the person opens one" "" "$(me_set loopback6)"
@@ -3836,7 +3842,7 @@ with tarfile.open(sys.argv[1], "w") as t:
     "$([ "$(grep -n 'fib daddr type local meta' "$tbl" | cut -d: -f1)" -lt "$(grep -n '@direct4' "$tbl" | cut -d: -f1)" ] && echo yes || echo no)"
   t "mind-egress: everything else is refused, TCP with a reset" 'meta l4proto tcp counter name "refused" reject with tcp reset' "$(cat "$tbl")"
   t "mind-egress: ... and the rest admin-prohibited, counted" 'counter name "refused" reject with icmpx admin-prohibited' "$(cat "$tbl")"
-  is "mind-egress: audit: DNS to the resolvers resolv.conf names" "192.168.4.1" "$(me_set resolvers4)"
+  is "mind-egress: audit: DNS to the resolvers resolv.conf names" "192.168.77.1" "$(me_set resolvers4)"
   is "mind-egress: ... an IPv6 one without its zone" "fe80::1" "$(me_set resolvers6)"
   t "mind-egress: ... and a loopback stub, counted" 'meta l4proto { tcp, udp } th dport 53 oifname "lo" counter name "dns" accept' "$(cat "$tbl")"
   is "mind-egress: ... the stub before the loopback ports" "yes" \
@@ -3848,32 +3854,32 @@ with tarfile.open(sys.argv[1], "w") as t:
   me_render "$(printf 'private off\nmode audit\n')" >/dev/null
   is "mind-egress: an empty set is declared without elements, not with an empty list" "no" "$(me_has 'elements = {  }')"
 
-  res="$(me_render "$(printf 'private off\nmode enforce\ndirect 192.168.4.42 8888\nloopback 127.0.0.1 11434\n')")"
+  res="$(me_render "$(printf 'private off\nmode enforce\ndirect 192.168.77.42 8888\nloopback 127.0.0.1 11434\n')")"
   is "mind-egress: enforce keeps the entries and refuses DNS" "entries: 2 from the person's lan rules (enforce); DNS refused" "$res"
   is "mind-egress: ... no resolvers" "" "$(me_set resolvers4)$(me_set resolvers6)"
   t "mind-egress: ... DNS anywhere, a loopback stub included, refused and counted" 'meta l4proto udp th dport 53 counter name "dns" reject with icmpx admin-prohibited' "$(cat "$tbl")"
   is "mind-egress: ... before anything is let through" "yes" \
     "$([ "$(grep -n 'dport 53 counter name "dns" reject with tcp reset' "$tbl" | cut -d: -f1)" -lt "$(grep -n '@loopback4 accept' "$tbl" | cut -d: -f1)" ] && echo yes || echo no)"
 
-  res="$(me_render "$(printf 'private on\nmode audit\ndirect 192.168.4.42 8888\nloopback 127.0.0.1 11434\n')")"
+  res="$(me_render "$(printf 'private on\nmode audit\ndirect 192.168.77.42 8888\nloopback 127.0.0.1 11434\n')")"
   is "mind-egress: Private mode: no entries and no DNS, even in audit" "entries: NONE, Private mode is on; DNS refused" "$res"
   is "mind-egress: ... whatever the reader also printed" "none" "$(me_none)"
   t "mind-egress: ... and says so in the file" "# Entries: NONE, Private mode is on" "$(cat "$tbl")"
 
   local bad
   for bad in 'direct searx.lan 8888' 'direct 8.8.8.8 443' 'direct 127.0.0.1 7440' 'direct 2606:4700::1111 443' \
-             'direct 64:ff9b::c0a8:414 80' 'direct 2001:0:4136:e378::1 80' 'direct 192.168.4.42 0' \
-             'direct 192.168.4.42 65536' 'direct 192.168.4.42 http' 'direct 192.168.4.42' 'allow 192.168.4.42 8888' \
-             'direct 192.168.004.042 8888' 'direct fd00::5%eth0 443' 'loopback 127.0.0.2 11434' \
-             'loopback 192.168.4.42 11434' 'loopback ::1%lo 11434'; do
+             'direct 64:ff9b::c0a8:4d2a 80' 'direct 2001:0:4136:e378::1 80' 'direct 192.168.77.42 0' \
+             'direct 192.168.77.42 65536' 'direct 192.168.77.42 http' 'direct 192.168.77.42' 'allow 192.168.77.42 8888' \
+             'direct 192.168.077.042 8888' 'direct fd00::5%eth0 443' 'loopback 127.0.0.2 11434' \
+             'loopback 192.168.77.42 11434' 'loopback ::1%lo 11434'; do
     me_render "$(printf 'private off\nmode audit\ndirect 10.0.0.9 80\n%s\n' "$bad")" > "$me/res"
     is "mind-egress: an answer with '$bad' loads no entries and no DNS, not the rest of it" "none" "$(me_none)"
   done
   t "mind-egress: ... and says why" "NONE, the policy reader's answer was refused" "$(cat "$me/res")"
-  res="$(me_render "$(printf 'mode audit\ndirect 192.168.4.42 8888\n')")"
+  res="$(me_render "$(printf 'mode audit\ndirect 192.168.77.42 8888\n')")"
   t "mind-egress: an answer that does not say whether Private mode is on is refused" "did not say whether Private mode is on" "$res"
   is "mind-egress: ... none" "none" "$(me_none)"
-  res="$(me_render "$(printf 'private off\ndirect 192.168.4.42 8888\n')")"
+  res="$(me_render "$(printf 'private off\ndirect 192.168.77.42 8888\n')")"
   t "mind-egress: an answer that does not say the policy mode is refused" "did not say the policy mode" "$res"
   is "mind-egress: ... none" "none" "$(me_none)"
   res="$(me_render 'policy.yaml: rules[0]: unknown field `program`' 1)"
@@ -3893,7 +3899,7 @@ loopback 127.0.0.1 11434")"
 
   # Written whole: a failed render leaves the last table as it was, a link planted at the path is
   # replaced rather than written through, and nothing is left beside it.
-  me_render "$(printf 'private off\nmode audit\ndirect 192.168.4.42 8888\n')" >/dev/null
+  me_render "$(printf 'private off\nmode audit\ndirect 192.168.77.42 8888\n')" >/dev/null
   local before; before="$(cat "$tbl")"
   me_render "$(printf 'private off\nmode audit\n')" 0 0 >/dev/null 2>&1
   is "mind-egress: a uid that is not an account's (0) writes nothing" "$before" "$(cat "$tbl")"
@@ -3937,9 +3943,9 @@ loopback 127.0.0.1 11434")"
     mind_egress_status_text "$(sed -n 2p "$me/out")" "${2-$ok_caps}" "$now"
   }
   is "mind-status: audit" "$js"'true, "mode": "audit", "private": false, "dns_allowed": true, "lan_hosts": null, "loaded_at": 1759600000, "version": 3}' \
-    "$(ms_text "$(printf 'private off\nmode audit\ndirect 192.168.4.42 8888\n')")"
+    "$(ms_text "$(printf 'private off\nmode audit\ndirect 192.168.77.42 8888\n')")"
   is "mind-status: enforce" "$js"'true, "mode": "enforce", "private": false, "dns_allowed": false, "lan_hosts": null, "loaded_at": 1759600000, "version": 3}' \
-    "$(ms_text "$(printf 'private off\nmode enforce\ndirect 192.168.4.42 8888\n')")"
+    "$(ms_text "$(printf 'private off\nmode enforce\ndirect 192.168.77.42 8888\n')")"
   is "mind-status: Private mode, audit underneath: no DNS" "$js"'true, "mode": "audit", "private": true, "dns_allowed": false, "lan_hosts": null, "loaded_at": 1759600000, "version": 3}' \
     "$(ms_text "$(printf 'private on\nmode audit\n')")"
   is "mind-status: Private mode, enforce underneath" "$js"'true, "mode": "enforce", "private": true, "dns_allowed": false, "lan_hosts": null, "loaded_at": 1759600000, "version": 3}' \
@@ -4011,14 +4017,14 @@ d = json.load(sys.stdin); print(d["public_proxy"], d["proxy"].split(":")[0])')"
   is "lan_hosts: seeded name rules" '[{"host": "gpu.example.ts.net", "ports": [11434]}, {"host": "homeassistant.local", "ports": [8123]}]' \
     "$(lj "$(printf 'lan homeassistant.local 8123\nlan gpu.example.ts.net 11434\n')")"
   is "lan_hosts: the person's rules and literals, sorted, lowercased, no trailing dot, ports merged" \
-    '[{"host": "*.home.arpa", "ports": [443]}, {"host": "192.168.4.42", "ports": [8080, 8888]}, {"host": "fd00::5", "ports": [443]}, {"host": "searx.lan", "ports": [80, 8888]}]' \
-    "$(lj "$(printf 'lan SearX.LAN. 8888\nlan 192.168.4.42 8888,8080\nlan fd00::5 443\nlan searx.lan 80,8888\nlan *.home.arpa 443\n')")"
+    '[{"host": "*.home.arpa", "ports": [443]}, {"host": "192.168.77.42", "ports": [8080, 8888]}, {"host": "fd00::5", "ports": [443]}, {"host": "searx.lan", "ports": [80, 8888]}]' \
+    "$(lj "$(printf 'lan SearX.LAN. 8888\nlan 192.168.77.42 8888,8080\nlan fd00::5 443\nlan searx.lan 80,8888\nlan *.home.arpa 443\n')")"
   is "lan_hosts: no lan rules is an empty list, not null" '[]' "$(lj '')"
   is "lan_hosts: the reader failed (a policy that does not read): null" 'null' "$(lj 'policy.yaml: bad' 1)"
   is "lan_hosts: ... an older proxy with no lan-hosts (usage, exit 2): null" 'null' "$(lj 'usage: yantrik-egress' 2)"
   local lbad
   for lbad in 'lan homeassistant.local' 'lan homeassistant.local 0' 'lan homeassistant.local 65536' 'lan homeassistant.local 08123' \
-              'lan home"assistant.local 8123' 'lan localhost 8123' 'direct 192.168.4.42 8888' 'lan a.b 1 x' 'lan a.b 1,,2'; do
+              'lan home"assistant.local 8123' 'lan localhost 8123' 'direct 192.168.77.42 8888' 'lan a.b 1 x' 'lan a.b 1,,2'; do
     is "lan_hosts: a line '$lbad' is null, not a list without it" 'null' "$(lj "$lbad")"
   done
   local many="" i
@@ -4150,39 +4156,39 @@ d = json.load(sys.stdin); print(d["public_proxy"], d["proxy"].split(":")[0])')"
   # Seeded lan rules: the endpoints the person and root configured, never the mind's own.
   local sd="$root/seed" cands plan
   mkdir -p "$sd/opt" "$sd/home/.config/yantrik" "$sd/etc" "$sd/mind/.config"
-  printf '%s\n' 'llm:' '  backend: api' '  api_base_url: "http://192.168.4.35:11434/v1"' '  api_key: sk-not-for-the-plan' \
+  printf '%s\n' 'llm:' '  backend: api' '  api_base_url: "http://192.168.77.35:11434/v1"' '  api_key: sk-not-for-the-plan' \
     '  fallback:' '    api_base_url: "http://127.0.0.1:8341/v1"' '  providers:' '    - id: openai' \
     '      base_url: https://api.openai.com/v1' > "$sd/opt/config.yaml"
-  printf '%s\n' 'web_search:' '  service: searxng' '  searxng_url: http://192.168.4.42:8888' > "$sd/home/.config/yantrik/settings.yaml"
+  printf '%s\n' 'web_search:' '  service: searxng' '  searxng_url: http://192.168.77.42:8888' > "$sd/home/.config/yantrik/settings.yaml"
   printf '%s\n' 'providers:' '  - base_url: "http://gpu.lan:11434/v1"' '    api_key: "sk-also-not"' > "$sd/home/.config/yantrik/providers.yaml"
-  printf '%s\n' 'YM_HA_URL=http://homeassistant.local:8123' 'export YM_SEARXNG_URL="http://192.168.4.42:8888"' \
+  printf '%s\n' 'YM_HA_URL=http://homeassistant.local:8123' 'export YM_SEARXNG_URL="http://192.168.77.42:8888"' \
     'YM_SOMETHING_ELSE=http://10.9.9.9:80' > "$sd/etc/mind-person.env"
-  printf '%s\n' 'YM_SEARXNG_URL=http://192.168.77.77:8888' 'YM_LOCAL_OLLAMA_URL=http://192.168.77.78:11434' > "$sd/mind/.config/yantrik-mind.env"
+  printf '%s\n' 'YM_SEARXNG_URL=http://10.20.30.77:8888' 'YM_LOCAL_OLLAMA_URL=http://10.20.30.78:11434' > "$sd/mind/.config/yantrik-mind.env"
   cands="$(seed_candidates "$sd/opt/config.yaml" "$sd/home" "$(id -u)" "$(id -g)" "$sd/etc/mind-person.env")"
-  t "seed: config.yaml's model endpoint is a candidate" "config.yaml:api_base_url http://192.168.4.35:11434/v1" "$cands"
+  t "seed: config.yaml's model endpoint is a candidate" "config.yaml:api_base_url http://192.168.77.35:11434/v1" "$cands"
   t "seed: ... and its providers'" "config.yaml:base_url https://api.openai.com/v1" "$cands"
-  t "seed: the person's web search URL" "settings.yaml:searxng_url http://192.168.4.42:8888" "$cands"
+  t "seed: the person's web search URL" "settings.yaml:searxng_url http://192.168.77.42:8888" "$cands"
   t "seed: the person's providers" "providers.yaml:base_url http://gpu.lan:11434/v1" "$cands"
   t "seed: mind-person.env's named keys" "mind-person.env:YM_HA_URL http://homeassistant.local:8123" "$cands"
   is "seed: ... and only those" "no" "$(printf '%s' "$cands" | grep -q 10.9.9.9 && echo yes || echo no)"
   is "seed: no key or secret ever leaves the files" "no" "$(printf '%s' "$cands" | grep -q 'sk-' && echo yes || echo no)"
-  is "seed: the mind's own settings are never read" "no" "$(printf '%s' "$cands" | grep -q '192.168.77' && echo yes || echo no)"
+  is "seed: the mind's own settings are never read" "no" "$(printf '%s' "$cands" | grep -q '10\.20\.30\.7[78]' && echo yes || echo no)"
   is "seed: ... nor named by the seeding at all" "0" \
     "$(declare -f seed_candidates reconcile_egress_seeds | grep -c 'yantrik-mind\|/var/lib/yantrik-mind\|YM_ENV_PATH')"
   ln -s "$sd/opt/config.yaml" "$sd/opt/linked.yaml"
   is "seed: a file that is a link is not followed" "" "$(seed_candidates "$sd/opt/linked.yaml" "" "" "" "$sd/none")"
 
   # The root check of a plan, without the proxy: a stand-in plan.
-  plan="$(printf '%s\n' 'seed 192.168.4.35 11434 http config.yaml:api_base_url' 'seed homeassistant.local 8123 http mind-person.env:YM_HA_URL' \
+  plan="$(printf '%s\n' 'seed 192.168.77.35 11434 http config.yaml:api_base_url' 'seed homeassistant.local 8123 http mind-person.env:YM_HA_URL' \
     'seed 8.8.8.8 443 https config.yaml:base_url' 'skip config.yaml:base_url api.openai.com public')"
   res="$(printf '%s\n' "$plan" | python3 -I -c "$PY_SEED_APPLY" -)"
-  t "seed: a LAN endpoint in the plan is seeded, http as it was" '{"host": "192.168.4.35", "ports": [11434], "http": true, "lan": true, "why": "seeded from config.yaml:api_base_url"}' "$res"
+  t "seed: a LAN endpoint in the plan is seeded, http as it was" '{"host": "192.168.77.35", "ports": [11434], "http": true, "lan": true, "why": "seeded from config.yaml:api_base_url"}' "$res"
   t "seed: ... a .local name too" '"host": "homeassistant.local"' "$res"
   is "seed: a public address in the plan is not, whatever the plan says" "no" "$(printf '%s' "$res" | grep -q '"8.8.8.8"' && echo yes || echo no)"
   t "seed: ... and says so" "8.8.8.8 (config.yaml:base_url): not a private address to this check" "$res"
   t "seed: what the plan skipped is said too" "api.openai.com (config.yaml:base_url): public" "$res"
   local badplan
-  for badplan in 'seed *.lan 80 http x' 'seed 192.168.4.35 0 http x' 'seed fd00::5%eth0 80 http x' 'seed a.lan 80 ftp x' \
+  for badplan in 'seed *.lan 80 http x' 'seed 192.168.77.35 0 http x' 'seed fd00::5%eth0 80 http x' 'seed a.lan 80 ftp x' \
                  'seed a.lan 80 http has space' 'allow a.lan 80 http x' 'seed Bad_Host.lan 80 http x'; do
     is "seed: a plan with '$badplan' seeds nothing" "1" "$(printf '%s\n' "$badplan" | python3 -I -c "$PY_SEED_APPLY" - >/dev/null; echo $?)"
   done
@@ -4202,16 +4208,16 @@ req = json.loads(buf)
 c.sendall((json.dumps({"ok": True, "seeded": req["rules"]}) + "\n").encode())' "$sd/control" "$sd/request" & )
   for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do [ -S "$sd/control" ] && break; sleep 0.1; done
   res="$(printf '%s\n' "$plan" | python3 -I -c "$PY_SEED_APPLY" "$sd/control")"
-  is "seed: one request, the seed op with the checked rules only" "seed 2 192.168.4.35,homeassistant.local" \
+  is "seed: one request, the seed op with the checked rules only" "seed 2 192.168.77.35,homeassistant.local" \
     "$(python3 -I -c 'import json,sys; r=json.load(open(sys.argv[1])); print(r["op"], len(r["rules"]), ",".join(x["host"] for x in r["rules"]))' "$sd/request" 2>&1)"
-  t "seed: the reconcile says what was seeded" "seeded 2 lan rule(s): 192.168.4.35:11434 (config.yaml:api_base_url), homeassistant.local:8123 (mind-person.env:YM_HA_URL)" "$res"
+  t "seed: the reconcile says what was seeded" "seeded 2 lan rule(s): 192.168.77.35:11434 (config.yaml:api_base_url), homeassistant.local:8123 (mind-person.env:YM_HA_URL)" "$res"
 
   # The real reader, from a real policy file, when one is handed over (CI does, after cargo build).
   if [ -n "${YANTRIK_EGRESS_BIN:-}" ] && [ -x "${YANTRIK_EGRESS_BIN:-}" ]; then
     plan="$(printf '%s\n' "$cands" | "$YANTRIK_EGRESS_BIN" seed-plan)"
     res="$(printf '%s\n' "$plan" | python3 -I -c "$PY_SEED_APPLY" -)"
-    t "seed (real planner): a LAN api_base_url is seeded" '"host": "192.168.4.35", "ports": [11434], "http": true' "$res"
-    t "seed (real planner): ... the person's SearXNG" '"host": "192.168.4.42", "ports": [8888]' "$res"
+    t "seed (real planner): a LAN api_base_url is seeded" '"host": "192.168.77.35", "ports": [11434], "http": true' "$res"
+    t "seed (real planner): ... the person's SearXNG" '"host": "192.168.77.42", "ports": [8888]' "$res"
     t "seed (real planner): ... a .lan and a .local name" '"host": "gpu.lan"' "$res"
     t "seed (real planner): ... " '"host": "homeassistant.local"' "$res"
     is "seed (real planner): a public one is not" "no" "$(printf '%s' "$res" | grep -q '"api.openai.com"' && echo yes || echo no)"
@@ -4220,23 +4226,23 @@ c.sendall((json.dumps({"ok": True, "seeded": req["rules"]}) + "\n").encode())' "
     local st="$me/state" ans rc
     mkdir -p "$st"
     printf '%s\n' 'mode: enforce' 'rules:' \
-      '  - {host: "192.168.4.42", ports: [8888], http: true, lan: true, why: SearXNG on the LAN}' \
+      '  - {host: "192.168.77.42", ports: [8888], http: true, lan: true, why: SearXNG on the LAN}' \
       '  - {host: "fd00::5", ports: [443, 8443], lan: true, why: a ULA service}' \
       '  - {host: "searx.lan", ports: [8888], http: true, lan: true, why: a name goes through the proxy}' \
-      '  - {host: "192.168.4.43", ports: [22], why: not lan}' \
+      '  - {host: "192.168.77.43", ports: [22], why: not lan}' \
       '  - {host: "1.1.1.1", ports: [443], lan: true, why: public}' \
       '  - {host: "127.0.0.1", ports: [11434], http: true, lan: true, why: Ollama on this machine}' > "$st/policy.yaml"
     ans="$("$YANTRIK_EGRESS_BIN" direct "$st" 2>&1)"; rc=$?
     res="$(me_render "$ans" "$rc")"
     is "mind-egress (real reader): only literal LAN and loopback addresses in lan rules" "entries: 4 from the person's lan rules (enforce); DNS refused" "$res"
-    is "mind-egress (real reader): ... the IPv4 one" "192.168.4.42 . 8888" "$(me_set direct4)"
+    is "mind-egress (real reader): ... the IPv4 one" "192.168.77.42 . 8888" "$(me_set direct4)"
     is "mind-egress (real reader): ... the IPv6 ones" "fd00::5 . 443, fd00::5 . 8443" "$(me_set direct6)"
     is "mind-egress (real reader): ... the loopback one" "$MIND_LOOPBACK_PORTS, 11434" "$(me_set loopback4)"
     is "mind-egress (real reader): ... no name, no rule without lan, no public address" "no no no" \
-      "$(me_has searx.lan) $(me_has 192.168.4.43) $(me_has 1.1.1.1)"
+      "$(me_has searx.lan) $(me_has 192.168.77.43) $(me_has 1.1.1.1)"
     ans="$("$YANTRIK_EGRESS_BIN" lan-hosts "$st" 2>/dev/null)"; rc=$?
     is "lan_hosts (real reader): every lan rule, names and literals, never one without lan" \
-      '[{"host": "1.1.1.1", "ports": [443]}, {"host": "127.0.0.1", "ports": [11434]}, {"host": "192.168.4.42", "ports": [8888]}, {"host": "fd00::5", "ports": [443, 8443]}, {"host": "searx.lan", "ports": [8888]}]' \
+      '[{"host": "1.1.1.1", "ports": [443]}, {"host": "127.0.0.1", "ports": [11434]}, {"host": "192.168.77.42", "ports": [8888]}, {"host": "fd00::5", "ports": [443, 8443]}, {"host": "searx.lan", "ports": [8888]}]' \
       "$(mind_egress_lan_json "$rc" "$ans")"
     printf 'on\n' > "$st/private"
     ans="$("$YANTRIK_EGRESS_BIN" lan-hosts "$st" 2>/dev/null)"; rc=$?
@@ -4246,16 +4252,16 @@ c.sendall((json.dumps({"ok": True, "seeded": req["rules"]}) + "\n").encode())' "
     is "mind-egress (real reader): Private mode" "entries: NONE, Private mode is on; DNS refused" "$(me_render "$ans" "$rc")"
     is "mind-egress (real reader): ... none" "none" "$(me_none)"
     rm -f "$st/private"
-    printf 'mode: audit\nrules:\n  - {host: "192.168.4.42", ports: [8888], lan: true, why: x}\n' > "$st/policy.yaml"
+    printf 'mode: audit\nrules:\n  - {host: "192.168.77.42", ports: [8888], lan: true, why: x}\n' > "$st/policy.yaml"
     ans="$("$YANTRIK_EGRESS_BIN" direct "$st" 2>&1)"; rc=$?
     is "mind-egress (real reader): audit lets DNS out" "entries: 1 from the person's lan rules (audit); DNS allowed" "$(me_render "$ans" "$rc")"
     # A rule written with a trailing dot before the proxy refused one is read without it on
     # upgrade, not taken for a policy that does not read.
-    printf 'mode: audit\nrules:\n  - {host: "192.168.4.42.", ports: [8888], lan: true, why: x}\n' > "$st/policy.yaml"
+    printf 'mode: audit\nrules:\n  - {host: "192.168.77.42.", ports: [8888], lan: true, why: x}\n' > "$st/policy.yaml"
     ans="$("$YANTRIK_EGRESS_BIN" direct "$st" 2>&1)"; rc=$?
     is "mind-egress (real reader): a rule written with a trailing dot is read without it" \
       "entries: 1 from the person's lan rules (audit); DNS allowed" "$(me_render "$ans" "$rc")"
-    printf 'mode: audit\nrules:\n  - {host: "192.168.4.42", ports: [0], lan: true, why: x}\n' > "$st/policy.yaml"
+    printf 'mode: audit\nrules:\n  - {host: "192.168.77.42", ports: [0], lan: true, why: x}\n' > "$st/policy.yaml"
     ans="$("$YANTRIK_EGRESS_BIN" direct "$st" 2>&1)"; rc=$?
     t "mind-egress (real reader): a policy with a rule nobody could have written is no entries" \
       "NONE, the egress policy could not be read" "$(me_render "$ans" "$rc")"
@@ -4280,8 +4286,8 @@ c.sendall((json.dumps({"ok": True, "seeded": req["rules"]}) + "\n").encode())' "
   # namespaces are both at hand.
   local variants="$me/variants" nftbin f
   mkdir -p "$variants"
-  me_render "$(printf 'private off\nmode audit\ndirect 192.168.4.42 8888\ndirect fd00::5 443\nloopback 127.0.0.1 11434\nloopback ::1 11434\n')" >/dev/null && cp "$tbl" "$variants/audit.nft"
-  me_render "$(printf 'private off\nmode enforce\ndirect 192.168.4.42 8888\n')" >/dev/null && cp "$tbl" "$variants/enforce.nft"
+  me_render "$(printf 'private off\nmode audit\ndirect 192.168.77.42 8888\ndirect fd00::5 443\nloopback 127.0.0.1 11434\nloopback ::1 11434\n')" >/dev/null && cp "$tbl" "$variants/audit.nft"
+  me_render "$(printf 'private off\nmode enforce\ndirect 192.168.77.42 8888\n')" >/dev/null && cp "$tbl" "$variants/enforce.nft"
   me_render "$(printf 'private on\nmode enforce\n')" >/dev/null && cp "$tbl" "$variants/private.nft"
   mind_egress_text 998 "" "" nodns "NONE, the table made from the policy did not load" > "$variants/fallback.nft"
   if [ -n "${YANTRIK_NFT_OUT:-}" ]; then
@@ -4322,6 +4328,7 @@ c.sendall((json.dumps({"ok": True, "seeded": req["rules"]}) + "\n").encode())' "
   printf '%s%s selftest check(s) failed%s\n' "$c_red" "$fails" "$c_off"
   return 1
 }
+# YANTRIK-SELFTEST-END
 
 usage() {
   printf '%s\n' \
