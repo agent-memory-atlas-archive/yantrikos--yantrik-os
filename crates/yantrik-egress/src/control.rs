@@ -6,15 +6,28 @@
 //!
 //! | `op` | with | does |
 //! |---|---|---|
-//! | `status` | — | the mode, Private mode, the rules |
+//! | `status` | — | the mode, Private mode, the rules, `kernel_current`, `wide_links`, `assumed_links`, and `modes`: each mode's word and the plain words the desktop shows for it, the least strict first, one marked recommended |
 //! | `seen` | — | every destination, most recent first |
 //! | `proposals` | — | destinations refused with no rule for them |
-//! | `mode` | `mode`: `audit` / `enforce` | switches the whole policy |
+//! | `mode` | `mode`: `audit` / `guarded` / `enforce` | switches the whole policy; answers `kernel_current` |
 //! | `private` | `on` | the person's Private mode |
 //! | `allow` | `rule` | adds or replaces a rule |
 //! | `seed` | `rules` | root only: replaces the seeded rules (`crate::seed`), never the person's |
 //! | `remove` | `host` | removes that host's rules |
 //! | `forget` | `host`, `port` | drops a destination from the ledger (the person said No) |
+//!
+//! `wide_links` lists the prefixes this machine's interfaces are on that are wider than /16 (IPv4)
+//! or /32 (IPv6): all of each is the local network, so a rule for a host in one needs `lan: true`
+//! (`null` when the network cannot be read). `assumed_links` lists the /56 around each global
+//! IPv6 address of this machine on a shared network: the local network by a guess (the usual
+//! delegated prefix), so a host in one is refused without a rule that says `lan: true`, and its
+//! refusal says so (`null` likewise).
+//!
+//! `kernel_current` is whether the kernel's table has caught up with the mode and Private mode
+//! (`State::kernel_current`): the proxy follows a switch at once, the kernel a moment later, when
+//! `yantrik-mind-egress.path` has run `apply`. Until then the mind's DNS and the status file are
+//! still the old mode's. `null`: no status file to read. A desktop can ask `status` again until it
+//! is `true`.
 
 use std::sync::{Arc, Mutex};
 
@@ -42,12 +55,19 @@ pub fn handle(state: &Mutex<State>, request: &Value, root: bool) -> Value {
         Err(e) => json!({ "ok": false, "error": format!("could not be saved: {e}") }),
     };
     match op {
-        "status" => json!({
+        "status" => {
+            let net = crate::local::addresses();
+            json!({
             "ok": true,
             "mode": s.policy.mode,
             "private": s.private,
             "rules": s.policy.rules,
-        }),
+            "kernel_current": s.kernel_current(),
+            "wide_links": net.as_ref().map(|n| n.wide()),
+            "assumed_links": net.as_ref().map(|n| n.assumed_links()),
+            "modes": Mode::ALL.map(|m| json!({ "mode": m, "label": m.label(), "recommended": m.recommended() })),
+            })
+        }
         "seen" => json!({ "ok": true, "seen": s.ledger.list() }),
         "proposals" => {
             let p = s.ledger.proposals(&s.policy);
@@ -56,9 +76,11 @@ pub fn handle(state: &Mutex<State>, request: &Value, root: bool) -> Value {
         "mode" => match serde_json::from_value::<Mode>(request["mode"].clone()) {
             Ok(m) => {
                 s.policy.mode = m;
-                saved(s.save_policy())
+                let mut answer = saved(s.save_policy());
+                answer["kernel_current"] = json!(s.kernel_current());
+                answer
             }
-            Err(_) => json!({ "ok": false, "error": "mode is `audit` or `enforce`" }),
+            Err(_) => json!({ "ok": false, "error": "mode is `audit`, `guarded` or `enforce`" }),
         },
         "private" => match request["on"].as_bool() {
             Some(on) => saved(s.set_private(on)),
@@ -138,8 +160,12 @@ pub async fn serve(listener: tokio::net::UnixListener, state: Arc<Mutex<State>>,
 mod tests {
     use super::*;
 
+    fn dir(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("yantrik-egress-control-{name}-{}", std::process::id()))
+    }
+
     fn state(name: &str) -> Mutex<State> {
-        let d = std::env::temp_dir().join(format!("yantrik-egress-control-{name}-{}", std::process::id()));
+        let d = dir(name);
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         Mutex::new(State::load(&d))
@@ -166,10 +192,40 @@ mod tests {
         let st = handle(&s, &json!({"op":"status"}), false);
         assert_eq!(st["mode"], "enforce");
         assert_eq!(st["rules"].as_array().unwrap().len(), 1);
+        assert!(st["wide_links"].is_array() && st["assumed_links"].is_array(), "{st}");
         assert_eq!(handle(&s, &json!({"op":"private","on":true}), false)["ok"], true);
         assert_eq!(handle(&s, &json!({"op":"status"}), false)["private"], true);
         assert_eq!(handle(&s, &json!({"op":"remove","host":"api.x.ai"}), false)["removed"], 1);
         assert_eq!(handle(&s, &json!({"op":"nonsense"}), false)["ok"], false);
+    }
+
+    #[test]
+    fn guarded_is_a_mode_the_person_can_choose_and_it_is_saved() {
+        let s = state("guarded");
+        let r = handle(&s, &json!({"op":"mode","mode":"guarded"}), false);
+        assert_eq!(r["ok"], true, "{r}");
+        assert_eq!(handle(&s, &json!({"op":"status"}), false)["mode"], "guarded");
+        let dir = dir("guarded");
+        assert_eq!(crate::policy::Policy::read(&dir.join("policy.yaml")).unwrap().mode, Mode::Guarded, "written to the policy file");
+        assert_eq!(State::load(&dir).policy.mode, Mode::Guarded, "and read back after a restart");
+    }
+
+    #[test]
+    fn the_modes_are_offered_in_plain_words_the_least_strict_first() {
+        let s = state("modes");
+        let st = handle(&s, &json!({"op":"status"}), false);
+        let got: Vec<(String, String, bool)> = st["modes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| (m["mode"].as_str().unwrap().into(), m["label"].as_str().unwrap().into(), m["recommended"].as_bool().unwrap()))
+            .collect();
+        let want = [
+            ("audit", "Watch only: everything allowed and recorded", false),
+            ("guarded", "Home network closed, internet open", true),
+            ("enforce", "Only places I approve", false),
+        ];
+        assert_eq!(got, want.map(|(m, l, r)| (m.to_string(), l.to_string(), r)));
     }
 
     #[test]

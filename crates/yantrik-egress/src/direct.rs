@@ -45,7 +45,7 @@
 use std::net::IpAddr;
 use std::path::Path;
 
-use crate::policy::{Mode, Policy};
+use crate::policy::Policy;
 
 /// The literal address a rule's host names, an IPv4 address written as IPv6 (`::ffff:a.b.c.d`)
 /// taken as the IPv4 one, which is what the kernel sees on the wire.
@@ -101,17 +101,14 @@ pub fn entries(policy: &Policy) -> Vec<Entry> {
 }
 
 /// What `yantrik-egress direct` prints for the state in `dir`: Private mode, the policy's mode
-/// (the kernel lets the mind ask DNS only in audit), then the entries, none in Private mode.
+/// (the kernel lets the mind ask DNS only in audit; guarded and enforce resolve in the proxy), then the entries, none in Private mode.
 pub fn export(dir: &Path) -> Result<String, String> {
     let policy = Policy::read(&dir.join("policy.yaml"))?;
     Ok(direct_text(&policy, crate::state::private_at(dir)))
 }
 
 fn direct_text(policy: &Policy, private: bool) -> String {
-    let mode = match policy.mode {
-        Mode::Audit => "audit",
-        Mode::Enforce => "enforce",
-    };
+    let mode = policy.mode.word();
     if private {
         return format!("private on\nmode {mode}\n");
     }
@@ -241,6 +238,12 @@ mod tests {
 
         std::fs::write(d.join("private"), "on\n").unwrap();
         assert_eq!(export(&d).unwrap(), "private on\nmode enforce\n", "Private mode: no entries");
+        std::fs::remove_file(d.join("private")).unwrap();
+
+        std::fs::write(d.join("policy.yaml"), "mode: guarded\nrules:\n  - host: 192.168.4.42\n    ports: [8888]\n    lan: true\n    why: SearXNG\n").unwrap();
+        assert_eq!(export(&d).unwrap(), "private off\nmode guarded\ndirect 192.168.4.42 8888\n", "guarded: its word, and the same entries");
+        std::fs::write(d.join("private"), "on\n").unwrap();
+        assert_eq!(export(&d).unwrap(), "private on\nmode guarded\n");
         std::fs::remove_file(d.join("private")).unwrap();
 
         std::fs::write(d.join("policy.yaml"), "mode: enforce\nrules:\n  - host: 192.168.4.42\n    ports: [0]\n    lan: true\n    why: x\n").unwrap();

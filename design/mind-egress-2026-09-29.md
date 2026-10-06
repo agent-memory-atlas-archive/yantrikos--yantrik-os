@@ -305,6 +305,95 @@ The kernel table lets the mind account reach both ports on `127.0.0.1` (`MIND_LO
   person turns. (A rule has no mode of its own: in an allow-list a rule that only watched would
   let through exactly what one in force does.)
 
+- **A third mode, between them (5 October 2026).** **guarded** — *Home network closed, internet
+  open*, the one Settings marks Recommended — lets every destination on the internet through with
+  no rule, counted as allowed (not as watching), and decides the local network, private ranges,
+  loopback and this machine exactly as enforce does: only a `lan` rule opens a LAN host, on the
+  endpoint door only. The kernel refuses the account DNS, as in enforce; the proxy resolves. So
+  nothing public is ever refused in guarded, and nothing public becomes a proposal. Strictness:
+  audit < guarded < enforce. The words the person chooses from (the control socket's `status`
+  answers them as `modes`): *Watch only: everything allowed and recorded* (audit); *Home network
+  closed, internet open* (guarded, Recommended); *Only places I approve* (enforce).
+
+- **The home network is more than the private ranges.** A dual-stack home gives every device a
+  global IPv6 address from the ISP's prefix (the NAS at `2a02:8070:abcd:1::20`), and some homes and
+  most servers sit on a public IPv4 subnet. So the proxy reads, with this machine's own addresses
+  (`getifaddrs`), what the kernel says the home network is (`local::Net::build`):
+  - the prefix each interface is on (its netmask);
+  - every prefix routed straight out of an interface with no router, in every routing table, IPv4
+    and IPv6: one netlink dump (`RTM_GETROUTE`, `NLM_F_DUMP`, no table asked for; `netlink.rs`),
+    so a policy-routed host's on-link prefix in `table 100`, or a VRF's, counts. Only unicast
+    routes are routes; the `local` table's own addresses and broadcasts, and the refusals, are
+    not. When netlink will not answer, `/proc/self/net/route` (IPv4's main table only) and
+    `ipv6_route`, and that is logged. A DHCPv6-only network (M=1, A=0) gives a /128 address, and its /64 exists only
+    as such a route. Such a route counts only when it is no wider than /48 (IPv6) or /16 (IPv4),
+    is not the /0 default, and does not leave through a point-to-point or tun device
+    (`IFF_POINTOPOINT`, or `ARPHRD_NONE` in `/sys/class/net/<dev>/type`). So a full-tunnel VPN's
+    `0.0.0.0/1` and `128.0.0.0/1 dev tun0` never make the internet the home network. A wider
+    public route is skipped, and logged once;
+  - the /56 around each global IPv6 address of this machine on a shared network (not on a
+    point-to-point or tun device: a VPN's address says nothing of who is near). When the ISP
+    delegates a /56 and the router puts the cameras on `…:2::/64` while the desktop is on
+    `…:1::/64`, the camera is the home network too. At worst this refuses a neighbour of the
+    ISP's (a VPS, or a pool that hands each customer a /64 of a shared /56), which a `lan` rule
+    then names. It is a guess, so it is said: the control socket's `status` lists these /56s as
+    `assumed_links`, and the refusal of an address that is the home network only by one says so;
+  - every router a route sends through, in any table.
+
+  An address on one of those prefixes, or a router's, is the local network, whatever range it is
+  in (`local::place`): in every mode and on both doors, only a `lan` rule reaches it, on the
+  endpoint door only. An address carried inside another (mapped, NAT64, 6to4) is judged by the
+  one it carries.
+
+  The network is read after the name is resolved, and is at most a second old (`local::Watch`):
+  one `getifaddrs` and one route dump a second at most, however many connections, and a network
+  change is seen within a second. Within that second, a network that just came up brought this
+  machine a new address: a connection that leaves from an address the read did not know
+  (`getsockname`) has the network read again, and when its destination is now the local network
+  or this machine, the verdict on that place counts — a refusal closes it before a byte goes
+  through, and a network that cannot be read then closes it too. When a read fails — the
+  addresses, or the routes (any error but a missing IPv6 table, and netlink failing with no
+  `/proc` to fall back on) — the last one that did not is used. When no
+  read ever has, nothing is reached: `503`, saying the network could not be read, counted as
+  refused (a rule might answer it once it reads), except an address that its range alone says is
+  never a destination.
+
+  **A wide public prefix on an interface.** All of a prefix an interface is on is the local
+  network, however wide: a server put on `44.1.2.3/8` has all of 44/8 as its neighbours. That
+  fails closed, but a rule without `lan` for a host in it, which reached it before, now refuses
+  it ("its rule does not allow"), and is never proposed, because a rule covers it. Such a rule
+  now needs `lan: true`. The proxy logs each such prefix once, and the control socket's `status`
+  lists them as `wide_links`: public prefixes wider than /16 (IPv4) or /32 (IPv6).
+
+  **Known limit: the router's public address.** A request to the home's own public WAN IPv4
+  address hairpins back through the router (often to its admin page). That address is on no
+  interface of this machine, and finding it means asking something outside ("what is my IP?"),
+  which the proxy never does. To the proxy it is the internet: allowed in guarded and audit,
+  reached in enforce only by a rule. A router that answers its admin page on the WAN side is
+  exposed to the whole internet anyway.
+
+- **A tunnel-only rule is stricter for plain http (guarded).** In guarded, a host no rule names
+  is reached over plain `http://` and tunnels alike. A rule for it decides instead: a rule with
+  `http: false` (say `api.x.ai:443`, tunnels only) refuses a plain-http request to that host on
+  that port, which with no rule would have been allowed. That is the rule doing what it says; to
+  allow plain http too, the rule says `http: true`.
+
+- **The kernel follows a switch a moment later.** The proxy decides by the new mode the moment
+  the control socket's `mode` returns. The kernel's table (DNS above all) and the status file
+  follow when `yantrik-mind-egress.path` sees `policy.yaml` change and runs `apply`, normally
+  well under a second; until then they are still the old mode's, which is never wider than the
+  mode being left. The `mode` answer, and every `status` answer, carry `kernel_current`: whether
+  the status file names this mode and Private mode and was made from this policy file or a later
+  one (`null` when there is no status file). `apply` takes `policy.yaml`'s modification time
+  (`stat -c %.9Y`) before it reads the policy, and once the table is loaded sets the status
+  file's to it (`touch -d`); the proxy compares the two to the nanosecond, status no older than
+  policy. When the policy changed while it loaded (its inode or time is not the one taken), `apply`
+  loads again, three times more at most — the path unit may not run for a change made while it
+  was running — and a policy still changing then leaves the status file older than it, so
+  `kernel_current` stays `false` until the next change is loaded. The status file's `loaded_at`
+  is whole seconds and the time of the load, so it is not used. A desktop can ask again until it
+  is `true`.
+
 ### 4. Asking, instead of silently failing
 
 When the mind connects somewhere no rule allows, the proxy refuses at once with `403` and a body
@@ -316,6 +405,13 @@ version 2. The shell shows the proposal as an ordinary approval card:
 A phone can answer the card like any other, since cards reach channels. Only the person's answer
 writes a rule. This is OpenShell's Policy Advisor, done through the approvals we already have.
 Repeated attempts to one host make one card, not a stream.
+
+A refusal no rule could answer is counted (as `refused`, and as `never` in the ledger) but is
+never a proposal, in any mode: a name that did not resolve (a typo, a dead link), a name that
+resolves only to an address that is never a destination (a Pi-hole's `0.0.0.0` for a blocked
+tracker, `127.0.0.1`), and a literal one (`127.0.0.1:7450`). Asking the person about those would
+be a question whose Yes changes nothing. In enforce, a name with no rule is still refused before
+it is looked up, so it is a proposal as before: a rule could answer it.
 
 ### 5. What a mind may rely on
 
@@ -346,10 +442,10 @@ the file only; the directory stays.
   **`null`** from a proxy without one, and then every untrusted fetch keeps the `lan_hosts` checks
   below.
 
-- `mode`: `audit` or `enforce`, the policy's; `fallback` when the policy could not be read or its
+- `mode`: `audit`, `guarded` or `enforce`, the policy's; `fallback` when the policy could not be read or its
   answer was refused and the loaded table holds loopback only (`private` and `dns_allowed` false).
 - `private`: Private mode is on; the table has no entries and refuses DNS.
-- `dns_allowed`: the account may send DNS (audit, not Private). Otherwise every lookup is refused.
+- `dns_allowed`: the account may send DNS (audit, not Private; never in guarded). Otherwise every lookup is refused.
 - `proxy_refuses_private`: the installed `yantrik-egress capabilities` prints
   `refuses-private-all-modes`, so the proxy refuses private and special ranges without a `lan`
   rule in audit too. Read from the binary at each apply, never assumed; false from an older proxy.
@@ -370,6 +466,11 @@ the file only; the directory stays.
   fail closed, never treat `null` as an empty list. `[]` means there are no `lan` rules.
 - `loaded_at`: unix seconds of the load. `version`: this layout (2 adds `lan_hosts`; 3 adds
   `public_proxy`). A reader refuses one it does not know.
+- **guarded is version 3.** Every mode is written as version 3, `guarded` included; guarded
+  changes no field's name or type, only adds a value of `mode`, with `dns_allowed` false. The
+  Mind's reader never reads `mode` (its trust rests on the checks below, and it honours
+  `dns_allowed` as written), so it reads a guarded file correctly with no change. A reader that
+  does check `mode` must accept `guarded`.
 - **Version 3 and version 2 readers.** Version 3 only adds `public_proxy`. Every version 2 field
   is still there, with the same name, type and meaning; the selftest checks that. A version 2
   reader keeps working by ignoring the new field, **once it accepts `version` 3 as well as 2**. A

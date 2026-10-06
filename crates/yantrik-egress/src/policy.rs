@@ -1,10 +1,16 @@
 //! The person's policy: where the mind may connect.
 //!
 //! Rules name a host (exactly, or `*.domain` for every name under it) and the ports it may be
-//! reached on, and say why. The whole policy is in one of two modes:
+//! reached on, and say why. The whole policy is in one of three modes, from the least strict:
 //!
 //! - **audit** — every destination on the internet is let through and counted, so a person can see
 //!   where the mind goes before deciding anything. Where every machine starts.
+//! - **guarded** — "home network closed, internet open": every destination on the internet is let
+//!   through and counted as allowed, not watched; the local network (every prefix this machine is
+//!   on and its routers, whatever their range: `crate::local::place`), private ranges, loopback and
+//!   this machine are decided exactly as in enforce. The kernel refuses the mind DNS, as in
+//!   enforce: this proxy resolves. A rule still decides for the host it names: a tunnel-only rule
+//!   (`http: false`) refuses plain http to that host, which with no rule would be let through.
 //! - **enforce** — only what a rule allows; everything else is refused and becomes a proposal.
 //!
 //! Private mode refuses everything, whatever the policy says. (A rule has no mode of its own: in an
@@ -20,7 +26,8 @@
 //! instead of resolving names itself.
 //!
 //! Nothing is looked up before it may be reached ([`Policy::before_resolve`]): with Private mode
-//! on, or in enforce without a rule, the name is refused unresolved — a lookup is itself a message
+//! on, or in enforce without a rule, the name is refused unresolved (guarded resolves it: where it
+//! leads decides) — a lookup is itself a message
 //! to whoever serves the name.
 
 use std::net::IpAddr;
@@ -36,12 +43,42 @@ pub const CAPABILITIES: &[&str] = &["refuses-private-all-modes", "public-door"];
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Declared from the least strict to the most, so `Ord` is strictness: audit < guarded < enforce.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
     #[default]
     Audit,
+    Guarded,
     Enforce,
+}
+
+impl Mode {
+    /// Every mode, the least strict first: the order the person chooses from.
+    pub const ALL: [Mode; 3] = [Mode::Audit, Mode::Guarded, Mode::Enforce];
+
+    /// The word the policy file, the control socket and the status file use.
+    pub fn word(self) -> &'static str {
+        match self {
+            Mode::Audit => "audit",
+            Mode::Guarded => "guarded",
+            Mode::Enforce => "enforce",
+        }
+    }
+
+    /// What the person is shown when choosing, in plain words.
+    pub fn label(self) -> &'static str {
+        match self {
+            Mode::Audit => "Watch only: everything allowed and recorded",
+            Mode::Guarded => "Home network closed, internet open",
+            Mode::Enforce => "Only places I approve",
+        }
+    }
+
+    /// The one shown as Recommended.
+    pub fn recommended(self) -> bool {
+        self == Mode::Guarded
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -196,13 +233,15 @@ impl Policy {
                 Verdict::Refuse(format!("{host} resolved to an address on the local network, which its rule does not allow."))
             }
             (mode, Some(_)) => Verdict::Allow { audit: mode == Mode::Audit },
-            // Not the internet, in audit too: only a rule that says `lan` reaches it. The Mind
-            // leaves this to the proxy when it is behind one, instead of resolving names itself.
-            (Mode::Audit, None) if place == Place::Lan => Verdict::Refuse(format!(
+            // Not the internet, in audit and guarded too: only a rule that says `lan` reaches it.
+            // The Mind leaves this to the proxy when it is behind one, instead of resolving names.
+            (Mode::Audit | Mode::Guarded, None) if place == Place::Lan => Verdict::Refuse(format!(
                 "{host} is on the local network or a private address, which the mind reaches only by a rule that says so. \
                  The person has been asked."
             )),
             (Mode::Audit, None) => Verdict::Allow { audit: true },
+            // The internet, open: allowed and counted as allowed, not as watching.
+            (Mode::Guarded, None) => Verdict::Allow { audit: false },
             (Mode::Enforce, None) => Verdict::Refuse(format!(
                 "{host}:{port} is not a place the person has allowed the mind to connect. They have been asked; \
                  try again once they answer."
@@ -345,9 +384,11 @@ mod tests {
     fn private_mode_and_forbidden_addresses_refuse_in_every_mode() {
         let mut p = Policy::default();
         p.allow(rule("anywhere.com", &[443])).unwrap();
-        for mode in [Mode::Audit, Mode::Enforce] {
+        for mode in Mode::ALL {
             p.mode = mode;
             assert!(matches!(p.decide("anywhere.com", 443, false, Place::Internet, true), Verdict::Refuse(_)));
+            assert!(matches!(p.decide("other.com", 443, false, Place::Internet, true), Verdict::Refuse(_)), "{mode:?}: no rule either");
+            assert!(matches!(p.before_resolve("other.com", 443, false, true), Some(Verdict::Refuse(_))), "{mode:?}: not even resolved");
             assert!(matches!(p.decide("anywhere.com", 443, false, Place::Forbidden, false), Verdict::Refuse(_)));
         }
     }
@@ -389,9 +430,67 @@ mod tests {
     #[test]
     fn the_capability_it_prints_is_one_it_has() {
         assert!(CAPABILITIES.contains(&"refuses-private-all-modes"));
-        for mode in [Mode::Audit, Mode::Enforce] {
+        for mode in Mode::ALL {
             let p = Policy { mode, ..Policy::default() };
             assert!(matches!(p.decide("10.0.0.7", 80, true, place_of("10.0.0.7".parse().unwrap()), false), Verdict::Refuse(_)), "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn guarded_opens_the_internet_and_keeps_the_home_network_closed() {
+        let mut p = Policy { mode: Mode::Guarded, rules: vec![] };
+        assert_eq!(p.decide("example.com", 443, false, Place::Internet, false), Verdict::Allow { audit: false }, "allowed, not watched");
+        assert_eq!(p.decide("example.com", 80, true, Place::Internet, false), Verdict::Allow { audit: false }, "plain http too");
+        assert_eq!(p.before_resolve("example.com", 443, false, false), None, "resolved: where it leads decides");
+        for ip in ["192.168.4.42", "10.0.0.7", "100.100.1.1", "fd00::5", "198.18.0.9", "127.0.0.1", "::1", "169.254.169.254"] {
+            let place = place_of(ip.parse().unwrap());
+            assert_ne!(place, Place::Internet, "{ip}");
+            assert!(matches!(p.decide(ip, 8888, false, place, false), Verdict::Refuse(_)), "guarded, no rule: {ip} refused");
+        }
+        assert!(matches!(p.decide("searx.lan", 8888, false, Place::Lan, false), Verdict::Refuse(_)), "a name that resolves there");
+        assert!(matches!(p.decide("localhost", 11434, false, Place::Forbidden, false), Verdict::Refuse(_)), "this machine");
+        // A rule without lan does not open the home network; one that says lan does, on its ports.
+        p.allow(rule("192.168.4.42", &[8888])).unwrap();
+        assert!(matches!(p.decide("192.168.4.42", 8888, false, Place::Lan, false), Verdict::Refuse(_)));
+        let mut r = rule("192.168.4.42", &[8888]);
+        r.lan = true;
+        p.allow(r).unwrap();
+        assert_eq!(p.decide("192.168.4.42", 8888, false, Place::Lan, false), Verdict::Allow { audit: false });
+        assert!(matches!(p.decide("192.168.4.42", 22, false, Place::Lan, false), Verdict::Refuse(_)), "only its ports");
+        // A lan rule never opens loopback or this machine.
+        let mut r = rule("127.0.0.1", &[11434]);
+        r.lan = true;
+        p.allow(r).unwrap();
+        assert!(matches!(p.decide("127.0.0.1", 11434, false, Place::Forbidden, false), Verdict::Refuse(_)));
+    }
+
+    #[test]
+    fn guarded_sits_between_audit_and_enforce_and_decides_the_rest_as_enforce_does() {
+        assert!(Mode::Audit < Mode::Guarded && Mode::Guarded < Mode::Enforce);
+        assert_eq!(Mode::ALL.map(Mode::word), ["audit", "guarded", "enforce"]);
+        for m in Mode::ALL {
+            assert_eq!(serde_yaml::to_string(&m).unwrap().trim(), m.word());
+        }
+        let mut lan = rule("gpu.lan", &[11434]);
+        lan.lan = true;
+        let tunnel_only = rule("api.x.ai", &[443]);
+        let rules = vec![lan, tunnel_only];
+        let guarded = Policy { mode: Mode::Guarded, rules: rules.clone() };
+        let enforce = Policy { mode: Mode::Enforce, rules };
+        for (host, port, http, place) in [
+            ("gpu.lan", 11434, false, Place::Lan),
+            ("gpu.lan", 22, false, Place::Lan),
+            ("other.lan", 11434, false, Place::Lan),
+            ("10.0.0.7", 80, true, Place::Lan),
+            ("localhost", 80, false, Place::Forbidden),
+            ("api.x.ai", 443, false, Place::Internet),
+            ("api.x.ai", 443, true, Place::Internet),
+        ] {
+            let same = matches!(
+                (guarded.decide(host, port, http, place, false), enforce.decide(host, port, http, place, false)),
+                (Verdict::Allow { .. }, Verdict::Allow { .. }) | (Verdict::Refuse(_), Verdict::Refuse(_))
+            );
+            assert!(same, "{host}:{port} http={http} {place:?}");
         }
     }
 
@@ -438,6 +537,9 @@ mod tests {
     fn nothing_is_looked_up_that_may_not_be_reached() {
         let mut p = Policy::default();
         assert!(matches!(p.before_resolve("x.example", 443, false, true), Some(Verdict::Refuse(_))), "private: not even resolved");
+        p.mode = Mode::Guarded;
+        assert!(matches!(p.before_resolve("x.example", 443, false, true), Some(Verdict::Refuse(_))), "private in guarded too");
+        p.mode = Mode::Audit;
         assert_eq!(p.before_resolve("x.example", 443, false, false), None, "audit resolves everything");
         p.mode = Mode::Enforce;
         assert!(matches!(p.before_resolve("x.example", 443, false, false), Some(Verdict::Refuse(_))), "enforce, no rule: unresolved");
