@@ -145,9 +145,12 @@ jobs:
         with:
           key: ci-v1
 
+      # --cap-lints warn: clippy's deny-by-default lints (never_loop and the like) would stop
+      # the build at the first crate that has one, and every crate after it would go unlinted.
+      # Capped, they are listed as warnings with the rest, and the whole workspace is read.
       - name: Clippy
         continue-on-error: true
-        run: cargo clippy --workspace --locked
+        run: cargo clippy --workspace --locked -- --cap-lints warn
 
   shell-scripts:
     name: shell scripts
