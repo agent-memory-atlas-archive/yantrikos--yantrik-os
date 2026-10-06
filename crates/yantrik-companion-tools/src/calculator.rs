@@ -77,8 +77,8 @@ fn eval_expr(src: &str, precision: usize) -> Result<String, String> {
     Ok(clean_number(&format!("{:.*}", precision, value)))
 }
 
-/// Recursive-descent parser. ^ is right-associative and unary minus binds
-/// tighter than it, matching bc: -2^2 is -4, (2)^-1 is 0.5.
+/// Recursive-descent parser. ^ is right-associative and binds tighter than a
+/// leading minus, as in ordinary notation: -2^2 is -4 (bc says 4), 2^-1 is 0.5.
 struct Parser<'a> {
     src: &'a [u8],
     pos: usize,
