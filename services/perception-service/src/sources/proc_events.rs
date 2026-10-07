@@ -141,6 +141,13 @@ pub fn run(bus: Bus, sock: libc::c_int) {
                 if command.is_empty() {
                     continue;
                 }
+                let parent_name = read_ppid(pid)
+                    .and_then(|p| read_proc(p, "comm"))
+                    .unwrap_or_default();
+                if is_own_chatter(&parent_name, &command) {
+                    bus.note_noise();
+                    continue;
+                }
                 if live.len() >= REMEMBERED {
                     live.clear();
                 }
@@ -310,6 +317,26 @@ fn redact(command: &str) -> String {
         .join(" ")
 }
 
+/// Whether a launch is the OS's own machinery rather than a person's or an agent's work.
+///
+/// The shell (`yantrik-ui`, `labwc`) and our own services (`*-service`) spawn helpers constantly —
+/// `nmcli`, `wl-paste`, `cat` — and the agent reads perception with `yos`. Those are the firehose
+/// that fills the ring, not signal. A terminal such as `yantrik-terminal` is different: commands
+/// run there are real work, so the parent name is matched exactly, never by the `yantrik` prefix.
+fn is_own_chatter(parent_name: &str, command: &str) -> bool {
+    if parent_name == "yantrik-ui" || parent_name == "labwc" || parent_name.ends_with("-service") {
+        return true;
+    }
+    command
+        .split(' ')
+        .next()
+        .unwrap_or_default()
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        == "yos"
+}
+
 fn read_ppid(pid: i32) -> Option<i32> {
     let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
     status
@@ -412,6 +439,16 @@ mod tests {
         assert_eq!(redact("/usr/bin/mysqldump -pS3cret schema"), "/usr/bin/mysqldump -p<redacted> schema");
         assert_eq!(redact("psql -pletmein"), "psql -p<redacted>");
         assert_eq!(redact("cargo build --release"), "cargo build --release");
+    }
+
+    #[test]
+    fn the_os_polling_itself_is_filtered_but_real_work_is_not() {
+        assert!(is_own_chatter("yantrik-ui", "nmcli -w 2 device"));
+        assert!(is_own_chatter("network-service", "wl-paste --no-newline"));
+        assert!(is_own_chatter("bash", "/usr/bin/yos perception 20"));
+        assert!(!is_own_chatter("yantrik-terminal", "cargo build"));
+        assert!(!is_own_chatter("yantrik-agent-terminal", "cat notes.md"));
+        assert!(!is_own_chatter("bash", "cargo test"));
     }
 
     #[test]
