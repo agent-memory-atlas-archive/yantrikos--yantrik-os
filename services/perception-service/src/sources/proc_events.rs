@@ -317,24 +317,58 @@ fn redact(command: &str) -> String {
         .join(" ")
 }
 
+/// Our own services, by exact binary name. A parent is only "ours" if it is one of these, never
+/// by a `-service` suffix: `comm` is chosen by the program itself, so any program could hide its
+/// children by naming itself `x-service`.
+const OUR_SERVICES: &[&str] = &[
+    "a11y-service",
+    "calendar-service",
+    "email-service",
+    "network-service",
+    "notes-service",
+    "notifications-service",
+    "perception-journal",
+    "perception-service",
+    "system-monitor-service",
+    "weather-service",
+];
+
+/// Helper binaries the shell or a service polls. A binary goes here only if the shell or a service
+/// polls it, never a user-facing app.
+const SHELL_HELPERS: &[&str] = &[
+    "nmcli", "wl-paste", "wl-copy", "cat", "pactl", "upower", "ip", "iw", "brightnessctl", "wpctl",
+];
+
 /// Whether a launch is the OS's own machinery rather than a person's or an agent's work.
 ///
-/// The shell (`yantrik-ui`, `labwc`) and our own services (`*-service`) spawn helpers constantly —
-/// `nmcli`, `wl-paste`, `cat` — and the agent reads perception with `yos`. Those are the firehose
-/// that fills the ring, not signal. A terminal such as `yantrik-terminal` is different: commands
-/// run there are real work, so the parent name is matched exactly, never by the `yantrik` prefix.
+/// The shell (`yantrik-ui`, `labwc`) and our own services spawn helpers constantly — `nmcli`,
+/// `wl-paste`, `cat` — and the agent reads perception with `yos`. Those are the firehose that
+/// fills the ring, not signal. A terminal such as `yantrik-terminal` is different: commands run
+/// there are real work, so the parent name is matched exactly, never by the `yantrik` prefix.
 fn is_own_chatter(parent_name: &str, command: &str) -> bool {
-    if parent_name == "yantrik-ui" || parent_name == "labwc" || parent_name.ends_with("-service") {
-        return true;
-    }
-    command
+    let program = command
         .split(' ')
         .next()
         .unwrap_or_default()
         .rsplit('/')
         .next()
-        .unwrap_or_default()
-        == "yos"
+        .unwrap_or_default();
+
+    // A perception read is the feedback loop: `yos perception` reads what we just recorded.
+    if program == "yos" && command.split(' ').nth(1) == Some("perception") {
+        return true;
+    }
+
+    // A helper spawned by the shell or one of our services is the OS polling itself.
+    if (parent_name == "yantrik-ui"
+        || parent_name == "labwc"
+        || OUR_SERVICES.contains(&parent_name))
+        && SHELL_HELPERS.contains(&program)
+    {
+        return true;
+    }
+
+    false
 }
 
 fn read_ppid(pid: i32) -> Option<i32> {
@@ -446,9 +480,11 @@ mod tests {
         assert!(is_own_chatter("yantrik-ui", "nmcli -w 2 device"));
         assert!(is_own_chatter("network-service", "wl-paste --no-newline"));
         assert!(is_own_chatter("bash", "/usr/bin/yos perception 20"));
+        assert!(!is_own_chatter("yantrik-ui", "firefox"));
+        assert!(!is_own_chatter("labwc", "/usr/bin/foot"));
+        assert!(!is_own_chatter("bash", "yos act shell open_app name=notes"));
+        assert!(!is_own_chatter("fake-service", "nmcli"));
         assert!(!is_own_chatter("yantrik-terminal", "cargo build"));
-        assert!(!is_own_chatter("yantrik-agent-terminal", "cat notes.md"));
-        assert!(!is_own_chatter("bash", "cargo test"));
     }
 
     #[test]
