@@ -1426,8 +1426,10 @@ fn worker_loop(
                         // Tell a caller blocked in `ask` whether a model answered this turn,
                         // while the fact is still the one being stored: it must not take the
                         // offline responder's canned text away as the model's words.
+                        // Nor the not-set-up sentence, a guard warning or a router reply:
+                        // no model produced those, so they prove nothing.
                         if let Some(tx) = &model {
-                            let _ = tx.send(ok);
+                            let _ = tx.send(ok && !response.without_model);
                         }
                         if ok {
                             execute_suppression_logged = false;

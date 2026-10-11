@@ -88,6 +88,8 @@ fn builtin_turn(
         let mut done = false;
         let mut failed = false;
         let mut replace_next = false;
+        // What the person sees as the reply, so an empty one is not counted as an answer.
+        let mut said = String::new();
         while let Ok(token) = answer.recv() {
             let end = token == "__DONE__";
             if token == "__REPLACE__" {
@@ -96,6 +98,10 @@ fn builtin_turn(
                 if replace_next && token == crate::bridge::TURN_FAILED_REPLY {
                     failed = true;
                 }
+                if replace_next {
+                    said.clear();
+                }
+                said.push_str(&token);
                 replace_next = false;
             }
             if tx.send(token).is_err() {
@@ -110,9 +116,13 @@ fn builtin_turn(
             bridge.score_conversation_turn(asked);
         }
         // The first run's first success is a model's words, not the not-set-up reply.
+        // A guard warning or a router reply is not a model's either (`without_model`), and
+        // only the not-set-up reply itself means nothing is set up.
         let outcome = match by_model.try_recv() {
-            Ok(true) if done && !failed => Ok(()),
-            Ok(false) => Err(super::onboarding::NOT_SET_UP_SENTENCE.to_string()),
+            Ok(true) if done && !failed && !said.trim().is_empty() => Ok(()),
+            Ok(false) if said.trim() == yantrik_ml::not_set_up::NOT_SET_UP.trim() => {
+                Err(super::onboarding::NOT_SET_UP_SENTENCE.to_string())
+            }
             _ => Err(super::onboarding::NO_ANSWER_SENTENCE.to_string()),
         };
         super::onboarding::first_chat_ended(&weak, outcome);
