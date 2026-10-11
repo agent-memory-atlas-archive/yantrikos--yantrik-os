@@ -847,6 +847,15 @@ fn configure_ai(mount_dir: &str, state: &InstallerState) {
         }
     }
 
+    // ── The sharing choice and text size made with the provider, so the first boot does not
+    // ask again (wire/onboarding.rs). Neither holds a key.
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
+    for file in ["ai-accounts.json", "first-run.json"] {
+        if let Ok(text) = std::fs::read_to_string(format!("{home}/.config/yantrik/{file}")) {
+            let _ = sudo_write(&format!("{settings_dir}/{file}"), &text);
+        }
+    }
+
     // ── Also write user_name to per-user settings.yaml ──────────
     let settings_content = if let Ok(existing) = std::fs::read_to_string(&settings_path) {
         let mut s = existing;

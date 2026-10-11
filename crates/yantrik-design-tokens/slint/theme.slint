@@ -113,6 +113,13 @@ export global MotionPrefs {
     in-out property <bool> reduced: false;
 }
 
+// The person's "Make text bigger" (the first run's first screen, design/experience-final-
+// 2026-10-10.md). A multiplier a screen applies to its `fs-` sizes, live: 1.0 is the scale
+// below, and the first run offers 1.25 and 1.5. The shell sets it from the saved choice.
+export global TextScale {
+    in-out property <float> factor: 1.0;
+}
+
 // ─── Bright and sharp (design/desk-and-mind-2026-09-23.md, section 1) ─────
 //
 // The desktop read muddy: grey text on grey cards on a grey ground, each step a few percent

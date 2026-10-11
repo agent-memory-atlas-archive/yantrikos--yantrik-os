@@ -194,6 +194,9 @@ export component DesktopScreen inherits Rectangle {
     callback send-message(string);
     callback mic-pressed();
     callback launch-app(string);
+    // The first run's first success, passed to the chat (IntentLens.first-run).
+    in property <bool> first-run-chat: false;
+    callback first-run-chat-done();
 
     // The desktop's right-click menu.
     //
@@ -677,6 +680,8 @@ export component DesktopScreen inherits Rectangle {
         }
         send-message(text) => { root.send-message(text); }
         mic-pressed => { root.mic-pressed(); }
+        first-run: root.first-run-chat;
+        first-run-done => { root.first-run-chat-done(); }
     }
 
     // Last in the file so it draws over the icons, the orb and the taskbar. A menu that opened

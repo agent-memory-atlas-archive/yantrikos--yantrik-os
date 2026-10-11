@@ -21,7 +21,7 @@ fn teal_stays_off_screens_that_are_not_a_minds() {
     for file in [
         "container_manager.slint", "about.slint", "skill_store.slint", "settings.slint",
         "system_dashboard.slint", "system_monitor.slint", "recipes.slint", "permission_dashboard.slint",
-        "installer.slint", "onboarding.slint", "login.slint", "terminal.slint",
+        "installer.slint", "onboarding.slint", "onboarding_first_run.slint", "login.slint", "terminal.slint",
         "components/onboard_kit.slint", "components/app_ribbon.slint", "components/window_frame.slint",
         "components/model_tier_badge.slint",
     ] {
