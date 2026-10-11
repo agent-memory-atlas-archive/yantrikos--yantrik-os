@@ -1,6 +1,6 @@
 """env_line from harnesses/lib/install/common.sh, run under a plain `sh` with HOME in a temp dir.
 
-The installer writes YANTRIK_ALLOW_ALL_USERS into Hermes's own .env (hermes.sh), and that file
+The installer writes the desktop platform's owner-only allowlist and YantrikDB settings into Hermes's own .env (hermes.sh), and that file
 may hold secrets, so the two things worth pinning down are the file's mode and the value's
 silence, next to the editing itself: replace in place, append when absent, never a neighbour
 that merely shares a prefix. Needs a real unix filesystem, so CI runs it and Windows does not.

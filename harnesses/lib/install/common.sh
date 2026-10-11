@@ -18,6 +18,72 @@ export PATH
 say() { printf '%s\n' "$*"; }
 fail() { printf 'install failed: %s\n' "$*" >&2; exit 1; }
 
+# This directory: the installers, proofs.py beside lib/, and model.sh when the model half (#675)
+# has put one here. Every installer is run as `sh <this dir>/<name>.sh`, so $0 is beside us.
+INSTALL_LIB=$(cd "$(dirname "$0")" && pwd)
+HARNESS_LIB=$(dirname "$INSTALL_LIB")
+
+# YantrikDB as every mind's memory (#677), baked into the image by build-debian-iso.sh and never
+# fetched at install time: the engine and the Hermes provider as wheels, and yantrikdb-mcp in a
+# virtualenv of its own on the image's Python. Outside /opt/yantrik/share on purpose: the updater
+# syncs share/ with --delete from the release bundle, which does not carry these.
+# YANTRIK_MEMORY_DIR moves it, for a checkout or a test.
+MEMORY_DIR=${YANTRIK_MEMORY_DIR:-/opt/yantrik/memory}
+MEMORY_WHEELS="$MEMORY_DIR/wheels"
+YANTRIKDB_MCP="$MEMORY_DIR/bin/yantrikdb-mcp"
+
+# What an install leaves for the proofs and for Revert to read: which steps ran, never a secret.
+harness_state() { printf '%s\n' "${XDG_STATE_HOME:-$HOME/.local/state}/yantrik/harnesses/$1"; }
+
+# harness_memory_db HARNESS — the harness's own YantrikDB file. One per harness, not one shared
+# file: the engine keeps its index in the process that opened it and does not see another
+# process's later writes (measured on engine 0.23.2), so two running harnesses on one file would
+# each recall a different memory. The person's one shared memory is the `yantrik` mode through
+# the memory server, which waits on #586 (see hermes.sh).
+harness_memory_db() { printf '%s\n' "${XDG_DATA_HOME:-$HOME/.local/share}/yantrik/memory/$1.db"; }
+
+# backup_once FILE — FILE copied to FILE.before-yantrik once, before the first change an install
+# makes to it, so Revert (revert.sh) can put the person's own file back. A second install never
+# replaces the backup with the first install's output. A file that did not exist is recorded as
+# such, and Revert removes what the install created.
+backup_once() {
+    [ -e "$1.before-yantrik" ] || [ -e "$1.before-yantrik.absent" ] && return 0
+    if [ -e "$1" ]; then
+        ( umask 077 && cp -p "$1" "$1.before-yantrik" ) || fail "could not keep a copy of $1"
+    else
+        mkdir -p "$(dirname "$1")" && ( umask 077 && : > "$1.before-yantrik.absent" ) \
+            || fail "could not note that $1 was not there"
+    fi
+    state=$(harness_state "${HARNESS:-unknown}")
+    mkdir -p "$state" || fail "could not write $state"
+    grep -qxF "$1" "$state/files" 2>/dev/null || printf '%s\n' "$1" >> "$state/files"
+}
+
+# wire_model HARNESS — the model half of the install, which is not this file's: #675's
+# install-time wiring (gateway token, `model: picked`) when this image carries it as
+# lib/install/model.sh with `yantrik_wire_model HARNESS`. Without it the harness keeps its own
+# model and says so, and the "Can it answer?" proof reads "model: its own" rather than failing.
+wire_model() {
+    state=$(harness_state "$1")
+    mkdir -p "$state" || fail "could not write $state"
+    if [ -f "$INSTALL_LIB/model.sh" ]; then
+        . "$INSTALL_LIB/model.sh"
+        if command -v yantrik_wire_model >/dev/null 2>&1; then
+            if yantrik_wire_model "$1"; then
+                printf 'picked\n' > "$state/model"
+                say "model: wired to the model you picked"
+                return 0
+            fi
+            rm -f "$state/model"
+            say "model: could not be wired to the model you picked; the proofs below say how to fix it"
+            printf 'failed\n' > "$state/model"
+            return 0
+        fi
+    fi
+    rm -f "$state/model"
+    say "model: its own (this image has no install-time model wiring; skipped)"
+}
+
 # Node, pinned. Updated by hand with the checksums nodejs.org publishes in SHASUMS256.txt for
 # this release: a download that does not match is refused, not unpacked. The .tar.gz, not the
 # smaller .tar.xz, because the image has no xz.
@@ -54,6 +120,34 @@ env_line() {
         [ "$found" -eq 1 ] || printf '%s=%s\n' "$key" "$value" >> "$tmp"
         mv "$tmp" "$file" || exit 1
     ) || fail "could not write $1"
+}
+
+# env_unset FILE KEY — every KEY= line removed from a dotenv file, the rest kept as it was, the
+# same private, atomic way env_line writes. Nothing to do when the file or the key is not there.
+env_unset() {
+    file=$1 key=$2
+    [ -f "$file" ] || return 0
+    grep -q "^$key=" "$file" || return 0
+    (
+        umask 077
+        tmp=$(mktemp "$(dirname "$file")/.env.XXXXXX") || exit 1
+        trap 'rm -f "$tmp"' EXIT INT TERM
+        while IFS= read -r line || [ -n "$line" ]; do
+            case $line in
+                "$key="*) ;;
+                *) printf '%s\n' "$line" ;;
+            esac
+        done < "$file" > "$tmp"
+        mv "$tmp" "$file" || exit 1
+    ) || fail "could not write $1"
+}
+
+# prove HARNESS [WAIT] — the three proofs (lib/proofs.py): "Can it answer?", "Can it remember?",
+# "Can it reach the desktop?". An install is not finished until all three pass; the rows it
+# prints are the ones Settings shows, each failure with its one-press fix.
+prove() {
+    python3 "$HARNESS_LIB/proofs.py" "$1" --wait "${2:-90}" \
+        || fail "$1 is installed but not every proof passed; the rows above say what to press"
 }
 
 # node_at_least MAJOR.MINOR — the node on PATH is at least that version.
