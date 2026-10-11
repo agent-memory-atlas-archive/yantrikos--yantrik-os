@@ -4,15 +4,20 @@
 //! - Welcome: focus starts on Make text bigger; Space makes the text bigger live (1.25, 1.5,
 //!   then back to normal); Tab reaches Read this to me, whose Enter speaks the screen's words;
 //!   Tab reaches Get started, whose Enter goes to "Who should do the thinking?".
+//!   A first boot the installer did not set up asks the person's name: one field, Enter goes on.
+//!   Escape is Back on every screen, never closing the first run.
 //! - Who thinks: focus starts on the first card; Space chooses it; the key field takes focus and
-//!   typing then Enter hands the shell the provider and the key; "Show every provider" opens the
-//!   full list.
+//!   typing then Enter hands the shell the provider and the key; the account's models are listed
+//!   with none chosen, and the person picks one by keyboard; a pick that did not take offers Try
+//!   again; "Show every provider" opens the full list.
 //! - What your minds share: the sentence names the provider and is pre-checked; Space unchecks
-//!   it and the screen says what that means.
+//!   it and the screen says what that means; choosing Keep personal things on this computer
+//!   shows the sentence unchecked.
 //! - Getting ready and Your minds: the three rows per mind, in every state.
 //! - The installer already chose: Get started goes straight to the checks, and starts them.
-//! - The chat's first success: one suggestion and Type · Talk; Talk reaches the microphone;
-//!   after the first reply, "You're ready." with Done.
+//! - The chat's first success: one suggestion and Type · Talk; Talk reaches the microphone; a
+//!   reply that was not an answer says so with Try again; only a real answer brings "You're
+//!   ready." with Done.
 //!
 //! Stills are written beside `output` (first-run-1-welcome.png …) for the pull request.
 
@@ -74,7 +79,7 @@ fn mind(name: &str, words: &str, ok: bool, checks: Vec<FirstRunCheck>) -> FirstR
 }
 
 fn minds_checking() -> Vec<FirstRunMind> {
-    vec![mind("Yantrik Companion", "Checking", false, vec![
+    vec![mind("Yantrik Mind", "Checking", false, vec![
         check("answer", "Can it answer?", "passed", "Passed", "https://api.anthropic.com/v1 · answered in 840 ms"),
         check("remember", "Can it remember?", "checking", "Checking (started 2:16)", ""),
         check("desktop", "Can it reach the desktop?", "not-checked", "Not checked yet", ""),
@@ -83,7 +88,7 @@ fn minds_checking() -> Vec<FirstRunMind> {
 
 fn minds_done() -> Vec<FirstRunMind> {
     vec![
-        mind("Yantrik Companion", "Ready", true, vec![
+        mind("Yantrik Mind", "Ready", true, vec![
             check("answer", "Can it answer?", "passed", "Passed", "https://api.anthropic.com/v1 · answered in 840 ms"),
             check("remember", "Can it remember?", "passed", "Passed", "wrote a note, recalled it, deleted it"),
             check("desktop", "Can it reach the desktop?", "passed", "Passed", "attached as companion"),
@@ -130,6 +135,7 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     let enter = || key(w, "\n".into());
 
     let ui = FirstRunProbe::new()?;
+    ui.set_ask_name(true);
     ui.set_featured(ModelRc::new(VecModel::from(featured())));
     ui.set_every_provider(ModelRc::new(VecModel::from(every())));
     ui.set_shared_items(strings(&["Your name", "Your town", "The app you're in", "What your minds remember about you"]));
@@ -160,6 +166,18 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     tab();
     enter();
     assert!(ui.get_spoken().starts_with("Welcome to Yantrik."), "Read this to me speaks the screen: {}", ui.get_spoken());
+    assert!(ui.get_spoken().contains("What should your minds call you?"), "{}", ui.get_spoken());
+    // A first boot the installer did not set up asks the name: one field, and empty skips it.
+    tab();
+    type_text(w, "Asha");
+    render(w, width, height, &still("1-welcome-name"))?;
+    enter();
+    assert_eq!(ui.get_step(), 2, "Enter in the name field is Get started");
+    assert_eq!(ui.get_named(), "Asha");
+    key(w, slint::platform::Key::Escape.into());
+    assert_eq!(ui.get_step(), 1, "Escape is Back, never closing the first run");
+    tab();
+    tab();
     tab();
     enter();
     assert_eq!(ui.get_step(), 2, "Get started, by keyboard");
@@ -173,8 +191,27 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     render(w, width, height, &still("2-connect"))?;
     enter();
     assert_eq!(ui.get_submitted(), "anthropic:sk-ant-test", "the key field had focus and Enter connects");
+    // The account lists its models and the person chooses one: nothing is chosen for them.
+    let model = |id: &str, name: &str| FirstRunModel { id: id.into(), name: name.into() };
+    ui.set_models(ModelRc::new(VecModel::from(vec![
+        model("claude-opus-4-1", "Claude Opus 4.1"),
+        model("claude-sonnet-4-5", "Claude Sonnet 4.5"),
+        model("claude-haiku-4-5", "Claude Haiku 4.5"),
+    ])));
+    ui.set_connect_status("choose-model".into());
+    ui.set_connect_words("It lists 3 models. Choose one.".into());
+    render(w, width, height, &still("2-choose-model"))?;
+    assert_eq!(ui.get_chosen_model(), "", "no model is pre-selected");
+    tab();
+    space();
+    assert_eq!(ui.get_picked(), "claude-sonnet-4-5", "the person picks, by keyboard");
+    ui.set_connect_status("pick-failed".into());
+    ui.set_connect_words("Needs attention: claude-sonnet-4-5 answered, but your minds could not be set to use it (not one of the listed models)".into());
+    render(w, width, height, &still("2-pick-failed"))?;
+    enter();
+    assert_eq!(ui.get_retries(), 1, "Try again has focus, and retries the pick");
     ui.set_connect_status("connected".into());
-    ui.set_connect_words("Connected to Claude.".into());
+    ui.set_connect_words("Connected to Claude. Your minds will use claude-sonnet-4-5.".into());
     render(w, width, height, &still("2-connected"))?;
     ui.set_light(true);
     render(w, width, height, &still("2-connected-light"))?;
@@ -193,6 +230,18 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     space();
     assert!(!ui.get_share(), "Space on the focused sentence unchecks it");
     render(w, width, height, &still("3-share-off"))?;
+    space();
+    assert!(ui.get_share());
+    // Keep personal things on this computer: the sharing sentence shows unchecked.
+    tab();
+    tab();
+    space();
+    assert!(ui.get_private_lane(), "the private lane, by keyboard");
+    assert!(!ui.get_share(), "the share sentence no longer looks checked");
+    render(w, width, height, &still("3-private-lane"))?;
+    key(w, slint::platform::Key::Escape.into());
+    assert_eq!(ui.get_step(), 2, "Escape on step 3 goes Back");
+    ui.set_private_lane(false);
     ui.set_share(true);
 
     // 4. Getting your minds ready.
@@ -254,6 +303,14 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     chat.set_generating(true);
     render(w, width, height, &still("6-answering"))?;
     chat.set_generating(false);
+    // A reply that was not an answer keeps the person here, with the plain sentence and Try again.
+    chat.set_outcome("failed".into());
+    chat.set_failure("Yantrik Mind did not answer this time.".into());
+    render(w, width, height, &still("6-not-answered"))?;
+    enter();
+    assert_eq!(chat.get_retries(), 1, "Try again takes the focus");
+    chat.set_outcome("answered".into());
+    chat.set_failure("".into());
     render(w, width, height, &still("7-ready"))?;
 
     println!("PASS first run: welcome, who thinks, sharing, checks, minds and the chat's first success, by keyboard");

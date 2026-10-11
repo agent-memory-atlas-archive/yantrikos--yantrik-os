@@ -8,9 +8,14 @@
 //!   private-lane backend says one can be downloaded), and it says its size.
 //! - **The check rows.** Not checked yet → Checking (started h:mm) → Passed / Needs attention:
 //!   <reason>, from what each check returned. No percentage, no step counter pretending to know.
+//! - **The model.** Connect account lists the account's models and the person chooses one;
+//!   nothing is chosen for them (no catalogue default, no first-in-the-list). That model is
+//!   proven with a real answer, saved on the account, and made the one pick for every mind
+//!   (`ai_accounts::onboarding::choose_model`, after the catalogue is listed again); a pick that
+//!   did not take is said on screen, with Try again.
 //! - **The sharing choice.** Share / Private lane / Off, recorded through #675's onboarding calls
-//!   (`ai_accounts::onboarding`: `agree_to_share`, `keep_personal_things_on`), and the model the
-//!   connection was proven with becomes the one pick (`choose_model`).
+//!   (`ai_accounts::onboarding`: `agree_to_share`, `keep_personal_things_on`).
+//! - **"Can it answer?"** is asked of the mind itself, through the companion's own chat path.
 //!
 //! The provider is chosen once: a choice made through these screens in the installer (carried to
 //! the new home in `first-run.json`) skips "Who should do the thinking?" and "What your minds
@@ -29,9 +34,9 @@ use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 use yantrik_ml::{ProviderDescriptor, ProviderKind, KNOWN_PROVIDERS};
 
 use crate::app_context::AppContext;
-use crate::wire::provider_catalogue::{auth_type_for, default_model_for};
+use crate::wire::provider_catalogue::auth_type_for;
 use crate::wire::settings::{ProviderStore, ProviderStoreEntry};
-use crate::{App, FirstRunCheck, FirstRunMind, FirstRunProvider, TextScale};
+use crate::{App, FirstRunCheck, FirstRunMind, FirstRunModel, FirstRunProvider, TextScale};
 
 // ── The cards ──────────────────────────────────────────────────────────────────────────────
 
@@ -423,7 +428,7 @@ fn apply_sharing(sharing: Sharing) -> Result<(), String> {
 // ── What other branches provide ───────────────────────────────────────────────────────────
 
 /// The minds and their three proofs (#677: memory write-then-recall, an attach seen on the
-/// harness socket). The answer proof is ours: a one-token call to the chosen account.
+/// harness socket). The answer proof is ours: the mind is asked, through its own chat path.
 pub trait Proofs: Send + Sync {
     /// Every mind to check, `(id, name)`.
     fn minds(&self) -> Vec<(String, String)>;
@@ -441,7 +446,7 @@ impl Proofs for PendingProofs {
     fn minds(&self) -> Vec<(String, String)> {
         // The built-in companion is the one mind every install has; the harness minds come with
         // #677's list.
-        vec![("companion".into(), "Yantrik Companion".into())]
+        vec![("companion".into(), "Yantrik Mind".into())]
     }
     fn remember(&self, _mind: &str) -> Proof {
         Proof::Attention {
@@ -492,8 +497,9 @@ pub struct Saved {
     pub text_scale: f32,
     /// "share", "private-lane", "off" or "local", for #675 to read when it routes.
     pub sharing: String,
-    /// The one-time hint about What really happened has been shown.
-    pub witness_hint_shown: bool,
+    // Not kept yet: whether the one-time "Hold What really happened" hint was shown. The 3:45
+    // "Recorded … Show me" footer and that hint wait on a receipt mechanism that does not exist
+    // yet; nothing here pretends to record one.
     /// A provider was chosen and answered through these screens (in the installer or at first
     /// boot): the first boot does not ask again.
     pub provider_chosen: bool,
@@ -556,49 +562,102 @@ fn save_primary(entry: ProviderStoreEntry) -> Result<(), String> {
 /// The companion's bridge, for putting it on the account just proven.
 static BRIDGE: std::sync::OnceLock<Arc<crate::bridge::CompanionBridge>> = std::sync::OnceLock::new();
 
-/// Proven: keep the model it answered with on the saved account (as the old onboarding's
-/// `remember_model` did, so the next start runs on a model the account serves, not a catalogue
-/// guess) and put the companion on it now, so the first success in the chat is answered by what
-/// was just checked rather than "No mind can think yet" until a restart. A companion on Yantrik
-/// models (companion-models.json) stays there.
-fn adopt(entry: &ProviderStoreEntry, model: &str) -> Result<(), String> {
-    let mut kept = entry.clone();
-    if kept.model.is_empty() {
-        kept.model = model.to_string();
+/// The account being connected, key and all, between "Connect account" and the person choosing
+/// its model. In memory only: nothing is saved until the chosen model has answered.
+static PENDING: Mutex<Option<ProviderStoreEntry>> = Mutex::new(None);
+
+/// One model the account lists, as the model step shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelChoice {
+    /// What the provider calls it, sent upstream as `model`.
+    pub id: String,
+    pub name: String,
+}
+
+/// The models an account offers, from the same source the catalogue lists them from: a hand-kept
+/// list for a provider with none of its own, else the provider's own answer. A failed listing is
+/// the plain reason. Nothing here chooses one: no catalogue default, no first-in-the-list.
+pub(crate) fn model_choices(
+    account: &crate::ai_accounts::account::Account,
+    listed: Option<Result<Vec<crate::wire::provider_models::ListedModel>, crate::wire::provider_models::ListError>>,
+) -> Result<Vec<ModelChoice>, String> {
+    use crate::ai_accounts::models::{build, Listing};
+    let free = yantrik_ml::provider::pool::tiers::FREE_TIERS;
+    let built = build(account, free, listed);
+    if let Listing::Failed(why) = &built.listing {
+        return Err(why.trim_end_matches('.').to_string());
     }
-    save_primary(kept.clone())?;
+    if built.models.is_empty() {
+        return Err("it answered, but lists no model to talk to".into());
+    }
+    Ok(built.models.into_iter().map(|m| ModelChoice { id: m.model, name: m.name }).collect())
+}
+
+/// Ask the account for its models (off the UI thread).
+fn list_choices(entry: &ProviderStoreEntry) -> Result<Vec<ModelChoice>, String> {
+    let account = crate::ai_accounts::account::accounts(std::slice::from_ref(entry), &[], &Default::default(), &Default::default())
+        .into_iter()
+        .next()
+        .ok_or("there is no address for it")?;
+    let free = yantrik_ml::provider::pool::tiers::FREE_TIERS;
+    let listed = if crate::ai_accounts::models::needs_no_listing(&account, free) {
+        None
+    } else {
+        Some(crate::wire::provider_models::list_models(&entry.base_url, entry.api_key.as_deref(), &entry.auth_type))
+    };
+    model_choices(&account, listed)
+}
+
+/// Proven with the person's model: keep it on the saved account (so the next start runs on the
+/// model they chose) and put the companion on it now, so the first success in the chat is
+/// answered by what was just checked rather than "No mind can think yet" until a restart. A
+/// companion on Yantrik models (companion-models.json) stays there.
+fn adopt(entry: &ProviderStoreEntry) -> Result<(), String> {
+    save_primary(entry.clone())?;
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/root"));
     if !home.join(".config/yantrik/companion-models.json").exists() {
         if let Some(bridge) = BRIDGE.get() {
-            crate::wire::provider_panel::reload_primary(bridge, &kept);
+            crate::wire::provider_panel::reload_primary(bridge, entry);
         }
     }
     Ok(())
 }
 
-/// A connection is proven by the smallest real answer: a one-token call with the model the
-/// person configured, or, when they named none, the catalogue's default if the provider serves
-/// it. Returns the model it answered with (for Details only), or the plain reason.
-fn prove_answer(entry: &ProviderStoreEntry) -> Result<(String, i32), String> {
-    use crate::wire::provider_models::{check_key, pick_model, KeyCheck};
+/// The smallest real answer from the account, with the model the person chose: a one-token call.
+fn prove_answer(entry: &ProviderStoreEntry) -> Result<i32, String> {
+    use crate::wire::provider_models::{check_key, KeyCheck};
+    if entry.model.is_empty() {
+        return Err("no model is chosen yet".into());
+    }
     let started = std::time::Instant::now();
-    let model = if !entry.model.is_empty() {
-        entry.model.clone()
-    } else {
-        let listed = crate::wire::settings::test_provider_connection(&entry.base_url, entry.api_key.as_deref(), &entry.auth_type);
-        if !listed.success {
-            return Err(listed.message);
-        }
-        pick_model(&listed.models, &[default_model_for(&entry.provider_type)]).unwrap_or("").to_string()
-    };
-    if model.is_empty() {
-        return Err("it answered, but offers no model to talk to".into());
-    }
-    match check_key(&entry.base_url, entry.api_key.as_deref().unwrap_or(""), &model) {
-        KeyCheck::Works => Ok((model, started.elapsed().as_millis() as i32)),
+    match check_key(&entry.base_url, entry.api_key.as_deref().unwrap_or(""), &entry.model) {
+        KeyCheck::Works => Ok(started.elapsed().as_millis() as i32),
         KeyCheck::Refused => Err("the key was refused".into()),
-        KeyCheck::Unconfirmed(why) => Err(why),
+        KeyCheck::Unconfirmed(why) => Err(why.trim_end_matches('.').to_string()),
     }
+}
+
+/// The AI-accounts id the catalogue gave `entry` once saved: its own key entry, else its address
+/// and model; the slug of its name when the catalogue has not listed it yet.
+fn catalogue_account(entry: &ProviderStoreEntry) -> String {
+    use crate::ai_accounts::account::KeyRef;
+    let base = crate::wire::provider_models::openai_base(&entry.base_url);
+    crate::ai_accounts::accounts()
+        .into_iter()
+        .find(|a| matches!(&a.key, KeyRef::Saved { entry: id } if *id == entry.id))
+        .or_else(|| crate::ai_accounts::accounts().into_iter().find(|a| a.base_url == base && a.saved_model == entry.model))
+        .map(|a| a.id)
+        .unwrap_or_else(|| account_id(entry))
+}
+
+/// Make the person's model the one pick for every mind (#675): the catalogue is listed again
+/// first, so the account added a moment ago is in it. The plain reason when it did not take.
+fn make_the_pick(entry: &ProviderStoreEntry) -> Result<(), String> {
+    if let Some(bridge) = BRIDGE.get() {
+        crate::ai_accounts::refresh_now(bridge);
+    }
+    let id = crate::ai_accounts::models::gateway_id(&catalogue_account(entry), &entry.model);
+    crate::ai_accounts::onboarding::choose_model(&id)
 }
 
 struct State {
@@ -634,6 +693,12 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         (None, false) => String::new(),
     }.into());
     ui.set_fr_minds(model_of(lock(&state).rows.iter().map(MindRows::to_ui).collect()));
+    // A first boot the installer did not set up has no name for the person: ask it, once, so
+    // the minds do not call them "User". Nothing else (interests, place, the companion's name).
+    ui.set_fr_ask_name(asks_name(
+        crate::onboarding::after_install_marker_path().exists(),
+        &ui.get_settings_user_name(),
+    ));
     // Chosen once: a provider already saved (the installer carries the live session's choice
     // into this account's providers.yaml) skips the two AI screens.
     if let Some(p) = ProviderStore::load().primary().filter(|_| load_saved(&saved).provider_chosen) {
@@ -681,6 +746,18 @@ pub fn wire(ui: &App, ctx: &AppContext) {
             ui.set_fr_key_input("".into());
             ui.set_fr_connect_status("".into());
             ui.set_fr_connect_words("".into());
+            ui.set_fr_models(model_of(Vec::new()));
+            ui.set_fr_chosen_model("".into());
+            *lock(&PENDING) = None;
+            // An address with a part only the person knows (Cloudflare's {account_id}): Advanced,
+            // with the address to fill in, rather than a Connect that can only fail.
+            if let Some(template) = needs_filling(&c.id) {
+                ui.set_fr_custom_url(template.into());
+                ui.set_fr_custom_model("".into());
+                ui.set_fr_custom_key("".into());
+                ui.set_fr_connect_mode("advanced".into());
+                return;
+            }
             let mode = if c.id == THIS_COMPUTER {
                 "this-computer"
             } else if c.browser_sign_in {
@@ -755,12 +832,26 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         move |url, model, key| {
             let Some(ui) = weak.upgrade() else { return };
             let key = key.trim().to_string();
+            let url = url.trim().to_string();
+            if url.contains('{') {
+                ui.set_fr_connect_status("attention".into());
+                ui.set_fr_connect_words("Needs attention: fill in the part of the address in braces first".into());
+                return;
+            }
+            // Advanced for a known provider (one whose address needed filling in) keeps its name
+            // and how it signs requests; otherwise it is the person's own endpoint.
+            let chosen = ui.get_fr_chosen_id().to_string();
+            let known = ProviderDescriptor::by_id(&chosen).map(|p| p.id.to_string());
+            let (id, name, provider_type, auth) = match &known {
+                Some(p) => (format!("{p}-onboarding"), crate::wire::provider_catalogue::provider_preset(p).0.to_string(), p.clone(), auth_type_for(p).to_string()),
+                None => ("custom-onboarding".into(), "Custom".into(), "custom".into(), "bearer".into()),
+            };
             connect(&ui, ProviderStoreEntry {
-                id: "custom-onboarding".into(),
-                name: "Custom".into(),
-                provider_type: "custom".into(),
-                base_url: url.trim().to_string(),
-                auth_type: if key.is_empty() { "none".into() } else { "bearer".into() },
+                id,
+                name,
+                provider_type,
+                base_url: url,
+                auth_type: if key.is_empty() { "none".into() } else { auth },
                 api_key: if key.is_empty() { None } else { Some(key) },
                 is_primary: true,
                 is_fallback: false,
@@ -770,13 +861,43 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         }
     });
 
+    ui.on_fr_pick_model({
+        let weak = ui.as_weak();
+        move |model| {
+            let Some(ui) = weak.upgrade() else { return };
+            if ui.get_fr_connect_status() == "checking" {
+                return;
+            }
+            let Some(entry) = lock(&PENDING).as_mut().map(|e| {
+                e.model = model.to_string();
+                e.clone()
+            }) else {
+                return;
+            };
+            ui.set_fr_chosen_model(entry.model.into());
+            prove_and_pick(&ui);
+        }
+    });
+
+    ui.on_fr_retry_pick({
+        let weak = ui.as_weak();
+        move || {
+            if let Some(ui) = weak.upgrade() {
+                retry_pick(&ui);
+            }
+        }
+    });
+
     ui.on_fr_use_this_computer({
         let weak = ui.as_weak();
         move || {
             let Some(ui) = weak.upgrade() else { return };
             // The image's own account for the bundled model, when it wrote one; else a new one.
+            // Its model is the one the person chooses from what the runtime lists, not whatever the
+            // image wrote down.
             if let Some(mut e) = ProviderStore::load().entries.into_iter().find(|e| e.base_url.trim_end_matches('/') == LOCAL_ENDPOINT) {
                 e.is_primary = true;
+                e.model.clear();
                 connect(&ui, e);
                 return;
             }
@@ -857,8 +978,21 @@ pub fn wire(ui: &App, ctx: &AppContext) {
             crate::onboarding::write_marker();
             // The first success happens in the chat beside the desktop.
             ui.set_fr_chat(1);
+            ui.set_fr_chat_outcome("".into());
+            ui.set_fr_chat_failure("".into());
             ui.set_lens_open(true);
             tracing::info!("first run: done, chat opened for the first success");
+        }
+    });
+
+    ui.on_fr_chat_retry({
+        let weak = ui.as_weak();
+        move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let question = lock(&FIRST_QUESTION).clone();
+            if !question.is_empty() {
+                ui.invoke_send_message(question.into());
+            }
         }
     });
 
@@ -872,6 +1006,18 @@ pub fn wire(ui: &App, ctx: &AppContext) {
     });
 }
 
+/// Whether Welcome asks the person's name: not when the installer made the account (it asked
+/// already), and not when a name is already kept. "User" is the config's placeholder, not a name.
+pub fn asks_name(after_install: bool, kept: &str) -> bool {
+    let kept = kept.trim();
+    !after_install && (kept.is_empty() || kept == "User")
+}
+
+/// The address to fill in, for a provider whose address has a part only the person knows.
+pub fn needs_filling(id: &str) -> Option<&'static str> {
+    ProviderDescriptor::by_id(id).filter(|p| p.url_needs_filling()).map(|p| p.openai_base_url())
+}
+
 fn card_name_for(provider_type: &str, saved_name: &str) -> String {
     match ProviderDescriptor::by_id(provider_type) {
         Some(p) => card_name(p),
@@ -883,39 +1029,40 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-/// Prove the account answers, off the UI thread, and save it once it has. "Connected to Claude."
-/// only after a real answer; anything else is the plain reason.
+/// Connect account: ask the account for its models, off the UI thread, and show them for the
+/// person to choose from. Nothing is chosen for them and nothing is saved yet. A model they
+/// typed themselves (Advanced) is theirs already, and goes straight to the proof.
 fn connect(ui: &App, entry: ProviderStoreEntry) {
     if entry.base_url.is_empty() {
         ui.set_fr_connect_status("attention".into());
         ui.set_fr_connect_words("Needs attention: there is no address for it".into());
         return;
     }
-    let name = ui.get_fr_chosen_name().to_string();
+    ui.set_fr_models(model_of(Vec::new()));
+    ui.set_fr_chosen_model("".into());
+    if !entry.model.is_empty() {
+        *lock(&PENDING) = Some(entry);
+        prove_and_pick(ui);
+        return;
+    }
     ui.set_fr_connect_status("checking".into());
     ui.set_fr_connect_words(format!("Checking (started {})", clock(chrono::Local::now())).into());
     let weak = ui.as_weak();
     std::thread::spawn(move || {
-        // Saved only once it has answered: a refused key or a runtime that is not running
-        // leaves nothing behind, and the account that worked before stays the primary.
-        let result = prove_answer(&entry).and_then(|(model, ms)| {
-            adopt(&entry, &model).map_err(|e| format!("it answered, but could not be saved ({e})"))?;
-            Ok((model, ms))
-        });
-        if let Ok((model, _)) = &result {
-            // The model it answered with is the one pick for every mind (#675).
-            let id = crate::ai_accounts::models::gateway_id(&account_id(&entry), model);
-            if let Err(e) = crate::ai_accounts::onboarding::choose_model(&id) {
-                tracing::info!(error = %e, "first run: the pick waits for the account's model list");
-            }
-            update_saved(&saved_path(), |s| s.provider_chosen = true);
+        let listed = list_choices(&entry);
+        if listed.is_ok() {
+            *lock(&PENDING) = Some(entry);
         }
         let _ = slint::invoke_from_event_loop(move || {
             let Some(ui) = weak.upgrade() else { return };
-            match result {
-                Ok(_) => {
-                    ui.set_fr_connect_status("connected".into());
-                    ui.set_fr_connect_words(format!("Connected to {name}.").into());
+            match listed {
+                Ok(models) => {
+                    let n = models.len();
+                    ui.set_fr_models(model_of(models.into_iter().map(|m| FirstRunModel { id: m.id.into(), name: m.name.into() }).collect()));
+                    ui.set_fr_connect_status("choose-model".into());
+                    ui.set_fr_connect_words(
+                        if n == 1 { "It lists one model. Choose it to go on.".to_string() } else { format!("It lists {n} models. Choose one.") }.into(),
+                    );
                 }
                 Err(why) => {
                     ui.set_fr_connect_status("attention".into());
@@ -923,6 +1070,129 @@ fn connect(ui: &App, entry: ProviderStoreEntry) {
                 }
             }
         });
+    });
+}
+
+/// The person chose `model`: prove it answers, save the account with it, put the companion on
+/// it, and make it the one pick for every mind. "Connected to Claude." only after all of that;
+/// a pick that did not take is said, with Try again.
+fn prove_and_pick(ui: &App) {
+    let Some(entry) = lock(&PENDING).clone() else { return };
+    let name = ui.get_fr_chosen_name().to_string();
+    ui.set_fr_connect_status("checking".into());
+    ui.set_fr_connect_words(format!("Checking (started {})", clock(chrono::Local::now())).into());
+    let weak = ui.as_weak();
+    std::thread::spawn(move || {
+        // Saved only once it has answered: a refused key or a runtime that is not running
+        // leaves nothing behind, and the account that worked before stays the primary.
+        let result = prove_answer(&entry).and_then(|_| adopt(&entry).map_err(|e| format!("it answered, but could not be saved ({e})")));
+        let picked = match &result {
+            Ok(()) => {
+                update_saved(&saved_path(), |s| s.provider_chosen = true);
+                make_the_pick(&entry)
+            }
+            Err(_) => Ok(()),
+        };
+        if let Err(e) = &picked {
+            tracing::warn!(error = %e, model = %entry.model, "first run: the model was not made the pick");
+        }
+        let model = entry.model.clone();
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            match (result, picked) {
+                (Ok(()), Ok(())) => {
+                    ui.set_fr_connect_status("connected".into());
+                    ui.set_fr_connect_words(format!("Connected to {name}. Your minds will use {model}.").into());
+                }
+                (Ok(()), Err(why)) => {
+                    ui.set_fr_connect_status("pick-failed".into());
+                    ui.set_fr_connect_words(
+                        format!("Needs attention: {model} answered, but your minds could not be set to use it ({why})").into(),
+                    );
+                }
+                (Err(why), _) => {
+                    ui.set_fr_connect_status("attention".into());
+                    ui.set_fr_connect_words(format!("Needs attention: {why}").into());
+                }
+            }
+        });
+    });
+}
+
+/// Try again after a pick that did not take: the account is saved and answered, so only the
+/// pick is made again.
+fn retry_pick(ui: &App) {
+    let Some(entry) = lock(&PENDING).clone() else { return };
+    let name = ui.get_fr_chosen_name().to_string();
+    ui.set_fr_connect_status("checking".into());
+    ui.set_fr_connect_words(format!("Checking (started {})", clock(chrono::Local::now())).into());
+    let weak = ui.as_weak();
+    std::thread::spawn(move || {
+        let picked = make_the_pick(&entry);
+        let model = entry.model.clone();
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            match picked {
+                Ok(()) => {
+                    ui.set_fr_connect_status("connected".into());
+                    ui.set_fr_connect_words(format!("Connected to {name}. Your minds will use {model}.").into());
+                }
+                Err(why) => {
+                    ui.set_fr_connect_status("pick-failed".into());
+                    ui.set_fr_connect_words(
+                        format!("Needs attention: {model} answered, but your minds could not be set to use it ({why})").into(),
+                    );
+                }
+            }
+        });
+    });
+}
+
+// ── The first success, in the chat ─────────────────────────────────────────────────────────
+
+/// What the chat says when the first reply came from the desktop, not a model.
+pub const NOT_SET_UP_SENTENCE: &str =
+    "Yantrik Mind did not answer: it is not set up to think yet. Choose who does the thinking in Settings \u{2192} AI, then try again.";
+/// What the chat says when the first reply failed or did not come.
+pub const NO_ANSWER_SENTENCE: &str = "Yantrik Mind did not answer this time.";
+
+/// The first-run question, for Try again.
+static FIRST_QUESTION: Mutex<String> = Mutex::new(String::new());
+
+/// The person asked something in the chat: while the first run's chat is open, it is the question
+/// whose answer decides "You're ready.", and anything said about an earlier one is cleared.
+/// On the UI thread.
+pub fn first_chat_asked(weak: &slint::Weak<App>, text: &str) {
+    let Some(ui) = weak.upgrade() else { return };
+    if ui.get_fr_chat() == 0 {
+        return;
+    }
+    *lock(&FIRST_QUESTION) = text.to_string();
+    ui.set_fr_chat_outcome("".into());
+    ui.set_fr_chat_failure("".into());
+}
+
+/// A chat turn ended: `Ok` only for a model's words. While the first run's chat is open, this
+/// is what lets "You're ready." show, or keeps the person there with the plain sentence and
+/// Try again. Any thread.
+pub fn first_chat_ended(weak: &slint::Weak<App>, outcome: Result<(), String>) {
+    let weak = weak.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        let Some(ui) = weak.upgrade() else { return };
+        if ui.get_fr_chat() == 0 {
+            return;
+        }
+        match outcome {
+            Ok(()) => {
+                ui.set_fr_chat_outcome("answered".into());
+                ui.set_fr_chat_failure("".into());
+            }
+            Err(why) => {
+                tracing::info!(why = %why, "first run: the first reply was not an answer");
+                ui.set_fr_chat_outcome("failed".into());
+                ui.set_fr_chat_failure(why.into());
+            }
+        }
     });
 }
 
@@ -950,16 +1220,7 @@ fn start_checks(ui: &App, state: Arc<Mutex<State>>, proofs: Arc<dyn Proofs>) {
             for kind in CheckKind::ALL {
                 set_row(&weak, &state, &mind, kind, CheckState::Checking(clock(chrono::Local::now())));
                 let proof = match kind {
-                    CheckKind::Answer => match ProviderStore::load().primary() {
-                        None => Proof::Attention {
-                            reason: "no account is connected".into(),
-                            details: "providers.yaml has no primary provider".into(),
-                        },
-                        Some(entry) => match prove_answer(entry) {
-                            Ok((model, ms)) => Proof::Passed { details: format!("{} · {model} · answered in {ms} ms", entry.base_url) },
-                            Err(why) => Proof::Attention { reason: why.clone(), details: format!("{} · {why}", entry.base_url) },
-                        },
-                    },
+                    CheckKind::Answer => ask_the_mind(&mind),
                     CheckKind::Remember => proofs.remember(&mind),
                     CheckKind::Desktop => proofs.desktop(&mind),
                 };
@@ -967,6 +1228,44 @@ fn start_checks(ui: &App, state: Arc<Mutex<State>>, proofs: Arc<dyn Proofs>) {
             }
         }
     });
+}
+
+/// "Can it answer?", asked of the mind itself: the companion's own chat path, on whatever it now
+/// runs on (the account just connected, or Yantrik models), not the account behind it. Only a
+/// model's words pass; the not-set-up reply and a failed turn are the plain reason.
+fn ask_the_mind(mind: &str) -> Proof {
+    if mind != "companion" {
+        return Proof::Attention {
+            reason: "this build cannot ask this mind yet".into(),
+            details: "only Yantrik Mind can be asked from the first run (the other minds come with #677)".into(),
+        };
+    }
+    let Some(bridge) = BRIDGE.get() else {
+        return Proof::Attention { reason: "Yantrik Mind is not running".into(), details: "no companion in this process".into() };
+    };
+    let started = std::time::Instant::now();
+    let said = bridge.handle().ask("Reply with the single word OK.".into(), std::time::Duration::from_secs(90));
+    answer_proof(said, started.elapsed().as_millis())
+}
+
+/// What the mind's reply proves.
+pub fn answer_proof(said: Result<String, crate::bridge::AskError>, ms: u128) -> Proof {
+    use crate::bridge::AskError;
+    match said {
+        Ok(words) if !words.trim().is_empty() => {
+            let words: String = words.trim().chars().take(60).collect();
+            Proof::Passed { details: format!("Yantrik Mind answered in {ms} ms: \u{201c}{words}\u{201d}") }
+        }
+        Ok(_) => Proof::Attention { reason: "it answered with nothing".into(), details: format!("an empty reply after {ms} ms") },
+        Err(AskError::NoModel) => Proof::Attention {
+            reason: "it is not set up to think yet".into(),
+            details: "the reply came from the desktop, not from a model".into(),
+        },
+        Err(AskError::Failed(why)) => {
+            let why = why.trim().trim_end_matches('.').to_string();
+            Proof::Attention { reason: if why.is_empty() { "it did not answer".into() } else { why.clone() }, details: why }
+        }
+    }
 }
 
 fn set_row(weak: &slint::Weak<App>, state: &Arc<Mutex<State>>, mind: &str, kind: CheckKind, s: CheckState) {
@@ -1080,7 +1379,7 @@ mod tests {
 
     #[test]
     fn a_row_goes_not_checked_then_checking_with_its_start_then_passed_or_the_reason() {
-        let mut m = MindRows::new("companion", "Yantrik Companion");
+        let mut m = MindRows::new("companion", "Yantrik Mind");
         assert_eq!(m.checks[0].1.words(), "Not checked yet");
         assert_eq!(m.words(), "Not checked yet");
         m.set(CheckKind::Answer, CheckState::Checking("2:16".into()));
@@ -1163,6 +1462,97 @@ mod tests {
             .map(|a| a.id)
             .collect();
         assert_eq!(ids, ["anthropic"]);
+    }
+
+    fn an_account(provider: &str, model: &str) -> crate::ai_accounts::account::Account {
+        let e = ProviderStoreEntry {
+            id: format!("{provider}-onboarding"),
+            name: provider.into(),
+            provider_type: provider.into(),
+            base_url: "https://example.com/v1".into(),
+            api_key: Some("k".into()),
+            auth_type: "bearer".into(),
+            is_primary: true,
+            is_fallback: false,
+            model: model.into(),
+        };
+        crate::ai_accounts::account::accounts(&[e], &[], &Default::default(), &Default::default()).remove(0)
+    }
+
+    fn listed(ids: &[&str]) -> Vec<crate::wire::provider_models::ListedModel> {
+        ids.iter().map(|id| crate::wire::provider_models::ListedModel { id: id.to_string(), name: id.to_string(), size_bytes: 0 }).collect()
+    }
+
+    #[test]
+    fn the_model_step_offers_what_the_account_lists_and_picks_none() {
+        let got = model_choices(&an_account("openai", ""), Some(Ok(listed(&["gpt-x", "gpt-y", "gpt-z"])))).unwrap();
+        let ids: Vec<&str> = got.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["gpt-x", "gpt-y", "gpt-z"], "every listed model, in the account's order, none chosen");
+        // A provider with no list of its own offers its hand-kept one, not a guess.
+        let curated = model_choices(&an_account("perplexity", ""), None).unwrap();
+        assert!(curated.iter().any(|m| m.id == "sonar"));
+    }
+
+    #[test]
+    fn a_failed_or_empty_listing_is_the_plain_reason_not_a_default() {
+        use crate::wire::provider_models::ListError;
+        let refused = model_choices(&an_account("openai", ""), Some(Err(ListError::KeyRefused))).unwrap_err();
+        assert!(refused.contains("refused"), "{refused}");
+        let empty = model_choices(&an_account("openai", ""), Some(Ok(Vec::new()))).unwrap_err();
+        assert!(empty.contains("no model"), "{empty}");
+    }
+
+    /// The owner's release gate: nothing on screen shows, or silently picks, a model the person
+    /// did not configure. No catalogue default and no first-in-the-list anywhere in the first run.
+    #[test]
+    fn the_first_run_never_picks_a_model_for_the_person() {
+        let src = include_str!("onboarding.rs");
+        let body = src.split("#[cfg(test)]").next().unwrap();
+        for banned in ["default_model_for", "pick_model(&", "models.first()", ".first().map(|m| m.id"] {
+            assert!(!body.contains(banned), "the first run uses {banned}");
+        }
+        let slint = include_str!("../../../yantrik-ui-slint/ui/onboarding_first_run.slint");
+        assert!(slint.contains("in-out property <string> chosen-model: \"\";"), "no model is chosen before the person chooses");
+        assert!(!slint.contains("yantrik-4b") && !body.contains("yantrik-4b"));
+    }
+
+    #[test]
+    fn can_it_answer_passes_only_on_the_minds_own_words() {
+        use crate::bridge::AskError;
+        assert!(matches!(answer_proof(Ok("OK".into()), 420), Proof::Passed { .. }));
+        match answer_proof(Err(AskError::NoModel), 5) {
+            Proof::Attention { reason, .. } => assert_eq!(reason, "it is not set up to think yet"),
+            p => panic!("{p:?}"),
+        }
+        match answer_proof(Err(AskError::Failed("companion timed out".into())), 90_000) {
+            Proof::Attention { reason, .. } => assert_eq!(reason, "companion timed out"),
+            p => panic!("{p:?}"),
+        }
+        assert!(matches!(answer_proof(Ok("  ".into()), 1), Proof::Attention { .. }));
+        assert!(matches!(ask_the_mind("hermes"), Proof::Attention { .. }), "a mind it cannot ask is not passed");
+    }
+
+    #[test]
+    fn a_provider_whose_address_needs_filling_goes_to_advanced() {
+        let cf = needs_filling("cloudflare").expect("Cloudflare's address has {account_id}");
+        assert!(cf.contains('{'), "{cf}");
+        assert_eq!(needs_filling("anthropic"), None);
+        for p in KNOWN_PROVIDERS.iter().filter(|p| !p.id.is_empty()) {
+            assert_eq!(needs_filling(p.id).is_some(), p.url_needs_filling(), "{}", p.id);
+        }
+    }
+
+    #[test]
+    fn a_first_boot_without_the_installer_asks_the_name_and_nothing_else() {
+        assert!(asks_name(false, ""), "no installer, no name: ask");
+        assert!(asks_name(false, "User"), "the config's placeholder is not a name");
+        assert!(!asks_name(true, ""), "the installer asked already");
+        assert!(!asks_name(false, "Asha"), "a name already kept is not asked again");
+        let slint = include_str!("../../../yantrik-ui-slint/ui/onboarding_first_run.slint");
+        assert!(slint.contains("What should your minds call you?") && slint.contains("You can leave this empty."));
+        for hidden in ["interests", "Interests", "Where do you live", "companion's name", "Name your companion"] {
+            assert!(!slint.contains(hidden), "the first run asks \"{hidden}\"");
+        }
     }
 
     #[test]

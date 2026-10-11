@@ -1023,9 +1023,9 @@ export component PickerProbe inherits Window {
 // The first run (onboarding_first_run.slint), screen by screen, and the chat's first success.
 // src/first_run_tests.rs plays the shell: it answers each callback the way wire/onboarding.rs
 // does, with fixture cards and rows, and drives real key events.
-import { FirstRunScreen, FirstRunProvider, FirstRunCheck, FirstRunMind } from "onboarding_first_run.slint";
+import { FirstRunScreen, FirstRunProvider, FirstRunModel, FirstRunCheck, FirstRunMind } from "onboarding_first_run.slint";
 import { TextScale } from "theme.slint";
-export { FirstRunProvider, FirstRunCheck, FirstRunMind }
+export { FirstRunProvider, FirstRunModel, FirstRunCheck, FirstRunMind }
 export component FirstRunProbe inherits Window {
     width: 1280px;
     height: 800px;
@@ -1038,6 +1038,13 @@ export component FirstRunProbe inherits Window {
     out property <float> scale-now: TextScale.factor;
     in-out property <int> step <=> screen.step;
     in property <bool> installer-chose;
+    in property <bool> ask-name;
+    in-out property <string> person-name <=> screen.person-name;
+    in-out property <string> named;
+    in property <[FirstRunModel]> models;
+    in-out property <string> chosen-model <=> screen.chosen-model;
+    in-out property <string> picked;
+    in-out property <int> retries;
     in property <[FirstRunProvider]> featured;
     in property <[FirstRunProvider]> every-provider;
     in-out property <string> chosen-id <=> screen.chosen-id;
@@ -1065,6 +1072,11 @@ export component FirstRunProbe inherits Window {
     screen := FirstRunScreen {
         width: 100%; height: 100%;
         installer-chose: root.installer-chose;
+        ask-name: root.ask-name;
+        name-given(n) => { root.named = n; }
+        models: root.models;
+        pick-model(m) => { root.picked = m; root.chosen-model = m; }
+        retry-pick => { root.retries += 1; }
         featured: root.featured;
         every-provider: root.every-provider;
         connect-status: root.connect-status;
@@ -1093,6 +1105,9 @@ export component FirstRunChatProbe inherits Window {
     changed light => { ThemeMode.dark = !root.light; }
     in property <[MessageData]> messages;
     in property <bool> generating: false;
+    in property <string> outcome: "";
+    in property <string> failure: "";
+    in-out property <int> retries;
     in-out property <int> talks;
     in-out property <int> dones;
     IntentLens {
@@ -1100,11 +1115,14 @@ export component FirstRunChatProbe inherits Window {
         height: 100%;
         is-open: true;
         chat-mode: true;
-        mind-name: "Yantrik Companion";
+        mind-name: "Yantrik Mind";
         messages: root.messages;
         is-generating: root.generating;
         first-run: true;
+        first-run-outcome: root.outcome;
+        first-run-failure: root.failure;
         mic-pressed => { root.talks += 1; }
         first-run-done => { root.dones += 1; }
+        first-run-retry => { root.retries += 1; }
     }
 }

@@ -281,12 +281,6 @@ pub fn state(ui: &App) -> serde_json::Value {
             "runtime_ok": ui.get_onboard_ai_hw_runtime_ok(),
             "recommends": ui.get_onboard_ai_hw_recommend().to_string(),
         },
-        "ai_test": {
-            "status": ui.get_onboard_ai_test_status().to_string(),
-            "model": ui.get_onboard_ai_test_model().to_string(),
-            "latency_ms": ui.get_onboard_ai_test_latency_ms(),
-            "privacy": ui.get_onboard_ai_test_privacy().to_string(),
-        },
         "installing": ui.get_onboard_installing(),
         "progress": ui.get_onboard_install_progress(),
         "status": ui.get_onboard_install_status().to_string(),
