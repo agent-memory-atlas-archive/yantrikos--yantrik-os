@@ -479,7 +479,7 @@ fn pid_alive(_pid: u32) -> bool {
 }
 
 /// The agents that count toward [`protocol::MAX_LIVE_AGENTS`]: every agent except the `main` a
-/// shared or presence-only attach is given at attach. Those are made for every terminal session
+/// presence-only attach is given at attach. Those are made for every terminal session
 /// the bridge attaches, so counting them would let terminal sessions starve everyone's
 /// `start_agent`, the Mind's included (yantrik-mind-72). Every other agent, a single-conversation
 /// harness's `main` included, counts as it always did. One rule, used by the host and the recipe
@@ -488,7 +488,9 @@ fn counted_live(attached: &HashMap<String, Attached>) -> usize {
     attached
         .values()
         .map(|a| {
-            let free_main = a.announced.shared || !a.announced.takes_turns;
+            // Only a presence-only mind's `main` is free: it does no work the desktop asked for.
+            // A shared mind that takes turns does real work in its `main`, so that counts.
+            let free_main = !a.announced.takes_turns;
             a.agents.keys().filter(|c| !(free_main && c.as_str() == AgentId::MAIN)).count()
         })
         .sum()
@@ -1138,7 +1140,6 @@ impl Host {
         Ok(rx)
     }
 
-    /// Every live agent, oldest first.
     /// How many live agents count toward [`protocol::MAX_LIVE_AGENTS`] (see [`counted_live`]).
     pub fn counted_live_agents(&self) -> usize {
         let mut state = self.lock();
@@ -1146,6 +1147,7 @@ impl Host {
         counted_live(&state.attached)
     }
 
+    /// Every live agent, oldest first.
     pub fn agents(&self) -> Vec<AgentEntry> {
         let mut state = self.lock();
         self.reap(&mut state);
@@ -4219,7 +4221,7 @@ mod tests {
     }
 
     #[test]
-    fn main_agents_never_count_toward_the_live_cap() {
+    fn presence_only_mains_never_count_toward_the_live_cap() {
         let host = host_with_nothing();
         host.handle(protocol::ATTACH, &json!({ "id": "mind", "name": "Mind", "conversations": true })).unwrap();
         for _ in 1..=4 {
@@ -4229,7 +4231,8 @@ mod tests {
             )
             .unwrap();
         }
-        // Six `main` agents are live (mind's plus four shared presence-only), but none counts.
+        // Four presence-only `main` agents are live (`mind` holds conversations, so it has none
+        // until one is started), and none of them counts.
         for _ in 0..protocol::MAX_LIVE_AGENTS {
             host.start_agent("mind").unwrap();
         }
@@ -4302,6 +4305,18 @@ mod tests {
         )
         .unwrap();
         assert_eq!(host.counted_live_agents(), protocol::MAX_LIVE_AGENTS);
+    }
+
+    /// A shared mind that takes turns does real work in its `main`, so that `main` counts; only a
+    /// presence-only `main` is free (yantrik-mind-72's re-review, point 1).
+    #[test]
+    fn a_turn_taking_shared_main_counts() {
+        let host = host_with_nothing().with_liveness(|_| true);
+        host.handle_from(protocol::ATTACH, &json!({ "id": "hermes", "name": "Hermes", "shared": true }), Some(100), None)
+            .unwrap();
+        assert_eq!(host.counted_live_agents(), 0, "no agent yet");
+        host.start_agent("hermes.1").unwrap();
+        assert_eq!(host.counted_live_agents(), 1, "its working main counts");
     }
 
     /// yantrik-mind-72's change C: no harness id or key is ever matched by prefix or by splitting

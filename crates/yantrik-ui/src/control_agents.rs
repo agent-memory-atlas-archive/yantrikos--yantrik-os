@@ -1087,6 +1087,18 @@ mod tests {
         AgentId(s.to_string())
     }
 
+    /// The recipe runner's place check reads the host's own count, so it and `start_agent` agree
+    /// on what fills a place: a terminal session's presence-only `main` does not
+    /// (yantrik-mind-72, #735). Reverting to counting every listed agent fails here.
+    #[test]
+    fn the_recipe_runner_counts_places_the_way_the_host_does() {
+        let src = include_str!("control_agents.rs");
+        let check = &src[src.find("let most = yantrik_harness::protocol::MAX_LIVE_AGENTS;").expect("the place check")..];
+        let check = &check[..check.find("// Nobody started this run at the desk").expect("its end")];
+        assert!(check.contains("host.counted_live_agents()"), "the cap reads the host's count");
+        assert!(!check.contains("live.len() >= most"), "not the raw list of agents");
+    }
+
     /// A call on a session from this process, which stands in for the harness that attached it:
     /// a session answers only the process that attached it and the ones it started.
     fn as_harness(host: &Host, method: &str, params: &Value) -> Result<Value, String> {
