@@ -57,8 +57,9 @@ MCP_MEMORY = ("pi", "deepseek", "openclaw")
 
 
 def state_dir(harness: str) -> Path:
-    base = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
-    return Path(base) / "yantrik" / "harnesses" / harness
+    """Where the install recorded its steps (common.sh, harness_state): fixed under ~/.local/state,
+    because the harness manifests name the same place with `~`."""
+    return Path.home() / ".local" / "state" / "yantrik" / "harnesses" / harness
 
 
 def memory_db(harness: str) -> Path:
@@ -322,6 +323,30 @@ def render(result: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def keep_and_find(harness: str, remember: str = "", recall: str = "") -> Dict[str, Any]:
+    """For a check that a fact outlives the process that wrote it (the ISO boot test, the 520
+    check): `remember` writes TEXT through the harness's memory server and keeps it; `recall`, in
+    a later process, asks for TEXT and says whether it came back. MCP-memory harnesses only."""
+    from yantrik_harness import McpTools
+
+    if harness not in MCP_MEMORY:
+        return {"harness": harness, "error": "--remember/--recall reach yantrikdb-mcp harnesses only"}
+    tools = McpTools("Yantrik memory check", "1", command=[str(MEMORY_DIR / "bin" / "yantrikdb-mcp")],
+                     env=mcp_env(harness), timeout=60, log=lambda _m: None)
+    try:
+        out: Dict[str, Any] = {"harness": harness}
+        if remember:
+            text, error = tools.call("remember", {"text": remember, "source": harness,
+                                                  "metadata": {"provenance": harness}})
+            out["remembered"] = not error
+        if recall:
+            text, error = tools.call("recall", {"query": recall, "top_k": 5})
+            out["recalled"] = (not error) and recall.lower() in text.lower()
+        return out
+    finally:
+        tools.close()
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("harness")
@@ -329,7 +354,15 @@ def main(argv: Optional[List[str]] = None) -> int:
                         help="seconds to wait for the attach (an install that just restarted it)")
     parser.add_argument("--only", default="", help="comma-separated: answer,remember,desktop")
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--remember", default="", metavar="TEXT",
+                        help="write TEXT to the harness's memory and keep it (a boot test's fact)")
+    parser.add_argument("--recall", default="", metavar="TEXT",
+                        help="say whether TEXT comes back from the harness's memory")
     args = parser.parse_args(argv)
+    if args.remember or args.recall:
+        found = keep_and_find(args.harness, args.remember, args.recall)
+        print(json.dumps(found), flush=True)
+        return 0 if found.get("remembered", True) and found.get("recalled", True) and "error" not in found else 1
     only = [w for w in args.only.split(",") if w] or None
     result = prove(args.harness, args.wait, only)
     print(json.dumps(result) if args.json else render(result), flush=True)

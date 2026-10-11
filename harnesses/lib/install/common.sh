@@ -29,11 +29,15 @@ HARNESS_LIB=$(dirname "$INSTALL_LIB")
 # syncs share/ with --delete from the release bundle, which does not carry these.
 # YANTRIK_MEMORY_DIR moves it, for a checkout or a test.
 MEMORY_DIR=${YANTRIK_MEMORY_DIR:-/opt/yantrik/memory}
+# shellcheck disable=SC2034  # read by the installers that source this
 MEMORY_WHEELS="$MEMORY_DIR/wheels"
+# shellcheck disable=SC2034
 YANTRIKDB_MCP="$MEMORY_DIR/bin/yantrikdb-mcp"
 
 # What an install leaves for the proofs and for Revert to read: which steps ran, never a secret.
-harness_state() { printf '%s\n' "${XDG_STATE_HOME:-$HOME/.local/state}/yantrik/harnesses/$1"; }
+# `installed` in it is written only once all three proofs pass, and every manifest requires it,
+# so Settings shows a harness as installed only when it was proved (harness.yaml, `requires`).
+harness_state() { printf '%s\n' "$HOME/.local/state/yantrik/harnesses/$1"; }
 
 # harness_memory_db HARNESS — the harness's own YantrikDB file. One per harness, not one shared
 # file: the engine keeps its index in the process that opened it and does not see another
@@ -67,6 +71,7 @@ wire_model() {
     state=$(harness_state "$1")
     mkdir -p "$state" || fail "could not write $state"
     if [ -f "$INSTALL_LIB/model.sh" ]; then
+        # shellcheck disable=SC1091  # the model half's (#675), present only on an image that has it
         . "$INSTALL_LIB/model.sh"
         if command -v yantrik_wire_model >/dev/null 2>&1; then
             if yantrik_wire_model "$1"; then
@@ -142,12 +147,47 @@ env_unset() {
     ) || fail "could not write $1"
 }
 
+# json_merge FILE JSON — the keys in JSON set in the JSON object in FILE, every other key kept as
+# it was; the file private (600) and replaced whole, so a reader sees the old file or the new one.
+# A file that is not a JSON object is refused, never replaced.
+json_merge() {
+    python3 - "$1" "$2" <<'PY' || fail "could not write $1"
+import json, os, sys, tempfile
+path, patch = sys.argv[1], json.loads(sys.argv[2])
+data = {}
+if os.path.exists(path):
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        sys.exit("%s is not a JSON object; not touching it" % path)
+data.update(patch)
+os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".", prefix=".yantrik-")
+with os.fdopen(fd, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+os.replace(tmp, path)
+PY
+}
+
+# start_unit HARNESS — the harness's own user unit enabled and (re)started, so it attaches now and
+# at every login.
+start_unit() {
+    systemctl --user daemon-reload >/dev/null 2>&1 || true
+    systemctl --user enable "yantrik-$1.service" >/dev/null 2>&1 \
+        || fail "could not enable yantrik-$1.service"
+    systemctl --user restart "yantrik-$1.service" || fail "yantrik-$1.service would not start"
+}
+
 # prove HARNESS [WAIT] — the three proofs (lib/proofs.py): "Can it answer?", "Can it remember?",
 # "Can it reach the desktop?". An install is not finished until all three pass; the rows it
 # prints are the ones Settings shows, each failure with its one-press fix.
 prove() {
+    rm -f "$(harness_state "$1")/installed"
     python3 "$HARNESS_LIB/proofs.py" "$1" --wait "${2:-90}" \
-        || fail "$1 is installed but not every proof passed; the rows above say what to press"
+        || fail "$1 is not installed yet: not every proof passed, and the rows above say what to press"
+    mkdir -p "$(harness_state "$1")" && date -u +%Y-%m-%dT%H:%M:%SZ > "$(harness_state "$1")/installed" \
+        || fail "could not record that $1 passed its proofs"
 }
 
 # node_at_least MAJOR.MINOR — the node on PATH is at least that version.

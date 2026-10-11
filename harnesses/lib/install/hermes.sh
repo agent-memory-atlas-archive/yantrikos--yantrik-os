@@ -46,11 +46,6 @@ fi
 say "$(hermes --version 2>/dev/null | head -n 1 || echo Hermes) is here"
 
 HARNESS=hermes
-say "copying the desktop plugin into ~/.hermes"
-mkdir -p "$HOME/.hermes/plugins/yantrik"
-cp -r "$plugin/." "$HOME/.hermes/plugins/yantrik/"
-hermes plugins enable yantrik-desktop || fail "Hermes would not enable the desktop plugin"
-
 # The Python Hermes runs on, which has its YAML library and is where its plugins are installed.
 hermes_bin=$(readlink -f "$(command -v hermes)") || fail "cannot tell where hermes is installed"
 hermes_python="$(dirname "$hermes_bin")/python"
@@ -61,6 +56,11 @@ config=$(timeout 30 hermes config path </dev/null) || fail "Hermes would not say
 env_file=$(timeout 30 hermes config env-path </dev/null 2>/dev/null) || env_file="$HOME/.hermes/.env"
 backup_once "$config"
 backup_once "$env_file"
+
+say "copying the desktop plugin into ~/.hermes"
+mkdir -p "$HOME/.hermes/plugins/yantrik"
+cp -r "$plugin/." "$HOME/.hermes/plugins/yantrik/"
+hermes plugins enable yantrik-desktop || fail "Hermes would not enable the desktop plugin"
 
 # ── The desktop's tools, not Hermes's own ──
 # Hermes's `terminal`, `file`, `code_execution`, `browser` and `web` are a second, ungraded route
