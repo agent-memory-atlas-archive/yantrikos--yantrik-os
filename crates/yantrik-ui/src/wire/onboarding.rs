@@ -8,17 +8,19 @@
 //!   private-lane backend says one can be downloaded), and it says its size.
 //! - **The check rows.** Not checked yet → Checking (started h:mm) → Passed / Needs attention:
 //!   <reason>, from what each check returned. No percentage, no step counter pretending to know.
-//! - **The sharing choice.** Share / Private lane / Off, mapped onto AI accounts' per-account
-//!   private-context switch (#675).
+//! - **The sharing choice.** Share / Private lane / Off, recorded through #675's onboarding calls
+//!   (`ai_accounts::onboarding`: `agree_to_share`, `keep_personal_things_on`), and the model the
+//!   connection was proven with becomes the one pick (`choose_model`).
 //!
-//! The provider is chosen once: a primary provider already saved (by the installer, from the live
-//! session) skips "Who should do the thinking?" and "What your minds share".
+//! The provider is chosen once: a choice made through these screens in the installer (carried to
+//! the new home in `first-run.json`) skips "Who should do the thinking?" and "What your minds
+//! share" at first boot. A provider merely present (the `--with-llm` image's own account) does not.
 //!
-//! Two other branches own functions these screens call. Until they land, each is behind a small
-//! trait here with a stub marked `STUB(#…)` that never reports a pass it did not see:
-//! - [`Proofs`], the three proofs per mind and the list of minds (#677, feat/677-memory-and-pairing);
-//! - [`Lane`], browser sign-in, the private lane and a downloadable local model (#675,
-//!   feat/model-gateway).
+//! Functions not built yet sit behind a small trait with a stub marked `STUB(#…)` that never
+//! reports a pass it did not see:
+//! - [`Proofs`], the memory and desktop proofs and the list of minds (#677,
+//!   feat/677-memory-and-pairing);
+//! - [`Lane`], browser sign-in and a downloadable local model (no branch owns them yet).
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -385,25 +387,37 @@ pub fn account_id(entry: &ProviderStoreEntry) -> String {
     if s.is_empty() { crate::ai_accounts::account::slug(&entry.provider_type) } else { s }
 }
 
-/// Share and Off are the per-account private-context switch #675 already has. The private lane is
-/// recorded as chosen and, until #675 routes it, the switch stays off: the gateway then refuses a
-/// call that carries the person's context, with the fix in its message, rather than sending it.
-pub fn apply_sharing(consent_path: &Path, account: &str, sharing: Sharing, lane: &dyn Lane) -> Result<(), String> {
-    use crate::ai_accounts::consent;
-    let mut c = consent::load(consent_path);
+/// The local model that keeps personal things here: the bundled one when it is listed (it is on
+/// this machine, not only the network), else the first local model.
+pub fn lane_model(choices: &[(String, String)]) -> Option<String> {
+    choices
+        .iter()
+        .find(|(_, url)| url.contains("127.0.0.1") || url.contains("localhost"))
+        .or_else(|| choices.first())
+        .map(|(id, _)| id.clone())
+}
+
+/// Share / Private lane / Off, through #675's onboarding calls. A private lane with no local
+/// model to keep it is refused with the reason, and sharing stays off: nothing is sent quietly.
+fn apply_sharing(sharing: Sharing) -> Result<(), String> {
+    use crate::ai_accounts::onboarding as ob;
     match sharing {
-        Sharing::Share => {
-            c.private_context.insert(account.to_string());
-        }
-        Sharing::PrivateLane | Sharing::Off => {
-            c.private_context.remove(account);
+        Sharing::Share => ob::agree_to_share(true),
+        Sharing::Off => ob::agree_to_share(false),
+        Sharing::PrivateLane => {
+            ob::agree_to_share(false)?;
+            let accounts = crate::ai_accounts::accounts();
+            let choices: Vec<(String, String)> = ob::private_lane_choices()
+                .into_iter()
+                .map(|m| {
+                    let url = accounts.iter().find(|a| a.id == m.account).map(|a| a.base_url.clone()).unwrap_or_default();
+                    (m.id, url)
+                })
+                .collect();
+            let lane = lane_model(&choices).ok_or("no model on this computer is ready to keep personal things yet")?;
+            ob::keep_personal_things_on(&lane)
         }
     }
-    consent::save(consent_path, &c)?;
-    if sharing == Sharing::PrivateLane {
-        lane.set_up_private_lane()?;
-    }
-    Ok(())
 }
 
 // ── What other branches provide ───────────────────────────────────────────────────────────
@@ -443,7 +457,7 @@ impl Proofs for PendingProofs {
     }
 }
 
-/// Browser sign-in, the private lane and a downloadable local model: AI accounts' backend (#675).
+/// Browser sign-in and a downloadable local model: AI accounts' backend, not built yet.
 pub trait Lane: Send + Sync {
     /// The provider lets a person sign in with the browser instead of pasting a key.
     fn browser_sign_in(&self, provider: &str) -> bool;
@@ -451,12 +465,10 @@ pub trait Lane: Send + Sync {
     fn sign_in(&self, provider: &str) -> Result<(), String>;
     /// A model the private lane can download, when none is on the machine.
     fn downloadable(&self) -> Option<LocalModel>;
-    /// Route calls that carry the person's context to the local model.
-    fn set_up_private_lane(&self) -> Result<(), String>;
 }
 
-/// STUB(#675): no browser sign-in, nothing to download, and the private lane only recorded.
-/// Every answer here is the honest "not available", so no card offers what cannot happen.
+/// STUB(#675 follow-up): no browser sign-in and nothing to download. Every answer here is the
+/// honest "not available", so no card offers what cannot happen.
 pub struct PendingLane;
 
 impl Lane for PendingLane {
@@ -468,10 +480,6 @@ impl Lane for PendingLane {
     }
     fn downloadable(&self) -> Option<LocalModel> {
         None
-    }
-    fn set_up_private_lane(&self) -> Result<(), String> {
-        tracing::info!("first run: private lane chosen; recorded, routing waits on #675");
-        Ok(())
     }
 }
 
@@ -486,6 +494,9 @@ pub struct Saved {
     pub sharing: String,
     /// The one-time hint about What really happened has been shown.
     pub witness_hint_shown: bool,
+    /// A provider was chosen and answered through these screens (in the installer or at first
+    /// boot): the first boot does not ask again.
+    pub provider_chosen: bool,
 }
 
 pub fn saved_path() -> PathBuf {
@@ -587,11 +598,16 @@ pub fn wire(ui: &App, _ctx: &AppContext) {
     ui.set_fr_featured(model_of(featured_cards(local.as_ref(), lane.as_ref()).iter().map(to_ui).collect()));
     ui.set_fr_every_provider(model_of(every_card(lane.as_ref()).iter().map(to_ui).collect()));
     ui.set_fr_shared_items(model_of(SHARED_ITEMS.iter().map(|s| SharedString::from(*s)).collect()));
-    ui.set_fr_private_lane_words(private_lane_words(local.as_ref()).into());
+    let lane_listed = !crate::ai_accounts::onboarding::private_lane_choices().is_empty();
+    ui.set_fr_private_lane_words(match (&local, lane_listed) {
+        (Some(_), _) => private_lane_words(local.as_ref()),
+        (None, true) => "Uses a model on this computer or your network. Answers about you may be slower.".into(),
+        (None, false) => String::new(),
+    }.into());
     ui.set_fr_minds(model_of(lock(&state).rows.iter().map(MindRows::to_ui).collect()));
     // Chosen once: a provider already saved (the installer carries the live session's choice
     // into this account's providers.yaml) skips the two AI screens.
-    if let Some(p) = ProviderStore::load().primary() {
+    if let Some(p) = ProviderStore::load().primary().filter(|_| load_saved(&saved).provider_chosen) {
         let name = card_name_for(&p.provider_type, &p.name);
         ui.set_fr_installer_chose(true);
         ui.set_fr_chosen_name(name.clone().into());
@@ -729,9 +745,15 @@ pub fn wire(ui: &App, _ctx: &AppContext) {
         let weak = ui.as_weak();
         move || {
             let Some(ui) = weak.upgrade() else { return };
+            // The image's own account for the bundled model, when it wrote one; else a new one.
+            if let Some(mut e) = ProviderStore::load().entries.into_iter().find(|e| e.base_url.trim_end_matches('/') == LOCAL_ENDPOINT) {
+                e.is_primary = true;
+                connect(&ui, e);
+                return;
+            }
             connect(&ui, ProviderStoreEntry {
                 id: "llamacpp-onboarding".into(),
-                name: "This computer".into(),
+                name: "On this computer".into(),
                 provider_type: "llamacpp".into(),
                 base_url: LOCAL_ENDPOINT.into(),
                 api_key: None,
@@ -745,13 +767,11 @@ pub fn wire(ui: &App, _ctx: &AppContext) {
 
     ui.on_fr_sharing_chosen({
         let weak = ui.as_weak();
-        let lane = lane.clone();
         let saved = saved.clone();
         move |mode| {
             update_saved(&saved, |s| s.sharing = mode.to_string());
             let Some(sharing) = Sharing::parse(&mode) else { return };
-            let Some(entry) = ProviderStore::load().primary().cloned() else { return };
-            if let Err(e) = apply_sharing(&crate::ai_accounts::consent::path(), &account_id(&entry), sharing, lane.as_ref()) {
+            if let Err(e) = apply_sharing(sharing) {
                 tracing::warn!(error = %e, "first run: the sharing choice was not saved");
                 if let Some(ui) = weak.upgrade() {
                     ui.set_fr_connect_words(format!("Needs attention: the sharing choice was not saved ({e})").into());
@@ -838,6 +858,14 @@ fn connect(ui: &App, entry: ProviderStoreEntry) {
     let weak = ui.as_weak();
     std::thread::spawn(move || {
         let result = prove_answer(&entry);
+        if let Ok((model, _)) = &result {
+            // The model it answered with is the one pick for every mind (#675).
+            let id = crate::ai_accounts::models::gateway_id(&account_id(&entry), model);
+            if let Err(e) = crate::ai_accounts::onboarding::choose_model(&id) {
+                tracing::info!(error = %e, "first run: the pick waits for the account's model list");
+            }
+            update_saved(&saved_path(), |s| s.provider_chosen = true);
+        }
         let _ = slint::invoke_from_event_loop(move || {
             let Some(ui) = weak.upgrade() else { return };
             match result {
@@ -939,9 +967,6 @@ mod tests {
         }
         fn downloadable(&self) -> Option<LocalModel> {
             Some(LocalModel { bytes: 2_500_000_000, present: false })
-        }
-        fn set_up_private_lane(&self) -> Result<(), String> {
-            Ok(())
         }
     }
 
@@ -1063,23 +1088,16 @@ mod tests {
     }
 
     #[test]
-    fn sharing_maps_onto_the_private_context_switch_and_never_shares_by_default() {
-        let dir = std::env::temp_dir().join(format!("fr-consent-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("ai-accounts.json");
-        let load = || crate::ai_accounts::consent::load(&path).private_context;
-        apply_sharing(&path, "anthropic", Sharing::Share, &PendingLane).unwrap();
-        assert!(load().contains("anthropic"));
-        apply_sharing(&path, "anthropic", Sharing::Off, &PendingLane).unwrap();
-        assert!(!load().contains("anthropic"));
-        apply_sharing(&path, "anthropic", Sharing::Share, &PendingLane).unwrap();
-        // A private lane keeps the context off the provider, even before #675 routes it.
-        apply_sharing(&path, "anthropic", Sharing::PrivateLane, &PendingLane).unwrap();
-        assert!(!load().contains("anthropic"));
+    fn the_private_lane_keeps_personal_things_on_this_computer_first() {
+        let lan = ("lan-ollama/llama3".to_string(), "http://192.168.1.5:11434/v1".to_string());
+        let here = ("on-this-computer-qwen-3-5-4b/qwen3.5-4b".to_string(), "http://127.0.0.1:8341/v1".to_string());
+        assert_eq!(lane_model(&[lan.clone(), here.clone()]).as_deref(), Some(here.0.as_str()));
+        assert_eq!(lane_model(&[lan.clone()]).as_deref(), Some(lan.0.as_str()));
+        assert_eq!(lane_model(&[]), None, "no lane: refused with the reason, nothing shared");
         assert_eq!(Sharing::parse("share"), Some(Sharing::Share));
+        assert_eq!(Sharing::parse("private-lane"), Some(Sharing::PrivateLane));
+        assert_eq!(Sharing::parse("off"), Some(Sharing::Off));
         assert_eq!(Sharing::parse("local"), None, "a model on this computer has nothing to share");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1101,6 +1119,15 @@ mod tests {
             .map(|a| a.id)
             .collect();
         assert_eq!(ids, ["anthropic"]);
+    }
+
+    #[test]
+    fn the_sharing_sentence_is_the_one_ai_accounts_records() {
+        let slint = include_str!("../../../yantrik-ui-slint/ui/onboarding_first_run.slint");
+        let line = crate::ai_accounts::onboarding::share_line("Claude");
+        let (head, tail) = line.split_once("Claude").unwrap();
+        assert!(slint.contains(&format!("\"{head}\"")), "{head}");
+        assert!(slint.contains(&format!("\"{tail}\"")), "{tail}");
     }
 
     #[test]

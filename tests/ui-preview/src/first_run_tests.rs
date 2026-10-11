@@ -176,12 +176,14 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     ui.set_connect_status("connected".into());
     ui.set_connect_words("Connected to Claude.".into());
     render(w, width, height, &still("2-connected"))?;
-    ui.set_show_every(true);
-    render(w, width, height, &still("2-every-provider"))?;
-    ui.set_show_every(false);
     ui.set_light(true);
     render(w, width, height, &still("2-connected-light"))?;
     ui.set_light(false);
+    // Choose another: the list is back, and the full catalogue opens under it.
+    ui.set_connect_mode("".into());
+    ui.set_show_every(true);
+    render(w, width, height, &still("2-every-provider"))?;
+    ui.set_show_every(false);
 
     // 3. What your minds share.
     ui.set_step(3);

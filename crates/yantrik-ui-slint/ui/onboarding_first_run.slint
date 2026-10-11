@@ -281,7 +281,6 @@ component FrCheckRow inherits Rectangle {
     in property <FirstRunCheck> c;
     property <bool> open: false;
     property <float> s: TextScale.factor;
-    height: col.preferred-height;
 
     col := VerticalLayout {
         spacing: 4px;
@@ -507,13 +506,38 @@ export component FirstRunScreen inherits Rectangle {
                     font-size: Theme.fs-title-2 * root.s;
                     wrap: word-wrap;
                 }
-                for p[i] in root.featured : FrProviderCard {
-                    p: p;
-                    selected: p.id == root.chosen-id;
-                    init => { if i == 0 { self.focus-me(); } }
-                    chosen => { root.choose-provider(p.id); }
+                // Once a card is chosen, the list steps aside for connecting it, so the key field
+                // is on screen; "Choose another" brings the list back.
+                if root.connect-mode == "" : VerticalLayout {
+                    spacing: 12px;
+                    for p[i] in root.featured : FrProviderCard {
+                        p: p;
+                        selected: p.id == root.chosen-id;
+                        init => { if i == 0 { self.focus-me(); } }
+                        chosen => { root.choose-provider(p.id); }
+                    }
                 }
-                HorizontalLayout {
+                if root.connect-mode != "" : HorizontalLayout {
+                    spacing: 12px;
+                    alignment: start;
+                    Text {
+                        text: "Chosen: " + root.chosen-name;
+                        color: Theme.text-primary;
+                        font-size: Theme.fs-title-1 * root.s;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                    FrButton {
+                        link: true;
+                        label: "Choose another";
+                        clicked => {
+                            root.connect-mode = "";
+                            root.chosen-id = "";
+                            root.chosen-name = "";
+                        }
+                    }
+                }
+                if root.connect-mode == "" : HorizontalLayout {
                     alignment: start;
                     spacing: 8px;
                     FrButton {
@@ -527,7 +551,7 @@ export component FirstRunScreen inherits Rectangle {
                         clicked => { root.connect-mode = "advanced"; root.chosen-id = "custom"; root.chosen-name = "your endpoint"; }
                     }
                 }
-                if root.show-every : VerticalLayout {
+                if root.show-every && root.connect-mode == "" : VerticalLayout {
                     spacing: 8px;
                     for p in root.every-provider : FrProviderCard {
                         p: p;
@@ -768,14 +792,12 @@ export component FirstRunScreen inherits Rectangle {
                     wrap: word-wrap;
                 }
                 for m in root.minds : Rectangle {
-                    height: mcol.preferred-height + 24px;
                     border-radius: Theme.r-lg;
                     background: Theme.bg-card;
                     border-width: 1px;
                     border-color: Theme.border-default;
-                    mcol := VerticalLayout {
-                        x: 16px; y: 12px;
-                        width: parent.width - 32px;
+                    VerticalLayout {
+                        padding-left: 16px; padding-right: 16px; padding-top: 12px; padding-bottom: 12px;
                         spacing: 8px;
                         Text {
                             text: m.name;
