@@ -3,6 +3,9 @@
 //! Manages local music library, playlists, queue, and playback state.
 //! Playback engine integration (mpv) is stubbed for now.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use yantrik_app_runtime::prelude::*;
 
@@ -31,6 +34,28 @@ fn main() {
 
 // ── Wire all callbacks ───────────────────────────────────────────────
 
+/// One folder the library scans. Shared by the three scan handlers.
+struct ScanFolder {
+    path: String,
+    track_count: i32,
+}
+
+type ScanState = Rc<RefCell<Vec<ScanFolder>>>;
+
+/// Rebuild the `scan-folders` model from the shared list so the dialog shows the truth.
+fn rebuild_scan_folders(app: &MusicPlayerApp, state: &ScanState) {
+    let folders: Vec<MusicScanFolderData> = state
+        .borrow()
+        .iter()
+        .map(|f| MusicScanFolderData {
+            path: f.path.clone().into(),
+            track_count: f.track_count,
+            is_scanning: false,
+        })
+        .collect();
+    app.set_scan_folders(ModelRc::new(VecModel::from(folders)));
+}
+
 fn wire(app: &MusicPlayerApp) {
     // Set initial state
     app.set_volume(0.8);
@@ -41,6 +66,20 @@ fn wire(app: &MusicPlayerApp) {
     app.set_library_track_count(0);
     app.set_queue_current_index(-1);
     app.set_active_playlist_index(-1);
+
+    // The scan folders live in shared state so the three handlers below all see the same list.
+    let scan_state: ScanState = Rc::new(RefCell::new(Vec::new()));
+    // Seed with ~/Music when it exists; otherwise the list starts empty (never demo paths).
+    if let Some(home) = std::env::var_os("HOME") {
+        let music = std::path::Path::new(&home).join("Music");
+        if music.is_dir() {
+            scan_state.borrow_mut().push(ScanFolder {
+                path: music.to_string_lossy().into_owned(),
+                track_count: 0,
+            });
+        }
+    }
+    rebuild_scan_folders(app, &scan_state);
 
     // Playback controls
     {
@@ -172,111 +211,68 @@ fn wire(app: &MusicPlayerApp) {
     // Scan folders
     {
         let weak = app.as_weak();
+        let state = scan_state.clone();
         app.on_scan_add_folder(move |path| {
             let Some(ui) = weak.upgrade() else { return };
             let path = path.to_string();
 
-            // A folder already in the list is refused, not scanned twice.
-            let folders = ui.get_scan_folders();
-            let already = (0..folders.row_count())
-                .filter_map(|i| folders.row_data(i))
-                .any(|f| f.path.as_str() == path);
-            if already {
+            // Skip duplicates and paths that are not directories.
+            if state.borrow().iter().any(|f| f.path == path) {
                 ui.set_scan_status(format!("Already scanning {path}").into());
                 return;
             }
-
-            let tracks = library::scan_folder(std::path::Path::new(&path));
-            let count = tracks.len() as i32;
-
-            // Append the found tracks to the library.
-            let library = ui.get_library_tracks();
-            let model = library
-                .as_any()
-                .downcast_ref::<VecModel<MusicTrackData>>()
-                .expect("library-tracks is a VecModel");
-            for track in tracks {
-                model.push(MusicTrackData {
-                    title: track.title.into(),
-                    artist: track.artist.into(),
-                    album: track.album.into(),
-                    genre: track.genre.into(),
-                    duration_text: library::duration_text(track.duration_secs).into(),
-                    duration_secs: track.duration_secs as f32,
-                    path: track.path.into(),
-                    is_current: false,
-                    format_info: "".into(),
-                    bitrate: "".into(),
-                });
+            if !std::path::Path::new(&path).is_dir() {
+                ui.set_scan_status(format!("Not a folder: {path}").into());
+                return;
             }
-            ui.set_library_track_count(ui.get_library_track_count() + count);
 
-            // Record the folder itself.
-            let folders = ui.get_scan_folders();
-            let model = folders
-                .as_any()
-                .downcast_ref::<VecModel<MusicScanFolderData>>()
-                .expect("scan-folders is a VecModel");
-            model.push(MusicScanFolderData {
-                path: path.clone().into(),
-                track_count: count,
-                is_scanning: false,
-            });
-
-            ui.set_scan_status(format!("Scanned {path}: {count} tracks").into());
+            state.borrow_mut().push(ScanFolder { path, track_count: 0 });
+            rebuild_scan_folders(&ui, &state);
         });
     }
 
     {
         let weak = app.as_weak();
+        let state = scan_state.clone();
         app.on_scan_remove_folder(move |idx| {
             let Some(ui) = weak.upgrade() else { return };
             let idx = idx as usize;
-
-            let folders = ui.get_scan_folders();
-            let Some(folder) = folders.row_data(idx) else { return };
-            let path = folder.path.to_string();
-
-            // Drop the folder entry.
-            if let Some(model) = folders.as_any().downcast_ref::<VecModel<MusicScanFolderData>>() {
-                model.remove(idx);
+            if idx < state.borrow().len() {
+                state.borrow_mut().remove(idx);
             }
-
-            // Remove its tracks from the library, matching on the path prefix.
-            let library = ui.get_library_tracks();
-            if let Some(model) = library.as_any().downcast_ref::<VecModel<MusicTrackData>>() {
-                let mut i = 0;
-                while i < model.row_count() {
-                    if model.row_data(i).map(|t| t.path.starts_with(&path)).unwrap_or(false) {
-                        model.remove(i);
-                    } else {
-                        i += 1;
-                    }
-                }
-            }
-            ui.set_library_track_count(ui.get_library_tracks().row_count() as i32);
+            rebuild_scan_folders(&ui, &state);
         });
     }
 
     {
         let weak = app.as_weak();
+        let state = scan_state.clone();
         app.on_scan_rescan(move || {
             let Some(ui) = weak.upgrade() else { return };
+            ui.set_is_scanning(true);
 
-            // Re-scan every folder and replace the library wholesale.
-            let folders = ui.get_scan_folders();
-            let paths: Vec<String> = (0..folders.row_count())
-                .filter_map(|i| folders.row_data(i))
-                .map(|f| f.path.to_string())
-                .collect();
-
-            let mut all = Vec::new();
-            for path in &paths {
-                all.extend(library::scan_folder(std::path::Path::new(path)));
+            let folders = state.borrow();
+            if folders.is_empty() {
+                ui.set_library_tracks(ModelRc::new(VecModel::from(Vec::<MusicTrackData>::new())));
+                ui.set_library_track_count(0);
+                ui.set_is_scanning(false);
+                ui.set_scan_status("No folders yet".into());
+                return;
             }
 
-            let tracks: Vec<MusicTrackData> = all
-                .into_iter()
+            // Scan every folder and merge: a track seen in two folders appears once, keyed by path.
+            let mut seen: std::collections::HashMap<String, library::Track> =
+                std::collections::HashMap::new();
+            for folder in folders.iter() {
+                for track in library::scan_folder(std::path::Path::new(&folder.path)) {
+                    seen.entry(track.path.clone()).or_insert(track);
+                }
+            }
+            let folder_count = folders.len();
+            drop(folders);
+
+            let mut tracks: Vec<MusicTrackData> = seen
+                .into_values()
                 .map(|track| MusicTrackData {
                     title: track.title.into(),
                     artist: track.artist.into(),
@@ -290,9 +286,13 @@ fn wire(app: &MusicPlayerApp) {
                     bitrate: "".into(),
                 })
                 .collect();
+            tracks.sort_by(|a, b| a.title.cmp(&b.title));
+
+            let count = tracks.len();
             ui.set_library_tracks(ModelRc::new(VecModel::from(tracks)));
-            ui.set_library_track_count(ui.get_library_tracks().row_count() as i32);
-            ui.set_scan_status("Library rescanned".into());
+            ui.set_library_track_count(count as i32);
+            ui.set_is_scanning(false);
+            ui.set_scan_status(format!("{count} tracks in {folder_count} folders").into());
         });
     }
 

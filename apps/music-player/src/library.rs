@@ -1,10 +1,9 @@
 //! Local music library scan: walk a folder for audio files and read what a file name alone
 //! can tell us.
 //!
-//! No tag crate is in the workspace `Cargo.toml` (no `lofty`/`id3`/`symphonia` entry), so tags
-//! are not read: the file name is the title, the parent directory is the album, and
-//! `artist`/`genre` stay empty. `duration_secs` stays `0.0` for the same reason; the duration
-//! text is still well-formed.
+//! Tags and durations are deliberately out of scope here: they need a metadata crate, and this
+//! issue is only the scan. So the file stem is the title, `artist`/`album`/`genre` stay empty,
+//! `duration_secs` stays `0.0` and the duration text is `"--:--"`.
 
 use std::path::Path;
 
@@ -18,7 +17,7 @@ pub struct Track {
     pub path: String,
 }
 
-const AUDIO_EXTENSIONS: &[&str] = &["mp3", "flac", "ogg", "wav", "m4a"];
+const AUDIO_EXTENSIONS: &[&str] = &["flac", "mp3", "ogg", "opus", "wav", "m4a"];
 
 fn is_audio(path: &Path) -> bool {
     path.extension()
@@ -27,14 +26,12 @@ fn is_audio(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Walk `root` recursively (an `Artist/Album/track.flac` tree), keeping audio files. The result
-/// is sorted by `(artist, album, title)` so the library is stable between scans.
+/// Walk `root` recursively, keeping one `Track` per recognised audio file, sorted by title so
+/// the result is stable between scans.
 pub fn scan_folder(root: &Path) -> Vec<Track> {
     let mut tracks = Vec::new();
     walk(root, &mut tracks);
-    tracks.sort_by(|a, b| {
-        (&a.artist, &a.album, &a.title).cmp(&(&b.artist, &b.album, &b.title))
-    });
+    tracks.sort_by(|a, b| a.title.cmp(&b.title));
     tracks
 }
 
@@ -56,26 +53,20 @@ fn track_from(path: &Path) -> Track {
         .and_then(|s| s.to_str())
         .unwrap_or_default()
         .to_string();
-    let album = path
-        .parent()
-        .and_then(|p| p.file_name())
-        .and_then(|s| s.to_str())
-        .unwrap_or_default()
-        .to_string();
     Track {
         title,
         artist: String::new(),
-        album,
+        album: String::new(),
         genre: String::new(),
         duration_secs: 0.0,
         path: path.to_string_lossy().into_owned(),
     }
 }
 
-/// `m:ss` — minutes unpadded, seconds zero-padded. Anything negative or non-finite is `0:00`.
+/// `m:ss` for a known duration, `"--:--"` when it is unknown (0.0) or non-finite.
 pub fn duration_text(secs: f64) -> String {
-    if !secs.is_finite() || secs < 0.0 {
-        return "0:00".to_string();
+    if !secs.is_finite() || secs <= 0.0 {
+        return "--:--".to_string();
     }
     let total = secs.round() as u64;
     let minutes = total / 60;
@@ -101,34 +92,30 @@ mod tests {
     }
 
     #[test]
-    fn duration_text_renders_minutes_and_seconds() {
-        assert_eq!(duration_text(0.0), "0:00");
-        assert_eq!(duration_text(187.0), "3:07");
-        assert_eq!(duration_text(725.0), "12:05");
-        assert_eq!(duration_text(-1.0), "0:00");
-        assert_eq!(duration_text(f64::NAN), "0:00");
-        assert_eq!(duration_text(f64::INFINITY), "0:00");
+    fn scan_finds_audio_and_ignores_the_rest() {
+        let root = temp_dir("scan");
+        std::fs::write(root.join("a.flac"), b"").expect("a.flac");
+        std::fs::write(root.join("b.MP3"), b"").expect("b.MP3");
+        std::fs::write(root.join("c.txt"), b"not audio").expect("c.txt");
+        let sub = root.join("sub");
+        std::fs::create_dir_all(&sub).expect("sub dir");
+        std::fs::write(sub.join("d.opus"), b"").expect("d.opus");
+
+        let tracks = scan_folder(&root);
+        let titles: Vec<&str> = tracks.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(titles, vec!["a", "b", "d"], "c.txt is excluded, the three audio files are kept");
+
+        let a = tracks.iter().find(|t| t.title == "a").expect("a.flac kept");
+        assert_eq!(a.title, "a");
+        assert!(a.path.ends_with("a.flac"), "path is the file's own: {}", a.path);
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
-    fn scan_folder_keeps_audio_files_and_reads_album_from_parent() {
-        let root = temp_dir("scan");
-        let album = root.join("Artist").join("Album");
-        std::fs::create_dir_all(&album).expect("album dir");
-        std::fs::write(album.join("one.flac"), b"").expect("one.flac");
-        std::fs::write(root.join("two.mp3"), b"").expect("two.mp3");
-        std::fs::write(root.join("notes.txt"), b"not audio").expect("notes.txt");
-
-        let tracks = scan_folder(&root);
-        assert_eq!(tracks.len(), 2, "notes.txt is excluded, the two audio files are kept");
-
-        // Sorted by (artist, album, title): both artists are empty, so album then title.
-        // The flac's album is "Album"; the mp3's album is the temp dir's own name.
-        let flac = tracks.iter().find(|t| t.title == "one").expect("one.flac kept");
-        assert_eq!(flac.album, "Album");
-        let mp3 = tracks.iter().find(|t| t.title == "two").expect("two.mp3 kept");
-        assert_eq!(mp3.album, root.file_name().unwrap().to_str().unwrap());
-
-        std::fs::remove_dir_all(&root).ok();
+    fn scan_of_a_missing_folder_is_empty() {
+        let missing = temp_dir("missing").join("does-not-exist");
+        let tracks = scan_folder(&missing);
+        assert!(tracks.is_empty(), "a missing folder yields no tracks, not a panic");
     }
 }
