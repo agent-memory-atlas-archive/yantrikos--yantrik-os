@@ -513,6 +513,10 @@ export component FirstRunScreen inherits Rectangle {
         root.private-lane ? "private-lane" : root.share ? "share" : "off"
     }
 
+    // A runtime the person hosts lists its models before anything focusable shows, and the card
+    // that had the focus is gone: the screen holds it, so Escape still goes back.
+    changed connect-mode => { if root.connect-mode == "local" { keys.focus(); } }
+
     keys := FocusScope {
         x: 0; y: 0;
         width: root.width;
@@ -844,6 +848,9 @@ export component FirstRunScreen inherits Rectangle {
                             // Connected, and still the chosen one: "Choose another" brings the list
                             // back, and a connection made before it is not the one on screen.
                             enabled: root.connect-status == "connected" && root.connect-mode != "";
+                            // The model rows (or Try again) that held the focus are gone once it
+                            // connects; without this nothing has focus and Escape reaches nothing.
+                            changed enabled => { if self.enabled { self.focus-me(); } }
                             clicked => {
                                 // A model on this computer sends nothing anywhere: no sharing question.
                                 if root.connect-mode == "this-computer" {
@@ -981,7 +988,8 @@ export component FirstRunScreen inherits Rectangle {
                         padding-top: 12px;
                         if root.checks-done : FrButton {
                             label: "Check again";
-                            clicked => { root.start-checks(); }
+                            // This button goes away while the checks run: the screen keeps the focus.
+                            clicked => { keys.focus(); root.start-checks(); }
                         }
                         FrButton {
                             primary: true;
@@ -989,9 +997,10 @@ export component FirstRunScreen inherits Rectangle {
                             // The three checks cannot be skipped; once they have said what they
                             // found, passed or not, the person goes on and the rows say what to fix.
                             enabled: root.checks-done;
-                            init => { self.focus-me(); }
-                            // Disabled while the checks run, so the focus set at init did not land:
-                            // it moves here the moment the checks have said what they found.
+                            // Disabled while the checks run, so the focus cannot land here yet: the
+                            // screen holds it meanwhile (Escape still goes back), and it moves here
+                            // the moment the checks have said what they found.
+                            init => { if self.enabled { self.focus-me(); } else { keys.focus(); } }
                             changed enabled => { if self.enabled { self.focus-me(); } }
                             clicked => { root.step = 5; }
                         }
