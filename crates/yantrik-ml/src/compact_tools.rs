@@ -87,7 +87,8 @@ fn param_type(field: &Value) -> String {
 
 /// Parameters in compact order: those named in `required` first (in
 /// `required` order), then the rest in declaration order, capped at `max` so
-/// an over-parameterized tool keeps the arguments it cannot do without.
+/// an over-parameterized tool keeps the arguments it cannot do without. The cap
+/// only drops optional parameters: a call missing a required one cannot succeed.
 pub(crate) fn ordered_params<'a>(
     props: &'a serde_json::Map<String, Value>,
     required: &[&str],
@@ -99,12 +100,13 @@ pub(crate) fn ordered_params<'a>(
             ordered.push((k, v));
         }
     }
+    let kept = ordered.len().max(max);
     for (k, v) in props {
         if !required.iter().any(|r| *r == k.as_str()) {
             ordered.push((k, v));
         }
     }
-    ordered.truncate(max);
+    ordered.truncate(kept);
     ordered
 }
 
@@ -253,5 +255,26 @@ mod tests {
         assert!(body.contains("[1|2|3|4|…"), "got: {}", body);
         assert!(!body.contains("5"));
     }
-}
 
+    #[test]
+    fn the_param_cap_never_drops_a_required_param() {
+        let mut props = serde_json::Map::new();
+        let names: Vec<String> = (0..7).map(|i| format!("r{}", i)).collect();
+        for n in &names {
+            props.insert(n.clone(), json!({ "type": "string" }));
+        }
+        props.insert("opt".into(), json!({ "type": "string" }));
+        let def = json!({
+            "function": {
+                "name": "t",
+                "parameters": { "properties": props, "required": names },
+            },
+        });
+        // Tiny keeps at most 5 parameters, but all 7 are required.
+        let body = compact_tool(&def, ToolBudget::for_tier(ModelTier::Tiny));
+        for i in 0..7 {
+            assert!(body.contains(&format!("r{}*", i)), "required r{} dropped: {}", i, body);
+        }
+        assert!(!body.contains("opt"), "the optional one is what the cap drops: {}", body);
+    }
+}

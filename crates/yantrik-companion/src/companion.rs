@@ -2096,7 +2096,7 @@ impl CompanionService {
             let selected_defs = self.registry.definitions_for(&selected_tool_names, max_perm);
             let tools_text = self
                 .template()
-                .format_tools_compact(&selected_defs, self.capability_profile.tier);
+                .format_tools_compact(&selected_defs, active_profile.tier);
             if !tools_text.is_empty() {
                 if let Some(first) = context_messages.first() {
                     let combined = format!("{}\n\n{}", tools_text, first.content);
@@ -2353,6 +2353,7 @@ impl CompanionService {
                 &self.policy_engine,
                 &self.trust_state,
                 self.model_family,
+                active_profile.tier,
             );
 
             if !text_part.is_empty() {
@@ -2958,7 +2959,7 @@ impl CompanionService {
             let selected_defs = self.registry.definitions_for(&selected_tool_names, max_perm);
             let tools_text = self
                 .template()
-                .format_tools_compact(&selected_defs, self.capability_profile.tier);
+                .format_tools_compact(&selected_defs, active_profile.tier);
             if !tools_text.is_empty() {
                 if let Some(first) = context_messages.first() {
                     let combined = format!("{}\n\n{}", tools_text, first.content);
@@ -3172,6 +3173,7 @@ impl CompanionService {
                         &self.policy_engine,
                         &self.trust_state,
                         self.model_family,
+                        active_profile.tier,
                     );
 
                     // Remaining rounds: discovery rounds are budget-limited,
@@ -3275,6 +3277,7 @@ impl CompanionService {
                                     &self.policy_engine,
                                     &self.trust_state,
                                     self.model_family,
+                                    active_profile.tier,
                                 );
 
                                 if !round_text.is_empty() {
@@ -4139,6 +4142,7 @@ fn execute_tool_round(
     native_tools: &mut Vec<serde_json::Value>,
     incognito: bool,
     model_family: ModelFamily,
+    model_tier: yantrik_ml::ModelTier,
 ) {
     let ctx = ToolContext {
         db,
@@ -4204,7 +4208,7 @@ fn execute_tool_round(
                     } else {
                         // For non-API: text-inject into system message
                         let tmpl = template_for_family(model_family);
-                        let new_text = tmpl.format_tools(&new_defs);
+                        let new_text = tmpl.format_tools_compact(&new_defs, model_tier);
                         if let Some(sys_msg) = messages.first_mut() {
                             sys_msg.content.push_str(&new_text);
                         }
@@ -4265,6 +4269,7 @@ fn execute_tool_round_tracked(
     policy_engine: &crate::policy_engine::PolicyEngine,
     trust_state: &crate::trust_model::TrustState,
     model_family: ModelFamily,
+    model_tier: yantrik_ml::ModelTier,
 ) {
     let agent_spawner_any = agent_spawner.map(|s| s as &dyn std::any::Any);
     let ctx = ToolContext {
@@ -4496,7 +4501,7 @@ fn execute_tool_round_tracked(
                         native_tools.extend(new_defs);
                     } else {
                         let tmpl = template_for_family(model_family);
-                        let new_text = tmpl.format_tools(&new_defs);
+                        let new_text = tmpl.format_tools_compact(&new_defs, model_tier);
                         if let Some(sys_msg) = messages.first_mut() {
                             sys_msg.content.push_str(&new_text);
                         }
