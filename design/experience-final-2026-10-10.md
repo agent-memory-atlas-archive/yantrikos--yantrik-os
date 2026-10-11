@@ -4,6 +4,8 @@ Pranab's bar: "a novice, someone old and not into tech, as well as a seasoned AI
 
 This is the final pass over everything designed on 10 Oct: the Witness, many minds, the board, onboarding, voice and the shell as windows. DeepSeek V4 Pro, GLM 5.3 and GPT-6 Astra each reviewed the whole flow against that bar (`F:/yantrik/qwen/lead-work/ui-final*`). They agreed on the principle. This doc is what Claude took from them, with the conflicts resolved.
 
+**Read with `design/ux-psychology-2026-10-11.md`** (PR #747, written at Pranab's ask: "understand human psychology and craving and appeal"). It is the why behind this doc. People return for **earned pull**: what leaves them capable, in control and understood, and answers fast. They never return for **manufactured pull**: streaks, variable rewards, guilt-trip buttons, nagging. Its test is binding on every behaviour here: *would the person still want this if the Lens explained exactly why it happened?* Its "What we will not build" list is a hard rule.
+
 ## The principle: one sentence on top, proof underneath
 
 Every card, message and row has a **complete plain sentence** a newcomer can act on. Behind it is the **proof**, which is the same object, not a second interface.
