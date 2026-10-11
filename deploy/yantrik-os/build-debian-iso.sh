@@ -651,82 +651,29 @@ ok "Harnesses staged at /opt/yantrik/share/harnesses, units in /etc/systemd/user
 
 # ── YantrikDB, every mind's memory (#677) ──
 #
-# Baked in, offline: a harness installed from Settings gets YantrikDB as its memory with nothing
-# fetched from a catalog, git or PyPI, and with no terminal (the Mac failure of #677 was the
-# provider's dependencies refused by a non-interactive install). /opt/yantrik/memory, root-owned
-# and outside share/, which the updater replaces from a bundle that does not carry these.
-#
-#   wheels/   the engine and the Hermes provider, installed by harnesses/lib/install/hermes.sh
-#             into Hermes's own Python with --no-index. Hermes picks its Python itself (3.14 at
-#             the commit hermes.sh pins), so the one compiled dependency is fetched for every
-#             CPython it may be; the engine is abi3 and the rest pure Python.
-#   mcp/      yantrikdb-mcp and its dependencies for the image's own python3, which is how Pi,
-#   bin/      DeepSeek and OpenClaw reach YantrikDB (bin/yantrikdb-mcp starts it, with -I so neither
-#             the person's own site-packages nor the directory it runs in can shadow it).
-#
-# The provider is yantrikdb-hermes-plugin with the shared `yantrik` mode (yantrikdb-hermes-plugin
-# PR #93), by commit: a tag can move and a commit cannot. Its mode stays `embedded` until #586's
-# tamper-proof door lands (hermes.sh says why), and switching then needs nothing new in the image.
-# Moved on by hand, together, with a review of what changed.
-YANTRIKDB_VERSION=0.23.2
-YANTRIKDB_MCP_VERSION=0.24.0
-YANTRIKDB_HERMES_PLUGIN_COMMIT=d1f82fab223bc092557f56c3d2ff39f6ca65c583
-YANTRIKDB_DEPS="uuid-utils==1.0.0 click==8.3.1"
-case "$ARCH" in
-    amd64) PY_PLATFORMS="--platform manylinux_2_17_x86_64 --platform manylinux2014_x86_64 --platform manylinux_2_28_x86_64 --platform linux_x86_64" ;;
-    arm64) PY_PLATFORMS="--platform manylinux_2_17_aarch64 --platform manylinux2014_aarch64 --platform manylinux_2_28_aarch64 --platform linux_aarch64" ;;
-    *) fail "no YantrikDB wheels for $ARCH" ;;
-esac
+# From the release bundle, which bakes it (bake-memory.sh, called by build-release.sh): the same
+# tree an update installs, so a machine set up from this image and one set up by update have the
+# same memory. /opt/yantrik/memory, root-owned and outside share/. What is in it, and why, is in
+# bake-memory.sh.
+[ -d "$UNPACK/memory" ] \
+    || fail "release tarball carries no memory/ — every harness install would stop at \"no yantrikdb-mcp\" (build it with build-release.sh, which bakes it)"
+sh "$SCRIPT_DIR/bake-memory.sh" --check "$UNPACK/memory" \
+    || fail "the release tarball's memory/ is missing a file a harness install reads"
 IMAGE_PY=$(sudo chroot "$ROOTFS" python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])') \
     || fail "the image has no python3 to run yantrikdb-mcp on"
-MEM_STAGE="$WORK_DIR/memory-stage"
-rm -rf "$MEM_STAGE"; mkdir -p "$MEM_STAGE/wheels" "$MEM_STAGE/bin"
-for py in 3.11 3.12 3.13 3.14; do
-    # shellcheck disable=SC2086  # PY_PLATFORMS and YANTRIKDB_DEPS are word lists on purpose
-    python3 -m pip download --quiet --disable-pip-version-check --dest "$MEM_STAGE/wheels" \
-        --only-binary=:all: --no-deps --implementation cp --python-version "$py" $PY_PLATFORMS \
-        "yantrikdb==$YANTRIKDB_VERSION" $YANTRIKDB_DEPS \
-        || fail "could not fetch the YantrikDB wheels for CPython $py"
-done
-python3 -m pip wheel --quiet --disable-pip-version-check --no-deps --wheel-dir "$MEM_STAGE/wheels" \
-    "git+https://github.com/yantrikos/yantrikdb-hermes-plugin@$YANTRIKDB_HERMES_PLUGIN_COMMIT" \
-    || fail "could not build the YantrikDB Hermes provider at $YANTRIKDB_HERMES_PLUGIN_COMMIT"
-# shellcheck disable=SC2086
-python3 -m pip install --quiet --disable-pip-version-check --target "$MEM_STAGE/mcp" \
-    --only-binary=:all: --implementation cp --python-version "$IMAGE_PY" $PY_PLATFORMS \
-    "yantrikdb-mcp==$YANTRIKDB_MCP_VERSION" "yantrikdb==$YANTRIKDB_VERSION" \
-    || fail "could not fetch yantrikdb-mcp $YANTRIKDB_MCP_VERSION for the image's Python $IMAGE_PY"
-rm -rf "$MEM_STAGE/mcp/bin"
-cat > "$MEM_STAGE/bin/yantrikdb-mcp" <<'MCP'
-#!/bin/sh
-# YantrikDB's MCP server on the image's own Python, from /opt/yantrik/memory/mcp (#677).
-# -I, not -s: with -c, Python puts the current directory on sys.path, and this runs in whatever
-# directory the harness is working in (a project Pi was opened in, OpenClaw's workspace), where a
-# json.py or typing.py a mind's graded tools wrote would run here ungraded. -I leaves out the
-# current directory, the person's site-packages and every PYTHON* variable.
-exec /usr/bin/python3 -I -c 'import sys; sys.path.insert(0, "/opt/yantrik/memory/mcp"); from yantrikdb_mcp import main; sys.exit(main())' "$@"
-MCP
-{
-    echo "yantrikdb=$YANTRIKDB_VERSION"
-    echo "yantrikdb-mcp=$YANTRIKDB_MCP_VERSION"
-    echo "yantrikdb-hermes-plugin=$YANTRIKDB_HERMES_PLUGIN_COMMIT"
-    echo "image-python=$IMAGE_PY"
-    (cd "$MEM_STAGE/wheels" && ls -1)
-} > "$MEM_STAGE/VERSIONS"
+BUNDLE_PY=$(sed -n 's/^image-python=//p' "$UNPACK/memory/VERSIONS")
+[ "$IMAGE_PY" = "$BUNDLE_PY" ] \
+    || fail "the bundle's yantrikdb-mcp is for Python $BUNDLE_PY and this image has $IMAGE_PY; rebuild the bundle with YANTRIK_IMAGE_PYTHON=$IMAGE_PY"
 sudo rm -rf "$ROOTFS/opt/yantrik/memory"
 sudo mkdir -p "$ROOTFS/opt/yantrik/memory"
-sudo cp -a "$MEM_STAGE/." "$ROOTFS/opt/yantrik/memory/"
+sudo cp -a "$UNPACK/memory/." "$ROOTFS/opt/yantrik/memory/"
 sudo chown -R root:root "$ROOTFS/opt/yantrik/memory"
 sudo chmod -R go-w "$ROOTFS/opt/yantrik/memory"
 sudo chmod 755 "$ROOTFS/opt/yantrik/memory/bin/yantrikdb-mcp"
 # Asserted, not hoped: each harness's Install fails on a machine without these.
-ls "$ROOTFS/opt/yantrik/memory/wheels/yantrikdb-$YANTRIKDB_VERSION"-*.whl >/dev/null 2>&1 \
-    || fail "the YantrikDB engine wheel did not land in the image"
-ls "$ROOTFS/opt/yantrik/memory/wheels/"yantrikdb_hermes_plugin-*.whl >/dev/null 2>&1 \
-    || fail "the YantrikDB Hermes provider did not land in the image"
 sudo chroot "$ROOTFS" /usr/bin/python3 -I -c 'import sys; sys.path.insert(0, "/opt/yantrik/memory/mcp"); import yantrikdb, yantrikdb_mcp' \
     || fail "yantrikdb-mcp does not import on the image's Python"
-ok "YantrikDB baked at /opt/yantrik/memory ($(sudo du -sh "$ROOTFS/opt/yantrik/memory" | cut -f1)): engine $YANTRIKDB_VERSION, Hermes provider, yantrikdb-mcp $YANTRIKDB_MCP_VERSION"
+ok "YantrikDB at /opt/yantrik/memory ($(sudo du -sh "$ROOTFS/opt/yantrik/memory" | cut -f1)), from the release bundle: $(head -n 2 "$UNPACK/memory/VERSIONS" | tr '\n' ' ')"
 
 # ── The mind, beside the OS ──
 #
