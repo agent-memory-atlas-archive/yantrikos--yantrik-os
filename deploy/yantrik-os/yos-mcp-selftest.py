@@ -1932,6 +1932,12 @@ with tempfile.TemporaryDirectory() as d:
     check("the mind reads how it ended, and a client gets the shell's own answer",
           text.startswith("Nobody was asked") and "exit code 0 after 1.2 s, in /tmp." in text
           and meta and meta.get("exit_code") == 0 and meta.get("job") == "job-1a2b", (text, meta))
+    # The command tools present the answer themselves (`command_text`, and the meta pi's `bash`
+    # reads), so they never take `yos act --full`: its JSON would be answered by `command_answer`
+    # instead, and the meta lost.
+    check("a command tool never asks yos for the raw answer",
+          s.get("carried") and not any("--full" in c["argv"] for c in s["carried"]),
+          [c["argv"] for c in s.get("carried", [])])
 
     # 22e. A command still running when its wait ran out says so, and how to follow it up.
     module, state = case(tmp, "token-running", mode="auto", ceiling=None, token=TOKEN,

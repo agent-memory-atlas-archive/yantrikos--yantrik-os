@@ -2609,8 +2609,10 @@ def run_tool(tool, args, present=None):
         argv.append("--no-ask")
         if grant:
             argv += ["--grant", grant]
-        if agent_call and args.get("action") in AGENT_COMMANDS:
-            # The raw answer, so the command's result can lead (see `command_answer`).
+        if agent_call and args.get("action") in AGENT_COMMANDS and present is None:
+            # The raw answer, so the command's result can lead (see `command_answer`). Not when
+            # the caller presents the answer itself: the command tools and a routed terminal.run
+            # already lead with the command (`command_text`), and pi's `bash` reads their meta.
             argv.append("--full")
     timeout = tool["timeout"]
     if callable(timeout):
@@ -2698,7 +2700,7 @@ def run_tool(tool, args, present=None):
         # by os_act as by the hand_off tool.
         _SAW_PRIVATE.append("shell.hand_off")
 
-    if tool["name"] == "os_act" and agent_call and args.get("action") in AGENT_COMMANDS:
+    if tool["name"] == "os_act" and agent_call and args.get("action") in AGENT_COMMANDS and present is None:
         try:
             parsed = json.loads(out) if out else {}
         except ValueError:
