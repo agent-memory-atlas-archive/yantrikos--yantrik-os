@@ -20,7 +20,7 @@ wire_model pi
 # On by default wherever the image carries yantrikdb-mcp (yantrik_pi.py, `memory`); said in pi.json
 # too when there is one, so the file shows it and Revert takes it back.
 [ -x "$YANTRIKDB_MCP" ] || fail "this image has no yantrikdb-mcp at $YANTRIKDB_MCP"
-mkdir -p "$(dirname "$(harness_memory_db pi)")" || fail "could not make the memory directory"
+memory_dir pi
 if [ ! -f "$ours" ]; then
     # No model step on this image and no pi.json of the person's: Pi would run on its own default
     # provider (google), which is rarely what anyone meant. Not installed until it has a model.

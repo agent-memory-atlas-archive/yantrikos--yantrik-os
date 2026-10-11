@@ -114,7 +114,7 @@ timeout 30 hermes config set memory.user_profile_enabled false </dev/null || fai
 env_line "$env_file" YANTRIKDB_MODE embedded
 env_line "$env_file" YANTRIKDB_DB_PATH "$(harness_memory_db hermes)"
 env_line "$env_file" YANTRIKDB_AGENT_NAME hermes
-mkdir -p "$(dirname "$(harness_memory_db hermes)")" || fail "could not make the memory directory"
+memory_dir hermes
 
 # ── The desktop channel, paired with the owner only ──
 # Hermes reads a platform's gate from the profile's own .env, not from what a plugin put in its

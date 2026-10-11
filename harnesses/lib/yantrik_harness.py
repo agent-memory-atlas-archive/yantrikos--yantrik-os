@@ -1424,6 +1424,20 @@ def memory_db(harness: str) -> str:
     return str(Path(base) / "yantrik" / "memory" / ("%s.db" % harness))
 
 
+def private_memory_dir(harness: str) -> str:
+    """The directory of the harness's YantrikDB file, made and kept private (700), with any file
+    already in it 600: what a mind remembers about the person is never readable by another
+    account, whatever umask the harness or the engine runs under."""
+    directory = os.path.dirname(memory_db(harness))
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    os.chmod(directory, 0o700)
+    for name in os.listdir(directory):
+        path = os.path.join(directory, name)
+        if os.path.isfile(path) and not os.path.islink(path):
+            os.chmod(path, 0o600)
+    return directory
+
+
 def memory_env(harness: str) -> Dict[str, str]:
     """What the harness's yantrikdb-mcp is given: its own file and the engine's bundled embedder,
     which is offline (nothing is fetched on first use)."""
@@ -1442,7 +1456,7 @@ def memory_on(setting: Any) -> bool:
 
 def memory_tools(harness: str, log: Optional[Callable[[str], None]] = None) -> "McpTools":
     """The harness's own YantrikDB, as an MCP client: one per harness process."""
-    os.makedirs(os.path.dirname(memory_db(harness)), exist_ok=True)
+    private_memory_dir(harness)
     return McpTools("Yantrik %s memory" % harness, "1.0.0", command=[YANTRIKDB_MCP], env=memory_env(harness),
                     timeout=60.0, log=log)
 

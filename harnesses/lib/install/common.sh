@@ -46,6 +46,18 @@ harness_state() { printf '%s\n' "$HOME/.local/state/yantrik/harnesses/$1"; }
 # the memory server, which waits on #586 (see hermes.sh).
 harness_memory_db() { printf '%s\n' "${XDG_DATA_HOME:-$HOME/.local/share}/yantrik/memory/$1.db"; }
 
+# memory_dir HARNESS — the directory of the harness's YantrikDB file, made and kept private: 700,
+# and any file already in it 600. What a mind remembers about the person is never readable by
+# another account, whatever the umask the install ran under or the engine creates its file with.
+memory_dir() {
+    dir=$(dirname "$(harness_memory_db "$1")")
+    ( umask 077 && mkdir -p "$dir" ) && chmod 700 "$dir" || fail "could not make the memory directory $dir private"
+    for f in "$dir"/*; do
+        [ -f "$f" ] && [ ! -L "$f" ] && { chmod 600 "$f" || fail "could not make $f private"; }
+    done
+    return 0
+}
+
 # backup_once FILE — FILE copied to FILE.before-yantrik once, before the first change an install
 # makes to it, so Revert (revert.sh) can put the person's own file back. A second install never
 # replaces the backup with the first install's output. A file that did not exist is recorded as
