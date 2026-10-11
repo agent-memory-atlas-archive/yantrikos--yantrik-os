@@ -93,12 +93,66 @@ INSTALL_FIX = {"label": "Install again", "action": "install"}
 
 # ── Can it answer? ──────────────────────────────────────────────────────────────────────────────
 
-def prove_answer(harness: str, run: Callable[..., subprocess.CompletedProcess] = subprocess.run
-                 ) -> Dict[str, Any]:
+# Where #675's handoff writes each harness's gateway token (crates/yantrik-ui/src/provider_handoff):
+# the harness's own config, its own way. Read only to make the one call below; never printed.
+GATEWAY_URL = os.environ.get("YANTRIK_GATEWAY_URL", "http://127.0.0.1:7460/v1")
+TOKEN_FILES = {
+    "hermes": (".hermes/config.yaml",),
+    "pi": (".pi/agent/models.json",),
+    "openclaw": (".openclaw/openclaw.json",),
+    "deepseek": (".config/yantrik/deepseek.json",),
+}
+
+
+def gateway_token(harness: str) -> str:
+    """The `ygw-` token #675 wrote into the harness's own config, or "" when there is none."""
+    import re
+
+    for name in TOKEN_FILES.get(harness, ()):
+        try:
+            text = (Path.home() / name).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        found = re.search(r"ygw-[0-9a-f]{64}", text)
+        if found:
+            return found.group(0)
+    return ""
+
+
+def gateway_call(token: str, timeout: float = 90.0) -> Dict[str, Any]:
+    """One short, real chat call through the gateway as the harness: `model: picked`, so it is
+    the model the person picked that answers. Returns {"model"} or {"error"}."""
+    import urllib.error
+    import urllib.request
+
+    body = json.dumps({"model": "picked", "stream": False, "max_tokens": 8,
+                       "messages": [{"role": "user", "content": "Reply with the single word OK."}]})
+    req = urllib.request.Request(GATEWAY_URL.rstrip("/") + "/chat/completions", data=body.encode(),
+                                 headers={"Authorization": "Bearer " + token,
+                                          "Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as reply:
+            answer = json.loads(reply.read(256 * 1024) or b"{}")
+    except urllib.error.HTTPError as exc:
+        try:
+            message = (json.loads(exc.read(64 * 1024) or b"{}").get("error") or {}).get("message")
+        except (ValueError, AttributeError):
+            message = None
+        return {"error": message or "the gateway said %d" % exc.code}
+    except (OSError, ValueError) as exc:
+        return {"error": "the gateway did not answer (%s)" % one_line(exc, 80)}
+    if not isinstance(answer, dict) or not answer.get("choices"):
+        return {"error": "the gateway answered with no reply in it"}
+    return {"model": str(answer.get("model") or "picked")}
+
+
+def prove_answer(harness: str, run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+                 call: Callable[[str], Dict[str, Any]] = gateway_call) -> Dict[str, Any]:
     """The model gateway, when the install wired it; otherwise the harness's own model, said so.
 
-    The probe is the model half's own (#675): lib/install/model.sh's `yantrik_model_probe HARNESS`
-    makes one real call with the harness's gateway token and prints the model that answered.
+    The probe is one real call through the gateway (#675) with the gateway token the model step
+    wrote into the harness's own config. An image whose model step ships a
+    lib/install/model.sh with `yantrik_model_probe HARNESS` uses that instead.
     """
     try:
         wired = (state_dir(harness) / "model").read_text(encoding="utf-8").strip()
@@ -107,21 +161,30 @@ def prove_answer(harness: str, run: Callable[..., subprocess.CompletedProcess] =
     if not wired:
         return row("answer", ANSWER, True, "own", "model: its own")
     fix = {"label": "Use Yantrik models", "action": "configure"}
-    model_sh = HERE / "install" / "model.sh"
-    if wired != "picked" or not model_sh.is_file():
+    if wired != "picked":
         return row("answer", ANSWER, False, "failed",
                    "not connected: the model you picked was not wired in", fix)
-    try:
-        done = run(["sh", "-c", '. "$1" && yantrik_model_probe "$2"', "sh", str(model_sh), harness],
-                   capture_output=True, text=True, timeout=90, stdin=subprocess.DEVNULL)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return row("answer", ANSWER, False, "failed", "not connected: %s" % one_line(exc), fix)
-    if done.returncode != 0:
-        said = (done.stderr or done.stdout or "").strip().splitlines()
-        reason = one_line(said[-1]) if said else "the gateway did not answer"
-        return row("answer", ANSWER, False, "failed", "not connected: %s" % reason, fix)
-    model = one_line((done.stdout or "").strip().splitlines()[0] if done.stdout.strip() else "picked", 80)
-    return row("answer", ANSWER, True, "connected", "connected · %s" % model)
+    model_sh = HERE / "install" / "model.sh"
+    if model_sh.is_file():
+        try:
+            done = run(["sh", "-c", '. "$1" && yantrik_model_probe "$2"', "sh", str(model_sh), harness],
+                       capture_output=True, text=True, timeout=90, stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return row("answer", ANSWER, False, "failed", "not connected: %s" % one_line(exc), fix)
+        if done.returncode != 0:
+            said = (done.stderr or done.stdout or "").strip().splitlines()
+            reason = one_line(said[-1]) if said else "the gateway did not answer"
+            return row("answer", ANSWER, False, "failed", "not connected: %s" % reason, fix)
+        model = one_line((done.stdout or "").strip().splitlines()[0] if done.stdout.strip() else "picked", 80)
+        return row("answer", ANSWER, True, "connected", "connected · %s" % model)
+    token = gateway_token(harness)
+    if not token:
+        return row("answer", ANSWER, False, "failed",
+                   "not connected: its config holds no gateway token", fix)
+    answer = call(token)
+    if "error" in answer:
+        return row("answer", ANSWER, False, "failed", "not connected: %s" % one_line(answer["error"]), fix)
+    return row("answer", ANSWER, True, "connected", "connected · %s" % one_line(answer["model"], 80))
 
 
 # ── Can it remember? ────────────────────────────────────────────────────────────────────────────

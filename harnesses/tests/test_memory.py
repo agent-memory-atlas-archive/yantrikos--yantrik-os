@@ -130,6 +130,66 @@ class ProofTests(MemoryCase):
         self.assertFalse(row["ok"])
         self.assertEqual(row["fix"]["action"], "configure")
 
+    def wired(self, harness):
+        (self.state / "yantrik" / "harnesses" / harness).mkdir(parents=True, exist_ok=True)
+        (self.state / "yantrik" / "harnesses" / harness / "model").write_text("picked\n")
+
+    def test_a_wired_harness_answers_through_the_gateway_with_its_own_token(self):
+        # #675's model step writes the token into the harness's own config; the proof makes one
+        # real call as that harness, through a stand-in gateway that checks the bearer token.
+        import http.server
+        import threading
+
+        token = "ygw-" + "ab" * 32
+        seen = {}
+
+        class Gateway(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                seen["auth"] = self.headers.get("Authorization")
+                seen["body"] = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                reply = json.dumps({"model": "deepseek-v4-pro",
+                                    "choices": [{"message": {"content": "OK"}}]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(reply)))
+                self.end_headers()
+                self.wfile.write(reply)
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Gateway)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        saved = proofs.GATEWAY_URL
+        proofs.GATEWAY_URL = "http://127.0.0.1:%d/v1" % server.server_port
+        self.addCleanup(setattr, proofs, "GATEWAY_URL", saved)
+
+        self.wired("deepseek")
+        config = self.work / ".config" / "yantrik"
+        config.mkdir(parents=True)
+        (config / "deepseek.json").write_text(json.dumps({"base_url": "http://127.0.0.1:7460/v1",
+                                                         "api_key": token, "model": "picked"}))
+        row = proofs.prove_answer("deepseek")
+        self.assertTrue(row["ok"], row)
+        self.assertEqual(row["says"], "connected · deepseek-v4-pro")
+        self.assertEqual(seen["auth"], "Bearer " + token)
+        self.assertEqual(seen["body"]["model"], "picked")
+        self.assertNotIn(token, json.dumps(row), "the token is never in what the row shows")
+
+    def test_a_wired_harness_with_no_token_or_a_refusal_fails_with_its_fix(self):
+        self.wired("pi")
+        row = proofs.prove_answer("pi", call=lambda _t: {"model": "x"})
+        self.assertFalse(row["ok"])
+        self.assertIn("no gateway token", row["says"])
+        agent = self.work / ".pi" / "agent"
+        agent.mkdir(parents=True)
+        (agent / "models.json").write_text('{"providers": {"yantrik": {"apiKey": "ygw-%s"}}}' % ("0" * 64))
+        row = proofs.prove_answer("pi", call=lambda _t: {"error": "No model is picked for this mind yet"})
+        self.assertFalse(row["ok"])
+        self.assertEqual(row["fix"]["action"], "configure")
+        self.assertIn("No model is picked", row["says"])
+
     def test_remember_writes_recalls_and_deletes_through_the_harness_memory_server(self):
         row = proofs.remember_through_mcp("pi", command=[FAKE_MEMORY], env={})
         self.assertTrue(row["ok"], row)
