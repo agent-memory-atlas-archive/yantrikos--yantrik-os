@@ -98,9 +98,9 @@ pub fn wire(ui: &App, _ctx: &AppContext) {
             // and the first run's provider screens (wire/onboarding.rs) keep that choice in this store. Carried
             // over when present, so a key typed in the live session is not typed twice.
             let wizard = ProviderStore::load().primary().cloned();
-            let (ai_provider, ai_base_url, ai_api_key, ai_model) = match wizard {
-                Some(p) => (p.provider_type, p.base_url, p.api_key.unwrap_or_default(), p.model),
-                None => (String::new(), String::new(), String::new(), String::new()),
+            let (ai_provider, ai_name, ai_base_url, ai_api_key, ai_model) = match wizard {
+                Some(p) => (p.provider_type, p.name, p.base_url, p.api_key.unwrap_or_default(), p.model),
+                None => (String::new(), String::new(), String::new(), String::new(), String::new()),
             };
             // The endpoint is not a secret; the key is, so only its presence is logged.
             tracing::info!(
@@ -128,6 +128,7 @@ pub fn wire(ui: &App, _ctx: &AppContext) {
                 encrypt,
                 partition_scheme: "auto".into(),
                 ai_provider,
+                ai_name,
                 ai_base_url,
                 ai_api_key,
                 ai_model,
@@ -329,6 +330,9 @@ pub struct InstallerState {
     pub encrypt: bool,
     pub partition_scheme: String,  // "auto" or "manual"
     pub ai_provider: String,
+    /// The live entry's name. The account id is made from it (`onboarding::account_id`), and
+    /// the carried picker.json names that id, so the installed entry keeps it.
+    pub ai_name: String,
     /// The endpoint the wizard saved for the provider. Empty means nobody chose
     /// one, and the provider's well-known URL is used if a provider is set.
     pub ai_base_url: String,
@@ -1063,7 +1067,8 @@ fn installed_providers_yaml(state: &InstallerState) -> Option<String> {
     if state.ai_provider.is_empty() {
         return None;
     }
-    let (name, preset_url) = provider_preset(&state.ai_provider);
+    let (preset_name, preset_url) = provider_preset(&state.ai_provider);
+    let name = if state.ai_name.is_empty() { preset_name } else { state.ai_name.as_str() };
     let base_url = if !state.ai_base_url.is_empty() {
         state.ai_base_url.as_str()
     } else {
@@ -1639,6 +1644,33 @@ mod tests {
         let yaml = installed_providers_yaml(&state).expect("a chosen provider produces a store");
         let store: ProviderStore = serde_yaml::from_str(&yaml).expect("valid YAML");
         assert_eq!(store.primary().expect("primary").model, "anthropic/claude-sonnet-5-5");
+    }
+
+    /// The carried picker.json names the live account by id, and the id is made from the
+    /// entry's name: the installed entry keeps that name, or the pick points at nothing.
+    #[test]
+    fn the_installed_account_keeps_the_live_id() {
+        let mut state = wizard_state("llamacpp", "http://127.0.0.1:8080/v1", "");
+        state.ai_name = "On this computer".into();
+        state.ai_model = "qwen3.5-4b".into();
+        let live = ProviderStoreEntry {
+            id: "llamacpp-onboarding".into(),
+            name: state.ai_name.clone(),
+            provider_type: state.ai_provider.clone(),
+            base_url: state.ai_base_url.clone(),
+            api_key: None,
+            auth_type: String::new(),
+            is_primary: true,
+            is_fallback: false,
+            model: state.ai_model.clone(),
+        };
+        let yaml = installed_providers_yaml(&state).expect("a chosen provider produces a store");
+        let store: ProviderStore = serde_yaml::from_str(&yaml).expect("valid YAML");
+        let installed = store.primary().expect("primary");
+        assert_eq!(
+            crate::wire::onboarding::account_id(installed),
+            crate::wire::onboarding::account_id(&live),
+        );
     }
 
     #[test]
