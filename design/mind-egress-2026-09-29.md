@@ -515,19 +515,19 @@ What this does and does not open:
 - **It needs the mind's own token** (`Authorization: Bearer ygw-…`), minted by the desktop for that
   mind; without one it answers 401 and sends nothing. It answers no request that carries an
   `Origin` header, so a web page on this machine cannot use it either.
-- **Private context goes only where the person allowed it.** The Mind's token is marked as sending
-  private context; it may use an account only when the person switched private context on for
-  that account (Settings → AI & Intelligence → AI accounts), the same per-account flag as the
-  Mind's own E.PROV1 `private_context`. An account on this machine or the local network needs no
-  switch.
+- **Private context goes where the person chose** (revised 11 Oct, onboarding-one-model-one-memory:
+  a preference, not a lock). The Mind's token, like every mind's, is marked as carrying private
+  context. Per account (Settings → AI & Intelligence → AI accounts): Share sends the call
+  unchanged; Private lane sends it to the local model kept as the private lane instead; Off refuses
+  it with the fix named. An account on this machine or the local network is always Share.
 - **Private mode holds here too.** The kernel table keeps the port open in Private mode (it is one
   of the mind's own, like the proxy's), and the gateway refuses every account that is not on this
   machine or network while Private mode is on.
 - **Every call is logged without content** (`~/.local/state/yantrik/gateway-calls.jsonl`): which
   mind, account, model, effort, status, tokens and time.
 
-What it does not close: what the person allowed. An account the person allowed private context
-for receives it, as a provider the Mind was configured with always did; the difference is that the
+What it does not close: what the person chose. An account the person chose to share with
+receives it, as a provider the Mind was configured with always did; the difference is that the
 key is no longer in the Mind's settings, and the call is counted.
 
 ## Questions for yantrik-mind-72

@@ -13,7 +13,7 @@ use yantrik_ml::model_caps::ModelCaps;
 use crate::body;
 use crate::http::{self, error_body, write_json, Request};
 use crate::log::{Call, CallLog};
-use crate::policy::{self, Refusal, Target};
+use crate::policy::{self, Decision, Refusal, Sharing, Target};
 use crate::route;
 use crate::tokens::{Grant, Tokens};
 use crate::upstream::Upstream;
@@ -28,8 +28,8 @@ pub struct ModelInfo {
     pub caps: ModelCaps,
     /// On this machine or the local network.
     pub local: bool,
-    /// The person allowed this account to receive private context.
-    pub private_ok: bool,
+    /// What the person chose for this account and private context ([`Sharing`]).
+    pub sharing: Sharing,
 }
 
 /// What the gateway asks the OS: its models, an account's key and address at the moment of a
@@ -48,6 +48,12 @@ pub trait Accounts: Send + Sync {
     /// The model the person picked for this harness, `<account>/<model>`: what [`crate::PICKED`]
     /// means for it. `None` when nothing it may use is there to pick.
     fn picked_model(&self, _harness: &str) -> Option<String> {
+        None
+    }
+    /// The private lane, `<account>/<model>`: the model on this machine or network that a call
+    /// carrying private context goes to when the person keeps it on this computer for the account
+    /// the call names. `None` when none is set up.
+    fn private_lane(&self) -> Option<String> {
         None
     }
 }
@@ -192,7 +198,9 @@ impl Gateway {
             .models()
             .into_iter()
             .filter(|m| !(private_mode && !m.local))
-            .filter(|m| !grant.private_context || m.local || m.private_ok)
+            // An account set to Off would refuse this harness's every call; Private lane answers
+            // them on this computer, so it stays listed.
+            .filter(|m| !grant.private_context || m.local || m.sharing != Sharing::Off)
             .map(|m| {
                 json!({
                     "id": m.id,
@@ -225,6 +233,7 @@ impl Gateway {
             prompt_tokens: 0,
             completion_tokens: 0,
             ms: 0,
+            lane_for: None,
         };
         let result = self.forward(grant, req, out, &mut call);
         if let Err(refusal) = result {
@@ -250,8 +259,14 @@ impl Gateway {
         })?;
         call.account = r.account.clone();
         call.model = r.model.clone();
-        let target = self.accounts.target(&r.account, &r.model)?;
-        policy::decide(grant, &target, self.accounts.private_mode())?;
+        let mut target = self.accounts.target(&r.account, &r.model)?;
+        if policy::decide(grant, &target, self.accounts.private_mode())? == Decision::Lane {
+            target = self.lane(&target)?;
+            // The log keeps which model answered, and which account it was meant for.
+            call.lane_for = Some(format!("{}/{}", r.account, r.model));
+            call.account = target.account.clone();
+            call.model = target.model.clone();
+        }
         if let Some(map) = body.as_object_mut() {
             if !map.contains_key("effort") && !map.contains_key("reasoning_effort") {
                 if let Some(e) = self.accounts.effort_for(&grant.harness, &asked) {
@@ -273,6 +288,20 @@ impl Gateway {
         let _ = http::write_head(out, reply.status, &reply.content_type);
         pump(reply.body, out, call);
         Ok(())
+    }
+}
+
+impl Gateway {
+    /// The private lane's account and model, in place of `meant` for a call that carries private
+    /// context. Refused, with the fix named, when there is none or it is not on this machine or
+    /// network: a lane never sends anything off it.
+    fn lane(&self, meant: &Target) -> Result<Target, Refusal> {
+        let lane = self.accounts.private_lane().and_then(|id| route::parse(&id)).ok_or_else(|| policy::not_shared(&meant.provider))?;
+        let target = self.accounts.target(&lane.account, &lane.model)?;
+        if !target.local {
+            return Err(policy::not_shared(&meant.provider));
+        }
+        Ok(target)
     }
 }
 

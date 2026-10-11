@@ -26,7 +26,7 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
         model("model", "free-groq/openai/gpt-oss-120b", "openai/gpt-oss-120b", "Groq (free) · thinks · 131K context", false, ""),
         model("header", "", "OLLAMA CLOUD", "", false, ""),
         model("model", "ollama-cloud/deepseek-v4.1-flash", "deepseek-v4.1-flash", "Ollama Cloud · 128K context", false, ""),
-        model("model", "openai/o4-mini", "o4-mini", "", true, "Yantrik Mind keeps a memory of you; allow private context for OpenAI under AI accounts to use it."),
+        model("model", "openai/o4-mini", "o4-mini", "", true, "Set up a private lane, or allow sharing with OpenAI in AI accounts."),
     ])));
     ui.set_efforts(ModelRc::new(VecModel::from(vec!["easy".into(), "medium".into(), "high".into()])));
     ui.set_files(ModelRc::new(VecModel::from(vec![PickerFile { path: "/home/p/plan.md".into(), name: "plan.md".into(), detail: "2 KB".into(), folder: false }])));

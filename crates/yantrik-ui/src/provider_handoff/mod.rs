@@ -132,7 +132,7 @@ impl Plan {
             lines.push(format!("It asks for whichever model you pick for it in the ask bar; that is {} now.", self.model));
             if self.private_context {
                 lines.push(format!(
-                    "{} keeps a memory of you, so it may only use accounts you allowed private context for (Settings → AI & Intelligence → AI accounts).",
+                    "{} remembers things about you; where they go is your choice per account (Settings → AI & Intelligence → AI accounts).",
                     self.harness_name
                 ));
             }
@@ -222,8 +222,9 @@ pub(crate) trait Handoff: Send + Sync {
     fn takes_saved_provider(&self) -> bool {
         false
     }
-    /// Whether it keeps a memory of the person, and so sends private context with its requests
-    /// (its `memory` when it attaches): the Mind, the companion, Hermes and OpenClaw do.
+    /// Whether its requests carry private context: every mind's do, since every mind has
+    /// YantrikDB memory (design/onboarding-one-model-one-memory-2026-10-10.md). The person's choice
+    /// per account (Share, Private lane, Off) then decides where they go, in the gateway.
     fn private_context(&self) -> bool {
         true
     }
@@ -253,6 +254,67 @@ pub(crate) fn start_companion(home: &Path, bridge: std::sync::Arc<crate::bridge:
 /// Whether the harness was pointed at the gateway here (and not since reverted).
 pub(crate) fn uses_gateway(home: &Path, harness: &str) -> bool {
     marker(home, harness).is_some_and(|m| m.provider_id == GATEWAY_ID)
+}
+
+/// What wiring a harness at install did ([`wire_at_install`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Wired {
+    /// Pointed at the gateway now: its own file was kept for Revert.
+    Now,
+    /// It already was.
+    Already,
+    /// The person chose "Use its own models" for it: left alone.
+    OwnModels,
+    /// The person gave it one of their saved providers: left alone.
+    SavedProvider(String),
+}
+
+/// The mark "Use its own models" leaves: `~/.config/yantrik/handoff/<harness>.own-models`.
+pub(crate) fn own_models_path(home: &Path, harness: &str) -> PathBuf {
+    home.join(".config/yantrik/handoff").join(format!("{harness}.own-models"))
+}
+
+/// The person chose "Use its own models" for this harness: it is never wired at install.
+pub(crate) fn uses_own_models(home: &Path, harness: &str) -> bool {
+    std::fs::symlink_metadata(own_models_path(home, harness)).is_ok()
+}
+
+/// "Use its own models" (`on`), or back to Yantrik models' default (`!on`). On: a harness on the
+/// gateway is reverted (its own file back, its token withdrawn) and the mark left so no install
+/// wires it again. Off: the mark removed; the caller wires it.
+pub(crate) fn set_own_models(home: &Path, harness: &str, on: bool) -> Result<(), String> {
+    adapter_for(harness).ok_or_else(|| format!("{harness} cannot be given a provider here"))?;
+    let mark = own_models_path(home, harness);
+    if !on {
+        return match std::fs::remove_file(&mark) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("could not remove {}: {e}", mark.display())),
+            _ => Ok(()),
+        };
+    }
+    if uses_gateway(home, harness) {
+        revert(home, harness)?;
+    }
+    private_file::write(&mark, b"The person chose: use its own models.\n", Publish::Replace, || Ok(()))
+}
+
+/// The install-time default (design/onboarding-one-model-one-memory-2026-10-10.md, "The flow"):
+/// a harness installed by the ISO, the installer or Settings is pointed at the gateway with no
+/// question, through its own adapter, keeping its own file for Revert. Idempotent: one already
+/// on the gateway, one the person gave a saved provider, and one marked "Use its own models" are
+/// left as they are. `offer` is asked for only when a write is due.
+pub(crate) fn wire_at_install(home: &Path, harness: &str, offer: impl FnOnce() -> Result<Offer, String>) -> Result<Wired, String> {
+    let adapter = adapter_for(harness).ok_or_else(|| format!("{harness} has no model step: it keeps its own settings"))?;
+    if uses_own_models(home, harness) {
+        return Ok(Wired::OwnModels);
+    }
+    match marker(home, harness) {
+        Some(m) if m.provider_id == GATEWAY_ID => return Ok(Wired::Already),
+        Some(m) => return Ok(Wired::SavedProvider(m.provider_name)),
+        None => {}
+    }
+    let plan = adapter.plan_gateway(home, &offer()?)?;
+    apply(home, &plan)?;
+    Ok(Wired::Now)
 }
 
 /// A plan with every field a plan for the gateway shares: the adapter fills in its files.
@@ -333,6 +395,7 @@ pub(crate) fn row_line(home: &Path, harness: &str) -> String {
     match (adapter_for(harness), marker(home, harness)) {
         (_, Some(m)) if m.provider_id == GATEWAY_ID => format!("Provider: {} · {} (through the desktop's gateway)", m.provider_name, m.model),
         (_, Some(m)) => format!("Provider: {} · {} (from your saved providers)", m.provider_name, m.model),
+        (Some(_), None) if uses_own_models(home, harness) => "Provider: its own models (your choice)".into(),
         (Some(_), None) => "Provider: its own settings".into(),
         (None, None) => String::new(),
     }
@@ -377,6 +440,10 @@ pub(crate) fn apply(home: &Path, plan: &Plan) -> Result<Marker, String> {
     }
     let text = serde_json::to_string_pretty(&m).map_err(|e| e.to_string())?;
     private_file::write(&marker_path(home, &plan.harness), text.as_bytes(), Publish::Replace, || Ok(()))?;
+    // Given Yantrik models (the button, or a later install): "Use its own models" is undone.
+    if plan.provider_id == GATEWAY_ID {
+        let _ = std::fs::remove_file(own_models_path(home, &plan.harness));
+    }
     if let Some(unit) = &plan.restart {
         try_restart(unit);
     }

@@ -95,16 +95,22 @@ fn models_a_mind_cannot_use_are_disabled_with_the_reason() {
     let the_mind = mind("mind", true, true);
     let rows = model_rows(&the_mind, &catalogue, &accounts, &Consent::default(), false, "", &[], "");
     let o4 = rows.iter().find(|r| r.id == "openai/o4-mini").unwrap();
-    assert!(o4.disabled && o4.reason.contains("allow private context for OpenAI"), "{}", o4.reason);
+    assert!(o4.disabled && o4.reason == "Set up a private lane, or allow sharing with OpenAI in AI accounts.", "{}", o4.reason);
     let home = rows.iter().find(|r| r.id == "home/qwen3:8b").unwrap();
     assert!(!home.disabled, "a model on this network takes private context");
     let groq = rows.iter().find(|r| r.id.starts_with("free-groq/")).unwrap();
-    assert!(groq.disabled && groq.reason.contains("allow private context for Groq"), "{}", groq.reason);
-    let kilo = rows.iter().find(|r| r.id.starts_with("free-kilo/")).unwrap();
-    assert!(kilo.disabled && kilo.reason.contains("may train"), "a free tier that trains on prompts is never allowed: {}", kilo.reason);
-    let allowed = Consent { private_context: ["openai".to_string()].into_iter().collect() };
+    assert!(groq.disabled && groq.reason.contains("allow sharing with Groq"), "{}", groq.reason);
+    // Shared, or kept on this computer through the private lane: usable either way.
+    use crate::ai_accounts::consent::Sharing;
+    let allowed = Consent { sharing: [("openai".to_string(), Sharing::Share), ("free-groq".to_string(), Sharing::Lane)].into_iter().collect(), ..Consent::default() };
     let rows = model_rows(&the_mind, &catalogue, &accounts, &allowed, false, "", &[], "");
     assert!(!rows.iter().find(|r| r.id == "openai/o4-mini").unwrap().disabled);
+    assert!(!rows.iter().find(|r| r.id.starts_with("free-groq/")).unwrap().disabled);
+    let kilo = rows.iter().find(|r| r.id.starts_with("free-kilo/")).unwrap();
+    assert!(kilo.disabled, "no choice made and no default: Off");
+    let shared_by_default = Consent { default: Some(Sharing::Share), ..Consent::default() };
+    let rows = model_rows(&the_mind, &catalogue, &accounts, &shared_by_default, false, "", &[], "");
+    assert!(rows.iter().filter(|r| r.kind == "model").all(|r| !r.disabled), "agreed at onboarding: every account is usable");
     // Private mode: only what is on this network.
     let rows = model_rows(&mind("pi", true, false), &catalogue, &accounts, &allowed, true, "", &[], "");
     assert!(rows.iter().find(|r| r.id == "openai/o4-mini").unwrap().reason.starts_with("Private mode"));
@@ -116,7 +122,7 @@ fn models_a_mind_cannot_use_are_disabled_with_the_reason() {
 }
 
 #[test]
-fn a_pick_is_kept_per_mind_and_recent_first() {
+fn a_pick_is_one_for_every_mind_effort_per_mind_and_recent_first() {
     let mut c = Choices::default();
     c.pick_model("pi", "openai/o4-mini");
     c.pick_model("mind", "home/qwen3:8b");
@@ -124,9 +130,10 @@ fn a_pick_is_kept_per_mind_and_recent_first() {
     c.pick_model("pi", "openai/o4-mini");
     assert_eq!(c.of("pi").model, "openai/o4-mini");
     assert_eq!(c.of("pi").effort, "high");
-    assert_eq!(c.of("mind").model, "home/qwen3:8b", "switching mind keeps each one's own");
+    assert_eq!(c.of("mind").model, "openai/o4-mini", "one pick for every mind");
+    assert_eq!(c.of("mind").effort, "", "effort is each mind's own");
     assert_eq!(c.recent, ["openai/o4-mini", "home/qwen3:8b"], "no repeats, newest first");
-    assert_eq!(c.of("nobody"), Default::default());
+    assert_eq!(c.of("nobody").model, "openai/o4-mini");
     let dir = std::env::temp_dir().join(format!("picker-{}", std::process::id()));
     let path = dir.join("picker.json");
     super::choices::save(&path, &c).unwrap();
@@ -185,7 +192,7 @@ fn a_file_is_read_no_further_than_its_size_and_never_a_fifo() {
 }
 
 fn call(at: i64, status: u16, outcome: &str) -> Call {
-    Call { at, harness: "pi".into(), account: "openai".into(), model: "o4-mini".into(), effort: None, status, outcome: outcome.into(), prompt_tokens: 0, completion_tokens: 0, ms: 1 }
+    Call { at, harness: "pi".into(), account: "openai".into(), model: "o4-mini".into(), effort: None, status, outcome: outcome.into(), prompt_tokens: 0, completion_tokens: 0, ms: 1, lane_for: None }
 }
 
 #[test]
@@ -203,7 +210,7 @@ fn connected_is_said_only_after_a_real_call_or_a_probe() {
     assert_eq!((s.state, s.fix), ("key-missing", Fix::AddKey));
     let s = judge(&Input { last_call: Some(call(990, 502, "unreachable")), ..base.clone() });
     assert_eq!((s.state, s.fix), ("unreachable", Fix::Retry));
-    let s = judge(&Input { last_call: Some(call(990, 403, "private_context_not_allowed")), ..base.clone() });
+    let s = judge(&Input { last_call: Some(call(990, 403, "private_context_not_shared")), ..base.clone() });
     assert_eq!((s.state, s.fix), ("not-allowed", Fix::Allow));
     let s = judge(&Input { probe: Some(Probe { at: 990, outcome: Outcome::KeyMissing }), ..base.clone() });
     assert_eq!(s.words, "key missing");

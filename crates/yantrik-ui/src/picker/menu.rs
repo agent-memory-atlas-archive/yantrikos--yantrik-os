@@ -102,12 +102,8 @@ pub fn reason(mind: &MindSeen, account: &Account, consent: &Consent, private_mod
     if private_mode && !account.local {
         return Some("Private mode: only models on this machine or network.".into());
     }
-    if mind.private_context && !crate::gateway::private_ok(account, consent) {
-        return Some(if account.trains_on_prompts {
-            format!("{} keeps a memory of you, and this free tier may train on what it is sent.", mind.name)
-        } else {
-            format!("{} keeps a memory of you; allow private context for {} under AI accounts to use it.", mind.name, account.name)
-        });
+    if mind.private_context && crate::gateway::sharing(account, consent) == crate::ai_accounts::consent::Sharing::Off {
+        return Some(format!("Set up a private lane, or allow sharing with {} in AI accounts.", account.name));
     }
     None
 }

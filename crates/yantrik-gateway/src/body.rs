@@ -67,7 +67,8 @@ mod tests {
             efforts: reasoning.efforts(),
             reasoning,
             local: false,
-            private_ok: false,
+            sharing: crate::policy::Sharing::Off,
+            provider: "A".into(),
         }
     }
 

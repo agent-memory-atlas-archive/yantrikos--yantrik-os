@@ -18,9 +18,9 @@
 //!
 //! - **One token per harness** ([`tokens`]), minted by the OS and written into that harness's own
 //!   config through `provider_handoff`, kept here as a SHA-256 only. A wrong token is a 401.
-//! - **Private context stays where the person allowed it** ([`policy`]): a harness marked as
-//!   sending the person's private context may use only the accounts the person allowed it for,
-//!   and in Private mode only accounts on this machine or network.
+//! - **Private context goes where the person chose** ([`policy`]): per account, Share (sent
+//!   unchanged), Private lane (a call carrying it is answered by a local model instead) or Off
+//!   (refused, with the fix named); in Private mode only accounts on this machine or network.
 //! - **Effort in the provider's own words** ([`body`]), with `yantrik_ml::model_caps`.
 //! - **Every call logged without its content** ([`log`]): harness, account, model, effort, status,
 //!   tokens and time, for the honest status and the audit view.
@@ -55,6 +55,6 @@ pub fn base_url() -> String {
     format!("http://{ADDR}/v1")
 }
 
-pub use policy::{Refusal, Target};
+pub use policy::{Decision, Refusal, Sharing, Target};
 pub use server::{Accounts, Gateway, ModelInfo};
 pub use tokens::{Grant, Tokens};

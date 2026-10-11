@@ -32,7 +32,7 @@ impl Fix {
             Fix::None => "",
             Fix::SetUp => "Set up",
             Fix::AddKey => "Add key",
-            Fix::Allow => "Allow",
+            Fix::Allow => "Choose",
             Fix::Retry => "Try again",
         }
     }
@@ -120,7 +120,7 @@ pub fn judge(i: &Input) -> Status {
                 "key_missing" | "vault_locked" | "upstream_401" | "upstream_403" => {
                     return Status::new("key-missing", "key missing", Fix::AddKey)
                 }
-                "private_context_not_allowed" => return Status::new("not-allowed", "not allowed · private context", Fix::Allow),
+                "private_context_not_shared" | "private_context_not_allowed" => return Status::new("not-allowed", "not shared · set up a private lane or allow sharing", Fix::Allow),
                 "account_not_found" | "model_not_found" => return Status::new("not-set-up", "not set up · that account is gone", Fix::AddKey),
                 "private_mode" => return Status::new("not-allowed", "Private mode · local models only", Fix::None),
                 _ if c.status >= 500 || c.outcome == "unreachable" => return Status::new("unreachable", "unreachable", Fix::Retry),

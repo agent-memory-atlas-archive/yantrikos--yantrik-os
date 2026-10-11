@@ -550,6 +550,8 @@ export component SettingsScreen inherits Rectangle {
     callback apply-provider();
     callback cancel-provider();
     callback revert-provider(string);
+    // "Use its own models": its own file back, and no install points it at the gateway again.
+    callback use-own-models(string);
     // Whether any row has a job running. Computed in Rust because Slint cannot reduce over a
     // model, and it is what stops the sweep below from animating on an idle machine.
     in property <bool> harness-busy: false;
@@ -3812,6 +3814,14 @@ SettingRow{label:"About this device";description:"Detailed information about thi
                                         size: 0;
                                         variant: 1;
                                         clicked => { root.revert-provider(h.id); }
+                                    }
+                                    // Every mind is wired to the person's model when it is
+                                    // installed; this is the way out, per harness.
+                                    if h.can-revert-provider : YButton {
+                                        label: "Use its own models";
+                                        size: 0;
+                                        variant: 1;
+                                        clicked => { root.use-own-models(h.id); }
                                     }
                                     // Attachment is still the only thing that lets a mind answer.
                                     // A "Use this" on a row that is not attached would be a

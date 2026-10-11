@@ -143,14 +143,86 @@ fn the_cache_file_never_holds_a_key() {
 }
 
 #[test]
-fn private_context_is_off_for_every_account_until_the_person_switches_it_on() {
-    use super::consent;
+fn private_context_is_off_for_every_account_until_the_person_chooses() {
+    use super::consent::{self, Sharing};
     let dir = std::env::temp_dir().join(format!("ai-consent-{}", std::process::id()));
     let path = dir.join("ai-accounts.json");
-    assert!(consent::load(&path).private_context.is_empty(), "nothing is allowed by default");
-    assert!(consent::toggle(&path, "ollama-cloud").unwrap());
-    assert!(consent::load(&path).private_context.contains("ollama-cloud"));
-    assert!(!consent::toggle(&path, "ollama-cloud").unwrap());
-    assert!(consent::load(&path).private_context.is_empty());
-    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_file(&path);
+    let cloud = saved_account("ollama-cloud", false, false);
+    assert_eq!(consent::load(&path).sharing_for(&cloud), Sharing::Off, "nothing is shared by default");
+    consent::set(&path, "ollama-cloud", Sharing::Lane).unwrap();
+    assert_eq!(consent::load(&path).sharing_for(&cloud), Sharing::Lane);
+    consent::agree_at_onboarding(&path, true).unwrap();
+    let c = consent::load(&path);
+    assert_eq!(c.sharing_for(&cloud), Sharing::Lane, "a choice already made stays");
+    assert_eq!(c.sharing_for(&saved_account("openai", false, false)), Sharing::Share, "agreed at onboarding: the rest share");
+    assert_eq!(c.sharing_for(&saved_account("free-kilo", false, true)), Sharing::Lane, "a tier that may train is never shared with");
+    assert_eq!(c.sharing_for(&saved_account("home", true, false)), Sharing::Share, "a local account: nothing leaves");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_earlier_allow_list_reads_as_share_and_is_never_deleted() {
+    use super::consent::{self, Sharing};
+    let dir = std::env::temp_dir().join(format!("ai-consent-old-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("ai-accounts.json");
+    std::fs::write(&path, r#"{"private_context": ["openai"]}"#).unwrap();
+    let c = consent::load(&path);
+    assert_eq!(c.sharing_for(&saved_account("openai", false, false)), Sharing::Share, "Allow → Share");
+    assert_eq!(c.sharing_for(&saved_account("groq", false, false)), Sharing::Off, "Stop → Off");
+    consent::set(&path, "groq", Sharing::Share).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(v["private_context"], serde_json::json!(["openai"]), "the stored list is kept as written: {text}");
+    assert_eq!(v["sharing"]["openai"], "share");
+    assert_eq!(v["sharing"]["groq"], "share");
+    // A newer choice wins over the old list.
+    consent::set(&path, "openai", Sharing::Off).unwrap();
+    assert_eq!(consent::load(&path).sharing_for(&saved_account("openai", false, false)), Sharing::Off);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_private_lane_is_only_ever_a_local_account() {
+    use super::consent::{self, Consent};
+    let accounts = [saved_account("home", true, false), saved_account("openai", false, false)];
+    let on = |lane: &str| consent::lane(&Consent { lane: Some(lane.into()), ..Consent::default() }, &accounts);
+    assert_eq!(on("home/qwen3:8b").as_deref(), Some("home/qwen3:8b"));
+    assert_eq!(on("openai/gpt-4o"), None);
+    assert_eq!(on("gone/x"), None);
+    assert_eq!(consent::lane(&Consent::default(), &accounts), None);
+}
+
+fn saved_account(id: &str, local: bool, trains: bool) -> super::account::Account {
+    super::account::Account {
+        id: id.into(),
+        name: id.into(),
+        provider_type: "openai".into(),
+        base_url: "https://example.invalid/v1".into(),
+        key: super::account::KeyRef::None,
+        local,
+        source: super::account::Source::Saved,
+        trains_on_prompts: trains,
+        saved_model: String::new(),
+    }
+}
+
+#[test]
+fn the_isos_local_model_account_is_named_honestly_and_its_id_is_the_slug_of_its_name() {
+    let script = include_str!("../../../../deploy/yantrik-os/build-debian-iso.sh");
+    let value = |key: &str| {
+        let line = script.lines().map(str::trim).find(|l| l.starts_with(&format!("{key}="))).unwrap_or_else(|| panic!("{key} is set"));
+        line.split_once('=').unwrap().1.trim_matches('"').to_string()
+    };
+    let name = value("LOCAL_ACCOUNT_NAME");
+    assert_eq!(name, "On this computer (Qwen 3.5 4B)");
+    assert_eq!(super::account::slug(&name), value("LOCAL_ACCOUNT_ID"), "the lane and the pick name the account by this id");
+    assert_eq!(value("LOCAL_MODEL"), "qwen3.5-4b");
+    assert!(script.contains("--alias qwen3.5-4b"), "llama-server serves it under that name");
+    // The build fills the config's empty model lines; they are there to fill.
+    let config = include_str!("../../../../deploy/yantrik-os/config-default.yaml");
+    assert!(config.contains("\n  api_base_url: \"\"\n") && config.contains("\n  api_model: \"\"\n"));
+    let local = crate::runs_on::identity::is_local("http://127.0.0.1:8341/v1");
+    assert!(local, "an account on this computer keeps personal things here");
 }

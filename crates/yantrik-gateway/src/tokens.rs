@@ -2,15 +2,20 @@
 //! as its SHA-256 only, so the gateway's own file cannot be used to call it.
 //!
 //! `ygw-` and 256 random bits as hex. A token names a harness and whether that harness sends the
-//! person's private context (the Mind does; a coding agent pointed at a repository may not): the
-//! one fact [`crate::policy`] needs. Like the agent token (docs/harness.md), it stops confusion
+//! person's private context (every one issued now does: every mind has YantrikDB memory): the
+//! one fact [`crate::policy`] needs.
+//!
+//! The file is the one record: a harness wired at install by another process (`yantrik-ui
+//! --wire-model`) writes it while the shell runs, so the set is read again whenever the file has
+//! changed since it was last read, before a change and when a token is not found. Like the agent token (docs/harness.md), it stops confusion
 //! and casual impersonation, not a hostile program running as the person, which can read the
 //! harness's file as well as the harness can.
 
 use std::collections::BTreeMap;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock};
+use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -36,6 +41,12 @@ struct File {
 pub struct Tokens {
     path: Option<PathBuf>,
     inner: RwLock<File>,
+    /// The file's modification time when it was last read or written.
+    read_at: Mutex<Option<SystemTime>>,
+}
+
+fn modified(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
 fn digest(token: &str) -> String {
@@ -54,13 +65,28 @@ pub fn mint() -> Result<String, String> {
 impl Tokens {
     /// Tokens kept in memory only (tests).
     pub fn in_memory() -> Tokens {
-        Tokens { path: None, inner: RwLock::new(File::default()) }
+        Tokens { path: None, inner: RwLock::new(File::default()), read_at: Mutex::new(None) }
     }
 
     /// Tokens kept at `path` (`~/.config/yantrik/gateway/tokens.json`, mode 600): hashes only.
     pub fn open(path: &Path) -> Tokens {
+        let at = modified(path);
         let file = std::fs::read_to_string(path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
-        Tokens { path: Some(path.to_path_buf()), inner: RwLock::new(file) }
+        Tokens { path: Some(path.to_path_buf()), inner: RwLock::new(file), read_at: Mutex::new(at) }
+    }
+
+    /// Read the file again into `f` when another process changed it since it was last read.
+    fn refresh(&self, f: &mut File) {
+        let Some(path) = &self.path else { return };
+        let now = modified(path);
+        let mut read_at = self.read_at.lock().unwrap_or_else(|e| e.into_inner());
+        if now == *read_at {
+            return;
+        }
+        if let Some(file) = std::fs::read_to_string(path).ok().and_then(|t| serde_json::from_str(&t).ok()) {
+            *f = file;
+        }
+        *read_at = now;
     }
 
     /// Accept `token` for `grant.harness`, replacing any token that harness had: one per harness.
@@ -69,6 +95,7 @@ impl Tokens {
             return Err("not a gateway token".into());
         }
         let mut f = self.inner.write().unwrap_or_else(|e| e.into_inner());
+        self.refresh(&mut f);
         f.tokens.retain(|_, g| g.harness != grant.harness);
         f.tokens.insert(digest(token), grant);
         self.save(&f)
@@ -77,6 +104,7 @@ impl Tokens {
     /// Stop accepting the harness's token (Revert).
     pub fn revoke(&self, harness: &str) -> Result<bool, String> {
         let mut f = self.inner.write().unwrap_or_else(|e| e.into_inner());
+        self.refresh(&mut f);
         let before = f.tokens.len();
         f.tokens.retain(|_, g| g.harness != harness);
         let gone = f.tokens.len() != before;
@@ -89,7 +117,31 @@ impl Tokens {
         if !token.starts_with(PREFIX) {
             return None;
         }
-        self.inner.read().unwrap_or_else(|e| e.into_inner()).tokens.get(&digest(token)).cloned()
+        let d = digest(token);
+        if let Some(g) = self.inner.read().unwrap_or_else(|e| e.into_inner()).tokens.get(&d).cloned() {
+            return Some(g);
+        }
+        // Wired by another process since it was read: one stat, and a read only if it changed.
+        let mut f = self.inner.write().unwrap_or_else(|e| e.into_inner());
+        self.refresh(&mut f);
+        f.tokens.get(&d).cloned()
+    }
+
+    /// Mark every token held as carrying private context, as every one issued now is (every mind
+    /// has YantrikDB memory): a token issued before that, marked as carrying none, would otherwise
+    /// skip the person's choice per account. Returns how many changed.
+    pub fn mark_all_private(&self) -> Result<usize, String> {
+        let mut f = self.inner.write().unwrap_or_else(|e| e.into_inner());
+        self.refresh(&mut f);
+        let mut changed = 0;
+        for g in f.tokens.values_mut().filter(|g| !g.private_context) {
+            g.private_context = true;
+            changed += 1;
+        }
+        if changed > 0 {
+            self.save(&f)?;
+        }
+        Ok(changed)
     }
 
     /// The harnesses that hold a token.
@@ -100,7 +152,9 @@ impl Tokens {
     fn save(&self, f: &File) -> Result<(), String> {
         let Some(path) = &self.path else { return Ok(()) };
         let text = serde_json::to_string_pretty(f).map_err(|e| e.to_string())?;
-        write_private(path, text.as_bytes())
+        write_private(path, text.as_bytes())?;
+        *self.read_at.lock().unwrap_or_else(|e| e.into_inner()) = modified(path);
+        Ok(())
     }
 }
 

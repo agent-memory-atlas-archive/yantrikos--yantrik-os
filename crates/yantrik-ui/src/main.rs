@@ -194,6 +194,15 @@ fn main() {
     // being read as the name of a config file that does not exist.
     yantrik_version::handle_version_flag("yantrik-ui");
 
+    // `yantrik-ui --wire-model <harness>`: an installer's model step (the ISO build, the
+    // installer, harnesses/lib/install's `wire_model`). No window, no TTY, one line, an exit code.
+    {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        if args.first().map(String::as_str) == Some("--wire-model") {
+            std::process::exit(wire::harness_provider::wire_model_cli(&args[1..]));
+        }
+    }
+
     // Private mode lasts until the person turns it off, so it is read back before the companion,
     // the clipboard watcher or the harness socket can start thinking it is off.
     let private_at_start = private_mode::load();

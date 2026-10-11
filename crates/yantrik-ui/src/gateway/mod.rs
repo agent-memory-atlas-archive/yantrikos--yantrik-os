@@ -10,7 +10,7 @@
 
 mod accounts;
 
-pub(crate) use accounts::private_ok;
+pub(crate) use accounts::sharing;
 
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
@@ -46,7 +46,16 @@ pub fn tokens() -> Arc<Tokens> {
     #[cfg(test)]
     return TOKENS.get_or_init(|| Arc::new(Tokens::in_memory())).clone();
     #[cfg(not(test))]
-    TOKENS.get_or_init(|| Arc::new(Tokens::open(&tokens_path()))).clone()
+    TOKENS
+        .get_or_init(|| {
+            let tokens = Tokens::open(&tokens_path());
+            // Every mind has YantrikDB memory: a token from before that carries private context too.
+            if let Err(e) = tokens.mark_all_private() {
+                tracing::warn!(error = %e, "gateway tokens were not marked as carrying private context");
+            }
+            Arc::new(tokens)
+        })
+        .clone()
 }
 
 /// The call log the server writes. The same one whether or not the server started.

@@ -100,9 +100,4 @@ impl Handoff for Pi {
             ],
         ))
     }
-
-    /// A coding agent on the folder it is given; it keeps no memory of the person.
-    fn private_context(&self) -> bool {
-        false
-    }
 }

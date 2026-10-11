@@ -69,6 +69,14 @@ pub fn remembered_model(mind: &str) -> Option<String> {
     Some(lock(&CHOICES).of(mind).model).filter(|m| !m.is_empty())
 }
 
+/// Pick `model` (`<account>/<model>`) for every mind at once, as the picker does: what onboarding's
+/// AI step calls once the person chose a provider and a model. Kept across restarts.
+pub fn pick_for_every_mind(model: &str) -> Result<(), String> {
+    let mut c = lock(&CHOICES);
+    c.pick_model("", model);
+    choices::save(&choices::path(), &c)
+}
+
 /// Every mind the menu knows: the attached ones from the host, the rest from the Harnesses list.
 fn minds_seen() -> Vec<MindSeen> {
     let home = home();

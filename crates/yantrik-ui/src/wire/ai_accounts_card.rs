@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use slint::{ComponentHandle, ModelRc, VecModel};
 
-use crate::ai_accounts::{self, account::Account, consent::Consent, models::Listing, store::Catalogue};
+use crate::ai_accounts::{self, account::Account, consent::{self, Consent, Sharing}, models::Listing, store::Catalogue};
 use crate::app_context::AppContext;
 use crate::{AiAccountRow, AiAccountsState, App};
 
@@ -19,9 +19,33 @@ pub struct Row {
     pub state: &'static str,
     pub detail: String,
     pub local: bool,
-    pub private_ok: bool,
+    /// The person's choice as the gateway applies it: "share", "lane" or "off".
+    pub sharing: &'static str,
+    /// "Share what your minds know about you with OpenAI".
+    pub share_words: String,
+    /// What happens now, in one plain sentence.
     pub private_words: String,
+    /// The three choices are offered: not local (nothing leaves it).
     pub switchable: bool,
+    /// Share is among them: not a free tier that may train on what it is sent.
+    pub offers_share: bool,
+    /// A local account: the model it would keep personal things on, as the private lane
+    /// (`<account>/<model>`), or "" when it has none listed.
+    pub lane_model: String,
+    /// It is the private lane now.
+    pub is_lane: bool,
+}
+
+/// The private lane, in words: "Personal things stay on: On this computer (Qwen 3.5 4B) · qwen…".
+pub fn lane_words(catalogue: &Catalogue, accounts: &[Account], consent: &Consent) -> String {
+    match consent::lane(consent, accounts) {
+        Some(id) => {
+            let account = accounts.iter().find(|a| id.starts_with(&format!("{}/", a.id))).map(|a| a.name.clone()).unwrap_or_default();
+            let model = catalogue.find(&id).map(|m| m.name.clone()).unwrap_or_else(|| id.split_once('/').map(|(_, m)| m.to_string()).unwrap_or_default());
+            format!("Personal things are kept on this computer by {account} · {model}.")
+        }
+        None => "Keeping personal things on this computer needs a model here: add Ollama or another local one, then choose it below.".into(),
+    }
 }
 
 fn plural(n: usize, one: &str, many: &str) -> String {
@@ -49,15 +73,23 @@ pub fn rows(catalogue: &Catalogue, accounts: &[Account], consent: &Consent) -> (
             Some(Listing::Failed(why)) => ("failed", format!("Its models could not be listed: {why}")),
             Some(Listing::Pending) | None => ("pending", "Not listed yet.".to_string()),
         };
-        let private_ok = crate::gateway::private_ok(a, consent);
+        let sharing = crate::gateway::sharing(a, consent);
+        let lane = consent::lane(consent, accounts);
         let private_words = if a.local {
-            "Private context: stays on this network".to_string()
-        } else if private_ok {
-            "Private context: allowed for minds that send it".to_string()
-        } else if a.trains_on_prompts {
-            "Private context: never (this free tier may train on prompts)".to_string()
+            "On this computer or your network: what your minds know about you never leaves it.".to_string()
         } else {
-            "Private context: not allowed".to_string()
+            match sharing {
+                Sharing::Share => format!("Your minds share what they know about you with {}.", a.name),
+                Sharing::Lane if lane.is_some() => format!("Personal things stay on this computer; everything else goes to {}.", a.name),
+                Sharing::Lane => "Personal things stay on this computer, but no model here is set up for them yet, so those questions are not answered.".to_string(),
+                Sharing::Off => format!("Questions with personal things are not sent to {}.", a.name),
+            }
+        };
+        let lane_model = if a.local {
+            let first = listed.and_then(|m| m.models.iter().find(|m| m.name == a.saved_model).or(m.models.first())).map(|m| m.id.clone());
+            first.unwrap_or_default()
+        } else {
+            String::new()
         };
         out.push(Row {
             id: a.id.clone(),
@@ -66,9 +98,13 @@ pub fn rows(catalogue: &Catalogue, accounts: &[Account], consent: &Consent) -> (
             state,
             detail,
             local: a.local,
-            private_ok,
+            sharing: sharing.as_str(),
+            share_words: format!("Share what your minds know about you with {}", a.name),
             private_words,
-            switchable: !a.local && !a.trains_on_prompts,
+            switchable: !a.local,
+            offers_share: !a.local && !a.trains_on_prompts,
+            is_lane: a.local && lane.as_deref().is_some_and(|l| l.starts_with(&format!("{}/", a.id))),
+            lane_model,
         });
     }
     let total: usize = catalogue.models().count();
@@ -88,13 +124,18 @@ fn render(ui: &App) {
             state: r.state.into(),
             detail: r.detail.into(),
             local: r.local,
-            private_ok: r.private_ok,
+            sharing: r.sharing.into(),
+            share_words: r.share_words.into(),
             private_words: r.private_words.into(),
             switchable: r.switchable,
+            offers_share: r.offers_share,
+            lane_model: r.lane_model.into(),
+            is_lane: r.is_lane,
         })
         .collect();
     g.set_rows(ModelRc::new(VecModel::from(items)));
     g.set_summary(summary.into());
+    g.set_lane(lane_words(&ai_accounts::catalogue(), &ai_accounts::accounts(), &ai_accounts::consent::load(&ai_accounts::consent::path())).into());
 }
 
 pub fn wire(ui: &App, ctx: &AppContext) {
@@ -119,14 +160,27 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         ai_accounts::refresh(b.clone());
     });
     let weak = ui.as_weak();
-    g.on_toggle_private(move |id| {
+    g.on_set_sharing(move |id, choice| {
         let Some(ui) = weak.upgrade() else { return };
-        // A free tier that may train on prompts is never sent anything private: no switch.
-        if ai_accounts::accounts().iter().any(|a| a.id == id.as_str() && (a.trains_on_prompts || a.local)) {
+        let Some(sharing) = Sharing::parse(&choice) else { return };
+        let Some(a) = ai_accounts::accounts().into_iter().find(|a| a.id == id.as_str()) else { return };
+        // Nothing to choose for a local account; a free tier that may train is never shared with.
+        if a.local || (a.trains_on_prompts && sharing == Sharing::Share) {
             return;
         }
-        if let Err(e) = ai_accounts::consent::toggle(&ai_accounts::consent::path(), &id) {
-            tracing::warn!(error = %e, "private context switch was not saved");
+        if let Err(e) = consent::set(&consent::path(), &a.id, sharing) {
+            tracing::warn!(error = %e, "the private-context choice was not saved");
+        }
+        render(&ui);
+    });
+    let weak = ui.as_weak();
+    g.on_use_as_lane(move |model| {
+        let Some(ui) = weak.upgrade() else { return };
+        let local = model.split_once('/').is_some_and(|(acc, _)| ai_accounts::accounts().iter().any(|a| a.id == acc && a.local));
+        if local {
+            if let Err(e) = consent::set_lane(&consent::path(), Some(&model)) {
+                tracing::warn!(error = %e, "the private lane was not saved");
+            }
         }
         render(&ui);
     });
@@ -174,14 +228,37 @@ mod tests {
         assert_eq!(summary, "3 accounts · 2 models");
         assert_eq!(drawn[0].summary, "2 models · 1 thinks · 1 sees images");
         assert_eq!(drawn[0].state, "ready");
-        assert!(!drawn[0].private_ok && drawn[0].private_words.ends_with("not allowed"));
+        assert_eq!(drawn[0].sharing, "off", "nothing is shared until the person says so");
+        assert_eq!(drawn[0].private_words, "Questions with personal things are not sent to openai.");
+        assert_eq!(drawn[0].share_words, "Share what your minds know about you with openai");
         assert_eq!(drawn[1].state, "failed");
         assert!(drawn[1].detail.contains("refused"));
-        assert!(drawn[1].private_words.contains("may train"));
-        assert!(!drawn[1].switchable && drawn[0].switchable && !drawn[2].switchable);
-        assert!(drawn[2].private_ok && drawn[2].local, "a local account keeps private context on the network");
-        let consent = Consent { private_context: ["openai".to_string()].into_iter().collect() };
-        let (_, allowed) = rows(&catalogue, &[account("openai", false, false)], &consent);
-        assert!(allowed[0].private_ok);
+        assert!(!drawn[1].offers_share && drawn[1].switchable, "a free tier that may train: keep on this computer, or don't share");
+        assert!(drawn[0].offers_share && !drawn[2].switchable);
+        assert_eq!(drawn[2].sharing, "share");
+        assert!(drawn[2].local && drawn[2].private_words.contains("never leaves"), "a local account keeps private context on the network");
+        let consent = Consent { sharing: [("openai".to_string(), Sharing::Share)].into_iter().collect(), ..Consent::default() };
+        let (_, shared) = rows(&catalogue, &[account("openai", false, false)], &consent);
+        assert_eq!((shared[0].sharing, shared[0].private_words.as_str()), ("share", "Your minds share what they know about you with openai."));
+        let consent = Consent { sharing: [("openai".to_string(), Sharing::Lane)].into_iter().collect(), ..Consent::default() };
+        let (_, laned) = rows(&catalogue, &[account("openai", false, false)], &consent);
+        assert!(laned[0].private_words.contains("no model here is set up"), "a lane chosen with none set up says so");
+    }
+
+    #[test]
+    fn a_local_account_can_be_made_the_private_lane_and_the_card_says_so() {
+        let mut home = account("ollama", true, false);
+        home.saved_model = "qwen3:8b".into();
+        let listed = vec![crate::wire::provider_models::ListedModel { id: "qwen3:8b".into(), name: "qwen3:8b".into(), size_bytes: 0 }];
+        let catalogue = Catalogue { accounts: vec![build(&home, &[], Some(Ok(listed)))], at: 0 };
+        let none = Consent::default();
+        let (_, drawn) = rows(&catalogue, std::slice::from_ref(&home), &none);
+        assert_eq!(drawn[0].lane_model, "ollama/qwen3:8b");
+        assert!(!drawn[0].is_lane);
+        assert!(lane_words(&catalogue, std::slice::from_ref(&home), &none).starts_with("Keeping personal things on this computer needs"));
+        let lane = Consent { lane: Some("ollama/qwen3:8b".into()), ..Consent::default() };
+        let (_, drawn) = rows(&catalogue, std::slice::from_ref(&home), &lane);
+        assert!(drawn[0].is_lane);
+        assert_eq!(lane_words(&catalogue, std::slice::from_ref(&home), &lane), "Personal things are kept on this computer by ollama · qwen3:8b.");
     }
 }

@@ -104,9 +104,4 @@ impl Handoff for DeepSeek {
     fn takes_saved_provider(&self) -> bool {
         true
     }
-
-    /// It keeps no memory of the person (`memory=False` when it attaches).
-    fn private_context(&self) -> bool {
-        false
-    }
 }

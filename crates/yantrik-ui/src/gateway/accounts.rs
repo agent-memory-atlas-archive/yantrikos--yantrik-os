@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use yantrik_gateway::{ModelInfo, Refusal, Target};
+use yantrik_gateway::{ModelInfo, Refusal, Sharing, Target};
 use yantrik_ml::model_caps::caps_for;
 
 use crate::ai_accounts::{self, account::Account, consent, keys};
@@ -14,10 +14,9 @@ pub(super) struct ShellAccounts {
     pub bridge: Arc<CompanionBridge>,
 }
 
-/// Whether the person allowed private context for this account. A free tier that may train on
-/// prompts never is: the free card promises nothing of the person's goes there.
-pub(crate) fn private_ok(account: &Account, allowed: &consent::Consent) -> bool {
-    account.local || (!account.trains_on_prompts && allowed.private_context.contains(&account.id))
+/// Where a call carrying private context to this account goes ([`consent::Consent::sharing_for`]).
+pub(crate) fn sharing(account: &Account, consent: &consent::Consent) -> Sharing {
+    consent.sharing_for(account)
 }
 
 impl yantrik_gateway::Accounts for ShellAccounts {
@@ -34,7 +33,7 @@ impl yantrik_gateway::Accounts for ShellAccounts {
                     name: m.name.clone(),
                     caps: m.caps.clone(),
                     local: a.local,
-                    private_ok: private_ok(a, &allowed),
+                    sharing: sharing(a, &allowed),
                 })
             })
             .collect()
@@ -68,7 +67,8 @@ impl yantrik_gateway::Accounts for ShellAccounts {
             reasoning: caps.reasoning,
             efforts: caps.efforts,
             local: a.local,
-            private_ok: private_ok(a, &allowed),
+            sharing: sharing(a, &allowed),
+            provider: a.name.clone(),
         })
     }
 
@@ -77,8 +77,11 @@ impl yantrik_gateway::Accounts for ShellAccounts {
     }
 
     fn picked_model(&self, harness: &str) -> Option<String> {
-        let private_context = crate::provider_handoff::adapter_for(harness).map(|a| a.private_context()).unwrap_or(true);
-        crate::wire::harness_provider::starting_model(harness, private_context).ok()
+        crate::wire::harness_provider::starting_model(harness).ok()
+    }
+
+    fn private_lane(&self) -> Option<String> {
+        consent::lane(&consent::load(&consent::path()), &ai_accounts::accounts())
     }
 
     fn effort_for(&self, harness: &str, model: &str) -> Option<yantrik_ml::model_caps::Effort> {

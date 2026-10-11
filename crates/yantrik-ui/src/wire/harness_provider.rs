@@ -25,14 +25,18 @@ static PENDING: Mutex<Option<(String, String, String)>> = Mutex::new(None);
 /// sending the key somewhere the person was not shown.
 static EXPLAINED: Mutex<Vec<((String, String), String)>> = Mutex::new(Vec::new());
 
+pub(crate) fn home_dir() -> PathBuf {
+    home()
+}
+
 fn home() -> PathBuf {
     std::env::var("HOME").map(PathBuf::from).unwrap_or_default()
 }
 
-/// The model "Use Yantrik models" starts a harness on: the one the person picked for it, else
-/// the first it may use — any, for a harness that sends no private context; one the person allowed
-/// private context for (or on this network), for one that does.
-pub(crate) fn starting_model(harness: &str, private_context: bool) -> Result<String, String> {
+/// The model a harness on Yantrik models answers with (what `"model": "picked"` resolves to at
+/// each call): the one the person picked in the one picker, else the first it may use, on an
+/// account not set to Off for private context (every mind carries it: YantrikDB memory).
+pub(crate) fn starting_model(harness: &str) -> Result<String, String> {
     let catalogue = crate::ai_accounts::catalogue();
     if catalogue.models().next().is_none() {
         return Err("There are no models yet: add an account under AI & Intelligence (or switch on a free one), then press Use Yantrik models again.".into());
@@ -44,23 +48,110 @@ pub(crate) fn starting_model(harness: &str, private_context: bool) -> Result<Str
     let allowed = crate::ai_accounts::consent::load(&crate::ai_accounts::consent::path());
     let usable = catalogue
         .models()
-        .find(|m| {
-            !private_context
-                || accounts.iter().any(|a| a.id == m.account && crate::gateway::private_ok(a, &allowed))
-        })
+        .find(|m| accounts.iter().any(|a| a.id == m.account && crate::gateway::sharing(a, &allowed) != crate::ai_accounts::consent::Sharing::Off))
         .map(|m| m.id.clone());
     usable.ok_or_else(|| {
         format!(
-            "{harness} keeps a memory of you, and no account may receive private context yet. Allow one under AI & Intelligence → AI accounts, or add a local one, then try again."
+            "{harness} remembers things about you, and no account may hear them yet. Set up a private lane, or allow sharing in AI & Intelligence → AI accounts, then try again."
         )
     })
+}
+
+/// What install-time wiring offers a harness: a token minted now, `picked` resolved at each call
+/// (so it is wired even before any account exists), and the catalogue for a harness that lists
+/// models (Pi, OpenClaw).
+fn install_offer(harness: &str) -> Result<provider_handoff::Offer, String> {
+    Ok(provider_handoff::Offer {
+        token: provider_handoff::Token(yantrik_gateway::tokens::mint()?),
+        model: starting_model(harness).unwrap_or_else(|_| yantrik_gateway::PICKED.to_string()),
+        models: crate::ai_accounts::catalogue().models().cloned().collect(),
+    })
+}
+
+/// The model step of installing a harness, with no question (the install-time default): its own
+/// config pointed at the gateway with a token and `"model": "picked"`, its own file kept for
+/// Revert. Idempotent; a harness the person gave a saved provider or "Use its own models" is left
+/// alone. What `yantrik-ui --wire-model <harness>` and Settings → Harnesses → Install call.
+pub(crate) fn wire_installed(harness: &str) -> Result<provider_handoff::Wired, String> {
+    provider_handoff::wire_at_install(&home(), harness, || install_offer(harness))
+}
+
+/// `yantrik-ui --wire-model <harness>`: [`wire_installed`] for an installer (the ISO build, the
+/// installer, harnesses/lib/install's `wire_model`), with no TTY. One line on stdout; exit 0 when
+/// the harness is (or already was) on the person's model, or was left as the person chose; 1 with
+/// the reason on stderr otherwise.
+pub fn wire_model_cli(args: &[String]) -> i32 {
+    let [harness] = args else {
+        eprintln!("usage: yantrik-ui --wire-model <harness>");
+        return 2;
+    };
+    match wire_installed(harness) {
+        Ok(provider_handoff::Wired::Now) => println!("{harness} now uses your model (Revert in Settings → Harnesses puts its own file back)"),
+        Ok(provider_handoff::Wired::Already) => println!("{harness} already uses your model"),
+        Ok(provider_handoff::Wired::OwnModels) => println!("{harness} uses its own models, as you chose"),
+        Ok(provider_handoff::Wired::SavedProvider(p)) => println!("{harness} uses {p}, as you chose"),
+        Err(e) => {
+            eprintln!("{harness}: {e}");
+            return 1;
+        }
+    }
+    0
+}
+
+/// "Use its own models" on a harness's row: its own file back and no install wires it again.
+pub(crate) fn use_own_models(harness: &str) -> Result<(), String> {
+    provider_handoff::set_own_models(&home(), harness, true)
+}
+
+thread_local! {
+    /// The window, for the one toast a wiring after onboarding shows. Set by [`wire`].
+    static UI: std::cell::RefCell<Option<slint::Weak<App>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The toast's id prefix; its one action is "undo".
+pub(crate) const WIRED_TOAST: &str = "local:wired:";
+
+/// After an install (any thread): wire the harness, and once onboarding is over, say so in one
+/// toast, "<Harness> now uses your model · Undo". During onboarding its summary says it instead.
+pub(crate) fn wire_after_install(harness: &str) {
+    match wire_installed(harness) {
+        Ok(provider_handoff::Wired::Now) if crate::onboarding::marker_path().exists() => {
+            let Some(name) = provider_handoff::adapter_for(harness).map(|a| a.name()) else { return };
+            let id = harness.to_string();
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(ui) = UI.with(|u| u.borrow().as_ref().and_then(|w| w.upgrade())) else { return };
+                crate::wire::toast::push(
+                    &ui,
+                    crate::ToastData {
+                        id: format!("{WIRED_TOAST}{id}").into(),
+                        app_name: name.into(),
+                        summary: format!("{name} now uses your model").into(),
+                        body: "".into(),
+                        urgency: 1,
+                        icon_char: name.chars().next().unwrap_or('M').to_string().into(),
+                        actions: slint::ModelRc::new(slint::VecModel::from(vec![crate::ToastActionData { id: "undo".into(), label: "Undo".into() }])),
+                    },
+                    1,
+                );
+            });
+        }
+        Ok(w) => tracing::info!(harness, outcome = ?w, "model step at install"),
+        Err(e) => tracing::warn!(harness, error = %e, "the model step at install did not run"),
+    }
+}
+
+/// The toast's Undo: the harness goes back to its own models and its own file.
+pub(crate) fn undo_wired(harness: &str) {
+    if let Err(e) = use_own_models(harness) {
+        tracing::warn!(harness, error = %e, "undoing the model step did not work");
+    }
 }
 
 /// The plan for pointing `harness` at the local model gateway, with a token minted for it now.
 fn plan_gateway(harness: &str) -> Result<Plan, String> {
     let adapter = provider_handoff::adapter_for(harness)
         .ok_or_else(|| format!("{harness} cannot be pointed at Yantrik models from here yet — it keeps its own settings"))?;
-    let model = starting_model(harness, adapter.private_context())?;
+    let model = starting_model(harness)?;
     let offer = provider_handoff::Offer {
         token: provider_handoff::Token(yantrik_gateway::tokens::mint()?),
         model,
@@ -172,6 +263,7 @@ pub(crate) fn revert(harness: &str) -> Result<(), String> {
 }
 
 pub(crate) fn wire(ui: &App) {
+    UI.with(|u| *u.borrow_mut() = Some(ui.as_weak()));
     {
         let weak = ui.as_weak();
         ui.on_plan_provider(move |harness, provider| {
@@ -221,6 +313,15 @@ pub(crate) fn wire(ui: &App) {
         ui.on_revert_provider(move |harness| {
             let Some(ui) = weak.upgrade() else { return };
             if let Err(e) = revert(&harness) {
+                ui.set_harness_error(e.into());
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_use_own_models(move |harness| {
+            let Some(ui) = weak.upgrade() else { return };
+            if let Err(e) = use_own_models(&harness) {
                 ui.set_harness_error(e.into());
             }
         });

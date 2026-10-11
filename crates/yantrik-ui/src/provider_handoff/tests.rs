@@ -277,7 +277,7 @@ fn pi_gets_one_provider_of_its_own_beside_the_ones_the_person_keeps() {
     std::fs::write(home.0.join(".pi/agent/models.json"), r#"{"providers":{"ollama":{"baseUrl":"http://localhost:11434/v1","api":"openai-completions","models":[]}}}"#).unwrap();
     let o = offer();
     let plan = adapter_for("pi").unwrap().plan_gateway(&home.0, &o).unwrap();
-    assert!(!plan.private_context, "a coding agent keeps no memory of the person");
+    assert!(plan.private_context, "every mind has YantrikDB memory, so every token carries private context");
     apply(&home.0, &plan).unwrap();
     let models = json(&home.0.join(".pi/agent/models.json"));
     assert!(models["providers"]["ollama"].is_object(), "the person's own provider stays");
@@ -369,4 +369,55 @@ fn a_config_that_cannot_be_read_is_refused_not_replaced() {
     std::fs::write(home.0.join(".hermes/config.yaml"), b"model:\n  default: \xff\n").unwrap();
     assert!(adapter_for("hermes").unwrap().plan_gateway(&home.0, &offer()).is_err());
     assert_eq!(std::fs::read(home.deepseek()).unwrap(), bytes, "the file is as it was");
+}
+
+#[test]
+fn an_installed_harness_is_wired_with_no_question_once_and_revert_restores_its_file() {
+    let home = Home::new("install-hermes");
+    std::fs::create_dir_all(home.0.join(".hermes")).unwrap();
+    let theirs = "model: anthropic/claude-opus\nmemory:\n  provider: yantrikdb\n";
+    std::fs::write(home.0.join(".hermes/config.yaml"), theirs).unwrap();
+    let mut offered = 0;
+    let mut ask = || {
+        offered += 1;
+        Ok(offer())
+    };
+    assert_eq!(wire_at_install(&home.0, "hermes", &mut ask).unwrap(), Wired::Now);
+    assert!(uses_gateway(&home.0, "hermes"));
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&std::fs::read_to_string(home.0.join(".hermes/config.yaml")).unwrap()).unwrap();
+    assert_eq!(yaml["model"]["default"].as_str(), Some("picked"), "its config names `picked`, never a model");
+    assert!(crate::gateway::tokens().harnesses().contains(&"hermes".to_string()));
+    // Idempotent: a second install asks for nothing and writes nothing.
+    assert_eq!(wire_at_install(&home.0, "hermes", &mut ask).unwrap(), Wired::Already);
+    assert_eq!(offered, 1);
+    revert(&home.0, "hermes").unwrap();
+    assert_eq!(std::fs::read_to_string(home.0.join(".hermes/config.yaml")).unwrap(), theirs, "Revert restores the person's file");
+}
+
+#[test]
+fn use_its_own_models_puts_the_file_back_and_no_install_wires_it_again() {
+    let _turn = DEEPSEEK_TOKEN.lock().unwrap_or_else(|e| e.into_inner());
+    let home = Home::new("own-models");
+    std::fs::write(home.deepseek(), r#"{"base_url":"https://api.deepseek.com/v1"}"#).unwrap();
+    assert_eq!(wire_at_install(&home.0, "deepseek", || Ok(offer())).unwrap(), Wired::Now);
+    set_own_models(&home.0, "deepseek", true).unwrap();
+    assert!(!uses_gateway(&home.0, "deepseek"));
+    assert_eq!(json(&home.deepseek())["base_url"], "https://api.deepseek.com/v1");
+    assert!(!crate::gateway::tokens().harnesses().contains(&"deepseek".to_string()), "its token is withdrawn");
+    assert_eq!(wire_at_install(&home.0, "deepseek", || panic!("not asked")).unwrap(), Wired::OwnModels);
+    assert_eq!(row_line(&home.0, "deepseek"), "Provider: its own models (your choice)");
+    // Choosing Yantrik models again lifts it.
+    let plan = adapter_for("deepseek").unwrap().plan_gateway(&home.0, &offer()).unwrap();
+    apply(&home.0, &plan).unwrap();
+    assert!(!uses_own_models(&home.0, "deepseek"));
+}
+
+#[test]
+fn a_saved_provider_the_person_chose_is_left_alone_at_install() {
+    let _turn = DEEPSEEK_TOKEN.lock().unwrap_or_else(|e| e.into_inner());
+    let home = Home::new("install-saved");
+    let plan = adapter_for("deepseek").unwrap().plan(&home.0, &nim()).unwrap();
+    apply(&home.0, &plan).unwrap();
+    assert_eq!(wire_at_install(&home.0, "deepseek", || panic!("not asked")).unwrap(), Wired::SavedProvider("NVIDIA NIM".into()));
+    assert!(wire_at_install(&home.0, "claude-code", || Ok(offer())).is_err(), "the person's own CLIs are never wired silently");
 }

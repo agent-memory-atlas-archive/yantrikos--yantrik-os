@@ -24,7 +24,7 @@ pub struct Call {
     pub effort: Option<String>,
     /// The HTTP status the harness was given.
     pub status: u16,
-    /// Why, when it was refused or failed: a code, never content (`private_context_not_allowed`,
+    /// Why, when it was refused or failed: a code, never content (`private_context_not_shared`,
     /// `upstream_401`, `unreachable`).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub outcome: String,
@@ -33,6 +33,10 @@ pub struct Call {
     #[serde(default)]
     pub completion_tokens: u64,
     pub ms: u64,
+    /// When the private lane answered (`account`/`model` are then the lane's): the
+    /// `<account>/<model>` the call named, which was kept from private context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane_for: Option<String>,
 }
 
 impl Call {
@@ -122,7 +126,7 @@ mod tests {
     use super::*;
 
     fn call(model: &str) -> Call {
-        Call { at: 1, harness: "pi".into(), account: "a".into(), model: model.into(), effort: None, status: 200, outcome: String::new(), prompt_tokens: 0, completion_tokens: 0, ms: 1 }
+        Call { at: 1, harness: "pi".into(), account: "a".into(), model: model.into(), effort: None, status: 200, outcome: String::new(), prompt_tokens: 0, completion_tokens: 0, ms: 1, lane_for: None }
     }
 
     #[test]

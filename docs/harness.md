@@ -537,14 +537,21 @@ POST /v1/chat/completions    → OpenAI chat completions; "stream": true streams
   model does not have becomes the nearest one below it. A request that names none is given the
   effort the person picked for that harness, so one that never reads `options` still thinks as
   hard as was picked.
-- **The token is the harness's own.** "Use Yantrik models" on a harness's row mints one and writes
-  it into that harness's own config, the harness's way, after a card naming every file, with
-  Revert. A wrong or missing token is a 401. A request carrying an `Origin` header (a web page) is
-  refused.
-- **Private context goes only where the person allowed it.** A harness that keeps a memory of the
-  person (the Mind, the companion, Hermes, OpenClaw) is marked as sending private context, and may
-  use an account only if the person switched private context on for it (Settings → AI accounts);
-  an account on this machine or network needs no switch. In Private mode only those are used.
+- **The token is the harness's own.** A harness is wired when it is installed (by the ISO, the
+  installer or Settings → Harnesses → Install), with no question: a token is minted and written
+  into that harness's own config, the harness's way, with `picked` as its model, and its own file
+  kept for Revert. The installers' step is `yantrik-ui --wire-model <harness>` (idempotent, no
+  TTY; `wire_model` in harnesses/lib/install/common.sh). "Use its own models" on the row puts the
+  file back and keeps later installs from wiring it; "Use Yantrik models" wires it again. A wrong
+  or missing token is a 401. A request carrying an `Origin` header (a web page) is refused.
+- **Private context goes where the person chose.** Every mind has YantrikDB memory, so every token
+  is marked as carrying private context. Per account the person chose (Settings → AI accounts):
+  **Share** ("Share what your minds know about you with <provider>") sends the call unchanged;
+  **Private lane** ("Keep personal things on this computer") sends it to the local model kept as
+  the private lane, and the call log records which model answered (`lane_for` names the one the
+  call asked for); **Off** ("Don't share") refuses it with 403 `private_context_not_shared` and the
+  fix: "Set up a private lane, or allow sharing with <provider> in AI accounts". An account on this
+  machine or network is always Share. In Private mode only those are used, for every call.
 - **Every call is logged without content**: harness, account, model, effort, status, tokens, time
   (`~/.local/state/yantrik/gateway-calls.jsonl`). The status shown for a mind comes from these.
 

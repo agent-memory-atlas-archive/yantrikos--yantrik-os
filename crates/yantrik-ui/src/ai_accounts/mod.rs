@@ -6,7 +6,8 @@
 //! - `models`: each account's models and capabilities (pure; capabilities from yantrik_ml).
 //! - `keys`: an account's key and address at the moment of use (the vault, or the saved entry).
 //! - `store`: the catalogue in memory and its cache file, which holds no key.
-//! - `consent`: which accounts may be sent the person's private context (off until switched on).
+//! - `consent`: where the person's private context goes, per account: Share, Private lane or Off.
+//! - `onboarding`: what the first-run AI step calls (the pick, sharing, the private lane, wiring).
 //!
 //! Keys stay where they are kept — the vault for the free tiers, the saved provider's entry for
 //! the rest — and are read only to list an account's models and by the gateway as it forwards.
@@ -16,6 +17,7 @@ pub mod account;
 pub mod consent;
 pub mod keys;
 pub mod models;
+pub mod onboarding;
 pub mod store;
 
 #[cfg(test)]
