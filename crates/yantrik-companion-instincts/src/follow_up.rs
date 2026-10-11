@@ -1,7 +1,8 @@
 //! Follow-up instinct — surfaces important memories that are fading.
 //!
 //! The memory store raises a `decay_review` trigger when something the person said is fading
-//! (#755). The message says what it is and when it was last mentioned, and offers the one choice
+//! (#755). The message says what it is and when it was last used (the store records the last
+//! access, not when it was said), and offers the one choice
 //! that matters — keep it or let it go — instead of claiming the companion "was thinking about"
 //! it. Memories with a painful tone are never raised this way: pain is met when the person
 //! brings it up, not resurfaced later.
@@ -56,13 +57,15 @@ impl Instinct for FollowUpInstinct {
                     .get("trigger_id")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                let days_since = ctx
+                // `days_since_access` counts from the memory's last access, not from when the person
+                // said it, so the message claims only that: "last used on …" (evidence, not a guess).
+                let last_used = ctx
                     .get("days_since_access")
                     .and_then(|v| v.as_f64())
-                    .unwrap_or(0.0);
-                let when = mentioned_on(state.current_ts - days_since * 86400.0, days_since);
+                    .map(|days| format!(", last used {}", day_of(state.current_ts - days * 86400.0, days)))
+                    .unwrap_or_default();
                 let message = format!(
-                    "Something you mentioned {when}: \u{201c}{}\u{201d} Still useful, or should I let it go?",
+                    "Something you mentioned{last_used}: \u{201c}{}\u{201d} Still useful, or should I let it go?",
                     quote(text)
                 );
 
@@ -78,7 +81,7 @@ impl Instinct for FollowUpInstinct {
 }
 
 /// "on Tuesday" within the last week, "on 29 Sep" before that — a real day, never "before".
-fn mentioned_on(ts: f64, days_since: f64) -> String {
+fn day_of(ts: f64, days_since: f64) -> String {
     match chrono::Local.timestamp_opt(ts as i64, 0).single() {
         Some(day) if days_since < 6.0 => format!("on {}", day.format("%A")),
         Some(day) => format!("on {}", day.format("%-d %b")),
@@ -116,7 +119,7 @@ mod tests {
         let urges = FollowUpInstinct.evaluate(&state);
         assert_eq!(urges.len(), 1);
         let msg = &urges[0].suggested_message;
-        assert!(msg.starts_with("Something you mentioned on "), "{msg}");
+        assert!(msg.starts_with("Something you mentioned, last used on "), "{msg}");
         assert!(msg.contains("Renew the passport"), "{msg}");
         assert!(!msg.to_lowercase().contains("thinking"), "{msg}");
         assert!(!msg.contains("importance="), "machinery must not reach the person: {msg}");
@@ -127,5 +130,15 @@ mod tests {
         let mut state = state_idle_for(Some(3600.0));
         state.pending_triggers = vec![decay("My dad is in the hospital", -0.8, 3.0)];
         assert!(FollowUpInstinct.evaluate(&state).is_empty());
+    }
+
+    #[test]
+    fn no_access_age_means_no_invented_day() {
+        let mut state = state_idle_for(Some(3600.0));
+        let mut trigger = decay("Renew the passport", 0.1, 2.0);
+        trigger["context"].as_object_mut().unwrap().remove("days_since_access");
+        state.pending_triggers = vec![trigger];
+        let urges = FollowUpInstinct.evaluate(&state);
+        assert!(urges[0].suggested_message.starts_with("Something you mentioned: "), "{}", urges[0].suggested_message);
     }
 }

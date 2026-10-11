@@ -14,17 +14,21 @@ use std::path::Path;
 /// shows what it kept and did; it never says what it felt, and the person is never responsible
 /// for its wellbeing.
 const BANNED_PHRASES: &[&str] = &[
-    "i missed you",
+    // "missed you" also catches "I've missed you" and "I really missed you".
+    "missed you",
     "i was worried",
+    "worried about you",
     "i care about you",
     "genuinely care",
-    "i was thinking about you",
+    // Catches "I was / I've been / I keep thinking about you".
+    "thinking about you",
     "no take-backs",
     "stuck with me",
     "i'm lonely",
     "i was lonely",
     "don't leave",
     "you haven't talked to me",
+    "we're in this together",
 ];
 
 fn instinct_sources() -> Vec<(String, String)> {
@@ -72,4 +76,9 @@ fn the_guard_catches_what_it_bans() {
     // The retired bond_milestone line, as it shipped.
     let line = normalise("I realize I genuinely care about what happens to you. You\u{2019}re stuck with me now.");
     assert!(BANNED_PHRASES.iter().any(|p| line.contains(p)));
+    // Variants of the same claims, with a typographic apostrophe.
+    for line in ["I\u{2019}ve missed you.", "I\u{2019}ve been thinking about you all day."] {
+        let line = normalise(line);
+        assert!(BANNED_PHRASES.iter().any(|p| line.contains(p)), "{line}");
+    }
 }
