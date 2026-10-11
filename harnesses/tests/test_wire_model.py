@@ -34,7 +34,7 @@ class WireModelTests(unittest.TestCase):
     def install(self, harness):
         env = dict(os.environ)
         env["HOME"] = self.home
-        env["PATH"] = self.bin + os.pathsep + env.get("PATH", "")
+        env["YANTRIK_UI"] = os.path.join(self.bin, "yantrik-ui")
         return subprocess.run(
             ["sh", "-c", 'set -eu; . %s; wire_model "$1"; echo "install went on"' % COMMON_SH, "sh", harness],
             cwd=REPO_ROOT, env=env, capture_output=True, text=True)

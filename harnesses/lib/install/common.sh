@@ -83,9 +83,11 @@ backup_once() {
 wire_model() {
     state=$(harness_state "$1")
     mkdir -p "$state" || fail "could not write $state"
-    # YANTRIK_UI names the desktop binary for tests; a desktop older than the model step (no
-    # --wire-model in it) is the same as none.
-    ui=${YANTRIK_UI:-$(command -v yantrik-ui 2>/dev/null || echo /opt/yantrik/bin/yantrik-ui)}
+    # The image's own desktop first: PATH starts with ~/.local/bin, where harness npm packages put
+    # their binaries (security review, #675). YANTRIK_UI names the binary for tests; a desktop
+    # older than the model step (no --wire-model in it) is the same as none.
+    ui=${YANTRIK_UI:-/opt/yantrik/bin/yantrik-ui}
+    [ -x "$ui" ] || ui=$(command -v yantrik-ui 2>/dev/null || echo "$ui")
     if [ -x "$ui" ] && grep -q -e '--wire-model' "$ui" 2>/dev/null; then
         # #675's model step: the harness's own config pointed at the gateway, `model: picked`,
         # its file kept for Revert. It never stops the install: a step that did not run is said,
