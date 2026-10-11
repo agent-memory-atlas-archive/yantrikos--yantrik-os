@@ -49,6 +49,19 @@ fn modified(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
+/// The file as the gateway trusts it. Every grant read from it carries private context: every
+/// token the OS issues now does, and the file is writable by anything running as the person, so a
+/// grant there saying otherwise (from before, or written by a harness) must not let a call skip
+/// the person's Share / Private lane / Off choice. Only [`Tokens::register`] in this process can
+/// hold a grant without it.
+fn read(path: &Path) -> Option<File> {
+    let mut file: File = std::fs::read_to_string(path).ok().and_then(|t| serde_json::from_str(&t).ok())?;
+    for g in file.tokens.values_mut() {
+        g.private_context = true;
+    }
+    Some(file)
+}
+
 fn digest(token: &str) -> String {
     Sha256::digest(token.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -71,7 +84,7 @@ impl Tokens {
     /// Tokens kept at `path` (`~/.config/yantrik/gateway/tokens.json`, mode 600): hashes only.
     pub fn open(path: &Path) -> Tokens {
         let at = modified(path);
-        let file = std::fs::read_to_string(path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+        let file = read(path).unwrap_or_default();
         Tokens { path: Some(path.to_path_buf()), inner: RwLock::new(file), read_at: Mutex::new(at) }
     }
 
@@ -83,10 +96,16 @@ impl Tokens {
         if now == *read_at {
             return;
         }
-        if let Some(file) = std::fs::read_to_string(path).ok().and_then(|t| serde_json::from_str(&t).ok()) {
+        if let Some(file) = read(path) {
             *f = file;
         }
         *read_at = now;
+    }
+
+    /// The file changed since it was last read (one stat).
+    fn stale(&self) -> bool {
+        let Some(path) = &self.path else { return false };
+        modified(path) != *self.read_at.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Accept `token` for `grant.harness`, replacing any token that harness had: one per harness.
@@ -118,13 +137,15 @@ impl Tokens {
             return None;
         }
         let d = digest(token);
-        if let Some(g) = self.inner.read().unwrap_or_else(|e| e.into_inner()).tokens.get(&d).cloned() {
-            return Some(g);
+        // Wired or revoked by another process since it was read: one stat, and a read only if it
+        // changed. Checked on every call, found or not, so a token withdrawn elsewhere (Revert,
+        // "Use its own models", a re-wire) stops working at once rather than at the next miss.
+        if self.stale() {
+            let mut f = self.inner.write().unwrap_or_else(|e| e.into_inner());
+            self.refresh(&mut f);
+            return f.tokens.get(&d).cloned();
         }
-        // Wired by another process since it was read: one stat, and a read only if it changed.
-        let mut f = self.inner.write().unwrap_or_else(|e| e.into_inner());
-        self.refresh(&mut f);
-        f.tokens.get(&d).cloned()
+        self.inner.read().unwrap_or_else(|e| e.into_inner()).tokens.get(&d).cloned()
     }
 
     /// Mark every token held as carrying private context, as every one issued now is (every mind

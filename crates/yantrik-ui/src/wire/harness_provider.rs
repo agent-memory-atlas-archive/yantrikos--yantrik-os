@@ -85,6 +85,14 @@ pub fn wire_model_cli(args: &[String]) -> i32 {
         eprintln!("usage: yantrik-ui --wire-model <harness>");
         return 2;
     };
+    // The person's own files, written as the person. As root (a `sudo` that kept $HOME) every
+    // write would follow directories the person controls and leave root-owned files the shell
+    // and the harness cannot read, so it is refused.
+    // SAFETY: geteuid cannot fail.
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("{harness}: run this as the person whose harness it is, not as root");
+        return 1;
+    }
     match wire_installed(harness) {
         Ok(provider_handoff::Wired::Now) => println!("{harness} now uses your model (Revert in Settings → Harnesses puts its own file back)"),
         Ok(provider_handoff::Wired::Already) => println!("{harness} already uses your model"),
