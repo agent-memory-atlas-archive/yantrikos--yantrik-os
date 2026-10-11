@@ -39,7 +39,10 @@ fn walk(dir: &Path, tracks: &mut Vec<Track>) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
+        // The entry's own type, not what a symlink points at: a link back up the tree would
+        // recurse until the stack overflows, and a link from ~/Music to ~ would scan the home.
+        let Ok(kind) = entry.file_type() else { continue };
+        if kind.is_dir() {
             walk(&path, tracks);
         } else if is_audio(&path) {
             tracks.push(track_from(&path));
@@ -50,9 +53,8 @@ fn walk(dir: &Path, tracks: &mut Vec<Track>) {
 fn track_from(path: &Path) -> Track {
     let title = path
         .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or_default()
-        .to_string();
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
     Track {
         title,
         artist: String::new(),
@@ -117,5 +119,17 @@ mod tests {
         let missing = temp_dir("missing").join("does-not-exist");
         let tracks = scan_folder(&missing);
         assert!(tracks.is_empty(), "a missing folder yields no tracks, not a panic");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_loop_is_not_followed() {
+        let dir = temp_dir("loop");
+        std::fs::create_dir_all(dir.join("album")).unwrap();
+        std::fs::write(dir.join("album/song.mp3"), b"").unwrap();
+        std::os::unix::fs::symlink(&dir, dir.join("album/back-up")).unwrap();
+        let tracks = scan_folder(&dir);
+        assert_eq!(tracks.len(), 1, "the song once, the loop not walked");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
