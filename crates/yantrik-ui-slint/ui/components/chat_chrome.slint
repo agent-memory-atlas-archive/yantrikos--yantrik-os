@@ -1,6 +1,6 @@
 // The conversation panel's header and its empty state.
 
-import { Theme, TextScale } from "theme.slint";
+import { Theme } from "theme.slint";
 import { Icon, Icons } from "icon.slint";
 import { ChatIconButton } from "chat_parts.slint";
 
@@ -129,7 +129,7 @@ export component ChatEmpty inherits Rectangle {
         Text {
             text: "What would you like help with?";
             color: Theme.chat-text;
-            font-size: Theme.fs-title-1 * TextScale.factor;
+            font-size: Theme.fs-title-1;
             font-weight: 600;
             wrap: word-wrap;
         }
@@ -155,7 +155,7 @@ export component ChatEmpty inherits Rectangle {
                 width: parent.width - 2 * Theme.sp-4;
                 text: "Make a note reminding me to call Sam";
                 color: Theme.chat-text;
-                font-size: Theme.fs-title-2 * TextScale.factor;
+                font-size: Theme.fs-title-2;
                 vertical-alignment: center;
                 wrap: word-wrap;
             }
@@ -189,7 +189,7 @@ export component ChatEmpty inherits Rectangle {
                 ch-text := Text {
                     text: choice;
                     color: Theme.chat-text;
-                    font-size: Theme.fs-title-2 * TextScale.factor;
+                    font-size: Theme.fs-title-2;
                     horizontal-alignment: center;
                     vertical-alignment: center;
                 }
