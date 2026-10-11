@@ -161,9 +161,11 @@ pub fn load_instincts(settings: &InstinctSettings) -> Vec<Box<dyn Instinct>> {
     instincts.push(Box::new(ActivityReflectorInstinct));
 
     // Phase 2: Proactive intelligence
+    // A merged instinct's old switch is not read: the target's own switch decides, so turning
+    // the target off always turns it off (#755: "off" must mean off).
     // predictive_workflow is merged into routine (#755): one routine line per window, not one
-    // "you usually…" per hour. Either switch keeps it on.
-    if settings.routine_enabled || settings.predictive_workflow_enabled {
+    // "you usually…" per hour.
+    if settings.routine_enabled {
         instincts.push(Box::new(RoutineInstinct::new()));
     }
     if settings.cognitive_load_enabled {
@@ -179,14 +181,14 @@ pub fn load_instincts(settings: &InstinctSettings) -> Vec<Box<dyn Instinct>> {
 
     // Browser-based proactive intelligence
     // trend_watch is merged into news_watch (#755), whose cultural lens covers trends.
-    if settings.news_watch_enabled || settings.trend_watch_enabled {
+    if settings.news_watch_enabled {
         instincts.push(Box::new(NewsWatchInstinct::new(settings.news_watch_interval_minutes)));
     }
 
     // Human-first intelligence instincts (interest-aware, location-aware)
     // curiosity is merged into interest_intelligence (#755): the same interest research, but
     // never started by the person's absence.
-    if settings.interest_intelligence_enabled || settings.curiosity_enabled {
+    if settings.interest_intelligence_enabled {
         instincts.push(Box::new(InterestIntelligenceInstinct::new(
             settings.interest_intelligence_interval_hours,
         )));
@@ -222,13 +224,13 @@ pub fn load_instincts(settings: &InstinctSettings) -> Vec<Box<dyn Instinct>> {
         )));
     }
     // cultural_radar is merged into golden_find (#755): both found the one thing matching taste.
-    if settings.golden_find_enabled || settings.cultural_radar_enabled {
+    if settings.golden_find_enabled {
         instincts.push(Box::new(GoldenFindInstinct::new(
             settings.golden_find_interval_hours,
         )));
     }
     // legacy_builder is merged into growth_mirror (#755): one evidence-based progress line.
-    if settings.growth_mirror_enabled || settings.legacy_builder_enabled {
+    if settings.growth_mirror_enabled {
         instincts.push(Box::new(GrowthMirrorInstinct::new(
             settings.growth_mirror_interval_hours,
         )));
@@ -283,7 +285,7 @@ pub fn load_instincts(settings: &InstinctSettings) -> Vec<Box<dyn Instinct>> {
         )));
     }
     // future_self is merged into goal_keeper (#755): one place for stated intentions.
-    if settings.goal_keeper_enabled || settings.future_self_enabled {
+    if settings.goal_keeper_enabled {
         instincts.push(Box::new(GoalKeeperInstinct::new(
             settings.goal_keeper_interval_hours,
         )));
@@ -295,7 +297,7 @@ pub fn load_instincts(settings: &InstinctSettings) -> Vec<Box<dyn Instinct>> {
     }
     // mentor_match is merged into skill_forge (#755): both answered "what unblocks the thing
     // you're learning".
-    if settings.skill_forge_enabled || settings.mentor_match_enabled {
+    if settings.skill_forge_enabled {
         instincts.push(Box::new(SkillForgeInstinct::new(
             settings.skill_forge_interval_hours,
         )));
@@ -345,4 +347,49 @@ pub fn load_instincts(settings: &InstinctSettings) -> Vec<Box<dyn Instinct>> {
     instincts.push(Box::new(SilenceRevealInstinct::new()));
 
     instincts
+}
+
+#[cfg(test)]
+mod load_tests {
+    use super::*;
+
+    const MERGE_TARGETS: &[&str] = &[
+        "routine",
+        "WorldSense",
+        "InterestIntelligence",
+        "GoldenFind",
+        "GrowthMirror",
+        "GoalKeeper",
+        "SkillForge",
+    ];
+
+    fn loaded(settings: &InstinctSettings) -> Vec<String> {
+        load_instincts(settings).iter().map(|i| i.name().to_string()).collect()
+    }
+
+    #[test]
+    fn turning_off_a_merge_target_turns_it_off() {
+        // The merged instincts' old switches default to on; they must not keep a target running
+        // after the person turned it off.
+        let mut s = InstinctSettings::default();
+        s.routine_enabled = false;
+        s.news_watch_enabled = false;
+        s.interest_intelligence_enabled = false;
+        s.golden_find_enabled = false;
+        s.growth_mirror_enabled = false;
+        s.goal_keeper_enabled = false;
+        s.skill_forge_enabled = false;
+        let names = loaded(&s);
+        for gone in MERGE_TARGETS {
+            assert!(!names.iter().any(|n| n == gone), "{gone} still loaded: {names:?}");
+        }
+    }
+
+    #[test]
+    fn defaults_load_the_merge_targets() {
+        let names = loaded(&InstinctSettings::default());
+        for kept in MERGE_TARGETS {
+            assert!(names.iter().any(|n| n == kept), "{kept} missing: {names:?}");
+        }
+    }
 }
