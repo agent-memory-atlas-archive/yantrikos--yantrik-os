@@ -19,7 +19,7 @@ wire_model deepseek
 # On by default wherever the image carries yantrikdb-mcp (yantrik_deepseek.py, `memory`); said in
 # deepseek.json too when there is one, so the file shows it and Revert takes it back.
 [ -x "$YANTRIKDB_MCP" ] || fail "this image has no yantrikdb-mcp at $YANTRIKDB_MCP"
-mkdir -p "$(dirname "$(harness_memory_db deepseek)")" || fail "could not make the memory directory"
+memory_dir deepseek
 if [ ! -f "$ours" ]; then
     # No model step on this image and no deepseek.json of the person's: nothing to answer with.
     say "DeepSeek will remember in YantrikDB; it needs its model first: set up deepseek.json on this row, then press Start"

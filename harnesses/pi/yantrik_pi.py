@@ -54,8 +54,8 @@ if _LIB.is_dir() and str(_LIB) not in sys.path:
 
 from yantrik_harness import (  # noqa: E402
     AGENT_TOKEN_ENV, MAIN, Handler, Harness, PerConversation, Turn, end_process,
-    YANTRIKDB_MCP, memory_db, memory_env, memory_on, mind_directory, program_path, summary_line,
-    tool_target,
+    YANTRIKDB_MCP, memory_env, memory_on, mind_directory, private_memory_dir, program_path,
+    summary_line, tool_target,
 )
 
 VERSION = "1.0"
@@ -162,7 +162,7 @@ class PiConfig:
             env["YANTRIKDB_MCP_BIN"] = YANTRIKDB_MCP
             env["YANTRIK_MEMORY_SOURCE"] = "pi"
             env.update(memory_env("pi"))
-            os.makedirs(os.path.dirname(memory_db("pi")), exist_ok=True)
+            private_memory_dir("pi")
         return env
 
 

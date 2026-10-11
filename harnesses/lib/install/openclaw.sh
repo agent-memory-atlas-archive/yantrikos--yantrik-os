@@ -39,7 +39,7 @@ mcp_server() {
 # ── Memory: YantrikDB, from the image ──
 [ -x "$YANTRIKDB_MCP" ] || fail "this image has no yantrikdb-mcp at $YANTRIKDB_MCP"
 db=$(harness_memory_db openclaw)
-mkdir -p "$(dirname "$db")" || fail "could not make the memory directory"
+memory_dir openclaw
 say "giving OpenClaw YantrikDB as its memory"
 mcp_server yantrikdb \
     "{\"command\":\"$YANTRIKDB_MCP\",\"env\":{\"YANTRIKDB_DB_PATH\":\"$db\",\"YANTRIKDB_EMBEDDER\":\"bundled\"}}" \
