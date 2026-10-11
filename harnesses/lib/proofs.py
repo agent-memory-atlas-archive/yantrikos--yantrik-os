@@ -134,16 +134,19 @@ def remember_through_mcp(harness: str, command: Optional[List[str]] = None,
                          env: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """Write, recall and delete one note through yantrikdb-mcp with the harness's own settings,
     the same server and the same file the harness's memory tools use."""
-    from yantrik_harness import McpTools
+    from yantrik_harness import McpTools, private_memory_dir
 
     command = command or [str(MEMORY_DIR / "bin" / "yantrikdb-mcp")]
     if not Path(command[0]).exists():
         return row("remember", REMEMBER, False, "failed",
                    "no memory: YantrikDB is not in this image (%s)" % command[0], INSTALL_FIX)
+    if env is None:
+        private_memory_dir(harness)
     env = dict(env or mcp_env(harness))
     tools = McpTools("Yantrik install check", "1", command=command, env=env, timeout=60,
                      log=lambda _m: None)
     note = probe_note()
+    rid = ""
     try:
         text, error = tools.call("remember", {"text": note, "importance": 0.05, "source": harness,
                                               "metadata": {"provenance": harness, "probe": True}})
@@ -156,10 +159,13 @@ def remember_through_mcp(harness: str, command: Optional[List[str]] = None,
             rid = ""
         found, error = tools.call("recall", {"query": note, "top_k": 5})
         recalled = (not error) and bool(rid) and rid in found
-        if rid:
-            tools.call("forget", {"rid": rid})
     finally:
-        tools.close()
+        # The note is deleted however the recall went, a failed or interrupted one included.
+        try:
+            if rid:
+                tools.call("forget", {"rid": rid})
+        finally:
+            tools.close()
     if not recalled:
         return row("remember", REMEMBER, False, "failed",
                    "wrote a note but could not recall it", INSTALL_FIX)
@@ -188,9 +194,11 @@ config = YantrikDBConfig.from_env()
 client = make_backend(config)
 note = sys.argv[1]
 rid = client.remember(note, importance=0.05, metadata={"source": "hermes", "probe": True}).get("rid") or ""
-found = json.dumps(client.recall(note, top_k=5), default=str)
-if rid:
-    client.forget(rid)
+try:
+    found = json.dumps(client.recall(note, top_k=5), default=str)
+finally:
+    if rid:
+        client.forget(rid)
 print(json.dumps({"mode": config.mode, "recalled": bool(rid) and rid in found}))
 """
 
@@ -331,6 +339,8 @@ def keep_and_find(harness: str, remember: str = "", recall: str = "") -> Dict[st
 
     if harness not in MCP_MEMORY:
         return {"harness": harness, "error": "--remember/--recall reach yantrikdb-mcp harnesses only"}
+    from yantrik_harness import private_memory_dir
+    private_memory_dir(harness)
     tools = McpTools("Yantrik memory check", "1", command=[str(MEMORY_DIR / "bin" / "yantrikdb-mcp")],
                      env=mcp_env(harness), timeout=60, log=lambda _m: None)
     try:
