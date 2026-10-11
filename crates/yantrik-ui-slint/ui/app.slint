@@ -1369,6 +1369,7 @@ export component App inherits Window {
     in-out property <bool> fr-show-shared: false;
     in property <[string]> fr-shared-items: [];
     in property <string> fr-private-lane-words: "";
+    in property <string> fr-sharing-words: "";
     in property <[FirstRunMind]> fr-minds: [];
     in property <bool> fr-checks-running: false;
     in property <bool> fr-checks-done: false;
@@ -1578,6 +1579,7 @@ export component App inherits Window {
             show-shared <=> root.fr-show-shared;
             shared-items: root.fr-shared-items;
             private-lane-words: root.fr-private-lane-words;
+            sharing-words: root.fr-sharing-words;
             minds: root.fr-minds;
             checks-running: root.fr-checks-running;
             checks-done: root.fr-checks-done;

@@ -205,6 +205,8 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     ui.set_scale(1.5);
     render(w, width, height, &still("4-done-bigger"))?;
     ui.set_scale(1.0);
+    enter();
+    assert_eq!(ui.get_step(), 5, "Continue takes the focus once the checks are done, and Enter presses it");
 
     // 5. Your minds.
     ui.set_step(5);

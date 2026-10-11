@@ -540,12 +540,40 @@ fn model_of<T: Clone + 'static>(v: Vec<T>) -> ModelRc<T> {
     ModelRc::new(VecModel::from(v))
 }
 
-/// Save `entry` as the one primary provider, as Settings and the old onboarding do.
+/// Save `entry` as the one primary provider. An earlier primary steps aside but is kept: merely
+/// looking at a card (a runtime the person hosts connects at once) or a refused key must not
+/// delete an account that worked, key and all.
 fn save_primary(entry: ProviderStoreEntry) -> Result<(), String> {
     let mut store = ProviderStore::load();
-    store.entries.retain(|e| !e.is_primary && e.id != entry.id);
+    store.entries.retain(|e| e.id != entry.id);
+    for e in &mut store.entries {
+        e.is_primary = false;
+    }
     store.entries.push(entry);
     store.save()
+}
+
+/// The companion's bridge, for putting it on the account just proven.
+static BRIDGE: std::sync::OnceLock<Arc<crate::bridge::CompanionBridge>> = std::sync::OnceLock::new();
+
+/// Proven: keep the model it answered with on the saved account (as the old onboarding's
+/// `remember_model` did, so the next start runs on a model the account serves, not a catalogue
+/// guess) and put the companion on it now, so the first success in the chat is answered by what
+/// was just checked rather than "No mind can think yet" until a restart. A companion on Yantrik
+/// models (companion-models.json) stays there.
+fn adopt(entry: &ProviderStoreEntry, model: &str) -> Result<(), String> {
+    let mut kept = entry.clone();
+    if kept.model.is_empty() {
+        kept.model = model.to_string();
+    }
+    save_primary(kept.clone())?;
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/root"));
+    if !home.join(".config/yantrik/companion-models.json").exists() {
+        if let Some(bridge) = BRIDGE.get() {
+            crate::wire::provider_panel::reload_primary(bridge, &kept);
+        }
+    }
+    Ok(())
 }
 
 /// A connection is proven by the smallest real answer: a one-token call with the model the
@@ -578,7 +606,8 @@ struct State {
     local: Option<LocalModel>,
 }
 
-pub fn wire(ui: &App, _ctx: &AppContext) {
+pub fn wire(ui: &App, ctx: &AppContext) {
+    let _ = BRIDGE.set(ctx.bridge.clone());
     let proofs: Arc<dyn Proofs> = Arc::new(PendingProofs);
     let lane: Arc<dyn Lane> = Arc::new(PendingLane);
     let saved = saved_path();
@@ -769,12 +798,27 @@ pub fn wire(ui: &App, _ctx: &AppContext) {
         let weak = ui.as_weak();
         let saved = saved.clone();
         move |mode| {
-            update_saved(&saved, |s| s.sharing = mode.to_string());
-            let Some(sharing) = Sharing::parse(&mode) else { return };
-            if let Err(e) = apply_sharing(sharing) {
-                tracing::warn!(error = %e, "first run: the sharing choice was not saved");
-                if let Some(ui) = weak.upgrade() {
-                    ui.set_fr_connect_words(format!("Needs attention: the sharing choice was not saved ({e})").into());
+            if let Some(ui) = weak.upgrade() {
+                ui.set_fr_sharing_words("".into());
+            }
+            let Some(sharing) = Sharing::parse(&mode) else {
+                update_saved(&saved, |s| s.sharing = mode.to_string());
+                return;
+            };
+            match apply_sharing(sharing) {
+                Ok(()) => update_saved(&saved, |s| s.sharing = mode.to_string()),
+                Err(e) => {
+                    tracing::warn!(error = %e, "first run: the sharing choice was not saved");
+                    let words = if sharing == Sharing::PrivateLane {
+                        // apply_sharing turned sharing off before the lane refused: record what is true.
+                        update_saved(&saved, |s| s.sharing = "off".into());
+                        format!("Needs attention: personal things are not shared, and not kept on this computer either: {e}. You can choose again in Settings → AI accounts.")
+                    } else {
+                        format!("Needs attention: the sharing choice was not saved ({e})")
+                    };
+                    if let Some(ui) = weak.upgrade() {
+                        ui.set_fr_sharing_words(words.into());
+                    }
                 }
             }
         }
@@ -839,17 +883,12 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-/// Save the account and prove it answers, off the UI thread. "Connected to Claude." only after a
-/// real answer; anything else is the plain reason.
+/// Prove the account answers, off the UI thread, and save it once it has. "Connected to Claude."
+/// only after a real answer; anything else is the plain reason.
 fn connect(ui: &App, entry: ProviderStoreEntry) {
     if entry.base_url.is_empty() {
         ui.set_fr_connect_status("attention".into());
         ui.set_fr_connect_words("Needs attention: there is no address for it".into());
-        return;
-    }
-    if let Err(e) = save_primary(entry.clone()) {
-        ui.set_fr_connect_status("attention".into());
-        ui.set_fr_connect_words(format!("Needs attention: it could not be saved ({e})").into());
         return;
     }
     let name = ui.get_fr_chosen_name().to_string();
@@ -857,7 +896,12 @@ fn connect(ui: &App, entry: ProviderStoreEntry) {
     ui.set_fr_connect_words(format!("Checking (started {})", clock(chrono::Local::now())).into());
     let weak = ui.as_weak();
     std::thread::spawn(move || {
-        let result = prove_answer(&entry);
+        // Saved only once it has answered: a refused key or a runtime that is not running
+        // leaves nothing behind, and the account that worked before stays the primary.
+        let result = prove_answer(&entry).and_then(|(model, ms)| {
+            adopt(&entry, &model).map_err(|e| format!("it answered, but could not be saved ({e})"))?;
+            Ok((model, ms))
+        });
         if let Ok((model, _)) = &result {
             // The model it answered with is the one pick for every mind (#675).
             let id = crate::ai_accounts::models::gateway_id(&account_id(&entry), model);

@@ -371,6 +371,9 @@ export component FirstRunScreen inherits Rectangle {
     // "Uses a 2.5 GB model on this computer. Answers may be slower." Empty: none is here or
     // downloadable, and the offer says so rather than pretending.
     in property <string> private-lane-words: "";
+    // The sharing choice could not be kept as chosen (a private lane with no local model to
+    // keep it): said on the checks and on Your minds, not on a screen already left behind.
+    in property <string> sharing-words: "";
 
     // ── 4 and 5 ──
     in property <[FirstRunMind]> minds: [];
@@ -685,7 +688,9 @@ export component FirstRunScreen inherits Rectangle {
                     FrButton {
                         primary: true;
                         label: "Continue";
-                        enabled: root.connect-status == "connected";
+                        // Connected, and still the chosen one: "Choose another" brings the list
+                        // back, and a connection made before it is not the one on screen.
+                        enabled: root.connect-status == "connected" && root.connect-mode != "";
                         clicked => {
                             // A model on this computer sends nothing anywhere: no sharing question.
                             if root.connect-mode == "this-computer" {
@@ -808,6 +813,12 @@ export component FirstRunScreen inherits Rectangle {
                         for c in m.checks : FrCheckRow { c: c; }
                     }
                 }
+                if root.sharing-words != "" : Text {
+                    text: root.sharing-words;
+                    color: Theme.color-warning;
+                    font-size: Theme.fs-title-2 * root.s;
+                    wrap: word-wrap;
+                }
                 HorizontalLayout {
                     alignment: end;
                     spacing: 8px;
@@ -823,6 +834,9 @@ export component FirstRunScreen inherits Rectangle {
                         // found, passed or not, the person goes on and the rows say what to fix.
                         enabled: root.checks-done;
                         init => { self.focus-me(); }
+                        // Disabled while the checks run, so the focus set at init did not land:
+                        // it moves here the moment the checks have said what they found.
+                        changed enabled => { if self.enabled { self.focus-me(); } }
                         clicked => { root.step = 5; }
                     }
                 }
@@ -853,6 +867,12 @@ export component FirstRunScreen inherits Rectangle {
                         horizontal-stretch: 1;
                         wrap: word-wrap;
                     }
+                }
+                if root.sharing-words != "" : Text {
+                    text: root.sharing-words;
+                    color: Theme.color-warning;
+                    font-size: Theme.fs-title-2 * root.s;
+                    wrap: word-wrap;
                 }
                 HorizontalLayout {
                     alignment: space-between;
