@@ -696,17 +696,28 @@ impl CognitiveRouter {
     /// Top-N tool and recipe candidates by cosine similarity (descending),
     /// with the composite boost applied to recipes. Used to fill the
     /// explanation even when a keyword rule short-circuits the decision.
+    /// `route()` asks for none (`top_n == 0`) and pays nothing: no embedding on the keyword fast
+    /// path, no second scoring pass on the embedding path.
     fn top_candidates(&self, query: &str, top_n: usize) -> (Vec<(String, f32)>, Vec<(String, f32)>) {
+        if top_n == 0 {
+            return (Vec::new(), Vec::new());
+        }
         let query_emb = match self.embedder.embed(query) {
             Ok(emb) => emb,
             Err(_) => return (Vec::new(), Vec::new()),
         };
-        let shape = detect_plan_shape(&query.to_lowercase());
+        self.top_from(&query_emb, detect_plan_shape(&query.to_lowercase()), top_n)
+    }
 
+    /// The top-N lists for an embedding already made.
+    fn top_from(&self, query_emb: &[f32], shape: PlanShape, top_n: usize) -> (Vec<(String, f32)>, Vec<(String, f32)>) {
+        if top_n == 0 {
+            return (Vec::new(), Vec::new());
+        }
         let mut tool_top: Vec<(String, f32)> = Vec::new();
         if let Ok(tools) = self.tools.lock() {
             for tool in tools.iter() {
-                let sim = cosine_similarity(&query_emb, &tool.embedding);
+                let sim = cosine_similarity(query_emb, &tool.embedding);
                 tool_top.push((tool.name.clone(), sim));
             }
         }
@@ -716,7 +727,7 @@ impl CognitiveRouter {
         let mut recipe_top: Vec<(String, f32)> = Vec::new();
         if let Ok(recipes) = self.recipes.lock() {
             for recipe in recipes.iter() {
-                let mut sim = cosine_similarity(&query_emb, &recipe.embedding);
+                let mut sim = cosine_similarity(query_emb, &recipe.embedding);
                 if shape == PlanShape::Composite {
                     sim *= self.recipe_composite_boost;
                 }
@@ -833,30 +844,8 @@ impl CognitiveRouter {
             None
         };
 
-        // Top-N tool candidates (descending cosine similarity)
-        let mut tool_top: Vec<(String, f32)> = Vec::new();
-        if let Ok(tools) = self.tools.lock() {
-            for tool in tools.iter() {
-                let sim = cosine_similarity(&query_emb, &tool.embedding);
-                tool_top.push((tool.name.clone(), sim));
-            }
-        }
-        tool_top.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        tool_top.truncate(top_n);
-
-        // Top-N recipe candidates (descending, with composite boost)
-        let mut recipe_top: Vec<(String, f32)> = Vec::new();
-        if let Ok(recipes) = self.recipes.lock() {
-            for recipe in recipes.iter() {
-                let mut sim = cosine_similarity(&query_emb, &recipe.embedding);
-                if shape == PlanShape::Composite {
-                    sim *= self.recipe_composite_boost;
-                }
-                recipe_top.push((recipe.id.clone(), sim));
-            }
-        }
-        recipe_top.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        recipe_top.truncate(top_n);
+        // Top-N candidates for the explanation; none when route() asks.
+        let (tool_top, recipe_top) = self.top_from(&query_emb, shape, top_n);
 
         // Pick the best candidate across tools and recipes
         let tool_score = best_tool.as_ref().map(|(_, s)| *s).unwrap_or(0.0);
