@@ -161,9 +161,10 @@ class ProofTests(MemoryCase):
         server = http.server.HTTPServer(("127.0.0.1", 0), Gateway)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.shutdown)
-        saved = proofs.GATEWAY_URL
-        proofs.GATEWAY_URL = "http://127.0.0.1:%d/v1" % server.server_port
-        self.addCleanup(setattr, proofs, "GATEWAY_URL", saved)
+        saved = os.environ.get("YANTRIK_GATEWAY_URL")
+        os.environ["YANTRIK_GATEWAY_URL"] = "http://127.0.0.1:%d/v1" % server.server_port
+        self.addCleanup(lambda: os.environ.pop("YANTRIK_GATEWAY_URL", None) if saved is None
+                        else os.environ.__setitem__("YANTRIK_GATEWAY_URL", saved))
 
         self.wired("deepseek")
         config = self.work / ".config" / "yantrik"
@@ -172,7 +173,7 @@ class ProofTests(MemoryCase):
                                                          "api_key": token, "model": "picked"}))
         row = proofs.prove_answer("deepseek")
         self.assertTrue(row["ok"], row)
-        self.assertEqual(row["says"], "connected · deepseek-v4-pro")
+        self.assertEqual(row["says"], "connected · deepseek-v4-pro · checked with one short call to your account")
         self.assertEqual(seen["auth"], "Bearer " + token)
         self.assertEqual(seen["body"]["model"], "picked")
         self.assertNotIn(token, json.dumps(row), "the token is never in what the row shows")
@@ -189,6 +190,20 @@ class ProofTests(MemoryCase):
         self.assertFalse(row["ok"])
         self.assertEqual(row["fix"]["action"], "configure")
         self.assertIn("No model is picked", row["says"])
+        row = proofs.prove_answer("pi", call=lambda _t: {
+            "error": "Set up a private lane, or allow sharing with Groq in AI accounts.",
+            "code": "private_context_not_shared"})
+        self.assertFalse(row["ok"])
+        self.assertEqual(row["fix"], proofs.SHARING_FIX, "a refused share is fixed in AI accounts")
+
+    def test_the_gateway_address_is_only_ever_loopback(self):
+        self.assertEqual(proofs.gateway_url(""), proofs.GATEWAY_DEFAULT)
+        for good in ("http://127.0.0.1:7460/v1", "http://127.5.6.7:9000/v1", "http://[::1]:7460/v1"):
+            self.assertEqual(proofs.gateway_url(good), good)
+        for bad in ("http://evil.example:7460/v1", "https://127.0.0.1:7460/v1", "http://localhost:7460/v1",
+                    "http://user:pw@127.0.0.1:7460/v1", "http://192.168.4.28:7460/v1", "http://127.0.0.1/v1",
+                    "not a url"):
+            self.assertEqual(proofs.gateway_url(bad), proofs.GATEWAY_DEFAULT, bad)
 
     def test_remember_writes_recalls_and_deletes_through_the_harness_memory_server(self):
         row = proofs.remember_through_mcp("pi", command=[FAKE_MEMORY], env={})

@@ -24,7 +24,8 @@ which prints one JSON document and exits 0 only when every proof passed:
 `status` is the word a program matches on (connected, own, recalled, paired, failed); `says` is
 the line a person reads; `fix`, on a failure, is the one press that puts it right: {"label",
 "action"} where action is `install` (run the row's Install again), `configure` (the row's own
-setup) or `restart` (with the `command` to run). Nothing here prints a secret: the probe note is a
+setup), `ai_accounts` (Settings → AI accounts, where the person chooses what is shared with an
+account) or `restart` (with the `command` to run). Nothing here prints a secret: the probe note is a
 fixed sentence with a random number, and the model probe's own output is reduced to one line.
 
 Stdlib only, and run with the image's Python, so it works before any harness has its own.
@@ -95,7 +96,35 @@ INSTALL_FIX = {"label": "Install again", "action": "install"}
 
 # Where #675's handoff writes each harness's gateway token (crates/yantrik-ui/src/provider_handoff):
 # the harness's own config, its own way. Read only to make the one call below; never printed.
-GATEWAY_URL = os.environ.get("YANTRIK_GATEWAY_URL", "http://127.0.0.1:7460/v1")
+GATEWAY_DEFAULT = "http://127.0.0.1:7460/v1"
+
+
+def gateway_url(asked: Optional[str] = None) -> str:
+    """The gateway's address. YANTRIK_GATEWAY_URL is taken only when it is plain http to a loopback
+    address with no user info: the call carries the harness's bearer token, and a token sent
+    anywhere else works from the gateway's own machine (yantrik-mind-72; the Mind's own rule for
+    its gateway address, E.PROV2 is_loopback_http). Anything else is ignored."""
+    import ipaddress
+    import urllib.parse
+
+    asked = os.environ.get("YANTRIK_GATEWAY_URL") if asked is None else asked
+    if not asked:
+        return GATEWAY_DEFAULT
+    try:
+        u = urllib.parse.urlsplit(asked)
+        host = ipaddress.ip_address((u.hostname or "").strip("[]"))
+        if u.scheme == "http" and u.username is None and u.password is None and host.is_loopback and u.port:
+            return asked
+    except ValueError:
+        pass
+    print("proofs: YANTRIK_GATEWAY_URL is not plain http to a loopback address; using %s" % GATEWAY_DEFAULT,
+          file=sys.stderr)
+    return GATEWAY_DEFAULT
+
+
+# Says which press fixes a refused call: sharing is the person's choice in AI accounts, not the
+# harness's wiring (yantrik-mind-72).
+SHARING_FIX = {"label": "Allow sharing in AI accounts", "action": "ai_accounts"}
 TOKEN_FILES = {
     "hermes": (".hermes/config.yaml",),
     "pi": (".pi/agent/models.json",),
@@ -127,7 +156,7 @@ def gateway_call(token: str, timeout: float = 90.0) -> Dict[str, Any]:
 
     body = json.dumps({"model": "picked", "stream": False, "max_tokens": 8,
                        "messages": [{"role": "user", "content": "Reply with the single word OK."}]})
-    req = urllib.request.Request(GATEWAY_URL.rstrip("/") + "/chat/completions", data=body.encode(),
+    req = urllib.request.Request(gateway_url().rstrip("/") + "/chat/completions", data=body.encode(),
                                  headers={"Authorization": "Bearer " + token,
                                           "Content-Type": "application/json"}, method="POST")
     try:
@@ -135,10 +164,11 @@ def gateway_call(token: str, timeout: float = 90.0) -> Dict[str, Any]:
             answer = json.loads(reply.read(256 * 1024) or b"{}")
     except urllib.error.HTTPError as exc:
         try:
-            message = (json.loads(exc.read(64 * 1024) or b"{}").get("error") or {}).get("message")
+            err = json.loads(exc.read(64 * 1024) or b"{}").get("error") or {}
+            message, code = err.get("message"), err.get("code")
         except (ValueError, AttributeError):
-            message = None
-        return {"error": message or "the gateway said %d" % exc.code}
+            message, code = None, None
+        return {"error": message or "the gateway said %d" % exc.code, "code": code or ""}
     except (OSError, ValueError) as exc:
         return {"error": "the gateway did not answer (%s)" % one_line(exc, 80)}
     if not isinstance(answer, dict) or not answer.get("choices"):
@@ -183,8 +213,14 @@ def prove_answer(harness: str, run: Callable[..., subprocess.CompletedProcess] =
                    "not connected: its config holds no gateway token", fix)
     answer = call(token)
     if "error" in answer:
-        return row("answer", ANSWER, False, "failed", "not connected: %s" % one_line(answer["error"]), fix)
-    return row("answer", ANSWER, True, "connected", "connected · %s" % one_line(answer["model"], 80))
+        # Refused because the person's picked account is not shared with: the press that fixes it
+        # is in AI accounts, not the harness's wiring.
+        refused = answer.get("code") == "private_context_not_shared"
+        return row("answer", ANSWER, False, "failed", "not connected: %s" % one_line(answer["error"]),
+                   SHARING_FIX if refused else fix)
+    # One short real call (8 tokens) to the account the person picked; the row says so.
+    return row("answer", ANSWER, True, "connected",
+               "connected · %s · checked with one short call to your account" % one_line(answer["model"], 80))
 
 
 # ── Can it remember? ────────────────────────────────────────────────────────────────────────────
