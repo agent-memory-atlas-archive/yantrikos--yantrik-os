@@ -44,6 +44,7 @@ import hashlib
 import json
 import os
 import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -143,15 +144,31 @@ def socket_path() -> Optional[str]:
     if runtime:
         candidates.append(Path(runtime) / "yantrik")
     candidates.append(Path("/run/yantrik"))
-    try:
-        candidates.extend(sorted(p for p in Path("/tmp").iterdir() if p.name.startswith("yantrik-")))
-    except OSError:
-        pass
+    # The shell's last resort is /tmp/yantrik-<its uid> (yantrik-ipc-transport, server.rs), and
+    # only this account's. /tmp is shared: any account can make a /tmp/yantrik-<anything> with a
+    # harness.sock in it, and a harness that attached there would take that account's "turns" as
+    # the owner's (every desktop turn is the allowlisted user `owner`) and answer it from this
+    # person's memory and model.
+    candidates.append(Path("/tmp") / ("yantrik-%d" % os.getuid()))
     for directory in candidates:
         sock = directory / "harness.sock"
-        if sock.exists():
+        if _ours(directory, sock):
             return str(sock)
     return None
+
+
+def _ours(directory: Path, sock: Path) -> bool:
+    """A socket found by looking (not named outright) counts only when it, and the directory it is
+    in, belong to this account and no other account can write that directory: a socket another
+    account put somewhere this looks is not the desktop's."""
+    try:
+        d = os.lstat(directory)
+        s = os.lstat(sock)
+    except OSError:
+        return False
+    me = os.getuid()
+    return (stat.S_ISDIR(d.st_mode) and d.st_uid == me and not (d.st_mode & 0o022)
+            and s.st_uid == me)
 
 
 def call(address: str, method: str, params: Dict[str, Any], timeout: float = 10.0) -> Any:
