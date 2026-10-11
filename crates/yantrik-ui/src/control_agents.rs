@@ -698,12 +698,14 @@ pub fn start_for_recipe(host: &Host, catalog: &Catalog, call: &AgentCall<'_>, as
             )));
         }
     }
+    // The host's own count, so the recipe runner and `start_agent` agree on what fills a place: a
+    // terminal session's presence-only `main` does not (yantrik-mind-72's B).
     let most = yantrik_harness::protocol::MAX_LIVE_AGENTS;
-    if live.len() >= most {
+    let counted = host.counted_live_agents();
+    if counted >= most {
         return Err(AgentRefusal::Wait(format!(
-            "a place: the desktop is running {} agents, the most it runs at once — stop one on the \
-             Agents screen, or it starts when one finishes",
-            live.len()
+            "a place: the desktop is running {counted} agents, the most it runs at once — stop one on the \
+             Agents screen, or it starts when one finishes"
         )));
     }
     // Nobody started this run at the desk: a role above `safe` waits for the person's Allow.

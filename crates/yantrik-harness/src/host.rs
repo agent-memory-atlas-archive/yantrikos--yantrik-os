@@ -478,6 +478,22 @@ fn pid_alive(_pid: u32) -> bool {
     true
 }
 
+/// The agents that count toward [`protocol::MAX_LIVE_AGENTS`]: every agent except the `main` a
+/// shared or presence-only attach is given at attach. Those are made for every terminal session
+/// the bridge attaches, so counting them would let terminal sessions starve everyone's
+/// `start_agent`, the Mind's included (yantrik-mind-72). Every other agent, a single-conversation
+/// harness's `main` included, counts as it always did. One rule, used by the host and the recipe
+/// runner alike.
+fn counted_live(attached: &HashMap<String, Attached>) -> usize {
+    attached
+        .values()
+        .map(|a| {
+            let free_main = a.announced.shared || !a.announced.takes_turns;
+            a.agents.keys().filter(|c| !(free_main && c.as_str() == AgentId::MAIN)).count()
+        })
+        .sum()
+}
+
 /// How far up the process tree [`pid_descends`] walks before it gives up. A harness's worker is a
 /// few generations below it, never hundreds.
 const ANCESTRY_BOUND: usize = 64;
@@ -1019,13 +1035,7 @@ impl Host {
         let mut state = self.lock();
         self.reap(&mut state);
         let st = &mut *state;
-        // `main` never counts toward the cap: every harness has one, made at attach for a
-        // presence-only or shared mind, so counting it would starve `start_agent` for everyone.
-        let live: usize = st
-            .attached
-            .values()
-            .map(|a| a.agents.keys().filter(|c| c.as_str() != AgentId::MAIN).count())
-            .sum();
+        let live = counted_live(&st.attached);
         let Some(harness) = st.attached.get_mut(harness_id) else {
             let mut known: Vec<&String> = st.attached.keys().collect();
             known.sort();
@@ -1129,6 +1139,13 @@ impl Host {
     }
 
     /// Every live agent, oldest first.
+    /// How many live agents count toward [`protocol::MAX_LIVE_AGENTS`] (see [`counted_live`]).
+    pub fn counted_live_agents(&self) -> usize {
+        let mut state = self.lock();
+        self.reap(&mut state);
+        counted_live(&state.attached)
+    }
+
     pub fn agents(&self) -> Vec<AgentEntry> {
         let mut state = self.lock();
         self.reap(&mut state);
@@ -1525,6 +1542,9 @@ impl Host {
         state.next_session += 1;
 
         let key = self.allocate_key(&mut state, &announced, pid)?;
+        // Minted before anything is listed, so a failing RNG refuses the attach whole instead of
+        // leaving an entry with no token behind it (yantrik-mind-72's C).
+        let presence_main = if announced.takes_turns { None } else { Some(Agent::new(mint_token()?)) };
 
         // Re-attaching under an existing id replaces it, which is what a harness that restarted
         // should get. Anything the old one owed is failed rather than abandoned — the turn it was
@@ -1600,13 +1620,10 @@ impl Host {
             state.active = id.clone();
         }
 
-        // A presence-only mind is never handed a turn, but its acts need a token: make its `main`
-        // agent now, as `ensure_main` does.
-        if !state.attached[&id].announced.takes_turns {
-            let harness = state.attached.get_mut(&id).expect("just inserted");
-            if !harness.agents.contains_key(AgentId::MAIN) {
-                harness.agents.insert(AgentId::MAIN.to_string(), Agent::new(mint_token()?));
-            }
+        // A presence-only mind is never handed a turn, but its acts need a token: its `main` agent,
+        // minted before the attach was listed (see `presence_main`), goes in now.
+        if let Some(main) = presence_main {
+            state.attached.get_mut(&id).expect("just inserted").agents.insert(AgentId::MAIN.to_string(), main);
         }
 
         let mut reply = serde_json::json!({ "session": session, "as": id });
@@ -1632,6 +1649,20 @@ impl Host {
             return Err(
                 "`id` cannot contain `.`; the desktop gives a shared attach its own key".into(),
             );
+        }
+        // Lowercase ASCII only, so `Mind`, a zero-width `mind` or a Cyrillic `mіnd` cannot pass
+        // as the person's Mind in the picker (yantrik-mind-72's D).
+        if !announced.id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_') {
+            return Err(format!(
+                "`id` may hold only lowercase ASCII letters, digits, `-` and `_` (`{}`)",
+                announced.id.escape_default()
+            ));
+        }
+        // Presence-only is for a mind that takes its turns elsewhere, beside others under its id;
+        // under the bare id it would replace a live mind of that id, take its grants, and become
+        // the mind the Lens talks to while refusing every turn (yantrik-mind-72's A).
+        if !announced.takes_turns && !announced.shared {
+            return Err("a presence-only attach (`takes_turns: false`) must also be `shared: true`".into());
         }
         if self.builtin(&announced.id).is_some() {
             return Err(format!(
@@ -4131,7 +4162,12 @@ mod tests {
             .unwrap();
         assert_eq!(second["as"], "mind");
         assert_ne!(second["session"], first_session);
-        assert!(host.handle(protocol::POLL, &json!({ "session": first_session })).is_err(), "the old session is gone");
+        // Polled from the very process that attached it, so the refusal is the session being gone,
+        // not the peer check (yantrik-mind-72: a peerless poll is refused anyway).
+        let err = host
+            .handle_from(protocol::POLL, &json!({ "session": first_session }), Some(100), Some(1000))
+            .unwrap_err();
+        assert!(err.contains("not attached any more"), "{err}");
         assert!(matches!(answer.try_recv(), Ok(Chunk::Failed(_))), "the queued turn failed");
     }
 
@@ -4214,6 +4250,58 @@ mod tests {
             .unwrap();
         assert_eq!(reply["resumed"], json!([]));
         assert_eq!(reply["refused"][0]["why"], "a shared attach starts fresh");
+    }
+
+    /// yantrik-mind-72's A: presence-only under the bare id would replace a live mind of that id,
+    /// take its grants and become the mind the Lens talks to while refusing every turn.
+    #[test]
+    fn a_presence_only_attach_must_be_shared() {
+        let host = host_with_nothing();
+        let err = host
+            .handle(protocol::ATTACH, &json!({ "id": "hermes", "name": "Hermes", "takes_turns": false }))
+            .unwrap_err();
+        assert!(err.contains("must also be `shared: true`"), "{err}");
+        assert!(host.list().is_empty(), "nothing was listed");
+        assert_eq!(host.active_id(), "");
+    }
+
+    /// yantrik-mind-72's D: only lowercase ASCII ids, so nothing can pass as `mind` in the picker.
+    #[test]
+    fn ids_are_lowercase_ascii_so_nothing_passes_as_mind() {
+        let host = host_with_nothing();
+        for id in ["Mind", "MIND", "mind\u{200b}", "m\u{0456}nd", "mind\u{2024}x"] {
+            let err = host.handle(protocol::ATTACH, &json!({ "id": id, "name": "Mind" })).unwrap_err();
+            assert!(err.contains("lowercase ASCII"), "{id:?}: {err}");
+        }
+        for id in ["mind", "hermes", "open-claw", "pi_2"] {
+            assert!(host.handle(protocol::ATTACH, &json!({ "id": id, "name": "X" })).is_ok(), "{id}");
+        }
+    }
+
+    /// yantrik-mind-72's B and the uncapped loose end: only the `main` a shared or presence-only
+    /// attach is given is free. A single-conversation harness's `main` still counts, so many of
+    /// them cannot go past the cap, and the host's count is the one the recipe runner reads.
+    #[test]
+    fn only_shared_and_presence_mains_are_free_under_the_cap() {
+        let host = host_with_nothing().with_liveness(|_| true);
+        for n in 0..protocol::MAX_LIVE_AGENTS {
+            let id = format!("solo{n}");
+            host.handle_from(protocol::ATTACH, &json!({ "id": id, "name": "Solo" }), Some(1000 + n as u32), None)
+                .unwrap();
+            host.start_agent(&id).unwrap();
+        }
+        assert_eq!(host.counted_live_agents(), protocol::MAX_LIVE_AGENTS);
+        host.handle_from(protocol::ATTACH, &json!({ "id": "solo9", "name": "Solo" }), Some(1999), None).unwrap();
+        assert!(host.start_agent("solo9").unwrap_err().contains("as many as this desktop runs"));
+        // A presence-only shared attach adds a `main` that is not counted.
+        host.handle_from(
+            protocol::ATTACH,
+            &json!({ "id": "hermes", "name": "Hermes", "shared": true, "takes_turns": false }),
+            Some(3000),
+            None,
+        )
+        .unwrap();
+        assert_eq!(host.counted_live_agents(), protocol::MAX_LIVE_AGENTS);
     }
 
     /// yantrik-mind-72's change C: no harness id or key is ever matched by prefix or by splitting
