@@ -5,6 +5,7 @@ edition = "2021"
 description = "The OS-owned local model gateway: an OpenAI-compatible endpoint on 127.0.0.1:7460 that forwards each harness's requests to the person's AI accounts, keys never leaving the OS (#673)"
 
 [dependencies]
+libc = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }

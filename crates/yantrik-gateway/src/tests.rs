@@ -280,3 +280,79 @@ fn picked_is_the_model_the_person_picked_for_that_mind_at_each_call() {
     assert_eq!(status, 404, "nothing picked for it: said, not guessed");
     assert!(body.contains("pick one in the ask bar"));
 }
+
+#[test]
+fn a_host_that_is_not_loopback_is_refused_so_a_rebound_page_gets_nothing() {
+    let (g, _, pi, _) = gateway(false);
+    for (host, status) in [("127.0.0.1:7460", 200), ("localhost:7460", 200), ("127.0.0.1", 200), ("[::1]:7460", 200), ("evil.example:7460", 403), ("127.0.0.1.evil.example", 403), ("localhost.evil.example:7460", 403)] {
+        let mut req = request("GET", "/v1/models", Some(&pi), json!({}));
+        req.headers.push(("Host".into(), host.into()));
+        assert_eq!(answer(&g, &req).0, status, "{host}");
+    }
+}
+
+/// Counts what is read from it.
+struct Counted<R> {
+    inner: R,
+    read: Arc<Mutex<usize>>,
+}
+
+impl<R: Read> Read for Counted<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        *self.read.lock().unwrap() += n;
+        Ok(n)
+    }
+}
+
+#[test]
+fn a_header_that_never_ends_is_refused_without_being_read_whole() {
+    let mut endless = b"GET /v1/models HTTP/1.1\r\nX-Pad: ".to_vec();
+    endless.extend(std::iter::repeat(b'a').take(8 * 1024 * 1024));
+    let read = Arc::new(Mutex::new(0));
+    let got = crate::http::read_request(Counted { inner: Cursor::new(endless), read: read.clone() });
+    assert_eq!(got.unwrap_err().0, 431);
+    assert!(*read.lock().unwrap() <= 64 * 1024, "read {} bytes of an endless header", read.lock().unwrap());
+    let mut endless_line = b"GET /".to_vec();
+    endless_line.extend(std::iter::repeat(b'a').take(8 * 1024 * 1024));
+    assert_eq!(crate::http::read_request(Cursor::new(endless_line)).unwrap_err().0, 431);
+}
+
+#[test]
+fn a_request_that_drips_in_is_cut_off_at_its_deadline() {
+    let listener = bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (g, _, _, _) = gateway(false);
+    let served = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let started = std::time::Instant::now();
+        g.handle_within(stream, std::time::Duration::from_millis(400));
+        started.elapsed()
+    });
+    let mut s = std::net::TcpStream::connect(addr).unwrap();
+    write!(s, "GET /v1/models HTTP/1.1\r\n").unwrap();
+    // One byte every 50 ms: never quiet long enough for a per-read timeout.
+    for _ in 0..60 {
+        if s.write_all(b"a").is_err() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let took = served.join().unwrap();
+    assert!(took < std::time::Duration::from_secs(2), "held for {took:?}");
+}
+
+#[test]
+fn connections_past_the_limit_are_closed_unread() {
+    let listener = bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (g, _, _, _) = gateway(false);
+    std::thread::spawn(move || g.serve(listener));
+    // Every slot held by a connection that says nothing.
+    let held: Vec<_> = (0..crate::server::MAX_CONNECTIONS).map(|_| std::net::TcpStream::connect(addr).unwrap()).collect();
+    let mut extra = std::net::TcpStream::connect(addr).unwrap();
+    extra.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+    let mut buf = [0u8; 16];
+    assert_eq!(extra.read(&mut buf).unwrap(), 0, "closed at once, not served");
+    drop(held);
+}

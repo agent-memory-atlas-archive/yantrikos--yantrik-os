@@ -34,6 +34,9 @@ impl Default for Http {
             .timeout_connect(Duration::from_secs(10))
             .timeout_read(Duration::from_secs(600))
             .try_proxy_from_env(true)
+            // A redirect is passed back, never followed: the account's address is the only place
+            // a call goes, so a local account cannot send it on off this network in Private mode.
+            .redirects(0)
             .build();
         Http { agent }
     }

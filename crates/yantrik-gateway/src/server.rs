@@ -2,6 +2,7 @@
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -58,6 +59,37 @@ pub struct Gateway {
     pub log: Arc<CallLog>,
 }
 
+/// The most connections served at once. The mind account can reach this port (its kernel loopback
+/// set opens it), and a thread per connection with no bound would let it, or anything else on this
+/// machine, grow the shell until it falls over. One past this is closed unread.
+pub const MAX_CONNECTIONS: usize = 64;
+
+/// How long a request may take to arrive, head and body, however slowly it drips in.
+pub const REQUEST_DEADLINE: Duration = Duration::from_secs(60);
+
+/// A connection being served, counted until it ends.
+struct Slot(Arc<AtomicUsize>);
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Whether a request's `Host` names this machine's loopback: what a harness sends. A web page that
+/// rebinds its own name to 127.0.0.1 still sends its own name, and is refused.
+pub fn loopback_host(host: &str) -> bool {
+    let h = host.trim().to_ascii_lowercase();
+    let name = match h.strip_prefix('[') {
+        Some(inside) => inside.split(']').next().unwrap_or(""),
+        None => match h.rsplit_once(':') {
+            Some((name, port)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => name,
+            _ => h.as_str(),
+        },
+    };
+    matches!(name, "127.0.0.1" | "localhost" | "::1")
+}
+
 /// Bind the gateway's address. Anything but a loopback address is refused: the gateway adds the
 /// person's keys to what it forwards, and nothing off this machine may ask it to.
 pub fn bind(addr: &str) -> Result<TcpListener, String> {
@@ -71,20 +103,36 @@ pub fn bind(addr: &str) -> Result<TcpListener, String> {
 impl Gateway {
     /// Serve until the listener fails. Each connection on a thread of its own.
     pub fn serve(self: Arc<Self>, listener: TcpListener) {
+        let open = Arc::new(AtomicUsize::new(0));
         for conn in listener.incoming() {
             let Ok(stream) = conn else { continue };
+            if open.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
+                open.fetch_sub(1, Ordering::SeqCst);
+                drop(stream);
+                continue;
+            }
+            let slot = Slot(open.clone());
             let me = self.clone();
-            let _ = std::thread::Builder::new().name("gateway-conn".into()).spawn(move || me.handle(stream));
+            let _ = std::thread::Builder::new().name("gateway-conn".into()).spawn(move || {
+                let _slot = slot;
+                me.handle(stream)
+            });
         }
     }
 
-    pub fn handle(&self, mut stream: TcpStream) {
+    pub fn handle(&self, stream: TcpStream) {
+        self.handle_within(stream, REQUEST_DEADLINE)
+    }
+
+    /// [`Self::handle`], with the time the request has to arrive.
+    pub fn handle_within(&self, mut stream: TcpStream, deadline: Duration) {
         // Loopback only, whatever the socket was bound to.
         if !stream.peer_addr().is_ok_and(|p| p.ip().is_loopback()) {
             return;
         }
-        let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
-        let req = match http::read_request(&mut stream) {
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(30).min(deadline)));
+        let read = http::read_request(http::Deadline { inner: &mut stream, until: Instant::now() + deadline });
+        let req = match read {
             Ok(r) => r,
             Err((status, why)) => {
                 let _ = write_json(&mut stream, status, &error_body("bad_request", why));
@@ -100,6 +148,11 @@ impl Gateway {
         // A browser page on this machine can reach loopback; no web page has any business here.
         if req.header("origin").is_some() {
             let _ = write_json(out, 403, &error_body("origin_refused", "The model gateway does not answer web pages."));
+            return;
+        }
+        // A page that rebound its own name to 127.0.0.1 still names itself in Host.
+        if req.header("host").is_some_and(|h| !loopback_host(h)) {
+            let _ = write_json(out, 403, &error_body("host_refused", "The model gateway answers 127.0.0.1 and localhost only."));
             return;
         }
         let Some(grant) = req.bearer().and_then(|t| self.tokens.verify(t)) else {

@@ -3,6 +3,7 @@
 //! (Python's urllib and httpx, Node's fetch, Rust's ureq and reqwest) reads that.
 
 use std::io::{BufRead, BufReader, Read, Write};
+use std::time::Instant;
 
 /// The largest request taken: a turn with images handed over can be big, a request this size is
 /// not a turn.
@@ -30,13 +31,40 @@ impl Request {
     }
 }
 
+/// A reader that gives up at `until`, however slowly its bytes arrive: a per-read timeout alone
+/// lets a client hold a connection for as long as it sends a byte now and then.
+pub struct Deadline<R> {
+    pub inner: R,
+    pub until: Instant,
+}
+
+impl<R: Read> Read for Deadline<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if Instant::now() >= self.until {
+            return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "request took too long"));
+        }
+        self.inner.read(buf)
+    }
+}
+
+/// One line of the head, read no further than the head's allowance: a line that never ends is
+/// refused at [`MAX_HEAD`], not buffered whole.
+fn head_line(reader: &mut impl BufRead, head: &mut usize, line: &mut String) -> Result<usize, (u16, &'static str)> {
+    let left = MAX_HEAD.saturating_sub(*head) as u64;
+    let n = Read::take(&mut *reader, left).read_line(line).map_err(|_| (400, "unreadable request"))?;
+    *head += n;
+    if *head >= MAX_HEAD && !line.ends_with('\n') {
+        return Err((431, "headers too large"));
+    }
+    Ok(n)
+}
+
 /// Read one request. `Err` carries the status to answer with.
 pub fn read_request(stream: impl Read) -> Result<Request, (u16, &'static str)> {
     let mut reader = BufReader::new(stream);
     let mut head = 0usize;
     let mut line = String::new();
-    reader.read_line(&mut line).map_err(|_| (400, "unreadable request"))?;
-    head += line.len();
+    head_line(&mut reader, &mut head, &mut line)?;
     let mut parts = line.split_whitespace();
     let (method, path) = match (parts.next(), parts.next()) {
         (Some(m), Some(p)) => (m.to_string(), p.to_string()),
@@ -45,11 +73,7 @@ pub fn read_request(stream: impl Read) -> Result<Request, (u16, &'static str)> {
     let mut headers = Vec::new();
     loop {
         let mut h = String::new();
-        let n = reader.read_line(&mut h).map_err(|_| (400, "unreadable headers"))?;
-        head += n;
-        if head > MAX_HEAD {
-            return Err((431, "headers too large"));
-        }
+        let n = head_line(&mut reader, &mut head, &mut h)?;
         let h = h.trim_end_matches(['\r', '\n']);
         if n == 0 || h.is_empty() {
             break;

@@ -90,10 +90,7 @@ fn append(path: &std::path::Path, call: &Call) -> Result<(), String> {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
     if std::fs::symlink_metadata(path).is_ok_and(|m| m.len() > MAX_BYTES) {
-        let text = std::fs::read_to_string(path).unwrap_or_default();
-        let keep = &text[text.len() / 2..];
-        let keep = keep.split_once('\n').map(|(_, rest)| rest).unwrap_or("");
-        crate::tokens::write_private(path, keep.as_bytes())?;
+        crate::tokens::write_private(path, newest_half(&std::fs::read(path).unwrap_or_default()))?;
     }
     let line = serde_json::to_string(call).map_err(|e| e.to_string())? + "\n";
     let mut f = std::fs::OpenOptions::new()
@@ -106,7 +103,64 @@ fn append(path: &std::path::Path, call: &Call) -> Result<(), String> {
     f.write_all(line.as_bytes()).map_err(|e| e.to_string())
 }
 
-/// O_NOFOLLOW on Linux, so a link planted at the log's name is refused.
+/// The newest half of the log, from the first whole line on. Cut in bytes at a newline, never in
+/// the middle of a character: a model id a harness sent can be any text, and slicing a `str` there
+/// panicked the connection's thread on every call once the log was full.
+fn newest_half(bytes: &[u8]) -> &[u8] {
+    let half = &bytes[bytes.len() / 2..];
+    half.iter().position(|b| *b == b'\n').map_or(&[][..], |i| &half[i + 1..])
+}
+
+/// O_NOFOLLOW, so a link planted at the log's name is refused. From libc: it is not the same
+/// number on every architecture (0o400000 on x86_64 is O_LARGEFILE on aarch64).
 fn libc_nofollow() -> i32 {
-    0o400000
+    libc::O_NOFOLLOW
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn call(model: &str) -> Call {
+        Call { at: 1, harness: "pi".into(), account: "a".into(), model: model.into(), effort: None, status: 200, outcome: String::new(), prompt_tokens: 0, completion_tokens: 0, ms: 1 }
+    }
+
+    #[test]
+    fn a_full_log_is_cut_at_a_line_whatever_characters_it_holds() {
+        let dir = std::env::temp_dir().join(format!("gateway-log-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("calls.jsonl");
+        // Three-byte characters throughout, so the middle of the file is inside one.
+        let line = serde_json::to_string(&call(&"模".repeat(200))).unwrap() + "\n";
+        let mut text = String::new();
+        while (text.len() as u64) <= MAX_BYTES {
+            text.push_str(&line);
+        }
+        while text.is_char_boundary(text.len() / 2) {
+            text.insert(0, 'x');
+        }
+        std::fs::write(&path, &text).unwrap();
+        append(&path, &call("after")).unwrap();
+        let kept = std::fs::read_to_string(&path).unwrap();
+        assert!((kept.len() as u64) < MAX_BYTES && kept.ends_with("\n"));
+        for l in kept.lines() {
+            serde_json::from_str::<Call>(l).unwrap();
+        }
+        assert!(kept.lines().last().unwrap().contains("after"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_link_at_the_logs_name_is_not_followed() {
+        let dir = std::env::temp_dir().join(format!("gateway-log-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let elsewhere = dir.join("elsewhere");
+        std::fs::write(&elsewhere, "").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, dir.join("calls.jsonl")).unwrap();
+        assert!(append(&dir.join("calls.jsonl"), &call("m")).is_err());
+        assert_eq!(std::fs::read_to_string(&elsewhere).unwrap(), "");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
