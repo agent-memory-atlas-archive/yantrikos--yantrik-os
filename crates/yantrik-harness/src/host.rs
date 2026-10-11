@@ -1893,9 +1893,12 @@ impl Host {
                 tracing::warn!(harness = %who, turn = turn_id, "notice with empty `text`; refused");
                 return Ok(refused("a `notice` needs `text`".to_string()));
             }
-            self.record("notice", turn_id, |s| s.append(turn_id, "notice", raw));
             match harness.in_flight.get_mut(&turn_id) {
+                // Recorded in a run only when the turn is this harness's own: turn ids are the
+                // host's, so one named by any other harness's session (the Mind's included) is
+                // never written into.
                 Some(flight) if flight.tx.is_some() => {
+                    self.record("notice", turn_id, |s| s.append(turn_id, "notice", raw));
                     let tx = flight.tx.as_ref().expect("checked above");
                     if tx.send(Chunk::Event(event)).is_err() {
                         flight.abandon(None);
@@ -3800,6 +3803,19 @@ mod tests {
         assert_eq!(kinds(&store, run), vec!["state", "text", "event", "event", "state"]);
         let text = &store.events(run, 1, 1).unwrap().events[0];
         assert_eq!(text.payload["delta"].as_str().unwrap().len(), 900, "a message longer than the 600-character summary is kept whole");
+    }
+
+    #[test]
+    fn a_notice_is_never_written_into_another_harness_s_run() {
+        let (host, store) = host_with_runs();
+        let (session, _, run, _answer) = turn_in_flight(&host);
+        let other = attach(&host, "mind");
+        let reply = event(&host, &other, run, json!({ "kind": "notice", "text": "not yours" })).unwrap();
+        assert_eq!(reply, json!({ "kept": true }), "{reply}");
+        assert!(!kinds(&store, run).contains(&"notice".to_string()), "{:?}", kinds(&store, run));
+        // Its own turn's notice is kept in its run.
+        event(&host, &session, run, json!({ "kind": "notice", "text": "mine" })).unwrap();
+        assert!(kinds(&store, run).contains(&"notice".to_string()), "{:?}", kinds(&store, run));
     }
 
     #[test]
