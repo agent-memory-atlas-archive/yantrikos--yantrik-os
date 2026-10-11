@@ -1,6 +1,6 @@
 //! "What runs on what", on screen: the map at the top of Settings → AI & Intelligence, the line
-//! under "Answering" in the Minds panel, and each harness row's "Runs on". All three come from one
-//! `runs_on::resolve`, so they cannot disagree.
+//! under "Answering" in the Minds panel, each harness row's "Runs on", and the line under the chat
+//! composer. All of them come from one `runs_on::resolve`, so they cannot disagree.
 //!
 //! Published whenever the minds change (wire::harness::publish) and whenever the companion's own
 //! address is resolved again (wire::ai_status::refresh).
@@ -51,6 +51,12 @@ pub(crate) fn publish(ui: &App) {
         .unwrap_or_default();
     ui.set_runs_on_summary(runs_on::summary(&rows).into());
     ui.set_runs_on_answering(answering.into());
+    // The chat composer's line: where words typed to the answering mind go, or "" when that is
+    // not known (the composer then says nothing rather than guess).
+    let destination = rows.iter().find(|r| r.answering).map(|r| r.destination()).unwrap_or_default();
+    if ui.get_lens_destination() != destination.as_str() {
+        ui.set_lens_destination(destination.into());
+    }
     let model: Vec<RunsOnRow> = rows
         .iter()
         .map(|r| RunsOnRow {

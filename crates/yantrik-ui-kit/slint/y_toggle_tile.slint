@@ -24,10 +24,11 @@
 // Input
 //   pointer   click the body to toggle; click the chevron half for details.
 //   keyboard  Tab stops on the body, then (when split) on the chevron. Space/Enter activate
-//             whichever has focus. Right arrow on the body opens details, like the chevron.
+//             whichever has focus. Right arrow on the body opens details, like the chevron
+//             (`right-opens-details: false` leaves the arrow to the owner).
 //             The ring shows for keyboard focus only, not after a click.
 //
-// States: off, off+hover, pressed, on (accent fill, dark text), on+hover, keyboard focus (ring),
+// States: off (the tile fill with its border), off+hover, pressed, on (accent fill, dark text), on+hover, keyboard focus (ring),
 // disabled (dimmed, inert). Accessible role switch with checked state; the chevron is a button.
 import { Theme } from "theme.slint";
 import { Icon, Icons } from "icon.slint";
@@ -36,11 +37,21 @@ export component YToggleTile inherits Rectangle {
     in property <string> icon: "";
     in property <string> title: "";
     in property <string> subtitle: "";
+    // What the tile does, in a sentence, for a tile whose one-line subtitle cannot hold it. Read
+    // out as the switch's description in place of the subtitle; "" reads the subtitle.
+    in property <string> description: "";
     in property <bool> on: false;
     in property <bool> enabled: true;
     in property <bool> split: false;
+    // Right arrow on the body opens the details, like the chevron. A panel that moves focus with
+    // the arrow keys (Quick Settings) turns it off so Right means "next tile" there too.
+    in property <bool> right-opens-details: true;
+    // Either half has keyboard focus: for an owner that tracks where focus is.
+    out property <bool> focused: body-keys.has-focus || chevron-keys.has-focus;
     callback toggled();
     callback details-requested();
+    // Put keyboard focus on the body, for an owner that moves focus itself.
+    public function focus-body() { body-keys.focus(); }
 
     forward-focus: body-keys;
     accessible-role: none;
@@ -67,7 +78,7 @@ export component YToggleTile inherits Rectangle {
     background: root.on ? Theme.accent : Theme.tile-off;
     animate background { duration: Theme.dur-fast; }
     border-width: Theme.hairline;
-    border-color: root.on ? transparent : Theme.border-card;
+    border-color: root.on ? transparent : Theme.tile-border;
 
     function activate-body() { if (root.enabled) { root.toggled(); } }
     function activate-chevron() { if (root.enabled && root.split) { root.details-requested(); } }
@@ -86,7 +97,7 @@ export component YToggleTile inherits Rectangle {
             enabled: root.enabled;
             accessible-role: switch;
             accessible-label: root.title;
-            accessible-description: root.subtitle;
+            accessible-description: root.description != "" ? root.description : root.subtitle;
             accessible-checkable: true;
             accessible-checked: root.on;
             accessible-enabled: root.enabled;
@@ -94,7 +105,7 @@ export component YToggleTile inherits Rectangle {
             key-pressed(event) => {
                 root.pointer-focus = false;
                 if ((event.text == " " || event.text == "\n") && !event.repeat) { root.activate-body(); return accept; }
-                if (event.text == Key.RightArrow && root.split) { root.activate-chevron(); return accept; }
+                if (event.text == Key.RightArrow && root.split && root.right-opens-details) { root.activate-chevron(); return accept; }
                 reject
             }
         }

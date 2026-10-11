@@ -130,6 +130,11 @@ pub enum CompanionCommand {
         query: String,
         reply_tx: Sender<Vec<MemoryResult>>,
     },
+    /// The newest memories, for the Memory screen before anything is searched.
+    RecentMemories {
+        limit: usize,
+        reply_tx: Sender<Vec<MemoryResult>>,
+    },
     /// Get current bond level (for voice profile adaptation).
     GetBondLevel {
         reply_tx: Sender<BondLevel>,
@@ -228,12 +233,33 @@ pub struct StateSnapshot {
 pub struct BondSnapshot {
     pub bond_score: f64,
     pub bond_level: String,
+    /// Which of the five levels, 1 to 5, so the screen can say "Level 4 of 5".
+    pub level_number: i64,
     pub total_interactions: i64,
     pub days_together: i64,
     pub current_streak: i64,
     pub humor_rate: f64,
     pub vulnerability_events: i64,
     pub shared_references: i64,
+}
+
+impl BondSnapshot {
+    /// The bond as the Slint struct has it, with `loaded` set: this is only built from a read of
+    /// the store. One conversion, for the push and for the Bond screen's own fetch.
+    pub fn to_ui(&self) -> BondData {
+        BondData {
+            loaded: true,
+            bond_score: self.bond_score as f32,
+            bond_level: self.bond_level.clone().into(),
+            level_number: self.level_number as i32,
+            total_interactions: self.total_interactions as i32,
+            days_together: self.days_together as i32,
+            current_streak: self.current_streak as i32,
+            humor_rate: self.humor_rate as f32,
+            vulnerability_events: self.vulnerability_events as i32,
+            shared_references: self.shared_references as i32,
+        }
+    }
 }
 
 /// Personality/evolution screen data.
@@ -324,6 +350,8 @@ pub struct CompanionBridge {
     /// The Settings incognito switch, and Private mode: the companion is incognito while either is on.
     incognito_setting: AtomicBool,
     private: AtomicBool,
+    /// The memory store's path, for reads that must not wait on the worker (`recent_memories`).
+    memory_db: String,
 }
 
 /// A companion you can use from another thread.
@@ -649,6 +677,7 @@ impl CompanionBridge {
         }
         let decisions = yantrik_companion::decisions::Decisions::default();
         let decisions_w = decisions.clone();
+        let memory_db = config.yantrikdb.db_path.clone();
         let self_tx = cmd_tx.clone();
         let board_w = board.clone();
         let worker_handle = std::thread::spawn(move || {
@@ -667,6 +696,7 @@ impl CompanionBridge {
             decisions,
             incognito_setting: AtomicBool::new(false),
             private: AtomicBool::new(private),
+            memory_db,
         }
     }
 
@@ -737,6 +767,29 @@ impl CompanionBridge {
     pub fn recall_memories(&self, query: String) -> Receiver<Vec<MemoryResult>> {
         let (reply_tx, reply_rx) = crossbeam_channel::unbounded();
         let _ = self.cmd_tx.send(CompanionCommand::RecallMemories { query, reply_tx });
+        reply_rx
+    }
+
+    /// The newest `limit` memories, newest first.
+    ///
+    /// Read on a thread of its own from the store directly (`crate::memory_reader`), not through
+    /// the worker: the worker serves one command at a time, and on VM 520 (4 October) the Memory
+    /// screen sat on "searching" behind its background LLM turns. Only when the store can be read
+    /// no other way (encrypted, or the worker has not opened it yet) is the worker asked, and the
+    /// screen's own timeout covers that wait.
+    pub fn recent_memories(&self, limit: usize) -> Receiver<Vec<MemoryResult>> {
+        let (reply_tx, reply_rx) = crossbeam_channel::unbounded();
+        let db_path = self.memory_db.clone();
+        let cmd_tx = self.cmd_tx.clone();
+        std::thread::spawn(move || match crate::memory_reader::newest(&db_path, limit) {
+            Ok(items) => {
+                let _ = reply_tx.send(items);
+            }
+            Err(why) => {
+                tracing::debug!(reason = %why, "newest memories asked of the worker");
+                let _ = cmd_tx.send(CompanionCommand::RecentMemories { limit, reply_tx });
+            }
+        });
         reply_rx
     }
 
@@ -1505,6 +1558,37 @@ fn worker_loop(
                     }
                     Err(e) => {
                         tracing::error!(error = %e, "Memory recall failed");
+                        let _ = reply_tx.send(vec![]);
+                    }
+                }
+            }
+            // The Memory screen's newest memories (VM 520 sweep, 4 October), by recall's own
+            // domain rule, paged until the screen's page is full: crate::recent_memories.
+            Ok(CompanionCommand::RecentMemories { limit, reply_tx }) => {
+                let newest = crate::recent_memories::collect(
+                    limit,
+                    |m: &yantrikdb_core::types::Memory| m.domain.as_str(),
+                    |offset, page| companion.db.list_memories(page, offset, None, None, None, "created_at"),
+                );
+                match newest {
+                    Ok(memories) => {
+                        let items: Vec<MemoryResult> = memories
+                            .into_iter()
+                            .map(|m| MemoryResult {
+                                rid: m.rid,
+                                text: m.text,
+                                memory_type: m.memory_type,
+                                importance: m.importance,
+                                valence: m.valence,
+                                score: 0.0,
+                                created_at: m.created_at,
+                                domain: m.domain,
+                            })
+                            .collect();
+                        let _ = reply_tx.send(items);
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "Listing recent memories failed");
                         let _ = reply_tx.send(vec![]);
                     }
                 }
@@ -2857,6 +2941,8 @@ fn bond_snapshot(companion: &CompanionService) -> BondSnapshot {
     BondSnapshot {
         bond_score: bond.bond_score,
         bond_level: bond.bond_level.name().to_string(),
+        // Stranger is 1 and Partner-in-Crime 5 (yantrik-companion-core's `BondLevel`).
+        level_number: bond.bond_level.as_u8() as i64,
         total_interactions: bond.total_interactions,
         days_together: bond.days_together as i64,
         current_streak: bond.current_streak_days,
@@ -2876,20 +2962,10 @@ fn push_bond(companion: &CompanionService, ui_weak: &slint::Weak<App>) {
     let weak = ui_weak.clone();
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(ui) = weak.upgrade() {
-            ui.set_bond_data(BondData {
-                // The one place this becomes true: the store has been read, on the thread that
-                // owns it. Until then the property is the Slint default, and the rail and
-                // `describe shell` say so instead of showing that default as a level.
-                loaded: true,
-                bond_score: bond.bond_score as f32,
-                bond_level: bond.bond_level.into(),
-                total_interactions: bond.total_interactions as i32,
-                days_together: bond.days_together as i32,
-                current_streak: bond.current_streak as i32,
-                humor_rate: bond.humor_rate as f32,
-                vulnerability_events: bond.vulnerability_events as i32,
-                shared_references: bond.shared_references as i32,
-            });
+            // `to_ui` is the one place `loaded` becomes true: the store has been read, on the
+            // thread that owns it. Until then the property is the Slint default, and the rail and
+            // `describe shell` say so instead of showing that default as a level.
+            ui.set_bond_data(bond.to_ui());
         }
     });
 }
@@ -3141,6 +3217,9 @@ fn build_companion(config: CompanionConfig) -> Result<CompanionService, String> 
     let mut db =
         yantrikdb_core::YantrikDB::new(&config.yantrikdb.db_path, config.yantrikdb.embedding_dim)
             .map_err(|e| format!("failed to create YantrikDB: {e}"))?;
+    // Whether the Memory screen may read the store's rows itself (crate::memory_reader): only
+    // when its text is kept in the clear.
+    crate::memory_reader::set_plain(!db.is_encrypted());
     db.set_embedder(match embedder_identity {
         Some(id) => Box::new(yantrik_companion::embedder_bridge::EmbedderBridge::with_identity(embedder, id)),
         None => Box::new(yantrik_companion::embedder_bridge::EmbedderBridge::new(embedder)),

@@ -52,7 +52,7 @@ impl Secret {
 }
 
 /// The account this desktop runs as, from the system rather than the environment.
-fn account_name() -> Option<String> {
+pub(crate) fn account_name() -> Option<String> {
     let out = std::process::Command::new("/usr/bin/id").arg("-un").output().ok()?;
     let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
     (out.status.success() && !name.is_empty()).then_some(name)
@@ -107,9 +107,13 @@ pub const START_OPEN_MARKER: &str = "/etc/yantrik/start-open";
 /// review of #547). After the window a restarted shell locks as any other does. The password, the
 /// vault (shut until the password is given), the idle lock and a lock pressed by hand are unchanged.
 pub fn declared_open_at_boot() -> bool {
-    if !just_booted() {
-        return false;
-    }
+    just_booted() && start_open_marker_present()
+}
+
+/// Whether the root-owned start-open marker is in place, whatever the uptime. A restart of such a
+/// machine comes back inside the boot window, so open: the lock screen offers no Restart there
+/// (security review of #601), or Restart would be a one-click unlock.
+pub fn start_open_marker_present() -> bool {
     use std::os::unix::fs::MetadataExt;
     let marker = std::path::Path::new(START_OPEN_MARKER);
     let (Ok(file), Some(Ok(dir))) = (marker.symlink_metadata(), marker.parent().map(|d| d.symlink_metadata())) else {

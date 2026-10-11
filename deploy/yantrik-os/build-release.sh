@@ -200,6 +200,12 @@ if [ -f "$SCRIPT_DIR/yantrik-update" ]; then
 else
   echo "   (no yantrik-update script found — image will not self-update)"
 fi
+# What the text installer and cloud-init's first boot run around the updater's
+# migrate-ownership, so a machine never comes out with a tree its user can write (#397).
+cp "$SCRIPT_DIR/yantrik-lockdown" "$ROOT/bin/yantrik-lockdown" \
+  || fail "no yantrik-lockdown: an installed machine could keep a tree its user can write"
+chmod +x "$ROOT/bin/yantrik-lockdown"
+echo "   + yantrik-lockdown"
 
 # The session script. It decides what environment every program on this desktop inherits,
 # and it used to live only inside cloud-init's write_files -- written once at provision
@@ -361,12 +367,12 @@ echo "   + $(ls "$ROOT/share/applications" | wc -l) application entries"
 # for the toolkits that will not read one.
 ICONS="$ROOT/share/icons/hicolor"
 mkdir -p "$ICONS/scalable/apps"
-cp "$PROJECT_ROOT/brand/yantrik-mark.svg" "$ICONS/scalable/apps/yantrik.svg" \
-  || fail "brand/yantrik-mark.svg missing — the apps would ship with an Icon= that resolves to nothing"
+cp "$PROJECT_ROOT/brand/yantrik-icon.svg" "$ICONS/scalable/apps/yantrik.svg" \
+  || fail "brand/yantrik-icon.svg missing — the apps would ship with an Icon= that resolves to nothing"
 for px in 48 128 256; do
   mkdir -p "$ICONS/${px}x${px}/apps"
-  cp "$PROJECT_ROOT/brand/yantrik-mark-${px}.png" "$ICONS/${px}x${px}/apps/yantrik.png" \
-    || fail "brand/yantrik-mark-${px}.png missing — run: python3 brand/render.py"
+  cp "$PROJECT_ROOT/brand/yantrik-icon-${px}.png" "$ICONS/${px}x${px}/apps/yantrik.png" \
+    || fail "brand/yantrik-icon-${px}.png missing — run: python3 brand/render.py"
 done
 echo "   + app icon (svg + 48/128/256) as hicolor 'yantrik'"
 

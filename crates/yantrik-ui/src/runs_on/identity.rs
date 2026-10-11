@@ -86,6 +86,17 @@ pub fn is_local(url_or_host: &str) -> bool {
     }
 }
 
+/// Whether an address is this machine itself: loopback or `localhost`, not merely the local
+/// network. What the composer's "on this machine" rests on.
+pub fn is_loopback(url_or_host: &str) -> bool {
+    let h = host(url_or_host).to_ascii_lowercase();
+    let name = host_name(&h);
+    match name.parse::<std::net::IpAddr>() {
+        Ok(ip) => ip.is_loopback(),
+        Err(_) => name == "localhost",
+    }
+}
+
 /// The provider a URL (or a bare host) points at.
 pub fn from_url(url: &str) -> ProviderRef {
     let h = host(url).to_ascii_lowercase();

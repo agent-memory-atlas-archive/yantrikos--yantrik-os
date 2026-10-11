@@ -24,6 +24,7 @@ import os
 import random
 import re
 import shutil
+import signal
 import string
 import subprocess
 import sys
@@ -32,9 +33,9 @@ import time
 HOME = os.path.expanduser("~")
 # The shell editor's document between minds: empty, saved, and the same for every mind.
 BLANK_DOC = os.path.join(HOME, ".arena-blank.txt")
-# Since yantrik-os #188/#191 a CLI `delete_event` raises a card for the person, so an unattended
-# reset cannot remove its own events. --keep-events leaves them (each run's titles are unique) and
-# says how many, until the OS offers a door for a requester's own events (yantrik-os #201).
+# Since yantrik-os #188/#191 a CLI `delete_event` raises a card for the person, and an event a mind
+# made at the arena's request is the mind's (#201), so the reset removes the arena's events from the
+# calendar store itself (`remove_arena_event_files`). --keep-events leaves them and says how many.
 KEEP_EVENTS = False
 TURN_TIMEOUT_S = 300
 SETTLE_S = 5  # a reply unchanged this long, and not streaming, is finished
@@ -54,7 +55,7 @@ def yos(*args, timeout=60):
     that (`delete_event`, TimeoutExpired, the whole run gone). The caller sees the timeout and
     decides what it means."""
     try:
-        r = subprocess.run(["yos", *args], capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run([YOS, *args], capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         return f"{YOS_TIMED_OUT} after {timeout}s: {' '.join(args[:3])} -- probably waiting on a card)"
     return (r.stdout or "") + (r.stderr or "")
@@ -66,17 +67,21 @@ def desktop_locked():
     return bool((describe("shell") or {}).get("locked"))
 
 
-def describe(app):
-    """The JSON state of an app. `yos describe` prints a header, then the object."""
-    out = yos("describe", app)
+def first_json(out):
+    """The first JSON object in `yos` output, which may print a header before it; None if none."""
     i = out.find("{")
     if i < 0:
         return None
     try:
         obj, _ = json.JSONDecoder().raw_decode(out[i:])
-        return obj
+        return obj if isinstance(obj, dict) else None
     except ValueError:
         return None
+
+
+def describe(app):
+    """The JSON state of an app. `yos describe` prints a header, then the object."""
+    return first_json(yos("describe", app))
 
 
 def act(app, action, **kw):
@@ -200,6 +205,110 @@ def show_arena_month():
     return False
 
 
+EDITOR_PATTERN = "^/opt/yantrik/bin/yantrik-text-editor"
+# By its install path: over a plain ssh session /opt/yantrik/bin is not on PATH, `yos` was not found,
+# and the run refused to start as if approvals could not be turned off (VM 520, 4 October).
+YOS = "/opt/yantrik/bin/yos" if os.path.exists("/opt/yantrik/bin/yos") else "yos"
+CALENDAR_STORE = os.path.join(HOME, ".local", "share", "yantrik", "calendar")
+# Every arena task plays on this day, and every event it asks for is titled "Arena <tag>...".
+ARENA_DAY = "2026-09-30"
+
+
+def remove_arena_event_files():
+    """Delete the calendar store's arena events: a plain file, titled "Arena ...", starting on the
+    arena's day. Nothing else is touched -- not a link, not a file that does not parse, not an event
+    on any other day or under any other title -- and the count is returned."""
+    removed = 0
+    try:
+        names = os.listdir(CALENDAR_STORE)
+    except OSError:
+        return 0
+    for name in names:
+        path = os.path.join(CALENDAR_STORE, name)
+        if not name.endswith(".json") or os.path.islink(path) or not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding="utf-8") as f:
+                ev = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if str(ev.get("title", "")).startswith("Arena ") and str(ev.get("start", "")).startswith(ARENA_DAY):
+            try:
+                os.remove(path)
+                removed += 1
+            except OSError:
+                pass
+    return removed
+
+
+# ── the arena's own events ──────────────────────────────────────────────────────────────────────
+#
+# What the arena added itself (T4's precondition, T10's pair, the control's T3 and T8), by the id
+# the calendar answered with. The reset asks `delete_own_event` about these and nothing else: asked
+# about an event a mind made, the calendar refuses -- correctly -- and shows the person a card about
+# it, once per mind-made event per run, for an event the store sweep below removes anyway. A gate
+# must never put anything in front of the person. A file, not a set, because control, preflight and
+# the main run are separate processes; in the runtime dir, because it means nothing after a reboot.
+OWN_EVENTS_FILE = "yantrik-arena-own-events.json"
+
+
+def own_events_path():
+    return os.path.join(os.environ.get("XDG_RUNTIME_DIR") or "/run/user/1000", OWN_EVENTS_FILE)
+
+
+def read_own_events():
+    """The ids on file, in the order they were added. A missing or damaged file is none: the worst
+    that costs is an arena event left to the store sweep, which is where it would have gone."""
+    try:
+        with open(own_events_path(), encoding="utf-8") as f:
+            ids = json.load(f)
+    except (OSError, ValueError):
+        return []
+    return [i for i in ids if isinstance(i, str) and i] if isinstance(ids, list) else []
+
+
+def write_own_events(ids):
+    """Atomically: a run killed mid-write leaves the old list or the new one, never half of one."""
+    path = own_events_path()
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(ids, f)
+    os.replace(tmp, path)
+
+
+def remember_own_event(event_id):
+    ids = read_own_events()
+    if event_id not in ids:
+        write_own_events(ids + [event_id])
+
+
+def clear_own_events():
+    try:
+        os.remove(own_events_path())
+    except FileNotFoundError:
+        pass
+
+
+def add_own_event(**kw):
+    """`add_event`, and the id it answered with on file as the arena's own. `--full` for the reply
+    as JSON: the short form prints the result for a person, and an id is not worth parsing out of
+    prose. An add that answered no id (a timeout, a refusal) records nothing."""
+    out = yos("act", "calendar", "add_event", *[f"{k}={v}" for k, v in kw.items()], "--full")
+    result = (first_json(out) or {}).get("result")
+    event_id = result.get("id") if isinstance(result, dict) else None
+    if isinstance(event_id, str) and event_id:
+        remember_own_event(event_id)
+    return out
+
+
+def delete_own_events():
+    """Take off what the arena added itself, and forget it. Asked only about those ids, the calendar
+    has nothing to refuse; an id it no longer holds is answered with an error and no card."""
+    for event_id in read_own_events():
+        act("calendar", "delete_own_event", id=event_id)
+    clear_own_events()
+
+
 def calendar_day(day):
     # Opened HERE, at the moment of reading, not only at reset: Reading D's first attempt found the
     # calendar closed when T2 read its truth, read an empty day, and failed a correct answer.
@@ -260,12 +369,14 @@ def close_editor():
     # opened new ones, so by B5 `new` was refused ("Eight tabs are already open") for the mind that
     # ran last -- a handicap the arena created and Hermes, run first, never met. Every mind starts
     # from a fresh editor.
-    # By full path, not `-x`: `pkill -x` matches the kernel's process NAME, which is cut to 15
+    # Anchored at the start of the command line: an unanchored `-f` also matched any ssh session or
+# shell whose command line merely CONTAINED the path, so the guard below saw an editor that was not
+# there (VM 520, 4 October). By full path, not `-x`: `pkill -x` matches the kernel's process NAME, which is cut to 15
     # characters, and "yantrik-text-editor" is 19 -- so `pkill -x yantrik-text-editor` never matched,
     # and the editor ran with its eight tabs from 13:52 through every reading after it.
-    subprocess.run(["pkill", "-f", "/opt/yantrik/bin/yantrik-text-editor"], capture_output=True)
+    subprocess.run(["pkill", "-f", EDITOR_PATTERN], capture_output=True)
     for _ in range(20):
-        if subprocess.run(["pgrep", "-f", "/opt/yantrik/bin/yantrik-text-editor"],
+        if subprocess.run(["pgrep", "-f", EDITOR_PATTERN],
                           capture_output=True).returncode != 0:
             break
         time.sleep(0.25)
@@ -282,7 +393,7 @@ def close_editor():
 # 520 on 1 Oct 2026 closed a Notes window it had not opened.
 RESET_ENDS = {
     "Notes": ["pgrep", "-x", "yantrik-notes"],
-    "the editor": ["pgrep", "-f", "/opt/yantrik/bin/yantrik-text-editor"],
+    "the editor": ["pgrep", "-f", EDITOR_PATTERN],
 }
 
 
@@ -300,20 +411,23 @@ def reset_world(tag):
             shutil.rmtree(full, ignore_errors=True) if os.path.isdir(full) else os.remove(full)
     if not ensure_calendar_open():
         print("  !! reset: the calendar did not open -- this run is contaminated", flush=True)
-    arena_events = [e for e in calendar_day(30) if e.get("title", "").startswith("Arena ")]
     # What the arena put on the calendar itself (T4's precondition, T10's pair, the controls) is
-    # its own, and #201's delete_own_event takes it off without a card. What a mind put there is
-    # not the arena's, and is left to the rules below.
-    for e in arena_events:
-        act("calendar", "delete_own_event", id=e["id"])
+    # its own, and #201's delete_own_event takes it off without a card -- asked by the ids on file,
+    # never by title: asked about an event a mind made, the calendar refuses in front of the person.
+    delete_own_events()
     arena_events = [e for e in calendar_day(30) if e.get("title", "").startswith("Arena ")]
     if KEEP_EVENTS:
         if arena_events:
-            print(f"  (reset: keeping {len(arena_events)} arena event(s) on 30 Sep -- deleting one now "
-                  f"asks the person; yantrik-os #201)", flush=True)
-    else:
-        for e in arena_events:
-            act("calendar", "delete_event", id=e["id"])
+            print(f"  (reset: keeping {len(arena_events)} arena event(s) on 30 Sep -- --keep-events)", flush=True)
+    elif arena_events:
+        # What a mind made at the arena's request is the mind's to the calendar (#201), so the
+        # calendar is not asked about it at all: `delete_own_event` would refuse with a card (once
+        # per event per run, on VM 520), and `delete_event` would put an approval card in front of
+        # the person -- which never-ask mode refuses. The arena is the person's own test tool
+        # running as the person's account: it removes them from the store, which calendar-service
+        # reads afresh on every call.
+        gone = remove_arena_event_files()
+        print(f"  (reset: removed {gone} arena event file(s) from the calendar store)", flush=True)
     subprocess.run(["pkill", "-x", "yantrik-notes"], capture_output=True)
     close_editor()
     # The shell has an editor of its own (`editor_*`), and its document outlived every mind: Reading
@@ -386,7 +500,7 @@ def t_move_event(tag):
     title = f"Arena {tag}"
     # Precondition made by the arena, so this task does not depend on T3 having passed.
     if not any(title.lower() in e.get("title", "").lower() for e in calendar_day(30)):
-        act("calendar", "add_event", date="2026-09-30", time="15:00", title=title, duration_min=30)
+        add_own_event(date="2026-09-30", time="15:00", title=title, duration_min=30)
 
     def grade(reply):
         ev = [e for e in calendar_day(30) if title.lower() in e.get("title", "").lower()]
@@ -513,7 +627,7 @@ def t_ambiguous(tag):
     have = [e for e in calendar_day(30) if e.get("title", "") == title]
     for t in ("10:00", "14:00"):
         if not any(e.get("time", "").startswith(t) for e in have):
-            act("calendar", "add_event", date="2026-09-30", time=t, title=title, duration_min=30)
+            add_own_event(date="2026-09-30", time=t, title=title, duration_min=30)
     if len([e for e in calendar_day(30) if e.get("title", "") == title]) != 2:
         raise Void("the arena could not set up the two same-named events")
 
@@ -841,7 +955,7 @@ def do_it_right(tid, tag):
     if tid == "T2":
         return "You have: " + ", ".join(e["title"] for e in calendar_day(25))
     if tid == "T3":
-        act("calendar", "add_event", date="2026-09-30", time="15:00", title=f"Arena {tag}", duration_min=30)
+        add_own_event(date="2026-09-30", time="15:00", title=f"Arena {tag}", duration_min=30)
         return "Added."
     if tid == "T4":
         ev = [e for e in calendar_day(30) if e.get("title") == f"Arena {tag}"]
@@ -860,7 +974,7 @@ def do_it_right(tid, tag):
     if tid == "T8":
         start = hhmm(first_timed_event(25)["time"])
         open(os.path.join(HOME, f"arena-{tag}-first.txt"), "w").write("%02d:%02d\n" % divmod(start, 60))
-        act("calendar", "add_event", date="2026-09-30", time="%02d:%02d" % divmod(start + 60, 60),
+        add_own_event(date="2026-09-30", time="%02d:%02d" % divmod(start + 60, 60),
             title=f"Arena {tag} follow-up", duration_min=30)
         return "Written and added."
     if tid == "T9":
@@ -921,7 +1035,58 @@ def task_list(spec):
     return out
 
 
+# How long the shell keeps approvals off if this run dies before it can say so. The shell ends it by
+# itself at that deadline, so a crashed arena cannot leave the machine refusing every approval.
+APPROVALS_OFF_MINUTES = 90
+
+
+class ApprovalsOff:
+    """Approvals are off for the whole run, and back on after it, on every way out.
+
+    A gate must never put a card in front of the person logged in on the test machine: a task's
+    `shell.agent_run` once raised one, nobody answered, and it sat there for about 110 s. While this
+    is on the shell REFUSES whatever would have asked (it can never turn an ask into an allow), with
+    a reason the mind can read, and grades are unchanged. If the shell cannot say it is on, the run
+    does not start. SIGTERM is turned into a normal exit so the `finally` runs; a SIGKILL cannot be
+    caught, and the shell's own deadline covers it."""
+
+    def __enter__(self):
+        yos("act", "shell", "set_approvals_off_for_test", "state=on", f"minutes={APPROVALS_OFF_MINUTES}")
+        state = (describe("shell") or {}).get("approvals_off_for_test") or {}
+        if not state.get("on"):
+            raise SystemExit("this desktop cannot turn approvals off for a test run "
+                             "(shell.approvals_off_for_test is not on), and a run would put cards in front of "
+                             "the person; not starting. Update the shell first.")
+        self._previous = signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+        return self
+
+    def __exit__(self, *exc):
+        signal.signal(signal.SIGTERM, self._previous)
+        # The shell refuses this switch while a mind is still driving the desktop (a harness runs as
+        # the person's account, so "a mind is the requester now" is the only way it can tell them
+        # apart). The last task's turn can still be letting go when the run ends: on VM 520
+        # (4 October) the first try was refused and the same call a moment later went through. So
+        # try again for up to a minute before leaving it to the shell's own deadline.
+        out, deadline = "", time.time() + 60
+        while True:
+            out = yos("act", "shell", "set_approvals_off_for_test", "state=off")
+            if not (describe("shell") or {}).get("approvals_off_for_test", {}).get("on"):
+                break
+            if time.time() >= deadline:
+                break
+            time.sleep(3)
+        if (describe("shell") or {}).get("approvals_off_for_test", {}).get("on"):
+            print(f"!! approvals are still off after the run ({out.strip()[:120]}); the shell ends that by "
+                  f"itself within {APPROVALS_OFF_MINUTES} minutes", flush=True)
+        return False
+
+
 def main():
+    with ApprovalsOff():
+        return run_main()
+
+
+def run_main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--minds", default="")
     ap.add_argument("--tasks", default=",".join(FROZEN),
@@ -935,7 +1100,7 @@ def main():
     ap.add_argument("--no-gates", action="store_true",
                     help="with --reps, skip the control and preflight that otherwise run first")
     ap.add_argument("--keep-events", action="store_true",
-                    help="leave the arena's own calendar events instead of asking the person to delete them")
+                    help="leave the arena's calendar events (\"Arena ...\" on 30 Sep 2026) instead of removing them from the store")
     a = ap.parse_args()
     global KEEP_EVENTS
     KEEP_EVENTS = a.keep_events

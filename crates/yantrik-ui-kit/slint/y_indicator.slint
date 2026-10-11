@@ -16,7 +16,7 @@
 // shown greyed with a made-up value. It is a glyph, a hover wash and a click, nothing more;
 // what opens from it is a YPopover the owner places under it.
 //
-// Size: `Theme.h-regular` tall, `Theme.bar-icon-size` (16px) glyph, as wide as its content and
+// Size: `Theme.h-regular` tall, `Theme.bar-icon-size` (18px) glyph, as wide as its content and
 // never narrower than it is tall, so a row of icon-only indicators is a row of squares.
 //
 // Input
@@ -27,20 +27,30 @@
 //             (`tooltip-above: false` for a bar along the top). It is drawn where it is; a
 //             tooltip that would cross the screen edge is the owner's to avoid.
 //
+// A glyph that is more than a path (the battery's fill follows the level) puts its extra
+// shapes inside the indicator as children; they are drawn in the glyph's own box.
+//
 // States: rest, hover, pressed, active (popover open), keyboard focus, attention dot, disabled
 // (dimmed, inert). Accessible role button; `active` is reported as expanded.
 import { Theme } from "theme.slint";
 import { Icon } from "icon.slint";
 import { YWheelArea } from "y_wheel.slint";
+import { YTooltip } from "y_tooltip.slint";
 
 export component YIndicator inherits Rectangle {
     in property <string> icon: "";
+    // A fainter glyph drawn beneath `icon` in the same box: the unlit bars of a signal mark, so
+    // 2 of 4 reads as two lit and two dim. Empty draws nothing.
+    in property <string> icon-under: "";
     in property <string> label: "";
     in property <string> tooltip: "";
     in property <bool> active: false;
     in property <bool> attention: false;
     in property <bool> enabled: true;
     in property <bool> tooltip-above: true;
+    // Hang the tooltip from the indicator's right edge instead of centring it, for the one at the
+    // far right of a bar, whose centred tooltip would run off the screen.
+    in property <bool> tooltip-end: false;
     callback clicked();
     callback middle-clicked();
     callback scrolled(int);
@@ -52,6 +62,10 @@ export component YIndicator inherits Rectangle {
     out property <length> anchor-x: area.absolute-position.x + root.width / 2;
     out property <length> anchor-top: area.absolute-position.y;
     out property <length> anchor-bottom: area.absolute-position.y + root.height;
+    // Keyboard focus is on it: for an owner that tracks where focus is.
+    out property <bool> focused: keys.has-focus;
+    // Put keyboard focus on the indicator, for an owner that moves focus itself.
+    public function focus-indicator() { keys.focus(); }
 
     forward-focus: keys;
     accessible-role: button;
@@ -64,7 +78,6 @@ export component YIndicator inherits Rectangle {
     property <bool> ring: keys.has-focus && !root.pointer-focus && root.enabled;
     property <bool> hovered: root.enabled && area.has-hover;
     property <bool> pressed: root.enabled && area.pressed;
-    property <bool> tip-shown: false;
     property <color> fg: (root.hovered || root.active) ? Theme.text-primary : Theme.text-secondary;
 
     height: Theme.h-regular;
@@ -84,16 +97,6 @@ export component YIndicator inherits Rectangle {
 
     function activate() { if (root.enabled) { root.clicked(); } }
 
-    changed hovered => { if (!root.hovered) { root.tip-shown = false; } }
-
-    // One single-shot delay: it runs only while the pointer rests on the indicator, and stops
-    // itself the moment the tooltip is up. Nothing ticks at rest.
-    Timer {
-        running: root.hovered && !root.pressed && !root.tip-shown && root.tooltip != "";
-        interval: Theme.dur-tooltip;
-        triggered => { root.tip-shown = true; }
-    }
-
     keys := FocusScope {
         enabled: root.enabled;
         key-pressed(event) => {
@@ -107,8 +110,9 @@ export component YIndicator inherits Rectangle {
         enabled: root.enabled;
         mouse-cursor: root.enabled ? pointer : default;
         pointer-event(event) => {
+            // A press hides the tooltip: YTooltip below is told the pointer is not resting while
+            // the indicator is pressed.
             if (event.kind == PointerEventKind.down) {
-                root.tip-shown = false;
                 if (event.button == PointerEventButton.left) {
                     root.pointer-focus = true;
                     keys.focus();
@@ -132,6 +136,13 @@ export component YIndicator inherits Rectangle {
         // dot pinned to its upper right. (A Path cannot hold children, hence the box.)
         Rectangle {
             width: Theme.bar-icon-size;
+            if root.icon-under != "" : Icon {
+                commands: root.icon-under;
+                size: Theme.bar-icon-size;
+                tint: Theme.text-dim.with-alpha(0.45);
+                thickness: Theme.icon-stroke;
+                y: (parent.height - self.height) / 2;
+            }
             Icon {
                 commands: root.icon;
                 size: Theme.bar-icon-size;
@@ -147,6 +158,15 @@ export component YIndicator inherits Rectangle {
                 border-radius: self.height / 2;
                 background: Theme.color-warning;
             }
+            // Drawn over the glyph, in exactly its square (the glyph is centred in the row, so
+            // this is too): the battery's fill and bolt. Anything placed here is decoration for
+            // the glyph and takes no input.
+            Rectangle {
+                y: (parent.height - Theme.bar-icon-size) / 2;
+                width: Theme.bar-icon-size;
+                height: Theme.bar-icon-size;
+                @children
+            }
         }
 
         if root.label != "" : Text {
@@ -158,25 +178,10 @@ export component YIndicator inherits Rectangle {
         }
     }
 
-    if root.tip-shown && root.tooltip != "" : Rectangle {
-        x: (parent.width - self.width) / 2;
+    YTooltip {
+        text: root.tooltip;
+        hovered: root.hovered && !root.pressed;
+        x: root.tooltip-end ? parent.width + Theme.sp-2 - self.width : (parent.width - self.width) / 2;
         y: root.tooltip-above ? -self.height - Theme.sp-1 : parent.height + Theme.sp-1;
-        width: tip-text.preferred-width + 2 * Theme.sp-3;
-        height: tip-text.preferred-height + 2 * Theme.sp-1 + Theme.sp-1;
-        border-radius: Theme.r-sm;
-        background: Theme.bg-elevated;
-        border-width: Theme.hairline;
-        border-color: Theme.border-card;
-        drop-shadow-blur: Theme.shadow-md-blur;
-        drop-shadow-offset-y: Theme.shadow-md-dy;
-        drop-shadow-color: Theme.overlay-shadow;
-
-        tip-text := Text {
-            text: root.tooltip;
-            color: Theme.text-primary;
-            font-size: Theme.fs-caption;
-            x: Theme.sp-3;
-            y: (parent.height - self.height) / 2;
-        }
     }
 }
