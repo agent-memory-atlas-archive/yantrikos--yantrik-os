@@ -239,8 +239,13 @@ fn offer() -> Offer {
     }
 }
 
+/// The gateway's tokens are one set for the whole test run, one per harness: the tests that give
+/// DeepSeek a token take turns.
+static DEEPSEEK_TOKEN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn a_harness_given_yantrik_models_holds_a_gateway_token_never_a_key() {
+    let _turn = DEEPSEEK_TOKEN.lock().unwrap_or_else(|e| e.into_inner());
     let home = Home::new("gw-deepseek");
     std::fs::write(home.deepseek(), r#"{"base_url":"https://api.deepseek.com/v1","api_key":"sk-old-SECRET","max_steps":12}"#).unwrap();
     let o = offer();
@@ -337,4 +342,31 @@ fn the_mind_is_sent_its_provider_never_a_file_and_the_companion_gets_a_file_of_i
     assert!(adapter_for("pi").unwrap().plan(&home.0, &nim()).is_err());
     assert!(adapter_for("deepseek").unwrap().takes_saved_provider());
     assert!(!adapter_for("pi").unwrap().takes_saved_provider());
+}
+
+#[test]
+fn a_harness_moved_from_the_gateway_to_a_saved_provider_keeps_no_gateway_token() {
+    let _turn = DEEPSEEK_TOKEN.lock().unwrap_or_else(|e| e.into_inner());
+    let home = Home::new("gw-then-saved");
+    let o = offer();
+    apply(&home.0, &adapter_for("deepseek").unwrap().plan_gateway(&home.0, &o).unwrap()).unwrap();
+    assert!(crate::gateway::tokens().verify(&o.token.0).is_some());
+    apply(&home.0, &adapter_for("deepseek").unwrap().plan(&home.0, &nim()).unwrap()).unwrap();
+    assert!(crate::gateway::tokens().verify(&o.token.0).is_none(), "the token it no longer holds is withdrawn");
+    revert(&home.0, "deepseek").unwrap();
+}
+
+#[test]
+fn a_config_that_cannot_be_read_is_refused_not_replaced() {
+    let home = Home::new("unreadable");
+    // Not UTF-8: unreadable as text, and not a missing file.
+    let bytes = b"{\"base_url\": \"\xff\xfe\", \"max_steps\": 12}".to_vec();
+    std::fs::write(home.deepseek(), &bytes).unwrap();
+    let a = adapter_for("deepseek").unwrap();
+    assert!(a.plan(&home.0, &nim()).is_err(), "a saved provider is not written over it");
+    assert!(a.plan_gateway(&home.0, &offer()).is_err(), "nor Yantrik models");
+    std::fs::create_dir_all(home.0.join(".hermes")).unwrap();
+    std::fs::write(home.0.join(".hermes/config.yaml"), b"model:\n  default: \xff\n").unwrap();
+    assert!(adapter_for("hermes").unwrap().plan_gateway(&home.0, &offer()).is_err());
+    assert_eq!(std::fs::read(home.deepseek()).unwrap(), bytes, "the file is as it was");
 }

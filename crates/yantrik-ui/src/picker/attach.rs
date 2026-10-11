@@ -58,14 +58,29 @@ fn mime(path: &Path) -> String {
 /// inline allowance is unspent; it is spent here.
 pub fn read(path: &Path, via: &str, at: &str, inline_left: &mut u64) -> Result<Attachment, String> {
     let real = std::fs::canonicalize(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let meta = std::fs::metadata(&real).map_err(|e| format!("{}: {e}", path.display()))?;
+    // A device is never opened (opening one can do something by itself)...
+    if !std::fs::metadata(&real).map_err(|e| format!("{}: {e}", path.display()))?.is_file() {
+        return Err(format!("{} is not a file", path.display()));
+    }
+    // ...and the answer is asked again of what was opened, not of the name: a FIFO swapped in
+    // after that check would otherwise be read (and would hang the read).
+    use std::os::unix::fs::OpenOptionsExt;
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(&real)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let meta = f.metadata().map_err(|e| format!("{}: {e}", path.display()))?;
     if !meta.is_file() {
         return Err(format!("{} is not a file", path.display()));
     }
     if meta.len() > MAX_SIZE {
         return Err(format!("{} is larger than {}", path.display(), size_words(MAX_SIZE)));
     }
-    let mut f = std::fs::File::open(&real).map_err(|e| format!("{}: {e}", path.display()))?;
+    // No more than it said it holds, plus one byte to tell a file that grew (or a /proc file that
+    // says 0 and is not) from one that did not: the caps are on what is sent, not on what stat said.
+    let mut f = f.take(meta.len() + 1);
+    let mut read_total = 0u64;
     let mut hasher = Sha256::new();
     let keep = meta.len() <= INLINE_EACH && meta.len() <= *inline_left;
     let mut kept = Vec::new();
@@ -74,6 +89,10 @@ pub fn read(path: &Path, via: &str, at: &str, inline_left: &mut u64) -> Result<A
         let n = f.read(&mut buf).map_err(|e| format!("{}: {e}", path.display()))?;
         if n == 0 {
             break;
+        }
+        read_total += n as u64;
+        if read_total > meta.len() {
+            return Err(format!("{} changed while it was read; hand it over again", path.display()));
         }
         hasher.update(&buf[..n]);
         if keep {

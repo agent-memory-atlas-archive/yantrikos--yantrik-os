@@ -273,18 +273,29 @@ pub(crate) fn gateway_plan(adapter: &dyn Handoff, offer: &Offer, writes: Vec<Wri
     }
 }
 
+/// A harness's own config as text, `None` when there is no file. Any other failure to read it — not
+/// UTF-8, a directory, no permission — is an error, never an empty file: a config that cannot be
+/// read is left alone, not replaced with one holding only what this writes.
+pub(crate) fn read_config(path: &Path) -> Result<Option<String>, String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("{} could not be read ({e}), so it is left alone", path.display())),
+    }
+}
+
 /// A JSON file of the harness's own, read as an object (a missing file is an empty one). A file
 /// that is not plain JSON — comments, JSON5 — is left alone and said to be.
 pub(crate) fn read_json_object(path: &Path) -> Result<serde_json::Map<String, serde_json::Value>, String> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
+    match read_config(path)? {
+        Some(text) => match serde_json::from_str::<serde_json::Value>(&text) {
             Ok(serde_json::Value::Object(m)) => Ok(m),
             _ => Err(format!(
                 "{} is not plain JSON (it may have comments), so it is left alone; set it by hand as its README says",
                 path.display()
             )),
         },
-        Err(_) => Ok(serde_json::Map::new()),
+        None => Ok(serde_json::Map::new()),
     }
 }
 
@@ -350,9 +361,16 @@ pub(crate) fn apply(home: &Path, plan: &Plan) -> Result<Marker, String> {
     };
     // The token is accepted before the harness is restarted onto it, and the Mind is told only
     // once the gateway will take what it is given.
-    if let Some(token) = &plan.token {
-        let grant = yantrik_gateway::Grant { harness: plan.harness.clone(), private_context: plan.private_context };
-        crate::gateway::tokens().register(&token.0, grant)?;
+    // A harness moved off the gateway (a saved provider in its place) keeps no token there.
+    match &plan.token {
+        Some(token) => {
+            let grant = yantrik_gateway::Grant { harness: plan.harness.clone(), private_context: plan.private_context };
+            crate::gateway::tokens().register(&token.0, grant)?;
+        }
+        None if earlier.as_ref().is_some_and(|m| m.provider_id == GATEWAY_ID) => {
+            crate::gateway::tokens().revoke(&plan.harness)?;
+        }
+        None => {}
     }
     if let Some(body) = &plan.mind_post {
         mind::post(&body.0)?;

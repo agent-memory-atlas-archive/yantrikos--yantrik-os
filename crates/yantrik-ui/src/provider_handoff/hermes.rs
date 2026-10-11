@@ -44,8 +44,8 @@ impl Handoff for Hermes {
 
     fn plan_gateway(&self, home: &Path, offer: &Offer) -> Result<Plan, String> {
         let path = config(home);
-        let mut doc: Mapping = match std::fs::read_to_string(&path) {
-            Ok(text) if !text.trim().is_empty() => match serde_yaml::from_str::<Value>(&text) {
+        let mut doc: Mapping = match super::read_config(&path)? {
+            Some(text) if !text.trim().is_empty() => match serde_yaml::from_str::<Value>(&text) {
                 Ok(Value::Mapping(m)) => m,
                 _ => return Err(format!("{} is not a YAML mapping, so it is left alone", path.display())),
             },

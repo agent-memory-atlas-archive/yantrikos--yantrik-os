@@ -162,6 +162,28 @@ fn a_handed_over_file_carries_its_provenance_its_hash_and_small_content() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[test]
+fn a_file_is_read_no_further_than_its_size_and_never_a_fifo() {
+    // /proc says 0 bytes and holds more: before, all of it went inline past the caps, and the
+    // allowance underflowed.
+    let mut left = 10;
+    let proc_file = std::path::Path::new("/proc/self/status");
+    match attach::read(proc_file, "lens", "now", &mut left) {
+        Ok(a) => assert!(base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &a.content_b64).unwrap().len() as u64 <= a.size),
+        Err(why) => assert!(why.contains("changed while it was read"), "{why}"),
+    }
+    assert!(left <= 10);
+    let dir = std::env::temp_dir().join(format!("attach-fifo-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let fifo = dir.join("pipe");
+    let made = std::process::Command::new("mkfifo").arg(&fifo).status().is_ok_and(|s| s.success());
+    if made {
+        // Refused, and at once: nothing is waiting on the other end.
+        assert!(attach::read(&fifo, "lens", "now", &mut left).is_err());
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 fn call(at: i64, status: u16, outcome: &str) -> Call {
     Call { at, harness: "pi".into(), account: "openai".into(), model: "o4-mini".into(), effort: None, status, outcome: outcome.into(), prompt_tokens: 0, completion_tokens: 0, ms: 1 }
 }

@@ -40,12 +40,12 @@ impl Handoff for DeepSeek {
             ));
         }
         let path = home.join(".config/yantrik/deepseek.json");
-        let mut config: Map<String, Value> = match std::fs::read_to_string(&path) {
-            Ok(text) => match serde_json::from_str::<Value>(&text) {
+        let mut config: Map<String, Value> = match super::read_config(&path)? {
+            Some(text) => match serde_json::from_str::<Value>(&text) {
                 Ok(Value::Object(m)) => m,
                 _ => return Err(format!("{} is not a JSON object, so it is left alone", path.display())),
             },
-            Err(_) => Map::new(),
+            None => Map::new(),
         };
         // The harness speaks OpenAI chat completions, so a provider saved at a native address
         // (Anthropic's, Gemini's) is given its OpenAI-compatible one. Any other address is the
