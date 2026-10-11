@@ -66,6 +66,20 @@ Both become the **default at install**, with a per-harness opt-out. Memory has b
 - **Default-on writes into the person's harness configs happen at install**, an action the person took, so there is no per-harness card. Every write keeps the original for Revert, and the onboarding summary lists every file written (#675's card text, shown once, together).
 - **Private context** (Decision 1) is enforced in the gateway, not in each harness.
 
+## Private context is a preference, with a private lane on offer (Pranab, 10 Oct)
+
+> "This is a preference, not enforced. By default we might show an option to set up a private lane using a local LLM. If the user is comfortable sharing the info, then are we wrong not to send it?"
+
+No. Sending it with the person's consent is right. The gateway's job is to follow the person's choice, not to refuse on their behalf. That changes #675's enforcement into routing:
+
+- **Share (the default once consented):** at onboarding the provider step says plainly, pre-checked, "Your minds will send what they remember about you, and where you are, to <provider> when they ask it something." Checked, every mind's calls go to the chosen model with their context, Pi and DeepSeek included. Nothing is stripped or refused.
+- **Private lane (offered, never forced):** the same step offers "Keep what your minds know about you on this machine", which sets up a local model: the bundled one, Ollama, llama-server, or Strata on the LAN. With a private lane on, the gateway **routes** every call that carries private context (memory, desktop context, handover) to the local model, and calls without it to the chosen model. The person sees which model answered (history keeps who answered, #675).
+- **Neither:** sharing unchecked and no private lane. Only then does the gateway refuse a private-context call, and the refusal says how to fix it ("Set up a private lane, or allow sharing with <provider> in AI accounts"). It never fails silently and never quietly drops the context.
+- **Private mode** stays what it is, the person's explicit "nothing leaves this machine": local only, for every call.
+- **Changeable at any time** in Settings → AI accounts, per account: Share, Private lane, or Off.
+
+#675's Pi and DeepSeek item is settled by this. Every harness token is marked as carrying private context, because every mind has YantrikDB memory, and the person's preference above decides where the calls go.
+
 ## Decisions for Pranab
 
 1. **Private context at onboarding.** With YantrikDB memory on every mind, every mind sends what it remembers about the person to the model. #675 blocks that for any cloud account until the person allows it. Recommendation: the provider step shows one plain line, pre-checked: "Your minds will send what they remember about you to <provider> when they ask it something." A local model needs no line. Unchecked, minds still work with that provider, but without memory context, and the row says so.
