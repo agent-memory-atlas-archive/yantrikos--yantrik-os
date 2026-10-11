@@ -63,30 +63,38 @@ backup_once() {
     grep -qxF "$1" "$state/files" 2>/dev/null || printf '%s\n' "$1" >> "$state/files"
 }
 
-# wire_model HARNESS — the model half of the install, which is not this file's: #675's
-# install-time wiring (gateway token, `model: picked`) when this image carries it as
-# lib/install/model.sh with `yantrik_wire_model HARNESS`. Without it the harness keeps its own
-# model and says so, and the "Can it answer?" proof reads "model: its own" rather than failing.
+# wire_model HARNESS — the model step of an install (design/onboarding-one-model-one-memory-
+# 2026-10-10.md, "The flow"): #675's `yantrik-ui --wire-model`, no question and no TTY. It
+# records what happened in the harness's state/model for the "Can it answer?" proof (picked,
+# failed, or absent for its own model) and always returns 0: installers run under set -e, and
+# a model step that did not run must never abort the install.
 wire_model() {
     state=$(harness_state "$1")
     mkdir -p "$state" || fail "could not write $state"
-    if [ -f "$INSTALL_LIB/model.sh" ]; then
-        # shellcheck disable=SC1091  # the model half's (#675), present only on an image that has it
-        . "$INSTALL_LIB/model.sh"
-        if command -v yantrik_wire_model >/dev/null 2>&1; then
-            if yantrik_wire_model "$1"; then
-                printf 'picked\n' > "$state/model"
-                say "model: wired to the model you picked"
-                return 0
-            fi
-            rm -f "$state/model"
-            say "model: could not be wired to the model you picked; the proofs below say how to fix it"
-            printf 'failed\n' > "$state/model"
+    # YANTRIK_UI names the desktop binary for tests; a desktop older than the model step (no
+    # --wire-model in it) is the same as none.
+    ui=${YANTRIK_UI:-$(command -v yantrik-ui 2>/dev/null || echo /opt/yantrik/bin/yantrik-ui)}
+    if [ -x "$ui" ] && grep -q -e '--wire-model' "$ui" 2>/dev/null; then
+        # #675's model step: the harness's own config pointed at the gateway, `model: picked`,
+        # its file kept for Revert. It never stops the install: a step that did not run is said,
+        # recorded as failed for the proofs, and Settings → Harnesses → Use Yantrik models retries.
+        # Only its last line is kept: that is the one it writes for a person (logs go before it).
+        if out=$(RUST_LOG=error "$ui" --wire-model "$1" </dev/null 2>&1); then
+            out=$(printf '%s\n' "$out" | tail -n 1)
+            case $out in
+                *"uses your model"*) printf 'picked\n' > "$state/model" ;;
+                *) rm -f "$state/model" ;;   # its own models, a saved provider, or the Mind's card
+            esac
+            say "model: $out"
             return 0
         fi
+        out=$(printf '%s\n' "$out" | tail -n 1)
+        say "model: $1 was not pointed at your model ($out); Settings → Harnesses → Use Yantrik models does it"
+        printf 'failed\n' > "$state/model"
+        return 0
     fi
     rm -f "$state/model"
-    say "model: its own (this image has no install-time model wiring; skipped)"
+    say "model: its own (no desktop here to point it at your model; Settings → Harnesses does it later)"
 }
 
 # Node, pinned. Updated by hand with the checksums nodejs.org publishes in SHASUMS256.txt for
@@ -240,3 +248,4 @@ ensure_node() {
     node_at_least "$want" || fail "Node $NODE_VERSION is unpacked but does not run, or is older than $want"
     say "Node $(node --version) installed in ~/.local/node"
 }
+

@@ -194,14 +194,18 @@ class InstallerTests(unittest.TestCase):
         lib.mkdir()
         shutil.copy(self.INSTALL / "common.sh", lib / "common.sh")
         (lib / "probe.sh").write_text('. "$(dirname "$0")/common.sh"\nwire_model pi\n')
-        env = dict(os.environ, HOME=work)
+        env = dict(os.environ, HOME=work, YANTRIK_UI=str(Path(work) / "no-such-desktop"))
         done = subprocess.run(["sh", str(lib / "probe.sh")], capture_output=True, text=True, env=env)
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertIn("model: its own", done.stdout)
         self.assertFalse((Path(work) / ".local" / "state" / "yantrik" / "harnesses" / "pi" / "model").exists())
-        (lib / "model.sh").write_text('yantrik_wire_model() { echo "wired $1"; }\n')
+        # The model half (#675): the desktop's `yantrik-ui --wire-model`, here a stand-in.
+        ui = Path(work) / "yantrik-ui"
+        ui.write_text("#!/bin/sh\n# --wire-model\necho \"$2 now uses your model\"\n")
+        ui.chmod(0o700)
+        env["YANTRIK_UI"] = str(ui)
         done = subprocess.run(["sh", str(lib / "probe.sh")], capture_output=True, text=True, env=env)
-        self.assertIn("wired pi", done.stdout)
+        self.assertIn("model: pi now uses your model", done.stdout)
         self.assertEqual((Path(work) / ".local" / "state" / "yantrik" / "harnesses" / "pi" / "model").read_text(),
                          "picked\n")
 
