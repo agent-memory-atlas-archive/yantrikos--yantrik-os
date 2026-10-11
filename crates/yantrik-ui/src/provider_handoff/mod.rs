@@ -267,6 +267,10 @@ pub(crate) enum Wired {
     OwnModels,
     /// The person gave it one of their saved providers: left alone.
     SavedProvider(String),
+    /// The Yantrik Mind: never wired by an install. Its model and where its private context may go
+    /// are the person's pick on the "Use Yantrik models" card (the person picks, Pranab 28 Sep;
+    /// yantrik-mind E.PROV2), so an install leaves it on its own provider.
+    AsksFirst,
 }
 
 /// The mark "Use its own models" leaves: `~/.config/yantrik/handoff/<harness>.own-models`.
@@ -304,6 +308,9 @@ pub(crate) fn set_own_models(home: &Path, harness: &str, on: bool) -> Result<(),
 /// left as they are. `offer` is asked for only when a write is due.
 pub(crate) fn wire_at_install(home: &Path, harness: &str, offer: impl FnOnce() -> Result<Offer, String>) -> Result<Wired, String> {
     let adapter = adapter_for(harness).ok_or_else(|| format!("{harness} has no model step: it keeps its own settings"))?;
+    if harness == mind::ID {
+        return Ok(Wired::AsksFirst);
+    }
     if uses_own_models(home, harness) {
         return Ok(Wired::OwnModels);
     }
@@ -436,7 +443,14 @@ pub(crate) fn apply(home: &Path, plan: &Plan) -> Result<Marker, String> {
         None => {}
     }
     if let Some(body) = &plan.mind_post {
-        mind::post(&body.0)?;
+        // A Mind that refuses the offer keeps its own provider, so the gateway keeps no token for
+        // it either: the token went nowhere that holds it.
+        if let Err(e) = mind::post(&body.0) {
+            if plan.token.is_some() {
+                let _ = crate::gateway::tokens().revoke(&plan.harness);
+            }
+            return Err(e);
+        }
     }
     let text = serde_json::to_string_pretty(&m).map_err(|e| e.to_string())?;
     private_file::write(&marker_path(home, &plan.harness), text.as_bytes(), Publish::Replace, || Ok(()))?;

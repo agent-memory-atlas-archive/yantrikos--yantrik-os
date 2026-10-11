@@ -181,6 +181,40 @@ fn a_token_another_process_wrote_is_accepted_and_kept() {
 }
 
 #[test]
+fn a_grant_in_the_file_cannot_say_it_carries_no_private_context() {
+    // The file is writable by anything running as the person: a grant there marked as carrying
+    // no private context would send a call past the person's Share / Private lane / Off choice.
+    let dir = std::env::temp_dir().join(format!("gw-tokens-forged-{}", std::process::id()));
+    let path = dir.join("tokens.json");
+    let shell = Tokens::open(&path);
+    shell.register(&mint().unwrap(), Grant { harness: "mind".into(), private_context: true }).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let forged = mint().unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    let mut file: Value = serde_json::from_str(&text).unwrap();
+    let d: String = <sha2::Sha256 as sha2::Digest>::digest(forged.as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
+    file["tokens"][d] = json!({"harness": "hermes", "private_context": false});
+    std::fs::write(&path, file.to_string()).unwrap();
+    assert!(shell.verify(&forged).unwrap().private_context, "read again, and held to the person's choice");
+    assert!(Tokens::open(&path).verify(&forged).unwrap().private_context, "and at a restart");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_token_another_process_revoked_stops_at_once() {
+    let dir = std::env::temp_dir().join(format!("gw-tokens-revoked-{}", std::process::id()));
+    let path = dir.join("tokens.json");
+    let shell = Tokens::open(&path);
+    let hermes = mint().unwrap();
+    shell.register(&hermes, Grant { harness: "hermes".into(), private_context: true }).unwrap();
+    assert!(shell.verify(&hermes).is_some());
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    assert!(Tokens::open(&path).revoke("hermes").unwrap());
+    assert!(shell.verify(&hermes).is_none(), "a token found before is not kept after it was withdrawn");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn the_token_file_holds_hashes_never_tokens() {
     let dir = std::env::temp_dir().join(format!("gw-tokens-{}", std::process::id()));
     let path = dir.join("tokens.json");

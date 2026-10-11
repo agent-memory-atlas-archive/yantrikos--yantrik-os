@@ -85,11 +85,20 @@ pub fn wire_model_cli(args: &[String]) -> i32 {
         eprintln!("usage: yantrik-ui --wire-model <harness>");
         return 2;
     };
+    // The person's own files, written as the person. As root (a `sudo` that kept $HOME) every
+    // write would follow directories the person controls and leave root-owned files the shell
+    // and the harness cannot read, so it is refused.
+    // SAFETY: geteuid cannot fail.
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("{harness}: run this as the person whose harness it is, not as root");
+        return 1;
+    }
     match wire_installed(harness) {
         Ok(provider_handoff::Wired::Now) => println!("{harness} now uses your model (Revert in Settings → Harnesses puts its own file back)"),
         Ok(provider_handoff::Wired::Already) => println!("{harness} already uses your model"),
         Ok(provider_handoff::Wired::OwnModels) => println!("{harness} uses its own models, as you chose"),
         Ok(provider_handoff::Wired::SavedProvider(p)) => println!("{harness} uses {p}, as you chose"),
+        Ok(provider_handoff::Wired::AsksFirst) => println!("{harness} keeps its own provider until you choose Use Yantrik models on its card"),
         Err(e) => {
             eprintln!("{harness}: {e}");
             return 1;
@@ -136,7 +145,30 @@ pub(crate) fn wire_after_install(harness: &str) {
             });
         }
         Ok(w) => tracing::info!(harness, outcome = ?w, "model step at install"),
-        Err(e) => tracing::warn!(harness, error = %e, "the model step at install did not run"),
+        Err(e) => {
+            tracing::warn!(harness, error = %e, "the model step at install did not run");
+            // The install itself stands; the person is told it still uses its own models, why, and
+            // where to try again. A harness with no model step has nothing to tell.
+            let Some(name) = provider_handoff::adapter_for(harness).map(|a| a.name().to_string()) else { return };
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(ui) = UI.with(|u| u.borrow().as_ref().and_then(|w| w.upgrade())) else { return };
+                crate::wire::toast::push(&ui, not_wired_toast(&name, &e), 1);
+            });
+        }
+    }
+}
+
+/// What the person is told when an install's model step did not run: the harness is installed and
+/// keeps its own models, with the reason and where to try again. No action: there is nothing to undo.
+pub(crate) fn not_wired_toast(name: &str, why: &str) -> crate::ToastData {
+    crate::ToastData {
+        id: format!("local:not-wired:{name}").into(),
+        app_name: name.into(),
+        summary: format!("{name} still uses its own models").into(),
+        body: format!("{}. Settings → Harnesses → Use Yantrik models tries again.", why.trim_end_matches('.')).into(),
+        urgency: 1,
+        icon_char: name.chars().next().unwrap_or('M').to_string().into(),
+        actions: slint::ModelRc::new(slint::VecModel::<crate::ToastActionData>::default()),
     }
 }
 
@@ -325,5 +357,19 @@ pub(crate) fn wire(ui: &App) {
                 ui.set_harness_error(e.into());
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_model_step_that_did_not_run_is_said_with_its_reason_and_where_to_try_again() {
+        let t = super::not_wired_toast("Yantrik Mind", "The Mind did not take it (HTTP 422): it may not take Yantrik models this way yet.");
+        assert_eq!(t.summary.as_str(), "Yantrik Mind still uses its own models");
+        assert_eq!(
+            t.body.as_str(),
+            "The Mind did not take it (HTTP 422): it may not take Yantrik models this way yet. Settings → Harnesses → Use Yantrik models tries again."
+        );
+        assert_eq!(slint::Model::row_count(&t.actions), 0, "nothing to undo");
     }
 }

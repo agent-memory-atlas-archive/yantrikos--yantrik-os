@@ -26,6 +26,8 @@ pub(crate) struct Mind;
 pub(crate) fn offer_body(offer: &Offer) -> String {
     json!({
         "source": SOURCE,
+        // The Mind keeps it as a provider of its own, by this id (yantrik-mind E.PROV2).
+        "provider": SOURCE,
         "name": super::GATEWAY_NAME,
         "base_url": offer.base_url(),
         "model": yantrik_gateway::PICKED,

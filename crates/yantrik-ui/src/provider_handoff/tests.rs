@@ -333,6 +333,7 @@ fn the_mind_is_sent_its_provider_never_a_file_and_the_companion_gets_a_file_of_i
     assert_eq!(body["model"], "picked");
     assert_eq!(body["api_key"], o.token.0.as_str());
     assert_eq!(body["private_context"], true);
+    assert_eq!(body["provider"], "yantrik-gateway", "the Mind keeps it as a provider of its own (E.PROV2)");
     assert!(plan.card(&home.0).contains("its own provider setting"));
     assert!(!format!("{plan:?}").contains(&o.token.0));
 
@@ -420,4 +421,25 @@ fn a_saved_provider_the_person_chose_is_left_alone_at_install() {
     apply(&home.0, &plan).unwrap();
     assert_eq!(wire_at_install(&home.0, "deepseek", || panic!("not asked")).unwrap(), Wired::SavedProvider("NVIDIA NIM".into()));
     assert!(wire_at_install(&home.0, "claude-code", || Ok(offer())).is_err(), "the person's own CLIs are never wired silently");
+}
+
+#[test]
+fn a_mind_that_does_not_take_the_offer_leaves_no_token_and_no_marker() {
+    // No Mind's memory socket here, so the POST fails the way a Mind refusing the body does.
+    let home = Home::new("gw-mind-refused");
+    let o = offer();
+    let plan = adapter_for("mind").unwrap().plan_gateway(&home.0, &o).unwrap();
+    let why = apply(&home.0, &plan).unwrap_err();
+    assert!(why.contains("Mind"), "{why}");
+    assert!(crate::gateway::tokens().verify(&o.token.0).is_none(), "the token went nowhere that holds it");
+    assert!(!uses_gateway(&home.0, "mind"), "and nothing says the Mind is on Yantrik models");
+}
+
+#[test]
+fn an_install_never_hands_the_mind_a_model_the_person_did_not_pick_on_its_card() {
+    let home = Home::new("gw-mind-install");
+    let wired = wire_at_install(&home.0, "mind", || panic!("no offer is made, so no token is minted")).unwrap();
+    assert!(matches!(wired, Wired::AsksFirst));
+    assert!(!uses_gateway(&home.0, "mind"));
+    assert!(!crate::gateway::tokens().harnesses().contains(&"mind".to_string()));
 }
