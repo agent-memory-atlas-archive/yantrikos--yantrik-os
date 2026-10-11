@@ -661,8 +661,8 @@ ok "Harnesses staged at /opt/yantrik/share/harnesses, units in /etc/systemd/user
 #             the commit hermes.sh pins), so the one compiled dependency is fetched for every
 #             CPython it may be; the engine is abi3 and the rest pure Python.
 #   mcp/      yantrikdb-mcp and its dependencies for the image's own python3, which is how Pi,
-#   bin/      DeepSeek and OpenClaw reach YantrikDB (bin/yantrikdb-mcp starts it, with -s so the
-#             person's own site-packages cannot shadow it).
+#   bin/      DeepSeek and OpenClaw reach YantrikDB (bin/yantrikdb-mcp starts it, with -I so neither
+#             the person's own site-packages nor the directory it runs in can shadow it).
 #
 # The provider is yantrikdb-hermes-plugin with the shared `yantrik` mode (yantrikdb-hermes-plugin
 # PR #93), by commit: a tag can move and a commit cannot. Its mode stays `embedded` until #586's
@@ -700,7 +700,11 @@ rm -rf "$MEM_STAGE/mcp/bin"
 cat > "$MEM_STAGE/bin/yantrikdb-mcp" <<'MCP'
 #!/bin/sh
 # YantrikDB's MCP server on the image's own Python, from /opt/yantrik/memory/mcp (#677).
-exec /usr/bin/python3 -s -c 'import sys; sys.path.insert(0, "/opt/yantrik/memory/mcp"); from yantrikdb_mcp import main; sys.exit(main())' "$@"
+# -I, not -s: with -c, Python puts the current directory on sys.path, and this runs in whatever
+# directory the harness is working in (a project Pi was opened in, OpenClaw's workspace), where a
+# json.py or typing.py a mind's graded tools wrote would run here ungraded. -I leaves out the
+# current directory, the person's site-packages and every PYTHON* variable.
+exec /usr/bin/python3 -I -c 'import sys; sys.path.insert(0, "/opt/yantrik/memory/mcp"); from yantrikdb_mcp import main; sys.exit(main())' "$@"
 MCP
 {
     echo "yantrikdb=$YANTRIKDB_VERSION"
@@ -720,7 +724,7 @@ ls "$ROOTFS/opt/yantrik/memory/wheels/yantrikdb-$YANTRIKDB_VERSION"-*.whl >/dev/
     || fail "the YantrikDB engine wheel did not land in the image"
 ls "$ROOTFS/opt/yantrik/memory/wheels/"yantrikdb_hermes_plugin-*.whl >/dev/null 2>&1 \
     || fail "the YantrikDB Hermes provider did not land in the image"
-sudo chroot "$ROOTFS" /usr/bin/python3 -s -c 'import sys; sys.path.insert(0, "/opt/yantrik/memory/mcp"); import yantrikdb, yantrikdb_mcp' \
+sudo chroot "$ROOTFS" /usr/bin/python3 -I -c 'import sys; sys.path.insert(0, "/opt/yantrik/memory/mcp"); import yantrikdb, yantrikdb_mcp' \
     || fail "yantrikdb-mcp does not import on the image's Python"
 ok "YantrikDB baked at /opt/yantrik/memory ($(sudo du -sh "$ROOTFS/opt/yantrik/memory" | cut -f1)): engine $YANTRIKDB_VERSION, Hermes provider, yantrikdb-mcp $YANTRIKDB_MCP_VERSION"
 
