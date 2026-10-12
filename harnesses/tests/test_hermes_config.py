@@ -351,7 +351,7 @@ class HermesConfigTests(unittest.TestCase):
         # F3: `check` ran only after `restart`, with the gateway already up on a widened file.
         script = (SCRIPT.parent / "hermes.sh").read_text(encoding="utf-8")
         before = script.index("hermes_check ||")
-        install = script.index("hermes gateway install --if-missing")
+        install = script.index("gateway_install ||")
         restart = script.index("systemctl --user restart hermes-gateway")
         after = script.rindex("hermes_check ||")
         self.assertLess(before, install)
@@ -361,6 +361,41 @@ class HermesConfigTests(unittest.TestCase):
         tail = script[before:]
         self.assertEqual(tail.count("stop_gateway;"), 4)
         self.assertIn("systemctl --user stop hermes-gateway", script)
+
+    def test_an_older_hermes_without_if_missing_keeps_its_unit_and_is_enabled_for_login(self):
+        # Hermes 0.14.0 (VM 520) refused `--if-missing --start-now --start-on-login`, so the install
+        # stopped there and Hermes never got its YantrikDB file. gateway_install is run from the
+        # script itself, against a stand-in hermes and systemctl that record what they were asked.
+        import re
+        import shutil
+        import subprocess
+        sh = shutil.which("sh")
+        if not sh or os.name == "nt":
+            self.skipTest("needs a POSIX sh")
+        script = (SCRIPT.parent / "hermes.sh").read_text(encoding="utf-8")
+        body = re.search(r"^gateway_install\(\) \{.*?^\}", script, re.M | re.S).group(0)
+        help_ = "hermes gateway install --help"
+        cat = "systemctl --user cat hermes-gateway"
+        enable = "systemctl --user enable hermes-gateway"
+        for knows, has_unit, want in (
+                (True, True, [help_, "hermes gateway install --if-missing --start-now --start-on-login"]),
+                (False, True, [help_, cat, enable]),
+                (False, False, [help_, cat, "hermes gateway install", enable])):
+            with tempfile.TemporaryDirectory() as d:
+                log = Path(d) / "log"
+                usage = ("usage: hermes gateway install [-h] [--if-missing] [--start-now]" if knows
+                         else "usage: hermes gateway install [-h] [--force] [--system]")
+                (Path(d) / "hermes").write_text(
+                    '#!/bin/sh\necho "hermes $*" >> %s\n[ "$3" = --help ] && echo \'%s\'\nexit 0\n' % (log, usage))
+                (Path(d) / "systemctl").write_text(
+                    '#!/bin/sh\necho "systemctl $*" >> %s\n[ "$2" = cat ] && exit %d\nexit 0\n' % (log, 0 if has_unit else 1))
+                for f in ("hermes", "systemctl"):
+                    os.chmod(Path(d) / f, 0o755)
+                done = subprocess.run([sh, "-c", body + "\ngateway_install"], capture_output=True, text=True,
+                                      env=dict(os.environ, PATH=d + os.pathsep + os.environ.get("PATH", "")),
+                                      timeout=30)
+                self.assertEqual(done.returncode, 0, done.stderr)
+                self.assertEqual(log.read_text().splitlines(), want, (knows, has_unit))
 
     # ── a Hermes before 3d7f773, which turns kanban on for every platform (VM 520) ──────────────
 

@@ -143,12 +143,24 @@ hermes_check() {
 stop_gateway() {
     systemctl --user stop hermes-gateway >/dev/null 2>&1 || true
 }
+# Hermes's gateway as the person's own user service, started now and at every login: nothing
+# else loads the plugin. A Hermes that knows `--if-missing` leaves a unit that is already there
+# alone. An older one (0.14.0 on VM 520 knows only --force, --system and --run-as-user, and
+# refused the rest) is given a unit only when there is none, and is enabled for login here; the
+# restart after this starts it either way.
+gateway_install() {
+    if hermes gateway install --help 2>/dev/null | grep -q -e '--if-missing'; then
+        hermes gateway install --if-missing --start-now --start-on-login </dev/null
+        return
+    fi
+    if ! systemctl --user cat hermes-gateway >/dev/null 2>&1; then
+        hermes gateway install </dev/null || return 1
+    fi
+    systemctl --user enable hermes-gateway >/dev/null 2>&1
+}
 hermes_check || { stop_gateway; fail "Hermes's desktop platform has more than the desktop's tools, and Hermes's gateway is stopped; see $config"; }
 
-# Hermes's gateway as the person's own user service, started now and at every login: nothing
-# else loads the plugin. `--if-missing` leaves one that is already there alone.
-hermes gateway install --if-missing --start-now --start-on-login </dev/null \
-    || { stop_gateway; fail "Hermes would not install its gateway service"; }
+gateway_install || { stop_gateway; fail "Hermes would not install its gateway service"; }
 systemctl --user restart hermes-gateway || { stop_gateway; fail "Hermes's gateway would not start"; }
 
 # Read back last, after everything else that edits config.yaml has run.
