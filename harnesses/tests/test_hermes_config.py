@@ -382,6 +382,7 @@ class HermesConfigTests(unittest.TestCase):
             code = hermes_config.main(["x", "apply", self.path], lambda: ["spotify_like"], lambda: self.older_hermes())
         self.assertEqual(code, 0)
         self.assertIn("kanban", out.getvalue())
+        self.assertIn("your other Hermes platforms lose kanban too", out.getvalue(), "the global side effect is said")
         data = self.read()
         self.assertEqual(data["agent"]["disabled_toolsets"], ["spotify", "kanban"], "the person's own stay")
         self.assertEqual(hermes_config.problems(self.path, self.older_hermes()), [])

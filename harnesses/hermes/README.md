@@ -60,6 +60,15 @@ delegation:
   max_iterations: 25        # a research sub-agent that may take 50 turns will take 50
 ```
 
+**On an older Hermes, kanban is turned off everywhere.** A Hermes from before commit `3d7f773`
+(10 Sep 2026; releases before `v2026.9.14`, 0.14.0 among them) adds its `kanban` toolset to the desktop platform whatever
+the list above says. Kanban's `kanban_create` queues worker agents with toolsets of their own, a
+route around the desktop's grading, so the install turns it off in `agent.disabled_toolsets`, the
+only switch such a Hermes honours, and says so. That setting is **global**: your other Hermes
+platforms (Telegram, Discord, the CLI) lose kanban too. Revert puts your own `config.yaml` back,
+kanban included. A current Hermes (the commit the installer pins) honours the list, and nothing
+global is written.
+
 ## Yantrik models
 
 Installing Hermes (the ISO, the installer, or **Settings → Harnesses → Install**) does this with no

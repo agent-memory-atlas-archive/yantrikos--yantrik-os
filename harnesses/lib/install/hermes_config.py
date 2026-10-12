@@ -249,7 +249,11 @@ def main(argv, plugin_toolsets=hermes_plugin_toolsets, resolver=hermes_resolver)
         if argv[1] == "apply":
             apply(path, plugin_toolsets())
             for name in hold_off_older_hermes(path, resolver()):
-                print("this Hermes turns %s on for every platform; turned off in agent.disabled_toolsets" % name)
+                # agent.disabled_toolsets is global: say plainly that the person's other Hermes platforms
+                # (Telegram, Discord, the CLI...) lose it too, and how to get it back.
+                print("this Hermes turns %s on for every platform, so it is turned off in agent.disabled_toolsets, "
+                      "which is global: your other Hermes platforms lose %s too. Revert (or updating Hermes and "
+                      "taking %s out of that list) gives it back" % (name, name, name))
         wrong = problems(path, resolver())
     except (ConfigError, OSError) as exc:
         print(exc, file=sys.stderr)
