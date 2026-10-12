@@ -75,8 +75,8 @@ say "giving Hermes's desktop platform the desktop's tools in $config"
 wire_model hermes
 
 # ── Memory: YantrikDB, from the image ──
-# Installed from the wheels baked into the image (build-debian-iso.sh), with no index: nothing is
-# fetched from a catalog, git or PyPI here, and no TTY is needed (the Mac failure of #677 was
+# Installed from the wheels at /opt/yantrik/memory (bake-memory.sh; there by image or by update),
+# with no index: nothing is fetched from a catalog, git or PyPI here, and no TTY is needed (the Mac failure of #677 was
 # `hermes plugins install` refusing the provider's dependencies without one). The provider and
 # the engine go in with --no-deps; of their own dependencies, only what Hermes's environment lacks
 # is added, so none of Hermes's locked packages is moved. requests is Hermes's own.

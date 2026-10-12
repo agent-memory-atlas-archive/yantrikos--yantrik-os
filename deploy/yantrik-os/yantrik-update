@@ -977,7 +977,10 @@ safely. Old backups live in $BACKUP_DIR."
     fi
   fi
 
-  install_memory "$root"
+  if ! install_memory "$root" "$backup"; then
+    restore_backup "$backup"
+    fail "could not install memory/ (YantrikDB for the harnesses); rolled back to the previous build"
+  fi
 
   # Record the new build so `check` can prove currency next time.
   cat > "$BUILD_FILE" <<EOF
@@ -1351,6 +1354,17 @@ restore_backup() {
     seal_share
   fi
   [ -f "$backup/BUILD" ] && cp -a "$backup/BUILD" "$BUILD_FILE"
+  # The YantrikDB the build had (#677), which apply moved into the backup. Only from a tree root
+  # alone could write, as the binaries: a harness install feeds these wheels to pip. A backup
+  # taken before the bundle carried memory/ has none, and the one here now stays: the older
+  # build's installers read the same paths, and none would work without it.
+  if [ -d "$backup/memory" ]; then
+    if tree_is_roots && [ -n "$(find "$backup/memory" \( ! -user root -o \( ! -type l -perm /022 \) \) -print -quit 2>/dev/null)" ]; then
+      warn "backup $backup/memory is not root's alone to write; keeping the YantrikDB installed now"
+    else
+      swap_memory "$backup/memory" || warn "could not restore memory/ from $backup; keeping the YantrikDB installed now"
+    fi
+  fi
   # A rollback moves the version backwards, so the one-line copy has to move with it.
   stamp_version_file "$PREFIX" "$(installed_version)"
   info "restored from $backup"
@@ -1641,40 +1655,66 @@ seal_share() {
 # YantrikDB, every mind's memory (#677): the bundle's memory/ (bake-memory.sh) at $PREFIX/memory,
 # where every harness install reads its wheels and yantrikdb-mcp. Before the bundle carried it,
 # only an imaged machine had it, and one that got its build by update (VM 520, build 1448) stopped
-# every harness install at "this image has no yantrikdb-mcp". Swapped in whole: a copy beside it,
-# then two renames, so a harness install never reads half of one memory and half of another. Root's
-# and not writable by others on a root-owned tree, as share/ is; the harnesses only read it.
-# A bundle without memory/ (one built before this) leaves what is there alone.
+# every harness install at "this image has no yantrikdb-mcp".
+#
+# install_memory ROOT BACKUP — the old tree is moved into BACKUP/memory (a rename on the same
+# disk, so it costs no space) and restore_backup puts it back with the rest of the build. A bundle
+# without memory/ (one built before this) leaves what is there alone. Returns 1 on failure, and
+# the caller rolls the whole build back.
 install_memory() {
-  local root="$1" dest="$PREFIX/memory" new="$PREFIX/.memory.new" old="$PREFIX/.memory.old"
+  local root="$1" backup="${2:-}" dest="$PREFIX/memory"
   if [ ! -d "$root/memory" ]; then
     warn "this build carries no memory/; harness installs use the YantrikDB already here, if any"
     return 0
   fi
-  rm -rf "$new" "$old"
-  if ! cp -a --no-preserve=ownership "$root/memory" "$new"; then
-    rm -rf "$new"
-    fail "could not install memory/ (YantrikDB for the harnesses)"
-  fi
-  if tree_is_roots && [ "$(id -u)" = 0 ]; then
-    chown -R root:root "$new"
-  fi
-  chmod -R go-w "$new"
-  if [ -e "$dest" ]; then
-    mv "$dest" "$old" || { rm -rf "$new"; fail "could not move the old memory/ aside"; }
-  fi
-  if ! mv "$new" "$dest"; then
-    [ -e "$old" ] && mv "$old" "$dest"
-    fail "could not install memory/ (YantrikDB for the harnesses)"
-  fi
-  rm -rf "$old"
+  swap_memory "$root/memory" "$backup" || return 1
   local want have
   want="$(sed -n 's/^image-python=//p' "$dest/VERSIONS" 2>/dev/null)"
-  have="$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || true)"
+  have="$(python3 -I -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || true)"
   if [ -n "$want" ] && [ "$want" != "$have" ]; then
     warn "this build's yantrikdb-mcp is for Python $want and this machine's python3 is ${have:-missing}; Pi, DeepSeek and OpenClaw memory will not start"
   fi
   info "installed YantrikDB for the harnesses ($(head -n 1 "$dest/VERSIONS" 2>/dev/null))"
+}
+
+# swap_memory SRC [KEEP] — SRC's copy becomes $PREFIX/memory whole: copied beside it, sealed, then
+# two renames, so a harness install never reads half of one memory and half of another. The tree
+# it replaces goes to KEEP/memory when KEEP is given, and is deleted otherwise.
+#
+# Sealed as root: root:root and nothing writable by group or others, whoever owned SRC, on the
+# update path as on the ISO (build-debian-iso.sh). The harnesses run as the person and only read
+# it, so neither the person nor a harness can swap a wheel or yantrikdb-mcp under the next install.
+# The copy is a hard-link copy where it can be (a backup's tree back in place costs no space); a
+# shared file is never written, only replaced whole, and the seal applies to the backup's links too.
+swap_memory() {
+  local src="$1" keep="${2:-}" dest="$PREFIX/memory" new="$PREFIX/.memory.new" old="$PREFIX/.memory.old"
+  rm -rf "$new" "$old"
+  if ! { cp -al "$src" "$new" 2>/dev/null || { rm -rf "$new"; cp -a --no-preserve=ownership "$src" "$new"; }; }; then
+    rm -rf "$new"
+    warn "could not copy memory/ (YantrikDB for the harnesses) into place"
+    return 1
+  fi
+  if [ "$(id -u)" = 0 ]; then
+    chown -R root:root "$new" || { rm -rf "$new"; warn "could not make memory/ root's"; return 1; }
+  fi
+  chmod -R go-w "$new" || { rm -rf "$new"; warn "could not seal memory/"; return 1; }
+  if [ -e "$dest" ]; then
+    mv "$dest" "$old" || { rm -rf "$new"; warn "could not move the old memory/ aside"; return 1; }
+  fi
+  if ! mv "$new" "$dest"; then
+    [ -e "$old" ] && mv "$old" "$dest"
+    rm -rf "$new"
+    warn "could not put memory/ (YantrikDB for the harnesses) in place"
+    return 1
+  fi
+  if [ -e "$old" ]; then
+    if [ -n "$keep" ] && [ -d "$keep" ] && [ ! -e "$keep/memory" ] && mv "$old" "$keep/memory"; then
+      [ "$(id -u)" = 0 ] && chmod -R go-w "$keep/memory"
+    else
+      rm -rf "$old"
+    fi
+  fi
+  return 0
 }
 
 # Whether a file this updater is about to install as root came from where only root can write:
@@ -4530,6 +4570,36 @@ c.sendall((json.dumps({"ok": True, "seeded": req["rules"]}) + "\n").encode())' "
     "$(grep -qF -- 'cp -a "$UNPACK/memory/.' "$here/build-debian-iso.sh" && echo yes || echo no)"
   is "memory: apply installs memory/" "yes" \
     "$(sed -n '/^cmd_apply()/,/^}/p' "$SELF_PATH" | grep -cF 'install_memory "$root"' | grep -qx 1 && echo yes || echo no)"
+  is "memory: a failed memory install rolls the whole build back" "yes" \
+    "$(sed -n '/^cmd_apply()/,/^}/p' "$SELF_PATH" | grep -A1 -F 'if ! install_memory "$root" "$backup"' | grep -qF 'restore_backup "$backup"' && echo yes || echo no)"
+
+  # Rollback brings the previous memory/ back with the rest of the build: apply moves the tree it
+  # replaces into the backup, and restore_backup swaps it back in, sealed as on install.
+  local rb="$root/memrb" rbk
+  rbk="$rb/backups/1"
+  mkdir -p "$rb/bin" "$rb/share" "$rbk/bin" "$rb/memory/wheels"
+  printf 'x\n' > "$rbk/bin/yantrik-ui"
+  printf 'build-a\n' > "$rb/memory/VERSIONS"
+  mkdir -p "$mb/memory/bin" "$mb/memory/wheels"
+  printf 'build-b\nimage-python=0.0\n' > "$mb/memory/VERSIONS"
+  out="$( (PREFIX="$rb"; install_memory "$mb" "$rbk") 2>&1 )"
+  is "memory: apply moves the memory/ it replaces into the backup" "build-a|build-b" \
+    "$(head -n 1 "$rbk/memory/VERSIONS" 2>/dev/null)|$(head -n 1 "$rb/memory/VERSIONS" 2>/dev/null)"
+  is "memory: ... and leaves nothing beside it" "" "$(find "$rb" -mindepth 1 -maxdepth 1 -name '.memory*')"
+  ( PREFIX="$rb" BIN_DIR="$rb/bin" SHARE_DIR="$rb/share" BUILD_FILE="$rb/BUILD"; restore_backup "$rbk" ) >/dev/null 2>&1
+  is "memory: rollback restores the previous memory/" "build-a" "$(head -n 1 "$rb/memory/VERSIONS" 2>/dev/null)"
+  is "memory: ... and the backup keeps it for the next rollback" "build-a" "$(head -n 1 "$rbk/memory/VERSIONS" 2>/dev/null)"
+  is "memory: ... sealed: nothing in it writable by group or others" "" "$(find "$rb/memory" ! -type l -perm /022 | head -n 1)"
+  if [ "$(id -u)" = 0 ]; then
+    is "memory: as root the installed tree is root's" "" "$(find "$rb/memory" ! -user root | head -n 1)"
+    chmod g+w "$rbk/memory/VERSIONS"; printf 'build-c\n' > "$rb/memory/VERSIONS"
+    out="$( ( PREFIX="$rb" BIN_DIR="$rb/bin" SHARE_DIR="$rb/share" BUILD_FILE="$rb/BUILD"; restore_backup "$rbk" ) 2>&1 )"
+    is "memory: a backup memory/ others could write is not restored" "build-c" "$(head -n 1 "$rb/memory/VERSIONS")"
+    t "memory: ... and it says so" "not root's alone to write" "$out"
+  fi
+  rm -rf "$rbk/memory"; printf 'build-d\n' > "$rb/memory/VERSIONS"
+  ( PREFIX="$rb" BIN_DIR="$rb/bin" SHARE_DIR="$rb/share" BUILD_FILE="$rb/BUILD"; restore_backup "$rbk" ) >/dev/null 2>&1
+  is "memory: a backup from before memory/ shipped leaves the installed one" "build-d" "$(head -n 1 "$rb/memory/VERSIONS" 2>/dev/null)"
 
   if [ "$fails" = 0 ]; then
     printf '%sall selftest checks passed%s\n' "$c_grn" "$c_off"

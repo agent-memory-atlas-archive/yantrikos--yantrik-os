@@ -23,10 +23,11 @@ fail() { printf 'install failed: %s\n' "$*" >&2; exit 1; }
 INSTALL_LIB=$(cd "$(dirname "$0")" && pwd)
 HARNESS_LIB=$(dirname "$INSTALL_LIB")
 
-# YantrikDB as every mind's memory (#677), baked into the image by build-debian-iso.sh and never
-# fetched at install time: the engine and the Hermes provider as wheels, and yantrikdb-mcp in a
-# virtualenv of its own on the image's Python. Outside /opt/yantrik/share on purpose: the updater
-# syncs share/ with --delete from the release bundle, which does not carry these.
+# YantrikDB as every mind's memory (#677), baked by deploy/yantrik-os/bake-memory.sh into the
+# release bundle's memory/ and never fetched at install time: the engine and the Hermes provider as
+# wheels, and yantrikdb-mcp on the image's Python. `yantrik-update apply` installs it and the ISO
+# copies it from the bundle, so an updated machine has it as an imaged one does. Root's and outside
+# /opt/yantrik/share, so neither the person nor a harness can swap what an install feeds to pip.
 # YANTRIK_MEMORY_DIR moves it, for a checkout or a test.
 MEMORY_DIR=${YANTRIK_MEMORY_DIR:-/opt/yantrik/memory}
 # shellcheck disable=SC2034  # read by the installers that source this
