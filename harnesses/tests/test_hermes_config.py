@@ -283,6 +283,26 @@ class HermesConfigTests(unittest.TestCase):
         data["platform_toolsets"]["yantrik"] = WANTED + ["no_mcp"]
         self.assertNotIn("yantrik_os", resolve(data, "yantrik"))
 
+    def test_hermess_own_resolver_with_the_desktop_platform_registered_installs_with_the_allowlist(self):
+        # Hermes builds the desktop's composite (`hermes-yantrik`) only once the plugin has registered the
+        # platform, so without this the test above never sees what a real gateway resolves. On Hermes
+        # 0.14.0 (VM 520) that composite carries the kanban tools and the check fails until `apply` turns
+        # kanban off; on the pinned Hermes nothing extra appears and nothing global is written.
+        resolve = real_resolver()
+        if resolve is None:
+            self.skipTest("no Hermes to import")
+        from gateway.platform_registry import platform_registry, PlatformEntry
+        if not platform_registry.is_registered("yantrik"):
+            platform_registry.register(PlatformEntry(
+                name="yantrik", label="Yantrik OS", adapter_factory=lambda cfg: None, check_fn=lambda: True))
+        self.write(LIVED_IN)
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            code = hermes_config.main(["x", "apply", self.path], lambda: [], lambda: resolve)
+        self.assertEqual(code, 0)
+        self.assertEqual(sorted(resolve(self.read(), "yantrik")), sorted(WANTED))
+        # Only kanban is ever switched off globally, and only where this Hermes needs it.
+        self.assertLessEqual(set((self.read().get("agent") or {}).get("disabled_toolsets") or []), {"kanban"})
+
 
     # ── review round 4 ────────────────────────────────────────────────────────────────────────
 
