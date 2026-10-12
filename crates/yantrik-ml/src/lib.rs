@@ -84,7 +84,7 @@ pub use llm::ClaudeCliLLM;
 pub use llm::LlamaCppLLM;
 #[cfg(feature = "cognitive-kernel")]
 pub use llm::CognitiveKernelLLM;
-pub use llm::{CognitiveRouter, RouteDecision, PlanShape};
+pub use llm::{CognitiveRouter, RouteDecision, PlanShape, RouteExplanation, RouteLayer};
 pub use llm::{FallbackLLM, FallbackConfig};
 
 // ── Provider registry exports ──────────────────────────────────────
