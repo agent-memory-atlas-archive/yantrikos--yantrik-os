@@ -30,6 +30,9 @@
 # agrees and the updater warns on a machine whose python3 does not. YANTRIK_ARCH is amd64 or arm64.
 # Needs python3 with pip, and git, on the machine that builds.
 set -eu
+# Files this writes are never writable by others, whatever the builder's umask (Ubuntu's 0002 made
+# VERSIONS 664 on the build box, 12 Oct, and check below refused the tree).
+umask 022
 
 fail() { echo "bake-memory: $*" >&2; exit 1; }
 
@@ -102,7 +105,6 @@ cat > "$dest/bin/yantrikdb-mcp" <<'MCP'
 exec /usr/bin/python3 -I -c 'import sys; sys.path.insert(0, "/opt/yantrik/memory/mcp"); from yantrikdb_mcp import main; sys.exit(main())' "$@"
 MCP
 chmod 755 "$dest/bin/yantrikdb-mcp"
-chmod -R go-w "$dest"
 {
     echo "yantrikdb=$YANTRIKDB_VERSION"
     echo "yantrikdb-mcp=$YANTRIKDB_MCP_VERSION"
@@ -111,6 +113,8 @@ chmod -R go-w "$dest"
     echo "arch=$ARCH"
     (cd "$dest/wheels" && ls -1)
 } > "$dest/VERSIONS"
+# After every file is written, VERSIONS included: pip may create files with its own modes.
+chmod -R go-w "$dest"
 
 check "$dest"
 echo "bake-memory: $dest holds engine $YANTRIKDB_VERSION, the Hermes provider and yantrikdb-mcp $YANTRIKDB_MCP_VERSION for Python $IMAGE_PY"
