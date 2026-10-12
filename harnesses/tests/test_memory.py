@@ -228,6 +228,14 @@ class ProofTests(MemoryCase):
         self.assertEqual(row["fix"]["command"], "systemctl --user restart hermes-gateway")
         self.assertEqual(proofs.restart_fix("pi")["command"], "systemctl --user restart yantrik-pi.service")
 
+    def test_a_locked_desktop_is_said_and_not_taken_for_a_harness_that_never_attached(self):
+        locked = subprocess.CompletedProcess([], 0, stdout=json.dumps({"state": {"locked": True}}), stderr="")
+        self.assertEqual(proofs.desktop_state("deepseek", run=lambda *a, **k: locked), "locked")
+        row = proofs.prove_desktop("deepseek", 0, state=lambda _h: "locked", sleep=lambda _s: None)
+        self.assertFalse(row["ok"])
+        self.assertIn("the desktop is locked", row["says"])
+        self.assertNotIn("not listed", row["says"])
+
     def test_the_rows_use_the_experience_words(self):
         self.assertEqual((proofs.ANSWER, proofs.REMEMBER, proofs.DESKTOP),
                          ("Can it answer?", "Can it remember?", "Can it reach the desktop?"))

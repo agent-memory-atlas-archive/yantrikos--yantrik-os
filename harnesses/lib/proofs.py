@@ -380,7 +380,12 @@ def desktop_state(harness: str, run: Callable[..., subprocess.CompletedProcess] 
         view = json.loads(done.stdout or "{}")
     except (OSError, ValueError, subprocess.TimeoutExpired):
         return "no desktop"
-    rows = ((view.get("state") or {}).get("harnesses") or []) if isinstance(view, dict) else []
+    state = (view.get("state") or {}) if isinstance(view, dict) else {}
+    if state.get("locked"):
+        # A locked desktop answers describe with nothing in it, harnesses included, so "not
+        # listed" would send the person after the harness when it is the desktop that is waiting.
+        return "locked"
+    rows = state.get("harnesses") or []
     for entry in rows:
         if isinstance(entry, dict) and entry.get("id") == harness:
             return str(entry.get("state") or "")
@@ -397,6 +402,9 @@ def prove_desktop(harness: str, wait: float,
         seen = state(harness)
     if seen in ("attached", "answering"):
         return row("desktop", DESKTOP, True, "paired", "paired")
+    if seen == "locked":
+        return row("desktop", DESKTOP, False, "failed",
+                   "not checked: the desktop is locked; unlock it, then check again", restart_fix(harness))
     return row("desktop", DESKTOP, False, "failed",
                "not paired: the desktop has not seen it attach (%s)" % one_line(seen, 60),
                restart_fix(harness))
