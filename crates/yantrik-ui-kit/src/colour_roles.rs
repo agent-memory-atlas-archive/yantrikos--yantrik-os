@@ -401,7 +401,8 @@ fn the_lines_that_say_what_and_where_are_readable() {
     assert!(row.contains("y: parent.height - 44px - root.destination-h;"), "directly above the row Send is on");
     assert!(composer.find("destination-row").unwrap() < composer.find("label: root.run-active ? \"Send follow-up\" : \"Send\";").unwrap());
     let theme = read("crates/yantrik-design-tokens/slint/theme.slint");
-    assert!(theme.contains("out property <length> fs-label: 13px;") && theme.contains("out property <length> fs-caption: 12px;"));
+    assert!(theme.contains("out property <length> fs-label: 13px * TextScale.factor;")
+        && theme.contains("out property <length> fs-caption: 12px * TextScale.factor;"));
 }
 
 /// Decline is the outline kind, transparent at rest, so it shows the card's ground: on the light
