@@ -589,7 +589,7 @@ cmd_migrate_ownership() {
   say "Making $PREFIX root's; $owner keeps logs/ and data/"
   chown root:root "$PREFIX" && chmod 0755 "$PREFIX"
   for d in "$BIN_DIR" "$SHARE_DIR" "$UPDATES_DIR" "$BACKUP_DIR" "$PREFIX/models" "$PREFIX/skills" \
-           "$PREFIX/i18n" "$PREFIX/ui-deployments"; do
+           "$PREFIX/i18n" "$PREFIX/ui-deployments" "$PREFIX/memory"; do
     [ -e "$d" ] || continue
     chown -R root:root "$d"
     chmod -R go-w "$d"
@@ -1697,7 +1697,9 @@ swap_memory() {
   if [ "$(id -u)" = 0 ]; then
     chown -R root:root "$new" || { rm -rf "$new"; warn "could not make memory/ root's"; return 1; }
   fi
-  chmod -R go-w "$new" || { rm -rf "$new"; warn "could not seal memory/"; return 1; }
+  # a+rX as well: tar unpacked the bundle under root's umask, and a sudo umask of 077 would leave
+  # a tree the harnesses (the person's) cannot read. Modes then match the ISO's copy of the bundle.
+  chmod -R go-w,a+rX "$new" || { rm -rf "$new"; warn "could not seal memory/"; return 1; }
   if [ -e "$dest" ]; then
     mv "$dest" "$old" || { rm -rf "$new"; warn "could not move the old memory/ aside"; return 1; }
   fi
@@ -4546,11 +4548,16 @@ c.sendall((json.dumps({"ok": True, "seeded": req["rules"]}) + "\n").encode())' "
   printf 'yantrikdb=0.23.2\nimage-python=0.0\n' > "$mb/memory/VERSIONS"
   chmod -R go-w "$mb/memory"
   printf 'old\n' > "$mp/memory/stale"
+  chmod 600 "$mb/memory/VERSIONS"; chmod 700 "$mb/memory/bin/yantrikdb-mcp" "$mb/memory/wheels"
   is "memory: the bundle's file list passes bake-memory's check" "ok" \
     "$(sh "$here/bake-memory.sh" --check "$mb/memory" 2>&1 && echo ok)"
   out="$( (PREFIX="$mp"; install_memory "$mb") 2>&1 )"
   is "memory: apply installs the bundle's memory/ at \$PREFIX/memory" "yes" \
     "$([ -x "$mp/memory/bin/yantrikdb-mcp" ] && [ -f "$mp/memory/wheels/click-8.3.1-py3-none-any.whl" ] && echo yes || echo no)"
+  is "memory: modes are the ISO's whatever the umask (dirs 755, files 644, the launcher 755)" "755 644 755 755" \
+    "$(stat -c %a "$mp/memory/wheels" "$mp/memory/VERSIONS" "$mp/memory/bin/yantrikdb-mcp" "$mp/memory/bin" | tr '\n' ' ' | sed 's/ $//')"
+  is "memory: migrate-ownership makes memory/ root's with the rest of the tree" "yes" \
+    "$(declare -f cmd_migrate_ownership | grep -qF '"$PREFIX/memory"' && echo yes || echo no)"
   is "memory: the old memory/ is replaced whole, not merged" "no" "$([ -e "$mp/memory/stale" ] && echo yes || echo no)"
   is "memory: nothing is left beside it" "none" "$(find "$mp" -mindepth 1 -maxdepth 1 ! -name memory | head -n 1)$( [ -z "$(find "$mp" -mindepth 1 -maxdepth 1 ! -name memory)" ] && echo none)"
   t "memory: a python3 the bundle was not built for is said" "is for Python 0.0" "$out"
