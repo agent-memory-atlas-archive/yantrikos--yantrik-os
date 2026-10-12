@@ -342,6 +342,54 @@ class HermesConfigTests(unittest.TestCase):
         self.assertEqual(tail.count("stop_gateway;"), 4)
         self.assertIn("systemctl --user stop hermes-gateway", script)
 
+    # ── a Hermes before 3d7f773, which turns kanban on for every platform (VM 520) ──────────────
+
+    def older_hermes(self, also=()):
+        """The stand-in, plus what an older Hermes recovers onto every platform whatever its list says,
+        less what `agent.disabled_toolsets` (applied last) takes out."""
+        base = stand_in()
+
+        def resolve(config, platform):
+            disabled = set((config.get("agent") or {}).get("disabled_toolsets") or [])
+            return (base(config, platform) | {"kanban", *also}) - disabled
+
+        return resolve
+
+    def test_an_older_hermes_that_adds_kanban_has_it_turned_off_and_installs(self):
+        self.write("model: x\nagent:\n  disabled_toolsets: [spotify]\n")
+        out = io.StringIO()
+        with redirect_stdout(out), redirect_stderr(io.StringIO()):
+            code = hermes_config.main(["x", "apply", self.path], lambda: ["spotify_like"], lambda: self.older_hermes())
+        self.assertEqual(code, 0)
+        self.assertIn("kanban", out.getvalue())
+        data = self.read()
+        self.assertEqual(data["agent"]["disabled_toolsets"], ["spotify", "kanban"], "the person's own stay")
+        self.assertEqual(hermes_config.problems(self.path, self.older_hermes()), [])
+
+    def test_a_current_hermes_that_honours_the_list_is_not_given_a_global_switch(self):
+        self.write("model: x\n")
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            code = hermes_config.main(["x", "apply", self.path], lambda: ["spotify_like"], lambda: stand_in())
+        self.assertEqual(code, 0)
+        self.assertNotIn("agent", self.read())
+
+    def test_only_kanban_is_ever_turned_off_globally_anything_else_still_fails(self):
+        # A terminal that an older Hermes added is a broken allowlist, not something to switch off for
+        # the person's every other Hermes surface behind their back.
+        self.write("model: x\n")
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            code = hermes_config.main(["x", "apply", self.path], lambda: ["spotify_like"],
+                                      lambda: self.older_hermes(also=("terminal",)))
+        self.assertEqual(code, 1)
+        self.assertEqual(self.read()["agent"]["disabled_toolsets"], ["kanban"])
+
+    def test_a_disabled_toolsets_that_is_not_a_list_is_refused_not_rewritten(self):
+        self.write("model: x\nagent:\n  disabled_toolsets: \"['memory']\"\n")
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            code = hermes_config.main(["x", "apply", self.path], lambda: ["spotify_like"], lambda: self.older_hermes())
+        self.assertEqual(code, 1)
+        self.assertEqual(self.read()["agent"]["disabled_toolsets"], "['memory']")
+
     def test_hermes_sh_never_allows_every_user_and_allowlists_only_the_owner_on_the_socket(self):
         # PR #696 folded in, narrowed: the owner, never "all users", never a wildcard (#677).
         script = (SCRIPT.parent / "hermes.sh").read_text(encoding="utf-8")

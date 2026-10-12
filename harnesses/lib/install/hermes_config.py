@@ -43,6 +43,14 @@ YANTRIK_OS_SERVER = {"command": "/opt/yantrik/bin/yos-mcp", "timeout": 300}
 # A research sub-agent that may take 50 turns will take 50.
 DELEGATION_MAX_ITERATIONS = 25
 BACKUP_SUFFIX = ".before-yantrik-desktop"
+# Toolsets a Hermes before 3d7f773 (10 Sep 2026) turns on for every platform whose default composite
+# lists their tools, whatever the platform's own list says: `kanban` was neither configurable nor off
+# by default then, so `_recover_platform_native_toolsets` added it to the desktop platform too (found on
+# VM 520). Current Hermes ships it off by default and honours the list. On an older Hermes the one switch
+# that holds is `agent.disabled_toolsets`, which is global, so it is used for these only, and only when
+# Hermes's own resolver still adds them after the allowlist is written. Kanban's orchestrator tools fan
+# work out to other agents, which is a route around the desktop's grading, so it stays off.
+OFF_ON_OLDER_HERMES = ("kanban",)
 
 
 class ConfigError(Exception):
@@ -97,8 +105,6 @@ def hermes_resolver():
 
 def apply(path, plugin_toolsets=()):
     """Hold the desktop platform to the allowlist in the file at `path`."""
-    import yaml
-
     data, text = _read(path)
     _section(data, "platform_toolsets", path)[PLATFORM] = list(ALLOWED)
     # Seen, so Hermes's resolver treats each as chosen-off rather than new-and-on.
@@ -113,6 +119,13 @@ def apply(path, plugin_toolsets=()):
     servers[YANTRIK_OS] = dict(YANTRIK_OS_SERVER)
     _section(data, "skills", path)["inline_shell"] = False
     _section(data, "delegation", path)["max_iterations"] = DELEGATION_MAX_ITERATIONS
+
+    _write(path, data, text)
+
+
+def _write(path, data, text):
+    """`data` written over the file at `path`, whose text before any change was `text` (None: no file)."""
+    import yaml
 
     directory = os.path.dirname(os.path.abspath(path))
     os.makedirs(directory, exist_ok=True)
@@ -135,6 +148,29 @@ def apply(path, plugin_toolsets=()):
         if os.path.exists(temp):
             os.unlink(temp)
         raise
+
+
+def hold_off_older_hermes(path, resolve):
+    """On a Hermes that still adds OFF_ON_OLDER_HERMES to the desktop platform after its allowlist is
+    written, turn those off in `agent.disabled_toolsets`, keeping whatever is there. Returns what was
+    turned off. Nothing else is ever added there: any other extra stays a problem for `check`."""
+    data, text = _read(path)
+    try:
+        extra = {str(t) for t in resolve(data, PLATFORM)} - set(ALLOWED)
+    except Exception as exc:
+        raise ConfigError("Hermes could not resolve the desktop platform's toolsets: %s" % exc)
+    off = [t for t in OFF_ON_OLDER_HERMES if t in extra]
+    if not off:
+        return []
+    agent = _section(data, "agent", path)
+    current = agent.get("disabled_toolsets")
+    if current is None:
+        current = []
+    if not isinstance(current, list):
+        raise ConfigError("`agent.disabled_toolsets` in %s is not a list; not touching it" % path)
+    agent["disabled_toolsets"] = list(current) + [t for t in off if t not in current]
+    _write(path, data, text)
+    return off
 
 
 def toolsets(path):
@@ -197,6 +233,7 @@ def reassert(path, plugin_toolsets=hermes_plugin_toolsets, resolver=hermes_resol
         found = [str(exc)]
     try:
         apply(path, plugin_toolsets())
+        hold_off_older_hermes(path, resolver())
         left = problems(path, resolver())
     except (ConfigError, OSError) as exc:
         left = [str(exc)]
@@ -211,6 +248,8 @@ def main(argv, plugin_toolsets=hermes_plugin_toolsets, resolver=hermes_resolver)
     try:
         if argv[1] == "apply":
             apply(path, plugin_toolsets())
+            for name in hold_off_older_hermes(path, resolver()):
+                print("this Hermes turns %s on for every platform; turned off in agent.disabled_toolsets" % name)
         wrong = problems(path, resolver())
     except (ConfigError, OSError) as exc:
         print(exc, file=sys.stderr)
