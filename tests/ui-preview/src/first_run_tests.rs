@@ -79,7 +79,7 @@ fn mind(name: &str, words: &str, ok: bool, checks: Vec<FirstRunCheck>) -> FirstR
 }
 
 fn minds_checking() -> Vec<FirstRunMind> {
-    vec![mind("Yantrik Mind", "Checking", false, vec![
+    vec![mind("Yantrik Companion", "Checking", false, vec![
         check("answer", "Can it answer?", "passed", "Passed", "https://api.anthropic.com/v1 · answered in 840 ms"),
         check("remember", "Can it remember?", "checking", "Checking (started 2:16)", ""),
         check("desktop", "Can it reach the desktop?", "not-checked", "Not checked yet", ""),
@@ -88,7 +88,7 @@ fn minds_checking() -> Vec<FirstRunMind> {
 
 fn minds_done() -> Vec<FirstRunMind> {
     vec![
-        mind("Yantrik Mind", "Ready", true, vec![
+        mind("Yantrik Companion", "Ready", true, vec![
             check("answer", "Can it answer?", "passed", "Passed", "https://api.anthropic.com/v1 · answered in 840 ms"),
             check("remember", "Can it remember?", "passed", "Passed", "wrote a note, recalled it, deleted it"),
             check("desktop", "Can it reach the desktop?", "passed", "Passed", "attached as companion"),
@@ -305,7 +305,7 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     chat.set_generating(false);
     // A reply that was not an answer keeps the person here, with the plain sentence and Try again.
     chat.set_outcome("failed".into());
-    chat.set_failure("Yantrik Mind did not answer this time.".into());
+    chat.set_failure("Yantrik Companion did not answer this time.".into());
     render(w, width, height, &still("6-not-answered"))?;
     enter();
     assert_eq!(chat.get_retries(), 1, "Try again takes the focus");

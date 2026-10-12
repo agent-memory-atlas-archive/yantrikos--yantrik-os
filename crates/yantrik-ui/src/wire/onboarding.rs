@@ -446,7 +446,7 @@ impl Proofs for PendingProofs {
     fn minds(&self) -> Vec<(String, String)> {
         // The built-in companion is the one mind every install has; the harness minds come with
         // #677's list.
-        vec![("companion".into(), "Yantrik Mind".into())]
+        vec![("companion".into(), "Yantrik Companion".into())]
     }
     fn remember(&self, _mind: &str) -> Proof {
         Proof::Attention {
@@ -1152,9 +1152,9 @@ fn retry_pick(ui: &App) {
 
 /// What the chat says when the first reply came from the desktop, not a model.
 pub const NOT_SET_UP_SENTENCE: &str =
-    "Yantrik Mind did not answer: it is not set up to think yet. Choose who does the thinking in Settings \u{2192} AI, then try again.";
+    "Yantrik Companion did not answer: it is not set up to think yet. Choose who does the thinking in Settings \u{2192} AI, then try again.";
 /// What the chat says when the first reply failed or did not come.
-pub const NO_ANSWER_SENTENCE: &str = "Yantrik Mind did not answer this time.";
+pub const NO_ANSWER_SENTENCE: &str = "Yantrik Companion did not answer this time.";
 
 /// The first-run question, for Try again.
 static FIRST_QUESTION: Mutex<String> = Mutex::new(String::new());
@@ -1237,11 +1237,11 @@ fn ask_the_mind(mind: &str) -> Proof {
     if mind != "companion" {
         return Proof::Attention {
             reason: "this build cannot ask this mind yet".into(),
-            details: "only Yantrik Mind can be asked from the first run (the other minds come with #677)".into(),
+            details: "only Yantrik Companion can be asked from the first run (the other minds come with #677)".into(),
         };
     }
     let Some(bridge) = BRIDGE.get() else {
-        return Proof::Attention { reason: "Yantrik Mind is not running".into(), details: "no companion in this process".into() };
+        return Proof::Attention { reason: "Yantrik Companion is not running".into(), details: "no companion in this process".into() };
     };
     let started = std::time::Instant::now();
     let said = bridge.handle().ask("Reply with the single word OK.".into(), std::time::Duration::from_secs(90));
@@ -1254,7 +1254,7 @@ pub fn answer_proof(said: Result<String, crate::bridge::AskError>, ms: u128) -> 
     match said {
         Ok(words) if !words.trim().is_empty() => {
             let words: String = words.trim().chars().take(60).collect();
-            Proof::Passed { details: format!("Yantrik Mind answered in {ms} ms: \u{201c}{words}\u{201d}") }
+            Proof::Passed { details: format!("Yantrik Companion answered in {ms} ms: \u{201c}{words}\u{201d}") }
         }
         Ok(_) => Proof::Attention { reason: "it answered with nothing".into(), details: format!("an empty reply after {ms} ms") },
         Err(AskError::NoModel) => Proof::Attention {
@@ -1379,7 +1379,7 @@ mod tests {
 
     #[test]
     fn a_row_goes_not_checked_then_checking_with_its_start_then_passed_or_the_reason() {
-        let mut m = MindRows::new("companion", "Yantrik Mind");
+        let mut m = MindRows::new("companion", "Yantrik Companion");
         assert_eq!(m.checks[0].1.words(), "Not checked yet");
         assert_eq!(m.words(), "Not checked yet");
         m.set(CheckKind::Answer, CheckState::Checking("2:16".into()));
@@ -1609,5 +1609,16 @@ mod tests {
                      "Keep personal things on this computer instead", "Getting your minds ready", "Your minds", "Add another mind"] {
             assert!(slint.contains(want), "{want}");
         }
+    }
+
+    /// The first run asks the built-in companion, never the harness Mind (id `mind`), so it must not
+    /// credit the companion's answer, or its failure, to the harness Mind by name (yantrik-mind-3e,
+    /// 11 Oct).
+    #[test]
+    fn the_first_run_never_calls_the_companion_yantrik_mind() {
+        let harness_mind = ["Yantrik", " Mind"].concat();
+        assert!(!include_str!("onboarding.rs").contains(&harness_mind));
+        assert!(NOT_SET_UP_SENTENCE.starts_with("Yantrik Companion"));
+        assert!(NO_ANSWER_SENTENCE.starts_with("Yantrik Companion"));
     }
 }
