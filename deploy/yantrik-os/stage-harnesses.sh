@@ -42,6 +42,8 @@ for script in common.sh npm.sh hermes.sh hermes_config.py openclaw.sh pi.sh deep
 done
 # The three proofs every installer ends with, and the Settings row and onboarding call (#677).
 [ -f "$dest/lib/proofs.py" ] || { echo "lib/proofs.py did not stage" >&2; exit 1; }
+# Where Hermes runs, which hermes.sh and proofs.py both ask (#677).
+[ -f "$dest/lib/hermes_runtime.py" ] || { echo "lib/hermes_runtime.py did not stage" >&2; exit 1; }
 
 if [ -n "$units" ]; then
     mkdir -p "$units"
