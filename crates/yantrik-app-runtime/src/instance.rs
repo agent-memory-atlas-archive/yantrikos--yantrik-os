@@ -147,7 +147,7 @@ fn claim_in(dir: &std::path::Path, app_name: &str, held: impl FnOnce(&str)) -> O
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
-    use std::io::{BufRead, BufReader, Write as _};
+    use std::io::{BufRead, BufReader};
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixListener;
 
