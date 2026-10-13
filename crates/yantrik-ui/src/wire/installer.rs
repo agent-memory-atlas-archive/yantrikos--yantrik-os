@@ -626,13 +626,7 @@ fn install_to_target(
 
     // Configure GRUB defaults. The kernel's line is installer_unlock's: the pre-boot screen on an
     // encrypted install, and the quiet that keeps kernel lines off the password prompt.
-    let _ = sudo_write(
-        &format!("{mount_dir}/etc/default/grub"),
-        &format!(
-            "GRUB_DEFAULT=0\nGRUB_TIMEOUT=3\nGRUB_DISTRIBUTOR=\"Yantrik OS\"\nGRUB_CMDLINE_LINUX_DEFAULT=\"{}\"\nGRUB_CMDLINE_LINUX=\"console=ttyS0,115200 console=tty1\"\nGRUB_TERMINAL=\"console serial\"\nGRUB_SERIAL_COMMAND=\"serial --speed=115200\"\n",
-            installer_unlock::cmdline_default(layout.encrypted())
-        ),
-    );
+    let _ = sudo_write(&format!("{mount_dir}/etc/default/grub"), &grub_defaults(layout.encrypted()));
 
     progress(85, "Updating GRUB configuration...");
     // grub-mkconfig names the root by UUID only once udev has made its /dev/disk/by-uuid link,
@@ -1510,6 +1504,22 @@ fn fallback_candidate(name: &str, dtype: &str, ro: &str, rm: &str, live: Option<
         && live != Some(name)
 }
 
+/// /etc/default/grub for an installed machine.
+///
+/// The kernel's console is the screen only. The live image also says `console=ttyS0`, because the
+/// CI boot test reads the serial line, and this file used to copy it. On an installed machine with
+/// no serial port (nearly every laptop) that made systemd start a serial login prompt that failed
+/// and restarted every ten seconds for as long as the machine ran: 3,056 times in 8.7 hours on the
+/// fresh-install VM (12 Oct). GRUB keeps its serial terminal, which costs nothing without a port,
+/// so a machine that does have one still shows the boot menu there; add `console=ttyS0,115200` to
+/// GRUB_CMDLINE_LINUX by hand to debug one over serial.
+fn grub_defaults(encrypted: bool) -> String {
+    format!(
+        "GRUB_DEFAULT=0\nGRUB_TIMEOUT=3\nGRUB_DISTRIBUTOR=\"Yantrik OS\"\nGRUB_CMDLINE_LINUX_DEFAULT=\"{}\"\nGRUB_CMDLINE_LINUX=\"console=tty1\"\nGRUB_TERMINAL=\"console serial\"\nGRUB_SERIAL_COMMAND=\"serial --speed=115200\"\n",
+        installer_unlock::cmdline_default(encrypted)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1838,5 +1848,23 @@ llm:
         let ready = InstallerState { table_fingerprint: "a7df3a2a0968d199".into(), ..unscanned };
         assert_eq!(beside_problem(&ready), None);
         assert_eq!(InstallerState::default().mode, InstallMode::Erase);
+    }
+}
+
+#[cfg(test)]
+mod grub_defaults_tests {
+    use super::grub_defaults;
+
+    /// No serial console on the kernel's line of an installed machine: without a port, systemd's
+    /// serial login prompt failed and restarted every ten seconds for as long as it ran.
+    #[test]
+    fn an_installed_machine_has_no_serial_console_on_its_kernel_line() {
+        for encrypted in [false, true] {
+            let text = grub_defaults(encrypted);
+            let line = text.lines().find(|l| l.starts_with("GRUB_CMDLINE_LINUX=")).expect("the line");
+            assert_eq!(line, "GRUB_CMDLINE_LINUX=\"console=tty1\"", "{text}");
+            assert!(!text.contains("ttyS0"), "{text}");
+            assert!(text.contains("GRUB_CMDLINE_LINUX_DEFAULT=\""), "the unlock screen's own line is still there");
+        }
     }
 }
