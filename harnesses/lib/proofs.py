@@ -43,6 +43,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+import hermes_runtime
+
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
@@ -279,6 +281,8 @@ def mcp_env(harness: str) -> Dict[str, str]:
 
 HERMES_PROBE = r"""
 import json, os, sys
+# Where the install put the provider (hermes_runtime.VENDOR), last, as the shim Hermes loads does.
+sys.path.append(os.path.expanduser("~/.hermes/plugins/yantrikdb/vendor"))
 env = os.path.expanduser(os.environ.get("HERMES_HOME", "~/.hermes")) + "/.env"
 try:
     for line in open(env, encoding="utf-8"):
@@ -303,24 +307,8 @@ print(json.dumps({"mode": config.mode, "recalled": bool(rid) and rid in found}))
 
 
 def hermes_python() -> Optional[str]:
-    """The Python Hermes runs on: the one hermes.sh found and wrote down (a newer Hermes runs a
-    managed Python with its venv on sys.path, 0.21), else the one beside the `hermes` it put in
-    ~/.local/bin (an older Hermes links that into its venv, 0.14)."""
-    try:
-        found = (state_dir("hermes") / "python").read_text(encoding="utf-8").strip()
-    except OSError:
-        found = ""
-    if found and os.access(found, os.X_OK):
-        return found
-    for candidate in (Path.home() / ".local" / "bin" / "hermes",):
-        try:
-            real = candidate.resolve(strict=True)
-        except OSError:
-            continue
-        python = real.parent / "python"
-        if python.exists():
-            return str(python)
-    return None
+    """The Python Hermes runs on now (hermes_runtime.py, which the install asks too)."""
+    return hermes_runtime.python()
 
 
 def remember_through_hermes(run: Callable[..., subprocess.CompletedProcess] = subprocess.run

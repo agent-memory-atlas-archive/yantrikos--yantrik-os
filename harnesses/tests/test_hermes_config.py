@@ -465,7 +465,7 @@ class HermesConfigTests(unittest.TestCase):
         script = (SCRIPT.parent / "hermes.sh").read_text(encoding="utf-8")
         enable = script.index("hermes plugins enable yantrik-desktop")
         apply_at = script.index('hermes_config.py" apply')
-        provider = script.index("pip_install yantrikdb yantrikdb-hermes-plugin")
+        provider = script.index('vendor_install "$new_plugin/vendor"')
         restart = script.index("systemctl --user restart hermes-gateway")
         check = script.rindex("hermes_check ||")
         proofs = script.index("prove hermes")

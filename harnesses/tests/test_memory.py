@@ -22,6 +22,7 @@ import unittest
 from pathlib import Path
 
 import support  # noqa: F401  (puts harnesses/lib on the path)
+import hermes_runtime
 import yantrik_harness
 from yantrik_harness import McpTools, WithMemory, memory_on, stamped
 
@@ -118,15 +119,58 @@ class ProofTests(MemoryCase):
         self.addCleanup(os.environ.__setitem__, "HOME", saved or "/")
         self.state = self.work / ".local" / "state"
 
-    def test_the_hermes_python_is_the_one_the_install_wrote_down(self):
-        # Hermes 0.21 runs a managed Python with its venv on sys.path: nothing beside ~/.local/bin/hermes.
-        self.assertIsNone(proofs.hermes_python(), "nothing written down and no hermes: no guess")
-        record = proofs.state_dir("hermes") / "python"
-        record.parent.mkdir(parents=True)
-        record.write_text(sys.executable + "\n", encoding="utf-8")
-        self.assertEqual(proofs.hermes_python(), sys.executable)
-        record.write_text(str(self.work / "gone" / "python") + "\n", encoding="utf-8")
-        self.assertIsNone(proofs.hermes_python(), "a Python that is not there is not used")
+    def test_the_hermes_python_is_asked_of_hermes_every_time(self):
+        # Hermes 0.21 runs a managed Python with a venv on its sys.path, and rebuilds that venv as a
+        # new generation on an update (VM 541, 13 Oct): nothing is written down to go stale.
+        self.assertIsNone(proofs.hermes_python(), "no hermes: no guess")
+        venv = self.work / "gen-2" / "venv"
+        (venv / "bin").mkdir(parents=True)
+        (venv / "pyvenv.cfg").write_text("home = /x\n", encoding="utf-8")
+        python = venv / "bin" / "python"
+        python.symlink_to(sys.executable)
+        stale = self.work / "gen-1" / "venv"
+        site = ("sys.path = [\n    '/opt/hermes/lib/python3.14',\n"
+                "    '%s/lib/python3.14/site-packages',\n"
+                "    '%s/lib/python3.14/site-packages',\n]\n" % (stale, venv))
+        self.assertEqual(hermes_runtime.venv_of(site), str(python), "the first entry that is a venv")
+        launcher = self.work / ".local" / "bin" / "hermes"
+        launcher.parent.mkdir(parents=True)
+        launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+        asked = []
+
+        def run(argv, **_kw):
+            asked.append(argv[1:])
+            return subprocess.CompletedProcess(argv, 0, stdout=site, stderr="")
+
+        self.assertEqual(hermes_runtime.python(run=run), str(python))
+        self.assertEqual(asked, [["--run-module", "site"]])
+
+    def test_the_hermes_python_is_the_generation_hermes_committed_without_asking_it(self):
+        # Asking Hermes runs any sync it owes first (90 s on VM 541): its own record is read instead.
+        venv = self.work / ".hermes" / "installs" / "abc" / "environments" / "gen-2" / "venv"
+        (venv / "bin").mkdir(parents=True)
+        python = venv / "bin" / "python"
+        python.symlink_to(sys.executable)
+        facts = self.work / ".hermes" / "installs" / "abc" / "facts.json"
+        facts.write_text(json.dumps({"packages": {"venv": {"environment": str(venv)}}, "schema": 1}),
+                         encoding="utf-8")
+        launcher = self.work / ".local" / "bin" / "hermes"
+        launcher.parent.mkdir(parents=True)
+        launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+
+        def run(argv, **_kw):
+            raise AssertionError("Hermes was asked: %s" % argv)
+
+        saved = os.environ.pop("HERMES_HOME", None)
+        self.addCleanup(lambda: saved is not None and os.environ.__setitem__("HERMES_HOME", saved))
+        self.assertEqual(hermes_runtime.python(run=run), str(python))
+        facts.write_text("{not json", encoding="utf-8")
+        self.assertIsNone(hermes_runtime.committed_venv(self.work / ".hermes"), "a record it cannot read is no answer")
+
+    def test_the_hermes_probe_finds_the_provider_beside_the_shim(self):
+        self.assertIn('sys.path.append(os.path.expanduser("~/.hermes/plugins/yantrikdb/vendor"))',
+                      proofs.HERMES_PROBE)
+        self.assertEqual(hermes_runtime.VENDOR.parts[-4:], (".hermes", "plugins", "yantrikdb", "vendor"))
 
     def test_a_harness_whose_model_was_not_wired_keeps_its_own_and_that_is_not_a_failure(self):
         row = proofs.prove_answer("pi")

@@ -108,8 +108,11 @@ class InstallersReadOnlyWhatShipsTests(unittest.TestCase):
     def test_hermes_installs_only_wheels_the_bundle_carries(self):
         with open(os.path.join(INSTALLERS, "hermes.sh")) as f:
             hermes = f.read()
-        wanted = {"yantrikdb", "yantrikdb-hermes-plugin"}
-        wanted |= {dep.split(":")[1] for dep in re.search(r"for dep in ([^;]+);", hermes).group(1).split()}
+        # Both ways in (uv, and pip on an older Hermes) name the same packages.
+        named = re.findall(r"--no-deps ([a-z0-9 -]+) </dev/null", hermes)
+        self.assertEqual(len(named), 2, named)
+        self.assertEqual(named[0], named[1])
+        wanted = set(named[0].split())
         shipped = {os.path.basename(rel).split("-")[0].replace("_", "-")
                    for rel in BUNDLE_MEMORY if rel.startswith("wheels/")}
         self.assertEqual(wanted, shipped)
