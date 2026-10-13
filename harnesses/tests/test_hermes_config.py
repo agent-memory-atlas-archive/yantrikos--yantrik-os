@@ -500,6 +500,30 @@ class HermesMemoryTests(unittest.TestCase):
     def tearDown(self):
         self.dir.cleanup()
 
+    def test_the_installed_plugin_manifest_asks_hermes_to_install_nothing(self):
+        # Left in, Hermes's own update fetches yantrikdb from PyPI into its venv, ahead of vendor/.
+        src = os.path.join(self.dir.name, "src.yaml")
+        dest = os.path.join(self.dir.name, "plugin.yaml")
+        with open(src, "w", encoding="utf-8") as f:
+            f.write("name: yantrikdb\nversion: 0.28.0\npip_dependencies:\n  - yantrikdb>=0.12.1\n  - requests>=2.31\n"
+                    "python_dependencies:\n  - x\nhooks:\n  - on_session_end\n  - on_memory_write\n")
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            self.assertEqual(hermes_config.main(["hermes_config.py", "manifest", src, dest]), 0)
+        with open(dest, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        self.assertEqual(data, {"name": "yantrikdb", "version": "0.28.0", "hooks": ["on_session_end", "on_memory_write"]})
+
+    def test_hermes_sh_checks_after_hermes_s_update_that_the_provider_runs_from_vendor(self):
+        script = (SCRIPT.parent / "hermes.sh").read_text(encoding="utf-8")
+        self.assertIn('hermes_config.py" manifest', script)
+        self.assertNotIn("cp \"$new_plugin/vendor/yantrikdb_hermes_plugin/plugin.yaml\"", script)
+        settle = script.index("timeout 300 hermes config path")
+        check = script.index("is not the one this install put in")
+        restart = script.index("systemctl --user restart hermes-gateway")
+        self.assertLess(settle, check, "checked in the Python Hermes runs on after its update")
+        self.assertLess(check, restart)
+        self.assertIn('module.__file__.startswith(vendor + "/")', script)
+
     def test_memory_makes_yantrikdb_the_one_memory_and_keeps_the_rest(self):
         with open(self.path, "w", encoding="utf-8") as f:
             f.write("memory:\n  memory_char_limit: 2200\n  memory_enabled: true\nmodel:\n  default: x\n")

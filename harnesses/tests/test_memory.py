@@ -161,8 +161,6 @@ class ProofTests(MemoryCase):
         def run(argv, **_kw):
             raise AssertionError("Hermes was asked: %s" % argv)
 
-        saved = os.environ.pop("HERMES_HOME", None)
-        self.addCleanup(lambda: saved is not None and os.environ.__setitem__("HERMES_HOME", saved))
         self.assertEqual(hermes_runtime.python(run=run), str(python))
         facts.write_text("{not json", encoding="utf-8")
         self.assertIsNone(hermes_runtime.committed_venv(self.work / ".hermes"), "a record it cannot read is no answer")

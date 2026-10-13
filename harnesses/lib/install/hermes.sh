@@ -125,8 +125,11 @@ vendor_install "$new_plugin/vendor" >/dev/null \
     || fail "the YantrikDB memory provider did not install from $MEMORY_WHEELS"
 # The shim Hermes loads (the package's own `yantrikdb-hermes install` writes the same three lines,
 # without vendor/), and the package's plugin.yaml beside it, which Hermes reads for its hooks.
-cp "$new_plugin/vendor/yantrikdb_hermes_plugin/plugin.yaml" "$new_plugin/plugin.yaml" \
-    || fail "the YantrikDB memory provider has no plugin.yaml"
+# Without its pip_dependencies: vendor/ supplies them, and named there they would have Hermes's own
+# update fetch yantrikdb from PyPI into its venv, ahead of vendor/ (hermes_config.py, `manifest`).
+"$hermes_python" "$INSTALL_LIB/hermes_config.py" manifest \
+    "$new_plugin/vendor/yantrikdb_hermes_plugin/plugin.yaml" "$new_plugin/plugin.yaml" </dev/null \
+    || fail "the YantrikDB memory provider has no plugin.yaml Hermes could be given"
 cat > "$new_plugin/__init__.py" <<'SHIM' || fail "could not write the YantrikDB plugin's shim"
 """Hermes user-plugin shim for the YantrikDB provider, written by Yantrik OS (harnesses/lib/install/hermes.sh).
 
@@ -197,6 +200,20 @@ case $settled in
     124) fail "Hermes did not finish updating itself within five minutes; press Install again to let it carry on" ;;
     *) fail "Hermes would not start after its plugins were added; its own message is above" ;;
 esac
+# Checked again in the Python Hermes runs on after that update, so the check is of what will run:
+# the provider and the engine both from vendor/, not a copy something else put in Hermes's venv.
+hermes_python=$(python3 "$HARNESS_LIB/hermes_runtime.py" </dev/null) \
+    || fail "cannot find the Python Hermes runs on after its update"
+"$hermes_python" -c '
+import sys
+vendor = sys.argv[1]
+sys.path.append(vendor)
+import yantrikdb, yantrikdb_hermes_plugin
+for module in (yantrikdb, yantrikdb_hermes_plugin):
+    if not module.__file__.startswith(vendor + "/"):
+        sys.exit("%s loads from %s, not from %s" % (module.__name__, module.__file__, vendor))
+' "$plugin_dir/vendor" </dev/null \
+    || fail "the YantrikDB memory provider that would run is not the one this install put in $plugin_dir/vendor"
 
 # Checked before the gateway starts, and again once it has, against the same file. A gateway is not
 # left running on an allowlist that does not hold.

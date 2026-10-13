@@ -1,4 +1,4 @@
-"""Give Hermes's `yantrik` platform the desktop's tools and nothing of Hermes's own: hermes_config.py apply|check|memory CONFIG
+"""Give Hermes's `yantrik` platform the desktop's tools and nothing of Hermes's own: hermes_config.py apply|check|memory CONFIG (and manifest SRC DEST)
 
 Run by hermes.sh with Hermes's own Python, which has PyYAML and Hermes's own modules, against the
 file `hermes config path` names. `hermes config set` cannot write this: it turns every value into a
@@ -166,6 +166,23 @@ def memory(path):
     _write(path, data, text)
 
 
+# What a plugin manifest names for Hermes's package manager to install (its plugin_declarations.py).
+DEPENDENCY_KEYS = ("pip_dependencies", "python_dependencies")
+
+
+def manifest(src, dest):
+    """The YantrikDB provider's plugin.yaml at `src`, written to `dest` without the packages it asks
+    Hermes to install. vendor/ beside the shim supplies them from the image's wheels; left in, Hermes's
+    own update fetches yantrikdb from PyPI into its venv, where it wins over vendor/ (review of
+    08f0937a), so the engine that runs would not be the one this install checked."""
+    data, _ = _read(src)
+    for key in DEPENDENCY_KEYS:
+        data.pop(key, None)
+    _load, dump, _error = _yaml()
+    with open(dest, "w", encoding="utf-8") as f:
+        dump(data, f)
+
+
 def memory_problems(path):
     """What keeps YantrikDB from being Hermes's one memory in the file at `path`, as sentences."""
     data, _ = _read(path)
@@ -296,8 +313,15 @@ def reassert(path, plugin_toolsets=hermes_plugin_toolsets, resolver=hermes_resol
 
 
 def main(argv, plugin_toolsets=hermes_plugin_toolsets, resolver=hermes_resolver):
+    if len(argv) == 4 and argv[1] == "manifest":
+        try:
+            manifest(argv[2], argv[3])
+        except (ConfigError, OSError) as exc:
+            print(exc, file=sys.stderr)
+            return 1
+        return 0
     if len(argv) != 3 or argv[1] not in ("apply", "check", "memory"):
-        print("usage: hermes_config.py apply|check|memory CONFIG", file=sys.stderr)
+        print("usage: hermes_config.py apply|check|memory CONFIG, or manifest SRC DEST", file=sys.stderr)
         return 2
     path = argv[2]
     if argv[1] == "memory":

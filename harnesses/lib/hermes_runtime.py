@@ -75,7 +75,8 @@ def python(run: Callable[..., subprocess.CompletedProcess] = subprocess.run) -> 
     beside = real.parent / "python"
     if os.access(beside, os.X_OK):
         return str(beside)
-    committed = committed_venv(Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes"))
+    # ~/.hermes, as PLUGIN and hermes.sh have it: the desktop never sets HERMES_HOME.
+    committed = committed_venv(Path.home() / ".hermes")
     if committed:
         return committed
     # A layout with neither: Hermes's own sys.path, which may first wait on a sync it owes.
