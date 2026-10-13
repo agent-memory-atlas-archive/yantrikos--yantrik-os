@@ -211,6 +211,45 @@ class ProofTests(MemoryCase):
         self.assertEqual(row["says"], "memory · YantrikDB · recalled")
         self.assertEqual(self.rows(), [], "the probe note is deleted")
 
+    def fake_openclaw(self, server):
+        """An `openclaw` in ~/.local/bin whose `mcp show yantrikdb --json` prints `server`, or fails."""
+        bin_dir = self.work / ".local" / "bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        tool = bin_dir / "openclaw"
+        if server is None:
+            tool.write_text("#!/bin/sh\necho 'No MCP server named yantrikdb' >&2\nexit 1\n")
+        else:
+            tool.write_text("#!/bin/sh\ncat <<'JSON'\n%s\nJSON\n" % json.dumps(server))
+        tool.chmod(0o755)
+
+    def test_openclaw_without_its_yantrikdb_server_cannot_remember_whatever_the_store_says(self):
+        # VM 520: the note was recalled through yantrikdb-mcp while OpenClaw itself had no server.
+        self.fake_openclaw(None)
+        row = proofs.prove_remember("openclaw")
+        self.assertFalse(row["ok"])
+        self.assertIn("OpenClaw has no YantrikDB MCP server", row["says"])
+        self.assertEqual(row["fix"], proofs.INSTALL_FIX)
+
+    def test_openclaw_with_its_server_on_another_file_is_said(self):
+        self.fake_openclaw({"command": "/opt/yantrik/memory/bin/yantrikdb-mcp",
+                            "env": {"YANTRIKDB_DB_PATH": "/elsewhere.db"}})
+        self.assertIn("another file", proofs.harness_wiring("openclaw"))
+
+    def test_openclaw_with_its_own_server_is_wired(self):
+        self.fake_openclaw({"command": "/opt/yantrik/memory/bin/yantrikdb-mcp",
+                            "env": {"YANTRIKDB_DB_PATH": str(proofs.memory_db("openclaw"))}})
+        self.assertIsNone(proofs.harness_wiring("openclaw"))
+
+    def test_pi_with_memory_turned_off_cannot_remember(self):
+        config = self.work / ".config" / "yantrik"
+        config.mkdir(parents=True)
+        (config / "pi.json").write_text('{"memory": "off"}')
+        row = proofs.prove_remember("pi")
+        self.assertFalse(row["ok"])
+        self.assertIn("turned off in pi.json", row["says"])
+        (config / "pi.json").write_text('{"memory": "yantrikdb"}')
+        self.assertIsNone(proofs.harness_wiring("pi"))
+
     def test_no_memory_in_the_image_is_a_failure_that_says_install_again(self):
         row = proofs.remember_through_mcp("pi", command=[str(self.work / "nothing")], env={})
         self.assertFalse(row["ok"])

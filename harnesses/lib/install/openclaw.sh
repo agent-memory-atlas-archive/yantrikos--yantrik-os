@@ -34,6 +34,14 @@ mcp_server() {
     timeout 60 openclaw mcp add "$name" "$@" </dev/null >/dev/null 2>&1 \
         || timeout 60 openclaw mcp set "$name" "$json" </dev/null >/dev/null \
         || fail "OpenClaw would not take the $name MCP server"
+    has_mcp_server "$name" || fail "OpenClaw said it took the $name MCP server, but does not list it"
+}
+
+# has_mcp_server NAME — OpenClaw's own config holds the server. Asked of OpenClaw rather than
+# assumed from the command's exit: VM 520 was left with no yantrikdb server and an install that
+# carried on (#758).
+has_mcp_server() {
+    timeout 60 openclaw mcp show "$1" --json </dev/null >/dev/null 2>&1
 }
 
 # ── Memory: YantrikDB, from the image ──
@@ -41,6 +49,13 @@ mcp_server() {
 db=$(harness_memory_db openclaw)
 memory_dir openclaw
 say "giving OpenClaw YantrikDB as its memory"
+# Started once before OpenClaw is told about it. `mcp add` probes a server and refuses to save one
+# that has not answered within 5 seconds, and yantrikdb-mcp's first start creates the database and
+# loads the engine, which took longer than that against OpenClaw 2026.9.6 here. `mcp set` saves
+# without a probe, so the server is still added, but warmed it answers in about a second.
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"yantrik-install","version":"1"}}}' \
+    | YANTRIKDB_DB_PATH="$db" YANTRIKDB_EMBEDDER=bundled timeout 120 "$YANTRIKDB_MCP" 2>/dev/null \
+    | grep -q '"id": *1' || fail "yantrikdb-mcp did not start (it did not answer initialize)"
 mcp_server yantrikdb \
     "{\"command\":\"$YANTRIKDB_MCP\",\"env\":{\"YANTRIKDB_DB_PATH\":\"$db\",\"YANTRIKDB_EMBEDDER\":\"bundled\"}}" \
     --command "$YANTRIKDB_MCP" --env "YANTRIKDB_DB_PATH=$db" --env YANTRIKDB_EMBEDDER=bundled
@@ -89,6 +104,11 @@ if [ "$route" = gateway ]; then
 else
     json_merge "$ours" '{"route":"cli"}'
 fi
+
+# Asked again after the gateway has been installed and restarted, which rewrites OpenClaw's config.
+for server in yantrikdb yantrik-os; do
+    has_mcp_server "$server" || fail "OpenClaw's $server MCP server is gone after its gateway restarted; press Install again"
+done
 
 start_unit openclaw
 

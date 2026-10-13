@@ -352,10 +352,44 @@ def remember_through_hermes(run: Callable[..., subprocess.CompletedProcess] = su
     return row("remember", REMEMBER, True, "recalled", "memory · YantrikDB · recalled")
 
 
+def harness_wiring(harness: str, run: Callable[..., subprocess.CompletedProcess] = subprocess.run
+                   ) -> Optional[str]:
+    """Why the harness itself would not use YantrikDB, or None. The note below goes through
+    yantrikdb-mcp directly, so on its own it proves the memory works, not that this harness uses it:
+    VM 520 showed OpenClaw with no yantrikdb MCP server while the note was recalled."""
+    if harness == "openclaw":
+        openclaw = str(Path.home() / ".local" / "bin" / "openclaw")
+        try:
+            done = run([openclaw, "mcp", "show", "yantrikdb", "--json"], capture_output=True, text=True,
+                       timeout=60, stdin=subprocess.DEVNULL)
+            server = json.loads(done.stdout or "{}") if done.returncode == 0 else {}
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            server = {}
+        if not isinstance(server, dict) or not server.get("command"):
+            return "OpenClaw has no YantrikDB MCP server"
+        if (server.get("env") or {}).get("YANTRIKDB_DB_PATH") != str(memory_db(harness)):
+            return "OpenClaw's YantrikDB MCP server points at another file"
+        return None
+    if harness in ("pi", "deepseek"):
+        # On unless the harness's config says otherwise (yantrik_harness.memory_on); whether the
+        # image carries yantrikdb-mcp is the note's own first question below.
+        path = Path.home() / ".config" / "yantrik" / ("%s.json" % harness)
+        try:
+            setting = json.loads(path.read_text(encoding="utf-8")).get("memory")
+        except (OSError, ValueError, AttributeError):
+            setting = None
+        if setting is False or (isinstance(setting, str) and setting.strip().lower() in ("off", "none", "false", "own")):
+            return "YantrikDB is turned off in %s" % path.name
+    return None
+
+
 def prove_remember(harness: str) -> Dict[str, Any]:
     if harness == "hermes":
         return remember_through_hermes()
     if harness in MCP_MEMORY:
+        reason = harness_wiring(harness)
+        if reason:
+            return row("remember", REMEMBER, False, "failed", "no memory: %s" % reason, INSTALL_FIX)
         return remember_through_mcp(harness)
     if harness == "mind":
         # The Mind's memory is the person's YantrikDB itself, kept by yantrik-memory under the
