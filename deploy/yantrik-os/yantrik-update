@@ -1968,10 +1968,13 @@ MIND_SOCKET_TMPFILES=/etc/tmpfiles.d/yantrik-mind-socket.conf
 MIND_SOCKET_DROPIN=/etc/systemd/system/yantrik-mind.service.d/yantrik-person.conf
 
 # "<uid> <gid>" of the desktop's owner, or nothing (and false) for a name that is not a plain
-# account name, root, or an account the database does not know. The selftest hands it a passwd
-# file of its own; every real run asks the account database.
-mind_person_ids() { # <owner> [passwd file]
-  local line uid gid
+# account name, root, an account the database does not know, a uid outside the people's range the
+# launcher trusts (1000-59999), or a primary group anyone else is in. The socket is 0660 to that
+# group, so a shared one (Debian's "users", gid 100) would let every member connect to it, and
+# the Mind's peer-uid check is the only gate on /mcp's memory: it is refused rather than trusted.
+# The selftest hands it passwd and group files of its own; every real run asks the database.
+mind_person_ids() { # <owner> [passwd file] [group file]
+  local line uid gid others members
   # Never the mind account itself: a Mind that answered its own uid would answer itself.
   case "$1" in ''|root|yantrik-mind|*[!a-z0-9_-]*) return 1 ;; esac
   if [ -n "${2:-}" ]; then line="$(grep -m1 "^$1:" "$2" 2>/dev/null)" || return 1
@@ -1979,6 +1982,14 @@ mind_person_ids() { # <owner> [passwd file]
   uid="$(printf '%s' "$line" | cut -d: -f3)"; gid="$(printf '%s' "$line" | cut -d: -f4)"
   case "$uid" in ''|0|*[!0-9]*) return 1 ;; esac
   case "$gid" in ''|0|*[!0-9]*) return 1 ;; esac
+  [ "$uid" -ge 1000 ] && [ "$uid" -lt 60000 ] || return 1
+  # Anyone else whose primary group it is, or who is listed in it.
+  if [ -n "${2:-}" ]; then others="$(awk -F: -v g="$gid" -v me="$1" '$4 == g && $1 != me' "$2")"
+  else others="$(getent passwd | awk -F: -v g="$gid" -v me="$1" '$4 == g && $1 != me')"; fi
+  [ -z "$others" ] || return 1
+  if [ -n "${3:-}" ]; then members="$(awk -F: -v g="$gid" '$3 == g { print $4 }' "$3")"
+  else members="$(getent group "$gid" 2>/dev/null | cut -d: -f4)"; fi
+  [ -z "$(printf '%s' "$members" | tr ',' '\n' | grep -vx -e "$1" -e '')" ] || return 1
   printf '%s %s\n' "$uid" "$gid"
 }
 
@@ -2001,9 +2012,9 @@ mind_socket_dropin_text() { # <owner> <uid>
 # Write both files for <owner> when they differ, and say "changed" when either did. A link at
 # either path is replaced, never written through. False, with nothing written, for an owner whose
 # ids cannot be told: a socket for the wrong person is worse than none.
-mind_socket_write() { # <owner> <tmpfiles conf> <drop-in> [passwd file]
+mind_socket_write() { # <owner> <tmpfiles conf> <drop-in> [passwd file] [group file]
   local ids uid gid want f changed=""
-  ids="$(mind_person_ids "$1" "${4:-}")" || return 1
+  ids="$(mind_person_ids "$1" "${4:-}" "${5:-}")" || return 1
   uid="${ids% *}"; gid="${ids#* }"
   for f in "$2" "$3"; do
     if [ "$f" = "$2" ]; then want="$(mind_socket_tmpfiles_text "$1" "$uid" "$gid")"
@@ -2018,7 +2029,7 @@ mind_socket_write() { # <owner> <tmpfiles conf> <drop-in> [passwd file]
 reconcile_mind_socket() { # <owner>
   local out
   out="$(mind_socket_write "$1" "$MIND_SOCKET_TMPFILES" "$MIND_SOCKET_DROPIN")" \
-    || { warn "cannot tell $1's uid and group; the Mind's memory socket is not set up"; return 0; }
+    || { warn "the Mind's memory socket is not set up: $1 needs an account of their own (uid 1000-59999) and a primary group nobody else is in"; return 0; }
   systemd-tmpfiles --create "$MIND_SOCKET_TMPFILES" >/dev/null 2>&1 \
     || warn "could not make /run/yantrik-mind now; it is made at the next boot"
   [ "$out" = changed ] || return 0
@@ -4153,9 +4164,18 @@ loopback 127.0.0.1 11434")"
   mkdir -p "$mk"
   printf '%s\n' 'root:x:0:0:root:/root:/bin/bash' 'yantrik-mind:x:998:997::/var/lib/yantrik-mind:/usr/sbin/nologin' \
     'asha:x:1000:1000:Asha:/home/asha:/bin/bash' 'ravi:x:1001:100:Ravi:/home/ravi:/bin/bash' \
-    'broken:x:1002::Broken:/home/broken:/bin/bash' > "$mk/passwd"
-  is "mind-socket: the owner's uid and primary group" "1001 100" "$(mind_person_ids ravi "$mk/passwd")"
-  mout="$(mind_socket_write asha "$mk/tmpfiles.conf" "$mk/unit.d/person.conf" "$mk/passwd")"
+    'broken:x:1002::Broken:/home/broken:/bin/bash' 'sam:x:1003:100:Sam:/home/sam:/bin/bash' \
+    'meera:x:1004:1004:Meera:/home/meera:/bin/bash' 'svc:x:999:999::/var/lib/svc:/usr/sbin/nologin' \
+    'big:x:60001:60001::/home/big:/bin/bash' > "$mk/passwd"
+  printf '%s\n' 'asha:x:1000:' 'users:x:100:' 'meera:x:1004:asha' 'svc:x:999:' 'big:x:60001:' > "$mk/group"
+  is "mind-socket: the owner's uid and primary group" "1000 1000" "$(mind_person_ids asha "$mk/passwd" "$mk/group")"
+  is "mind-socket: a primary group another account also has is refused (Debian's users)" "" \
+    "$(mind_person_ids ravi "$mk/passwd" "$mk/group")"
+  is "mind-socket: a primary group that lists another member is refused" "" \
+    "$(mind_person_ids meera "$mk/passwd" "$mk/group")"
+  is "mind-socket: a uid below the people's range is refused" "" "$(mind_person_ids svc "$mk/passwd" "$mk/group")"
+  is "mind-socket: a uid above it is refused" "" "$(mind_person_ids big "$mk/passwd" "$mk/group")"
+  mout="$(mind_socket_write asha "$mk/tmpfiles.conf" "$mk/unit.d/person.conf" "$mk/passwd" "$mk/group")"
   is "mind-socket: a first write says it changed" "changed" "$mout"
   is "mind-socket: the drop-in names the person's uid and their socket" \
     "Environment=YANTRIK_PERSON_UID=1000 Environment=YM_MEMORY_SOCKET=/run/yantrik-mind/1000/memory.sock" \
@@ -4166,16 +4186,15 @@ loopback 127.0.0.1 11434")"
   is "mind-socket: tmpfiles makes the parent root's and the person's directory the mind's, setgid to their group" \
     "d /run/yantrik-mind 0755 root root - d /run/yantrik-mind/1000 2750 yantrik-mind 1000 -" \
     "$(grep '^d ' "$mk/tmpfiles.conf" | tr '\n' ' ' | sed 's/ $//')"
-  t "mind-socket: ... and the group is the person's primary one, not their uid" "d /run/yantrik-mind/1001 2750 yantrik-mind 100 -" \
-    "$(mind_socket_write ravi "$mk/r-tmpfiles.conf" "$mk/r-person.conf" "$mk/passwd" >/dev/null; cat "$mk/r-tmpfiles.conf")"
-  is "mind-socket: a second write changes nothing" "" "$(mind_socket_write asha "$mk/tmpfiles.conf" "$mk/unit.d/person.conf" "$mk/passwd")"
+
+  is "mind-socket: a second write changes nothing" "" "$(mind_socket_write asha "$mk/tmpfiles.conf" "$mk/unit.d/person.conf" "$mk/passwd" "$mk/group")"
   ln -s "$mk/passwd" "$mk/linked.conf"
-  mind_socket_write asha "$mk/tmpfiles.conf" "$mk/linked.conf" "$mk/passwd" >/dev/null
+  mind_socket_write asha "$mk/tmpfiles.conf" "$mk/linked.conf" "$mk/passwd" "$mk/group" >/dev/null
   is "mind-socket: a link at the drop-in's path is replaced, not written through" "file asha:x:1000" \
     "$([ -f "$mk/linked.conf" ] && [ ! -L "$mk/linked.conf" ] && echo file) $(grep -o '^asha:x:1000' "$mk/passwd")"
   local who
-  for who in nobody-here root yantrik-mind broken 'Asha' 'a;b' ''; do
-    mout="$(mind_socket_write "$who" "$mk/no-tmpfiles.conf" "$mk/no-person.conf" "$mk/passwd"; echo " [exit $?]")"
+  for who in nobody-here root yantrik-mind broken ravi meera svc big 'Asha' 'a;b' ''; do
+    mout="$(mind_socket_write "$who" "$mk/no-tmpfiles.conf" "$mk/no-person.conf" "$mk/passwd" "$mk/group"; echo " [exit $?]")"
     is "mind-socket: an owner it cannot resolve ('$who') is refused" " [exit 1]" "$mout"
   done
   is "mind-socket: ... and nothing is written for them" "no" "$([ -e "$mk/no-tmpfiles.conf" ] || [ -e "$mk/no-person.conf" ] && echo yes || echo no)"
