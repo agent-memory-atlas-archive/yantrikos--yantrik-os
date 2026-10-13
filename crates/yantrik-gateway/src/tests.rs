@@ -36,6 +36,9 @@ impl Accounts for Fake {
             "cloud" => ("https://cloud.example/v1", false, Reasoning::OpenAiEffort),
             "home" => ("http://127.0.0.1:11434/v1", true, Reasoning::OllamaThink { levels: false }),
             "elsewhere" => ("https://elsewhere.example/v1", false, Reasoning::None),
+            // An endpoint the person typed, serving a Qwen3: it may be a hosted service that answers
+            // 400 to the template switch.
+            "typed" => ("https://typed.example/v1", false, Reasoning::ChatTemplateThinking),
             _ => return Err(Refusal::new(404, "account_not_found", format!("There is no account `{account}`."))),
         };
         Ok(Target {
@@ -96,6 +99,7 @@ fn gateway_with(fake: Fake) -> (Arc<Gateway>, Arc<Echo>, String, String) {
         accounts: Arc::new(fake),
         upstream: echo.clone(),
         log: Arc::new(CallLog::in_memory()),
+        template_refused: Default::default(),
     });
     (g, echo, pi, mind)
 }
@@ -504,4 +508,53 @@ fn connections_past_the_limit_are_closed_unread() {
     let mut buf = [0u8; 16];
     assert_eq!(extra.read(&mut buf).unwrap(), 0, "closed at once, not served");
     drop(held);
+}
+
+/// Answers 400 to any body carrying the template switch, and 200 otherwise.
+#[derive(Default)]
+struct RefusesTheSwitch {
+    sent: Mutex<Vec<Value>>,
+}
+
+impl Upstream for RefusesTheSwitch {
+    fn chat(&self, _base_url: &str, _key: Option<&str>, body: &[u8]) -> Result<Reply, Unreachable> {
+        let v: Value = serde_json::from_slice(body).unwrap();
+        let refuse = v.get("chat_template_kwargs").is_some();
+        self.sent.lock().unwrap().push(v);
+        let (status, text) = if refuse {
+            (400, json!({"error": {"message": "Unrecognized request argument supplied: chat_template_kwargs"}}).to_string())
+        } else {
+            (200, json!({"choices": [{"message": {"content": "hi"}}], "usage": {"prompt_tokens": 3, "completion_tokens": 1}}).to_string())
+        };
+        Ok(Reply { status, content_type: "application/json".into(), body: Box::new(Cursor::new(text.into_bytes())) })
+    }
+}
+
+#[test]
+fn a_server_that_refuses_the_template_switch_is_asked_again_without_it_and_never_sent_it_again() {
+    let tokens = Arc::new(Tokens::in_memory());
+    let pi = mint().unwrap();
+    tokens.register(&pi, Grant { harness: "pi".into(), private_context: false }).unwrap();
+    let upstream = Arc::new(RefusesTheSwitch::default());
+    let g = Gateway {
+        tokens,
+        accounts: Arc::new(Fake { private_mode: false, cloud: Sharing::Share, lane: None }),
+        upstream: upstream.clone(),
+        log: Arc::new(CallLog::in_memory()),
+        template_refused: Default::default(),
+    };
+    let ask = json!({"model": "typed/qwen3.5:27b", "effort": "easy", "messages": [{"role": "user", "content": "hi"}]});
+    let (status, _) = answer(&g, &request("POST", "/v1/chat/completions", Some(&pi), ask.clone()));
+    assert_eq!(status, 200, "the person gets the answer, not the 400");
+    {
+        let sent = upstream.sent.lock().unwrap();
+        assert_eq!(sent.len(), 2, "asked once with the switch and once without");
+        assert_eq!(sent[0]["chat_template_kwargs"], json!({"enable_thinking": false}));
+        assert!(sent[1].get("chat_template_kwargs").is_none(), "{}", sent[1]);
+    }
+    let (status, _) = answer(&g, &request("POST", "/v1/chat/completions", Some(&pi), ask));
+    assert_eq!(status, 200);
+    let sent = upstream.sent.lock().unwrap();
+    assert_eq!(sent.len(), 3, "the account is remembered: one call, no retry");
+    assert!(sent[2].get("chat_template_kwargs").is_none(), "and never sent the switch again: {}", sent[2]);
 }
