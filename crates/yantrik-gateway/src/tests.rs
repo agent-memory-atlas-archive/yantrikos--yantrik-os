@@ -558,3 +558,32 @@ fn a_server_that_refuses_the_template_switch_is_asked_again_without_it_and_never
     assert_eq!(sent.len(), 3, "the account is remembered: one call, no retry");
     assert!(sent[2].get("chat_template_kwargs").is_none(), "and never sent the switch again: {}", sent[2]);
 }
+
+/// Answers 400 to everything: a request that is wrong for some other reason.
+struct RefusesEverything(Mutex<usize>);
+
+impl Upstream for RefusesEverything {
+    fn chat(&self, _base_url: &str, _key: Option<&str>, _body: &[u8]) -> Result<Reply, Unreachable> {
+        *self.0.lock().unwrap() += 1;
+        let text = json!({"error": {"message": "context length exceeded"}}).to_string();
+        Ok(Reply { status: 400, content_type: "application/json".into(), body: Box::new(Cursor::new(text.into_bytes())) })
+    }
+}
+
+#[test]
+fn a_400_for_another_reason_leaves_the_switch_on() {
+    let tokens = Arc::new(Tokens::in_memory());
+    let pi = mint().unwrap();
+    tokens.register(&pi, Grant { harness: "pi".into(), private_context: false }).unwrap();
+    let g = Gateway {
+        tokens,
+        accounts: Arc::new(Fake { private_mode: false, cloud: Sharing::Share, lane: None }),
+        upstream: Arc::new(RefusesEverything(Mutex::new(0))),
+        log: Arc::new(CallLog::in_memory()),
+        template_refused: Default::default(),
+    };
+    let ask = json!({"model": "typed/qwen3.5:27b", "effort": "easy", "messages": [{"role": "user", "content": "hi"}]});
+    let (status, _) = answer(&g, &request("POST", "/v1/chat/completions", Some(&pi), ask));
+    assert_eq!(status, 400, "the upstream's own refusal reaches the caller");
+    assert!(g.template_refused.lock().unwrap().is_empty(), "the switch was not the difference, so it is not remembered");
+}

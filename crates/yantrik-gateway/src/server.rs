@@ -300,17 +300,21 @@ impl Gateway {
             .map_err(|u| Refusal::new(502, u.code, u.message))?;
         if reply.status == 400 && target.reasoning == switch && effort.is_some() {
             // The switch was the gateway's, not the caller's: the call goes again without it, once.
-            if let Ok(mut refused) = self.template_refused.lock() {
-                refused.insert(target.account.clone());
-            }
-            tracing::info!(account = %target.account, "the account's server refused chat_template_kwargs; asking again without it");
             body::drop_template_switch(&mut body);
-            call.effort = None;
             let bytes = serde_json::to_vec(&body).map_err(|_| Refusal::new(400, "bad_request", "The request could not be re-encoded."))?;
             reply = self
                 .upstream
                 .chat(&target.base_url, target.key.as_deref(), &bytes)
                 .map_err(|u| Refusal::new(502, u.code, u.message))?;
+            // Remembered only when the switch was the difference: a 400 for another reason (a context
+            // too long, a bad tool schema) fails again without it, and leaves the switch on.
+            if (200..300).contains(&reply.status) {
+                call.effort = None;
+                if let Ok(mut refused) = self.template_refused.lock() {
+                    refused.insert(target.account.clone());
+                }
+                tracing::info!(account = %target.account, "the account's server refused chat_template_kwargs; it is sent no switch from now on");
+            }
         }
         call.status = reply.status;
         if !(200..300).contains(&reply.status) {
