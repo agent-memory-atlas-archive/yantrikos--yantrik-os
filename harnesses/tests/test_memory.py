@@ -118,6 +118,16 @@ class ProofTests(MemoryCase):
         self.addCleanup(os.environ.__setitem__, "HOME", saved or "/")
         self.state = self.work / ".local" / "state"
 
+    def test_the_hermes_python_is_the_one_the_install_wrote_down(self):
+        # Hermes 0.21 runs a managed Python with its venv on sys.path: nothing beside ~/.local/bin/hermes.
+        self.assertIsNone(proofs.hermes_python(), "nothing written down and no hermes: no guess")
+        record = proofs.state_dir("hermes") / "python"
+        record.parent.mkdir(parents=True)
+        record.write_text(sys.executable + "\n", encoding="utf-8")
+        self.assertEqual(proofs.hermes_python(), sys.executable)
+        record.write_text(str(self.work / "gone" / "python") + "\n", encoding="utf-8")
+        self.assertIsNone(proofs.hermes_python(), "a Python that is not there is not used")
+
     def test_a_harness_whose_model_was_not_wired_keeps_its_own_and_that_is_not_a_failure(self):
         row = proofs.prove_answer("pi")
         self.assertTrue(row["ok"])

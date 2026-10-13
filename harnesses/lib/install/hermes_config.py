@@ -1,4 +1,4 @@
-"""Give Hermes's `yantrik` platform the desktop's tools and nothing of Hermes's own: hermes_config.py apply|check CONFIG
+"""Give Hermes's `yantrik` platform the desktop's tools and nothing of Hermes's own: hermes_config.py apply|check|memory CONFIG
 
 Run by hermes.sh with Hermes's own Python, which has PyYAML and Hermes's own modules, against the
 file `hermes config path` names. `hermes config set` cannot write this: it turns every value into a
@@ -23,7 +23,13 @@ expands, and every enabled MCP server is added unless the platform names the one
 - `check` asks Hermes's own resolver which toolsets the platform really gets, and fails on
   anything outside the allowlist.
 
-`apply` keeps every other key in the file as it was. The file is backed up once, beside itself,
+`memory` makes YantrikDB Hermes's one memory: `memory.provider` is `yantrikdb`, and Hermes's own
+MEMORY.md and USER.md are off, which would otherwise run beside the provider (Hermes's agent_init.py)
+as a second memory of the person outside YantrikDB. It is written here, not with `hermes config set`:
+on a fresh Hermes 0.21 every `hermes` command first finishes its own update, and one `config set`
+took 102 seconds (VM 541, 13 Oct), past the 30 an install that runs from a button may wait.
+
+`apply` and `memory` keep every other key in the file as they were. The file is backed up once, beside itself,
 before the first change this script makes to it, and written whole through a temporary file, so a
 failure leaves the old file in place. Comments in it are not kept: Hermes's own `config set` drops
 them the same way.
@@ -57,16 +63,42 @@ class ConfigError(Exception):
     """The file is not something this can safely change, or Hermes could not be asked."""
 
 
+def _yaml():
+    """(load, dump, error) from the YAML library Hermes's own Python has: PyYAML on an older Hermes
+    (0.14), ruamel.yaml on a newer one (0.21 dropped PyYAML). Both read and write plain data here."""
+    try:
+        import yaml
+
+        def dump(data, f):
+            yaml.safe_dump(data, f, sort_keys=False, default_flow_style=False, allow_unicode=True)
+
+        return yaml.safe_load, dump, yaml.YAMLError
+    except ImportError:
+        from ruamel.yaml import YAML
+        from ruamel.yaml.error import YAMLError
+
+        def load(text):
+            return YAML(typ="safe", pure=True).load(text)
+
+        def dump(data, f):
+            y = YAML(typ="safe", pure=True)
+            y.default_flow_style = False
+            y.allow_unicode = True
+            y.dump(data, f)
+
+        return load, dump, YAMLError
+
+
 def _read(path):
-    import yaml
+    load, _dump, YAMLError = _yaml()
 
     if not os.path.exists(path):
         return {}, None
     with open(path, encoding="utf-8") as f:
         text = f.read()
     try:
-        data = yaml.safe_load(text)
-    except yaml.YAMLError as exc:
+        data = load(text)
+    except YAMLError as exc:
         raise ConfigError("%s is not YAML Hermes could read either: %s" % (path, exc))
     if data is None:
         return {}, text
@@ -123,9 +155,32 @@ def apply(path, plugin_toolsets=()):
     _write(path, data, text)
 
 
+# What `memory` writes under `memory:`.
+MEMORY = {"provider": "yantrikdb", "memory_enabled": False, "user_profile_enabled": False}
+
+
+def memory(path):
+    """YantrikDB as Hermes's one memory in the file at `path`; Hermes's own files off."""
+    data, text = _read(path)
+    _section(data, "memory", path).update(MEMORY)
+    _write(path, data, text)
+
+
+def memory_problems(path):
+    """What keeps YantrikDB from being Hermes's one memory in the file at `path`, as sentences."""
+    data, _ = _read(path)
+    found = data.get("memory")
+    found = found if isinstance(found, dict) else {}
+    return [
+        "memory.%s is %r, not %r" % (key, found.get(key), want)
+        for key, want in MEMORY.items()
+        if found.get(key) != want
+    ]
+
+
 def _write(path, data, text):
     """`data` written over the file at `path`, whose text before any change was `text` (None: no file)."""
-    import yaml
+    _load, dump, _error = _yaml()
 
     directory = os.path.dirname(os.path.abspath(path))
     os.makedirs(directory, exist_ok=True)
@@ -140,7 +195,7 @@ def _write(path, data, text):
     try:
         fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            yaml.safe_dump(data, f, sort_keys=False, default_flow_style=False, allow_unicode=True)
+            dump(data, f)
             f.flush()
             os.fsync(f.fileno())
         os.replace(temp, path)
@@ -241,10 +296,20 @@ def reassert(path, plugin_toolsets=hermes_plugin_toolsets, resolver=hermes_resol
 
 
 def main(argv, plugin_toolsets=hermes_plugin_toolsets, resolver=hermes_resolver):
-    if len(argv) != 3 or argv[1] not in ("apply", "check"):
-        print("usage: hermes_config.py apply|check CONFIG", file=sys.stderr)
+    if len(argv) != 3 or argv[1] not in ("apply", "check", "memory"):
+        print("usage: hermes_config.py apply|check|memory CONFIG", file=sys.stderr)
         return 2
     path = argv[2]
+    if argv[1] == "memory":
+        try:
+            memory(path)
+            wrong = memory_problems(path)
+        except (ConfigError, OSError) as exc:
+            print(exc, file=sys.stderr)
+            return 1
+        for line in wrong:
+            print(line, file=sys.stderr)
+        return 1 if wrong else 0
     try:
         if argv[1] == "apply":
             apply(path, plugin_toolsets())

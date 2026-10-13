@@ -46,10 +46,30 @@ fi
 say "$(hermes --version 2>/dev/null | head -n 1 || echo Hermes) is here"
 
 HARNESS=hermes
-# The Python Hermes runs on, which has its YAML library and is where its plugins are installed.
+# The Python Hermes runs on, which has its YAML library and Hermes's own modules, and is where its
+# plugins are installed. An older Hermes (0.14, VM 520) links ~/.local/bin/hermes into its venv, so
+# that Python sits beside it. A newer one (0.21, a fresh install on 13 Oct) puts a shell launcher
+# there and runs a managed Python with the venv on its sys.path: the venv is read from Hermes's own
+# sys.path, and the first entry with a pyvenv.cfg is it.
+hermes_venv_python() {
+    hermes --run-module site 2>/dev/null </dev/null \
+        | sed -n "s#^ *'\(/[^']*\)/lib/python[0-9.]*/site-packages',\$#\1#p" \
+        | while read -r venv; do
+            if [ -f "$venv/pyvenv.cfg" ] && [ -x "$venv/bin/python" ]; then
+                echo "$venv/bin/python"
+                break
+            fi
+        done
+}
 hermes_bin=$(readlink -f "$(command -v hermes)") || fail "cannot tell where hermes is installed"
 hermes_python="$(dirname "$hermes_bin")/python"
-[ -x "$hermes_python" ] || fail "no Python beside $hermes_bin"
+[ -x "$hermes_python" ] || hermes_python=$(hermes_venv_python)
+[ -n "$hermes_python" ] && [ -x "$hermes_python" ] \
+    || fail "cannot find the Python Hermes runs on: none beside $hermes_bin, and no venv on Hermes's own sys.path"
+# Found once, here: "Can it remember?" (proofs.py) runs its note in the same Python and reads it
+# from this file rather than looking again.
+mkdir -p "$(harness_state hermes)" && printf '%s\n' "$hermes_python" > "$(harness_state hermes)/python" \
+    || fail "could not write down which Python Hermes runs on"
 # `timeout`: a `hermes config` call was seen to hang on a fresh HERMES_HOME (review of #696), and
 # an install that runs from a button must never hang.
 config=$(timeout 30 hermes config path </dev/null) || fail "Hermes would not say where its config.yaml is"
@@ -82,9 +102,19 @@ wire_model hermes
 # is added, so none of Hermes's locked packages is moved. requests is Hermes's own.
 [ -d "$MEMORY_WHEELS" ] || fail "this image has no YantrikDB wheels at $MEMORY_WHEELS"
 say "installing the YantrikDB memory provider into Hermes, from the image"
+# uv on PATH, else the one a newer Hermes keeps in ~/.hermes/tools: its venv is made by uv and has
+# no pip in it (0.21, 13 Oct), so `python -m pip` is only for an older Hermes whose venv has one.
+hermes_uv() {
+    command -v uv 2>/dev/null && return
+    for candidate in "$HOME"/.hermes/tools/uv-*/uv; do
+        [ -x "$candidate" ] && last=$candidate
+    done
+    [ -n "${last:-}" ] && echo "$last"
+}
 pip_install() {
-    if command -v uv >/dev/null 2>&1; then
-        uv pip install --python "$hermes_python" --offline --no-index --find-links "$MEMORY_WHEELS" --no-deps "$@" </dev/null
+    uv_bin=$(hermes_uv)
+    if [ -n "$uv_bin" ]; then
+        "$uv_bin" pip install --python "$hermes_python" --offline --no-index --find-links "$MEMORY_WHEELS" --no-deps "$@" </dev/null
     else
         "$hermes_python" -m pip install --no-index --find-links "$MEMORY_WHEELS" --no-deps "$@" </dev/null
     fi
@@ -97,15 +127,16 @@ for dep in uuid_utils:uuid-utils click:click; do
 done
 "$hermes_python" -c "import requests, yantrikdb, yantrikdb_hermes_plugin" </dev/null \
     || fail "the YantrikDB memory provider is installed but does not import in Hermes's Python"
-# `--force` replaces the shim an earlier install left, which is the package's own.
-"$(dirname "$hermes_bin")/yantrikdb-hermes" install --force </dev/null >/dev/null \
+# `--force` replaces the shim an earlier install left, which is the package's own. Its command is
+# in the venv's bin, beside Hermes's Python (on an older Hermes that is also beside hermes itself).
+"$(dirname "$hermes_python")/yantrikdb-hermes" install --force </dev/null >/dev/null \
     || fail "the YantrikDB memory provider would not register itself with Hermes"
-timeout 30 hermes config set memory.provider yantrikdb </dev/null \
-    || fail "Hermes would not take yantrikdb as its memory"
-# A provider runs beside Hermes's own MEMORY.md and USER.md (Hermes's agent_init.py). Left on,
-# they are a second memory of the person outside YantrikDB.
-timeout 30 hermes config set memory.memory_enabled false </dev/null || fail "Hermes would not turn off its own MEMORY.md"
-timeout 30 hermes config set memory.user_profile_enabled false </dev/null || fail "Hermes would not turn off its own USER.md"
+# yantrikdb as Hermes's memory, with Hermes's own MEMORY.md and USER.md off: a provider runs beside
+# them (Hermes's agent_init.py), and left on they are a second memory of the person outside
+# YantrikDB. Written by hermes_config.py, not `hermes config set`, which on a fresh Hermes 0.21
+# first finishes Hermes's own update and took 102 seconds for one key (VM 541, 13 Oct).
+"$hermes_python" "$INSTALL_LIB/hermes_config.py" memory "$config" \
+    || fail "could not make yantrikdb Hermes's memory with its own MEMORY.md and USER.md off; see $config"
 # TODO(#586): `YANTRIKDB_MODE=yantrik`, the person's one shared memory through the memory server
 # (yantrikdb-hermes-plugin#93, baked in this image), once the door to it is tamper-proof. Until
 # then any process running as the person could attach as `hermes` and be handed Hermes's memory

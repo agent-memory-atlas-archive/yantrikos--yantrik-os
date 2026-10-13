@@ -303,7 +303,15 @@ print(json.dumps({"mode": config.mode, "recalled": bool(rid) and rid in found}))
 
 
 def hermes_python() -> Optional[str]:
-    """The Python Hermes runs on, beside the `hermes` it put in ~/.local/bin."""
+    """The Python Hermes runs on: the one hermes.sh found and wrote down (a newer Hermes runs a
+    managed Python with its venv on sys.path, 0.21), else the one beside the `hermes` it put in
+    ~/.local/bin (an older Hermes links that into its venv, 0.14)."""
+    try:
+        found = (state_dir("hermes") / "python").read_text(encoding="utf-8").strip()
+    except OSError:
+        found = ""
+    if found and os.access(found, os.X_OK):
+        return found
     for candidate in (Path.home() / ".local" / "bin" / "hermes",):
         try:
             real = candidate.resolve(strict=True)

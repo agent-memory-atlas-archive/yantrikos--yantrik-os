@@ -473,7 +473,8 @@ class HermesConfigTests(unittest.TestCase):
         self.assertLess(apply_at, provider, "the restriction must not wait on the memory provider")
         self.assertLess(restart, check)
         self.assertLess(check, proofs, "installed only once the three proofs pass")
-        self.assertEqual(script.count("hermes config set memory.provider"), 1)
+        self.assertEqual(script.count('hermes_config.py" memory "$config"'), 1)
+        self.assertNotIn("hermes config set memory.", script, "a `config set` waits on Hermes's own update")
 
     def test_the_memory_provider_comes_from_the_image_and_nothing_is_fetched(self):
         # #677: no catalog, no git, no PyPI at install time, and no TTY.
@@ -483,11 +484,45 @@ class HermesConfigTests(unittest.TestCase):
         self.assertIn('--find-links "$MEMORY_WHEELS"', memory)
         self.assertNotIn("git+", memory)
         self.assertNotIn("\nhermes plugins install", memory)
-        self.assertIn("memory.provider yantrikdb", memory)
-        self.assertIn("memory.memory_enabled false", memory)
-        self.assertIn("memory.user_profile_enabled false", memory)
+        self.assertIn('hermes_config.py" memory "$config"', memory)
+        self.assertEqual(hermes_config.MEMORY, {"provider": "yantrikdb", "memory_enabled": False, "user_profile_enabled": False})
         self.assertIn("YANTRIKDB_AGENT_NAME hermes", memory, "every write carries its harness")
         self.assertIn("TODO(#586)", memory, "the shared mode waits on the tamper-proof door, said plainly")
+
+@unittest.skipIf(yaml is None, "PyYAML is not installed")
+class HermesMemoryTests(unittest.TestCase):
+    """`memory`: YantrikDB as Hermes's one memory, written without `hermes config set`."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.dir.name, "config.yaml")
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def test_memory_makes_yantrikdb_the_one_memory_and_keeps_the_rest(self):
+        with open(self.path, "w", encoding="utf-8") as f:
+            f.write("memory:\n  memory_char_limit: 2200\n  memory_enabled: true\nmodel:\n  default: x\n")
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            self.assertEqual(hermes_config.main(["hermes_config.py", "memory", self.path]), 0)
+        with open(self.path, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        self.assertEqual(data["memory"], {
+            "memory_char_limit": 2200,
+            "memory_enabled": False,
+            "provider": "yantrikdb",
+            "user_profile_enabled": False,
+        })
+        self.assertEqual(data["model"], {"default": "x"})
+        self.assertEqual(hermes_config.memory_problems(self.path), [])
+
+    def test_memory_problems_names_each_key_that_is_wrong(self):
+        with open(self.path, "w", encoding="utf-8") as f:
+            f.write("memory:\n  provider: holographic\n  user_profile_enabled: false\n")
+        wrong = hermes_config.memory_problems(self.path)
+        self.assertEqual(len(wrong), 2, wrong)
+        self.assertTrue(any("memory.provider" in w for w in wrong))
+        self.assertTrue(any("memory.memory_enabled" in w for w in wrong))
 
 if __name__ == "__main__":
     unittest.main()
