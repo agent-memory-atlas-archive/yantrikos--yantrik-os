@@ -52,7 +52,7 @@ HARNESS=hermes
 # there and runs a managed Python with the venv on its sys.path: the venv is read from Hermes's own
 # sys.path, and the first entry with a pyvenv.cfg is it.
 hermes_venv_python() {
-    hermes --run-module site 2>/dev/null </dev/null \
+    timeout 30 hermes --run-module site 2>/dev/null </dev/null \
         | sed -n "s#^ *'\(/[^']*\)/lib/python[0-9.]*/site-packages',\$#\1#p" \
         | while read -r venv; do
             if [ -f "$venv/pyvenv.cfg" ] && [ -x "$venv/bin/python" ]; then
@@ -71,8 +71,18 @@ hermes_python="$(dirname "$hermes_bin")/python"
 mkdir -p "$(harness_state hermes)" && printf '%s\n' "$hermes_python" > "$(harness_state hermes)/python" \
     || fail "could not write down which Python Hermes runs on"
 # `timeout`: a `hermes config` call was seen to hang on a fresh HERMES_HOME (review of #696), and
-# an install that runs from a button must never hang.
-config=$(timeout 30 hermes config path </dev/null) || fail "Hermes would not say where its config.yaml is"
+# an install that runs from a button must never hang. The first command of a new Hermes 0.21 first
+# finishes Hermes's own update (venv_sync.prepare_launch; `--version` and `--run-module` skip it),
+# which took 102 seconds on VM 541: this is that command, so it is said and given three minutes,
+# and every call after it is quick.
+say "asking Hermes where its settings are (a new Hermes first finishes its own setup: this can take a couple of minutes)"
+said=0
+config=$(timeout 180 hermes config path </dev/null) || said=$?
+case $said in
+    0) ;;
+    124) fail "Hermes did not finish its own setup within three minutes; press Install again to let it carry on" ;;
+    *) fail "Hermes would not say where its config.yaml is" ;;
+esac
 env_file=$(timeout 30 hermes config env-path </dev/null 2>/dev/null) || env_file="$HOME/.hermes/.env"
 backup_once "$config"
 backup_once "$env_file"
@@ -80,7 +90,7 @@ backup_once "$env_file"
 say "copying the desktop plugin into ~/.hermes"
 mkdir -p "$HOME/.hermes/plugins/yantrik"
 cp -r "$plugin/." "$HOME/.hermes/plugins/yantrik/"
-hermes plugins enable yantrik-desktop || fail "Hermes would not enable the desktop plugin"
+timeout 60 hermes plugins enable yantrik-desktop </dev/null || fail "Hermes would not enable the desktop plugin"
 
 # ── The desktop's tools, not Hermes's own ──
 # Hermes's `terminal`, `file`, `code_execution`, `browser` and `web` are a second, ungraded route
@@ -106,10 +116,10 @@ say "installing the YantrikDB memory provider into Hermes, from the image"
 # no pip in it (0.21, 13 Oct), so `python -m pip` is only for an older Hermes whose venv has one.
 hermes_uv() {
     command -v uv 2>/dev/null && return
-    for candidate in "$HOME"/.hermes/tools/uv-*/uv; do
-        [ -x "$candidate" ] && last=$candidate
+    # The newest by modification time: a version in the folder name does not sort as text.
+    for candidate in $(ls -td "$HOME"/.hermes/tools/uv-*/uv 2>/dev/null); do
+        [ -x "$candidate" ] && { echo "$candidate"; return; }
     done
-    [ -n "${last:-}" ] && echo "$last"
 }
 pip_install() {
     uv_bin=$(hermes_uv)
@@ -180,12 +190,12 @@ stop_gateway() {
 # refused the rest) is given a unit only when there is none, and is enabled for login here; the
 # restart after this starts it either way.
 gateway_install() {
-    if hermes gateway install --help 2>/dev/null | grep -q -e '--if-missing'; then
-        hermes gateway install --if-missing --start-now --start-on-login </dev/null
+    if timeout 30 hermes gateway install --help </dev/null 2>/dev/null | grep -q -e '--if-missing'; then
+        timeout 180 hermes gateway install --if-missing --start-now --start-on-login </dev/null
         return
     fi
     if ! systemctl --user cat hermes-gateway >/dev/null 2>&1; then
-        hermes gateway install </dev/null || return 1
+        timeout 180 hermes gateway install </dev/null || return 1
     fi
     systemctl --user enable hermes-gateway >/dev/null 2>&1
 }
