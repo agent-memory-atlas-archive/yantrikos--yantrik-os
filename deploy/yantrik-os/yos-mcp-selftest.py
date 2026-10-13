@@ -2616,6 +2616,13 @@ check("a long value is not echoed whole", len(module.bare_value_refusal("notes",
 check("an action with no parameters says so",
       "takes no parameters" in module.bare_value_refusal("shell", "lock", [], "now"))
 
+# JSON that arrived as text with real newlines inside its strings (a model writing a note's lines)
+# is still the object it says, not a bare value: strict JSON refuses control characters in strings.
+pairs = module.act_pairs({"app": "notes", "action": "new_note",
+                          "args": '{"title": "Weekend packing list", "text": "Essentials\n- ID\n- Charger"}'})
+check("JSON text with raw newlines in its strings is read as the object it is",
+      pairs == ["title=Weekend packing list", "text=Essentials\n- ID\n- Charger"], pairs)
+
 print()
 if failures:
     print("%d failed: %s" % (len(failures), ", ".join(failures)))
