@@ -16,6 +16,9 @@ pub mod types;
 pub mod traits;
 pub mod capability;
 
+// A Qwen3's thinking switch on a self-run server, and the all-thinking-no-answer failure
+pub mod thinking;
+
 // Chat template formatting (always compiled — used by candle + llamacpp backends)
 mod chat_template;
 pub mod chat_templates;
@@ -64,6 +67,7 @@ pub use model_loader::{GGUFFiles, ModelFiles};
 pub use types::{ApiToolCall, ApiToolCallFunction, ChatMessage, GenerationConfig, LLMResponse, ToolCall, TranscribeResult, VoiceParams, ProviderConfigEntry};
 pub use traits::{LLMBackend, STTBackend, Embedder};
 pub use capability::{ModelCapabilityProfile, ModelFamily, ModelTier, ToolCallMode, SlotMode, ToolFamily};
+pub use thinking::{ThoughtWithoutAnswer, THOUGHT_WITHOUT_ANSWER};
 
 // ── Chat template exports ────────────────────────────────────────────
 

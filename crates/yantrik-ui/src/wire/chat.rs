@@ -92,7 +92,11 @@ fn builtin_turn(
             if token == "__REPLACE__" {
                 replace_next = true;
             } else if !end {
-                if replace_next && token == crate::bridge::TURN_FAILED_REPLY {
+                // The model thinking and giving no answer is a failed turn too: nobody was
+                // talked to.
+                if replace_next
+                    && (token == crate::bridge::TURN_FAILED_REPLY || token == yantrik_ml::THOUGHT_WITHOUT_ANSWER)
+                {
                     failed = true;
                 }
                 replace_next = false;

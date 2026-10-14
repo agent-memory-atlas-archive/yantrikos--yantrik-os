@@ -31,6 +31,23 @@ use crate::{App, BondData, UrgeCardData};
 /// same rule the harness path applies to a `Chunk::Failed`.
 pub const TURN_FAILED_REPLY: &str = "Something went wrong internally. Please try again.";
 
+/// What [`CompanionHandle::check_answer`] asks: a task with a tool for it, like a person's ask.
+pub const ANSWER_CHECK_ASK: &str = "Use the calculate tool to work out 17 times 23, and tell me the result.";
+/// The answer it must contain.
+const ANSWER_CHECK_RESULT: &str = "391";
+
+/// Who served a turn, sent by the worker just before the end-of-turn sentinel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Served {
+    /// A model's words.
+    Model,
+    /// The shell's own words: no model is set up, or the one set up could not be reached.
+    NoModel,
+    /// A model was reached and failed the turn (it thought and gave no answer); the streamed
+    /// text is the sentence saying so, and this is why, for the log.
+    ModelFailed(String),
+}
+
 /// Why an [`CompanionHandle::ask`] did not produce an answer.
 ///
 /// `NoModel` is the case callers over RPC need told apart: when no model is reachable the
@@ -64,7 +81,7 @@ pub enum CompanionCommand {
         ///
         /// Only [`CompanionHandle::ask`] passes one. The chat UI shows the offline notice from
         /// its own wiring, and a submitted job's subscriber is the board.
-        model: Option<Sender<bool>>,
+        model: Option<Sender<Served>>,
         /// Asked from away from the machine (a channel): the turn's tools are held to `Safe` —
         /// it reads, it changes nothing — and so is what the worker runs after it, until the
         /// person next speaks at the desk.
@@ -427,12 +444,31 @@ impl CompanionHandle {
             }
         }
         match model_rx.try_recv() {
-            Ok(true) => Ok(answer),
-            Ok(false) => Err(AskError::NoModel),
+            Ok(Served::Model) => Ok(answer),
+            Ok(Served::NoModel) => Err(AskError::NoModel),
+            // The text is the sentence about the failure, which is what the person should read.
+            Ok(Served::ModelFailed(_)) => Err(AskError::Failed(answer)),
             // No signal: the turn never reached the point where the worker knows — it panicked
             // mid-stream, and the text above is TURN_FAILED_REPLY. That is a report about the
             // turn, not the model's words, and an `Ok` would put it in a document.
             Err(_) => Err(AskError::Failed(answer)),
+        }
+    }
+
+    /// The first run's "Can it answer?": a real tool turn, checked for the right answer.
+    ///
+    /// "Reply with the single word OK." passed on VM 542 while the person's first real ask got
+    /// an empty bubble: the model thought a little about "OK" and a lot about a note, and only
+    /// the second ran out of tokens. So the check asks what a person asks, a task with a tool
+    /// for it (`calculate`, always offered and read-only), through the same turn as the chat,
+    /// and passes only on the answer, not on any words at all.
+    pub fn check_answer(&self, timeout: std::time::Duration) -> Result<String, AskError> {
+        let said = self.ask(ANSWER_CHECK_ASK.to_string(), timeout)?;
+        if said.contains(ANSWER_CHECK_RESULT) {
+            Ok(said)
+        } else {
+            let said: String = said.trim().chars().take(80).collect();
+            Err(AskError::Failed(format!("it answered, but not the question (\u{201c}{said}\u{201d})")))
         }
     }
 
@@ -1080,7 +1116,7 @@ fn worker_loop(
                     // No companion at all is the no-model case, not an answer: a caller blocked
                     // in `ask` must not carry this text away as one.
                     if let Some(tx) = model {
-                        let _ = tx.send(false);
+                        let _ = tx.send(Served::NoModel);
                     }
                 }
             }
@@ -1415,7 +1451,12 @@ fn worker_loop(
                         // while the fact is still the one being stored: it must not take the
                         // offline responder's canned text away as the model's words.
                         if let Some(tx) = &model {
-                            let _ = tx.send(ok);
+                            let served = match (&response.model_failure, ok) {
+                                (Some(why), _) => Served::ModelFailed(why.clone()),
+                                (None, true) => Served::Model,
+                                (None, false) => Served::NoModel,
+                            };
+                            let _ = tx.send(served);
                         }
                         if ok {
                             execute_suppression_logged = false;
@@ -1458,6 +1499,7 @@ fn worker_loop(
                             tokens = token_count,
                             online = ok,
                             offline_mode = response.offline_mode,
+                            model_failure = response.model_failure.as_deref().unwrap_or(""),
                             "Generation complete"
                         );
                     }
@@ -1670,7 +1712,7 @@ fn worker_loop(
             Ok(CompanionCommand::ReloadLLM { provider_type, base_url, api_key, model }) => {
                 tracing::info!(provider = %provider_type, model = %model, "Reloading LLM backend");
                 let new_llm: std::sync::Arc<dyn yantrik_ml::LLMBackend> = std::sync::Arc::new(
-                    yantrik_ml::ApiLLM::new(base_url.clone(), api_key.clone(), &model)
+                    yantrik_ml::ApiLLM::new(base_url.clone(), api_key.clone(), &model).for_provider(&provider_type)
                 );
                 // In memory, because swap_llm rebuilds a chat-model decision model whose
                 // locality is read from it. Never written to /opt/yantrik/config.yaml: that is
@@ -3133,7 +3175,8 @@ fn build_companion(config: CompanionConfig) -> Result<CompanionService, String> 
             model,
             "Using API LLM backend"
         );
-        std::sync::Arc::new(ApiLLM::new(base_url, config.llm.api_key.clone(), model))
+        let provider_type = yantrik_ml::thinking::provider_type_for_backend(&config.llm.backend);
+        std::sync::Arc::new(ApiLLM::new(base_url, config.llm.api_key.clone(), model).for_provider(provider_type))
     } else if config.llm.backend == "llamacpp" {
         let gguf = config.llm.gguf_path.as_deref()
             .ok_or_else(|| "gguf_path required for llamacpp backend".to_string())?;
@@ -3408,7 +3451,7 @@ mod ask_tests {
     /// The real worker needs a companion, a model and a Slint event loop, so what is pinned
     /// here is the contract `ask` has with it, which is the part that changed.
     fn stub(
-        served: impl Fn(&Sender<String>, &Option<Sender<bool>>) + Send + 'static,
+        served: impl Fn(&Sender<String>, &Option<Sender<Served>>) + Send + 'static,
     ) -> CompanionHandle {
         let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded::<CompanionCommand>();
         std::thread::spawn(move || {
@@ -3426,9 +3469,13 @@ mod ask_tests {
         }
     }
 
-    fn done(token_tx: &Sender<String>, model: &Option<Sender<bool>>, answered: bool) {
+    fn done(token_tx: &Sender<String>, model: &Option<Sender<Served>>, answered: bool) {
+        served_by(token_tx, model, if answered { Served::Model } else { Served::NoModel });
+    }
+
+    fn served_by(token_tx: &Sender<String>, model: &Option<Sender<Served>>, served: Served) {
         if let Some(tx) = model {
-            let _ = tx.send(answered);
+            let _ = tx.send(served);
         }
         let _ = token_tx.send("__DONE__".to_string());
     }
@@ -3459,6 +3506,53 @@ mod ask_tests {
             .ask("anything".to_string(), std::time::Duration::from_secs(10))
             .expect("a model's answer is an answer");
         assert_eq!(got, "The model's answer.");
+    }
+
+    /// VM 542: a Qwen3 thought through the whole budget and gave no answer. The turn says so in
+    /// words, and `ask` (the first run's "Can it answer?") must take that as a failure, not as
+    /// the model's answer.
+    #[test]
+    fn a_turn_the_model_failed_is_an_error_carrying_the_sentence() {
+        let handle = stub(|token_tx, model| {
+            let _ = token_tx.send("__REPLACE__".to_string());
+            let _ = token_tx.send(yantrik_ml::THOUGHT_WITHOUT_ANSWER.to_string());
+            served_by(token_tx, model, Served::ModelFailed("finish reason: length".into()));
+            let _ = token_tx.send("__DONE__".to_string());
+        });
+        match handle.ask("anything".to_string(), std::time::Duration::from_secs(10)) {
+            Err(AskError::Failed(reason)) => assert_eq!(reason, yantrik_ml::THOUGHT_WITHOUT_ANSWER),
+            other => panic!("a failed turn must not come back as an answer; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_answer_check_passes_only_on_the_answer() {
+        let right = stub(|token_tx, model| {
+            let _ = token_tx.send("17 times 23 is 391.".to_string());
+            done(token_tx, model, true);
+        });
+        assert_eq!(right.check_answer(std::time::Duration::from_secs(10)).unwrap(), "17 times 23 is 391.");
+
+        // Words are not enough: "OK" is what passed on VM 542 while real asks failed.
+        let any_words = stub(|token_tx, model| {
+            let _ = token_tx.send("OK".to_string());
+            done(token_tx, model, true);
+        });
+        assert!(matches!(any_words.check_answer(std::time::Duration::from_secs(10)), Err(AskError::Failed(_))));
+    }
+
+    #[test]
+    fn the_answer_check_fails_with_the_sentence_when_the_model_only_thought() {
+        let handle = stub(|token_tx, model| {
+            let _ = token_tx.send("__REPLACE__".to_string());
+            let _ = token_tx.send(yantrik_ml::THOUGHT_WITHOUT_ANSWER.to_string());
+            served_by(token_tx, model, Served::ModelFailed("finish reason: length".into()));
+            let _ = token_tx.send("__DONE__".to_string());
+        });
+        match handle.check_answer(std::time::Duration::from_secs(10)) {
+            Err(AskError::Failed(reason)) => assert_eq!(reason, yantrik_ml::THOUGHT_WITHOUT_ANSWER),
+            other => panic!("{other:?}"),
+        }
     }
 
     /// A turn that panicked mid-stream never reaches the point where the worker sends the

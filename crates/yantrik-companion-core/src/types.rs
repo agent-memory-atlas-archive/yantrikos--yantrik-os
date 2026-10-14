@@ -232,6 +232,10 @@ pub struct AgentResponse {
     /// True if the response came from the offline responder (LLM was unavailable).
     #[serde(default)]
     pub offline_mode: bool,
+    /// Set when a model was reached and failed the turn (it thought and gave no answer): why,
+    /// for the log and for a caller that must not take `message` as the model's words.
+    #[serde(default)]
+    pub model_failure: Option<String>,
 }
 
 /// A stored urge row from SQLite.
