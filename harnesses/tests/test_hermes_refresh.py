@@ -338,14 +338,14 @@ class UpdaterTests(unittest.TestCase):
 
     def test_the_updater_never_asks_for_a_gateway_restart(self):
         # A turn in flight would come back as a "Recovered reply" in the person's next turn.
-        self.assertIn('/bin/sh "$script" 2>&1', self.body)
+        self.assertIn('/bin/sh "$script" )', self.body)
         self.assertNotIn("--restart", self.body)
 
     def test_reconcile_and_an_up_to_date_apply_both_refresh(self):
         reconcile = self.text[self.text.index("cmd_reconcile() {"):]
         reconcile = reconcile[:reconcile.index("\n}\n")]
         self.assertIn("reconcile_harness_plugins", reconcile)
-        # The launcher is healed before the refresh may restart the gateway on it (#712).
+        # The launcher is healed before the refreshed plugins need the gateway to start (#712).
         self.assertLess(reconcile.index("reconcile_hermes_launcher"), reconcile.index("reconcile_harness_plugins"))
         self.assertIn("reconcile_harness_plugins || true", self.text)
         # A full apply reconciles through the new build's own updater, which runs the refresh.
@@ -359,10 +359,19 @@ class UpdaterTests(unittest.TestCase):
     def test_root_runs_nothing_found_on_the_owners_path(self):
         # After `env -i`, PATH starts with the owner's ~/.local/bin: every program root starts there
         # is named whole.
-        line = self.body[self.body.index("out=\"$(env -i"):]
+        line = self.body[self.body.index("exec env -i"):]
         line = line[:line.index("|| rc=$?")]
-        self.assertIn('"$timeout_bin" 600 "$setpriv"', line)
+        self.assertIn('"$timeout_bin" -k 10 600 "$setsid_bin" -w "$setpriv"', line)
         self.assertIn("/bin/sh \"$script\"", line)
+
+    def test_the_owners_programs_get_no_terminal_and_cannot_hold_the_update(self):
+        # A program of the owner's in root's session could open /dev/tty and push keystrokes into
+        # root's shell (TIOCSTI); one holding a pipe open would keep the update waiting.
+        line = self.body[self.body.index("exec env -i"):]
+        line = line[:line.index("|| rc=$?")]
+        self.assertIn('"$setsid_bin" -w', line)
+        self.assertIn('</dev/null >"$log" 2>&1 9>&-', line)
+        self.assertIn('setsid_bin="$(command -v setsid)"', self.body)
 
 
 if __name__ == "__main__":

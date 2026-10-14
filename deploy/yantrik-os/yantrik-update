@@ -2467,7 +2467,7 @@ reconcile_hermes_launcher() {
 reconcile_harness_plugins() {
   [ "$(id -u)" = 0 ] || return 0
   tree_is_roots || return 0
-  local owner home="" ouid="" ogid="" setpriv timeout_bin script out rc=0
+  local owner home="" ouid="" ogid="" setpriv timeout_bin setsid_bin script log out rc=0
   owner="$(desktop_owner)"
   case "$owner" in
     ''|root|*[!a-z0-9_-]*) ;;
@@ -2483,11 +2483,20 @@ reconcile_harness_plugins() {
   # with the owner's ~/.local/bin, and a bare name there would be a program of theirs run as root.
   setpriv="$(command -v setpriv)" || return 0
   timeout_bin="$(command -v timeout)" || return 0
-  # That PATH is for the refresh, which runs as the owner: Hermes is in their ~/.local/bin.
-  out="$(env -i HOME="$home" USER="$owner" LOGNAME="$owner" PATH="$home/.local/bin:/usr/bin:/bin" \
+  setsid_bin="$(command -v setsid)" || return 0
+  log="$(mktemp)" || return 0
+  # That PATH is for the refresh, which runs as the owner: Hermes is in their ~/.local/bin, and so
+  # may be programs of theirs (python3, uv). So the refresh gets its own session with no terminal
+  # (setsid, stdin /dev/null): from root's session a program of the owner's could open /dev/tty and
+  # push keystrokes into the shell root returns to (TIOCSTI). Its output goes to a file of root's,
+  # not a pipe, and the time limit ends in a KILL: a process of the owner's that ignores TERM, or
+  # outlives the refresh holding a pipe open, cannot keep the update waiting.
+  ( cd / && exec env -i HOME="$home" USER="$owner" LOGNAME="$owner" PATH="$home/.local/bin:/usr/bin:/bin" \
       XDG_RUNTIME_DIR="/run/user/$ouid" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$ouid/bus" \
-      "$timeout_bin" 600 "$setpriv" --reuid="$ouid" --regid="$ogid" --clear-groups --no-new-privs -- \
-      /bin/sh "$script" 2>&1 9>&-)" || rc=$?
+      "$timeout_bin" -k 10 600 "$setsid_bin" -w "$setpriv" --reuid="$ouid" --regid="$ogid" --clear-groups --no-new-privs -- \
+      /bin/sh "$script" ) </dev/null >"$log" 2>&1 9>&- || rc=$?
+  out="$(head -c 65536 "$log")"
+  rm -f "$log"
   # The lines name files in the owner's home: drop control characters before root prints them.
   [ -n "$out" ] && printf '%s\n' "$out" | tr -d '\000-\010\013-\037\177' | while IFS= read -r line; do info "$line"; done
   [ "$rc" = 0 ] || warn "could not refresh $owner's harness plugins (exit $rc); the ones in place are kept. Run as $owner: sh $script"
@@ -3490,8 +3499,8 @@ cmd_reconcile() {
   private_config
   reconcile_registries
   reconcile_podman_socket
-  # The launcher first: the plugin refresh may restart Hermes's gateway, which a launcher still
-  # pointing into /tmp (#712) would stop dead.
+  # The launcher first: the refreshed plugins load when Hermes's gateway next starts, which a
+  # launcher still pointing into /tmp (#712) would stop dead.
   reconcile_hermes_launcher
   reconcile_harness_plugins
   audit_unowned /etc/polkit-1/rules.d '*.rules' polkit
