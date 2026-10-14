@@ -2227,7 +2227,7 @@ impl CompanionService {
                     self.note_llm_reachable();
                     r
                 }
-                Err(e) if thought_without_answer(&e) => {
+                Err(e) if thought_without_answer(&*e) => {
                     self.note_llm_reachable();
                     response_text = THOUGHT_WITHOUT_ANSWER.to_string();
                     model_failure = Some(e.to_string());
@@ -3312,7 +3312,7 @@ impl CompanionService {
                                 }
                             }
                             Err(_) if !response_text.is_empty() => break,
-                            Err(e) if thought_without_answer(&e) => {
+                            Err(e) if thought_without_answer(&*e) => {
                                 self.note_llm_reachable();
                                 response_text = THOUGHT_WITHOUT_ANSWER.to_string();
                                 on_token("__REPLACE__");
@@ -3371,7 +3371,7 @@ impl CompanionService {
             }
             // The model was reached and answered with thinking alone (a Qwen3 that spent the whole
             // budget thinking, VM 542): say so, in words, rather than show an empty bubble.
-            Err(e) if thought_without_answer(&e) => {
+            Err(e) if thought_without_answer(&*e) => {
                 self.note_llm_reachable();
                 response_text = THOUGHT_WITHOUT_ANSWER.to_string();
                 on_token("__REPLACE__");
@@ -4117,7 +4117,7 @@ impl CompanionService {
 
 /// Whether a model call failed because the model thought and gave no answer. That model is
 /// reachable, so the turn is not offline; it failed, and the person is told so in words.
-fn thought_without_answer(e: &anyhow::Error) -> bool {
+fn thought_without_answer(e: &(dyn std::error::Error + Send + Sync + 'static)) -> bool {
     e.downcast_ref::<ThoughtWithoutAnswer>().is_some()
 }
 
