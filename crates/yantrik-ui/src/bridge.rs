@@ -1059,7 +1059,7 @@ fn paused_while_private(cmd: &CompanionCommand, recipe_signals: &mut std::collec
         CompanionCommand::SendMessage { token_tx, model, .. } => {
             let _ = token_tx.send(format!("__REPLACE__{SAID}"));
             if let Some(tx) = model {
-                let _ = tx.send(false);
+                let _ = tx.send(Served::NoModel);
             }
             let _ = token_tx.send("__DONE__".to_string());
             true
