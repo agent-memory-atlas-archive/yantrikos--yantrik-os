@@ -106,7 +106,8 @@ class InstallersReadOnlyWhatShipsTests(unittest.TestCase):
             self.assertIn(p, listed)
 
     def test_hermes_installs_only_wheels_the_bundle_carries(self):
-        with open(os.path.join(INSTALLERS, "hermes.sh")) as f:
+        # hermes.sh's provider install, shared with the refresh after an update.
+        with open(os.path.join(INSTALLERS, "hermes-plugins.sh")) as f:
             hermes = f.read()
         # Both ways in (uv, and pip on an older Hermes) name the same packages.
         named = re.findall(r"--no-deps ([a-z0-9 -]+) </dev/null", hermes)

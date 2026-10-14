@@ -465,7 +465,7 @@ class HermesConfigTests(unittest.TestCase):
         script = (SCRIPT.parent / "hermes.sh").read_text(encoding="utf-8")
         enable = script.index("hermes plugins enable yantrik-desktop")
         apply_at = script.index('hermes_config.py" apply')
-        provider = script.index('vendor_install "$new_plugin/vendor"')
+        provider = script.index('hermes_yantrikdb_plugin_build "$new_plugin"')
         restart = script.index("systemctl --user restart hermes-gateway")
         check = script.rindex("hermes_check ||")
         proofs = script.index("prove hermes")
@@ -480,8 +480,13 @@ class HermesConfigTests(unittest.TestCase):
         # #677: no catalog, no git, no PyPI at install time, and no TTY.
         script = (SCRIPT.parent / "hermes.sh").read_text(encoding="utf-8")
         memory = script[script.index("# ── Memory"):script.index("# ── The desktop channel")]
-        self.assertIn("--no-index", memory)
-        self.assertIn('--find-links "$MEMORY_WHEELS"', memory)
+        # The install itself is in hermes-plugins.sh, which the refresh after an update shares.
+        plugins = (SCRIPT.parent / "hermes-plugins.sh").read_text(encoding="utf-8")
+        self.assertIn('hermes_yantrikdb_plugin_build "$new_plugin"', memory)
+        self.assertIn("--no-index", plugins)
+        self.assertIn('--find-links "$MEMORY_WHEELS"', plugins)
+        self.assertNotIn("git+", plugins)
+        self.assertNotIn("\nhermes plugins install", plugins)
         self.assertNotIn("git+", memory)
         self.assertNotIn("\nhermes plugins install", memory)
         self.assertIn('hermes_config.py" memory "$config"', memory)
@@ -515,8 +520,9 @@ class HermesMemoryTests(unittest.TestCase):
 
     def test_hermes_sh_checks_after_hermes_s_update_that_the_provider_runs_from_vendor(self):
         script = (SCRIPT.parent / "hermes.sh").read_text(encoding="utf-8")
-        self.assertIn('hermes_config.py" manifest', script)
-        self.assertNotIn("cp \"$new_plugin/vendor/yantrikdb_hermes_plugin/plugin.yaml\"", script)
+        plugins = (SCRIPT.parent / "hermes-plugins.sh").read_text(encoding="utf-8")
+        self.assertIn('hermes_config.py" manifest', plugins)
+        self.assertNotIn("cp \"$new_plugin/vendor/yantrikdb_hermes_plugin/plugin.yaml\"", plugins)
         settle = script.index("timeout 300 hermes config path")
         check = script.index("is not the one this install put in")
         restart = script.index("systemctl --user restart hermes-gateway")

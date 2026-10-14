@@ -44,6 +44,13 @@ yos act shell use_harness id=hermes       # once it appears in the picker
 
 From a checkout, `cp -r harnesses/hermes ~/.hermes/plugins/yantrik` instead.
 
+Hermes runs that copy, not the one in `/opt/yantrik/share`, so after every OS update
+`yantrik-update` brings it up to the build's (`harnesses/lib/install/refresh-plugins.sh`, run as
+you): the desktop plugin and the YantrikDB plugin are replaced only where they differ, with what an
+install writes, and Hermes's gateway is restarted once if it was running. Nothing else in
+`~/.hermes` is touched. `sudo yantrik-update reconcile` does the same on demand, and so does
+`sh /opt/yantrik/share/harnesses/lib/install/refresh-plugins.sh` from your own terminal.
+
 ## Give the desktop's tools, not Hermes's own
 
 Hermes arrives with a `terminal`, `file`, `code_execution`, `browser` and `web` toolset. On this
