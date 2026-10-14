@@ -255,6 +255,7 @@ pub fn folded(steps: Vec<Step>) -> Vec<Step> {
 mod tests {
     use super::*;
     use crate::agents::model::{AgentMeta, Approval, Provenance, State, Turn};
+    use crate::agents::AgentId;
 
     fn agent() -> Agent {
         Agent {
