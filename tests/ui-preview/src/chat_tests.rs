@@ -492,7 +492,9 @@ fn timeline(w: &MinimalSoftwareWindow, ui: &ChatProbe, output: &str, before: &Pi
     assert_eq!(ui.get_answered().as_str(), "c1:Sat Oct 17 + Sun Oct 18:pressed", "the recommended answer, pressed");
     // Enter in the reply box goes to the shell, which answers the card with it (lens_queue).
     let sends = ui.get_sends();
-    crate::click(w, panel_x + 150.0, 690.0);
+    // The words, not the picker row under them: with the question line above it the box is the
+    // same height, and its text starts at the top.
+    crate::click(w, panel_x + 150.0, 645.0);
     clear_field(w);
     for c in "Saturday".chars() {
         key(w, c.to_string());
