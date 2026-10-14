@@ -9,25 +9,18 @@
 //! `chat_template_kwargs: {"enable_thinking": false}`, stops that; Ollama's `think: false`, which
 //! is what was sent, is not read by any of these servers.
 //!
-//! `model_caps::reasoning_for` has no knob for this yet: #791 adds `Reasoning::ChatTemplateThinking`
-//! and is not merged as this is written. So this is the smallest piece of it the companion needs,
-//! on `model_caps::family` and with #791's rule: a Qwen3 family, on the five provider types a
-//! person runs themselves, and not gpt-oss there (which takes `reasoning_effort`). Hosted
-//! services are left out on purpose: Groq and others answer an unknown body field with a 400.
-//! When #791 lands, [`sends_chat_template_thinking`] becomes
-//! `reasoning_for(provider_type, model) == Reasoning::ChatTemplateThinking`.
+//! Which models get the switch is `model_caps::reasoning_for`'s decision, the same table the
+//! gateway reads (#791): a Qwen3 family on a server the person runs (custom, llama.cpp, vLLM,
+//! LM Studio, LocalAI), never gpt-oss there (it takes `reasoning_effort`), and never a hosted
+//! service, which can answer an unknown body field with a 400. One rule for both, so a provider
+//! type added there is added here too.
 
-use crate::model_caps::family;
-
-/// The provider types that are a server the person runs, whose chat template reads
-/// `chat_template_kwargs`.
-const SELF_RUN: &[&str] = &["custom", "llamacpp", "vllm", "lmstudio", "localai"];
+use crate::model_caps::{reasoning_for, Reasoning};
 
 /// Whether a request to this model, on a provider of this type, should carry
 /// `chat_template_kwargs: {"enable_thinking": false}`.
 pub fn sends_chat_template_thinking(provider_type: &str, model: &str) -> bool {
-    let f = family(model);
-    SELF_RUN.contains(&provider_type) && f.contains("qwen3") && !f.contains("gpt-oss")
+    reasoning_for(provider_type, model) == Reasoning::ChatTemplateThinking
 }
 
 /// The provider type a backend name in `config.yaml` stands for, for the companion's start-up
