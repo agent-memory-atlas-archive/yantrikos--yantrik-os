@@ -9,24 +9,19 @@
 //! `chat_template_kwargs: {"enable_thinking": false}`, stops that; Ollama's `think: false`, which
 //! is what was sent, is not read by any of these servers.
 //!
-//! This is the smallest piece of `model_caps::reasoning_for` (#791, not merged when this was
-//! written) that the companion needs, with the same rule: a Qwen3 family, on the five provider
-//! types a person runs themselves, and not gpt-oss there (which takes `reasoning_effort`).
-//! Hosted services are left out on purpose: Groq and others answer an unknown body field with a
-//! 400. When #791 lands, [`sends_chat_template_thinking`] becomes
+//! `model_caps::reasoning_for` has no knob for this yet: #791 adds `Reasoning::ChatTemplateThinking`
+//! and is not merged as this is written. So this is the smallest piece of it the companion needs,
+//! on `model_caps::family` and with #791's rule: a Qwen3 family, on the five provider types a
+//! person runs themselves, and not gpt-oss there (which takes `reasoning_effort`). Hosted
+//! services are left out on purpose: Groq and others answer an unknown body field with a 400.
+//! When #791 lands, [`sends_chat_template_thinking`] becomes
 //! `reasoning_for(provider_type, model) == Reasoning::ChatTemplateThinking`.
+
+use crate::model_caps::family;
 
 /// The provider types that are a server the person runs, whose chat template reads
 /// `chat_template_kwargs`.
 const SELF_RUN: &[&str] = &["custom", "llamacpp", "vllm", "lmstudio", "localai"];
-
-/// The model's family: its id lowercased, without a vendor prefix or a free-tier suffix. The same
-/// rule as `model_caps::family`, so the two agree on what "qwen3" matches.
-fn family(model: &str) -> String {
-    let lower = model.trim().to_ascii_lowercase();
-    let last = lower.rsplit('/').next().unwrap_or(&lower);
-    last.trim_end_matches(":free").to_string()
-}
 
 /// Whether a request to this model, on a provider of this type, should carry
 /// `chat_template_kwargs: {"enable_thinking": false}`.

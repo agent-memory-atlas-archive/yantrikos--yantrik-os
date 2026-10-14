@@ -80,10 +80,11 @@ pub struct UserSettings {
     pub pinned_apps: Vec<String>,
     /// Which mind the person last chose to answer for them.
     ///
-    /// Empty means "whatever the shell starts with", which is the built-in companion. Kept here
-    /// rather than in the harness host because the host's list is LIVE — a harness exists only
-    /// while it is attached — and this is the opposite kind of fact: a preference that outlives
-    /// every process involved, including the mind it names.
+    /// Empty means the person never chose, and `DEFAULT_MIND` is preferred once it is proven; the
+    /// built-in companion answers until then. Kept here rather than in the harness host because
+    /// the host's list is LIVE — a harness exists only while it is attached — and this is the
+    /// opposite kind of fact: a preference that outlives every process involved, including the
+    /// mind it names.
     #[serde(default)]
     pub preferred_mind: String,
     /// What a mind on the socket may do without being asked: `plan`, `ask` or `auto`.
@@ -276,11 +277,33 @@ pub fn set_dnd_mode(on: bool) -> Result<(), String> {
     save(&settings)
 }
 
+/// The mind that answers for a person who has never chosen one, once it is installed and proven.
+///
+/// Hermes until Yantrik Mind is ready (13 October 2026): the OS ships without waiting on the
+/// Mind, and Hermes is the mind proven to install from nothing with YantrikDB memory and the
+/// desktop link (#758). The built-in answers until it is there. See `crate::default_mind`.
+pub const DEFAULT_MIND: &str = "hermes";
+
 /// Which mind the person last chose. Empty if they never have.
-pub fn preferred_mind() -> String {
+pub fn chosen_mind() -> String {
     match LIVE.get().and_then(|s| s.lock().ok()) {
         Some(settings) => settings.preferred_mind.clone(),
         None => load().preferred_mind,
+    }
+}
+
+/// Which mind should answer: the one the person chose, or [`DEFAULT_MIND`] when they never have.
+pub fn preferred_mind() -> String {
+    preference(&chosen_mind()).to_string()
+}
+
+/// The rule [`preferred_mind`] applies, apart from where the choice is kept. Any choice wins,
+/// the built-in included: the default fills only the absence of one.
+pub fn preference(chosen: &str) -> &str {
+    if chosen.is_empty() {
+        DEFAULT_MIND
+    } else {
+        chosen
     }
 }
 
@@ -1418,6 +1441,22 @@ fn format_param_count(size_bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_person_who_never_chose_a_mind_prefers_hermes() {
+        assert_eq!(preference(""), "hermes");
+        assert_eq!(preference(""), DEFAULT_MIND);
+        // A settings file from before the field existed is a person who never chose.
+        let old: UserSettings = serde_yaml::from_str("dark_mode: true\n").unwrap();
+        assert_eq!(preference(&old.preferred_mind), "hermes");
+    }
+
+    #[test]
+    fn a_saved_choice_wins_over_the_default_the_built_in_included() {
+        for chosen in ["companion", "mind", "pi", "deepseek", "hermes", "somebodys-own"] {
+            assert_eq!(preference(chosen), chosen, "the default never overrides a choice");
+        }
+    }
 
     #[test]
     fn a_providers_file_from_before_models_still_loads() {

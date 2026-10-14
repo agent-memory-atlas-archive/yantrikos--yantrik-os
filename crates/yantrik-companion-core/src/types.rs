@@ -236,6 +236,10 @@ pub struct AgentResponse {
     /// for the log and for a caller that must not take `message` as the model's words.
     #[serde(default)]
     pub model_failure: Option<String>,
+    /// True when no model produced these words: the not-set-up sentence, a SecurityGuard
+    /// warning or a CognitiveRouter reply. Such a turn is not proof that a mind can answer.
+    #[serde(default)]
+    pub without_model: bool,
 }
 
 /// A stored urge row from SQLite.
