@@ -28,6 +28,23 @@ pub struct MindSeen {
     pub on_gateway: bool,
     /// Keeps a memory of the person, so it sends private context.
     pub private_context: bool,
+    /// The built-in companion: what it runs on is the desktop's own configuration, so the menus
+    /// say it ("192.168.1.5:8080 · qwen3.8"), from `runs_on`, the one place it is resolved.
+    /// `None` for every other mind; "" when nothing is set up for it.
+    pub builtin_runs_on: Option<String>,
+}
+
+impl MindSeen {
+    /// What it answers with, in the menus' words: "Yantrik models", the built-in companion's own
+    /// endpoint, or "its own models" for a mind whose provider the desktop cannot see.
+    pub fn runs_on_words(&self) -> String {
+        match (&self.builtin_runs_on, self.on_gateway) {
+            (_, true) => "Yantrik models".into(),
+            (Some(line), false) if line.is_empty() => "nothing set up".into(),
+            (Some(line), false) => line.clone(),
+            (None, false) => "its own models".into(),
+        }
+    }
 }
 
 pub fn mind_rows(minds: &[MindSeen]) -> Vec<MindRow> {
@@ -36,12 +53,10 @@ pub fn mind_rows(minds: &[MindSeen]) -> Vec<MindRow> {
         .map(|m| MindRow {
             id: m.id.clone(),
             name: m.name.clone(),
-            words: match (m.active, m.attached, m.on_gateway) {
-                (true, _, true) => "answering · Yantrik models".into(),
-                (true, _, false) => "answering · its own models".into(),
-                (false, true, true) => "ready · Yantrik models".into(),
-                (false, true, false) => "ready · its own models".into(),
-                (false, false, _) => format!("{} · set it up in Settings", m.state.to_lowercase()),
+            words: match (m.active, m.attached) {
+                (true, _) => format!("answering · {}", m.runs_on_words()),
+                (false, true) => format!("ready · {}", m.runs_on_words()),
+                (false, false) => format!("{} · set it up in Settings", m.state.to_lowercase()),
             },
             selectable: m.attached,
             current: m.active,
@@ -97,7 +112,10 @@ pub fn caps_words(caps: &ModelCaps) -> String {
 /// Why `mind` cannot use a model of `account`, or `None` when it can.
 pub fn reason(mind: &MindSeen, account: &Account, consent: &Consent, private_mode: bool) -> Option<String> {
     if !mind.on_gateway {
-        return Some(format!("{} uses its own models. Use Yantrik models (Settings → Harnesses) to pick here.", mind.name));
+        return Some(match &mind.builtin_runs_on {
+            Some(_) => format!("{} runs on {}. Use Yantrik models (Settings → Harnesses) to pick here.", mind.name, mind.runs_on_words()),
+            None => format!("{} uses its own models. Use Yantrik models (Settings → Harnesses) to pick here.", mind.name),
+        });
     }
     if private_mode && !account.local {
         return Some("Private mode: only models on this machine or network.".into());
@@ -133,7 +151,10 @@ pub fn model_rows(
         return out;
     }
     if !mind.on_gateway {
-        out.push(ModelRow::note(format!("{} uses its own models. Use Yantrik models on its row in Settings → Harnesses to pick from these.", mind.name)));
+        out.push(ModelRow::note(match &mind.builtin_runs_on {
+            Some(_) => format!("{} runs on {}. Use Yantrik models on its row in Settings → Harnesses to pick from these.", mind.name, mind.runs_on_words()),
+            None => format!("{} uses its own models. Use Yantrik models on its row in Settings → Harnesses to pick from these.", mind.name),
+        }));
     }
     let row = |m: &crate::ai_accounts::models::CatalogueModel, a: &Account| {
         let why = reason(mind, a, consent, private_mode);

@@ -130,6 +130,18 @@ pub enum CompanionCommand {
         query: String,
         reply_tx: Sender<Vec<MemoryResult>>,
     },
+    /// The first run's "Can it remember?": a note written to this companion's memory, recalled by
+    /// its words and deleted (wire::onboarding_proofs). Here, not through `RunTool`: a tool run
+    /// for an outside caller is incognito, so `remember` saves nothing through it.
+    ProveMemory {
+        nonce: String,
+        reply_tx: Sender<Result<String, String>>,
+    },
+    /// The first run's "Can it reach the desktop?": the companion's own `describe_app` of the
+    /// shell, as its chat turns call it. `RunTool` refuses the app tools to an outside caller.
+    DescribeDesktop {
+        reply_tx: Sender<String>,
+    },
     /// The newest memories, for the Memory screen before anything is searched.
     RecentMemories {
         limit: usize,
@@ -449,6 +461,24 @@ impl CompanionHandle {
         reply_rx
             .recv_timeout(timeout)
             .map_err(|_| "companion timed out".to_string())
+    }
+
+    /// The first run's memory proof, on the worker: `Ok` carries what Details shows.
+    pub fn prove_memory(&self, nonce: String, timeout: std::time::Duration) -> Result<String, String> {
+        let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+        self.cmd_tx
+            .send(CompanionCommand::ProveMemory { nonce, reply_tx })
+            .map_err(|_| "companion worker is not running".to_string())?;
+        reply_rx.recv_timeout(timeout).map_err(|_| "companion timed out".to_string())?
+    }
+
+    /// The companion's own description of the desktop, for the first run's desktop proof.
+    pub fn describe_desktop(&self, timeout: std::time::Duration) -> Result<String, String> {
+        let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+        self.cmd_tx
+            .send(CompanionCommand::DescribeDesktop { reply_tx })
+            .map_err(|_| "companion worker is not running".to_string())?;
+        reply_rx.recv_timeout(timeout).map_err(|_| "companion timed out".to_string())
     }
 
     /// Run one tool by name and get its result.
@@ -1032,6 +1062,11 @@ fn paused_while_private(cmd: &CompanionCommand, recipe_signals: &mut std::collec
             }
             true
         }
+        // Nothing is written to memory while Private mode is on, a check's note included.
+        CompanionCommand::ProveMemory { reply_tx, .. } => {
+            let _ = reply_tx.send(Err(SAID.to_string()));
+            true
+        }
         CompanionCommand::SendMessage { token_tx, model, .. } => {
             let _ = token_tx.send(format!("__REPLACE__{SAID}"));
             if let Some(tx) = model {
@@ -1606,6 +1641,17 @@ fn worker_loop(
                         let _ = reply_tx.send(vec![]);
                     }
                 }
+            }
+            Ok(CompanionCommand::ProveMemory { nonce, reply_tx }) => {
+                let proved = if companion.is_incognito() {
+                    Err("incognito is on, so nothing is written to its memory now".to_string())
+                } else {
+                    crate::wire::onboarding_proofs::prove_memory(&crate::wire::onboarding_proofs::Db(&companion.db), &nonce)
+                };
+                let _ = reply_tx.send(proved);
+            }
+            Ok(CompanionCommand::DescribeDesktop { reply_tx }) => {
+                let _ = reply_tx.send(companion.execute_tool_direct("describe_app", &serde_json::json!({ "app": "shell" })));
             }
             Ok(CompanionCommand::RunTool { name, args, reply_tx, job }) => {
                 tracing::info!(tool = %name, "Running tool for an outside caller");

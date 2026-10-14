@@ -21,11 +21,10 @@
 //! the new home in `first-run.json`) skips "Who should do the thinking?" and "What your minds
 //! share" at first boot. A provider merely present (the `--with-llm` image's own account) does not.
 //!
-//! Functions not built yet sit behind a small trait with a stub marked `STUB(#…)` that never
-//! reports a pass it did not see:
-//! - [`Proofs`], the memory and desktop proofs and the list of minds (#677,
-//!   feat/677-memory-and-pairing);
-//! - [`Lane`], browser sign-in and a downloadable local model (no branch owns them yet).
+//! The checks behind [`Proofs`] are real for the built-in companion (wire/onboarding_proofs.rs),
+//! and a check that cannot run is not shown at all. What is not built yet sits behind [`Lane`]
+//! (browser sign-in and a downloadable local model), whose stub, marked `STUB(#…)`, offers
+//! nothing it cannot do.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -34,15 +33,21 @@ use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 use yantrik_ml::{ProviderDescriptor, ProviderKind, KNOWN_PROVIDERS};
 
 use crate::app_context::AppContext;
+use crate::wire::onboarding_nearby::Found;
 use crate::wire::provider_catalogue::auth_type_for;
 use crate::wire::settings::{ProviderStore, ProviderStoreEntry};
 use crate::{App, FirstRunCheck, FirstRunMind, FirstRunModel, FirstRunProvider, TextScale};
 
 // ── The cards ──────────────────────────────────────────────────────────────────────────────
 
-/// The named cards, in the order shown. Everything else is one press away, under "Show every
-/// provider".
+/// The named accounts, in the order shown, after what already works for the person (a model found
+/// here or on the network, the one on this computer, the free one). Everything else is one press
+/// away, under "Show every provider".
 const FEATURED: [&str; 6] = ["anthropic", "openai", "gemini", "deepseek", "openrouter", "nvidia-nim"];
+
+/// The free choice for someone with no account: a free tier the gateway knows
+/// (`yantrik_ml::provider::pool::tiers::FREE_TIERS`), that does not train on what it is sent.
+const FREE: &str = "groq";
 
 /// The bundled model the ISO puts on the machine (deploy/yantrik-os/build-debian-iso.sh), served
 /// by llama-server on the loopback port below.
@@ -72,6 +77,8 @@ pub struct Card {
     pub key_placeholder: String,
     pub browser_sign_in: bool,
     pub key_help: bool,
+    /// "Recommended: …" with its reason, on the one card the screen leads with; else empty.
+    pub recommended: String,
 }
 
 /// The name on the card. Anthropic's models are known by their own name.
@@ -155,6 +162,7 @@ fn card(p: &ProviderDescriptor, lane: &dyn Lane) -> Card {
         key_placeholder: p.key_placeholder.into(),
         browser_sign_in: lane.browser_sign_in(p.id),
         key_help: key_page(p.id).is_some(),
+        recommended: String::new(),
     }
 }
 
@@ -173,17 +181,61 @@ pub fn this_computer_card(local: &LocalModel) -> Card {
         key_placeholder: String::new(),
         browser_sign_in: false,
         key_help: false,
+        recommended: String::new(),
     }
 }
 
-pub fn featured_cards(local: Option<&LocalModel>, lane: &dyn Lane) -> Vec<Card> {
-    let mut cards: Vec<Card> = FEATURED
-        .iter()
-        .filter_map(|id| ProviderDescriptor::by_id(id))
-        .map(|p| card(p, lane))
-        .collect();
+/// A model server found here or on the network: free, already running, nothing to sign up for.
+pub fn found_card(f: &Found) -> Card {
+    Card {
+        id: f.card_id(),
+        name: if f.on_this_computer { "Found on this computer".into() } else { "Found on your network".into() },
+        line: crate::wire::onboarding_nearby::found_line(f),
+        needs: "already running, needs no account".into(),
+        group: "nearby".into(),
+        key_placeholder: String::new(),
+        browser_sign_in: false,
+        key_help: false,
+        recommended: String::new(),
+    }
+}
+
+/// The free tier's card: its own sign-up, said as free, with its daily limit.
+fn free_card(lane: &dyn Lane) -> Option<Card> {
+    let tier = yantrik_ml::provider::pool::tiers::tier(FREE)?;
+    let p = ProviderDescriptor::by_id(FREE)?;
+    Some(Card {
+        line: "free, fast open models".into(),
+        needs: format!("needs a free {} account; {}", tier.name, tier.note.split(". ").next().unwrap_or(tier.note).trim_end_matches('.')),
+        group: "free".into(),
+        ..card(p, lane)
+    })
+}
+
+/// Why the card the screen leads with is the one to choose, from what is true of it.
+fn recommend(c: &Card) -> String {
+    match c.group.as_str() {
+        "nearby" => "Recommended: it works now, with nothing to sign up for or pay".into(),
+        "free" => match yantrik_ml::provider::pool::tiers::tier(FREE) {
+            Some(t) if !t.trains_on_prompts => "Recommended: free to start, and it does not train on what you send".into(),
+            _ => "Recommended: free to start".into(),
+        },
+        _ => String::new(),
+    }
+}
+
+/// The cards in the order a person with no account needs them: what was found running (here or
+/// on the network), the model on this computer, the free choice, then the accounts. One card is
+/// marked Recommended, with its reason: the first found, else the free one.
+pub fn featured_cards(found: &[Found], local: Option<&LocalModel>, lane: &dyn Lane) -> Vec<Card> {
+    let mut cards: Vec<Card> = found.iter().map(found_card).collect();
     if let Some(l) = local {
         cards.push(this_computer_card(l));
+    }
+    cards.extend(free_card(lane));
+    cards.extend(FEATURED.iter().filter_map(|id| ProviderDescriptor::by_id(id)).map(|p| card(p, lane)));
+    if let Some(c) = cards.iter_mut().find(|c| !recommend(c).is_empty()) {
+        c.recommended = recommend(c);
     }
     cards
 }
@@ -193,9 +245,12 @@ pub fn every_card(lane: &dyn Lane) -> Vec<Card> {
     KNOWN_PROVIDERS.iter().filter(|p| !p.id.is_empty()).map(|p| card(p, lane)).collect()
 }
 
-fn find_card(id: &str, local: Option<&LocalModel>, lane: &dyn Lane) -> Option<Card> {
+fn find_card(id: &str, found: &[Found], local: Option<&LocalModel>, lane: &dyn Lane) -> Option<Card> {
     if id == THIS_COMPUTER {
         return local.map(this_computer_card);
+    }
+    if id.starts_with(crate::wire::onboarding_nearby::CARD_PREFIX) {
+        return found.iter().find(|f| f.card_id() == id).map(found_card);
     }
     ProviderDescriptor::by_id(id).map(|p| card(p, lane))
 }
@@ -293,8 +348,8 @@ pub struct MindRows {
 }
 
 impl MindRows {
-    pub fn new(id: &str, name: &str) -> Self {
-        Self { id: id.into(), name: name.into(), checks: CheckKind::ALL.iter().map(|k| (*k, CheckState::NotChecked)).collect() }
+    pub fn new(id: &str, name: &str, kinds: &[CheckKind]) -> Self {
+        Self { id: id.into(), name: name.into(), checks: kinds.iter().map(|k| (*k, CheckState::NotChecked)).collect() }
     }
     fn done(&self) -> bool {
         self.checks.iter().all(|(_, s)| matches!(s, CheckState::Done(_)))
@@ -425,40 +480,55 @@ fn apply_sharing(sharing: Sharing) -> Result<(), String> {
     }
 }
 
-// ── What other branches provide ───────────────────────────────────────────────────────────
+// ── The checks, and what other branches provide ──────────────────────────────────────────
 
-/// The minds and their three proofs (#677: memory write-then-recall, an attach seen on the
-/// harness socket). The answer proof is ours: the mind is asked, through its own chat path.
+/// The minds and their proofs. The answer proof is ours: the mind is asked, through its own
+/// chat path. A mind lists only the checks that really run for it: a row that could only ever
+/// say "cannot check yet" is not drawn (13 Oct: two such rows read as a broken system).
 pub trait Proofs: Send + Sync {
     /// Every mind to check, `(id, name)`.
     fn minds(&self) -> Vec<(String, String)>;
+    /// The checks that run for `mind`, in the order shown.
+    fn checks(&self, mind: &str) -> Vec<CheckKind>;
     /// Write a temporary note to the mind's memory, read it back, delete it.
     fn remember(&self, mind: &str) -> Proof;
-    /// See the mind attached to the desktop's harness socket.
+    /// See the mind reach the desktop.
     fn desktop(&self, mind: &str) -> Proof;
 }
 
-/// STUB(#677): replace with the three-proofs function from feat/677-memory-and-pairing. It never
-/// reports a pass: until the proof exists, the row says it could not be checked, and why.
-pub struct PendingProofs;
+/// The built-in companion's three checks, all real (wire/onboarding_proofs.rs). The harness
+/// minds check themselves as they install (Hermes, the default mind, records its three proofs
+/// in `installed`; `crate::default_mind`), and the first run says what that install says.
+pub struct CompanionProofs;
 
-impl Proofs for PendingProofs {
+/// How long a proof on the companion's worker may take: it queues behind whatever the worker is
+/// doing, the "Can it answer?" turn included.
+const PROOF_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+impl Proofs for CompanionProofs {
     fn minds(&self) -> Vec<(String, String)> {
-        // The built-in companion is the one mind every install has; the harness minds come with
-        // #677's list.
         vec![("companion".into(), "Yantrik Companion".into())]
     }
+    fn checks(&self, mind: &str) -> Vec<CheckKind> {
+        if mind == "companion" { CheckKind::ALL.to_vec() } else { vec![CheckKind::Answer] }
+    }
     fn remember(&self, _mind: &str) -> Proof {
-        Proof::Attention {
-            reason: "this build cannot check memory yet".into(),
-            details: "memory proof not built in (waiting on #677: write a note, recall it, delete it)".into(),
+        let Some(bridge) = BRIDGE.get() else {
+            return Proof::Attention { reason: "Yantrik Companion is not running".into(), details: "no companion in this process".into() };
+        };
+        let nonce = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+        match bridge.handle().prove_memory(nonce, PROOF_TIMEOUT) {
+            Ok(details) => Proof::Passed { details },
+            Err(reason) => Proof::Attention { details: reason.clone(), reason },
         }
     }
     fn desktop(&self, _mind: &str) -> Proof {
-        Proof::Attention {
-            reason: "this build cannot check the desktop link yet".into(),
-            details: "pairing proof not built in (waiting on #677: an attach seen on the harness socket)".into(),
-        }
+        let Some(bridge) = BRIDGE.get() else {
+            return Proof::Attention { reason: "Yantrik Companion is not running".into(), details: "no companion in this process".into() };
+        };
+        let started = std::time::Instant::now();
+        let said = bridge.handle().describe_desktop(PROOF_TIMEOUT);
+        crate::wire::onboarding_proofs::desktop_proof(said, started.elapsed().as_millis())
     }
 }
 
@@ -539,6 +609,7 @@ fn to_ui(c: &Card) -> FirstRunProvider {
         key_placeholder: c.key_placeholder.clone().into(),
         browser_sign_in: c.browser_sign_in,
         key_help: c.key_help,
+        recommended: c.recommended.clone().into(),
     }
 }
 
@@ -663,11 +734,39 @@ fn make_the_pick(entry: &ProviderStoreEntry) -> Result<(), String> {
 struct State {
     rows: Vec<MindRows>,
     local: Option<LocalModel>,
+    /// Model servers found on this computer and, once the person asked, on the network.
+    found: Vec<Found>,
+}
+
+/// Show the cards again, in their order, after something was found.
+fn publish_cards(ui: &App, state: &Mutex<State>, lane: &dyn Lane) {
+    let st = lock(state);
+    ui.set_fr_featured(model_of(featured_cards(&st.found, st.local.as_ref(), lane).iter().map(to_ui).collect()));
+}
+
+/// Keep what was found, one entry per address.
+fn add_found(state: &Mutex<State>, more: Vec<Found>) {
+    let mut st = lock(state);
+    for f in more {
+        if !st.found.iter().any(|g| g.base_url == f.base_url) {
+            st.found.push(f);
+        }
+    }
+}
+
+/// What the network look says once it is done.
+pub fn nearby_words(result: &Result<Vec<Found>, String>) -> (&'static str, String) {
+    match result {
+        Ok(f) if f.is_empty() => ("none", "Nothing was found on your network. You can choose another below.".into()),
+        Ok(f) if f.len() == 1 => ("found", "Found one model server on your network. It is first in the list.".into()),
+        Ok(f) => ("found", format!("Found {} model servers on your network. They are first in the list.", f.len())),
+        Err(why) => ("none", format!("Could not look on your network: {why}.")),
+    }
 }
 
 pub fn wire(ui: &App, ctx: &AppContext) {
     let _ = BRIDGE.set(ctx.bridge.clone());
-    let proofs: Arc<dyn Proofs> = Arc::new(PendingProofs);
+    let proofs: Arc<dyn Proofs> = Arc::new(CompanionProofs);
     let lane: Arc<dyn Lane> = Arc::new(PendingLane);
     let saved = saved_path();
 
@@ -679,11 +778,29 @@ pub fn wire(ui: &App, ctx: &AppContext) {
 
     let local = local_model_in(Path::new(LOCAL_MODEL_DIR)).or_else(|| lane.downloadable());
     let state = Arc::new(Mutex::new(State {
-        rows: proofs.minds().iter().map(|(id, n)| MindRows::new(id, n)).collect(),
+        rows: mind_rows(proofs.as_ref()),
         local: local.clone(),
+        found: Vec::new(),
     }));
 
-    ui.set_fr_featured(model_of(featured_cards(local.as_ref(), lane.as_ref()).iter().map(to_ui).collect()));
+    publish_cards(ui, &state, lane.as_ref());
+    // A model already serving on this computer is looked for at once: it is this machine, and
+    // nothing leaves it. The network is looked at only when the person asks (fr_look_nearby).
+    {
+        let (weak, state, lane) = (ui.as_weak(), state.clone(), lane.clone());
+        std::thread::spawn(move || {
+            let here = crate::wire::onboarding_nearby::on_this_computer();
+            if here.is_empty() {
+                return;
+            }
+            add_found(&state, here);
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = weak.upgrade() {
+                    publish_cards(&ui, &state, lane.as_ref());
+                }
+            });
+        });
+    }
     ui.set_fr_every_provider(model_of(every_card(lane.as_ref()).iter().map(to_ui).collect()));
     ui.set_fr_shared_items(model_of(SHARED_ITEMS.iter().map(|s| SharedString::from(*s)).collect()));
     let lane_listed = !crate::ai_accounts::onboarding::private_lane_choices().is_empty();
@@ -741,8 +858,11 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         let state = state.clone();
         move |id| {
             let Some(ui) = weak.upgrade() else { return };
-            let local = lock(&state).local.clone();
-            let Some(c) = find_card(&id, local.as_ref(), lane.as_ref()) else { return };
+            let (local, found) = {
+                let st = lock(&state);
+                (st.local.clone(), st.found.clone())
+            };
+            let Some(c) = find_card(&id, &found, local.as_ref(), lane.as_ref()) else { return };
             ui.set_fr_chosen_id(c.id.clone().into());
             ui.set_fr_chosen_name(c.name.clone().into());
             ui.set_fr_chosen_key_placeholder(c.key_placeholder.clone().into());
@@ -765,6 +885,22 @@ pub fn wire(ui: &App, ctx: &AppContext) {
             }
             let mode = if c.id == THIS_COMPUTER {
                 "this-computer"
+            } else if let Some(f) = found.iter().find(|f| f.card_id() == c.id) {
+                // Already running, no key: its models are listed at once for the person to pick.
+                // Named by its address, so "Connected to 192.168.1.5:8080" says where words go.
+                ui.set_fr_chosen_name(f.host.clone().into());
+                connect(&ui, ProviderStoreEntry {
+                    id: format!("{}-nearby-onboarding", f.runtime),
+                    name: f.host.clone(),
+                    provider_type: f.runtime.into(),
+                    base_url: f.base_url.clone(),
+                    api_key: None,
+                    auth_type: "none".into(),
+                    is_primary: true,
+                    is_fallback: false,
+                    model: String::new(),
+                });
+                "local"
             } else if c.browser_sign_in {
                 "browser"
             } else if c.key_placeholder.is_empty() {
@@ -785,6 +921,34 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                 "key"
             };
             ui.set_fr_connect_mode(mode.into());
+        }
+    });
+
+    // "Look on your network": the person's say-so for the network look, which says when it began
+    // and what it found.
+    ui.on_fr_look_nearby({
+        let (weak, state, lane) = (ui.as_weak(), state.clone(), lane.clone());
+        move || {
+            let Some(ui) = weak.upgrade() else { return };
+            if ui.get_fr_nearby_status() == "looking" {
+                return;
+            }
+            ui.set_fr_nearby_status("looking".into());
+            ui.set_fr_nearby_words(format!("Looking on your network (started {})", clock(chrono::Local::now())).into());
+            let (weak, state, lane) = (weak.clone(), state.clone(), lane.clone());
+            std::thread::spawn(move || {
+                let result = crate::wire::onboarding_nearby::on_the_network();
+                if let Ok(f) = &result {
+                    add_found(&state, f.clone());
+                }
+                let (status, words) = nearby_words(&result);
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(ui) = weak.upgrade() else { return };
+                    publish_cards(&ui, &state, lane.as_ref());
+                    ui.set_fr_nearby_status(status.into());
+                    ui.set_fr_nearby_words(words.into());
+                });
+            });
         }
     });
 
@@ -981,11 +1145,14 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         move || {
             let Some(ui) = weak.upgrade() else { return };
             crate::onboarding::write_marker();
-            // The first success happens in the chat beside the desktop.
+            // The first success happens in the chat beside the desktop, opened in chat mode: its
+            // first-run state (three first tasks, Type · Talk) and its composer, which takes the
+            // cursor (intent_lens.slint, the chat block's `focus-owed`). Opened the way every
+            // other opener does, so it comes in front and its suggestions are built.
             ui.set_fr_chat(1);
             ui.set_fr_chat_outcome("".into());
             ui.set_fr_chat_failure("".into());
-            ui.set_lens_open(true);
+            hand_over_to_chat(&ui);
             tracing::info!("first run: done, chat opened for the first success");
         }
     });
@@ -1009,6 +1176,14 @@ pub fn wire(ui: &App, ctx: &AppContext) {
             }
         }
     });
+}
+
+/// The first run's last step: the chat beside the desktop, in chat mode, open. In search mode it
+/// showed "Type to search, ask, or command" and its first-run state never drew (13 Oct).
+pub fn hand_over_to_chat(ui: &App) {
+    ui.set_lens_chat_mode(true);
+    ui.set_lens_open(true);
+    ui.invoke_open_lens();
 }
 
 /// Whether Welcome asks the person's name: not when the installer made the account (it asked
@@ -1104,6 +1279,9 @@ fn prove_and_pick(ui: &App) {
         let model = entry.model.clone();
         let _ = slint::invoke_from_event_loop(move || {
             let Some(ui) = weak.upgrade() else { return };
+            if result.is_ok() {
+                show_new_backend(&ui);
+            }
             match (result, picked) {
                 (Ok(()), Ok(())) => {
                     ui.set_fr_connect_status("connected".into());
@@ -1123,6 +1301,16 @@ fn prove_and_pick(ui: &App) {
             }
         });
     });
+}
+
+/// The companion was just moved to the account proven here: everything that says what it runs on
+/// (the chat composer's line, the AI page, the picker) reads it again from the one place it is
+/// resolved (`ai_status::refresh`). Without this the composer said "Where message text goes is
+/// not known" beside a companion already answering from the new endpoint (13 Oct).
+fn show_new_backend(ui: &App) {
+    let store = ProviderStore::load();
+    crate::wire::settings::push_providers_to_ui(ui, &store);
+    crate::wire::ai_status::refresh(ui, &store);
 }
 
 /// The model step is done and the gateway has a pick: set the default mind up in the background,
@@ -1214,6 +1402,11 @@ pub fn first_chat_ended(weak: &slint::Weak<App>, outcome: Result<(), String>) {
     });
 }
 
+/// One row per mind, with only the checks that run for it.
+fn mind_rows(proofs: &dyn Proofs) -> Vec<MindRows> {
+    proofs.minds().iter().map(|(id, n)| MindRows::new(id, n, &proofs.checks(id))).collect()
+}
+
 fn push_rows(ui: &App, state: &Mutex<State>) {
     let st = lock(state);
     ui.set_fr_minds(model_of(st.rows.iter().map(MindRows::to_ui).collect()));
@@ -1226,16 +1419,16 @@ fn push_rows(ui: &App, state: &Mutex<State>) {
 fn start_checks(ui: &App, state: Arc<Mutex<State>>, proofs: Arc<dyn Proofs>) {
     {
         let mut st = lock(&state);
-        st.rows = proofs.minds().iter().map(|(id, n)| MindRows::new(id, n)).collect();
+        st.rows = mind_rows(proofs.as_ref());
     }
     ui.set_fr_checks_running(true);
     ui.set_fr_checks_done(false);
     push_rows(ui, &state);
     let weak = ui.as_weak();
     std::thread::spawn(move || {
-        let minds: Vec<String> = lock(&state).rows.iter().map(|r| r.id.clone()).collect();
-        for mind in minds {
-            for kind in CheckKind::ALL {
+        let minds: Vec<(String, Vec<CheckKind>)> = lock(&state).rows.iter().map(|r| (r.id.clone(), r.checks.iter().map(|(k, _)| *k).collect())).collect();
+        for (mind, kinds) in minds {
+            for kind in kinds {
                 set_row(&weak, &state, &mind, kind, CheckState::Checking(clock(chrono::Local::now())));
                 let proof = match kind {
                     CheckKind::Answer => ask_the_mind(&mind),
@@ -1343,8 +1536,8 @@ mod tests {
 
     #[test]
     fn named_cards_say_one_plain_line_and_an_honest_need() {
-        let cards = featured_cards(None, &PendingLane);
-        let claude = &cards[0];
+        let cards = featured_cards(&[], None, &PendingLane);
+        let claude = cards.iter().find(|c| c.id == "anthropic").unwrap();
         assert_eq!(claude.name, "Claude");
         assert_eq!(claude.line, "online, careful with words");
         assert_eq!(claude.needs, "needs an Anthropic account");
@@ -1353,11 +1546,74 @@ mod tests {
         assert!(every_card(&PendingLane).iter().find(|c| c.id == "ollama").unwrap().needs.contains("running"));
     }
 
+    fn found(host: &str, models: &[&str]) -> Found {
+        Found {
+            base_url: format!("http://{host}/v1"),
+            host: host.into(),
+            runtime: "llamacpp",
+            models: models.iter().map(|m| m.to_string()).collect(),
+            on_this_computer: false,
+        }
+    }
+
+    /// 13 Oct: the six cards a person with no account saw were all paid accounts. What works for
+    /// them leads: a model found running, then this computer's, then the free one, then accounts.
+    #[test]
+    fn the_cards_lead_with_what_works_without_an_account() {
+        let here = LocalModel { bytes: 2_740_000_000, present: true };
+        let cards = featured_cards(&[found("192.168.1.5:8080", &["qwen3.8-flash"])], Some(&here), &PendingLane);
+        let ids: Vec<&str> = cards.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["nearby:http://192.168.1.5:8080/v1", THIS_COMPUTER, FREE, "anthropic", "openai", "gemini", "deepseek", "openrouter", "nvidia-nim"]
+        );
+        assert_eq!((cards[0].name.as_str(), cards[0].line.as_str()), ("Found on your network", "qwen3.8-flash on 192.168.1.5:8080"));
+        assert!(cards[2].needs.starts_with("needs a free Groq account"), "{}", cards[2].needs);
+        let paid = cards.iter().filter(|c| c.group == "cloud" || c.group == "aggregator").count();
+        assert_eq!(paid, FEATURED.len(), "the accounts are still all there, after");
+    }
+
+    #[test]
+    fn exactly_one_card_is_recommended_with_its_reason() {
+        let with_found = featured_cards(&[found("10.0.0.7:11434", &["a", "b"])], None, &PendingLane);
+        let marked: Vec<&Card> = with_found.iter().filter(|c| !c.recommended.is_empty()).collect();
+        assert_eq!(marked.len(), 1);
+        assert_eq!(marked[0].group, "nearby", "a model already running is the one to choose");
+        assert!(marked[0].recommended.starts_with("Recommended: ") && marked[0].recommended.contains("nothing to sign up for"));
+        // Nothing found: the free one, for its reason.
+        let without = featured_cards(&[], None, &PendingLane);
+        let marked: Vec<&Card> = without.iter().filter(|c| !c.recommended.is_empty()).collect();
+        assert_eq!((marked.len(), marked[0].id.as_str()), (1, FREE));
+        assert!(marked[0].recommended.contains("free"), "{}", marked[0].recommended);
+        assert_eq!(without[0].id, FREE, "and it leads");
+    }
+
+    #[test]
+    fn a_found_card_is_found_again_by_its_id() {
+        let f = [found("192.168.1.5:8080", &["m"])];
+        let c = find_card(&f[0].card_id(), &f, None, &PendingLane).unwrap();
+        assert_eq!(c.name, "Found on your network");
+        assert!(find_card("nearby:http://elsewhere/v1", &f, None, &PendingLane).is_none());
+        let here = Found { on_this_computer: true, ..f[0].clone() };
+        assert_eq!(found_card(&here).name, "Found on this computer");
+    }
+
+    #[test]
+    fn the_network_look_says_what_it_found_or_why_not() {
+        assert_eq!(nearby_words(&Ok(vec![])).0, "none");
+        let (status, words) = nearby_words(&Ok(vec![found("a:1", &["m"])]));
+        assert_eq!(status, "found");
+        assert!(words.contains("first in the list"), "{words}");
+        assert!(nearby_words(&Ok(vec![found("a:1", &["m"]), found("b:2", &["n"])])).1.starts_with("Found 2"));
+        assert!(nearby_words(&Err("this computer is not on a network".into())).1.contains("not on a network"));
+    }
+
     #[test]
     fn this_computer_is_offered_only_when_a_model_is_here_or_downloadable_with_its_size() {
-        assert!(!featured_cards(None, &PendingLane).iter().any(|c| c.id == THIS_COMPUTER));
+        assert!(!featured_cards(&[], None, &PendingLane).iter().any(|c| c.id == THIS_COMPUTER));
         let here = LocalModel { bytes: 2_740_000_000, present: true };
-        let c = featured_cards(Some(&here), &PendingLane).pop().unwrap();
+        let cards = featured_cards(&[], Some(&here), &PendingLane);
+        let c = cards.iter().find(|c| c.id == THIS_COMPUTER).unwrap();
         assert_eq!((c.name.as_str(), c.line.as_str(), c.needs.as_str()), ("On this computer", "private, slower", "already here (2.7 GB)"));
         let fetch = Signs.downloadable().unwrap();
         assert_eq!(this_computer_card(&fetch).needs, "downloads 2.5 GB");
@@ -1397,7 +1653,7 @@ mod tests {
 
     #[test]
     fn a_row_goes_not_checked_then_checking_with_its_start_then_passed_or_the_reason() {
-        let mut m = MindRows::new("companion", "Yantrik Companion");
+        let mut m = MindRows::new("companion", "Yantrik Companion", &CheckKind::ALL);
         assert_eq!(m.checks[0].1.words(), "Not checked yet");
         assert_eq!(m.words(), "Not checked yet");
         m.set(CheckKind::Answer, CheckState::Checking("2:16".into()));
@@ -1438,14 +1694,24 @@ mod tests {
         assert_eq!(clock(t), "9:05");
     }
 
+    /// 13 Oct: "Needs attention: this build cannot check memory yet" on a fresh VM read as a
+    /// broken system. Every row drawn is a check that runs; none is a stub.
     #[test]
-    fn the_pending_proofs_never_claim_a_pass() {
-        let p = PendingProofs;
-        assert!(!p.minds().is_empty());
-        for (id, _) in p.minds() {
-            assert!(matches!(p.remember(&id), Proof::Attention { .. }));
-            assert!(matches!(p.desktop(&id), Proof::Attention { .. }));
+    fn no_check_row_is_a_stub() {
+        let p = CompanionProofs;
+        assert_eq!(p.checks("companion"), CheckKind::ALL.to_vec(), "the built-in companion's three checks are real");
+        assert_eq!(p.checks("hermes"), vec![CheckKind::Answer], "a mind without a real proof shows only the check that runs");
+        let rows = mind_rows(&p);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].checks.len(), 3);
+        let src = include_str!("onboarding.rs");
+        let body = src.split("#[cfg(test)]").next().unwrap();
+        for stub in ["cannot check memory yet", "cannot check the desktop link yet", "PendingProofs"] {
+            assert!(!body.contains(stub), "the first run still carries {stub}");
         }
+        // With no companion in this process, the checks say so; they never pass unseen.
+        assert!(matches!(p.remember("companion"), Proof::Attention { .. }));
+        assert!(matches!(p.desktop("companion"), Proof::Attention { .. }));
     }
 
     #[test]

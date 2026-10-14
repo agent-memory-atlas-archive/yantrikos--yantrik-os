@@ -1,12 +1,17 @@
 // The first run, minute by minute (design/experience-final-2026-10-10.md). Five screens:
 //
-//   1  Welcome            "Welcome to Yantrik. Make yourself at home. Your files are safe."
-//                         (and, on a first boot the installer did not set up, the person's name)
-//   2  Who thinks         named cards with honest needs; the full provider list behind them;
-//                         Connect account (browser sign-in where the provider has it, else a key
-//                         with "Show me where to find it"); then the models the account lists,
-//                         none chosen, for the person to pick; Advanced for an endpoint + model
-//                         id, and for a provider whose address has a part to fill in
+//   1  Welcome            the desktop's wallpaper, centred: "Welcome to Yantrik.", one line on
+//                         what it is for, and what the next few minutes do (and, on a first boot
+//                         the installer did not set up, the person's name)
+//   2  Who thinks         what works without an account first (a model found running here or on
+//                         the network, this computer's, the free one), one of them marked
+//                         Recommended with its reason, then the accounts, each with an honest
+//                         need; the full provider list behind them; Connect account (browser
+//                         sign-in where the provider has it, else a key with "Show me where to
+//                         find it"); then the models the account lists, none chosen, for the
+//                         person to pick; Advanced for an endpoint (its models listed for the
+//                         person to pick, or an id typed), and for a provider whose address has
+//                         a part to fill in
 //   3  What minds share   the pre-checked sentence naming the provider, "What's shared?", and
 //                         "Keep personal things on this computer instead" (Share / Private lane / Off)
 //   4  Getting ready      three factual rows per mind, each Not checked yet → Checking (started
@@ -45,6 +50,9 @@ export struct FirstRunProvider {
     browser-sign-in: bool,
     // There is a page that shows where the key is.
     key-help: bool,
+    // "Recommended: it works now, with nothing to sign up for or pay" on the one card
+    // the screen leads with; empty on the rest.
+    recommended: string,
 }
 
 // One model the connected account lists, for the person to choose. Nothing is chosen for them.
@@ -245,7 +253,7 @@ component FrProviderCard inherits Rectangle {
     border-width: fs.has-focus ? Theme.focus-ring-width : root.selected ? 2px : 1px;
     border-color: fs.has-focus ? Theme.focus-ring : root.selected ? Theme.accent : Theme.border-default;
     accessible-role: button;
-    accessible-label: root.p.name + ". " + root.p.line + ". " + root.p.needs;
+    accessible-label: root.p.name + ". " + root.p.line + ". " + root.p.needs + (root.p.recommended == "" ? "" : ". " + root.p.recommended);
     accessible-checked: root.selected;
     accessible-action-default => { root.chosen(); }
 
@@ -282,6 +290,13 @@ component FrProviderCard inherits Rectangle {
             text: root.p.needs == "" ? root.p.line : root.p.line + " · " + root.p.needs;
             color: Theme.text-secondary;
             font-size: Theme.fs-title-2;
+            wrap: word-wrap;
+        }
+        if root.p.recommended != "" : Text {
+            text: root.p.recommended;
+            color: Theme.accent;
+            font-size: Theme.fs-body;
+            font-weight: 600;
             wrap: word-wrap;
         }
     }
@@ -425,6 +440,10 @@ export component FirstRunScreen inherits Rectangle {
     in-out property <string> custom-model: "";
     in-out property <string> custom-key: "";
     in-out property <bool> show-every: false;
+    // The look on the network for a model already running, with the person's say-so: "",
+    // "looking", "found", "none", and the words that say when it began and what it found.
+    in property <string> nearby-status: "";
+    in property <string> nearby-words: "";
     // "", "checking", "choose-model", "connected", "attention", "pick-failed"
     in property <string> connect-status: "";
     // The models the connected account lists, and the one the person chose (none until they do).
@@ -460,6 +479,7 @@ export component FirstRunScreen inherits Rectangle {
     callback name-given(string);
     callback read-aloud(string);
     callback choose-provider(string);
+    callback look-nearby();
     callback sign-in-browser(string);
     callback show-key-help(string);
     callback submit-key(string, string);
@@ -477,15 +497,26 @@ export component FirstRunScreen inherits Rectangle {
 
     // What Read this to me says on each screen: the words on it, in reading order.
     property <string> spoken:
-        root.step == 1 ? "Welcome to Yantrik. Make yourself at home. Your files are safe. Buttons: Make text bigger. Read this to me. "
+        root.step == 1 ? "Welcome to Yantrik. " + root.welcome-line + " " + root.welcome-next + " Buttons: Make text bigger. Read this to me. "
             + (root.ask-name ? "What should your minds call you? You can leave this empty. " : "") + "Get started."
-      : root.step == 2 ? "Who should do the thinking? Choose one. " + (root.chosen-name == "" ? "" : root.chosen-name + " is chosen. ") + "Then connect its account."
+      : root.step == 2 ? "Who should do the thinking? Choose one. "
+            + (root.featured.length > 0 && root.featured[0].recommended != "" ? "First: " + root.featured[0].name + ", " + root.featured[0].line + ". " + root.featured[0].recommended + ". " : "")
+            + (root.chosen-name == "" ? "" : root.chosen-name + " is chosen. ") + "Then connect it."
       : root.step == 3 ? root.share-sentence + " Or keep personal things on this computer instead."
-      : root.step == 4 ? "Getting your minds ready. Each mind is checked three ways: can it answer, can it remember, can it reach the desktop."
-      : "Your minds. " + root.minds-words;
+      : root.step == 4 ? "Getting your minds ready. Yantrik Companion is checked three ways: can it answer, can it remember, can it reach the desktop. "
+            + root.default-mind-words
+      : "Your minds. " + root.minds-words + " " + root.default-mind-words;
+    // What Yantrik is for, and what the next few minutes do: true on a machine minutes old.
+    property <string> welcome-line: "A desktop where minds work beside you, and you decide what they may do.";
+    property <string> welcome-next: root.installer-chose
+        ? "Next, Yantrik checks that the thinking you chose in the installer works."
+        : "Setting up takes a few minutes: choose who does the thinking, and Yantrik checks that it works.";
     property <string> minds-words: root.minds.length == 0 ? "No mind is set up yet." : root.minds[0].name + ": " + root.minds[0].words + ".";
     property <string> share-sentence: "Your minds will send what they remember about you, and where you are, to "
         + (root.chosen-name == "" ? "your provider" : root.chosen-name) + " when they ask it something.";
+
+    // Read this to me, as its button does: for the shell's own voice key and for the tests.
+    public function read-me() { root.read-aloud(root.spoken); }
 
     function next-from-welcome() {
         if root.ask-name && root.person-name != "" { root.name-given(root.person-name); }
@@ -519,6 +550,19 @@ export component FirstRunScreen inherits Rectangle {
     // A runtime the person hosts lists its models before anything focusable shows, and the card
     // that had the focus is gone: the screen holds it, so Escape still goes back.
     changed connect-mode => { if root.connect-mode == "local" { keys.focus(); } }
+
+    // The welcome sits on the desktop's own wallpaper (desktop.slint's default, the lake), as the
+    // installer and the desktop are drawn: the first screen of the installed machine is not a large
+    // empty dark one (13 Oct). Under a scrim, so the words read on any part of the photograph.
+    if root.step == 1 : Image {
+        width: 100%; height: 100%;
+        source: @image-url("wallpapers/lake.jpg");
+        image-fit: cover;
+    }
+    if root.step == 1 : Rectangle {
+        width: 100%; height: 100%;
+        background: @linear-gradient(180deg, Theme.bg-deep.transparentize(70%) 0%, Theme.bg-deep.transparentize(35%) 100%);
+    }
 
     keys := FocusScope {
         x: 0; y: 0;
@@ -566,51 +610,72 @@ export component FirstRunScreen inherits Rectangle {
                 spacing: 16px;
 
                 // ── 1. Welcome ──────────────────────────────────────────────────────
+                // Centred on the wallpaper, in a panel of the desktop's glass, as the installer
+                // centres its own welcome.
                 if root.step == 1 : VerticalLayout {
-                    spacing: 20px;
-                    padding-top: max(0px, (root.height - 420px * root.s) / 2);
-                    Text {
-                        text: "Welcome to Yantrik.";
-                        color: Theme.text-primary;
-                        font-size: Theme.fs-hero;
-                        font-weight: 600;
-                        wrap: word-wrap;
-                    }
-                    Text {
-                        text: "Make yourself at home. Your files are safe.";
-                        color: Theme.text-secondary;
-                        font-size: Theme.fs-display;
-                        wrap: word-wrap;
-                    }
-                    HorizontalLayout {
-                        spacing: 12px;
-                        alignment: start;
-                        bigger := FrButton {
-                            label: root.s >= 1.5 ? "Make text smaller" : "Make text bigger";
-                            init => { self.focus-me(); }
-                            clicked => {
-                                TextScale.factor = root.s >= 1.5 ? 1.0 : root.s + 0.25;
-                                root.text-scale-changed(TextScale.factor);
+                    padding-top: max(0px, (root.height - welcome.preferred-height - 48px) / 2);
+                    welcome := Rectangle {
+                        height: welcome-body.preferred-height;
+                        border-radius: Theme.r-xl;
+                        background: Theme.glass-panel;
+                        border-width: 1px;
+                        border-color: Theme.glass-border;
+                        welcome-body := VerticalLayout {
+                            spacing: 20px;
+                            padding: 40px;
+                            Text {
+                                text: "Welcome to Yantrik.";
+                                color: Theme.text-primary;
+                                font-size: Theme.fs-hero;
+                                font-weight: 600;
+                                horizontal-alignment: center;
+                                wrap: word-wrap;
                             }
-                        }
-                        FrButton {
-                            label: "Read this to me";
-                            clicked => { root.read-aloud(root.spoken); }
-                        }
-                    }
-                    if root.ask-name : FrField {
-                        label: "What should your minds call you?";
-                        placeholder: "Your name. You can leave this empty.";
-                        value <=> root.person-name;
-                        accepted => { root.next-from-welcome(); }
-                    }
-                    HorizontalLayout {
-                        alignment: start;
-                        padding-top: 12px;
-                        FrButton {
-                            primary: true;
-                            label: "Get started";
-                            clicked => { root.next-from-welcome(); }
+                            Text {
+                                text: root.welcome-line;
+                                color: Theme.text-primary;
+                                font-size: Theme.fs-display;
+                                horizontal-alignment: center;
+                                wrap: word-wrap;
+                            }
+                            Text {
+                                text: root.welcome-next;
+                                color: Theme.text-secondary;
+                                font-size: Theme.fs-title-2;
+                                horizontal-alignment: center;
+                                wrap: word-wrap;
+                            }
+                            HorizontalLayout {
+                                spacing: 12px;
+                                alignment: center;
+                                bigger := FrButton {
+                                    label: root.s >= 1.5 ? "Make text smaller" : "Make text bigger";
+                                    init => { self.focus-me(); }
+                                    clicked => {
+                                        TextScale.factor = root.s >= 1.5 ? 1.0 : root.s + 0.25;
+                                        root.text-scale-changed(TextScale.factor);
+                                    }
+                                }
+                                FrButton {
+                                    label: "Read this to me";
+                                    clicked => { root.read-aloud(root.spoken); }
+                                }
+                            }
+                            if root.ask-name : FrField {
+                                label: "What should your minds call you?";
+                                placeholder: "Your name. You can leave this empty.";
+                                value <=> root.person-name;
+                                accepted => { root.next-from-welcome(); }
+                            }
+                            HorizontalLayout {
+                                alignment: center;
+                                padding-top: 12px;
+                                FrButton {
+                                    primary: true;
+                                    label: "Get started";
+                                    clicked => { root.next-from-welcome(); }
+                                }
+                            }
                         }
                     }
                 }
@@ -629,6 +694,34 @@ export component FirstRunScreen inherits Rectangle {
                         text: "Choose one. You can add others later.";
                         color: Theme.text-secondary;
                         font-size: Theme.fs-title-2;
+                        wrap: word-wrap;
+                    }
+                    // A model already running on the network is looked for only when the person
+                    // says so: the look tries two ports on each address of this network, briefly.
+                    // Above the cards, because what it finds is put first among them.
+                    if root.connect-mode == "" && root.nearby-status != "found" : VerticalLayout {
+                        spacing: 4px;
+                        HorizontalLayout {
+                            alignment: start;
+                            FrButton {
+                                link: true;
+                                label: "Look on your network for a model already running";
+                                enabled: root.nearby-status != "looking";
+                                clicked => { root.look-nearby(); }
+                            }
+                        }
+                        Text {
+                            text: root.nearby-words != "" ? root.nearby-words
+                                : "Asks the other computers on your network, on Ollama's and llama.cpp's usual ports, for a few seconds.";
+                            color: Theme.text-secondary;
+                            font-size: Theme.fs-body;
+                            wrap: word-wrap;
+                        }
+                    }
+                    if root.connect-mode == "" && root.nearby-status == "found" : Text {
+                        text: root.nearby-words;
+                        color: Theme.text-secondary;
+                        font-size: Theme.fs-body;
                         wrap: word-wrap;
                     }
                     // Once a card is chosen, the list steps aside for connecting it, so the key field
@@ -767,15 +860,22 @@ export component FirstRunScreen inherits Rectangle {
                             font-size: Theme.fs-title-2;
                             wrap: word-wrap;
                         }
+                        // Enter on the address asks it for its models, and they are listed below for
+                        // the person to pick, as an account's are; an id can still be typed.
                         FrField {
                             label: root.chosen-id == "custom" ? "Endpoint (OpenAI-compatible)" : "Address";
                             placeholder: "https://example.com/v1";
                             value <=> root.custom-url;
                             init => { self.focus-me(); }
+                            accepted => {
+                                if root.custom-url != "" && root.connect-status != "checking" {
+                                    root.submit-custom(root.custom-url, "", root.custom-key);
+                                }
+                            }
                         }
                         FrField {
-                            label: "Model id";
-                            placeholder: "the model's exact id";
+                            label: "Model (optional)";
+                            placeholder: "leave empty to choose from the models it lists";
                             value <=> root.custom-model;
                         }
                         FrField {
@@ -788,8 +888,8 @@ export component FirstRunScreen inherits Rectangle {
                             alignment: start;
                             FrButton {
                                 primary: true;
-                                label: "Connect";
-                                enabled: root.custom-url != "" && root.custom-model != "" && root.connect-status != "checking";
+                                label: root.custom-model == "" ? "Connect and list its models" : "Connect";
+                                enabled: root.custom-url != "" && root.connect-status != "checking";
                                 clicked => { root.submit-custom(root.custom-url, root.custom-model, root.custom-key); }
                             }
                         }
@@ -819,7 +919,8 @@ export component FirstRunScreen inherits Rectangle {
                             wrap: word-wrap;
                         }
                         Text {
-                            text: "These are the models your " + root.chosen-name + " account lists. You can change this later in Settings → AI accounts.";
+                            text: (root.connect-mode == "advanced" || root.connect-mode == "local" ? "These are the models " + root.chosen-name + " lists." : "These are the models your " + root.chosen-name + " account lists.")
+                                + " You can change this later in Settings → AI accounts.";
                             color: Theme.text-secondary;
                             font-size: Theme.fs-title-2;
                             wrap: word-wrap;

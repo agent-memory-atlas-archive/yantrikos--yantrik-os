@@ -1375,6 +1375,10 @@ export component App inherits Window {
     in-out property <string> fr-custom-model: "";
     in-out property <string> fr-custom-key: "";
     in-out property <bool> fr-show-every: false;
+    // The look on the network for a model already running: "", "looking", "found", "none".
+    in property <string> fr-nearby-status: "";
+    in property <string> fr-nearby-words: "";
+    callback fr-look-nearby();
     in property <string> fr-connect-status: "";
     in property <string> fr-connect-words: "";
     in property <[FirstRunModel]> fr-models: [];
@@ -1595,6 +1599,9 @@ export component App inherits Window {
             custom-model <=> root.fr-custom-model;
             custom-key <=> root.fr-custom-key;
             show-every <=> root.fr-show-every;
+            nearby-status: root.fr-nearby-status;
+            nearby-words: root.fr-nearby-words;
+            look-nearby => { root.fr-look-nearby(); }
             connect-status: root.fr-connect-status;
             connect-words: root.fr-connect-words;
             models: root.fr-models;

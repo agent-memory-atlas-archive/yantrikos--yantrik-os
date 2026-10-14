@@ -113,10 +113,14 @@ export component ChatHeader inherits Rectangle {
 // in the composer and stops: nothing is sent until the person sends it.
 export component ChatEmpty inherits Rectangle {
     in property <string> mind-name;
-    // The first run's first success (design/experience-final-2026-10-10.md, 3:45): one
-    // question, one suggestion to tap, and Type · Talk, in place of the three starters.
+    // The first run's first success: three first tasks that do something real and visible on this
+    // desktop, each sent with one press, and Type · Talk. The cursor is in the composer, so typing
+    // works at once (13 Oct: the hand-over ended on a chat that took no keys until clicked). The
+    // same three are the Lens's suggestions on a machine with no history (lens.rs, FIRST_TASKS).
     in property <bool> first-run: false;
     callback starter(string);
+    // A first task, pressed: sent as it is.
+    callback task(string);
     callback type-chosen();
     callback talk-chosen();
 
@@ -133,27 +137,36 @@ export component ChatEmpty inherits Rectangle {
             font-weight: 600;
             wrap: word-wrap;
         }
-        suggestion := Rectangle {
-            height: sug-text.preferred-height + 20px;
+        Text {
+            text: "Type below, or press one of these to see it work.";
+            color: Theme.chat-text-2;
+            font-size: Theme.fs-body;
+            wrap: word-wrap;
+        }
+        for first-task in [
+            "Make a note called Groceries with milk, eggs and bread",
+            "What's on my calendar this week?",
+            "Open Files and show me what's in Documents",
+        ] : Rectangle {
+            height: task-text.preferred-height + 20px;
             border-radius: Theme.r-md;
-            background: sug-ta.has-hover ? Theme.hover-fill : transparent;
-            border-width: sug-fs.has-focus ? Theme.focus-ring-width : 1px;
-            border-color: sug-fs.has-focus ? Theme.focus-ring : Theme.chat-border;
+            background: task-ta.has-hover ? Theme.hover-fill : transparent;
+            border-width: task-fs.has-focus ? Theme.focus-ring-width : 1px;
+            border-color: task-fs.has-focus ? Theme.focus-ring : Theme.chat-border;
             accessible-role: button;
-            accessible-label: sug-text.text;
-            accessible-action-default => { root.starter(sug-text.text); }
-            sug-fs := FocusScope {
-                init => { self.focus(); }
+            accessible-label: first-task;
+            accessible-action-default => { root.task(first-task); }
+            task-fs := FocusScope {
                 key-pressed(event) => {
-                    if (event.text == "\n" || event.text == " ") { root.starter(sug-text.text); return accept; }
+                    if (event.text == "\n" || event.text == " ") { if !event.repeat { root.task(first-task); } return accept; }
                     reject
                 }
             }
-            sug-ta := TouchArea { mouse-cursor: pointer; clicked => { root.starter(sug-text.text); } }
-            sug-text := Text {
+            task-ta := TouchArea { mouse-cursor: pointer; clicked => { root.task(first-task); } }
+            task-text := Text {
                 x: Theme.sp-4;
                 width: parent.width - 2 * Theme.sp-4;
-                text: "Make a note reminding me to call Sam";
+                text: first-task;
                 color: Theme.chat-text;
                 font-size: Theme.fs-title-2;
                 vertical-alignment: center;

@@ -223,7 +223,7 @@ export component ModelPicker inherits Rectangle {
                 y: (parent.height - self.height) / 2;
                 border-radius: 3.5px;
                 background: root.status-state == "connected" ? Theme.color-success
-                    : root.status-state == "checking" || root.status-state == "own" ? Theme.text-dim
+                    : root.status-state == "checking" || root.status-state == "own" || root.status-state == "set" ? Theme.text-dim
                     : Theme.amber;
             }
             Text {
