@@ -151,6 +151,17 @@ class HermesConfigTests(unittest.TestCase):
         hermes_config.apply(self.path)
         self.assertEqual(self.read()["skills"], {"inline_shell": False, "inline_shell_timeout": 10})
 
+    def test_hermes_never_offers_to_build_a_profile_on_the_reply_to_a_first_request(self):
+        # 14 Oct: the first reply ended "want me to build a short profile of you". The offer is
+        # Hermes's onboarding.profile_build; what Hermes has latched as seen is kept.
+        self.write("onboarding:\n  seen: {busy_input_prompt: true}\n  profile_build: ask\n")
+        hermes_config.apply(self.path)
+        self.assertEqual(self.read()["onboarding"], {"seen": {"busy_input_prompt": True}, "profile_build": "off"})
+        # And on a file with none, which is where Hermes's default ("ask") would apply.
+        self.write("model:\n  default: x\n")
+        hermes_config.apply(self.path)
+        self.assertEqual(self.read()["onboarding"], {"profile_build": "off"})
+
     def test_no_config_yet_is_made_private(self):
         hermes_config.apply(self.path)
         self.assertEqual(self.read()["platform_toolsets"]["yantrik"], WANTED)

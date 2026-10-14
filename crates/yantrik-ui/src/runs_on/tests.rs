@@ -2,14 +2,14 @@ use super::identity::{from_reported, from_url, ProviderRef};
 use super::*;
 
 fn mind(id: &str, name: &str, detail: Option<&str>, answering: bool) -> MindFact {
-    MindFact { id: id.into(), name: name.into(), detail: detail.map(String::from), answering, builtin: false }
+    MindFact { id: id.into(), name: name.into(), detail: detail.map(String::from), answering, builtin: false, gateway: None }
 }
 
 /// VM 520 on 30 Sep 2026, verbatim: every mind's own line, and the companion from config.yaml
 /// with nothing saved in Settings.
 fn vm_520() -> (Vec<MindFact>, CompanionFact) {
     let minds = vec![
-        MindFact { id: "companion".into(), name: "Yantrik Companion".into(), detail: None, answering: false, builtin: true },
+        MindFact { id: "companion".into(), name: "Yantrik Companion".into(), detail: None, answering: false, builtin: true, gateway: None },
         mind("deepseek", "DeepSeek", Some("deepseek-v4.1-flash \u{b7} ollama.com"), false),
         mind("hermes", "Hermes Agent", Some("Hermes 0.14.0 \u{b7} deepseek-v4.1-flash"), false),
         mind("mind", "Yantrik Mind", Some("ollama-cloud:deepseek-v4.1-flash"), true),
@@ -90,7 +90,7 @@ fn addresses_are_named_by_the_catalogue_or_by_their_host() {
 
 #[test]
 fn a_companion_with_no_address_says_nothing_is_set_up_and_a_saved_one_is_named() {
-    let minds = [MindFact { id: "companion".into(), name: "Yantrik Companion".into(), detail: None, answering: true, builtin: true }];
+    let minds = [MindFact { id: "companion".into(), name: "Yantrik Companion".into(), detail: None, answering: true, builtin: true, gateway: None }];
     let rows = resolve(&minds, None);
     assert_eq!((rows[0].runs_on().as_str(), rows[0].source().as_str()), ("Nothing set up", "add a provider under Providers"));
     let saved = CompanionFact { base_url: "https://integrate.api.nvidia.com/v1".into(), model: "nvidia/x".into(), source: "saved provider".into(), provider_name: "NIM work".into(), ..CompanionFact::default() };
@@ -143,8 +143,8 @@ fn the_composer_line_says_where_words_go_or_nothing() {
     let line = |name: &str| rows.iter().find(|r| r.name == name).unwrap().destination();
     assert_eq!(line("Yantrik Mind"), "Sends your message and conversation context to: Ollama Cloud \u{b7} deepseek-v4.1-flash");
     assert_eq!(line("Yantrik Companion"), "Sends your message and conversation context to: aig.mycluster.cyou \u{b7} qwen3.8:27b");
-    // Hermes names a model and no provider: no line rather than a guessed one.
-    assert_eq!(line("Hermes Agent"), "");
+    // Hermes names a model and no provider: its own account, never a guessed place.
+    assert_eq!(line("Hermes Agent"), "Sends your message to Hermes Agent's own model account \u{b7} deepseek-v4.1-flash");
 
     let companion_at = |url: &str| {
         let c = CompanionFact { base_url: url.into(), model: "qwen3.5:9b".into(), source: "config.yaml".into(), provider_name: String::new(), ..CompanionFact::default() };
@@ -166,7 +166,7 @@ fn the_composer_line_says_where_words_go_or_nothing() {
 /// fallback by name.
 #[test]
 fn stays_on_this_machine_is_said_only_when_it_is_certain() {
-    let builtin = [MindFact { id: "companion".into(), name: "Yantrik Companion".into(), detail: None, answering: true, builtin: true }];
+    let builtin = [MindFact { id: "companion".into(), name: "Yantrik Companion".into(), detail: None, answering: true, builtin: true, gateway: None }];
     let line = |c: CompanionFact| resolve(&builtin, Some(&c))[0].destination();
     let at = |url: &str, model: &str| CompanionFact { base_url: url.into(), model: model.into(), source: "config.yaml".into(), ..CompanionFact::default() };
 
@@ -226,8 +226,8 @@ fn stays_on_this_machine_is_said_only_when_it_is_certain() {
     let said = |detail: &str| resolve(&[mind("x", "X", Some(detail), true)], None)[0].destination();
     assert_eq!(said("127.0.0.1:9000 \u{b7} qwen3.5:9b"), "Sends your message and conversation context to: 127.0.0.1:9000 \u{b7} qwen3.5:9b");
     assert_eq!(said("http://localhost:11434/v1 \u{b7} qwen3.5:9b"), "Sends your message and conversation context to: Ollama \u{b7} qwen3.5:9b");
-    // A bare `localhost:11434` names no host it can be held to: nothing is said rather than "Stays".
-    assert_eq!(said("localhost:11434 \u{b7} qwen3.5:9b"), "");
+    // A bare `localhost:11434` names no host it can be held to: no place is said, never "Stays".
+    assert_eq!(said("localhost:11434 \u{b7} qwen3.5:9b"), "Sends your message to X's own model account \u{b7} qwen3.5:9b");
     // The fallback's own words, from config.yaml.
     assert_eq!(fallback_label("llamacpp", None), "llama.cpp in this process");
     assert_eq!(fallback_label("api", Some("http://localhost:8341/v1")), "localhost:8341");
@@ -259,4 +259,58 @@ fn a_saved_provider_is_not_listed_again_as_in_use() {
     let in_use = in_use_not_saved(&rows, Some(&companion), &["https://ollama.com/v1".to_string()]);
     let labels: Vec<&str> = in_use.iter().map(|u| u.label.as_str()).collect();
     assert_eq!(labels, ["Custom endpoint \u{b7} aig.mycluster.cyou"]);
+}
+
+/// 14 Oct 2026, a fresh VM: Hermes answered through the desktop's gateway (#675) and the composer
+/// said "Where message text goes is not known". The desktop routes that call itself, so the line
+/// names the account it goes to, as it would for the built-in companion on the same account.
+#[test]
+fn a_mind_on_yantrik_models_names_the_account_the_gateway_sends_it_to() {
+    let on = |route: GatewayRoute| {
+        let hermes = MindFact { gateway: Some(route), ..mind("hermes", "Hermes Agent", Some("Hermes 0.21.0"), true) };
+        resolve(&[hermes], None).remove(0)
+    };
+    let home = GatewayRoute {
+        account: "Home server".into(),
+        base_url: "http://192.168.4.35:8080/v1".into(),
+        model: "qwen3.8-flash".into(),
+        provider_type: "custom".into(),
+    };
+    let hermes = on(home.clone());
+    assert_eq!(hermes.destination(), "Sends your message and conversation context to: 192.168.4.35:8080, on this network \u{b7} qwen3.8-flash");
+    assert_eq!(hermes.source(), "Yantrik models \u{b7} your account \u{201c}Home server\u{201d}");
+    assert!(!hermes.reported, "the desktop routed it; nothing was taken from the mind's own words");
+
+    // A cloud account and a proxy are named as they are for the companion.
+    let cloud = on(GatewayRoute { base_url: "https://ollama.com/v1".into(), model: "deepseek-v4.1-flash".into(), provider_type: "ollama-cloud".into(), ..home.clone() });
+    assert_eq!(cloud.destination(), "Sends your message and conversation context to: Ollama Cloud \u{b7} deepseek-v4.1-flash");
+    let proxy = on(GatewayRoute { base_url: "http://127.0.0.1:4100/v1".into(), model: "gpt-x".into(), provider_type: "litellm".into(), ..home });
+    assert_eq!(proxy.destination(), "Sends your message and conversation context to: a proxy that forwards it on, through 127.0.0.1:4100 \u{b7} gpt-x");
+
+    // On Yantrik models with no model to send to: the gateway refuses, and the line says so.
+    let none = on(GatewayRoute::default());
+    assert_eq!(none.destination(), "Yantrik models have no model for it yet, so nothing is sent");
+    assert_eq!(none.source(), "Yantrik models \u{b7} no model yet");
+}
+
+/// A harness whose provider is a cloud key in its own config, which it does not name: the desktop
+/// cannot know the place, so the line names whose account it is. Never "not known", never empty.
+#[test]
+fn a_mind_on_its_own_settings_is_named_as_its_own_account() {
+    for detail in [None, Some("Hermes 0.21.0")] {
+        let hermes = resolve(&[mind("hermes", "Hermes", detail, true)], None).remove(0);
+        assert_eq!(hermes.destination(), "Sends your message to Hermes's own model account", "{detail:?}");
+    }
+    // The built-in companion with nothing set up is the one case with nothing to say.
+    let builtin = [MindFact { id: "companion".into(), name: "Yantrik Companion".into(), detail: None, answering: true, builtin: true, gateway: None }];
+    assert_eq!(resolve(&builtin, None)[0].destination(), "");
+}
+
+/// The accounts the gateway sends to are the person's own: the Providers list does not offer to
+/// add them again as "in use but not saved".
+#[test]
+fn an_account_the_gateway_sends_to_is_not_listed_as_unsaved() {
+    let route = GatewayRoute { account: "Groq (free)".into(), base_url: "https://api.groq.com/openai/v1".into(), model: "m".into(), provider_type: "groq".into() };
+    let rows = resolve(&[MindFact { gateway: Some(route), ..mind("pi", "Pi", None, true) }], None);
+    assert!(in_use_not_saved(&rows, None, &[]).is_empty());
 }

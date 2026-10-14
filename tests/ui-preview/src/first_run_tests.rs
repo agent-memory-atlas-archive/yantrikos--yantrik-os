@@ -328,6 +328,27 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     ui.set_scale(1.5);
     render(w, width, height, &still("4-done-bigger"))?;
     ui.set_scale(1.0);
+    // Every Tab stop on the checks shows its ring, and Tab and Shift+Tab go round the screen's own
+    // buttons and nothing else (14 Oct: a stop with no ring, where Enter did nothing). The ring
+    // is drawn by the button that has the focus; "" here is the screen itself, which draws none.
+    assert_eq!(ui.get_focused_label(), "Continue", "Continue has the focus once the checks are done");
+    let round = ["Make text bigger", "Read this to me", "Details", "Details", "Details", "Check again", "Continue"];
+    for (direction, order) in [("Tab", round.to_vec()), ("Shift+Tab", round.iter().rev().skip(1).chain(["Continue"].iter()).copied().collect())] {
+        let mut seen = Vec::new();
+        for _ in 0..round.len() {
+            if direction == "Tab" { tab() } else { key(w, slint::platform::Key::Backtab.into()) }
+            seen.push(ui.get_focused_label().to_string());
+        }
+        assert_eq!(seen, order, "{direction} goes round the checks screen's buttons, each with its ring");
+    }
+    assert_eq!(ui.get_step(), 4, "going round pressed nothing");
+    enter();
+    assert_eq!(ui.get_step(), 5, "Enter on the focused Continue continues");
+    // Reached by Tab, not only by being given the focus.
+    ui.set_step(4);
+    tab();
+    key(w, slint::platform::Key::Backtab.into());
+    assert_eq!(ui.get_focused_label(), "Continue");
     enter();
     assert_eq!(ui.get_step(), 5, "Continue takes the focus once the checks are done, and Enter presses it");
 

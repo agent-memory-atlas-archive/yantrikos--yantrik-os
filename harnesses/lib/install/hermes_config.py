@@ -23,6 +23,15 @@ expands, and every enabled MCP server is added unless the platform names the one
 - `check` asks Hermes's own resolver which toolsets the platform really gets, and fails on
   anything outside the allowlist.
 
+`apply` also turns off Hermes's first-conversation offer to "build a short profile of you"
+(`onboarding.profile_build: off`, Hermes's own key; agent/onboarding.py). On the install's first
+message ever Hermes did the person's task and then asked for their name, their work and leave to
+look them up (14 Oct 2026). The rule for minds on this desktop is no get-to-know-you question on
+a reply to a request, only when the desktop is idle. With it off Hermes adds only its one-sentence
+introduction. The key is Hermes's, not the platform's, so it holds for every platform of this
+Hermes: the offer is made once per install, to whichever platform speaks first, and on this
+machine that is the desktop.
+
 `memory` makes YantrikDB Hermes's one memory: `memory.provider` is `yantrikdb`, and Hermes's own
 MEMORY.md and USER.md are off, which would otherwise run beside the provider (Hermes's agent_init.py)
 as a second memory of the person outside YantrikDB. It is written here, not with `hermes config set`:
@@ -49,6 +58,9 @@ YANTRIK_OS_SERVER = {"command": "/opt/yantrik/bin/yos-mcp", "timeout": 300}
 # A research sub-agent that may take 50 turns will take 50.
 DELEGATION_MAX_ITERATIONS = 25
 BACKUP_SUFFIX = ".before-yantrik-desktop"
+# Hermes's first-conversation offer to build a profile of the person (agent/onboarding.py's
+# profile_build_mode): "off" never offers; Hermes's default, "ask", does.
+PROFILE_BUILD = "off"
 # Toolsets a Hermes before 3d7f773 (10 Sep 2026) turns on for every platform whose default composite
 # lists their tools, whatever the platform's own list says: `kanban` was neither configurable nor off
 # by default then, so `_recover_platform_native_toolsets` added it to the desktop platform too (found on
@@ -151,6 +163,8 @@ def apply(path, plugin_toolsets=()):
     servers[YANTRIK_OS] = dict(YANTRIK_OS_SERVER)
     _section(data, "skills", path)["inline_shell"] = False
     _section(data, "delegation", path)["max_iterations"] = DELEGATION_MAX_ITERATIONS
+    # No profile-building questions on the reply to the person's first request (the docstring).
+    _section(data, "onboarding", path)["profile_build"] = PROFILE_BUILD
 
     _write(path, data, text)
 

@@ -31,6 +31,25 @@ pub struct MindFact {
     pub detail: Option<String>,
     pub answering: bool,
     pub builtin: bool,
+    /// Where the desktop's gateway sends this mind's calls, when it runs on Yantrik models (#675):
+    /// the desktop routes them, so it knows. `None` for a mind on its own settings.
+    pub gateway: Option<GatewayRoute>,
+}
+
+/// The account the gateway sends an attached mind's calls to, as `wire::runs_on_card` resolved it
+/// from the mind's pick, the person's accounts and their private-context choice: the private
+/// lane's account when that is where the calls go, not the one picked.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct GatewayRoute {
+    /// The account's name as Settings shows it ("Home server"). Empty when there is no model for
+    /// the mind yet: no account has one, or none may hear what the mind knows.
+    pub account: String,
+    /// The account's address, `…/v1`.
+    pub base_url: String,
+    /// The upstream model, as the provider names it.
+    pub model: String,
+    /// The account's catalogue id ("ollama", "litellm", "custom").
+    pub provider_type: String,
 }
 
 /// What the built-in companion is pointed at: the AI page's own answer.
@@ -159,6 +178,8 @@ pub enum SetIn {
     SavedProvider(String),
     /// The mind's own settings, which the desktop does not read.
     OwnSettings,
+    /// Yantrik models: the desktop's gateway sends its calls to this account, by its name.
+    Gateway(String),
     /// Nothing is set: the companion has no address.
     Nowhere,
 }
@@ -213,6 +234,8 @@ impl RunsOn {
             SetIn::ConfigYaml => "set in /opt/yantrik/config.yaml".to_string(),
             SetIn::SavedProvider(name) => format!("your saved provider \u{201c}{name}\u{201d}"),
             SetIn::OwnSettings => "its own settings".to_string(),
+            SetIn::Gateway(name) if name.is_empty() => "Yantrik models \u{b7} no model yet".to_string(),
+            SetIn::Gateway(name) => format!("Yantrik models \u{b7} your account \u{201c}{name}\u{201d}"),
             SetIn::Nowhere => "add a provider under Providers".to_string(),
         };
         if self.reported {
@@ -225,9 +248,11 @@ impl RunsOn {
     /// Where words typed to this mind go, for the row above the chat composer's Send:
     /// "Sends your message and conversation context to: Ollama Cloud · deepseek-v4.1-flash";
     /// "Stays on this machine · qwen3.5:9b". It says what leaves the machine (the message and the
-    /// conversation sent with it; the composer carries no attachments) and to whom. Empty when the
-    /// provider is not known: the line is an observed fact or nothing, never a guess (review of
-    /// the UI overhaul by GPT-6 Astra, A).
+    /// conversation sent with it; the composer carries no attachments) and to whom. A mind on
+    /// Yantrik models is named by the account the gateway sends it to, which the desktop resolved
+    /// itself; an attached mind that does not say its provider, by whose account it is ("Hermes
+    /// Agent's own model account"). Empty only for the built-in companion with nothing set up:
+    /// the line is an observed fact, never a guess (review of the UI overhaul by GPT-6 Astra, A).
     ///
     /// "Stays on this machine" is said for one thing only (security review of #648, H1): a model
     /// loaded into this process, with no fallback that could take the words elsewhere. An API is
@@ -243,6 +268,15 @@ impl RunsOn {
             (Backend::InProcess, _) if self.fallback.is_none() => "Stays on this machine".to_string(),
             (Backend::InProcess, _) => "Runs in this process".to_string(),
             _ if self.set_in == SetIn::Nowhere => return String::new(),
+            // On Yantrik models with no account to send to: the gateway refuses, nothing is sent.
+            (_, ProviderRef::NotReported) if matches!(self.set_in, SetIn::Gateway(_)) => {
+                return "Yantrik models have no model for it yet, so nothing is sent".to_string()
+            }
+            // A mind that keeps its provider in its own settings (a cloud key in its own config)
+            // and does not say which: the desktop cannot know the place, but it knows whose
+            // account it is, and says that rather than nothing (14 Oct: "Where message text goes
+            // is not known" beside Hermes).
+            (_, ProviderRef::NotReported) if !self.builtin => format!("Sends your message to {}'s own model account", self.name),
             (_, ProviderRef::NotReported) => return String::new(),
             // A mind's own words ("ollama:qwen3.5:9b", "127.0.0.1:9000") could be about any
             // machine: the provider is named and no place is said for it.
@@ -330,6 +364,17 @@ fn one(m: &MindFact, companion: Option<&CompanionFact>) -> RunsOn {
             _ => base(ProviderRef::NotReported, None, SetIn::Nowhere, false),
         };
     }
+    if let Some(g) = &m.gateway {
+        if g.account.is_empty() || g.base_url.trim().is_empty() {
+            return base(ProviderRef::NotReported, None, SetIn::Gateway(String::new()), false);
+        }
+        let model = Some(g.model.trim().to_string()).filter(|s| !s.is_empty());
+        return RunsOn {
+            base_url: g.base_url.trim().to_string(),
+            provider_kind: g.provider_type.clone(),
+            ..base(identity::from_url(&g.base_url), model, SetIn::Gateway(g.account.clone()), false)
+        };
+    }
     let (provider, model) = m.detail.as_deref().map(identity::from_reported).unwrap_or((ProviderRef::NotReported, None));
     base(provider, model, SetIn::OwnSettings, true)
 }
@@ -391,7 +436,8 @@ pub fn in_use_not_saved(rows: &[RunsOn], companion: Option<&CompanionFact>, save
     let mut out: Vec<(String, InUse, bool)> = Vec::new();
     for r in rows {
         let Some(key) = r.provider.key() else { continue };
-        if saved.contains(&key) || matches!(r.set_in, SetIn::SavedProvider(_) | SetIn::Nowhere) {
+        // An account the gateway sends to is one the person added: it is listed already.
+        if saved.contains(&key) || matches!(r.set_in, SetIn::SavedProvider(_) | SetIn::Gateway(_) | SetIn::Nowhere) {
             continue;
         }
         let i = match out.iter().position(|(k, _, _)| *k == key) {

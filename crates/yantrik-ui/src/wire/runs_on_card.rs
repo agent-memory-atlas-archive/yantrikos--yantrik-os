@@ -7,7 +7,7 @@
 
 use std::sync::Mutex;
 
-use crate::runs_on::{self, MindFact, RunsOn};
+use crate::runs_on::{self, GatewayRoute, MindFact, RunsOn};
 use crate::App;
 use yantrik_ui_slint::{InUseRow, RunsOnRow};
 
@@ -17,14 +17,41 @@ static SAVED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// What every mind runs on, right now.
 pub(crate) fn current() -> Vec<RunsOn> {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_else(|| "/root".into());
     let minds: Vec<MindFact> = super::harness::host()
         .map(|h| h.list())
         .unwrap_or_default()
         .into_iter()
-        .map(|e| MindFact { id: e.id, name: e.name, detail: e.detail, answering: e.active, builtin: e.builtin })
+        .map(|e| {
+            let gateway = (!e.builtin && crate::provider_handoff::uses_gateway(&home, &e.id)).then(|| gateway_route(&e.id));
+            MindFact { id: e.id, name: e.name, detail: e.detail, answering: e.active, builtin: e.builtin, gateway }
+        })
         .collect();
     let companion = super::ai_status::companion();
     runs_on::resolve(&minds, companion.as_ref())
+}
+
+/// Where the gateway sends `harness`'s next call, decided as the gateway decides it: the model its
+/// `picked` resolves to (`harness_provider::starting_model`), on that model's account, unless the
+/// mind carries private context to an account the person keeps it off, when the private lane
+/// answers instead (`yantrik_gateway::policy::decide`). An empty route when there is no model.
+fn gateway_route(harness: &str) -> GatewayRoute {
+    use crate::ai_accounts::{self, consent};
+    use yantrik_gateway::route;
+    let Some(picked) = super::harness_provider::starting_model(harness).ok().and_then(|m| route::parse(&m)) else {
+        return GatewayRoute::default();
+    };
+    let accounts = ai_accounts::accounts();
+    let Some(account) = accounts.iter().find(|a| a.id == picked.account) else { return GatewayRoute::default() };
+    let carries_private = crate::provider_handoff::adapter_for(harness).map(|a| a.private_context()).unwrap_or(true);
+    let allowed = consent::load(&consent::path());
+    let laned = carries_private && !account.local && crate::gateway::sharing(account, &allowed) == consent::Sharing::Lane;
+    let lane = laned
+        .then(|| consent::lane(&allowed, &accounts).and_then(|l| route::parse(&l)))
+        .flatten()
+        .and_then(|l| accounts.iter().find(|a| a.id == l.account).map(|a| (a, l.model)));
+    let (account, model) = lane.unwrap_or((account, picked.model));
+    GatewayRoute { account: account.name.clone(), base_url: account.base_url.clone(), model, provider_type: account.provider_type.clone() }
 }
 
 /// The saved providers changed: remember their addresses and show the lists again.
