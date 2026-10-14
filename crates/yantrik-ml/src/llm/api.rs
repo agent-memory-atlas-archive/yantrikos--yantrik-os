@@ -693,6 +693,7 @@ impl ApiLLM {
             .map(|r| r.chars().count())
             .sum();
         no_answer_after_thinking(&text, &api_tool_calls, reasoning_chars, &stop_reason)?;
+        warn_unreadable_calls(&api_tool_calls);
 
         let tool_calls = if !api_tool_calls.is_empty() {
             api_tool_calls
@@ -811,8 +812,14 @@ impl ApiLLM {
                     if let Some(name) = tc_delta["function"]["name"].as_str() {
                         tc_names.entry(idx).or_default().push_str(name);
                     }
-                    if let Some(args) = tc_delta["function"]["arguments"].as_str() {
-                        tc_args.entry(idx).or_default().push_str(args);
+                    match &tc_delta["function"]["arguments"] {
+                        serde_json::Value::String(args) => tc_args.entry(idx).or_default().push_str(args),
+                        // llama.cpp after its autoparser rewrite sends the arguments as an object,
+                        // whole, rather than as a string in pieces (ggml-org/llama.cpp#20198).
+                        args @ (serde_json::Value::Object(_) | serde_json::Value::Array(_)) => {
+                            tc_args.insert(idx, args.to_string());
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -843,6 +850,7 @@ impl ApiLLM {
 
         let full_text = strip_think_tags(&full_text);
         no_answer_after_thinking(&full_text, &api_tool_calls, reasoning_chars, &stop_reason)?;
+        warn_unreadable_calls(&api_tool_calls);
         if reasoning_chars > 0 {
             tracing::debug!(reasoning_chars, finish_reason = %stop_reason, "the model thought before answering");
         }
@@ -889,6 +897,15 @@ fn no_answer_after_thinking(
         "the model thought but gave no answer"
     );
     Err(failure.into())
+}
+
+/// A native call whose arguments are not JSON drops out of `tool_calls`; until 14 Oct 2026 it
+/// did so without a word, and the turn ended as an empty answer nobody could explain.
+fn warn_unreadable_calls(calls: &[ApiToolCall]) {
+    for call in calls.iter().filter(|c| ToolCall::from_api(c).is_none()) {
+        let arguments: String = call.function.arguments.chars().take(200).collect();
+        tracing::warn!(tool = %call.function.name, %arguments, "the model's native tool call has arguments that are not JSON");
+    }
 }
 
 impl LLMBackend for ApiLLM {
@@ -995,6 +1012,7 @@ mod thinking_tests {
     const MODEL: &str = "qwen3.8-flash-next-unsloth-ud-iq4_xs";
     const THINKS_THEN_ANSWERS: &str = include_str!("testdata/qwen3_thinks_then_answers.sse");
     const THINKS_UNTIL_LENGTH: &str = include_str!("testdata/qwen3_thinks_until_length.sse");
+    const NATIVE_TOOL_CALL: &str = include_str!("testdata/qwen3_native_tool_call.sse");
 
     fn custom_qwen() -> ApiLLM {
         ApiLLM::new("http://127.0.0.1:1/v1", None, MODEL).for_provider("custom")
@@ -1042,6 +1060,41 @@ mod thinking_tests {
         });
         let err = custom_qwen().read_openai_reply(&reply).unwrap_err();
         assert_eq!(err.downcast_ref::<ThoughtWithoutAnswer>().unwrap().finish_reason, "length");
+    }
+
+    #[test]
+    fn a_native_call_the_request_did_not_ask_for_is_read_as_a_call() {
+        // VM 542, 14 Oct 2026: no `tools` in the request, and the server answered natively.
+        let llm = ApiLLM::new("http://127.0.0.1:1/v1", None, MODEL).for_provider("llamacpp");
+        let (result, shown) = stream(&llm, NATIVE_TOOL_CALL);
+        let reply = result.expect("a call is not a failure");
+        assert_eq!(reply.stop_reason, "tool_calls");
+        assert!(reply.text.is_empty() && shown.is_empty(), "no words: {shown:?}");
+        assert_eq!(reply.tool_calls.len(), 1);
+        assert_eq!(reply.tool_calls[0].name, "calculate");
+        assert_eq!(reply.tool_calls[0].arguments, serde_json::json!({"expression": "17 * 23"}));
+        assert!(!reply.is_unread_tool_call());
+    }
+
+    #[test]
+    fn arguments_sent_as_an_object_are_read_too() {
+        let recorded = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"type\":\"function\",\
+                        \"function\":{\"name\":\"calculate\",\"arguments\":{\"expression\":\"17 * 23\"}}}]}}]}\n\n\
+                        data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n";
+        let reply = stream(&custom_qwen(), recorded).0.unwrap();
+        assert_eq!(reply.tool_calls[0].arguments, serde_json::json!({"expression": "17 * 23"}));
+    }
+
+    #[test]
+    fn a_native_call_with_arguments_that_are_not_json_is_an_unread_call_and_not_an_empty_answer() {
+        let recorded = "data: {\"choices\":[{\"delta\":{\"content\":\"\"}}]}\n\n\
+                        data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"type\":\"function\",\
+                        \"function\":{\"name\":\"calculate\",\"arguments\":\"{\\\"expression\\\": 17 * 23\"}}]}}]}\n\n\
+                        data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n";
+        let reply = stream(&custom_qwen(), recorded).0.unwrap();
+        assert!(reply.tool_calls.is_empty(), "nothing a caller can run");
+        assert_eq!(reply.unread_tool_calls().len(), 1);
+        assert!(reply.is_unread_tool_call(), "the caller can tell it from an answer");
     }
 
     #[test]
