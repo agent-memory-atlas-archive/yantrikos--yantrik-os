@@ -138,6 +138,10 @@ jobs:
     if: needs.decide.outputs.build == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 240
+    # contents: write is for the GitHub release a published image gets (below); nothing else in
+    # this job uses the token.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -278,6 +282,34 @@ jobs:
             echo "::warning::the bundle carries no share/CHANGELOG.md; nothing published beside the image"
           fi
           echo "- Published to https://iso.yantrikos.com/$ch/ and https://releases.yantrikos.com/$ch/" >> "$GITHUB_STEP_SUMMARY"
+
+      # Every published image also gets a GitHub release, so the repo's sidebar, search and
+      # anyone watching the repo see it: a pre-release for nightly and beta, a release for stable.
+      # It links the image on iso.yantrikos.com rather than attaching 2 GB. Never fails the
+      # build: the image is published either way.
+      - name: Make a GitHub release
+        if: needs.decide.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CH: ${{ needs.decide.outputs.channel }}
+          VERSION: ${{ steps.bundle.outputs.version }}
+          ISO: ${{ steps.iso.outputs.path }}
+        run: |
+          name="$(basename "$ISO")"
+          case "$CH" in stable) tag="$VERSION"; pre="" ;; *) tag="$CH-${VERSION#v}"; pre="--prerelease" ;; esac
+          changelog="$(dirname "$ISO")/$(basename "$ISO" .iso).changelog.md"
+          {
+            echo "**Download:** [$name](https://iso.yantrikos.com/$CH/$name) (live ISO; boot it, try it, then install)."
+            echo "sha256 \`$(sha256sum "$ISO" | cut -d' ' -f1)\`"
+            echo
+            echo "Every image on this channel: https://iso.yantrikos.com/$CH/ · Already installed: it updates itself from the $CH channel."
+            echo
+            if [ -s "$changelog" ]; then cat "$changelog"; fi
+          } > release-notes.md
+          gh release create "$tag" --target "$GITHUB_SHA" --title "Yantrik OS $VERSION ($CH)" \
+              --notes-file release-notes.md $pre \
+            && echo "- GitHub release: $tag" >> "$GITHUB_STEP_SUMMARY" \
+            || echo "::warning::the image is published, but its GitHub release $tag was not made"
 
       # The community server's #nightly channel. Never fails the build: a nightly that published
       # and could not say so is still published. Only the nightly channel is announced there.
