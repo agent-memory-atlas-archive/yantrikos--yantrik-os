@@ -69,6 +69,14 @@ platforms (Telegram, Discord, the CLI) lose kanban too. Revert puts your own `co
 kanban included. A current Hermes (the commit the installer pins) honours the list, and nothing
 global is written.
 
+## New conversation is not asked twice
+
+Hermes 0.21 asks before `/new`, `/reset` and `/undo` (`approvals.destructive_slash_confirm`). On
+the desktop, `/new` and `/reset` only ever come from the person — the Lens's new-conversation
+button, or typed in the Lens — so the adapter confirms those once on their behalf and the turn gets
+Hermes's reply. `/undo` is still asked, in the chat. Nothing global is written: your other Hermes
+platforms keep asking. An older Hermes, which does not ask, is unchanged.
+
 ## Yantrik models
 
 Installing Hermes (the ISO, the installer, or **Settings → Harnesses → Install**) does this with no
