@@ -154,14 +154,15 @@ export component ChatMessage inherits Rectangle {
                 }
                 if root.group-start : Rectangle { height: Theme.sp-1; }
 
-                // The timeline while the reply arrives, above the words still coming in.
+                // The timeline while the reply arrives, above the words still coming in: every
+                // line but a question still waiting, which goes under the words (below).
                 if root.data.is-streaming && root.live.length > 0 : VerticalLayout {
                     padding-bottom: root.data.content != "" ? Theme.sp-2 : 0px;
                     spacing: 2px;
-                    for block in root.live : TimelineLine {
-                        block: block;
-                        questions: root.questions;
-                        answered(agent, request, answer, pressed) => { root.question-answer(agent, request, answer, pressed); }
+                    for block in root.live : VerticalLayout {
+                        if !(block.block-type == "question" && block.call.status == "waiting") : TimelineLine {
+                            block: block;
+                        }
                     }
                 }
 
@@ -172,6 +173,21 @@ export component ChatMessage inherits Rectangle {
                     color: Theme.chat-text;
                     font-size: Theme.fs-title-2;
                     wrap: word-wrap;
+                }
+
+                // A question the mind is waiting on: its card under the words that led up to it,
+                // the order Hermes sends them in (it flushes its prose before it asks). Above
+                // them, a long explanation pushed the card out of view while the Lens followed
+                // the reply's end, and the person saw only the line over the box (VM 541, 14 Oct).
+                if root.data.is-streaming && root.questions.length > 0 : VerticalLayout {
+                    padding-top: root.data.content != "" ? Theme.sp-2 : 0px;
+                    for block in root.live : VerticalLayout {
+                        if block.block-type == "question" && block.call.status == "waiting" : TimelineLine {
+                            block: block;
+                            questions: root.questions;
+                            answered(agent, request, answer, pressed) => { root.question-answer(agent, request, answer, pressed); }
+                        }
+                    }
                 }
 
                 if root.data.run == "private:leave" && !root.data.is-streaming : HorizontalLayout {

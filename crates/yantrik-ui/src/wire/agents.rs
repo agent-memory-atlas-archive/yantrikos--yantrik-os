@@ -3082,6 +3082,14 @@ mod first_prompt_attribution_tests {
         assert!(lens.contains("for q in root.questions : VerticalLayout"), "the Lens pins the ones no reply holds");
         let timeline = read("../yantrik-ui-slint/ui/components/reply_timeline.slint");
         assert!(timeline.contains("if q.request == root.block.call.name : QuestionCard"), "and draws the rest in the reply that asked");
+        // Under the reply's words, not over them: above, the words that led up to it pushed the
+        // card out of view while the Lens followed the reply's end (VM 541, 14 Oct).
+        let bubble = read("../yantrik-ui-slint/ui/components/chat_message.slint");
+        let waiting = "block.block-type == \"question\" && block.call.status == \"waiting\"";
+        let above = bubble.find(&format!("if !({waiting}) : TimelineLine")).expect("the timeline over the words leaves a waiting question out");
+        let words = above + bubble[above..].find("text: root.data.content;").expect("the words under the timeline");
+        let card = bubble.find(&format!("if {waiting} : TimelineLine")).expect("and draws it on its own");
+        assert!(words < card, "the waiting question's card comes after the words");
         assert!(lens.contains("question-answer(agent, request, answer, pressed) => { root.question-answer(agent, request, answer, pressed); }"), "through the same callback");
     }
 
