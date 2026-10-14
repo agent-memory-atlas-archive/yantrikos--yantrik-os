@@ -461,6 +461,8 @@ sudo chroot "$ROOTFS" systemctl enable mbpfan.service \
     || fail "could not enable mbpfan.service"
 for required in usr/lib/yantrik/yantrik-broadcom-wifi usr/lib/yantrik/yantrik-mac-fans \
                 etc/systemd/system/multi-user.target.wants/yantrik-broadcom-wifi.service \
+                etc/systemd/system/yantrik-broadcom-wifi-recover.service \
+                etc/systemd/system/timers.target.wants/yantrik-broadcom-wifi-recover.timer \
                 etc/systemd/system/mbpfan.service.d/yantrik-apple.conf \
                 etc/NetworkManager/dispatcher.d/90-yantrik-broadcom-wifi; do
     # Inside the chroot: a unit's enable link is absolute, and from the host it would resolve
@@ -474,7 +476,7 @@ if sudo chroot "$ROOTFS" dpkg-query -W -f='${db:Status-Status}\n' broadcom-sta-d
         | grep -qx installed; then
     fail "broadcom-sta-dkms or firmware-b43-installer is installed in the image — it cannot be published"
 fi
-ok "Intel Mac support: mbpfan (Apple hardware only), BCM4331 Wi-Fi fetched on first network"
+ok "Intel Mac support: mbpfan (Apple hardware only), BCM4331 Wi-Fi fetched on first network, wl reloaded if it wedges"
 
 # ═══════════════════════════════════════════════════════════════
 # STEP 3: Create yantrik user + directory structure
