@@ -733,6 +733,13 @@ pub fn publish(
                         if !calls.is_empty() {
                             entry["calls"] = serde_json::Value::Array(calls);
                         }
+                        // What the mind is doing in a reply still arriving, as the bubble says
+                        // it: `[{text, state}]`, state running | done | failed | waiting. Once the
+                        // reply ends, the steps its "Show actions" folded. Read here so a gate can
+                        // check the live steps without a screenshot.
+                        if let Some(steps) = crate::wire::lens_steps::for_describe(i) {
+                            entry["steps"] = steps;
+                        }
                         entry
                     })
                     .collect()
@@ -880,6 +887,9 @@ pub fn publish(
                 // installed, or its config file was never written, or its unit is stopped. An
                 // agent asked to fix that needs the same list the Settings page draws.
                 .with("harnesses", crate::wire::harness::catalogue_for_describe())
+                // Settings → AI & Intelligence → AI accounts, as the card shows it (#673): each
+                // account, its models and whether personal things may go there. No key.
+                .with("ai_accounts", crate::wire::ai_accounts_card::for_describe())
                 // Agents' commands running now, per agent: the job, its command, how long, and
                 // whether it seems to be waiting for input. See `control_agent_terminal`.
                 .with("agent_jobs", {
@@ -3588,6 +3598,20 @@ mod power_profile_tests {
         let src = source();
         assert!(src.contains("crate::power_status::battery_for_describe("), "describe's `battery` comes from power_status");
         assert!(src.contains("\"power_profile\","), "describe has a top-level `power_profile`, battery or not");
+    }
+}
+
+#[cfg(test)]
+mod steps_describe_tests {
+    /// `describe shell` carries the live steps on the reply they belong to, inside the
+    /// conversation, which an agent caller is never handed.
+    #[test]
+    fn the_open_turns_steps_ride_on_its_conversation_entry() {
+        let src = include_str!("control.rs");
+        let at = src.find("let conversation: Vec<serde_json::Value> = if agent_reading { Vec::new() }").expect("conversation");
+        let block = &src[at..at + 4000];
+        assert!(block.contains("crate::wire::lens_steps::for_describe(i)"), "{block}");
+        assert!(block.contains("entry[\"steps\"] = steps"), "{block}");
     }
 }
 
