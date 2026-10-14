@@ -651,7 +651,7 @@ mod tests {
             "a callback sends straight to the builtin companion. Both ways of talking to this desktop — the chat panel and the Lens — must go through `dispatch`, which reads the harness host; otherwise choosing a mind changes a label and nothing else."
         );
         assert_eq!(
-            body.matches("submit(").count(),
+            body.matches(" submit(&ui_weak").count(),
             2,
             "there are two entry points — on_send_message and the Lens fallback — and both should reach the chosen mind through `submit`, then `dispatch`"
         );
