@@ -138,7 +138,7 @@ mod tests {
         heal.observe(t0, &idle(), false);
         let mut at = t0 + IDLE_FOR;
         let mut gaps = Vec::new();
-        let mut last = None;
+        let mut last: Option<Instant> = None;
         // Walk forward a minute at a time for a day and note when each attempt came.
         while at < t0 + s(24 * 3600) {
             if heal.observe(at, &idle(), false).is_some() {
