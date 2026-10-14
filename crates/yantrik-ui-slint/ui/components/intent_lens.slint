@@ -2304,7 +2304,7 @@ export component IntentLens inherits Rectangle {
                             ChatMessage {
                                 data: msg;
                                 mind-name: root.mind-name;
-                                group-start: idx == 0 || root.messages[idx - 1].role != msg.role;
+                                group-start: idx == 0 || root.messages[idx - 1].role != msg.role || root.messages[idx - 1].mind != msg.mind;
                                 steps: idx == root.live-steps-row ? root.live-steps : [];
                                 open-run(run) => { root.open-run(run); }
                             }

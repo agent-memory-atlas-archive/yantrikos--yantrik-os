@@ -1287,9 +1287,12 @@ def act_pairs(a):
         return []
 
     if isinstance(args, str):
-        # It may simply be JSON that arrived as text.
+        # It may simply be JSON that arrived as text. Not strictly: a model writing a note's lines
+        # puts real newlines inside the JSON string, which strict JSON refuses ("Invalid control
+        # character"), and the whole object then read as one bare value that new_note (title,
+        # text) cannot place. A 27B Mind on the fresh-install VM failed every note that way (13 Oct).
         try:
-            parsed = json.loads(args)
+            parsed = json.loads(args, strict=False)
         except ValueError:
             parsed = None
         if isinstance(parsed, dict):
