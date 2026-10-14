@@ -1636,6 +1636,7 @@ impl CompanionService {
             urges_delivered: vec![],
             tool_calls_made,
             offline_mode: false,
+            without_model: false,
         })
     }
 
@@ -1657,8 +1658,23 @@ impl CompanionService {
         }
     }
 
+    /// With no model chosen (the shipped config names none), every message is answered with one
+    /// plain sentence naming the fix, before anything else runs (the router's canned greetings
+    /// included): the person learns at once that nothing can think yet, and why.
+    fn not_set_up(&self, on_token: &mut dyn FnMut(&str)) -> Option<AgentResponse> {
+        if self.llm.backend_name() != yantrik_ml::not_set_up::BACKEND {
+            return None;
+        }
+        let message = yantrik_ml::not_set_up::NOT_SET_UP.to_string();
+        on_token(&message);
+        Some(AgentResponse { message, memories_recalled: 0, urges_delivered: vec![], tool_calls_made: vec![], offline_mode: false, without_model: true })
+    }
+
     /// The 9-step message pipeline.
     pub fn handle_message(&mut self, user_text: &str) -> AgentResponse {
+        if let Some(r) = self.not_set_up(&mut |_| {}) {
+            return r;
+        }
         // Step 0: SecurityGuard — check user input for injection
         if let Some(warning) = self.guard.check_input(user_text, &self.db) {
             return AgentResponse {
@@ -1667,6 +1683,7 @@ impl CompanionService {
                 urges_delivered: vec![],
                 tool_calls_made: vec![],
                 offline_mode: false,
+                without_model: true,
             };
         }
 
@@ -1690,6 +1707,7 @@ impl CompanionService {
                         urges_delivered: vec![],
                         tool_calls_made: vec![],
                         offline_mode: false,
+                        without_model: true,
                     };
                 }
                 RouteDecision::Tool { ref name, score, .. } if score >= 0.50 && self.config.tools.enabled => {
@@ -1722,6 +1740,7 @@ impl CompanionService {
                         urges_delivered: vec![],
                         tool_calls_made: vec![name.clone()],
                         offline_mode: false,
+                        without_model: true,
                     };
                 }
                 RouteDecision::Recipe { ref id, ref name, score } if score >= 0.40 => {
@@ -2058,6 +2077,7 @@ impl CompanionService {
                 urges_delivered: urge_ids,
                 tool_calls_made,
                 offline_mode: false,
+                without_model: false,
             };
         }
 
@@ -2559,6 +2579,7 @@ impl CompanionService {
             urges_delivered: urge_ids,
             tool_calls_made,
             offline_mode: is_offline,
+            without_model: false,
         }
     }
 
@@ -2602,6 +2623,9 @@ impl CompanionService {
         if outside {
             yantrik_companion_core::taint::mark_outside("a program on the companion's socket");
         }
+        if let Some(r) = self.not_set_up(&mut on_token) {
+            return r;
+        }
 
         // Step 0: SecurityGuard — check user input for injection
         if let Some(warning) = self.guard.check_input(user_text, &self.db) {
@@ -2612,6 +2636,7 @@ impl CompanionService {
                 urges_delivered: vec![],
                 tool_calls_made: vec![],
                 offline_mode: false,
+                without_model: true,
             };
         }
 
@@ -2628,6 +2653,7 @@ impl CompanionService {
                         urges_delivered: vec![],
                         tool_calls_made: vec![],
                         offline_mode: false,
+                        without_model: true,
                     };
                 }
                 RouteDecision::Tool { ref name, score, .. } if score >= 0.50 && self.config.tools.enabled => {
@@ -2657,6 +2683,7 @@ impl CompanionService {
                         urges_delivered: vec![],
                         tool_calls_made: vec![name.clone()],
                         offline_mode: false,
+                        without_model: true,
                     };
                 }
                 RouteDecision::Recipe { ref id, ref name, score } if score >= 0.40 => {
@@ -2922,6 +2949,7 @@ impl CompanionService {
                     urges_delivered: urge_ids,
                     tool_calls_made: vec![tool_name],
                     offline_mode: false,
+                    without_model: false,
                 };
             }
             // MCQ didn't select a tool — fall through to standard path
@@ -3509,6 +3537,7 @@ impl CompanionService {
             urges_delivered: urge_ids,
             tool_calls_made,
             offline_mode: is_offline,
+            without_model: false,
         }
     }
 
@@ -5935,6 +5964,23 @@ mod recipe_placeholder_tests {
         let mut c = CompanionService::new(db, std::sync::Arc::new(Echo), config);
         c.registry.register(Box::new(crate::tools::memory::RecallTool));
         c
+    }
+
+    /// The not-set-up sentence is the desktop's, not a model's: a first run that counted it as
+    /// an answer would say "You're ready." with nothing set up.
+    #[test]
+    fn the_not_set_up_reply_is_marked_as_no_model() {
+        let db = YantrikDB::new(":memory:", 64).expect("in-memory database");
+        let mut c = CompanionService::new(
+            db,
+            std::sync::Arc::new(yantrik_ml::not_set_up::NotSetUpLLM),
+            CompanionConfig::default(),
+        );
+        let r = c.handle_message("hi");
+        assert_eq!(r.message, yantrik_ml::not_set_up::NOT_SET_UP);
+        assert!(r.without_model);
+        let r = c.streaming_turn("hi", |_| {}, false);
+        assert!(r.without_model);
     }
 
     fn tool_step(tool: &str, args: serde_json::Value, store_as: &str) -> RecipeStep {

@@ -95,12 +95,12 @@ pub fn wire(ui: &App, _ctx: &AppContext) {
 
             // The installer no longer asks about AI — that is first-boot setup now (#400) —
             // but a person who tried the live desktop first may have chosen a provider there,
-            // and wire::ai_onboarding::save_primary keeps that choice in this store. Carried
+            // and the first run's provider screens (wire/onboarding.rs) keep that choice in this store. Carried
             // over when present, so a key typed in the live session is not typed twice.
             let wizard = ProviderStore::load().primary().cloned();
-            let (ai_provider, ai_base_url, ai_api_key, ai_model) = match wizard {
-                Some(p) => (p.provider_type, p.base_url, p.api_key.unwrap_or_default(), p.model),
-                None => (String::new(), String::new(), String::new(), String::new()),
+            let (ai_provider, ai_name, ai_base_url, ai_api_key, ai_model) = match wizard {
+                Some(p) => (p.provider_type, p.name, p.base_url, p.api_key.unwrap_or_default(), p.model),
+                None => (String::new(), String::new(), String::new(), String::new(), String::new()),
             };
             // The endpoint is not a secret; the key is, so only its presence is logged.
             tracing::info!(
@@ -128,6 +128,7 @@ pub fn wire(ui: &App, _ctx: &AppContext) {
                 encrypt,
                 partition_scheme: "auto".into(),
                 ai_provider,
+                ai_name,
                 ai_base_url,
                 ai_api_key,
                 ai_model,
@@ -329,6 +330,9 @@ pub struct InstallerState {
     pub encrypt: bool,
     pub partition_scheme: String,  // "auto" or "manual"
     pub ai_provider: String,
+    /// The live entry's name. The account id is made from it (`onboarding::account_id`), and
+    /// the carried picker.json names that id, so the installed entry keeps it.
+    pub ai_name: String,
     /// The endpoint the wizard saved for the provider. Empty means nobody chose
     /// one, and the provider's well-known URL is used if a provider is set.
     pub ai_base_url: String,
@@ -626,13 +630,7 @@ fn install_to_target(
 
     // Configure GRUB defaults. The kernel's line is installer_unlock's: the pre-boot screen on an
     // encrypted install, and the quiet that keeps kernel lines off the password prompt.
-    let _ = sudo_write(
-        &format!("{mount_dir}/etc/default/grub"),
-        &format!(
-            "GRUB_DEFAULT=0\nGRUB_TIMEOUT=3\nGRUB_DISTRIBUTOR=\"Yantrik OS\"\nGRUB_CMDLINE_LINUX_DEFAULT=\"{}\"\nGRUB_CMDLINE_LINUX=\"console=ttyS0,115200 console=tty1\"\nGRUB_TERMINAL=\"console serial\"\nGRUB_SERIAL_COMMAND=\"serial --speed=115200\"\n",
-            installer_unlock::cmdline_default(layout.encrypted())
-        ),
-    );
+    let _ = sudo_write(&format!("{mount_dir}/etc/default/grub"), &grub_defaults(layout.encrypted()));
 
     progress(85, "Updating GRUB configuration...");
     // grub-mkconfig names the root by UUID only once udev has made its /dev/disk/by-uuid link,
@@ -886,6 +884,35 @@ fi
     Ok(())
 }
 
+/// The first run's choices, carried from the live session to the new home: the sharing choice
+/// (ai-accounts.json), the text size (first-run.json) and the one model pick for every mind
+/// (picker.json). Choices only: no key in any of them.
+pub(crate) const CARRIED_CHOICES: [&str; 3] = ["ai-accounts.json", "first-run.json", "picker.json"];
+
+/// Whether a choices file is free of anything key-like: a field named like a secret with a value,
+/// or a value shaped like a provider key. A file that is not JSON is not carried either.
+pub(crate) fn holds_no_key(text: &str) -> bool {
+    fn clean(v: &serde_json::Value) -> bool {
+        match v {
+            serde_json::Value::Object(map) => map.iter().all(|(k, v)| {
+                let k = k.to_ascii_lowercase();
+                let secret_name = ["key", "token", "secret", "password", "authorization"]
+                    .iter()
+                    .any(|w| k == *w || k.ends_with(&format!("_{w}")) || k.ends_with(&format!("-{w}")) || k == "apikey");
+                let empty = v.is_null() || v.as_str().is_some_and(|s| s.is_empty());
+                (!secret_name || empty) && clean(v)
+            }),
+            serde_json::Value::Array(a) => a.iter().all(clean),
+            serde_json::Value::String(s) => {
+                let s = s.trim();
+                !["sk-", "nvapi-", "gsk_", "hf_", "AIza", "Bearer "].iter().any(|p| s.starts_with(p))
+            }
+            _ => true,
+        }
+    }
+    serde_json::from_str::<serde_json::Value>(text).is_ok_and(|v| clean(&v))
+}
+
 /// Write AI provider config and user_name into the installed system's config.yaml,
 /// and the provider entry — key included — into the new user's providers.yaml.
 fn configure_ai(mount_dir: &str, state: &InstallerState) {
@@ -912,6 +939,22 @@ fn configure_ai(mount_dir: &str, state: &InstallerState) {
         if sudo_write(&providers_path, &yaml).is_ok() {
             // sudo tee creates the file world-readable; it holds a secret.
             let _ = run_cmd("chmod", &["600", &providers_path]);
+        }
+    }
+
+    // ── The sharing choice, the text size and the model the person picked with the provider,
+    // so the first boot does not ask again (wire/onboarding.rs). None holds a key, and one that
+    // somehow did would not be carried: the key travels only in providers.yaml, mode 600.
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
+    for file in CARRIED_CHOICES {
+        if let Ok(text) = std::fs::read_to_string(format!("{home}/.config/yantrik/{file}")) {
+            if !holds_no_key(&text) {
+                tracing::warn!(file, "installer: a choices file holds something like a key; not carried");
+                continue;
+            }
+            if let Err(e) = sudo_write(&format!("{settings_dir}/{file}"), &text) {
+                tracing::warn!(file, error = %e, "installer: a first-run choice was not carried over");
+            }
         }
     }
 
@@ -1018,7 +1061,8 @@ fn installed_providers_yaml(state: &InstallerState) -> Option<String> {
     if state.ai_provider.is_empty() {
         return None;
     }
-    let (name, preset_url) = provider_preset(&state.ai_provider);
+    let (preset_name, preset_url) = provider_preset(&state.ai_provider);
+    let name = if state.ai_name.is_empty() { preset_name } else { state.ai_name.as_str() };
     let base_url = if !state.ai_base_url.is_empty() {
         state.ai_base_url.as_str()
     } else {
@@ -1510,26 +1554,51 @@ fn fallback_candidate(name: &str, dtype: &str, ro: &str, rm: &str, live: Option<
         && live != Some(name)
 }
 
+/// /etc/default/grub for an installed machine.
+///
+/// The kernel's console is the screen only. The live image also says `console=ttyS0`, because the
+/// CI boot test reads the serial line, and this file used to copy it. On an installed machine with
+/// no serial port (nearly every laptop) that made systemd start a serial login prompt that failed
+/// and restarted every ten seconds for as long as the machine ran: 3,056 times in 8.7 hours on the
+/// fresh-install VM (12 Oct). GRUB keeps its serial terminal, which costs nothing without a port,
+/// so a machine that does have one still shows the boot menu there; add `console=ttyS0,115200` to
+/// GRUB_CMDLINE_LINUX by hand to debug one over serial.
+fn grub_defaults(encrypted: bool) -> String {
+    format!(
+        "GRUB_DEFAULT=0\nGRUB_TIMEOUT=3\nGRUB_DISTRIBUTOR=\"Yantrik OS\"\nGRUB_CMDLINE_LINUX_DEFAULT=\"{}\"\nGRUB_CMDLINE_LINUX=\"console=tty1\"\nGRUB_TERMINAL=\"console serial\"\nGRUB_SERIAL_COMMAND=\"serial --speed=115200\"\n",
+        installer_unlock::cmdline_default(encrypted)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Shaped like the llm section of config-default.yaml, which the image ships
-    /// as /opt/yantrik/config.yaml: the primary endpoint first, a fallback block
-    /// after it.
-    const IMAGE_CONFIG: &str = "\
-user_name: \"User\"
+    #[test]
+    fn the_install_carries_the_pick_with_the_other_choices_and_no_key() {
+        assert!(CARRIED_CHOICES.contains(&"picker.json"), "the person's model pick reaches the new home");
+        assert!(CARRIED_CHOICES.contains(&"ai-accounts.json") && CARRIED_CHOICES.contains(&"first-run.json"));
+        // Each file as its own module writes it, with a choice in it: no key.
+        let mut picks = crate::picker::choices::Choices::default();
+        picks.pick_model("", "anthropic/claude-sonnet-4-5");
+        let picker = serde_json::to_string(&picks).unwrap();
+        assert!(picker.contains("anthropic/claude-sonnet-4-5"));
+        let first_run = serde_json::to_string(&crate::wire::onboarding::Saved { text_scale: 1.25, sharing: "share".into(), ..Default::default() }).unwrap();
+        let mut consent = crate::ai_accounts::consent::Consent::default();
+        consent.lane = Some("on-this-computer/qwen".into());
+        let accounts = serde_json::to_string(&consent).unwrap();
+        for text in [&picker, &first_run, &accounts] {
+            assert!(holds_no_key(text), "{text}");
+        }
+        // And one that somehow held a key is not carried.
+        assert!(!holds_no_key(r#"{"model":"a/b","api_key":"x"}"#));
+        assert!(!holds_no_key(r#"{"minds":{"m":{"model":"sk-ant-api03-abc"}}}"#));
+        assert!(!holds_no_key("not json"));
+        assert!(holds_no_key(r#"{"api_key":""}"#), "an empty field holds nothing");
+    }
 
-llm:
-  backend: \"api\"
-  api_base_url: \"http://127.0.0.1:8341/v1\"
-  api_model: \"yantrik-4b\"
-  max_tokens: 1024
-  fallback:
-    backend: \"api\"
-    api_base_url: \"http://127.0.0.1:8341/v1\"
-    api_model: \"yantrik-4b\"
-";
+    /// The image's own /opt/yantrik/config.yaml, as shipped: it names no model.
+    const IMAGE_CONFIG: &str = include_str!("../../../../deploy/yantrik-os/config-default.yaml");
 
     fn wizard_state(provider: &str, base_url: &str, key: &str) -> InstallerState {
         InstallerState {
@@ -1551,9 +1620,18 @@ llm:
         assert!(out.contains("user_name: \"Ada Lovelace\""), "{out}");
         assert!(out.contains("api_base_url: \"https://api.openai.com/v1\""), "{out}");
         assert!(out.contains("api_model: \"gpt-4o-mini\""), "{out}");
-        // Only the primary endpoint is replaced; the fallback block is the
-        // image's own and the wizard said nothing about it.
-        assert!(out.contains("    api_base_url: \"http://127.0.0.1:8341/v1\""), "{out}");
+        assert_eq!(out.matches("api_model:").count(), 1, "one model line, and no fallback naming another: {out}");
+    }
+
+    #[test]
+    fn the_image_names_no_model_until_one_is_chosen() {
+        let config: yantrik_companion::CompanionConfig = serde_yaml::from_str(IMAGE_CONFIG).expect("the image's config parses");
+        assert_eq!(yantrik_ml::not_set_up::chosen(config.llm.api_model.as_deref()), None);
+        assert!(config.llm.fallback.is_none(), "no fallback naming a model nothing serves");
+        assert!(!IMAGE_CONFIG.contains("yantrik-4b"));
+        // Skipping the AI step leaves it so.
+        let out = installed_config_yaml(IMAGE_CONFIG, &wizard_state("", "", ""));
+        assert!(out.contains("api_model: \"\""), "{out}");
     }
 
     #[test]
@@ -1562,9 +1640,9 @@ llm:
         assert!(out.contains("api_base_url: \"https://integrate.api.nvidia.com/v1\""), "{out}");
         assert!(out.contains("api_model: \"nvidia/nemotron-3-super-120b-a12b\""), "{out}");
         // A provider the catalogue does not know, with no endpoint saved, leaves
-        // the image's own endpoint rather than guessing one.
+        // the image's own (none) rather than guessing one.
         let out = installed_config_yaml(IMAGE_CONFIG, &wizard_state("nonesuch", "", ""));
-        assert!(out.contains("api_base_url: \"http://127.0.0.1:8341/v1\""), "{out}");
+        assert!(out.contains("api_base_url: \"\""), "{out}");
     }
 
     #[test]
@@ -1576,6 +1654,33 @@ llm:
         let yaml = installed_providers_yaml(&state).expect("a chosen provider produces a store");
         let store: ProviderStore = serde_yaml::from_str(&yaml).expect("valid YAML");
         assert_eq!(store.primary().expect("primary").model, "anthropic/claude-sonnet-5-5");
+    }
+
+    /// The carried picker.json names the live account by id, and the id is made from the
+    /// entry's name: the installed entry keeps that name, or the pick points at nothing.
+    #[test]
+    fn the_installed_account_keeps_the_live_id() {
+        let mut state = wizard_state("llamacpp", "http://127.0.0.1:8080/v1", "");
+        state.ai_name = "On this computer".into();
+        state.ai_model = "qwen3.5-4b".into();
+        let live = ProviderStoreEntry {
+            id: "llamacpp-onboarding".into(),
+            name: state.ai_name.clone(),
+            provider_type: state.ai_provider.clone(),
+            base_url: state.ai_base_url.clone(),
+            api_key: None,
+            auth_type: String::new(),
+            is_primary: true,
+            is_fallback: false,
+            model: state.ai_model.clone(),
+        };
+        let yaml = installed_providers_yaml(&state).expect("a chosen provider produces a store");
+        let store: ProviderStore = serde_yaml::from_str(&yaml).expect("valid YAML");
+        let installed = store.primary().expect("primary");
+        assert_eq!(
+            crate::wire::onboarding::account_id(installed),
+            crate::wire::onboarding::account_id(&live),
+        );
     }
 
     #[test]
@@ -1595,13 +1700,13 @@ llm:
             &wizard_state("openai", "https://api.openai.com/v1", "sk-secret-123"),
         );
         assert!(!out.contains("sk-secret-123"), "{out}");
-        assert!(!out.contains("api_key"), "{out}");
+        assert!(!out.lines().any(|l| l.trim_start().starts_with("api_key")), "no key line: {out}");
     }
 
     #[test]
     fn skipped_ai_leaves_the_image_default() {
         let out = installed_config_yaml(IMAGE_CONFIG, &InstallerState::default());
-        assert!(out.contains("api_base_url: \"http://127.0.0.1:8341/v1\""), "{out}");
+        assert!(out.contains("api_base_url: \"\"") && out.contains("api_model: \"\""), "nothing chosen stays nothing: {out}");
         assert!(installed_providers_yaml(&InstallerState::default()).is_none());
     }
 
@@ -1838,5 +1943,23 @@ llm:
         let ready = InstallerState { table_fingerprint: "a7df3a2a0968d199".into(), ..unscanned };
         assert_eq!(beside_problem(&ready), None);
         assert_eq!(InstallerState::default().mode, InstallMode::Erase);
+    }
+}
+
+#[cfg(test)]
+mod grub_defaults_tests {
+    use super::grub_defaults;
+
+    /// No serial console on the kernel's line of an installed machine: without a port, systemd's
+    /// serial login prompt failed and restarted every ten seconds for as long as it ran.
+    #[test]
+    fn an_installed_machine_has_no_serial_console_on_its_kernel_line() {
+        for encrypted in [false, true] {
+            let text = grub_defaults(encrypted);
+            let line = text.lines().find(|l| l.starts_with("GRUB_CMDLINE_LINUX=")).expect("the line");
+            assert_eq!(line, "GRUB_CMDLINE_LINUX=\"console=tty1\"", "{text}");
+            assert!(!text.contains("ttyS0"), "{text}");
+            assert!(text.contains("GRUB_CMDLINE_LINUX_DEFAULT=\""), "the unlock screen's own line is still there");
+        }
     }
 }

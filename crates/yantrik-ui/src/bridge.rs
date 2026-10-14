@@ -720,9 +720,21 @@ impl CompanionBridge {
         self.send_message_from(text, false)
     }
 
+    /// `send_message_from`, also saying whether a model produced the turn (`true`) or the
+    /// offline responder served it (`false`), sent just before `__DONE__`. Nothing arrives on it
+    /// when the turn panicked. The first run's first success reads it (wire/onboarding.rs).
+    pub fn send_message_reporting(&self, text: String, remote: bool) -> (Receiver<String>, Receiver<bool>) {
+        let (model_tx, model_rx) = crossbeam_channel::bounded(1);
+        (self.send_with(text, remote, Some(model_tx)), model_rx)
+    }
+
     /// `send_message`, saying whether the person asked it from away from the machine: a remote
     /// turn's tools are held to `Safe`.
     pub fn send_message_from(&self, text: String, remote: bool) -> Receiver<String> {
+        self.send_with(text, remote, None)
+    }
+
+    fn send_with(&self, text: String, remote: bool, model: Option<Sender<bool>>) -> Receiver<String> {
         let (token_tx, token_rx) = crossbeam_channel::unbounded();
         if self
             .cmd_tx
@@ -730,7 +742,7 @@ impl CompanionBridge {
                 text,
                 token_tx: token_tx.clone(),
                 job: None,
-                model: None,
+                model,
                 remote,
                 outside: false,
             })
@@ -1414,8 +1426,10 @@ fn worker_loop(
                         // Tell a caller blocked in `ask` whether a model answered this turn,
                         // while the fact is still the one being stored: it must not take the
                         // offline responder's canned text away as the model's words.
+                        // Nor the not-set-up sentence, a guard warning or a router reply:
+                        // no model produced those, so they prove nothing.
                         if let Some(tx) = &model {
-                            let _ = tx.send(ok);
+                            let _ = tx.send(ok && !response.without_model);
                         }
                         if ok {
                             execute_suppression_logged = false;
@@ -1778,6 +1792,8 @@ fn worker_loop(
                                     content: SharedString::from(&text),
                                     is_streaming: false,
                                     blocks: ModelRc::default(),
+                                    mind: crate::wire::harness::BUILTIN_NAME.into(),
+                                    model: Default::default(),
                                 });
                                 // Through the notifications service, and only when the Lens is
                                 // shut: with it open the answer is already in the conversation
@@ -2572,6 +2588,8 @@ fn worker_loop(
                                             content: SharedString::from(&text),
                                             is_streaming: false,
                                             blocks: ModelRc::default(),
+                                            mind: crate::wire::harness::BUILTIN_NAME.into(),
+                                            model: Default::default(),
                                         });
                                         // Raised only when the Lens is closed — re-checked here on
                                         // the UI thread, which is the one place that reading is
@@ -3121,6 +3139,14 @@ fn build_companion(config: CompanionConfig) -> Result<CompanionService, String> 
         { std::sync::Arc::new(ClaudeCliLLM::new(model, max_tokens)) }
         #[cfg(not(feature = "claude-cli"))]
         { panic!("claude-cli feature not enabled at compile time") }
+    } else if config.llm.is_api_backend()
+        && (yantrik_ml::not_set_up::chosen(config.llm.api_model.as_deref()).is_none()
+            || config.llm.resolve_api_base_url().is_none_or(|u| u.trim().is_empty()))
+    {
+        // No model chosen (the shipped config names none, and a name nothing serves would be a
+        // fake): the companion starts, and its chat says how to choose one.
+        tracing::info!("No model is chosen for the companion: it says so until one is");
+        std::sync::Arc::new(yantrik_ml::not_set_up::NotSetUpLLM)
     } else if config.llm.is_api_backend() {
         // API backend (Ollama, OpenAI, DeepSeek, vLLM, etc.)
         let base_url = config.llm.resolve_api_base_url()
@@ -3177,7 +3203,15 @@ fn build_companion(config: CompanionConfig) -> Result<CompanionService, String> 
     };
 
     // Wrap with fallback if configured
-    let llm: std::sync::Arc<dyn LLMBackend> = if let Some(ref fb_config) = config.llm.fallback {
+    // A fallback with no model or address chosen is none: never a name nothing serves.
+    let fallback = config.llm.fallback.as_ref().filter(|f| {
+        f.backend == "llamacpp"
+            || (yantrik_ml::not_set_up::chosen(f.api_model.as_deref()).is_some()
+                && f.api_base_url.as_deref().is_some_and(|u| !u.trim().is_empty()))
+    });
+    let llm: std::sync::Arc<dyn LLMBackend> = if primary_llm.backend_name() == yantrik_ml::not_set_up::BACKEND {
+        primary_llm
+    } else if let Some(fb_config) = fallback {
         let fallback_cfg = match fb_config.backend.as_str() {
             "llamacpp" => {
                 let path = fb_config.model_path.as_deref()
