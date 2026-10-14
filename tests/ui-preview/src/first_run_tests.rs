@@ -7,7 +7,8 @@
 //!   A first boot the installer did not set up asks the person's name: one field, Enter goes on.
 //!   Escape is Back on every screen, never closing the first run.
 //! - Who thinks: what works without an account leads (found on the network, this computer, the
-//!   free one), one card Recommended with its reason; the network is looked at only on the
+//!   free one), one card Recommended with its reason, never a model on another computer, whose
+//!   card says the conversations go there; the network is looked at only on the
 //!   person's say-so; focus starts on the first card; Space chooses it; the key field takes focus and
 //!   typing then Enter hands the shell the provider and the key; the account's models are listed
 //!   with none chosen, and the person picks one by keyboard; a pick that did not take offers Try
@@ -40,19 +41,32 @@ fn provider(id: &str, name: &str, line: &str, needs: &str, group: &str, placehol
         browser_sign_in: false,
         key_help,
         recommended: "".into(),
+        caution: "".into(),
     }
 }
 
-/// The cards as wire/onboarding.rs makes them for a person with no account: a model found on the
-/// network first (Recommended), this computer's, the free one, then the accounts.
+/// The cards as wire/onboarding.rs makes them for a person with no account: a model found on
+/// another computer first (never Recommended, and saying where conversations go), this
+/// computer's, the free one (Recommended), then the accounts.
 fn featured() -> Vec<FirstRunProvider> {
     vec![
         FirstRunProvider {
-            recommended: "Recommended: it works now, with nothing to sign up for or pay".into(),
-            ..provider("nearby:http://192.168.1.5:8080/v1", "Found on your network", "qwen3.8-flash on 192.168.1.5:8080", "already running, needs no account", "nearby", "", false)
+            caution: "Your conversations go to that computer. Choose it only if it's yours.".into(),
+            ..provider(
+                "nearby:http://192.168.1.5:8080/v1",
+                "On 192.168.1.5, another computer on this network",
+                "qwen3.8-flash on 192.168.1.5:8080",
+                "already running, needs no account",
+                "network",
+                "",
+                false,
+            )
         },
         provider("this-computer", "On this computer", "private, slower", "already here (2.7 GB)", "this-computer", "", false),
-        provider("groq", "Groq", "free, fast open models", "needs a free Groq account; 1,000 requests and 200K tokens a day per model", "free", "gsk_…", true),
+        FirstRunProvider {
+            recommended: "Recommended: free to start, and it does not train on what you send".into(),
+            ..provider("groq", "Groq", "free, fast open models", "needs a free Groq account; 1,000 requests and 200K tokens a day per model", "free", "gsk_…", true)
+        },
         provider("anthropic", "Claude", "online, careful with words", "needs an Anthropic account", "cloud", "sk-ant-…", true),
         provider("openai", "OpenAI", "online, a good all-rounder", "needs an OpenAI account", "cloud", "sk-…", true),
         provider("gemini", "Google Gemini", "online, reads long documents", "needs a Google account", "cloud", "AIza…", true),
@@ -64,15 +78,13 @@ fn featured() -> Vec<FirstRunProvider> {
 
 /// The same screen before anything was found: the free one leads, marked Recommended.
 fn featured_none_found() -> Vec<FirstRunProvider> {
-    let mut v: Vec<FirstRunProvider> = featured().into_iter().filter(|c| c.group != "nearby" && c.group != "this-computer").collect();
-    v[0].recommended = "Recommended: free to start, and it does not train on what you send".into();
-    v
+    featured().into_iter().filter(|c| c.group != "network" && c.group != "this-computer").collect()
 }
 
 /// A stand-in for the catalogue's full list: its length and order are the production's concern
 /// (wire/onboarding.rs tests that every provider is there); here it only has to draw.
 fn every() -> Vec<FirstRunProvider> {
-    let mut v: Vec<FirstRunProvider> = featured().into_iter().filter(|c| c.group != "nearby" && c.group != "this-computer").collect();
+    let mut v: Vec<FirstRunProvider> = featured().into_iter().filter(|c| c.group != "network" && c.group != "this-computer").collect();
     for (id, name) in [("mistral", "Mistral"), ("xai", "xAI"), ("ollama", "Ollama"), ("llamacpp", "llama.cpp")] {
         let local = matches!(id, "ollama" | "llamacpp");
         v.push(provider(
@@ -245,7 +257,8 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     render(w, width, height, &still("2-connected-light"))?;
     ui.set_light(false);
     // Choose another: the list is back. The person asks to look on the network; what was found
-    // leads, Recommended, and the look's words say what it found.
+    // leads, saying the conversations would go to that computer, the free one keeps Recommended,
+    // and the look's words say what it found.
     ui.set_connect_mode("".into());
     ui.set_connect_status("".into());
     ui.set_connect_words("".into());

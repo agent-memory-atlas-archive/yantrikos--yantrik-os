@@ -43,6 +43,11 @@ pub struct Found {
 }
 
 impl Found {
+    /// The address alone, "192.168.1.5": from the look's own probe, never from what answered.
+    pub fn ip(&self) -> &str {
+        self.host.rsplit_once(':').map_or(self.host.as_str(), |(ip, _)| ip)
+    }
+
     /// The card's id, which carries the address: the first run connects to it on a press.
     pub fn card_id(&self) -> String {
         format!("{CARD_PREFIX}{}", self.base_url)
@@ -53,12 +58,28 @@ impl Found {
 pub const CARD_PREFIX: &str = "nearby:";
 
 /// What a found server's card says: the model when it lists one, how many when it lists more.
-/// Nothing is chosen here; the person picks from the full list once connected.
+/// Nothing is chosen here; the person picks from the full list once connected. The host is the
+/// look's own probe address; the model id is whatever answered, so it is clipped (`shown_id`).
 pub fn found_line(f: &Found) -> String {
     match f.models.as_slice() {
-        [one] => format!("{one} on {}", f.host),
+        [one] => format!("{} on {}", shown_id(one), f.host),
         many => format!("{} models on {}", many.len(), f.host),
     }
+}
+
+/// The longest model id a card shows, in characters, before it is cut with an ellipsis.
+pub const ID_CHARS: usize = 60;
+
+/// A model id as a card shows it: one line, at most `ID_CHARS`. A server anyone on the network can
+/// run names its own models, and a card must not let one write "Recommended: …" across the layout.
+pub fn shown_id(id: &str) -> String {
+    let one_line: String = id.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    let one_line = one_line.trim();
+    if one_line.chars().count() <= ID_CHARS {
+        return one_line.to_string();
+    }
+    let cut: String = one_line.chars().take(ID_CHARS - 1).collect();
+    format!("{}…", cut.trim_end())
 }
 
 /// Whether `ip` is on a private range, the only kind the network look covers.
@@ -151,6 +172,22 @@ mod tests {
         assert_eq!(found_line(&found(&["qwen3.8-flash"])), "qwen3.8-flash on 192.168.1.5:8080");
         assert_eq!(found_line(&found(&["a", "b", "c"])), "3 models on 192.168.1.5:8080");
         assert_eq!(found(&["a"]).card_id(), "nearby:http://192.168.1.5:8080/v1");
+        assert_eq!(found(&["a"]).ip(), "192.168.1.5");
+    }
+
+    /// Review of #801: a server anyone on the network can run names its own models. What it names
+    /// is clipped to one short line, and the host on the card is the look's own address.
+    #[test]
+    fn a_long_or_misleading_model_id_is_clipped_on_the_card() {
+        let long = "x".repeat(200);
+        let line = found_line(&found(&[&long]));
+        let shown = line.strip_suffix(" on 192.168.1.5:8080").expect("the host is the probe's, after the id");
+        assert_eq!(shown.chars().count(), ID_CHARS);
+        assert!(shown.ends_with('…'), "{shown}");
+        let sly = found_line(&found(&["m\nRecommended: it is safe\r\n"]));
+        assert!(!sly.contains('\n') && !sly.contains('\r'), "{sly:?}");
+        assert_eq!(sly, "m Recommended: it is safe on 192.168.1.5:8080", "one line, on the card's own line");
+        assert_eq!(shown_id("qwen3.8-flash"), "qwen3.8-flash", "a usual id is shown as it is");
     }
 
     #[test]

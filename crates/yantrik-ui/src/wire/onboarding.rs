@@ -79,6 +79,9 @@ pub struct Card {
     pub key_help: bool,
     /// "Recommended: …" with its reason, on the one card the screen leads with; else empty.
     pub recommended: String,
+    /// What the person should know before choosing it, said on the card: where a model on another
+    /// computer sends their conversations. Empty on the rest.
+    pub caution: String,
 }
 
 /// The name on the card. Anthropic's models are known by their own name.
@@ -163,6 +166,7 @@ fn card(p: &ProviderDescriptor, lane: &dyn Lane) -> Card {
         browser_sign_in: lane.browser_sign_in(p.id),
         key_help: key_page(p.id).is_some(),
         recommended: String::new(),
+        caution: String::new(),
     }
 }
 
@@ -182,23 +186,38 @@ pub fn this_computer_card(local: &LocalModel) -> Card {
         browser_sign_in: false,
         key_help: false,
         recommended: String::new(),
+        caution: String::new(),
     }
 }
 
 /// A model server found here or on the network: free, already running, nothing to sign up for.
+/// One on another computer says so, and that the conversations go there: on a shared network
+/// (an office, a café, a hotel) anyone can answer the look, so it is the person's to judge, and it
+/// is never the recommended card.
 pub fn found_card(f: &Found) -> Card {
     Card {
         id: f.card_id(),
-        name: if f.on_this_computer { "Found on this computer".into() } else { "Found on your network".into() },
+        name: if f.on_this_computer {
+            "Found on this computer".into()
+        } else {
+            format!("On {}, another computer on this network", f.ip())
+        },
         line: crate::wire::onboarding_nearby::found_line(f),
         needs: "already running, needs no account".into(),
-        group: "nearby".into(),
+        group: if f.on_this_computer { "nearby" } else { NETWORK }.into(),
         key_placeholder: String::new(),
         browser_sign_in: false,
         key_help: false,
         recommended: String::new(),
+        caution: if f.on_this_computer { String::new() } else { NETWORK_CAUTION.into() },
     }
 }
+
+/// The group of a card for a model found on another computer.
+pub const NETWORK: &str = "network";
+
+/// Said on that card, under what it runs.
+pub const NETWORK_CAUTION: &str = "Your conversations go to that computer. Choose it only if it's yours.";
 
 /// The free tier's card: its own sign-up, said as free, with its daily limit.
 fn free_card(lane: &dyn Lane) -> Option<Card> {
@@ -226,7 +245,8 @@ fn recommend(c: &Card) -> String {
 
 /// The cards in the order a person with no account needs them: what was found running (here or
 /// on the network), the model on this computer, the free choice, then the accounts. One card is
-/// marked Recommended, with its reason: the first found, else the free one.
+/// marked Recommended, with its reason: the first found on this computer, else the free one. A
+/// model on another computer is never recommended.
 pub fn featured_cards(found: &[Found], local: Option<&LocalModel>, lane: &dyn Lane) -> Vec<Card> {
     let mut cards: Vec<Card> = found.iter().map(found_card).collect();
     if let Some(l) = local {
@@ -610,6 +630,7 @@ fn to_ui(c: &Card) -> FirstRunProvider {
         browser_sign_in: c.browser_sign_in,
         key_help: c.key_help,
         recommended: c.recommended.clone().into(),
+        caution: c.caution.clone().into(),
     }
 }
 
@@ -1567,7 +1588,10 @@ mod tests {
             ids,
             ["nearby:http://192.168.1.5:8080/v1", THIS_COMPUTER, FREE, "anthropic", "openai", "gemini", "deepseek", "openrouter", "nvidia-nim"]
         );
-        assert_eq!((cards[0].name.as_str(), cards[0].line.as_str()), ("Found on your network", "qwen3.8-flash on 192.168.1.5:8080"));
+        assert_eq!(
+            (cards[0].name.as_str(), cards[0].line.as_str()),
+            ("On 192.168.1.5, another computer on this network", "qwen3.8-flash on 192.168.1.5:8080")
+        );
         assert!(cards[2].needs.starts_with("needs a free Groq account"), "{}", cards[2].needs);
         let paid = cards.iter().filter(|c| c.group == "cloud" || c.group == "aggregator").count();
         assert_eq!(paid, FEATURED.len(), "the accounts are still all there, after");
@@ -1575,11 +1599,13 @@ mod tests {
 
     #[test]
     fn exactly_one_card_is_recommended_with_its_reason() {
-        let with_found = featured_cards(&[found("10.0.0.7:11434", &["a", "b"])], None, &PendingLane);
+        let here = Found { on_this_computer: true, ..found("127.0.0.1:11434", &["a", "b"]) };
+        let with_found = featured_cards(&[found("10.0.0.7:11434", &["c"]), here], None, &PendingLane);
         let marked: Vec<&Card> = with_found.iter().filter(|c| !c.recommended.is_empty()).collect();
         assert_eq!(marked.len(), 1);
-        assert_eq!(marked[0].group, "nearby", "a model already running is the one to choose");
+        assert_eq!(marked[0].id, "nearby:http://127.0.0.1:11434/v1", "a model already running here is the one to choose");
         assert!(marked[0].recommended.starts_with("Recommended: ") && marked[0].recommended.contains("nothing to sign up for"));
+        assert!(marked[0].caution.is_empty(), "nothing it says leaves this computer");
         // Nothing found: the free one, for its reason.
         let without = featured_cards(&[], None, &PendingLane);
         let marked: Vec<&Card> = without.iter().filter(|c| !c.recommended.is_empty()).collect();
@@ -1588,11 +1614,27 @@ mod tests {
         assert_eq!(without[0].id, FREE, "and it leads");
     }
 
+    /// Review of #801: on a shared network anyone can answer the look. A model on another computer
+    /// is never Recommended, and its card says the conversations go to that computer.
+    #[test]
+    fn a_model_on_another_computer_is_never_recommended_and_says_where_conversations_go() {
+        let cards = featured_cards(&[found("192.168.1.5:8080", &["qwen3.8-flash"])], None, &PendingLane);
+        let network = &cards[0];
+        assert_eq!(network.group, NETWORK);
+        assert!(network.recommended.is_empty(), "{}", network.recommended);
+        assert_eq!(network.caution, "Your conversations go to that computer. Choose it only if it's yours.");
+        assert_eq!(network.name, "On 192.168.1.5, another computer on this network");
+        let marked: Vec<&Card> = cards.iter().filter(|c| !c.recommended.is_empty()).collect();
+        assert_eq!((marked.len(), marked[0].id.as_str()), (1, FREE), "the free one keeps it, as with nothing found");
+        assert!(cards.iter().filter(|c| c.id != network.id).all(|c| c.caution.is_empty()));
+    }
+
     #[test]
     fn a_found_card_is_found_again_by_its_id() {
         let f = [found("192.168.1.5:8080", &["m"])];
         let c = find_card(&f[0].card_id(), &f, None, &PendingLane).unwrap();
-        assert_eq!(c.name, "Found on your network");
+        assert_eq!(c.name, "On 192.168.1.5, another computer on this network");
+        assert_eq!(c.caution, NETWORK_CAUTION, "found again, it still says where conversations go");
         assert!(find_card("nearby:http://elsewhere/v1", &f, None, &PendingLane).is_none());
         let here = Found { on_this_computer: true, ..f[0].clone() };
         assert_eq!(found_card(&here).name, "Found on this computer");

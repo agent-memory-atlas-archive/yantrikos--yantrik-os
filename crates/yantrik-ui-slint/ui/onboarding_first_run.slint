@@ -42,7 +42,8 @@ export struct FirstRunProvider {
     line: string,
     // The honest requirement: "needs an Anthropic account", "downloads 2.5 GB".
     needs: string,
-    // "cloud", "aggregator", "local" (a runtime the person hosts), "this-computer"
+    // "cloud", "aggregator", "local" (a runtime the person hosts), "this-computer", "nearby" (a
+    // model found running on this computer), "network" (one found on another computer)
     group: string,
     // What the key field shows before anything is typed; empty when no key is needed.
     key-placeholder: string,
@@ -53,6 +54,9 @@ export struct FirstRunProvider {
     // "Recommended: it works now, with nothing to sign up for or pay" on the one card
     // the screen leads with; empty on the rest.
     recommended: string,
+    // What to know before choosing it: "Your conversations go to that computer. Choose it only
+    // if it's yours." on a model found on another computer; empty on the rest.
+    caution: string,
 }
 
 // One model the connected account lists, for the person to choose. Nothing is chosen for them.
@@ -253,7 +257,8 @@ component FrProviderCard inherits Rectangle {
     border-width: fs.has-focus ? Theme.focus-ring-width : root.selected ? 2px : 1px;
     border-color: fs.has-focus ? Theme.focus-ring : root.selected ? Theme.accent : Theme.border-default;
     accessible-role: button;
-    accessible-label: root.p.name + ". " + root.p.line + ". " + root.p.needs + (root.p.recommended == "" ? "" : ". " + root.p.recommended);
+    accessible-label: root.p.name + ". " + root.p.line + ". " + root.p.needs + (root.p.caution == "" ? "" : ". " + root.p.caution)
+        + (root.p.recommended == "" ? "" : ". " + root.p.recommended);
     accessible-checked: root.selected;
     accessible-action-default => { root.chosen(); }
 
@@ -289,6 +294,12 @@ component FrProviderCard inherits Rectangle {
             // "online, careful with words · needs an Anthropic account"
             text: root.p.needs == "" ? root.p.line : root.p.line + " · " + root.p.needs;
             color: Theme.text-secondary;
+            font-size: Theme.fs-title-2;
+            wrap: word-wrap;
+        }
+        if root.p.caution != "" : Text {
+            text: root.p.caution;
+            color: Theme.color-warning;
             font-size: Theme.fs-title-2;
             wrap: word-wrap;
         }
