@@ -99,9 +99,9 @@ class RefreshTests(unittest.TestCase):
         env.update(extra)
         return env
 
-    def refresh(self, **extra):
+    def refresh(self, *args, **extra):
         return subprocess.run(
-            ["sh", str(self.share / "lib" / "install" / "refresh-plugins.sh")],
+            ["sh", str(self.share / "lib" / "install" / "refresh-plugins.sh"), *args],
             capture_output=True, text=True, env=self.env(**extra), stdin=subprocess.DEVNULL,
         )
 
@@ -135,18 +135,42 @@ class RefreshTests(unittest.TestCase):
         (dest / "adapter.py").write_text(adapter)
         return dest
 
+    def assert_only_our_plugins_and_theirs(self):
+        """Hermes 0.21 loads every child of ~/.hermes/plugins with a plugin.yaml, dot-directories
+        included, and of two with one name the later in sorted order wins: a staging or backup copy
+        left there can be the plugin Hermes runs (VM 541, 14 Oct). Nothing is ever left there, and
+        the staging directory beside it is gone once the refresh is done."""
+        plugins = self.home / ".hermes" / "plugins"
+        self.assertLessEqual({p.name for p in plugins.iterdir()}, {"yantrik", "yantrikdb", "someone-else"})
+        self.assertFalse((self.home / ".hermes" / ".yantrik-staging").exists())
+
     def theirs(self):
         """Everything under ~/.hermes that is not one of the two plugins an install writes."""
         hermes = self.home / ".hermes"
         return {k: v for k, v in tree(hermes).items()
                 if not k.startswith(("plugins/yantrik/", "plugins/yantrikdb/"))}
 
-    def test_an_older_desktop_plugin_is_replaced_and_the_gateway_restarted_once(self):
+    def test_an_older_desktop_plugin_is_replaced_and_the_gateway_left_for_its_next_start(self):
+        # A restart kills a turn in flight, which Hermes then replays into the next turn as a
+        # "Recovered reply" (review of #808): the update never restarts the gateway itself.
+        self.install_hermes()
+        dest = self.install_desktop_plugin("def send_message():\n    pass\n")
+        (dest / "stale.py").write_text("gone from the build\n")
+        result = self.refresh()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(tree(dest), tree(self.shipped))
+        self.assertIn("def send_clarify", (dest / "adapter.py").read_text())
+        self.assertEqual(self.restarts(), [])
+        self.assertFalse(self.log.exists(), "not even asked whether the gateway runs")
+        self.assertIn("when its gateway next starts", result.stdout)
+        self.assert_only_our_plugins_and_theirs()
+
+    def test_with_restart_an_older_desktop_plugin_is_replaced_and_the_gateway_restarted_once(self):
         self.install_hermes()
         dest = self.install_desktop_plugin("def send_message():\n    pass\n")
         (dest / "stale.py").write_text("gone from the build\n")
         (dest / "__pycache__").mkdir()
-        result = self.refresh()
+        result = self.refresh("--restart")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(tree(dest), tree(self.shipped))
         self.assertIn("def send_clarify", (dest / "adapter.py").read_text())
@@ -155,8 +179,7 @@ class RefreshTests(unittest.TestCase):
         self.assertIn("restarted Hermes's gateway", result.stdout)
         logged = (self.home / ".local/state/yantrik/harnesses/hermes/refreshed").read_text()
         self.assertTrue(logged.rstrip().endswith(" yantrik"), logged)
-        self.assertFalse((self.home / ".hermes/plugins/.yantrik-new").exists())
-        self.assertFalse((self.home / ".hermes/plugins/.yantrik-old").exists())
+        self.assert_only_our_plugins_and_theirs()
 
     def test_an_identical_desktop_plugin_is_left_alone_with_no_restart(self):
         self.install_hermes()
@@ -165,7 +188,7 @@ class RefreshTests(unittest.TestCase):
         (dest / "__pycache__").mkdir()
         (dest / "__pycache__" / "adapter.cpython-313.pyc").write_bytes(b"\0")
         inode = (dest / "adapter.py").stat().st_ino
-        result = self.refresh()
+        result = self.refresh("--restart")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "")
         self.assertEqual((dest / "adapter.py").stat().st_ino, inode)
@@ -201,7 +224,7 @@ class RefreshTests(unittest.TestCase):
     def test_a_stopped_gateway_is_not_started(self):
         self.install_hermes()
         self.install_desktop_plugin("old\n")
-        result = self.refresh(FAKE_GATEWAY="inactive")
+        result = self.refresh("--restart", FAKE_GATEWAY="inactive")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.restarts(), [])
         self.assertIn("not running", result.stdout)
@@ -213,7 +236,7 @@ class RefreshTests(unittest.TestCase):
         dest = self.home / ".hermes" / "plugins" / "yantrikdb"
         dest.mkdir()
         (dest / "__init__.py").write_text("an older shim\n")
-        result = self.refresh(FAKE_PROVIDER="2")
+        result = self.refresh("--restart", FAKE_PROVIDER="2")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("refreshed Hermes's YantrikDB plugin", result.stdout, result.stderr)
         self.assertIn('VERSION = "2"', (dest / "vendor/yantrikdb_hermes_plugin/__init__.py").read_text())
@@ -223,11 +246,11 @@ class RefreshTests(unittest.TestCase):
 
         # The same wheels again: a RECORD that differs is not a new provider.
         self.log.unlink()
-        again = self.refresh(FAKE_PROVIDER="2")
+        again = self.refresh("--restart", FAKE_PROVIDER="2")
         self.assertEqual(again.returncode, 0, again.stderr)
         self.assertEqual(again.stdout, "")
         self.assertEqual(self.restarts(), [])
-        self.assertFalse((self.home / ".hermes/plugins/.yantrikdb-new").exists())
+        self.assert_only_our_plugins_and_theirs()
 
     def test_a_yantrikdb_build_that_fails_keeps_the_one_in_place(self):
         self.install_hermes()
@@ -240,8 +263,36 @@ class RefreshTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((dest / "__init__.py").read_text(), "the working shim\n")
         self.assertIn("left Hermes's YantrikDB plugin as it was", result.stdout)
-        self.assertFalse((self.home / ".hermes/plugins/.yantrikdb-new").exists())
+        self.assert_only_our_plugins_and_theirs()
         self.assertEqual(self.restarts(), [])
+
+    def test_a_swap_whose_second_move_fails_puts_the_old_plugin_back_and_leaves_nothing_in_plugins(self):
+        # The half-swapped case: the old plugin moved aside, the new one not moved in. Staged
+        # inside plugins/, that left `.yantrik-old` beside `.yantrik-new`, and Hermes would run the
+        # old one (review of #808).
+        self.install_hermes()
+        dest = self.install_desktop_plugin("the working adapter\n")
+        missing = self.home / ".hermes" / ".yantrik-staging" / "yantrik-new"
+        result = subprocess.run(
+            ["sh", "-c", '. "$1"; hermes_swap_dir "$2" "$3"', "sh",
+             str(INSTALL / "hermes-plugins.sh"), str(missing), str(dest)],
+            capture_output=True, text=True, env=self.env(),
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((dest / "adapter.py").read_text(), "the working adapter\n")
+        self.assertLessEqual({p.name for p in (self.home / ".hermes" / "plugins").iterdir()},
+                             {"yantrik", "someone-else"})
+
+    def test_a_staging_copy_an_interrupted_refresh_left_is_not_a_plugin_and_is_replaced(self):
+        self.install_hermes()
+        dest = self.install_desktop_plugin("old\n")
+        stale = self.home / ".hermes" / ".yantrik-staging" / "yantrik-new"
+        stale.mkdir(parents=True)
+        (stale / "half-written.py").write_text("")
+        result = self.refresh()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(tree(dest), tree(self.shipped))
+        self.assert_only_our_plugins_and_theirs()
 
 
 class OneImplementationTests(unittest.TestCase):
@@ -255,6 +306,20 @@ class OneImplementationTests(unittest.TestCase):
         # No second copy of the provider's install left behind in the installer.
         self.assertNotIn("pip install", text)
         self.assertNotIn('cp -r "$plugin/."', text)
+
+    def test_nothing_is_ever_staged_inside_the_directory_hermes_scans(self):
+        # A copy interrupted mid-build stays where it was staged, and under plugins/ Hermes would
+        # load it (review of #808). So staging is a directory beside plugins/, never inside it.
+        with tempfile.TemporaryDirectory() as home:
+            out = subprocess.run(
+                ["sh", "-c", '. "$1"; hermes_staging yantrik', "sh", str(INSTALL / "hermes-plugins.sh")],
+                capture_output=True, text=True, env={"HOME": home, "PATH": "/usr/bin:/bin"},
+            ).stdout.strip()
+            self.assertEqual(out, os.path.join(home, ".hermes", ".yantrik-staging", "yantrik"))
+        for name in ("hermes.sh", "hermes-plugins.sh", "refresh-plugins.sh"):
+            text = (INSTALL / name).read_text()
+            self.assertNotIn('plugins/.yantrik', text, name)
+            self.assertNotIn('$plugins/.', text, name)
 
     def test_the_refresh_script_is_executable_and_staged(self):
         self.assertTrue(os.access(INSTALL / "refresh-plugins.sh", os.X_OK))
@@ -270,6 +335,11 @@ class UpdaterTests(unittest.TestCase):
         self.text = UPDATER.read_text()
         start = self.text.index("reconcile_harness_plugins() {")
         self.body = self.text[start:self.text.index("\n}\n", start)]
+
+    def test_the_updater_never_asks_for_a_gateway_restart(self):
+        # A turn in flight would come back as a "Recovered reply" in the person's next turn.
+        self.assertIn('/bin/sh "$script" 2>&1', self.body)
+        self.assertNotIn("--restart", self.body)
 
     def test_reconcile_and_an_up_to_date_apply_both_refresh(self):
         reconcile = self.text[self.text.index("cmd_reconcile() {"):]

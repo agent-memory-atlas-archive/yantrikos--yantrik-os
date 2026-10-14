@@ -2454,8 +2454,10 @@ reconcile_hermes_launcher() {
 # (harnesses/lib/install/refresh-plugins.sh): Hermes loads ~/.hermes/plugins, written once at
 # install, so before this every Hermes fix reached fresh installs only (VM 541, 14 Oct). Run after
 # every apply (through `reconcile`, by the new build's updater) and on `reconcile` itself, so an
-# updated machine is fixed without a new build. It replaces only what differs and restarts the
-# owner's gateway only then, so a build with no harness change does nothing.
+# updated machine is fixed without a new build. It replaces only what differs, so a build with no
+# harness change does nothing; and it is run without --restart, so the owner's Hermes gateway is
+# never restarted under a turn in flight: it loads the new plugins when it next starts
+# (refresh-plugins.sh says why).
 #
 # As the owner, the way reconcile_hermes_launcher heals the launcher: root never writes into a
 # home, and root executes nothing from share/ (the refresh is the owner's own process, with

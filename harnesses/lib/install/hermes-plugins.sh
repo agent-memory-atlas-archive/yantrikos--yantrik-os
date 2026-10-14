@@ -25,11 +25,23 @@ hermes_tree_hash() {
         | LC_ALL=C sort -k 2 | sha256sum | cut -d' ' -f1
 }
 
-# hermes_swap_dir NEW DEST — NEW, written beside DEST, put in DEST's place whole. The old one is
-# moved aside first and only removed once NEW is in, so a failed move puts it back: Hermes finds
-# the earlier plugin or the new one, never half of either and never none.
+# hermes_staging NAME — where a plugin NAME is built and where the one it replaces is moved aside:
+# ~/.hermes/.yantrik-staging/NAME-new and NAME-old, made if missing. On the same filesystem as
+# ~/.hermes/plugins, so each move is a rename; and never inside it, because Hermes 0.21's
+# scan_directory (hermes_cli/plugins_discovery.py) skips only dunder directories there: every child
+# with a plugin.yaml is a plugin, and of two with the same name the later in sorted order wins. On
+# VM 541 (14 Oct) a backup left beside `yantrik` was the one Hermes ran, and a half-finished swap
+# that left `.yantrik-old` and `.yantrik-new` there would have run the old one too (review of #808).
+hermes_staging() {
+    mkdir -p "$HOME/.hermes/.yantrik-staging" && printf '%s\n' "$HOME/.hermes/.yantrik-staging/$1"
+}
+
+# hermes_swap_dir NEW DEST — NEW, built in the staging directory, put in DEST's place whole. The
+# old one is moved aside first, into the staging directory, and only removed once NEW is in, so a
+# failed move puts it back: Hermes finds the earlier plugin or the new one, never half of either,
+# never none, and never a second copy under ~/.hermes/plugins.
 hermes_swap_dir() {
-    old="$(dirname "$2")/.$(basename "$2")-old"
+    old="$(hermes_staging "$(basename "$2")")-old" || return 1
     rm -rf "$old" || return 1
     if [ -e "$2" ]; then
         mv "$2" "$old" || return 1
@@ -39,10 +51,11 @@ hermes_swap_dir() {
         return 1
     fi
     rm -rf "$old"
+    rmdir "$HOME/.hermes/.yantrik-staging" 2>/dev/null || true
 }
 
 # hermes_desktop_plugin_build SRC NEW — the desktop plugin as an install writes it: SRC (the
-# harnesses/hermes directory the build ships) copied whole into a new NEW.
+# harnesses/hermes directory the build ships) copied whole into a new NEW (hermes_staging yantrik).
 hermes_desktop_plugin_build() {
     rm -rf "$2" && mkdir -p "$2" && cp -r "$1/." "$2/"
 }
@@ -71,7 +84,7 @@ hermes_vendor_install() {
 }
 
 # hermes_yantrikdb_plugin_build NEW PYTHON — the YantrikDB plugin as an install writes it, into a
-# new NEW, checked to import in Hermes's Python. Calls fail, so a caller that must carry on after
+# new NEW (hermes_staging yantrikdb), checked to import in Hermes's Python. Calls fail, so a caller that must carry on after
 # a failure (refresh-plugins.sh) runs it in a subshell.
 #
 # Not into Hermes's venv: Hermes 0.21's package manager rebuilds that as a new generation from its

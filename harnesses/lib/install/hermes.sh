@@ -77,8 +77,9 @@ backup_once "$env_file"
 # Written beside the installed one and swapped in whole, by the same function refresh-plugins.sh
 # uses after an update, so a reinstall and a refresh both leave exactly what ships.
 say "copying the desktop plugin into ~/.hermes"
-hermes_desktop_plugin_build "$plugin" "$HOME/.hermes/plugins/.yantrik-new" \
-    && hermes_swap_dir "$HOME/.hermes/plugins/.yantrik-new" "$HOME/.hermes/plugins/yantrik" \
+new_desktop=$(hermes_staging yantrik)-new || fail "could not make ~/.hermes/.yantrik-staging"
+hermes_desktop_plugin_build "$plugin" "$new_desktop" \
+    && hermes_swap_dir "$new_desktop" "$HOME/.hermes/plugins/yantrik" \
     || fail "could not put the desktop plugin in ~/.hermes/plugins/yantrik"
 timeout 60 hermes plugins enable yantrik-desktop </dev/null || fail "Hermes would not enable the desktop plugin"
 
@@ -104,7 +105,7 @@ wire_model hermes
 [ -d "$MEMORY_WHEELS" ] || fail "this image has no YantrikDB wheels at $MEMORY_WHEELS"
 say "installing the YantrikDB memory provider beside Hermes, from the image"
 plugin_dir="$HOME/.hermes/plugins/yantrikdb"
-new_plugin="$HOME/.hermes/plugins/.yantrikdb-new"
+new_plugin=$(hermes_staging yantrikdb)-new || fail "could not make ~/.hermes/.yantrik-staging"
 hermes_yantrikdb_plugin_build "$new_plugin" "$hermes_python"
 hermes_swap_dir "$new_plugin" "$plugin_dir" || fail "could not put the YantrikDB plugin in $plugin_dir"
 # yantrikdb as Hermes's memory, with Hermes's own MEMORY.md and USER.md off: a provider runs beside
