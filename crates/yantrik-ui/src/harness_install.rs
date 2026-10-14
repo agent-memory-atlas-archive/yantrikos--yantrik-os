@@ -82,6 +82,36 @@ pub fn busy() -> bool {
     with_board(|board| board.jobs.values().any(|j| j.running))
 }
 
+/// `true` while a job this shell started for `id` is running.
+pub fn running(id: &str) -> bool {
+    with_board(|board| board.jobs.get(id).is_some_and(|j| j.running))
+}
+
+/// Say on a harness's row why an install was not started, as a failed install says why it
+/// failed: in the row's own sentence, with Install offered again.
+///
+/// For an install the desktop would have started by itself (`crate::default_mind`), whose
+/// reason — no internet, no model picked — exists before any command runs. Never over a job
+/// that is running: what that job says is the truth until it ends.
+pub fn refuse(id: &str, why: &str) {
+    with_board(|board| {
+        if board.jobs.get(id).is_some_and(|j| j.running) {
+            return;
+        }
+        board.jobs.insert(
+            id.to_string(),
+            Job {
+                kind: JobKind::Install,
+                doing: String::new(),
+                lines: Vec::new(),
+                running: false,
+                error: why.to_string(),
+            },
+        );
+    });
+    tracing::info!(harness = %id, why = %why, "an install was not started");
+}
+
 /// Run the manifest's install command for `id`.
 ///
 /// Returns the command that was started, so the caller can say what it ran — a person who
@@ -458,6 +488,31 @@ mod tests {
         let bare = Manifest { id: "hermes".into(), ..Default::default() };
         let refused = start(&bare).unwrap_err();
         assert!(refused.contains("its own service"), "{refused}");
+    }
+
+    #[test]
+    fn an_install_not_started_says_why_on_the_row_and_can_be_tried_again() {
+        let _turn = taking_turns();
+        let id = "job-refused";
+        refuse(id, "Hermes was not set up: this computer cannot reach the internet.");
+        let view = views().remove(id).unwrap();
+        assert!(!view.running && !running(id));
+        assert_eq!(view.error, "Hermes was not set up: this computer cannot reach the internet.");
+        // Install again is an ordinary install, and the refusal does not stand in its way.
+        install(&manifest(id, "true")).unwrap();
+        assert_eq!(settled(id).error, "");
+    }
+
+    #[test]
+    fn a_refusal_never_covers_a_job_that_is_running() {
+        let _turn = taking_turns();
+        let id = "job-refused-running";
+        install(&manifest(id, "sleep 0.5")).unwrap();
+        assert!(running(id));
+        refuse(id, "no internet");
+        let view = views().remove(id).unwrap();
+        assert!(view.running && view.error.is_empty(), "{view:?}");
+        settled(id);
     }
 
     #[test]

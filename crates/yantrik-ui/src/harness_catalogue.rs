@@ -269,7 +269,14 @@ pub struct Machine {
     pub units: HashMap<String, Unit>,
     /// Keyed by harness id.
     pub jobs: HashMap<String, JobView>,
+    /// Yantrik Mind is on this machine ([`MIND_PROGRAM`]). The nightly may be built without it
+    /// (`YANTRIK_ISO_WITHOUT_MIND=1`), and then it is no row at all until it attaches: it has no
+    /// installer a person can run from here, so a row could only be a dead end.
+    pub mind_installed: bool,
 }
+
+/// Where the image puts Yantrik Mind when it carries it (deploy/yantrik-os/build-debian-iso.sh).
+pub const MIND_PROGRAM: &str = "/opt/yantrik-mind/bin/yantrik-mind";
 
 // ── The states a row can be in ──────────────────────────────────────
 
@@ -368,6 +375,10 @@ pub struct Row {
     pub unit: String,
     /// Where to read more. A path, because it is a file on this machine.
     pub docs: String,
+    /// The mind that answers for a person who never chose one (`settings::DEFAULT_MIND`).
+    pub default: bool,
+    /// What the install button says: "Install again" once an install has said why it did not.
+    pub install_label: String,
 }
 
 // ── Deriving the rows ───────────────────────────────────────────────
@@ -406,6 +417,8 @@ pub fn rows(machine: &Machine, minds: &[Entry]) -> Vec<Row> {
             can_revert_provider: crate::provider_handoff::marker(&machine.home, &entry.id).is_some(),
             unit: String::new(),
             docs: String::new(),
+            default: entry.id == crate::wire::settings::DEFAULT_MIND,
+            install_label: String::new(),
         });
     }
 
@@ -413,7 +426,11 @@ pub fn rows(machine: &Machine, minds: &[Entry]) -> Vec<Row> {
     ids.sort();
     for id in ids {
         let manifest = &machine.manifests[id];
-        out.push(from_manifest(machine, manifest, minds.iter().find(|e| &e.id == id)));
+        let attached = minds.iter().find(|e| &e.id == id);
+        if id == crate::memory_grants::FIRST_PARTY_MIND && attached.is_none() && !machine.mind_installed {
+            continue;
+        }
+        out.push(from_manifest(machine, manifest, attached));
     }
 
     // Whatever else is attached — a mind from its own repo, somebody's own harness, the echo
@@ -446,6 +463,8 @@ pub fn rows(machine: &Machine, minds: &[Entry]) -> Vec<Row> {
             can_revert_provider: crate::provider_handoff::marker(&machine.home, &entry.id).is_some(),
             unit: String::new(),
             docs: String::new(),
+            default: entry.id == crate::wire::settings::DEFAULT_MIND,
+            install_label: String::new(),
         });
     }
 
@@ -494,6 +513,11 @@ fn from_manifest(machine: &Machine, manifest: &Manifest, attached: Option<&Entry
             let n = missing_setup.expect("state says something is missing");
             sentence(&format!("write {}", n.subject(machine, dir)), &n.why)
         }
+        // The default mind says how long it takes and what it needs, in the words the first run
+        // used when it started it.
+        State::Installing if manifest.id == crate::wire::settings::DEFAULT_MIND => {
+            crate::default_mind::SETTING_UP.to_string()
+        }
         State::Installing => job
             .map(|j| {
                 if j.doing.is_empty() {
@@ -539,6 +563,7 @@ fn from_manifest(machine: &Machine, manifest: &Manifest, attached: Option<&Entry
     };
 
     let busy = job.map(|j| j.running).unwrap_or(false);
+    let failed = job.is_some_and(|j| !j.running && !j.error.is_empty());
     Row {
         id: manifest.id.clone(),
         name: if manifest.name.is_empty() { manifest.id.clone() } else { manifest.name.clone() },
@@ -577,6 +602,8 @@ fn from_manifest(machine: &Machine, manifest: &Manifest, attached: Option<&Entry
         } else {
             display_path(&dir.join(&manifest.docs), &machine.home)
         },
+        default: manifest.id == crate::wire::settings::DEFAULT_MIND,
+        install_label: if failed { "Install again" } else { "Install" }.to_string(),
     }
 }
 
@@ -851,6 +878,7 @@ fn gather() -> Machine {
         units: read_units(&units),
         manifests,
         jobs: HashMap::new(),
+        mind_installed: Path::new(MIND_PROGRAM).exists(),
     }
 }
 
@@ -910,6 +938,7 @@ mod tests {
                 path_dirs: vec![self.root.join("bin")],
                 units: HashMap::new(),
                 jobs: HashMap::new(),
+                mind_installed: false,
             }
         }
     }
@@ -1220,6 +1249,71 @@ setup:
         assert_eq!(claw.state, State::NotInstalled);
         assert!(!claw.can_install);
         assert!(claw.docs.ends_with("openclaw/README.md"), "{}", claw.docs);
+    }
+
+    const HERMES: &str = "id: hermes\nname: Hermes\nrequires:\n  - binary: hermes\n    why: Hermes itself\n\
+                          install:\n  command: sh {dir}/../lib/install/hermes.sh {dir}\n  doing: installing Hermes\n";
+
+    #[test]
+    fn hermes_is_marked_default_in_words_and_no_other_mind_is() {
+        let fixture = Fixture::new("default-mark");
+        fixture.harness("hermes", HERMES);
+        fixture.harness("pi", PI);
+        let rows = rows(&fixture.machine(), &[builtin()]);
+        assert!(row(&rows, "hermes").default);
+        assert!(!row(&rows, "pi").default && !row(&rows, "companion").default);
+        let settings = include_str!("../../yantrik-ui-slint/ui/settings.slint");
+        assert!(settings.contains("if h.is-default : Rectangle"), "the mark is drawn on the row");
+        assert!(settings.contains("text: \"Default\";"), "and it is a word, not only a colour");
+    }
+
+    #[test]
+    fn the_default_mind_installing_says_how_long_and_what_it_needs() {
+        let fixture = Fixture::new("default-installing");
+        fixture.harness("hermes", HERMES);
+        let mut machine = fixture.machine();
+        machine.jobs.insert("hermes".into(), JobView { running: true, doing: "installing Hermes".into(), ..Default::default() });
+        let hermes = row(&rows(&machine, &[builtin()]), "hermes").clone();
+        assert_eq!(hermes.state, State::Installing);
+        assert_eq!(hermes.need, "Setting up Hermes, your mind, about 4 minutes. It needs the internet.");
+    }
+
+    #[test]
+    fn an_install_that_said_why_it_did_not_happen_offers_install_again() {
+        let fixture = Fixture::new("install-again");
+        fixture.harness("hermes", HERMES);
+        let fresh = row(&rows(&fixture.machine(), &[builtin()]), "hermes").clone();
+        assert_eq!(fresh.install_label, "Install");
+        let mut machine = fixture.machine();
+        machine.jobs.insert("hermes".into(), JobView { error: crate::default_mind::NO_INTERNET.into(), ..Default::default() });
+        let refused = row(&rows(&machine, &[builtin()]), "hermes").clone();
+        assert!(refused.can_install);
+        assert_eq!(refused.install_label, "Install again");
+        assert!(refused.need.starts_with(crate::default_mind::NO_INTERNET), "{}", refused.need);
+    }
+
+    const MIND: &str = "id: mind\nname: Yantrik Mind\nrequires:\n  - file: /opt/yantrik-mind/bin/yantrik-mind\n    why: the Mind itself\n\
+                        install:\n  command: sh {dir}/../lib/install/mind.sh\n";
+
+    #[test]
+    fn with_no_mind_installed_settings_names_no_mind_that_is_not_there() {
+        let fixture = Fixture::new("no-mind");
+        fixture.harness("mind", MIND);
+        fixture.harness("hermes", HERMES);
+        let rows = rows(&fixture.machine(), &[builtin()]);
+        assert!(rows.iter().all(|r| r.id != "mind" && !r.name.contains("Yantrik Mind")), "{rows:?}");
+        assert!(rows.iter().any(|r| r.id == "hermes"));
+    }
+
+    #[test]
+    fn the_mind_is_a_row_once_it_is_installed_or_attached() {
+        let fixture = Fixture::new("with-mind");
+        fixture.harness("mind", MIND);
+        let mut machine = fixture.machine();
+        machine.mind_installed = true;
+        assert!(rows(&machine, &[builtin()]).iter().any(|r| r.id == "mind"));
+        let attached = rows(&fixture.machine(), &[builtin(), entry("mind", false)]);
+        assert_eq!(row(&attached, "mind").state, State::Attached, "attached wins, as everywhere else");
     }
 
     #[test]

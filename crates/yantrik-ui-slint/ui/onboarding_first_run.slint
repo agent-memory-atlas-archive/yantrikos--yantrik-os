@@ -452,6 +452,9 @@ export component FirstRunScreen inherits Rectangle {
     in property <[FirstRunMind]> minds: [];
     in property <bool> checks-running: false;
     in property <bool> checks-done: false;
+    // The default mind, installing in the background once a model is picked: said on the model
+    // step and on both screens after it. The first run never waits on it.
+    in property <string> default-mind-words: "";
 
     callback text-scale-changed(float);
     callback name-given(string);
@@ -798,6 +801,12 @@ export component FirstRunScreen inherits Rectangle {
                         font-size: Theme.fs-title-2;
                         wrap: word-wrap;
                     }
+                    if root.connect-status == "connected" && root.default-mind-words != "" : Text {
+                        text: root.default-mind-words;
+                        color: Theme.text-secondary;
+                        font-size: Theme.fs-title-2;
+                        wrap: word-wrap;
+                    }
                     // The models the account lists. The person chooses; nothing is chosen for them,
                     // and every mind uses the one chosen here (changed later in Settings → AI accounts).
                     if root.models.length > 0 && root.connect-mode != "" && root.connect-status != "connected" && root.connect-status != "pick-failed" : VerticalLayout {
@@ -982,6 +991,12 @@ export component FirstRunScreen inherits Rectangle {
                         font-size: Theme.fs-title-2;
                         wrap: word-wrap;
                     }
+                    if root.default-mind-words != "" : Text {
+                        text: root.default-mind-words;
+                        color: Theme.text-secondary;
+                        font-size: Theme.fs-title-2;
+                        wrap: word-wrap;
+                    }
                     HorizontalLayout {
                         alignment: end;
                         spacing: 8px;
@@ -1036,6 +1051,12 @@ export component FirstRunScreen inherits Rectangle {
                     if root.sharing-words != "" : Text {
                         text: root.sharing-words;
                         color: Theme.color-warning;
+                        font-size: Theme.fs-title-2;
+                        wrap: word-wrap;
+                    }
+                    if root.default-mind-words != "" : Text {
+                        text: root.default-mind-words;
+                        color: Theme.text-secondary;
                         font-size: Theme.fs-title-2;
                         wrap: word-wrap;
                     }

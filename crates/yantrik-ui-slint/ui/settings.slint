@@ -94,6 +94,10 @@ export struct HarnessRowData {
     can-use-saved: bool,       // "Use a provider" writes a saved provider into its own file
     can-revert-provider: bool,
     docs: string,
+    // The mind that answers for a person who never chose one (Hermes, until Yantrik Mind is ready).
+    is-default: bool,
+    // "Install", or "Install again" once an install has said why it did not happen.
+    install-label: string,
 }
 
 // ── AI Model data (for model list) ──
@@ -3645,6 +3649,22 @@ SettingRow{label:"About this device";description:"Detailed information about thi
                                         font-weight: 600;
                                         vertical-alignment: center;
                                     }
+                                    // In words: the default is a fact about the machine, and a
+                                    // colour alone would say nothing to a screen reader.
+                                    if h.is-default : Rectangle {
+                                        width: default-text.preferred-width + 16px;
+                                        height: 22px;
+                                        border-radius: 11px;
+                                        border-width: 1px;
+                                        border-color: Theme.border-default;
+                                        default-text := Text {
+                                            text: "Default";
+                                            color: Theme.text-secondary;
+                                            font-size: Theme.fs-caption;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                    }
                                     Rectangle { horizontal-stretch: 1; }
                                     Rectangle {
                                         width: pill-text.preferred-width + 20px;
@@ -3776,7 +3796,7 @@ SettingRow{label:"About this device";description:"Detailed information about thi
                                     }
                                     Rectangle { horizontal-stretch: 1; }
                                     if h.can-install : YButton {
-                                        label: "Install";
+                                        label: h.install-label;
                                         size: 0;
                                         variant: 1;
                                         clicked => { root.install-harness(h.id); }

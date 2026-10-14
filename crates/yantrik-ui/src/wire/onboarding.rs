@@ -706,6 +706,11 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         ui.set_fr_installer_chose(true);
         ui.set_fr_chosen_name(name.clone().into());
         ui.set_fr_installer_choice(name.into());
+        // The model step was done in the installer, so this first boot is where the default
+        // mind's install starts. Once per machine: `default_mind::begin` keeps count.
+        if !crate::onboarding::marker_path().exists() {
+            crate::default_mind::start(crate::default_mind::When::FirstRun);
+        }
     }
 
     // Back from the provider screens the installer drew: its "Thinking" row says what was chosen
@@ -1103,6 +1108,7 @@ fn prove_and_pick(ui: &App) {
                 (Ok(()), Ok(())) => {
                     ui.set_fr_connect_status("connected".into());
                     ui.set_fr_connect_words(format!("Connected to {name}. Your minds will use {model}.").into());
+                    set_up_default_mind(&ui);
                 }
                 (Ok(()), Err(why)) => {
                     ui.set_fr_connect_status("pick-failed".into());
@@ -1117,6 +1123,17 @@ fn prove_and_pick(ui: &App) {
             }
         });
     });
+}
+
+/// The model step is done and the gateway has a pick: set the default mind up in the background,
+/// through the job Settings → Harnesses runs. The first run does not wait on it; the built-in
+/// answers until it is proven (`crate::default_mind`). Not from the installer's own screens: what
+/// the live image downloads is gone at reboot, and the first boot starts it instead.
+fn set_up_default_mind(ui: &App) {
+    if ui.get_fr_in_installer() {
+        return;
+    }
+    crate::default_mind::start(crate::default_mind::When::FirstRun);
 }
 
 /// Try again after a pick that did not take: the account is saved and answered, so only the
@@ -1136,6 +1153,7 @@ fn retry_pick(ui: &App) {
                 Ok(()) => {
                     ui.set_fr_connect_status("connected".into());
                     ui.set_fr_connect_words(format!("Connected to {name}. Your minds will use {model}.").into());
+                    set_up_default_mind(&ui);
                 }
                 Err(why) => {
                     ui.set_fr_connect_status("pick-failed".into());
@@ -1609,6 +1627,22 @@ mod tests {
                      "Keep personal things on this computer instead", "Getting your minds ready", "Your minds", "Add another mind"] {
             assert!(slint.contains(want), "{want}");
         }
+    }
+
+    /// The default mind's install starts from the model step's success, and from nowhere else in
+    /// the first run: not from the installer's live screens, and not before a pick.
+    #[test]
+    fn the_default_mind_starts_only_once_the_pick_has_taken() {
+        let src = include_str!("onboarding.rs");
+        let body = &src[src.find("fn prove_and_pick").unwrap()..src.find("// ── The first success").unwrap()];
+        assert_eq!(body.matches("set_up_default_mind(&ui);").count(), 2, "after the pick, and after Try again");
+        for arm in body.split("ui.set_fr_connect_status(").skip(1) {
+            let status = &arm[..arm.find(')').unwrap()];
+            let arm = &arm[..arm.find("\n                }").unwrap_or(arm.len())];
+            assert_eq!(arm.contains("set_up_default_mind"), status.starts_with("\"connected\""), "{status}");
+        }
+        let setup = &src[src.find("fn set_up_default_mind").unwrap()..];
+        assert!(setup[..setup.find("\n}\n").unwrap()].contains("get_fr_in_installer()"));
     }
 
     /// The first run asks the built-in companion, never the harness Mind (id `mind`), so it must not
