@@ -420,7 +420,7 @@ mod tests {
                 ("thinking", "Thought for 5 s".to_string(), "done"),
                 ("step", "Searched the web for \u{201c}dallas weather\u{201d} \u{2014} 3 results".to_string(), "done"),
                 ("question", "Answered: Sat 17 + Sun 18".to_string(), "answered"),
-                ("step", "Opened a web page".to_string(), "done"),
+                ("step", "Opened the web page".to_string(), "done"),
             ],
             "thinking folded, steps in order, the question where it was asked, and no status line once it ended"
         );
@@ -461,7 +461,7 @@ mod tests {
             [
                 ("step", "Searched the web for \u{201c}dallas weather\u{201d}".to_string(), "done"),
                 ("question", "Answered: Sat 17 + Sun 18".to_string(), "answered"),
-                ("status", "Opening a web page\u{2026} \u{00b7} 30 s".to_string(), "running"),
+                ("status", "Opening the web page\u{2026} \u{00b7} 30 s".to_string(), "running"),
             ],
             "a step still running is said once, by the live line, with how long the turn has run"
         );

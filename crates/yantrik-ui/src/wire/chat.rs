@@ -359,7 +359,7 @@ fn submit(ui_weak: &slint::Weak<App>, bridge: &Arc<CompanionBridge>, text: &str,
             }
         }
         super::lens_queue::Enter::Answer(asking) => {
-            super::agents::answer_question(&asking.agent, &asking.request, text, false);
+            super::agents::answer_typed(&asking.agent, &asking.request, text);
         }
     }
 }
@@ -651,10 +651,13 @@ mod tests {
             "a callback sends straight to the builtin companion. Both ways of talking to this desktop — the chat panel and the Lens — must go through `dispatch`, which reads the harness host; otherwise choosing a mind changes a label and nothing else."
         );
         assert_eq!(
-            body.matches("dispatch(").count(),
+            body.matches("submit(").count(),
             2,
-            "there are two entry points — on_send_message and the Lens fallback — and both should reach the chosen mind through `dispatch`"
+            "there are two entry points — on_send_message and the Lens fallback — and both should reach the chosen mind through `submit`, then `dispatch`"
         );
+        assert_eq!(body.matches("dispatch(").count(), 1, "and the queued message, sent when its mind finishes, goes through `dispatch` too");
+        let submit = SELF_SRC.split_once("fn submit(").expect("submit").1;
+        assert!(submit[..submit.find("\n}\n").unwrap()].contains("dispatch(ui_weak, bridge, text, streams, false)"), "what is sent goes through `dispatch`");
     }
 
     /// The builtin's own path still has to exist. `dispatch` sends to it by id rather than by

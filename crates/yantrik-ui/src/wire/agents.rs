@@ -1509,6 +1509,14 @@ pub fn answer_question(agent: &str, request: &str, answer: &str, pressed: bool) 
     }
 }
 
+/// The person's own words from the Lens's reply box while their mind's run waits on a question
+/// (`lens_queue`): a typed answer, never a pressed one, so a typed "Erase" still lets no `redact`
+/// act. Its one caller is the person's composer (`chat::submit`, from `on_send_message`), which the
+/// control surface's `send_message` refuses to an agent, so a mind still cannot answer itself.
+pub fn answer_typed(agent: &str, request: &str, words: &str) {
+    answer_question(agent, request, words, false);
+}
+
 fn approval_of(a: &Agent, approval: &Approval, key: String, pending: &[crate::approvals::Card]) -> AgentItemData {
     let live = (approval.outcome == ApprovalOutcome::Pending)
         .then(|| {
@@ -3071,7 +3079,10 @@ mod first_prompt_attribution_tests {
         let desktop = read("../yantrik-ui-slint/ui/desktop.slint");
         assert!(desktop.contains("questions: root.questions;"), "the desktop screen hands the Lens its questions");
         let lens = read("../yantrik-ui-slint/ui/components/intent_lens.slint");
-        assert!(lens.contains("for q in root.questions : QuestionCard"), "the Lens draws them");
+        assert!(lens.contains("for q in root.questions : VerticalLayout"), "the Lens pins the ones no reply holds");
+        let timeline = read("../yantrik-ui-slint/ui/components/reply_timeline.slint");
+        assert!(timeline.contains("if q.request == root.block.call.name : QuestionCard"), "and draws the rest in the reply that asked");
+        assert!(lens.contains("question-answer(agent, request, answer, pressed) => { root.question-answer(agent, request, answer, pressed); }"), "through the same callback");
     }
 
     #[test]
@@ -3134,9 +3145,18 @@ mod first_prompt_attribution_tests {
         let wiring = read("src/wire/agents.rs");
         let wiring = wiring.split("#[cfg(test)]").next().unwrap();
         assert_eq!(wiring.matches("answer_for(").count(), 1, "one caller: the card's answer");
-        // Defined once, wired once (`g.on_answer_question(`), called once, from that callback.
-        assert_eq!(wiring.matches("answer_question(").count(), 3);
+        // Defined once, wired once (`g.on_answer_question(`), called once from that callback and
+        // once from `answer_typed`, the person's reply box answering a waiting question.
+        assert_eq!(wiring.matches("answer_question(").count(), 4);
         assert!(wiring.contains("g.on_answer_question("));
+        assert_eq!(wiring.matches("answer_typed(").count(), 1, "defined here, called elsewhere");
+        // The reply box is the person's: `send_message`, the one way the control surface types
+        // into it, refuses an agent before anything is sent.
+        let control = read("src/control.rs");
+        assert!(control.contains("if yantrik_app_runtime::control::agent_is_calling() {\n                    return Err(\"send_message puts words in the person's chat"));
+        let chat = read("src/wire/chat.rs");
+        let chat = chat.split("#[cfg(test)]").next().unwrap();
+        assert_eq!(chat.matches("answer_typed(").count(), 1, "one caller: the composer's submit");
     }
 }
 
