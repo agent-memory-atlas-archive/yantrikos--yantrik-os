@@ -2176,6 +2176,8 @@ pub fn publish(
     // The network mark's popover as data: set_wifi, disconnect_network, connect_wifi. See
     // `control_network`, which also says why no action there takes a password.
     let surface = crate::control_network::actions(surface, ui);
+    // The "Wi-Fi disconnected" notification's two buttons: reconnect_wifi, choose_wifi_network.
+    let surface = crate::control_wifi_reconnect::actions(surface, ui);
     // Suspend, hibernate, log out, restart and shut down: the power popover's acts, graded.
     let surface = crate::control_power::actions(surface, ui);
     // The window overview (Super+Tab): open_switcher, switcher_move, switcher_commit, switcher_cancel.

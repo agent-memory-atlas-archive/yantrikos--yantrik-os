@@ -55,6 +55,7 @@ mod alt_tab;
 mod window_name;
 mod power_status;
 mod control_network;
+mod control_wifi_reconnect;
 mod control_power;
 mod control_installer;
 mod control_installer_consent;
@@ -67,6 +68,8 @@ mod installer_medium;
 mod installer_rules;
 /// What the first-run screens say about a Wi-Fi chip still waiting for its driver (Mac BCM4331).
 mod wifi_note;
+mod wifi_heal;
+mod wifi_reconnect;
 mod control_update;
 mod control_files;
 mod control_screen;
