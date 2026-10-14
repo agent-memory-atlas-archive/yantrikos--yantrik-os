@@ -5325,6 +5325,7 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "tracing",
  "yantrik-ipc-contracts",
  "yantrik-service-sdk",
 ]

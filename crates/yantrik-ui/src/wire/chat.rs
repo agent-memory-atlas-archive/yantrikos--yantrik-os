@@ -193,7 +193,7 @@ fn dispatch(
     // of the person's words, so the switch is seamless. The person's bubble shows what they typed.
     let active = host.active_id();
     let handover = (!text.trim_start().starts_with('/'))
-        .then(|| crate::agents::store().read(|s| crate::agents::handover::for_turn(s.agents(), &active, crate::agents::model::now())))
+        .then(|| crate::agents::store().read(|s| crate::agents::handover::for_turn(s, &active, crate::agents::model::now())))
         .flatten();
 
     // Private mode: no mind is talked to, the built-in companion included. Not a word goes to
@@ -421,11 +421,16 @@ fn wire_new_chat(ui: &App, ctx: &AppContext) {
         }
         let messages = ui.get_messages();
         if let Some(model) = messages.as_any().downcast_ref::<slint::VecModel<crate::MessageData>>() {
-            model.set_vec(Vec::new());
+            // Through `streaming`, so an answer still arriving from a mind the person switched
+            // away from cannot write into the bubbles that take its row next.
+            streaming::clear(model);
         }
         // Stay in the conversation: an empty one says what a desk is and offers three ways to
         // begin, which the search row it used to fall back to did not.
         ui.set_lens_chat_mode(true);
+        // From here the conversation is new: the next word to any mind goes without a handover
+        // of what was said before (agents/handover.rs). Set only now, past the refusal above.
+        crate::agents::store().new_conversation();
         let active = super::harness::host().map(|h| h.active_id());
         match active.as_deref() {
             None | Some(super::harness::BUILTIN_ID) => {

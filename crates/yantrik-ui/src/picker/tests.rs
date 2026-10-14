@@ -15,7 +15,7 @@ use crate::wire::provider_models::ListedModel;
 use crate::wire::settings::ProviderStoreEntry;
 
 fn mind(id: &str, on_gateway: bool, private_context: bool) -> MindSeen {
-    MindSeen { id: id.into(), name: id.to_uppercase(), attached: true, active: true, state: String::new(), on_gateway, private_context }
+    MindSeen { id: id.into(), name: id.to_uppercase(), attached: true, active: true, state: String::new(), on_gateway, private_context, builtin_runs_on: None }
 }
 
 fn fixture() -> (Catalogue, Vec<crate::ai_accounts::account::Account>) {
@@ -232,6 +232,31 @@ fn a_mind_with_its_own_models_is_connected_only_once_it_answered() {
     let s = judge(&Input { own_answered_at: Some(900), own_model: "kimi-k3".into(), ..own.clone() });
     assert_eq!(s.words, "connected · kimi-k3");
     assert_eq!(judge(&Input { own_answered_at: Some(1), ..own }).state, "own", "long ago is not now");
+}
+
+/// 13 Oct: the composer and the mind panel said "Yantrik Companion · uses its own models" while the
+/// companion answered from the endpoint the first run had just put it on. The built-in companion's
+/// provider is the desktop's own configuration, and every label says it.
+#[test]
+fn the_built_in_companion_says_what_it_runs_on_never_its_own_models() {
+    let line = "192.168.1.5:8080 · qwen3.8-flash".to_string();
+    let companion = MindSeen { name: "Yantrik Companion".into(), builtin_runs_on: Some(line.clone()), ..mind("companion", false, true) };
+    let rows = mind_rows(std::slice::from_ref(&companion));
+    assert_eq!(rows[0].words, format!("answering · {line}"));
+    assert_eq!(companion.runs_on_words(), line);
+    let (catalogue, accounts) = fixture();
+    let notes = model_rows(&companion, &catalogue, &accounts, &Consent::default(), false, "", &[], "");
+    assert!(notes[0].name.contains(&line) && !notes[0].name.contains("its own models"), "{}", notes[0].name);
+
+    let input = Input { now: 1_000, on_gateway: false, builtin_runs_on: Some(line.clone()), ..Input::default() };
+    let s = judge(&input);
+    assert_eq!((s.state, s.words.as_str(), s.fix), ("set", "runs on 192.168.1.5:8080 · qwen3.8-flash", Fix::None));
+    let s = judge(&Input { own_answered_at: Some(990), ..input.clone() });
+    assert_eq!(s.words, format!("connected · {line}"));
+    let unset = judge(&Input { builtin_runs_on: Some(String::new()), ..input });
+    assert_eq!((unset.state, unset.fix), ("not-set-up", Fix::AddKey), "nothing set up is said, not dressed as a model");
+    let nothing = MindSeen { builtin_runs_on: Some(String::new()), ..companion };
+    assert_eq!(nothing.runs_on_words(), "nothing set up");
 }
 
 #[test]

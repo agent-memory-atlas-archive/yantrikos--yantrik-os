@@ -43,6 +43,7 @@ mod clipboard;
 mod shell_overlays;
 mod cheat_sheet;
 pub mod network;
+pub mod wifi_reconnect;
 pub mod dock;
 /// A launch by name for an app already open on the desktop raises its window instead.
 pub(crate) mod already_open;
@@ -75,6 +76,8 @@ pub mod version;
 pub mod ai_assist;
 pub mod ai_onboarding;
 pub mod onboarding;
+pub mod onboarding_proofs;
+pub mod onboarding_nearby;
 pub mod ai_provider;
 pub mod ai_status;
 pub mod harness_provider;
@@ -128,6 +131,8 @@ pub fn wire_all(ui: &App, ctx: &AppContext) {
     crate::power_status::wire(ui);
     // The network mark and its popover, and the one reading every surface shows of the network.
     network::wire(ui);
+    // The Wi-Fi tile's press, the notice a drop raises, and the rejoin-by-itself after one.
+    wifi_reconnect::wire(ui);
     lens::wire(ui, ctx);
     navigate::wire(ui, ctx);
     // The letter on the tile of an app there is no art and no theme icon for (AppTile).
