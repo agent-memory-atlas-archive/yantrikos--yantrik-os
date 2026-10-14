@@ -188,6 +188,32 @@ pub fn wire(ui: &App, ctx: &AppContext) {
     ai_accounts::refresh(bridge);
 }
 
+/// The same rows as `describe shell` publishes them under `ai_accounts`: what the card shows, so
+/// an agent (or a test drive) can read Settings → AI & Intelligence → AI accounts without the
+/// screen. Names, counts and the sharing choice; no key, no address.
+pub fn describe(catalogue: &Catalogue, accounts: &[Account], consent: &Consent) -> serde_json::Value {
+    let (summary, rows) = rows(catalogue, accounts, consent);
+    serde_json::json!({
+        "summary": summary,
+        "accounts": rows.iter().map(|r| serde_json::json!({
+            "id": r.id,
+            "name": r.name,
+            "models": r.summary,
+            "state": r.state,
+            "detail": r.detail,
+            "local": r.local,
+            "sharing": r.sharing,
+            "private": r.private_words,
+            "private_lane": r.is_lane,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+/// [`describe`] from what is known now.
+pub fn for_describe() -> serde_json::Value {
+    describe(&ai_accounts::catalogue(), &ai_accounts::accounts(), &ai_accounts::consent::load(&ai_accounts::consent::path()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,5 +286,20 @@ mod tests {
         let (_, drawn) = rows(&catalogue, std::slice::from_ref(&home), &lane);
         assert!(drawn[0].is_lane);
         assert_eq!(lane_words(&catalogue, std::slice::from_ref(&home), &lane), "Personal things are kept on this computer by ollama · qwen3:8b.");
+    }
+
+    #[test]
+    fn describe_shell_reads_the_card_and_never_a_key_or_an_address() {
+        let mut a = account("openai", false, false);
+        a.key = crate::ai_accounts::account::KeyRef::Saved { entry: "p1".into() };
+        let listed = vec![crate::wire::provider_models::ListedModel { id: "o4-mini".into(), name: "o4-mini".into(), size_bytes: 0 }];
+        let catalogue = Catalogue { accounts: vec![build(&a, &[], Some(Ok(listed)))], at: 0 };
+        let v = describe(&catalogue, std::slice::from_ref(&a), &Consent::default());
+        assert_eq!(v["summary"], "1 account · 1 model");
+        assert_eq!(v["accounts"][0]["id"], "openai");
+        assert_eq!(v["accounts"][0]["sharing"], "off");
+        assert_eq!(v["accounts"][0]["state"], "ready");
+        let text = v.to_string();
+        assert!(!text.contains("api.openai.com") && !text.contains("p1"), "{text}");
     }
 }
