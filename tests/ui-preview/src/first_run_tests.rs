@@ -116,10 +116,10 @@ fn minds_done() -> Vec<FirstRunMind> {
     ]
 }
 
-/// Where the first task's row is drawn in the chat at 1280×800, the step between rows, and Talk
+/// Where each first task's row is drawn in the chat at 1280×800 (the first wraps), and Talk
 /// (read from 6-first-success.png).
-const FIRST_TASK_AT: (f32, f32, f32) = (1000.0, 0.0, 0.0);
-const TALK_AT: (f32, f32) = (0.0, 0.0);
+const FIRST_TASKS_AT: [(f32, f32); 3] = [(1000.0, 316.0), (1000.0, 378.0), (1000.0, 430.0)];
+const TALK_AT: (f32, f32) = (956.0, 479.0);
 
 const HERMES_SETTING_UP: &str = "Setting up Hermes, your mind, about 4 minutes. It needs the internet.";
 
@@ -264,6 +264,8 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     render(w, width, height, &still("2-every-provider"))?;
     ui.set_show_every(false);
     // Advanced: the endpoint is enough. Enter on it lists its models; an id can still be typed.
+    // Choosing a card clears the last one's models, as choose_provider does.
+    ui.set_models(ModelRc::new(VecModel::from(Vec::<FirstRunModel>::new())));
     ui.set_connect_mode("advanced".into());
     ui.set_chosen_id("custom".into());
     ui.set_chosen_name("your endpoint".into());
@@ -352,13 +354,14 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     enter();
     assert_eq!(chat.get_sent(), "hello", "the cursor is in the composer when the chat opens");
     // Each first task is one press: it is sent as it is.
-    let (task_x, first_task_y, task_step) = FIRST_TASK_AT;
-    click(w, task_x, first_task_y);
-    assert_eq!(chat.get_sent(), "Make a note called Groceries with milk, eggs and bread");
-    click(w, task_x, first_task_y + task_step);
-    assert_eq!(chat.get_sent(), "What's on my calendar this week?");
-    click(w, task_x, first_task_y + 2.0 * task_step);
-    assert_eq!(chat.get_sent(), "Open Files and show me what's in Documents");
+    for ((x, y), task) in FIRST_TASKS_AT.into_iter().zip([
+        "Make a note called Groceries with milk, eggs and bread",
+        "What's on my calendar this week?",
+        "Open Files and show me what's in Documents",
+    ]) {
+        click(w, x, y);
+        assert_eq!(chat.get_sent(), task);
+    }
     click(w, TALK_AT.0, TALK_AT.1);
     assert_eq!(chat.get_talks(), 1, "Talk reaches the microphone");
     let msg = |role: &str, content: &str| MessageData {
