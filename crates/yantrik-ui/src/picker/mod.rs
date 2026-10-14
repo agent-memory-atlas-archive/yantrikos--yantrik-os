@@ -77,11 +77,22 @@ pub fn pick_for_every_mind(model: &str) -> Result<(), String> {
     choices::save(&choices::path(), &c)
 }
 
+/// What the built-in companion runs on, from the same resolution the chat composer's line and
+/// the AI page use (`runs_on`, over `ai_status`'s companion): "" when nothing is set up.
+fn companion_runs_on() -> String {
+    crate::wire::runs_on_card::current()
+        .into_iter()
+        .find(|r| r.builtin)
+        .filter(|r| r.set_in != crate::runs_on::SetIn::Nowhere || r.backend != crate::runs_on::Backend::Api)
+        .map(|r| r.runs_on())
+        .unwrap_or_default()
+}
+
 /// Every mind the menu knows: the attached ones from the host, the rest from the Harnesses list.
 fn minds_seen() -> Vec<MindSeen> {
     let home = home();
     let entries = crate::wire::harness::host().map(|h| h.list()).unwrap_or_default();
-    let seen = |id: &str, name: &str, attached: bool, active: bool, state: String| MindSeen {
+    let seen = |id: &str, name: &str, attached: bool, active: bool, state: String, builtin: bool| MindSeen {
         id: id.to_string(),
         name: name.to_string(),
         attached,
@@ -89,15 +100,16 @@ fn minds_seen() -> Vec<MindSeen> {
         state,
         on_gateway: crate::provider_handoff::uses_gateway(&home, id),
         private_context: crate::provider_handoff::adapter_for(id).map(|a| a.private_context()).unwrap_or(true),
+        builtin_runs_on: builtin.then(companion_runs_on),
     };
-    let mut out: Vec<MindSeen> = entries.iter().map(|e| seen(&e.id, &e.name, true, e.active, String::new())).collect();
+    let mut out: Vec<MindSeen> = entries.iter().map(|e| seen(&e.id, &e.name, true, e.active, String::new(), e.builtin)).collect();
     for row in crate::wire::harness::catalogue_for_describe().as_array().into_iter().flatten() {
         let id = row["id"].as_str().unwrap_or_default();
         if id.is_empty() || out.iter().any(|m| m.id == id) {
             continue;
         }
         let state = row["state"].as_str().unwrap_or("not installed").replace(['_', '-'], " ");
-        out.push(seen(id, row["name"].as_str().unwrap_or(id), false, false, state));
+        out.push(seen(id, row["name"].as_str().unwrap_or(id), false, false, state, false));
     }
     out
 }
@@ -225,6 +237,7 @@ fn status_now(minds: &[MindSeen]) -> status::Status {
         gateway_down: crate::gateway::state().err(),
         own_answered_at: own.as_ref().map(|(at, _)| *at),
         own_model: own.map(|(_, m)| m).unwrap_or_default(),
+        builtin_runs_on: mind.builtin_runs_on.clone(),
     };
     status::judge(&input)
 }
@@ -264,7 +277,7 @@ fn render(ui: &App, bridge: &Arc<CompanionBridge>) {
     let choice = lock(&CHOICES).of(&mind.id);
     let picked = catalogue.find(&choice.model).filter(|_| mind.on_gateway);
     g.set_model_label(match (mind.on_gateway, picked) {
-        (false, _) => "its own models".into(),
+        (false, _) => mind.runs_on_words().into(),
         (true, Some(m)) => {
             let account = accounts.iter().find(|a| a.id == m.account).map(|a| a.name.clone()).unwrap_or_default();
             format!("{} · {}", m.name, account).into()

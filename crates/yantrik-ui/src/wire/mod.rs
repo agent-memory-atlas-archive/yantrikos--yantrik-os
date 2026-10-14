@@ -75,6 +75,8 @@ pub mod version;
 pub mod ai_assist;
 pub mod ai_onboarding;
 pub mod onboarding;
+pub mod onboarding_proofs;
+pub mod onboarding_nearby;
 pub mod ai_provider;
 pub mod ai_status;
 pub mod harness_provider;
