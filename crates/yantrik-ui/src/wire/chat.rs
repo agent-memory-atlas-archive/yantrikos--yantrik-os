@@ -415,7 +415,9 @@ fn wire_new_chat(ui: &App, ctx: &AppContext) {
         }
         let messages = ui.get_messages();
         if let Some(model) = messages.as_any().downcast_ref::<slint::VecModel<crate::MessageData>>() {
-            model.set_vec(Vec::new());
+            // Through `streaming`, so an answer still arriving from a mind the person switched
+            // away from cannot write into the bubbles that take its row next.
+            streaming::clear(model);
         }
         // Stay in the conversation: an empty one says what a desk is and offers three ways to
         // begin, which the search row it used to fall back to did not.

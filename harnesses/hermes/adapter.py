@@ -66,6 +66,10 @@ HEARTBEAT_SECONDS = 20.0
 PICKUP_SECONDS = 180.0
 # How quiet a turn whose gateway session has ended must be before it is treated as abandoned.
 ABANDONED_QUIET_SECONDS = 90.0
+# The destructive commands the person has already confirmed by sending them from the desktop: the
+# Lens's new-conversation button sends /new, and a person typing /new or /reset there asked for it
+# in so many words. Hermes 0.21 registers both as "new". Anything else (/undo) is still asked.
+CONFIRMED_BY_ASKING = {"new", "reset"}
 
 
 def check_requirements() -> bool:
@@ -302,7 +306,9 @@ class YantrikAdapter(BasePlatformAdapter):
             # The gateway answers these inline — an approval, a stop, the answer to a question
             # Hermes asked — and its reply has been streamed by the time this returns.
             await self.handle_message(event)
-            if not turn.said_anything:
+            # A /new confirmed on the person's behalf (`send_slash_confirm`) has closed its turn
+            # already, with Hermes's own reply in it.
+            if self._ledger.get(turn.turn_id) is not None and not turn.said_anything:
                 await self._stream(turn, "Done.")
             await self._finish(turn.turn_id, why=f"/{command} answered inline")
             if command in {"stop", "new", "reset"}:
@@ -443,12 +449,70 @@ class YantrikAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="the desktop closed this turn")
         return SendResult(success=True, message_id=message_id)
 
+    async def send_slash_confirm(
+        self,
+        chat_id: str,
+        title: str,
+        message: str,
+        session_key: str,
+        confirm_id: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Hermes asks whether to go ahead with a destructive session command (Hermes 0.21+).
+
+        For /new the person has already answered: it only reaches Hermes from this platform
+        because they pressed the desktop's new-conversation button or typed it in the Lens. The
+        button throws the reply away by design, so asking again put the question where nobody saw
+        it, and the confirm left waiting held every turn after it — 38 minutes on VM 541 before
+        anyone noticed. So it is confirmed once here and the turn that asked gets Hermes's reply.
+        Anything else (/undo) returns not-supported, and Hermes asks the person in text as it
+        always did. Only this platform's confirms are answered: turning off
+        `approvals.destructive_slash_confirm` instead would stop Hermes asking on the person's
+        other platforms too.
+        """
+        not_here = SendResult(success=False, error="Not supported")
+        try:
+            from tools import slash_confirm
+        except Exception:
+            return not_here
+        pending = slash_confirm.get_pending(session_key) or {}
+        command = str(pending.get("command") or "")
+        if pending.get("confirm_id") != confirm_id or command not in CONFIRMED_BY_ASKING:
+            return not_here
+        turn = self._asking(chat_id)
+        reply = await slash_confirm.resolve(session_key, confirm_id, "once")
+        logger.info("[yantrik] /%s confirmed for the person, who sent it from the desktop", command)
+        if turn is not None:
+            # Hermes may answer with something other than text (an ephemeral reply), which
+            # `resolve` gives back as nothing; the turn still says what happened.
+            _, delta = self._ledger.sent(turn, reply or "Started a new conversation.")
+            await self._stream(turn, delta)
+            await self._finish(turn.turn_id, why=f"/{command} confirmed for the person")
+        return SendResult(success=True)
+
+    def _asking(self, chat_id: str) -> Optional[desktop.Turn]:
+        """The open turn that sent a /new or /reset, newest first; else the newest in the chat."""
+        asking = [
+            t
+            for t in self._ledger.open_turns()
+            if t.chat_id == chat_id and _command_of(t.text) in CONFIRMED_BY_ASKING
+        ]
+        if asking:
+            return max(asking, key=lambda t: t.opened)
+        return self._ledger.route(chat_id, None)
+
     async def send_typing(self, chat_id: str, metadata=None) -> None:
         # Presence is the heartbeat's job; the gateway asks for typing every two seconds.
         return None
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         return {"name": "Yantrik desktop", "type": "dm", "chat_id": chat_id}
+
+
+def _command_of(text: str) -> str:
+    """The slash command a message is, lower-cased and without its slash; empty for prose."""
+    word = (text or "").strip().split(maxsplit=1)
+    return word[0][1:].lower() if word and word[0].startswith("/") else ""
 
 
 def _question_pending(session_key: str) -> bool:
