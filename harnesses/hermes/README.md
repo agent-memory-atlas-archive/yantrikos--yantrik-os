@@ -77,6 +77,14 @@ button, or typed in the Lens — so the adapter confirms those once on their beh
 Hermes's reply. `/undo` is still asked, in the chat. Nothing global is written: your other Hermes
 platforms keep asking. An older Hermes, which does not ask, is unchanged.
 
+## A question Hermes asks is answered in the chat
+
+When Hermes 0.21 asks you something before it goes on (its `clarify` tool), the question ends the
+reply it is in, with any choices numbered. Your next message is the answer: a number, the choice's
+words or your own, and Hermes's work goes on in the reply to it. `/stop` or a new conversation
+drops the question along with the work. Hermes's "⏳ Working — N min" line is shown as the reply's
+status, not in its text. An older Hermes, which has no `clarify` gateway, is unchanged.
+
 ## Yantrik models
 
 Installing Hermes (the ISO, the installer, or **Settings → Harnesses → Install**) does this with no

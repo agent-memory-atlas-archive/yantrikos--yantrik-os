@@ -8,9 +8,15 @@
 //! were. The shell holds both: every mind's Lens conversation is its `<harness>:main` agent in
 //! this store. So on the first word to a mind after another one spoke, the desktop tells it what
 //! was said and what is still running.
+//!
+//! A new conversation ends that. On 14 October the person asked Yantrik Mind six things, switched
+//! to Hermes, pressed "+ new conversation" and asked about tomorrow's calendar; Hermes was handed
+//! the Mind's last four exchanges, a hotel confirmation number among them, and its memory plugin
+//! kept the paragraph for good. Only what was said after the last new conversation is handed over.
 
-use super::model::{Agent, AgentId, Item};
+use super::model::{Agent, AgentId, Item, Turn};
 use super::progress;
+use super::store::Store;
 
 /// How many of the previous mind's exchanges are handed over.
 pub const TURNS_HANDED: usize = 4;
@@ -27,20 +33,30 @@ pub struct Handover {
 }
 
 /// The handover for a word about to go to `active`'s conversation, or None when `active` spoke
-/// last (or nobody has spoken for [`STALE_SECS`]).
-pub fn for_turn(agents: &[Agent], active: &str, now: u64) -> Option<Handover> {
+/// last, nobody has spoken for [`STALE_SECS`], or nobody has spoken since the person last started
+/// a new conversation.
+pub fn for_turn(store: &Store, active: &str, now: u64) -> Option<Handover> {
+    let agents = store.agents();
     let mine = AgentId::new(active, AgentId::MAIN);
     let my_last = agents.iter().find(|a| a.meta.id == mine).map(last_spoke).unwrap_or(0);
-    let previous = agents
+    let (previous, since) = agents
         .iter()
         .filter(|a| a.meta.id.conversation() == AgentId::MAIN && a.meta.id.harness() != active)
-        .filter(|a| !a.turns.is_empty())
-        .max_by_key(|a| last_spoke(a))?;
+        .map(|a| (a, since_new(store, a)))
+        .filter(|(_, since)| !since.is_empty())
+        .max_by_key(|(a, _)| last_spoke(a))?;
     let when = last_spoke(previous);
     if when <= my_last || now.saturating_sub(when) > STALE_SECS {
         return None;
     }
-    Some(Handover { from: previous.meta.mind.clone(), told: told(previous, now) })
+    Some(Handover { from: previous.meta.mind.clone(), told: told(previous, since, now) })
+}
+
+/// The turns of `agent` since the person last started a new conversation.
+fn since_new<'a>(store: &Store, agent: &'a Agent) -> &'a [Turn] {
+    let fence = store.fence(&agent.meta.id);
+    let first = agent.turns.iter().position(|t| t.n > fence).unwrap_or(agent.turns.len());
+    &agent.turns[first..]
 }
 
 /// When anything was last said in an agent's conversation.
@@ -48,14 +64,14 @@ fn last_spoke(agent: &Agent) -> u64 {
     agent.turns.last().map(|t| t.ended.unwrap_or(agent.touched).max(t.started)).unwrap_or(0)
 }
 
-fn told(previous: &Agent, now: u64) -> String {
+fn told(previous: &Agent, turns: &[Turn], now: u64) -> String {
     let mind = &previous.meta.mind;
     let mut out = format!(
         "[From the desktop: you are taking this conversation over from {mind}. The person expects \
          you to know what was said; it was:"
     );
-    let skip = previous.turns.len().saturating_sub(TURNS_HANDED);
-    for turn in &previous.turns[skip..] {
+    let skip = turns.len().saturating_sub(TURNS_HANDED);
+    for turn in &turns[skip..] {
         out.push_str(&format!("\n- The person: {}", progress::brief(&turn.prompt, 300)));
         let said = reply_of(turn);
         if !said.is_empty() {
@@ -73,7 +89,7 @@ fn told(previous: &Agent, now: u64) -> String {
 }
 
 /// What the mind said in a turn: its text, without the calls.
-fn reply_of(turn: &super::model::Turn) -> String {
+fn reply_of(turn: &Turn) -> String {
     turn.items
         .iter()
         .filter_map(|i| match i {
@@ -123,7 +139,7 @@ mod tests {
         speak(&mut store, "hermes", "build a small town model: homes, roads, cars", "Starting with the roads.", true);
         clock.store(2_100, Ordering::SeqCst);
 
-        let handed = for_turn(store.agents(), "mind", 2_100).expect("Hermes spoke after Mind did");
+        let handed = for_turn(&store, "mind", 2_100).expect("Hermes spoke after Mind did");
         assert_eq!(handed.from, "hermes");
         assert!(handed.told.starts_with("[From the desktop: you are taking this conversation over from hermes."), "{}", handed.told);
         assert!(handed.told.contains("- The person: build a small town model: homes, roads, cars"), "{}", handed.told);
@@ -145,9 +161,9 @@ mod tests {
         speak(&mut store, "hermes", "tidy my notes", "Done.", false);
         clock.store(2_000, Ordering::SeqCst);
         speak(&mut store, "mind", "thanks", "Any time.", false);
-        assert_eq!(for_turn(store.agents(), "mind", 2_000), None, "Mind spoke last");
-        assert!(for_turn(store.agents(), "hermes", 2_000).is_some(), "Hermes has missed Mind's turn");
-        assert_eq!(for_turn(store.agents(), "hermes", 2_000 + STALE_SECS + 1), None, "too long ago");
+        assert_eq!(for_turn(&store, "mind", 2_000), None, "Mind spoke last");
+        assert!(for_turn(&store, "hermes", 2_000).is_some(), "Hermes has missed Mind's turn");
+        assert_eq!(for_turn(&store, "hermes", 2_000 + STALE_SECS + 1), None, "too long ago");
     }
 
     /// Only the last few exchanges go, oldest first.
@@ -159,8 +175,44 @@ mod tests {
             clock.store(1_000 + n as u64, Ordering::SeqCst);
             speak(&mut store, "pi", &format!("question {n}"), &format!("answer {n}"), false);
         }
-        let handed = for_turn(store.agents(), "hermes", 1_100).unwrap();
+        let handed = for_turn(&store, "hermes", 1_100).unwrap();
         assert!(!handed.told.contains("question 1\n") && !handed.told.contains("question 0"), "{}", handed.told);
         assert!(handed.told.contains("question 2") && handed.told.contains("question 5"), "{}", handed.told);
+    }
+
+    /// A switch of minds in the middle of a conversation hands it over, as #245 intends; the
+    /// person's "+ new conversation" afterwards means the next word carries nothing from before.
+    /// The 14 October leg: Mind, a switch to Hermes, a new conversation, a calendar question.
+    #[test]
+    fn a_new_conversation_after_a_switch_hands_nothing_over() {
+        let clock = Arc::new(AtomicU64::new(1_000));
+        let mut store = store_at(clock.clone());
+        speak(&mut store, "mind", "book the hotel", "Booked: confirmation 77-QX.", false);
+        clock.store(1_010, Ordering::SeqCst);
+        speak(&mut store, "mind", "and the weather?", "Sunny, 24°C.", false);
+        clock.store(1_020, Ordering::SeqCst);
+        assert!(for_turn(&store, "hermes", 1_020).is_some(), "a switch with no new conversation hands over");
+
+        store.new_conversation();
+        assert_eq!(for_turn(&store, "hermes", 1_020), None, "a new conversation carries nothing");
+        // In the same second as the press, and a minute later: the fence is not a clock.
+        assert_eq!(for_turn(&store, "hermes", 1_080), None);
+    }
+
+    /// After a new conversation, only what was said since it is handed over, even by the mind
+    /// that spoke before it.
+    #[test]
+    fn only_what_came_after_a_new_conversation_is_handed_over() {
+        let clock = Arc::new(AtomicU64::new(1_000));
+        let mut store = store_at(clock.clone());
+        speak(&mut store, "mind", "book the hotel", "Booked: confirmation 77-QX.", false);
+        store.new_conversation();
+        clock.store(1_100, Ordering::SeqCst);
+        speak(&mut store, "mind", "what's the time in Tokyo?", "Half past nine at night.", false);
+        clock.store(1_200, Ordering::SeqCst);
+
+        let handed = for_turn(&store, "hermes", 1_200).expect("Mind spoke after the new conversation");
+        assert!(handed.told.contains("- The person: what's the time in Tokyo?"), "{}", handed.told);
+        assert!(!handed.told.contains("hotel") && !handed.told.contains("77-QX"), "{}", handed.told);
     }
 }

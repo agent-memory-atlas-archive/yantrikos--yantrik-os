@@ -22,7 +22,7 @@
 //! - one event's text is cut at [`EVENT_CAP`]; one call keeps at most [`CARD_CAP`] of output, its
 //!   head and its tail with a marker between.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -68,6 +68,11 @@ pub struct Store {
     clock: Box<dyn Fn() -> u64 + Send>,
     /// How many agents it keeps before letting the oldest idle ones go: [`KEEP_AGENTS`].
     keep: usize,
+    /// The last turn of each agent when the person last started a new conversation
+    /// ([`Store::new_conversation`]). Nothing up to it is handed to another mind (#245): a new
+    /// conversation carries nothing from before. Kept by turn number, not by time, because the
+    /// clock counts seconds and a turn can end in the same second the person presses the button.
+    fence: BTreeMap<AgentId, u64>,
 }
 
 impl Default for Store {
@@ -92,6 +97,7 @@ impl Store {
             pending_deletes: Vec::new(),
             clock,
             keep: KEEP_AGENTS,
+            fence: BTreeMap::new(),
         }
     }
 
@@ -114,6 +120,17 @@ impl Store {
 
     pub fn agents(&self) -> &[Agent] {
         &self.agents
+    }
+
+    /// The person started a new conversation: what every mind has said so far stays in its
+    /// history, and none of it is handed over to the next mind spoken to.
+    pub fn new_conversation(&mut self) {
+        self.fence = self.agents.iter().filter_map(|a| Some((a.meta.id.clone(), a.turns.last()?.n))).collect();
+    }
+
+    /// The number of `id`'s last turn before the last new conversation; 0 if there was none.
+    pub fn fence(&self, id: &AgentId) -> u64 {
+        self.fence.get(id).copied().unwrap_or(0)
     }
 
     pub fn agent(&self, id: &AgentId) -> Option<&Agent> {
