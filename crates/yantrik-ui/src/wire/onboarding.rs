@@ -1476,7 +1476,9 @@ fn ask_the_mind(mind: &str) -> Proof {
         return Proof::Attention { reason: "Yantrik Companion is not running".into(), details: "no companion in this process".into() };
     };
     let started = std::time::Instant::now();
-    let said = bridge.handle().ask("Reply with the single word OK.".into(), std::time::Duration::from_secs(90));
+    // A real tool turn, checked for its answer: "Reply with the single word OK." passed on VM 542
+    // while the person's first ask came back empty (`CompanionHandle::check_answer`).
+    let said = bridge.handle().check_answer(std::time::Duration::from_secs(90));
     answer_proof(said, started.elapsed().as_millis())
 }
 
