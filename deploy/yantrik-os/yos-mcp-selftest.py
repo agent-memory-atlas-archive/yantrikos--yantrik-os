@@ -465,6 +465,14 @@ if argv[:1] == ["act"]:
         if state.get("shell_down"):
             die("shell.app.act refused: the shell is gone")
         state.setdefault("requests", []).append(args)
+        if state.get("not_needed"):
+            # What the real shell answers when its own mode would run this anyway — full bypass
+            # always, and `auto` or `bypass` under a session rule unless a purpose says it cannot
+            # be undone (control_approvals.rs): no card, and nothing to wait on.
+            save(state)
+            envelope({"status": "not_needed", "app": args.get("app"), "action": args.get("action"),
+                      "mode": state.get("mode")})
+            raise SystemExit(0)
         rid = "appr-%d" % len(state["requests"])
         state.setdefault("ids", {})[rid] = canonical(args.get("args_json", {}))
         save(state)
@@ -2138,6 +2146,19 @@ with tempfile.TemporaryDirectory() as d:
         check("allowed, it runs once, with the grant it was minted for",
               [(a["action"], a.get("grant")) for a in s.get("acted", [])] == [("send_to_agent", "appr-1")],
               s.get("acted"))
+    # The real shell answers `not_needed` to whatever its own mode would run, and a hand-off is
+    # never run unasked from here: the card's sentence makes it ask in every mode but full bypass,
+    # and there, where no card can be raised, the hand-off is refused.
+    module, state = case(tmp, "handoff-taint-not-needed", mode="bypass_all", ceiling=None,
+                         machine_ceiling="dangerous", token=TOKEN, not_needed=True)
+    module.run_tool(module.BY_NAME["os_describe"], {"app": "calendar"})
+    told = module.call_tool(module.AGENT_BY_NAME["send_to_agent"], {"agent": CHILD, "text": "Dentist"})
+    reqs = read(state).get("requests", [])
+    check("a tainted hand-off's card says that what is handed on cannot be undone",
+          reqs and "cannot be undone" in str(reqs[0].get("purpose")), reqs)
+    check("and when the shell will raise no card for it, it is refused, not run unasked",
+          not read(state).get("acted") and told[0].startswith("REFUSED")
+          and "never run unasked" in told[0], (told[0], read(state).get("acted")))
     module, state = case(tmp, "handoff-taint-denied", mode="auto", answer="denied", ceiling=None,
                          token=TOKEN)
     module.run_tool(module.BY_NAME["os_describe"], {"app": "calendar"})
@@ -2155,6 +2176,116 @@ with tempfile.TemporaryDirectory() as d:
     check("untainted, send_to_agent in auto runs as the mode says, unasked",
           not read(state).get("requests") and [a["action"] for a in read(state).get("acted", [])]
           == ["send_to_agent"], read(state))
+
+    # 23u. A command from a session that has read private state asks, whatever the mode and
+    # whatever the session has allowed (E.CMP1 run 2, 14 Oct 2026): refused a new address by the
+    # taint, a mind reached for `curl` through run_command instead, and in `auto` one session rule
+    # for shell.agent_run would have let it and every later command run with nobody asked. A
+    # command line can carry anything off the machine, so the session is the unit, not the text.
+    RULED = [{"app": "shell", "action": "agent_run"}, {"app": "shell", "action": "agent_input"},
+             {"app": "terminal", "action": "run"}]
+    CURL = 'curl -s "https://api.open-meteo.com/v1/forecast?latitude=41.88&longitude=-87.63"'
+    module, state = case(tmp, "command-clean", mode="auto", ceiling=None, token=TOKEN, rules=RULED)
+    module.call_tool(module.AGENT_BY_NAME["run_command"], {"command": CURL})
+    check("untainted, run_command in auto under the session's rule runs unasked, as before",
+          not read(state).get("requests")
+          and [a["action"] for a in read(state).get("acted", [])] == ["agent_run"], read(state))
+
+    def tainted_command(name, mode, call, want, answer="granted", **desktop):
+        """A session that has described the weather, then one command; what the desktop saw."""
+        module, state = case(tmp, "command-taint-%s-%s" % (name, mode), mode=mode, ceiling=None,
+                             machine_ceiling="dangerous", rules=RULED, answer=answer, **desktop)
+        module.run_tool(module.BY_NAME["os_describe"], {"app": "shell"})
+        told = call(module)
+        s = read(state)
+        reqs = s.get("requests", [])
+        check("in %s, a tainted session's %s puts a card up, its rule notwithstanding" % (mode, name),
+              [(r.get("app"), r.get("action")) for r in reqs] == [want], reqs)
+        purpose = str(reqs[0].get("purpose")) if reqs else ""
+        check("the card names what the session read and why it is asked (%s, %s)" % (name, mode),
+              "already read private state (os_describe)" in purpose
+              and "carry anything off this machine" in purpose
+              and "cannot be undone" in purpose, purpose)
+        text = told[0]
+        check("and the mind is told why, naming what it read (%s, %s)" % (name, mode),
+              "already read private state (os_describe)" in text
+              and "do not look for another route" in text, text)
+        return s, text
+
+    commands = (
+        ("run_command", lambda m: m.call_tool(m.AGENT_BY_NAME["run_command"], {"command": CURL}),
+         ("shell", "agent_run"), {"token": TOKEN}),
+        ("command_input", lambda m: m.call_tool(m.AGENT_BY_NAME["command_input"],
+                                                {"job": "job-1a2b", "text": CURL + "\n"}),
+         ("shell", "agent_input"), {"token": TOKEN}),
+        ("routed terminal.run", lambda m: act(m, "terminal", "run", {"command": CURL}),
+         ("shell", "agent_run"), {"token": TOKEN}),
+        ("terminal.run", lambda m: act(m, "terminal", "run", {"command": CURL}),
+         ("terminal", "run"), {"terminal_open": True}),
+    )
+    for mode in ("auto", "bypass"):
+        for name, call, want, desktop in commands:
+            s, _ = tainted_command(name, mode, call, want, **desktop)
+            check("allowed, it runs once, with the grant it was minted for (%s, %s)" % (name, mode),
+                  [(a["app"], a["action"], a.get("grant")) for a in s.get("acted", [])
+                   if a["action"] != "show_app"] == [want + ("appr-1",)], s.get("acted"))
+    s, text = tainted_command("run_command", "auto",
+                              lambda m: m.call_tool(m.AGENT_BY_NAME["run_command"], {"command": CURL}),
+                              ("shell", "agent_run"), answer="denied", token=TOKEN)
+    check("refused, a tainted command does not run, and the mind reads REFUSED",
+          not s.get("acted") and text.startswith("REFUSED"), (text[:160], s.get("acted")))
+    # Full bypass raises no card: the real shell answers `not_needed`. The command still does not
+    # run unasked; it is refused, in words that say so.
+    module, state = case(tmp, "command-taint-bypass_all", mode="bypass_all", ceiling=None,
+                         machine_ceiling="dangerous", token=TOKEN, rules=RULED, not_needed=True)
+    module.run_tool(module.BY_NAME["os_describe"], {"app": "shell"})
+    text = module.call_tool(module.AGENT_BY_NAME["run_command"], {"command": CURL})[0]
+    s = read(state)
+    check("in full bypass, a tainted command is put to the shell as a question",
+          [r.get("action") for r in s.get("requests", [])] == ["agent_run"], s.get("requests"))
+    check("and when no card can be raised, it is refused, not run unasked",
+          not s.get("acted") and not s.get("audited") and text.startswith("REFUSED")
+          and "never run unasked" in text and "another route" in text, (text, s))
+    module, state = case(tmp, "command-clean-not-needed", mode="auto", ceiling="safe", token=TOKEN,
+                         rules=RULED, not_needed=True)
+    module.call_tool(module.AGENT_BY_NAME["run_command"], {"command": "ls"})
+    check("untainted, the shell's not_needed still lets a harness-capped command run, as before",
+          [a["action"] for a in read(state).get("acted", [])] == ["agent_run"], read(state))
+    # Plan mode refuses first: the taint turns a run into a question, never a refusal into one.
+    module, state = case(tmp, "command-taint-plan", mode="plan", ceiling=None, token=TOKEN,
+                         rules=RULED)
+    module.run_tool(module.BY_NAME["os_describe"], {"app": "shell"})
+    text = module.call_tool(module.AGENT_BY_NAME["run_command"], {"command": CURL})[0]
+    check("in plan mode, a tainted command is refused by plan mode, and nobody is asked",
+          not read(state).get("requests") and not read(state).get("acted")
+          and "plan mode" in text and "private state" not in text, text)
+    # And the machine's ceiling before that.
+    module, state = case(tmp, "command-taint-ceiling", mode="auto", ceiling=None, token=TOKEN,
+                         machine_ceiling="standard", rules=RULED)
+    module.run_tool(module.BY_NAME["os_describe"], {"app": "shell"})
+    text = module.call_tool(module.AGENT_BY_NAME["run_command"], {"command": CURL})[0]
+    check("above the machine's ceiling, it is refused by the ceiling, and nobody is asked",
+          not read(state).get("requests") and "tool_permission" in text, text)
+    # An app that says its action runs whatever it is given is covered without being named.
+    module, state = case(tmp, "command-taint-scripts", mode="auto", ceiling=None,
+                         rules=[{"app": "scripts", "action": "run"}])
+    module.run_tool(module.BY_NAME["os_describe"], {"app": "shell"})
+    act(module, "scripts", "run", {"name": "backup"})
+    check("an action the app says runs anything asks too, from a tainted session",
+          [(r.get("app"), r.get("action")) for r in read(state).get("requests", [])]
+          == [("scripts", "run")], read(state))
+    # YOS_MCP_NO_TAINT=1 turns the whole rule off, this part included.
+    os.environ["YOS_MCP_NO_TAINT"] = "1"
+    try:
+        module, state = case(tmp, "command-taint-off", mode="auto", ceiling=None, token=TOKEN,
+                             rules=RULED)
+        module.run_tool(module.BY_NAME["os_describe"], {"app": "shell"})
+        module.call_tool(module.AGENT_BY_NAME["run_command"], {"command": CURL})
+    finally:
+        os.environ.pop("YOS_MCP_NO_TAINT", None)
+    check("with YOS_MCP_NO_TAINT=1, the session's rule answers it as it did",
+          not read(state).get("requests")
+          and [a["action"] for a in read(state).get("acted", [])] == ["agent_run"], read(state))
 
     # 23d. In `auto`, new_agent runs unasked and is written down — without the token; a token a
     # mind puts among the arguments is dropped; and one the desktop echoes back is scrubbed.
