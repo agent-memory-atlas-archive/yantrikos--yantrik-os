@@ -58,9 +58,9 @@ fn strip_mark(line: &str) -> Option<&str> {
 }
 
 /// `text` with its trail lines left out: what a reply says while it is still arriving. The calls
-/// are already said as steps above it (`wire::lens_steps`), and drawn raw they were
+/// are already said as steps above it (`wire::lens_timeline`), and drawn raw they were
 /// `⚙️ memory_remember {"text": …}` in the middle of an answer. The whole text, trail and all, is
-/// kept for the reply's "Show actions" fold at the end.
+/// kept, so a reply the Lens did not follow can still find its calls at the end.
 pub fn without_trail(text: &str) -> String {
     let mut kept: Vec<&str> = Vec::new();
     let mut after_call = false;

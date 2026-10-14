@@ -28,8 +28,7 @@ import { StatusBar } from "components/status_bar.slint";
 import { DockItem } from "components/app_dock.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { IntentLens, LensResult, ApprovalRequest } from "components/intent_lens.slint";
-import { WorkCardData } from "components/work_card.slint";
-import { StepLineData } from "components/live_steps.slint";
+import { ContentBlock } from "components/message_bubble.slint";
 import { QuestionRequest } from "components/question_card.slint";
 import { MessageData } from "components/message_bubble.slint";
 import { UrgeCardData } from "components/glance_card.slint";
@@ -114,18 +113,23 @@ export component DesktopScreen inherits Rectangle {
     callback lens-open-in-agents();
     callback lens-open-history();
     callback lens-new-chat();
+    callback lens-cancel-queued();
 
-    // Chat v2: the work cards of the runs this chat started, the strip's run and counts, the mode
-    // chip's label and the header's identity line. Filled from the Agents store and the mind mode.
-    in property <[WorkCardData]> lens-work-cards: [];
-    in property <WorkCardData> lens-strip;
-    // What the mind is doing in the reply still arriving, and that reply's row (-1: none).
-    in property <[StepLineData]> lens-live-steps: [];
+    // Chat v2: the counts of the runs this chat started, the mode chip's label and the header's
+    // identity line. Filled from the Agents store and the mind mode.
+    // The timeline of the reply still arriving, and that reply's row (-1: none).
+    in property <[ContentBlock]> lens-live-steps: [];
     in property <int> lens-live-steps-row: -1;
     in property <int> lens-live-runs: 0;
     in property <int> lens-waiting-runs: 0;
     in property <string> lens-mode-label: "Ask";
     in property <string> lens-identity: "";
+    // What the composer says Enter does while the mind is busy, and the queued message's line.
+    in property <string> lens-composer-mode: "";
+    in property <string> lens-composer-placeholder: "";
+    in property <string> lens-composer-asks: "";
+    in property <string> lens-queued-mind: "";
+    in property <string> lens-queued-note: "";
     // Where the composer's words go, or "" when that is not known (app.slint says where from).
     in property <string> lens-destination: "";
     callback lens-mode-clicked();
@@ -655,8 +659,6 @@ export component DesktopScreen inherits Rectangle {
         open-in-agents => { root.lens-open-in-agents(); }
         open-history => { root.lens-open-history(); }
         new-chat => { root.lens-new-chat(); }
-        work-cards: root.lens-work-cards;
-        strip: root.lens-strip;
         live-steps: root.lens-live-steps;
         live-steps-row: root.lens-live-steps-row;
         live-runs: root.lens-live-runs;
@@ -664,6 +666,12 @@ export component DesktopScreen inherits Rectangle {
         mode-label: root.lens-mode-label;
         identity: root.lens-identity;
         destination: root.lens-destination;
+        composer-mode: root.lens-composer-mode;
+        composer-placeholder: root.lens-composer-placeholder;
+        composer-asks: root.lens-composer-asks;
+        queued-mind: root.lens-queued-mind;
+        queued-note: root.lens-queued-note;
+        cancel-queued => { root.lens-cancel-queued(); }
         mode-clicked => { root.lens-mode-clicked(); }
         mind-clicked => { root.active-mind-clicked(); }
         view-desk(run) => { root.lens-view-desk(run); }

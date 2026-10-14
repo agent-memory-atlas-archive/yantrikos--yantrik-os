@@ -733,11 +733,12 @@ pub fn publish(
                         if !calls.is_empty() {
                             entry["calls"] = serde_json::Value::Array(calls);
                         }
-                        // What the mind is doing in a reply still arriving, as the bubble says
-                        // it: `[{text, state}]`, state running | done | failed | waiting. Once the
-                        // reply ends, the steps its "Show actions" folded. Read here so a gate can
-                        // check the live steps without a screenshot.
-                        if let Some(steps) = crate::wire::lens_steps::for_describe(i) {
+                        // The reply's timeline, as the bubble draws it: `[{kind, text, state}]`,
+                        // kind thinking | step | question | status, state running | done | failed |
+                        // waiting (a question: waiting | answered | closed). While it arrives the
+                        // last is the live status line; once it ends, the folded timeline. Read
+                        // here so a gate can check it without a screenshot.
+                        if let Some(steps) = crate::wire::lens_timeline::for_describe(i) {
                             entry["steps"] = steps;
                         }
                         entry
@@ -749,7 +750,7 @@ pub fn publish(
                 .with("screen", screen_name(screen))
                 .with("conversation", serde_json::Value::Array(conversation))
                 // What the answering mind says it is doing now ("Thinking… (60 s)"), while its
-                // turn runs; empty otherwise. The chat's work card shows the same line.
+                // turn runs; empty otherwise. The reply's live line says the same, in the shell's words.
                 // Withheld from an agent caller with the conversation: the status line is the
                 // person's chat in miniature. Flattened and clipped so it cannot bloat `describe`.
                 .with(
@@ -3610,7 +3611,7 @@ mod steps_describe_tests {
         let src = include_str!("control.rs");
         let at = src.find("let conversation: Vec<serde_json::Value> = if agent_reading { Vec::new() }").expect("conversation");
         let block = &src[at..at + 4000];
-        assert!(block.contains("crate::wire::lens_steps::for_describe(i)"), "{block}");
+        assert!(block.contains("crate::wire::lens_timeline::for_describe(i)"), "{block}");
         assert!(block.contains("entry[\"steps\"] = steps"), "{block}");
     }
 }

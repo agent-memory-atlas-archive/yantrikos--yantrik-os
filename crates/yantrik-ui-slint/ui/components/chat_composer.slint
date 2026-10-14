@@ -3,8 +3,10 @@
 // Enter sends and Shift+Enter breaks the line; a multi-line TextInput never fires `accepted`, so
 // the key handler is the whole of it (the field once could not send a second message from the
 // keyboard). Escape closes the panel, because a panel you cannot leave from the keyboard once
-// you are typing in it is a trap. While a run is going the send button reads "Send follow-up",
-// which is what it does: the words go to the mind beside its work.
+// you are typing in it is a trap. While an attached mind works the button reads "Queue" and the
+// placeholder "Queue a message for {mind}…", which is what happens: the message waits in the
+// conversation until the turn ends. While its run waits on a question, both say "Answer". The
+// built-in, which takes words beside its work, keeps "Send follow-up".
 //
 // The row above Send says where the message goes (`destination`): "Sends your message and
 // conversation context to: <provider> · <model>", or "Stays on this machine · <model>" only when
@@ -36,6 +38,11 @@ export component ChatComposer inherits Rectangle {
     in property <string> destination: "";
     // A run for this chat is going: the button says so.
     in property <bool> run-active: false;
+    // What Enter does while the mind is busy (wire/lens_queue.rs): "" sends, "queue" holds the
+    // message until the mind finishes, "answer" answers the question it waits on. The placeholder
+    // says the same before anything is typed; "" for the plain "Message {mind}…".
+    in property <string> mode: "";
+    in property <string> placeholder: "";
     out property <bool> has-text: input.chat-text != "";
     // Whether the cursor is in the box (the idle-redraw and focus tests read it).
     out property <bool> focused: input.has-focus;
@@ -111,7 +118,7 @@ export component ChatComposer inherits Rectangle {
             single-line: false;
             text <=> chat-text;
             accessible-role: text-input;
-            accessible-label: "Message " + root.mind-name;
+            accessible-label: root.placeholder != "" ? root.placeholder : "Message " + root.mind-name;
             key-pressed(event) => {
                 if (event.text == Key.Escape) {
                     root.escape();
@@ -130,7 +137,7 @@ export component ChatComposer inherits Rectangle {
         if input.chat-text == "" : Text {
             x: Theme.sp-3;
             y: Theme.sp-3 + root.files-h;
-            text: "Message " + root.mind-name + "\u{2026}";
+            text: root.placeholder != "" ? root.placeholder : "Message " + root.mind-name + "\u{2026}";
             color: Theme.chat-text-2;
             font-size: Theme.fs-title-2;
         }
@@ -257,7 +264,8 @@ export component ChatComposer inherits Rectangle {
             VerticalLayout {
                 alignment: center;
                 ChatPill {
-                    label: root.run-active ? "Send follow-up" : "Send";
+                    label: root.mode == "answer" ? "Answer" : root.mode == "queue" ? "Queue"
+                        : root.run-active ? "Send follow-up" : "Send";
                     primary: input.chat-text != "";
                     enabled: input.chat-text != "";
                     clicked => { root.send(input.chat-text); }

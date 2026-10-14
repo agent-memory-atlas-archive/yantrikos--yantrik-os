@@ -314,6 +314,12 @@ there is none to wait for (the desktop did not take it, the turn was stopped, it
 A desktop that keeps no runs
 refuses a `request` rather than leave it unanswerable.
 
+In the Lens, a question from the mind the person is talking to is drawn in that reply, where it
+was asked, and while it waits the composer answers it: what the person types and sends is
+delivered as this answer, the same way a typed answer in the card is (`by_option` false, so a typed
+"Erase" is still not a pressed one). A harness needs nothing for this; it gets the answer on a poll
+as it would from the card.
+
 **Events.** Text still travels as `harness.chunk`. Beside it, `harness.event` says what the agent
 is *doing*, and the Agents view draws each tool call as a card:
 
@@ -325,7 +331,7 @@ is *doing*, and the Agents view draws each tool call as a card:
 | `thinking` | `delta` | a folded "thinking" line |
 | `status` | `text` | the agent's state line |
 | `usage` | `model`, `input_tokens?`, `output_tokens?`, `cost_usd?` | the details panel; they add up |
-| `request` | `request_id`, `prompt`, `options?` | the agent waits for you, asking `prompt` |
+| `request` | `request_id`, `prompt`, `options?`, `recommended?` | the agent waits for you, asking `prompt`; `recommended` (an index into `options`) is marked on the card, never chosen for you |
 | `redact` | `request_id`, `needles: [{sha256, len}]` | nothing: the shell erases its copies of the words (below) |
 
 `call` is your own id for the call (pi's `toolCallId`, an OpenAI `tool_call.id`), unique within

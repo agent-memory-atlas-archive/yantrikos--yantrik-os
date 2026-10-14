@@ -5,8 +5,8 @@
 //! and as its own status lines ("Using web_search…"). Shown as they arrive, they are a log, not an
 //! account: the Lens drew `⚙️ memory_remember {"text": …}` in the middle of DeepSeek's answers on
 //! VM 541, and a person cannot tell from that whether anything is happening. This is the one
-//! place a step becomes words, so the Lens's live steps, its "Show actions" fold and the work card
-//! say the same thing about the same call.
+//! place a step becomes words, so a reply's timeline while it runs, the same timeline once it has
+//! ended and the Agents screen's run words say the same thing about the same call.
 //!
 //! The rule the table keeps: never an argument dump, a token, a path or JSON. The one argument
 //! that is said is a search's query, and only a short plain one, because "Searching the web" for
@@ -49,7 +49,7 @@ impl Phrase {
     }
 
     /// Whether it is something done, as opposed to the mind thinking or working between steps:
-    /// only actions go in a reply's "Show actions".
+    /// only actions stay in a reply's timeline once it has ended.
     pub fn is_action(&self) -> bool {
         !matches!(self, Phrase::Verb { base, .. } if base == "think" || base == "work")
     }
@@ -315,7 +315,9 @@ pub fn of_status(text: &str) -> Option<Phrase> {
     }
     let line = line.trim_end_matches(['…', '.', ' ']).trim();
     let lower = line.to_lowercase();
-    if line.is_empty() || lower.starts_with("waiting") {
+    // A question the mind asked ("asks: Which days…", as the store puts it) is drawn as its own
+    // card in the reply, not said again as a step.
+    if line.is_empty() || lower.starts_with("waiting") || lower.starts_with("asks:") {
         return None;
     }
     if let Some(tool) = line.strip_prefix("Using ").or_else(|| line.strip_prefix("using ")) {
@@ -327,6 +329,11 @@ pub fn of_status(text: &str) -> Option<Phrase> {
     }
     if lower.starts_with("thinking") {
         return Some(verb("think", ""));
+    }
+    // Hermes's heartbeat ("Working — 3 min"): the same one step however long it runs, never a new
+    // one each time its minutes change, and not an action.
+    if lower.starts_with("working") {
+        return Some(verb("work", ""));
     }
     match plain(line).filter(|s| s.chars().count() <= SAID_CHARS) {
         Some(said) => Some(Phrase::Said(capitalised(&said))),
@@ -437,5 +444,16 @@ mod tests {
         assert_eq!(said("{\"step\": 3}").as_deref(), Some("Working"), "data is never said");
         assert_eq!(said("waiting for your approval"), None);
         assert_eq!(said("   "), None);
+    }
+
+    /// Hermes's heartbeat changed its minutes every few, and each change was a new "done" step
+    /// in the reply ("Working — 3 min", "Working — 6 min"); the question a mind asks was a step
+    /// too, beside its own card.
+    #[test]
+    fn a_heartbeat_is_one_unchanging_step_and_a_question_is_no_step_at_all() {
+        let three = of_status("Working — 3 min").expect("a step");
+        assert_eq!(three, of_status("Working — 6 min").unwrap(), "the same step whatever its minutes");
+        assert!(!three.is_action(), "and not something done, so no reply lists it");
+        assert_eq!(of_status("asks: Which days is this weekend for you?"), None);
     }
 }

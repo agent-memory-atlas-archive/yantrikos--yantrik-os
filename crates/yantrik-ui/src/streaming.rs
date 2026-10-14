@@ -87,7 +87,8 @@ thread_local! {
     static TRANSCRIPT: Cell<u64> = const { Cell::new(0) };
 }
 
-fn transcript() -> u64 {
+/// Which transcript the conversation is showing now.
+pub(crate) fn transcript() -> u64 {
     TRANSCRIPT.with(Cell::get)
 }
 
@@ -179,7 +180,8 @@ impl Reply {
         Took::More
     }
 
-    /// The answer has ended: the bubble stops streaming and gets its whole text, folded.
+    /// The answer has ended: the bubble stops streaming and gets its whole text, under its
+    /// timeline.
     fn finish(&self, model: &VecModel<MessageData>) {
         let row = self.bubble.row;
         if !self.bubble.here() {
@@ -191,10 +193,7 @@ impl Reply {
             bubble.content = SharedString::from(self.whole.as_str());
         }
         let blocks = parse_content_blocks(&bubble.content);
-        // A reply with no trail lines (the Mind writes none) folds the steps the Lens followed
-        // instead, so every mind's answer can say what it did.
-        let steps = crate::wire::lens_steps::fold(row);
-        bubble.blocks = with_steps(blocks, &steps);
+        bubble.blocks = with_timeline(blocks, &crate::wire::lens_timeline::fold(row));
         model.set_row_data(row, bubble);
     }
 }
@@ -419,23 +418,38 @@ fn pump(
     streams.remember(done_flag, timer);
 }
 
-/// `blocks` with the turn's steps after them as "Show actions", when the reply carried no call of
-/// its own to fold. A reply whose trail lines are already folded keeps exactly those.
-fn with_steps(blocks: ModelRc<ContentBlock>, steps: &[crate::wire::lens_steps::Step]) -> ModelRc<ContentBlock> {
-    let mut all: Vec<ContentBlock> = blocks.iter().collect();
-    if steps.is_empty() || all.iter().any(|b| b.block_type == "tool") {
+/// The finished reply as its bubble draws it: its timeline first, in the order the work happened,
+/// then its words, with no step left among them.
+///
+/// The timeline is the one the Lens followed in the Agents store, where every call is, whether a
+/// harness reported it or wrote it as a trail line; the trail lines in the text are the same calls
+/// told again, so they are dropped. A reply the Lens did not follow (the built-in companion keeps no
+/// turn in the store) has only the calls its own text told: those are lifted out of the text to the
+/// top, in the Lens's words, so the reply still says what it did before what it says.
+fn with_timeline(blocks: ModelRc<ContentBlock>, entries: &[crate::wire::lens_timeline::Entry]) -> ModelRc<ContentBlock> {
+    let mut all: Vec<ContentBlock> = if entries.is_empty() {
+        blocks.iter().filter(|b| b.block_type == "tool").map(step_of_trail).collect()
+    } else {
+        crate::wire::lens_timeline::blocks(entries)
+    };
+    if all.is_empty() {
         return blocks;
     }
-    all.extend(steps.iter().map(|s| ContentBlock {
-        block_type: "tool".into(),
-        text: s.text.as_str().into(),
-        call: crate::ToolCallData {
-            summary: s.text.as_str().into(),
-            status: s.state.word().into(),
-            ..Default::default()
-        },
-    }));
+    all.extend(blocks.iter().filter(|b| b.block_type != "tool"));
     ModelRc::new(VecModel::from(all))
+}
+
+/// A call read off the reply's text, as a step of its timeline: the Lens's words for it, and what
+/// it opens to.
+fn step_of_trail(block: ContentBlock) -> ContentBlock {
+    let args: serde_json::Value = serde_json::from_str(&block.call.arguments).unwrap_or(serde_json::Value::Null);
+    let phrase = crate::wire::step_words::of_call(&block.call.name, &block.call.target, &args, "");
+    let (text, state) = if block.call.status == "failed" { (phrase.failed(), "failed") } else { (phrase.done(), "done") };
+    ContentBlock {
+        block_type: "step".into(),
+        text: text.into(),
+        call: crate::ToolCallData { status: state.into(), ..block.call },
+    }
 }
 
 /// Parse message content into styled blocks for rich rendering.
@@ -482,7 +496,7 @@ mod tests {
     }
 
     /// The trail lines of a reply still arriving are steps above it, not its words; the whole text
-    /// keeps them, so the finished reply folds them under "Show actions" as before.
+    /// keeps them, so the finished reply can still find its calls.
     #[test]
     fn trail_lines_are_left_out_while_streaming_and_kept_for_the_fold() {
         let whole = "Saving that.\n⚙️ memory_remember {\"text\": \"tea, no sugar\"}\nDone, I\u{2019}ll remember.";
@@ -497,25 +511,50 @@ mod tests {
         assert_eq!(tool.call.name, "memory_remember");
     }
 
-    /// The Mind writes no trail lines: its steps become the fold. A reply that carried its own
-    /// calls keeps them, and is not given a second list.
-    #[test]
-    fn a_reply_with_no_trail_lines_folds_the_steps_the_lens_followed() {
-        use crate::wire::lens_steps::{Step, StepState};
-        let steps = vec![
-            Step { text: "Looked at your calendar".into(), state: StepState::Done, action: true },
-            Step { text: "Couldn\u{2019}t open the web page".into(), state: StepState::Failed, action: true },
-        ];
-        let blocks = with_steps(parse_content_blocks(&SharedString::from("You have a dentist at 10.")), &steps);
-        let tools: Vec<ContentBlock> = blocks.iter().filter(|b| b.block_type == "tool").collect();
-        assert_eq!(tools.len(), 2);
-        assert_eq!(tools[0].call.summary, "Looked at your calendar");
-        assert_eq!(tools[1].call.status, "failed");
-        assert_eq!(tools[0].call.arguments, "", "nothing to open: the sentence is everything");
+    fn kinds(blocks: &ModelRc<ContentBlock>) -> Vec<(String, String)> {
+        blocks.iter().map(|b| (b.block_type.to_string(), b.text.to_string())).collect()
+    }
 
-        let own = parse_content_blocks(&SharedString::from("On it.\n⚙️ os_apps\nDone."));
-        let kept = with_steps(own, &steps);
-        assert_eq!(kept.iter().filter(|b| b.block_type == "tool").count(), 1);
+    /// A finished reply is its timeline, then its words: the calls its text told are the same
+    /// ones the store has, so they are not drawn a second time in the middle of what it says.
+    #[test]
+    fn a_finished_reply_draws_its_timeline_first_and_its_words_with_no_step_among_them() {
+        use crate::wire::lens_steps::{Step, StepState};
+        use crate::wire::lens_timeline::Entry;
+        let timeline = vec![
+            Entry::Thinking { secs: 3, text: "tea, then".into() },
+            Entry::Step { step: Step { text: "Saved it to memory".into(), state: StepState::Done, action: true }, detail: None },
+        ];
+        let text = "Saving that.\n⚙️ memory_remember {\"text\": \"tea, no sugar\"}\nDone, I\u{2019}ll remember.";
+        let blocks = with_timeline(parse_content_blocks(&SharedString::from(text)), &timeline);
+        assert_eq!(
+            kinds(&blocks),
+            [
+                ("thinking".into(), "Thought for 3 s".into()),
+                ("step".into(), "Saved it to memory".into()),
+                ("text".into(), "Saving that.".into()),
+                ("text".into(), "Done, I\u{2019}ll remember.".into()),
+            ]
+        );
+    }
+
+    /// The built-in keeps no turn in the store, so the Lens follows nothing for it: the calls its
+    /// own text told are its timeline, lifted to the top and said in the Lens's words.
+    #[test]
+    fn a_reply_the_lens_did_not_follow_lifts_its_own_calls_to_the_top_in_plain_words() {
+        let blocks = with_timeline(parse_content_blocks(&SharedString::from("On it.\n⚙️ os_apps\nDone.")), &[]);
+        let kinds = kinds(&blocks);
+        assert_eq!(kinds[0].0, "step");
+        assert!(!kinds[0].1.contains("os_apps"), "never the call's name: {:?}", kinds[0]);
+        assert_eq!(&kinds[1..], [("text".to_string(), "On it.".to_string()), ("text".into(), "Done.".into())]);
+        assert_eq!(blocks.row_data(0).unwrap().call.name, "os_apps", "what it opens to is the call itself");
+
+        let plain = parse_content_blocks(&SharedString::from("Hello."));
+        assert_eq!(kinds_of_plain(&with_timeline(plain, &[])), ["text"], "talk with no work is just its words");
+    }
+
+    fn kinds_of_plain(blocks: &ModelRc<ContentBlock>) -> Vec<String> {
+        blocks.iter().map(|b| b.block_type.to_string()).collect()
     }
 
     fn speaker(mind: &str) -> Speaker {

@@ -71,6 +71,7 @@ fn builtin_turn(
     text: &str,
     handover: Option<&crate::agents::handover::Handover>,
     streams: &streaming::Streams,
+    shown: bool,
 ) {
     let sent = match handover {
         Some(h) => crate::agents::handover::with_handover(h, text),
@@ -127,12 +128,22 @@ fn builtin_turn(
         };
         super::onboarding::first_chat_ended(&weak, outcome);
     });
+    let asked = (!shown).then_some(text);
     match handover {
         Some(h) => {
-            streaming::say(ui_weak, Some(text), "desktop", &switched_to("Yantrik Companion", h));
+            streaming::say(ui_weak, asked, "desktop", &switched_to("Yantrik Companion", h));
             streaming::stream_answer(ui_weak.clone(), rx, streams);
         }
-        None => streaming::stream_into(ui_weak.clone(), rx, text, streams),
+        None => stream_reply(ui_weak, rx, asked, streams),
+    }
+}
+
+/// The reply in a bubble of its own, under the person's words: put in the conversation first when
+/// `asked`, or already there (a queued message, whose bubble became the person's own).
+fn stream_reply(ui_weak: &slint::Weak<App>, rx: crossbeam_channel::Receiver<String>, asked: Option<&str>, streams: &streaming::Streams) {
+    match asked {
+        Some(text) => streaming::stream_into(ui_weak.clone(), rx, text, streams),
+        None => streaming::stream_answer(ui_weak.clone(), rx, streams),
     }
 }
 
@@ -151,12 +162,17 @@ fn switched_to(mind: &str, handover: &crate::agents::handover::Handover) -> Stri
 ///
 /// The host already knew how to do this: `Host::send` routes to the builtin or queues for the
 /// attached harness and hands back a stream either way. It was simply never called.
+///
+/// `shown`: the person's words are already in the conversation (a queued message, now sent);
+/// otherwise they are put there first (`words`).
 fn dispatch(
     ui_weak: &slint::Weak<App>,
     bridge: &Arc<CompanionBridge>,
     text: &str,
     streams: &streaming::Streams,
+    shown: bool,
 ) {
+    let words = (!shown).then_some(text);
     // A person just said something — to whichever mind. The Synthesis Gate, which decides
     // whether the built-in companion may speak unprompted, used to read a timestamp bumped only
     // inside the companion's own message arm, so a conversation with a harness mind looked like
@@ -172,13 +188,13 @@ fn dispatch(
     // pause or cancel a recipe (#176).
     if let Some(word) = crate::recipes::said_in_chat(text) {
         let reply = crate::recipes::act_from_chat(bridge.handle(), word);
-        streaming::stream_into(ui_weak.clone(), reply, text, streams);
+        stream_reply(ui_weak, reply, words, streams);
         return;
     }
 
     let Some(host) = super::harness::host() else {
         // No host yet (very early boot). The builtin is the only thing that could answer.
-        builtin_turn(ui_weak, bridge, text, None, streams);
+        builtin_turn(ui_weak, bridge, text, None, streams, shown);
         return;
     };
 
@@ -195,7 +211,7 @@ fn dispatch(
     // link (`private_mode::LEAVE_LINK`).
     if crate::private_mode::is_on() {
         let mind = host.list().into_iter().find(|e| e.id == active).map(|e| e.name).unwrap_or_else(|| active.clone());
-        streaming::offer(ui_weak, Some(text), &crate::private_mode::lens_offer(&mind), crate::private_mode::LEAVE_LINK);
+        streaming::offer(ui_weak, words, &crate::private_mode::lens_offer(&mind), crate::private_mode::LEAVE_LINK);
         return;
     }
 
@@ -211,25 +227,16 @@ fn dispatch(
             let names: Vec<String> = handed.iter().map(|a| format!("{} ({})", a.path, crate::picker::attach::size_words(a.size))).collect();
             format!("{text}\n\n[Files I handed over: {}]", names.join(", "))
         };
-        builtin_turn(ui_weak, bridge, &said, handover.as_ref(), streams);
+        builtin_turn(ui_weak, bridge, &said, handover.as_ref(), streams, shown);
         crate::picker::files_sent(ui_weak);
         return;
     }
 
-    // A mind already at work is answered by the desktop first, from its own record of the task:
-    // what it was asked, how long it has run, its last steps, and whether it looks stuck. The
-    // mind itself could only say "still working" (#246), and a status question sat queued behind
-    // the task until it ended. The word still goes to the mind below, which answers it as it
-    // always did: beside its work, or when its work is done. Commands (`/stop`) go straight on.
-    let told = (!text.trim_start().starts_with('/'))
-        .then(|| {
-            let agent = crate::agents::feed::main_agent(&host.active_id());
-            crate::agents::store().read(|s| {
-                let a = s.agent(&agent)?;
-                crate::agents::progress::of(a, crate::agents::model::now()).map(|p| p.told(&a.meta.mind))
-            })
-        })
-        .flatten();
+    // A message to a mind already at work no longer reaches here from the Lens: the composer
+    // queues it until the turn ends (`lens_queue`), and the reply's timeline says what the mind is
+    // doing. The desktop's "{mind} is working on …" reply went with that (#246's `Progress::told`,
+    // which the hand-over still uses): nothing could tell a status question from any other
+    // message, so every one got the status and was then held unseen.
 
     // An attached harness answers in Chunks. Adapt them to the token protocol the pump already
     // speaks, on a thread, because `Answer` is a blocking std channel and this is the UI thread.
@@ -261,10 +268,9 @@ fn dispatch(
         let mut answered = true;
         // Whether any words came back at all: the first run's first success needs some.
         let mut said = false;
-        // Whether the reply has been told which run it started. The work card is drawn under the
-        // reply that started the run, so the link goes on as soon as the first call is on record,
-        // not when the answer ends: a card that appeared only afterwards would arrive after the
-        // work it describes.
+        // Whether the reply has been told which run it started. The link goes on as soon as the
+        // first call is on record, not when the answer ends, so the reply names its run (in
+        // `describe shell`, and for the Agents screen) while the work it did is still going.
         let mut marked = false;
         // A closed channel is the end of the turn — that is the protocol, and it is why this
         // loop ends on recv() failing rather than on a sentinel.
@@ -325,15 +331,36 @@ fn dispatch(
         );
     });
     let mind = host.list().into_iter().find(|e| e.id == active).map(|e| e.name).unwrap_or_else(|| active.clone());
-    let desktop: Vec<String> =
-        [handover.as_ref().map(|h| switched_to(&mind, h)), told].into_iter().flatten().collect();
-    if desktop.is_empty() {
-        streaming::stream_into(ui_weak.clone(), rx, text, streams);
-    } else {
-        streaming::say(ui_weak, Some(text), "desktop", &desktop.join("
+    match handover {
+        Some(h) => {
+            streaming::say(ui_weak, words, "desktop", &switched_to(&mind, &h));
+            streaming::stream_answer(ui_weak.clone(), rx, streams);
+        }
+        None => stream_reply(ui_weak, rx, words, streams),
+    }
+}
 
-"));
-        streaming::stream_answer(ui_weak.clone(), rx, streams);
+/// What the person sent from the Lens, done as the composer said it would be (`lens_queue`): sent
+/// to the mind, queued while it works, or given as the answer to the question its run waits on.
+/// A command is always sent at once; one that ends the run closes its waiting question with the
+/// person's reason, before the run's end would close it as merely "stopped asking".
+fn submit(ui_weak: &slint::Weak<App>, bridge: &Arc<CompanionBridge>, text: &str, streams: &streaming::Streams) {
+    let composer = super::lens_queue::Composer::active();
+    match composer.enter(text) {
+        super::lens_queue::Enter::Send => {
+            if let (Some(why), Some(agent)) = (super::lens_queue::closes_questions(text), composer.agent.as_ref()) {
+                super::lens_queue::close_questions(agent, why);
+            }
+            dispatch(ui_weak, bridge, text, streams, false);
+        }
+        super::lens_queue::Enter::Queue => {
+            if let Some(ui) = ui_weak.upgrade() {
+                super::lens_queue::hold(&ui, text, &composer);
+            }
+        }
+        super::lens_queue::Enter::Answer(asking) => {
+            super::agents::answer_question(&asking.agent, &asking.request, text, false);
+        }
     }
 }
 
@@ -377,6 +404,32 @@ pub fn wire(ui: &App, ctx: &AppContext) {
     wire_send_message(ui, ctx);
     wire_lens_submit(ui, ctx);
     wire_new_chat(ui, ctx);
+    wire_queue(ui, ctx);
+}
+
+/// The Lens's queued message (`lens_queue`): sent as an ordinary turn once the mind it waits for
+/// has finished, looked for four times a second, and taken back by its ×.
+fn wire_queue(ui: &App, ctx: &AppContext) {
+    let ui_weak = ui.as_weak();
+    ui.on_lens_cancel_queued({
+        let ui_weak = ui_weak.clone();
+        move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                super::lens_queue::cancel(&ui);
+            }
+        }
+    });
+    let bridge = ctx.bridge.clone();
+    let streams = streaming::Streams::new();
+    let timer = Timer::default();
+    timer.start(slint::TimerMode::Repeated, std::time::Duration::from_millis(250), move || {
+        let Some(ui) = ui_weak.upgrade() else { return };
+        if let Some(text) = super::lens_queue::due(&ui) {
+            dispatch(&ui_weak, &bridge, &text, &streams, true);
+        }
+    });
+    // The timer lives as long as the shell, the idiom every wire module uses.
+    std::mem::forget(timer);
 }
 
 /// New chat (#246): the Lens empties, and whichever mind is answering starts a new conversation.
@@ -395,9 +448,13 @@ fn wire_new_chat(ui: &App, ctx: &AppContext) {
         // looked like housekeeping.
         if let Some(host) = super::harness::host() {
             let agent = crate::agents::feed::main_agent(&host.active_id());
+            // A run that is only waiting on the person's answer is not at work: a new chat drops
+            // the question with it, and the card says so.
             let busy = crate::agents::store().read(|s| {
                 let a = s.agent(&agent)?;
-                crate::agents::progress::of(a, crate::agents::model::now()).map(|p| (a.meta.mind.clone(), p.task))
+                crate::agents::progress::of(a, crate::agents::model::now())
+                    .filter(|p| p.question.is_none() || p.running.is_some())
+                    .map(|p| (a.meta.mind.clone(), p.task))
             });
             if let Some((mind, task)) = busy {
                 streaming::say(
@@ -413,6 +470,12 @@ fn wire_new_chat(ui: &App, ctx: &AppContext) {
                 return;
             }
         }
+        if let Some(host) = super::harness::host() {
+            let agent = crate::agents::feed::main_agent(&host.active_id());
+            super::lens_queue::close_questions(&agent, crate::agents::model::Question::NEW_CONVERSATION);
+        }
+        // A message queued for the old conversation goes with it, unsent.
+        super::lens_queue::cancel(&ui);
         let messages = ui.get_messages();
         if let Some(model) = messages.as_any().downcast_ref::<slint::VecModel<crate::MessageData>>() {
             // Through `streaming`, so an answer still arriving from a mind the person switched
@@ -459,7 +522,7 @@ fn wire_send_message(ui: &App, ctx: &AppContext) {
         }
         // V22: No offline guard — companion handles offline mode internally
         // via OfflineResponder (memory recall + pattern matching + templates)
-        dispatch(&ui_weak, &bridge, &text, &streams);
+        submit(&ui_weak, &bridge, &text, &streams);
     });
 }
 
@@ -526,7 +589,7 @@ fn wire_lens_submit(ui: &App, ctx: &AppContext) {
         // whichever mind is answering, the same as one typed into chat. This line called the
         // builtin directly, which meant the Lens (the primary way anyone talks to this desktop)
         // ignored the mind picker even after chat stopped doing so.
-        dispatch(&ui_weak, &bridge, &query, &streams);
+        submit(&ui_weak, &bridge, &query, &streams);
     });
 }
 
