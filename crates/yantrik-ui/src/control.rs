@@ -196,6 +196,19 @@ pub(crate) const SCREEN_ENTRY_PREFIX: &str = "shell:";
 /// the launch cannot disagree about what just happened. `None` means a window is coming: a
 /// program from the catalogue, the browser, Blender, or the launcher, which answers with its own
 /// report before this is ever reached.
+/// `describe shell`'s `mind_preference`: the default mind, the person's choice (`null` when they
+/// never made one), the mind that should answer, and which of the two decided it.
+fn mind_preference(chosen: &str) -> serde_json::Value {
+    serde_json::json!({
+        "default": crate::wire::settings::DEFAULT_MIND,
+        "chosen": if chosen.is_empty() { serde_json::Value::Null } else { chosen.into() },
+        "preferred": crate::wire::settings::preference(chosen),
+        "by": if chosen.is_empty() { "default" } else { "choice" },
+        // The default takes over only once its three proofs have passed.
+        "default_proven": crate::default_mind::proven(),
+    })
+}
+
 fn switches_the_shell(name: &str) -> Option<(&'static str, Option<&'static str>)> {
     use crate::wire::dock::Launch;
     match crate::wire::dock::route(name) {
@@ -856,6 +869,11 @@ pub fn publish(
                         })
                         .unwrap_or(serde_json::Value::Array(Vec::new())),
                 )
+                // Which mind should answer, and whether the person chose it or it is the default
+                // (Hermes until Yantrik Mind is ready), so a gate can check it without a picture.
+                // Beside `minds` rather than in it: `minds` is a list that release-check, yos-mcp,
+                // the arena and yantrik-term all read as one.
+                .with("mind_preference", mind_preference(&crate::wire::settings::chosen_mind()))
                 // What this machine could have, whether or not it is running — `minds` above is
                 // only what has attached. Published because the question "why can I not talk to
                 // Pi" has an answer the machine knows and nothing could read: it is not
@@ -3649,5 +3667,21 @@ mod auto_lock_action_tests {
             "describe's `settings` must carry `auto_lock_secs` read off the window, the same \
              property the idle watcher polls. Section as written:\n{settings}"
         );
+    }
+}
+
+#[cfg(test)]
+mod mind_preference_tests {
+    #[test]
+    fn describe_shell_says_hermes_is_the_default_and_whether_it_was_chosen() {
+        let never = super::mind_preference("");
+        assert_eq!(never["default"], "hermes");
+        assert_eq!(never["chosen"], serde_json::Value::Null);
+        assert_eq!((never["preferred"].as_str(), never["by"].as_str()), (Some("hermes"), Some("default")));
+
+        let chose = super::mind_preference("companion");
+        assert_eq!(chose["default"], "hermes");
+        assert_eq!(chose["chosen"], "companion");
+        assert_eq!((chose["preferred"].as_str(), chose["by"].as_str()), (Some("companion"), Some("choice")));
     }
 }

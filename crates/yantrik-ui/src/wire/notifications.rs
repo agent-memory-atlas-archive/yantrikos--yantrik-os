@@ -1346,7 +1346,8 @@ mod tests {
     /// added here because its words are the desktop's.
     #[test]
     fn model_text_reaches_a_notification_only_through_post_companion() {
-        const DESKTOPS_OWN_WORDS: [(&str, &str); 9] = [
+        const DESKTOPS_OWN_WORDS: [(&str, &str); 10] = [
+            ("default_mind.rs", "handed_over"),            // "Hermes is ready; it answers from now on."
             ("focus.rs", "start"),                         // "Session complete. Nice work."
             ("wire/agents.rs", "notification"),            // turn titles, "You asked: …"
             ("wire/harness.rs", "late_answer_notice"),     // "<mind> answered after you left."

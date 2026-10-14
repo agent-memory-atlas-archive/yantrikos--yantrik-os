@@ -1391,6 +1391,9 @@ export component App inherits Window {
     in property <[FirstRunMind]> fr-minds: [];
     in property <bool> fr-checks-running: false;
     in property <bool> fr-checks-done: false;
+    // How the default mind's install is going (crates/yantrik-ui/src/default_mind.rs): "Setting up
+    // Hermes, your mind, …", the reason it was not, or that it is ready. Empty before it starts.
+    in property <string> fr-default-mind-words: "";
     // The first success, in the chat beside the desktop: 1 while it waits for it, 0 after.
     in-out property <int> fr-chat: 0;
     // What the first reply was ("", "answered", "failed") and, when it failed, the sentence.
@@ -1608,6 +1611,7 @@ export component App inherits Window {
             minds: root.fr-minds;
             checks-running: root.fr-checks-running;
             checks-done: root.fr-checks-done;
+            default-mind-words: root.fr-default-mind-words;
             text-scale-changed(f) => { root.fr-text-scale-changed(f); }
             read-aloud(t) => { root.fr-read-aloud(t); }
             choose-provider(id) => { root.fr-choose-provider(id); }
@@ -3226,6 +3230,8 @@ export component App inherits Window {
                 y: 0;
                 width: 100%;
                 height: parent.height;
+                // The answering mind by name, as the status bar has it.
+                mind-label: root.active-harness-name == "" || root.active-harness-name == "no mind" ? "Your mind" : root.active-harness-name;
                 buttons: root.dock-buttons;
                 windows: root.dock-windows;
                 reveal-index: root.dock-reveal-index;

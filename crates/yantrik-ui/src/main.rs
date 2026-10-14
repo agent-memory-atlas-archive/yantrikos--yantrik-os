@@ -111,6 +111,8 @@ mod fileops;
 // What minds this machine could have, before any of them is running.
 mod harness_catalogue;
 mod harness_install;
+// Hermes as the mind for a person who has not chosen one, until Yantrik Mind is ready.
+mod default_mind;
 mod config_store;
 mod models;
 mod focus;
