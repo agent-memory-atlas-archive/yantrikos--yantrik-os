@@ -271,7 +271,9 @@ jobs:
 
       # Intel Macs (the Mac mini 2012). A fake sysfs and dry runs: the Broadcom BCM4331 gets wl
       # when headers exist and b43 when they do not, each blacklisting the other, nothing is
-      # fetched offline, and a USB dongle is not mistaken for the chip. Then mbpfan's settings:
+      # fetched offline, and a USB dongle is not mistaken for the chip. Its recover reloads wl only
+      # when wl's scanning has wedged, at most once per five minutes and backing off to an hour,
+      # through fake nmcli and modprobe. Then mbpfan's settings:
       # the Mac mini's 1800-5500 rpm, the SMC's own limits elsewhere, a person's edits kept.
       - name: A Mac's Wi-Fi driver is fetched, not shipped, and never fights the other driver
         run: bash deploy/yantrik-os/yantrik-broadcom-wifi selftest
@@ -286,6 +288,10 @@ jobs:
           test -L "$link"
           # The link is absolute: its target must exist inside the rootfs, not on this runner.
           test -f "$root$(readlink "$link")"
+          link="$root/etc/systemd/system/timers.target.wants/yantrik-broadcom-wifi-recover.timer"
+          test -L "$link"
+          test -f "$root$(readlink "$link")"
+          test -f "$root/etc/systemd/system/yantrik-broadcom-wifi-recover.service"
           test -f "$root/etc/systemd/system/mbpfan.service.d/yantrik-apple.conf"
 
       # The one-password start (#646): the disk's password typed once, on the pre-boot screen,
