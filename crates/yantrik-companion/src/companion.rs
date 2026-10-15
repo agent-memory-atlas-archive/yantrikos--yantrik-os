@@ -8,7 +8,7 @@ use yantrikdb_core::YantrikDB;
 use yantrik_ml::{
     ChatMessage, GenerationConfig, LLMBackend, ToolCall, ToolCallMode,
     ModelCapabilityProfile, ModelFamily, ToolFamily,
-    parse_tool_calls, extract_text_content,
+    parse_tool_calls, extract_text_content, ThoughtWithoutAnswer, THOUGHT_WITHOUT_ANSWER,
     ChatTemplate, template_for_family,
     CognitiveRouter, RouteDecision,
 };
@@ -1211,7 +1211,9 @@ impl CompanionService {
             self.judge = crate::judge_route::build_judge(&self.config.judge, &self.llm, crate::judge_route::chat_locality(&self.config.llm));
             self.publish_decisions();
         }
-        tracing::info!(model = %model_id, "LLM backend swapped");
+        // The profile logged at start-up is the start-up model's; after a swap (the first run
+        // picking a provider) it is this one, and a log that only shows the old one misleads.
+        tracing::info!(model = %model_id, profile = %self.capability_profile.summary(), "LLM backend swapped");
     }
 
     /// Switch the decision model at runtime, from Settings. `None` of a judge is Off: every
@@ -1636,6 +1638,7 @@ impl CompanionService {
             urges_delivered: vec![],
             tool_calls_made,
             offline_mode: false,
+            model_failure: None,
             without_model: false,
         })
     }
@@ -1667,7 +1670,7 @@ impl CompanionService {
         }
         let message = yantrik_ml::not_set_up::NOT_SET_UP.to_string();
         on_token(&message);
-        Some(AgentResponse { message, memories_recalled: 0, urges_delivered: vec![], tool_calls_made: vec![], offline_mode: false, without_model: true })
+        Some(AgentResponse { message, memories_recalled: 0, urges_delivered: vec![], tool_calls_made: vec![], offline_mode: false, without_model: true, model_failure: None })
     }
 
     /// The 9-step message pipeline.
@@ -1683,6 +1686,7 @@ impl CompanionService {
                 urges_delivered: vec![],
                 tool_calls_made: vec![],
                 offline_mode: false,
+                model_failure: None,
                 without_model: true,
             };
         }
@@ -1707,6 +1711,7 @@ impl CompanionService {
                         urges_delivered: vec![],
                         tool_calls_made: vec![],
                         offline_mode: false,
+                        model_failure: None,
                         without_model: true,
                     };
                 }
@@ -1740,6 +1745,7 @@ impl CompanionService {
                         urges_delivered: vec![],
                         tool_calls_made: vec![name.clone()],
                         offline_mode: false,
+                        model_failure: None,
                         without_model: true,
                     };
                 }
@@ -2077,6 +2083,7 @@ impl CompanionService {
                 urges_delivered: urge_ids,
                 tool_calls_made,
                 offline_mode: false,
+                model_failure: None,
                 without_model: false,
             };
         }
@@ -2190,6 +2197,10 @@ impl CompanionService {
             std::collections::HashSet::new();
         let mut response_text = String::new();
         let mut is_offline = false;
+        // Set when a model was reached and failed the turn (it thought and gave no answer): the
+        // reply is then a sentence about the failure, which is neither the model's words nor
+        // the offline responder's.
+        let mut model_failure: Option<String> = None;
         let max_nudges = if degraded { 0 } else { self.config.agent.max_nudges };
         let mut agent_loop = AgentLoop::new(user_text, max_nudges);
 
@@ -2235,6 +2246,13 @@ impl CompanionService {
                 Ok(r) => {
                     self.note_llm_reachable();
                     r
+                }
+                Err(e) if thought_without_answer(&*e) => {
+                    self.note_llm_reachable();
+                    response_text = THOUGHT_WITHOUT_ANSWER.to_string();
+                    model_failure = Some(e.to_string());
+                    agent_loop.fail("the model thought but gave no answer");
+                    break;
                 }
                 Err(e) => {
                     self.note_llm_offline("", &e);
@@ -2501,7 +2519,7 @@ impl CompanionService {
         if !self.incognito {
             // Step 8: Learn from this exchange (skip if offline — LLM needed)
             //   V25: Clean tool artifacts from response before learning
-            if !is_offline {
+            if !is_offline && model_failure.is_none() {
                 let clean_response = sanitize::clean_response_for_learning(
                     &response_text, &tool_calls_made,
                 );
@@ -2579,6 +2597,7 @@ impl CompanionService {
             urges_delivered: urge_ids,
             tool_calls_made,
             offline_mode: is_offline,
+            model_failure,
             without_model: false,
         }
     }
@@ -2636,6 +2655,7 @@ impl CompanionService {
                 urges_delivered: vec![],
                 tool_calls_made: vec![],
                 offline_mode: false,
+                model_failure: None,
                 without_model: true,
             };
         }
@@ -2653,6 +2673,7 @@ impl CompanionService {
                         urges_delivered: vec![],
                         tool_calls_made: vec![],
                         offline_mode: false,
+                        model_failure: None,
                         without_model: true,
                     };
                 }
@@ -2683,6 +2704,7 @@ impl CompanionService {
                         urges_delivered: vec![],
                         tool_calls_made: vec![name.clone()],
                         offline_mode: false,
+                        model_failure: None,
                         without_model: true,
                     };
                 }
@@ -2949,6 +2971,7 @@ impl CompanionService {
                     urges_delivered: urge_ids,
                     tool_calls_made: vec![tool_name],
                     offline_mode: false,
+                    model_failure: None,
                     without_model: false,
                 };
             }
@@ -3055,6 +3078,10 @@ impl CompanionService {
             std::collections::HashSet::new();
         let mut response_text: String;
         let mut is_offline = false;
+        // Set when a model was reached and failed the turn (it thought and gave no answer): the
+        // reply is then a sentence about the failure, which is neither the model's words nor
+        // the offline responder's.
+        let mut model_failure: Option<String> = None;
         let max_nudges = if degraded { 0 } else { self.config.agent.max_nudges };
         let mut agent_loop = AgentLoop::new(user_text, max_nudges);
 
@@ -3313,6 +3340,15 @@ impl CompanionService {
                                 }
                             }
                             Err(_) if !response_text.is_empty() => break,
+                            Err(e) if thought_without_answer(&*e) => {
+                                self.note_llm_reachable();
+                                response_text = THOUGHT_WITHOUT_ANSWER.to_string();
+                                on_token("__REPLACE__");
+                                on_token(&response_text);
+                                model_failure = Some(e.to_string());
+                                agent_loop.fail("the model thought but gave no answer");
+                                break;
+                            }
                             Err(e) => {
                                 self.note_llm_offline(" during tool follow-up", &e);
                                 response_text = OfflineResponder::respond(
@@ -3360,6 +3396,16 @@ impl CompanionService {
                         }
                     }
                 }
+            }
+            // The model was reached and answered with thinking alone (a Qwen3 that spent the whole
+            // budget thinking, VM 542): say so, in words, rather than show an empty bubble.
+            Err(e) if thought_without_answer(&*e) => {
+                self.note_llm_reachable();
+                response_text = THOUGHT_WITHOUT_ANSWER.to_string();
+                on_token("__REPLACE__");
+                on_token(&response_text);
+                model_failure = Some(e.to_string());
+                agent_loop.fail("the model thought but gave no answer");
             }
             Err(e) => {
                 self.note_llm_offline("", &e);
@@ -3459,7 +3505,7 @@ impl CompanionService {
         if !self.incognito {
             // Step 8: Learn from this exchange (skip if offline — LLM needed)
             //   V25: Clean tool artifacts from response before learning
-            if !is_offline {
+            if !is_offline && model_failure.is_none() {
                 let clean_response = sanitize::clean_response_for_learning(
                     &response_text, &tool_calls_made,
                 );
@@ -3537,6 +3583,7 @@ impl CompanionService {
             urges_delivered: urge_ids,
             tool_calls_made,
             offline_mode: is_offline,
+            model_failure,
             without_model: false,
         }
     }
@@ -4095,6 +4142,12 @@ impl CompanionService {
             self.session_turn_count = 0;
         }
     }
+}
+
+/// Whether a model call failed because the model thought and gave no answer. That model is
+/// reachable, so the turn is not offline; it failed, and the person is told so in words.
+fn thought_without_answer(e: &(dyn std::error::Error + Send + Sync + 'static)) -> bool {
+    e.downcast_ref::<ThoughtWithoutAnswer>().is_some()
 }
 
 /// Compute recall confidence from result scores.
@@ -5435,6 +5488,79 @@ mod identity_fact_tests {
         assert_eq!(fact.why_retrieved, vec!["identity anchor".to_string()]);
         assert_eq!(fact.current_status, yantrikdb_core::types::RecordStatus::Active);
         assert!(fact.superseded_by.is_none() && fact.pack.is_none());
+    }
+}
+
+#[cfg(test)]
+mod thought_without_answer_tests {
+    //! VM 542, 13 Oct 2026: a Qwen3 behind llama.cpp thought through the whole tool-turn budget
+    //! and sent no answer, and the Lens showed an empty bubble. The backend now calls that
+    //! [`ThoughtWithoutAnswer`]; here, the turn says so in words and is not taken for offline.
+
+    use super::*;
+    use yantrik_ml::LLMResponse;
+
+    /// A model that is reached and thinks until `max_tokens`, every time.
+    struct OnlyThinks;
+
+    impl LLMBackend for OnlyThinks {
+        fn chat(
+            &self,
+            _messages: &[ChatMessage],
+            _config: &GenerationConfig,
+            _tools: Option<&[serde_json::Value]>,
+        ) -> anyhow::Result<LLMResponse> {
+            Err(ThoughtWithoutAnswer { finish_reason: "length".into(), reasoning_chars: 3800 }.into())
+        }
+
+        fn chat_streaming(
+            &self,
+            messages: &[ChatMessage],
+            config: &GenerationConfig,
+            tools: Option<&[serde_json::Value]>,
+            _on_token: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<LLMResponse> {
+            self.chat(messages, config, tools)
+        }
+
+        fn count_tokens(&self, text: &str) -> anyhow::Result<usize> {
+            Ok(text.len())
+        }
+
+        fn backend_name(&self) -> &str {
+            "only-thinks"
+        }
+    }
+
+    fn companion() -> CompanionService {
+        let db = YantrikDB::new(":memory:", 384).expect("in-memory database");
+        let mut config = CompanionConfig::default();
+        config.tools.enabled = false;
+        CompanionService::new(db, std::sync::Arc::new(OnlyThinks), config)
+    }
+
+    #[test]
+    fn a_turn_the_model_only_thought_about_shows_the_failure_in_words() {
+        let mut c = companion();
+        let mut shown = String::new();
+        let reply = c.handle_message_streaming("Make a note called Groceries with milk, eggs and bread", |t| {
+            if t == "__REPLACE__" {
+                shown.clear();
+            } else {
+                shown.push_str(t);
+            }
+        });
+        assert_eq!(shown, THOUGHT_WITHOUT_ANSWER, "the bubble says what happened");
+        assert_eq!(reply.message, THOUGHT_WITHOUT_ANSWER);
+        assert!(reply.model_failure.as_deref().unwrap_or("").contains("length"), "{:?}", reply.model_failure);
+        assert!(!reply.offline_mode, "the model was reached: this is not the offline responder");
+    }
+
+    #[test]
+    fn the_same_holds_without_streaming() {
+        let reply = companion().handle_message("Make a note called Groceries with milk, eggs and bread");
+        assert_eq!(reply.message, THOUGHT_WITHOUT_ANSWER);
+        assert!(reply.model_failure.is_some() && !reply.offline_mode);
     }
 }
 

@@ -1346,7 +1346,7 @@ mod tests {
     /// added here because its words are the desktop's.
     #[test]
     fn model_text_reaches_a_notification_only_through_post_companion() {
-        const DESKTOPS_OWN_WORDS: [(&str, &str); 10] = [
+        const DESKTOPS_OWN_WORDS: [(&str, &str); 11] = [
             ("default_mind.rs", "handed_over"),            // "Hermes is ready; it answers from now on."
             ("focus.rs", "start"),                         // "Session complete. Nice work."
             ("wire/agents.rs", "notification"),            // turn titles, "You asked: …"
@@ -1357,6 +1357,7 @@ mod tests {
             ("wire/notifications.rs", "private_mode_notice"),
             ("wire/notifications.rs", "post_companion"),   // the one door for model text
             ("wire/screenshot.rs", "take_screenshot"),     // "Screenshot saved"
+            ("wire/wifi_reconnect.rs", "observe"),          // "Wi-Fi disconnected", DropWatch's words
         ];
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut files = Vec::new();

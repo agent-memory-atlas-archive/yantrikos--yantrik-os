@@ -1518,15 +1518,61 @@ def surface_name(app):
     return name[len("app-"):] if name.startswith("app-") else name
 
 
-def carries_private(app, action):
-    """Why this hand-off must be asked about, when it carries a tainted session's words. "" = no."""
-    if TAINT_OFF or not _SAW_PRIVATE or (app, action) not in HANDOFFS:
+# A command is the other way out. The taint refused a tainted session's `web_go` to a new
+# address, and the mind's next move was `run_command curl https://api.open-meteo.com/...?lat=...`,
+# which went to the person as an ordinary shell.agent_run card that said nothing about the taint;
+# in `auto` or `bypass` one "Allow for this session" on such a card would have let every later
+# command run unasked (E.CMP1 run 2, VM 541, 14 Oct 2026). A command line can carry anything off
+# this machine — curl, wget, nc, a DNS lookup, a git push — so matching on its text is no
+# defence: the session is the unit. From a session that has read private state, then, every
+# action that runs in a shell what it is given is asked about every time, whatever the mode, as a
+# hand-off is. Not refused: commands stay usable, and the person decides.
+#
+# Named here as well as read from the app's own sentence (`runs_anything`), so that an app which
+# stops saying it runs anything does not quietly take its terminal out of the rule. `terminal.run`
+# routed to the agent's own terminal arrives here already as `shell.agent_run`.
+COMMANDS = {("terminal", "run"), ("terminal", "send_input"),
+            ("shell", "agent_run"), ("shell", "agent_input")}
+
+
+def carries_private(app, action, runs_anything=False):
+    """Why this hand-off or command must be asked about, from a tainted session. "" = no."""
+    if TAINT_OFF or not _SAW_PRIVATE:
         return ""
     saw = ", ".join(dict.fromkeys(_SAW_PRIVATE))
-    return ("This session has already read private state (%s), and %s.%s carries text to another "
-            "mind whose own session has read nothing private and so could put it anywhere. It is "
-            "asked about whatever the mode, as typing into a page is refused whatever the mode: "
-            "not a fault, and not something to route around." % (saw, app, action))
+    if (app, action) in HANDOFFS:
+        return ("This session has already read private state (%s), and %s.%s carries text to "
+                "another mind whose own session has read nothing private and so could put it "
+                "anywhere. It is asked about whatever the mode, as typing into a page is refused "
+                "whatever the mode: not a fault, and not something to route around."
+                % (saw, app, action))
+    if (app, action) in COMMANDS or runs_anything:
+        return ("This session has already read private state (%s), and %s.%s runs a command, "
+                "which can carry anything off this machine — a fetch, a lookup, a push — and "
+                "nothing here can tell an innocent command line from one carrying a secret. It is "
+                "asked about every time, whatever the mode and whatever this session was allowed "
+                "before: not a fault. If the person says no, do not look for another route to the "
+                "same address or the same data — another command, a script, a sub-agent or the "
+                "browser is the same route." % (saw, app, action))
+    return ""
+
+
+def private_card_line(app, action):
+    """What the person's card says first, when the taint is why they are asked.
+
+    The card is where the person decides, so it names what this session read and why that
+    matters. It also says that what leaves cannot be undone, which is true, and which is the
+    sentence the shell reads (`approvals::unrecoverable`, over the caller's purpose as well as the
+    app's): it asks about it in `ask`, `auto` and `bypass` even where a session rule would have
+    answered, and offers no rule for it. Without that the shell would have answered `not_needed`
+    to a mode that runs the action anyway, and nobody would have been asked."""
+    saw = ", ".join(dict.fromkeys(_SAW_PRIVATE))
+    if (app, action) in HANDOFFS:
+        return ("Carries what this session has read (%s). Once it is handed on, that cannot be "
+                "undone." % saw)
+    return ("This session has already read private state (%s), and a command can carry anything "
+            "off this machine, so you are asked whatever the mode. What leaves cannot be undone."
+            % saw)
 
 
 # Every address this session has gone to, as `visited_form` spells it. Once the session has read
@@ -2050,7 +2096,7 @@ def shell_call(action, args, timeout=None):
     return result, None
 
 
-def ask_the_person(app, action, grade, purpose, args, requester):
+def ask_the_person(app, action, grade, purpose, args, requester, must_ask=False):
     """Put one action in front of the person, wait, and report exactly what happened.
 
     Returns `(allowed, message, grant)`. The message is the whole account the mind gets, and it
@@ -2064,6 +2110,9 @@ def ask_the_person(app, action, grade, purpose, args, requester):
     itself, which put the check in the caller; now every door's call is checked the same way,
     and this bridge's part is to carry the grant it was given. There is no action anywhere on
     this desktop that grants.
+
+    `must_ask` is the taint's: this call is never run unasked, so a desktop that answers
+    `not_needed` to it is a refusal here, not a go-ahead.
     """
     request, err = shell_call("request_approval", {
         "app": app,
@@ -2083,6 +2132,18 @@ def ask_the_person(app, action, grade, purpose, args, requester):
             "machine to allow it — and they could not be asked: %s. Nothing was run and nothing "
             "was changed. Tell them what you were trying to do and let them decide."
             % (app, action, grade, CEILING, err)), None
+
+    # A hand-off or a command from a session that has read private state is never run unasked.
+    # Only full bypass answers `not_needed` to one: the card's own sentence asks in every other
+    # mode (see `private_card_line`). That mode raises no card by definition, so the answer is no.
+    if request.get("status") == "not_needed" and must_ask:
+        return False, (
+            "the desktop's current mode (%s) puts no card in front of anybody, so the person could "
+            "not be asked about %s.%s — and from a session that has read private state it is never "
+            "run unasked. Nothing was run. Do not look for another route to the same effect: tell "
+            "the person what you wanted to do; they can switch the mode from the chip in the "
+            "status bar, or do this part themselves."
+            % (request.get("mode", "full bypass"), app, action)), None
 
     # The desktop decided nobody needed asking. That is not a refusal and not a failure: it
     # happens when this bridge's OWN cap (YOS_MCP_MAX_PERMISSION) is stricter than the desktop's
@@ -2267,7 +2328,7 @@ def guard_act(args):
     # vectors do not cover. See `decide`; `CEILING` is only a cap when somebody set it.
     verdict, detail = decide(level, app, action, cannot_undo, mode, rules, machine, cap=cap,
                              runs_anything=runs_anything)
-    private = carries_private(app, action)
+    private = carries_private(app, action, runs_anything)
     if private and verdict == "run":
         verdict = "ask"
 
@@ -2317,10 +2378,9 @@ def guard_act(args):
 
     asked_anyway = join(asked_anyway, private)
     # The card says it too: the person is deciding whether what this session read goes on.
-    card_purpose = (join("Carries what this session has read (%s)." % ", ".join(dict.fromkeys(_SAW_PRIVATE)),
-                         purpose) if private else purpose)
+    card_purpose = join(private_card_line(app, action), purpose) if private else purpose
     allowed, message, grant = ask_the_person(
-        app, action, level, card_purpose, bound, requester_name(state))
+        app, action, level, card_purpose, bound, requester_name(state), must_ask=bool(private))
     if allowed:
         return None, join(unreadable, join(asked_anyway, message)), None, grant
     return join(unreadable, join(asked_anyway, message)), None, None, None

@@ -208,7 +208,7 @@ export component ModelPicker inherits Rectangle {
 
     // The status's colour: the mind chip's dot in the lean row, the dot before the words otherwise.
     property <color> status-color: root.status-state == "connected" ? Theme.color-success
-        : root.status-state == "checking" || root.status-state == "own" ? Theme.text-dim
+        : root.status-state == "checking" || root.status-state == "own" || root.status-state == "set" ? Theme.text-dim
         : Theme.amber;
     // The lean row in a narrow Lens (380px): Effort gives its place to the model's name, and the
     // mind's name is shorter. Effort is still in the mind panel's picker.

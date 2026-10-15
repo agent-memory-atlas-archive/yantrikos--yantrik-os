@@ -40,7 +40,8 @@ impl Fix {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Status {
-    /// "connected", "checking", "not-set-up", "key-missing", "unreachable", "not-allowed", "own".
+    /// "connected", "checking", "not-set-up", "key-missing", "unreachable", "not-allowed", "own",
+    /// "set" (the built-in companion's endpoint, not called yet).
     pub state: &'static str,
     pub words: String,
     pub fix: Fix,
@@ -85,6 +86,9 @@ pub struct Input {
     /// started, and the model it says it runs.
     pub own_answered_at: Option<i64>,
     pub own_model: String,
+    /// The built-in companion, off the gateway: what it runs on, as `runs_on` resolves it from the
+    /// companion's real backend ("" when nothing is set up). `None` for every other mind.
+    pub builtin_runs_on: Option<String>,
 }
 
 /// The model's own name, for "connected · <model>": the part after the account.
@@ -94,6 +98,18 @@ fn short(model: &str) -> &str {
 
 pub fn judge(i: &Input) -> Status {
     if !i.on_gateway {
+        // The built-in companion's provider is the desktop's own configuration: said as it is,
+        // never "its own models" (13 Oct: it said so while answering from the endpoint the first
+        // run had just put it on).
+        if let Some(line) = i.builtin_runs_on.as_deref() {
+            if line.is_empty() {
+                return Status::new("not-set-up", "not set up · choose who does the thinking", Fix::AddKey);
+            }
+            return match i.own_answered_at {
+                Some(at) if i.now - at <= CALL_FRESH_SECS => Status::new("connected", format!("connected · {line}"), Fix::None),
+                _ => Status::new("set", format!("runs on {line}"), Fix::None),
+            };
+        }
         // Its own models: the desktop cannot see its provider, only whether it answered.
         return match i.own_answered_at {
             Some(at) if i.now - at <= CALL_FRESH_SECS => {

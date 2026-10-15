@@ -2299,6 +2299,10 @@ export component IntentLens inherits Rectangle {
                         mind-name: root.mind-name;
                         first-run: root.first-run;
                         starter(words) => { composer.fill(words); }
+                        task(words) => {
+                            transcript.jump();
+                            root.send-message(words);
+                        }
                         type-chosen => { composer.focus-input(); }
                         talk-chosen => { root.mic-pressed(); }
                     }

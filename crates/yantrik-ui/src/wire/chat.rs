@@ -10,7 +10,7 @@ use std::sync::Arc;
 use slint::{ComponentHandle, Timer};
 
 use crate::app_context::AppContext;
-use crate::bridge::CompanionBridge;
+use crate::bridge::{CompanionBridge, Served};
 use crate::{apps, lens, streaming, App};
 
 /// What the desktop tells a mind about where a turn came from: facts about the machine, as JSON.
@@ -96,7 +96,11 @@ fn builtin_turn(
             if token == "__REPLACE__" {
                 replace_next = true;
             } else if !end {
-                if replace_next && token == crate::bridge::TURN_FAILED_REPLY {
+                // The model thinking and giving no answer is a failed turn too: nobody was
+                // talked to.
+                if replace_next
+                    && (token == crate::bridge::TURN_FAILED_REPLY || token == yantrik_ml::THOUGHT_WITHOUT_ANSWER)
+                {
                     failed = true;
                 }
                 if replace_next {
@@ -119,11 +123,13 @@ fn builtin_turn(
         // The first run's first success is a model's words, not the not-set-up reply.
         // A guard warning or a router reply is not a model's either (`without_model`), and
         // only the not-set-up reply itself means nothing is set up.
+        // A model that thought and gave no answer is told as that, with what to do about it.
         let outcome = match by_model.try_recv() {
-            Ok(true) if done && !failed && !said.trim().is_empty() => Ok(()),
-            Ok(false) if said.trim() == yantrik_ml::not_set_up::NOT_SET_UP.trim() => {
+            Ok(Served::Model) if done && !failed && !said.trim().is_empty() => Ok(()),
+            Ok(Served::NoModel) if said.trim() == yantrik_ml::not_set_up::NOT_SET_UP.trim() => {
                 Err(super::onboarding::NOT_SET_UP_SENTENCE.to_string())
             }
+            Ok(Served::ModelFailed(_)) => Err(yantrik_ml::THOUGHT_WITHOUT_ANSWER.to_string()),
             _ => Err(super::onboarding::NO_ANSWER_SENTENCE.to_string()),
         };
         super::onboarding::first_chat_ended(&weak, outcome);

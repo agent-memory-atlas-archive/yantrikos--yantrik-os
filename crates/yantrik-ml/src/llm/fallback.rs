@@ -165,11 +165,12 @@ impl FallbackLLM {
                 );
                 #[cfg(feature = "api-llm")]
                 {
+                    // The API fallback is a llama-server on this machine.
                     Arc::new(crate::llm::ApiLLM::new(
                         base_url.clone(),
                         None, // no API key for local server
                         model,
-                    ))
+                    ).for_provider("llamacpp"))
                 }
                 #[cfg(not(feature = "api-llm"))]
                 {
