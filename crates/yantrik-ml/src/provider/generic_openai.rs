@@ -604,6 +604,11 @@ impl GenericOpenAIBackend {
                 Err(_) => continue,
             };
 
+            // The server's own failure, sent as an event after its 200 (crate::stream_error).
+            if let Some(error) = chunk.get("error").filter(|e| !e.is_null()) {
+                return Err(crate::stream_error::StreamError::of(error).into());
+            }
+
             let delta = &chunk["choices"][0]["delta"];
 
             if let Some(content) = delta["content"].as_str() {

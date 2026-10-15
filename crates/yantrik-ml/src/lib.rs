@@ -18,6 +18,8 @@ pub mod capability;
 
 // A Qwen3's thinking switch on a self-run server, and the all-thinking-no-answer failure
 pub mod thinking;
+// An error a server sends inside a streamed reply, after its 200
+pub mod stream_error;
 
 // Chat template formatting (always compiled — used by candle + llamacpp backends)
 mod chat_template;
@@ -74,6 +76,7 @@ pub use types::{ApiToolCall, ApiToolCallFunction, ChatMessage, GenerationConfig,
 pub use traits::{LLMBackend, STTBackend, Embedder};
 pub use capability::{ModelCapabilityProfile, ModelFamily, ModelTier, ToolCallMode, SlotMode, ToolFamily};
 pub use thinking::{ThoughtWithoutAnswer, THOUGHT_WITHOUT_ANSWER};
+pub use stream_error::StreamError;
 
 // ── Chat template exports ────────────────────────────────────────────
 
