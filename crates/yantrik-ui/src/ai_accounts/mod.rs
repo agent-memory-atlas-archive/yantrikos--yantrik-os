@@ -134,7 +134,7 @@ fn list_one(a: &Account, saved: &[crate::wire::settings::ProviderStoreEntry], va
     }
     match keys::resolve(a, saved, vault) {
         Ok(r) => {
-            let auth = if r.key.is_some() { "bearer" } else { "none" };
+            let auth = keys::auth_for(a, r.key.as_deref());
             let listed = crate::wire::provider_models::list_models(&r.base_url, r.key.as_deref(), auth);
             models::build(a, FREE_TIERS, Some(listed))
         }

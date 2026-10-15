@@ -592,5 +592,16 @@ fn timeline(w: &MinimalSoftwareWindow, ui: &ChatProbe, output: &str, before: &Pi
     ui.set_composer_mode("".into());
     ui.set_composer_placeholder("".into());
     ui.set_live_runs(0);
+
+    // A problem with the model: its one press sits after the model chip, which stays, so a person
+    // can choose another model (VM 541, 15 Oct: the LAN model was gone from its list).
+    let picker = ui.global::<PickerState>();
+    picker.set_status_words("qwen3.5:27b is not one of the models Custom lists".into());
+    picker.set_status_state("unreachable".into());
+    picker.set_fix_label("Try again".into());
+    save(&settle(w), &named(output, "composer-fixing"))?;
+    picker.set_status_words("connected \u{b7} qwen3.5:27b".into());
+    picker.set_status_state("connected".into());
+    picker.set_fix_label("".into());
     Ok(())
 }

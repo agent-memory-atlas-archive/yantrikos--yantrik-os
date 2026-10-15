@@ -226,3 +226,15 @@ fn the_isos_local_model_account_is_named_honestly_and_its_id_is_the_slug_of_its_
     let local = crate::runs_on::identity::is_local("http://127.0.0.1:8341/v1");
     assert!(local, "an account on this computer keeps personal things here");
 }
+
+/// An Anthropic account is listed with its own key header: as a bearer token, Anthropic answered
+/// 400 ("anthropic-version: header is required") and the account showed only its default model
+/// (VM 541, 15 Oct 2026). Every other account keeps its scheme, and no key means none.
+#[test]
+fn each_account_is_listed_with_its_providers_own_key_header() {
+    let of = |kind: &str| super::account::Account { provider_type: kind.into(), ..saved_account(kind, false, false) };
+    assert_eq!(super::keys::auth_for(&of("anthropic"), Some(KEY)), "x-api-key");
+    assert_eq!(super::keys::auth_for(&of("openai"), Some(KEY)), "bearer");
+    assert_eq!(super::keys::auth_for(&of("custom"), Some(KEY)), "bearer", "a custom address is assumed bearer");
+    assert_eq!(super::keys::auth_for(&of("anthropic"), None), "none");
+}

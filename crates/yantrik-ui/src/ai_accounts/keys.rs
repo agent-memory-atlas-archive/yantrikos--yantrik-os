@@ -40,6 +40,19 @@ impl std::fmt::Display for Missing {
     }
 }
 
+/// How a request to this account carries its key, as `provider_models::list_models` takes it:
+/// the provider's own scheme (Anthropic's `x-api-key`, which also needs `anthropic-version`),
+/// bearer for one that names none, and none without a key. Listing an Anthropic account with a
+/// bearer token was answered 400 ("anthropic-version: header is required"), so the account
+/// showed only its default model (VM 541, 15 Oct 2026).
+pub fn auth_for(account: &Account, key: Option<&str>) -> &'static str {
+    match (key, crate::wire::provider_catalogue::auth_type_for(&account.provider_type)) {
+        (None, _) => "none",
+        (Some(_), "none") => "bearer",
+        (Some(_), scheme) => scheme,
+    }
+}
+
 /// The key and the filled address. `vault` reads one value by its key-store id (None when it is
 /// not kept or the vault is shut).
 pub fn resolve(
