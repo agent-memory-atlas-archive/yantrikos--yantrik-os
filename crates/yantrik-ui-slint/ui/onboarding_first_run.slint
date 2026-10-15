@@ -87,9 +87,10 @@ export struct FirstRunMind {
 // `focused-label`, which the tests walk with Tab to hold that every stop is one that shows.
 global FrFocus {
     in-out property <string> label;
-    // How many buttons say they have the focus: one gaining it and one losing it may say so in
-    // either order, and two may share a label (the checks' Details).
-    in-out property <int> holders;
+    // Bumped by each button that gains the focus, which keeps the number it got: one gaining it
+    // and one losing it may say so in either order, and two may share a label (the checks'
+    // Details), so a button clears the label only while the last number is still its own.
+    in-out property <int> serial;
 }
 
 component FrButton inherits Rectangle {
@@ -100,8 +101,15 @@ component FrButton inherits Rectangle {
     callback clicked();
     public function focus-me() { fs.focus(); }
     out property <bool> focused: fs.has-focus;
+    property <int> focus-serial: -1;
     changed focused => {
-        if self.focused { FrFocus.label = root.label; FrFocus.holders += 1; } else { FrFocus.holders -= 1; }
+        if self.focused {
+            FrFocus.serial += 1;
+            self.focus-serial = FrFocus.serial;
+            FrFocus.label = root.label;
+        } else if FrFocus.serial == self.focus-serial {
+            FrFocus.label = "";
+        }
     }
 
     property <float> s: TextScale.factor;
@@ -539,7 +547,7 @@ export component FirstRunScreen inherits Rectangle {
         + (root.chosen-name == "" ? "your provider" : root.chosen-name) + " when they ask it something.";
 
     // The button that has the keyboard focus, by its label; "" when the screen itself holds it.
-    out property <string> focused-label: keys.has-focus || FrFocus.holders <= 0 ? "" : FrFocus.label;
+    out property <string> focused-label: keys.has-focus ? "" : FrFocus.label;
 
     // Read this to me, as its button does: for the shell's own voice key and for the tests.
     public function read-me() { root.read-aloud(root.spoken); }
