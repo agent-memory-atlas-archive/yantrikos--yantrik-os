@@ -69,7 +69,7 @@ pub struct Store {
     /// How many agents it keeps before letting the oldest idle ones go: [`KEEP_AGENTS`].
     keep: usize,
     /// The last turn of each agent when the person last started a new conversation
-    /// ([`Store::new_conversation`]). Nothing up to it is handed to another mind (#245): a new
+    /// ([`Store::new_conversation`]), or when the shell started ([`Store::load`]). Nothing up to it is handed to another mind (#245): a new
     /// conversation carries nothing from before. Kept by turn number, not by time, because the
     /// clock counts seconds and a turn can end in the same second the person presses the button.
     fence: BTreeMap<AgentId, u64>,
@@ -990,6 +990,11 @@ impl Store {
     /// The agents kept in `dir`, the newest [`KEEP_AGENTS`] of them. Older files are deleted, and a
     /// file that cannot be read is left alone and logged. A turn that was open when the shell
     /// stopped is closed, and its open calls interrupted: nothing is still running them.
+    ///
+    /// A start of the shell is a new conversation ([`Store::new_conversation`]): the fence is kept
+    /// in memory only, so without this a restart would read it as 0 and hand the next mind turns
+    /// from before the person's last "+ new conversation" (#802). The fence is set after the open
+    /// turns are closed, so a turn cut off mid-stream is behind it like every other.
     pub fn load(dir: &Path, clock: Box<dyn Fn() -> u64 + Send>) -> Store {
         let mut store = Store::with_clock(clock);
         let now = store.now();
@@ -1017,6 +1022,7 @@ impl Store {
             store.next_seq += 1;
             store.agents.push(agent);
         }
+        store.new_conversation();
         store.revision = 1;
         store
     }

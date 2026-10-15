@@ -13,6 +13,8 @@
 //! to Hermes, pressed "+ new conversation" and asked about tomorrow's calendar; Hermes was handed
 //! the Mind's last four exchanges, a hotel confirmation number among them, and its memory plugin
 //! kept the paragraph for good. Only what was said after the last new conversation is handed over.
+//! A start of the shell is one too: the fence lives in memory, the turns on disk, so a restart
+//! would otherwise hand over again what the person had already put behind them.
 
 use super::model::{Agent, AgentId, Item, Turn};
 use super::progress;
@@ -119,6 +121,24 @@ mod tests {
         Store::with_clock(Box::new(move || clock.load(Ordering::SeqCst)))
     }
 
+    /// The shell stops and starts again: everything saved to `dir` is read back by the store's own
+    /// load path, on the same clock.
+    fn restart(mut store: Store, dir: &std::path::Path, clock: Arc<AtomicU64>) -> Store {
+        store.save(dir).unwrap();
+        drop(store);
+        Store::load(dir, Box::new(move || clock.load(Ordering::SeqCst)))
+    }
+
+    fn scratch_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "yantrik-handover-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     fn speak(store: &mut Store, harness: &str, prompt: &str, reply: &str, open: bool) {
         let id = AgentId::new(harness, AgentId::MAIN);
         store.open_turn(&id, prompt);
@@ -214,5 +234,74 @@ mod tests {
         let handed = for_turn(&store, "hermes", 1_200).expect("Mind spoke after the new conversation");
         assert!(handed.told.contains("- The person: what's the time in Tokyo?"), "{}", handed.told);
         assert!(!handed.told.contains("hotel") && !handed.told.contains("77-QX"), "{}", handed.told);
+    }
+
+    /// The fence is kept in memory and the turns on disk, so a restart used to read it as 0:
+    /// the person presses "+ new conversation", the shell restarts, and the next mind was handed
+    /// the hotel booking again. A start of the shell is a new conversation.
+    #[test]
+    fn a_restart_hands_nothing_over_from_before_it() {
+        let dir = scratch_dir("restart");
+        let clock = Arc::new(AtomicU64::new(1_000));
+        let mut store = store_at(clock.clone());
+        speak(&mut store, "mind", "book the hotel", "Booked: confirmation 77-QX.", false);
+        clock.store(1_010, Ordering::SeqCst);
+        speak(&mut store, "mind", "and the weather?", "Sunny, 24°C.", false);
+        clock.store(1_020, Ordering::SeqCst);
+
+        let store = restart(store, &dir, clock.clone());
+        assert_eq!(for_turn(&store, "hermes", 1_020), None, "nothing from before the restart");
+        assert_eq!(for_turn(&store, "hermes", 1_080), None, "nor a minute later");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A turn still streaming when the shell stopped is saved open (`ended: null`) and closed by
+    /// the load as lost, at the time of the start. That makes it the newest thing Mind "said", but
+    /// it is behind the fence like every other turn from before the restart: none of it goes.
+    #[test]
+    fn a_turn_cut_off_by_the_restart_is_not_handed_over() {
+        let dir = scratch_dir("restart-open");
+        let clock = Arc::new(AtomicU64::new(1_000));
+        let mut store = store_at(clock.clone());
+        speak(&mut store, "mind", "book the hotel", "Booked: confirmation 77-QX.", false);
+        clock.store(1_010, Ordering::SeqCst);
+        speak(&mut store, "mind", "email the confirmation to Asha", "Sending 77-QX to asha@", true);
+        store.save(&dir).unwrap();
+        let saved = std::fs::read_to_string(crate::agents::store::file_for(&dir, &AgentId::new("mind", AgentId::MAIN))).unwrap();
+        assert!(saved.contains("\"ended\":null"), "the turn is saved unfinished: {saved}");
+
+        clock.store(1_100, Ordering::SeqCst);
+        let store = restart(store, &dir, clock.clone());
+        let mind = store.agent(&AgentId::new("mind", AgentId::MAIN)).unwrap();
+        assert!(mind.turns.last().unwrap().lost, "the load closed it as cut off");
+        assert_eq!(for_turn(&store, "hermes", 1_100), None, "the cut-off turn is not handed over");
+        assert_eq!(for_turn(&store, "hermes", 1_200), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// After a restart, a switch of minds still hands over what was said since it, as #245
+    /// intends, and only that.
+    #[test]
+    fn a_switch_after_a_restart_hands_over_only_what_came_after_it() {
+        let dir = scratch_dir("restart-switch");
+        let clock = Arc::new(AtomicU64::new(1_000));
+        let mut store = store_at(clock.clone());
+        speak(&mut store, "mind", "book the hotel", "Booked: confirmation 77-QX.", false);
+        clock.store(1_010, Ordering::SeqCst);
+        speak(&mut store, "mind", "email it to Asha", "Sending it", true);
+
+        clock.store(1_100, Ordering::SeqCst);
+        let mut store = restart(store, &dir, clock.clone());
+        clock.store(1_200, Ordering::SeqCst);
+        speak(&mut store, "mind", "what's the time in Tokyo?", "Half past nine at night.", false);
+        clock.store(1_300, Ordering::SeqCst);
+
+        let handed = for_turn(&store, "hermes", 1_300).expect("Mind spoke after the restart");
+        assert!(handed.told.contains("- The person: what's the time in Tokyo?"), "{}", handed.told);
+        assert!(handed.told.contains("  mind: Half past nine at night."), "{}", handed.told);
+        for before in ["hotel", "77-QX", "Asha", "Sending it"] {
+            assert!(!handed.told.contains(before), "{before} is from before the restart: {}", handed.told);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
