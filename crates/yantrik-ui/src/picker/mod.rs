@@ -203,7 +203,7 @@ fn probe(bridge: &Arc<CompanionBridge>, model: &str) {
                             crate::wire::provider_models::KeyCheck::Unconfirmed(why) => Outcome::Unreachable(why),
                         }
                     }
-                    Ok(r) => match crate::wire::provider_models::list_models(&r.base_url, r.key.as_deref(), if r.key.is_some() { "bearer" } else { "none" }) {
+                    Ok(r) => match crate::wire::provider_models::list_models(&r.base_url, r.key.as_deref(), ai_accounts::keys::auth_for(a, r.key.as_deref())) {
                         Ok(_) => Outcome::Ok,
                         Err(crate::wire::provider_models::ListError::KeyRefused) => Outcome::KeyRefused,
                         Err(e) => Outcome::Unreachable(e.to_string()),

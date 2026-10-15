@@ -213,7 +213,11 @@ export component ModelPicker inherits Rectangle {
     // The lean row in a narrow Lens (380px): Effort gives its place to the model's name, and the
     // mind's name is shorter. Effort is still in the mind panel's picker.
     property <bool> tight: root.lean && root.room > 0 && root.room < 300px;
-    property <bool> effort-shown: root.efforts.length > 0 && !root.tight;
+    // A problem's one press ("Try again", "Add key") takes Effort's place, never the model's: the
+    // model chip is how a person moves off a model that fails (VM 541, 15 Oct: the LAN model was
+    // gone from its list, and the row showed Try again with no way to choose another).
+    property <bool> fixing: root.lean && root.fix-label != "";
+    property <bool> effort-shown: root.efforts.length > 0 && !root.tight && !root.fixing;
 
     row := HorizontalLayout {
         spacing: 6px;
@@ -232,13 +236,14 @@ export component ModelPicker inherits Rectangle {
             a11y: "Mind: " + root.mind-label + (root.lean && root.status-words != "" ? ", " + root.status-words : "") + ". Choose who answers.";
             clicked => { root.opened("mind"); mind-menu.show(); }
         }
-        if !root.lean || root.fix-label == "" : model-chip := Chip {
+        model-chip := Chip {
             label: root.model-label;
             enabled: root.model-enabled;
             // In the lean row: the room less the attach chip (28), the mind chip, the effort chip
-            // when it is shown (45 and its gap), two gaps (12) and this chip's padding and chevron (34).
+            // or the fix chip when shown (45 or 80, and its gap), two gaps (12) and this chip's
+            // padding and chevron (34).
             max-label: !root.lean ? (root.compact ? 96px : 190px)
-                : root.room > 0 ? clamp(root.room - 28px - mind-chip.width - (root.effort-shown ? 45px + 6px : 0px) - 12px - 34px, 40px, 160px)
+                : root.room > 0 ? clamp(root.room - 28px - mind-chip.width - (root.effort-shown ? 45px + 6px : 0px) - (root.fixing ? 80px + 6px : 0px) - 12px - 34px, 40px, 160px)
                 : 84px;
             a11y: "Model: " + root.model-label + ". Choose the model.";
             clicked => { root.opened("model"); model-menu.show(); }
@@ -256,11 +261,11 @@ export component ModelPicker inherits Rectangle {
             a11y: "Attach a file";
             clicked => { root.opened("attach"); root.browse(root.browse-path); attach-menu.show(); }
         }
-        // A problem in the lean row: its one press, in the model chip's place.
-        if root.lean && root.fix-label != "" : Chip {
+        // A problem in the lean row: its one press, after the model, in Effort's place.
+        if root.fixing : Chip {
             label: root.fix-label;
             chevron: false;
-            max-label: 96px;
+            max-label: 60px;
             a11y: root.fix-label + ": " + root.status-words;
             clicked => { root.fix(); }
         }
