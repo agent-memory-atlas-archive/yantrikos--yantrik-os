@@ -25,6 +25,7 @@ import test_hermes_adapter as hermes
 
 ADAPTER, SESSION, ProcessingOutcome = hermes.ADAPTER, hermes.SESSION, hermes.ProcessingOutcome
 CANCELLED = "\x00cancelled"
+SKIPPED = "\x00skipped"
 
 
 def clarify_module():
@@ -73,6 +74,7 @@ def clarify_module():
     module.register, module.wait_for_response = register, wait_for_response
     module.get_pending_for_session, module.mark_awaiting_text = get_pending_for_session, mark_awaiting_text
     module.resolve_gateway_clarify, module.clear_session = resolve_gateway_clarify, clear_session
+    module.SKIPPED = SKIPPED
     return module
 
 
@@ -80,6 +82,8 @@ class Gateway:
     """A run that asks which weekend is meant, then answers with the forecast."""
 
     CHOICES = ["Sat Oct 17 + Sun Oct 18 (Recommended)", "Just the next 2 days (Thu/Fri)"]
+    # As one question of a batch arrives, Hermes adds its skip line (gateway.clarify.skip_hint).
+    QUESTION = "Which days is this weekend for you?"
 
     def __init__(self, clarify):
         self.clarify = clarify
@@ -112,8 +116,8 @@ class Gateway:
         await adapter.on_processing_start(event)
         chat = event.source.chat_id
         await adapter.send(chat, "🔎 Checking the forecast source.", reply_to=event.message_id)
-        self.clarify.register("c1", SESSION, "Which days is this weekend for you?", self.CHOICES)
-        await adapter.send_clarify(chat, "Which days is this weekend for you?", self.CHOICES, "c1", SESSION)
+        self.clarify.register("c1", SESSION, self.QUESTION, self.CHOICES)
+        await adapter.send_clarify(chat, self.QUESTION, self.CHOICES, "c1", SESSION)
         self.asked.set()
         # The heartbeat Hermes sends while the run waits: once, then edited in place.
         beat = await adapter.send(
@@ -168,14 +172,14 @@ async def settle():
         await asyncio.sleep(0)
 
 
-def run(script, cards=False, refuse=None):
+def run(script, cards=False, refuse=None, gateway=None):
     clarify = clarify_module()
 
     async def go():
         harness = hermes.Harness(None)
         harness.desktop = Desktop(cards=cards, refuse=refuse)
         harness.adapter._call = harness.desktop.call
-        harness.gateway = harness.adapter.gateway = Gateway(clarify)
+        harness.gateway = harness.adapter.gateway = (gateway or Gateway)(clarify)
         # A run left waiting on its question is the bug itself: fail rather than wait with it.
         await asyncio.wait_for(script(harness), timeout=5)
         await settle()
@@ -392,3 +396,42 @@ class OlderDesktopTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SkippableGateway(Gateway):
+    """The same question as Hermes asks it inside a batch, with its skip line."""
+
+    QUESTION = 'Which days is this weekend for you?\nReply "skip" to skip this question.'
+
+
+class SkipTests(unittest.TestCase):
+    """Hermes's skip line on a card: the card's own Skip button, answered with Hermes's SKIPPED."""
+
+    def test_the_skip_line_is_a_button_not_words_the_card_cannot_keep(self):
+        harness = run(asked, cards=True, gateway=SkippableGateway)
+        request = harness.desktop.requests["1"][0]
+        self.assertEqual(request["prompt"], "Which days is this weekend for you?", "no skip line in the card")
+        self.assertEqual(request["options"], ["Sat Oct 17 + Sun Oct 18", "Just the next 2 days (Thu/Fri)", "Skip"])
+        self.assertEqual(request["recommended"], 0)
+
+    def test_pressing_skip_skips_the_question_the_way_a_typed_skip_does(self):
+        async def script(h):
+            await asked(h)
+            await answered_by_poll(h, "Skip")
+            await h.gateway.run
+
+        harness = run(script, cards=True, gateway=SkippableGateway)
+        self.assertEqual(harness.gateway.answers, [SKIPPED])
+
+    def test_skip_typed_into_the_card_skips_too(self):
+        async def script(h):
+            await asked(h)
+            await answered_by_poll(h, " skip ")
+            await h.gateway.run
+
+        harness = run(script, cards=True, gateway=SkippableGateway)
+        self.assertEqual(harness.gateway.answers, [SKIPPED])
+
+    def test_a_question_hermes_did_not_say_could_be_skipped_offers_no_skip(self):
+        harness = run(asked, cards=True)
+        self.assertNotIn("Skip", harness.desktop.requests["1"][0]["options"])
