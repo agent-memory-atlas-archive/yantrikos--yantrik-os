@@ -142,12 +142,11 @@ pub fn from_reported(text: &str) -> (ProviderRef, Option<String>) {
     }
     if model.is_none() {
         // A segment that is one word, and neither an address, a version, nor a provider prefix,
-        // is a model name: "deepseek-v4.1-flash", "qwen3.5:9b". A name with a port
-        // ("localhost:11434") is an address, never a model, even when it is not a host here.
+        // is a model name: "deepseek-v4.1-flash", "qwen3.5:9b".
         model = segments
             .iter()
             .filter(|s| !s.contains(char::is_whitespace))
-            .find(|s| !is_host(s) && !has_port(s) && !s.contains("://") && !is_version(s) && provider_prefix(s).is_none())
+            .find(|s| !is_host(s) && !s.contains("://") && !is_version(s) && provider_prefix(s).is_none())
             .map(|s| s.to_string());
     }
     (provider, model)
@@ -173,11 +172,6 @@ fn provider_prefix(word: &str) -> Option<(ProviderRef, &str)> {
 
 /// A host name: dotted, ending in an alphabetic label of two or more letters ("ollama.com"), or an
 /// IP address, with or without a port. "deepseek-v4.1-flash", "qwen3.8" and "2026.9.1" are not.
-/// `name:port`, the port all digits: "localhost:11434". A model's tag ("qwen3.5:9b") is not one.
-fn has_port(word: &str) -> bool {
-    word.rsplit_once(':').is_some_and(|(name, port)| !name.is_empty() && !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()))
-}
-
 fn is_host(word: &str) -> bool {
     let h = host(word);
     let name = host_name(&h);
