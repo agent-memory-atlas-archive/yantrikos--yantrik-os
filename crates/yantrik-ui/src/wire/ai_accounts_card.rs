@@ -147,6 +147,9 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(ui) = weak.upgrade() {
                 ui.global::<AiAccountsState>().set_refreshing(false);
+                // The catalogue is what `picked` resolves against: an account added, removed or
+                // listed again can change where a mind on the gateway sends its words.
+                crate::wire::runs_on_card::publish(&ui);
                 render(&ui);
             }
         });
