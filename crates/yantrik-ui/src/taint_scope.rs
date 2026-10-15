@@ -23,6 +23,8 @@
 //!   taint scope is kept on disk instead: the harness may resume its own session across the
 //!   restart (Hermes keeps it on disk), and a mind that can restart the desktop must not untaint
 //!   itself by doing so. A conversation that read private state stays tainted for its whole life.
+//!   And a scope read back from disk is reported `begun: start`, never `person`: only a press in
+//!   this run of the shell is the person's, so a forged record that says otherwise clears nothing.
 //! - **Marks only add.** [`mark`] appends to the caller's current scope; nothing here removes a
 //!   read except the press.
 //! - **A record that cannot be read is tainted.** No file, or no entry for a harness, is a clean
@@ -105,7 +107,21 @@ impl Scopes {
                 (BTreeMap::new(), true)
             }
             Ok(text) => match serde_json::from_str::<OnDisk>(&text) {
-                Ok(disk) => (disk.scopes.into_iter().filter(|(_, s)| valid_id(&s.id)).collect(), false),
+                // Every scope read back is `begun: start`, whatever the file says. The press is
+                // an event in this run of the shell, not a field in a file: a record forged to say
+                // `person` (a mind that could write the data directory, then restart the desktop)
+                // then gains nothing, since the bridge carries its reads over into a scope the
+                // person did not begin (security review of #817, design point 3). The cost: a +
+                // the bridge had not yet heard of before a restart carries the old reads over,
+                // and the person presses + again.
+                Ok(disk) => (
+                    disk.scopes
+                        .into_iter()
+                        .filter(|(_, s)| valid_id(&s.id))
+                        .map(|(harness, s)| (harness, Scope { begun: Begun::Start, ..s }))
+                        .collect(),
+                    false,
+                ),
                 Err(e) => {
                     tracing::warn!(error = %e, path = %path.display(), "Taint scopes unreadable: every conversation starts tainted");
                     (BTreeMap::new(), true)
@@ -315,6 +331,32 @@ mod tests {
         let mut again = Scopes::load(path.clone());
         assert_eq!(again.current("hermes"), before, "a restart is not the person's +");
         assert!(valid_id(&before.id), "{}", before.id);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// A scope read back from disk was not begun by a press in this run of the shell, so it is
+    /// `begun: start` whatever the file says: a record forged to say `person` clears nothing.
+    #[test]
+    fn a_scope_read_from_disk_was_not_begun_by_the_person() {
+        let path = scratch("forged");
+        let pressed = {
+            let mut s = Scopes::load(path.clone());
+            s.mark("hermes", "os_describe");
+            s.begin_by_person("hermes")
+        };
+        assert_eq!(pressed.begun, Begun::Person, "the press itself is the person's");
+        let mut again = Scopes::load(path.clone());
+        let back = again.current("hermes");
+        assert_eq!((back.id.as_str(), back.begun), (pressed.id.as_str(), Begun::Start), "a restart is not a press");
+
+        let forged = format!(
+            r#"{{"scopes":{{"hermes":{{"id":"{}","begun":"person","read":[]}}}}}}"#,
+            "f".repeat(32)
+        );
+        std::fs::write(&path, forged).unwrap();
+        let mut loaded = Scopes::load(path.clone());
+        let scope = loaded.current("hermes");
+        assert_eq!((scope.id, scope.begun), ("f".repeat(32), Begun::Start), "a file cannot say the person pressed +");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
