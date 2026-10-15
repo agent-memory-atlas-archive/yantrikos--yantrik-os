@@ -228,6 +228,23 @@ pub(crate) trait Handoff: Send + Sync {
     fn private_context(&self) -> bool {
         true
     }
+    /// The model its own config asks the gateway for now: `picked`, or an `<account>/<model>` set
+    /// there since. `None` when that config no longer points at the gateway, or cannot be read:
+    /// then the gateway cannot say where its words go, and only what it reports is said. The
+    /// Mind keeps its provider itself (no file here), and was given `picked`.
+    fn asks_gateway_for(&self, _home: &Path) -> Option<String> {
+        Some(yantrik_gateway::PICKED.into())
+    }
+}
+
+/// Whether an address is this desktop's gateway, as `plan_gateway` writes it.
+pub(crate) fn is_gateway(base_url: &str) -> bool {
+    base_url.trim().trim_end_matches('/') == yantrik_gateway::base_url().trim_end_matches('/')
+}
+
+/// A non-empty string value of a JSON object.
+pub(crate) fn text_of(m: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<String> {
+    m.get(key).and_then(serde_json::Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
 }
 
 /// The harnesses that know how to take a provider, by id.

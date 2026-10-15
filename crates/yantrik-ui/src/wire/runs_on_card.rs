@@ -28,16 +28,18 @@ pub(crate) fn current() -> Vec<RunsOn> {
     runs_on::resolve(&minds, companion.as_ref())
 }
 
-/// For a mind wired to this desktop's gateway (its handoff marker names the gateway): where the
-/// gateway sends its next call, by the gateway's own routing over the pick (`gateway::route_for`).
-/// `None` for a mind with its own provider.
+/// For a mind wired to this desktop's gateway (its handoff marker names the gateway, and its own
+/// config still points there): where the gateway sends its next call, by the gateway's own routing
+/// over the model that config asks for — `picked`, or one set there since (`gateway::route_for`).
+/// `None` for a mind with its own provider, or whose config was pointed elsewhere after the marker.
 fn gateway_fact(harness: &str) -> Option<GatewayFact> {
     let home = super::harness_provider::home_dir();
     let marker = crate::provider_handoff::marker(&home, harness)?;
     if marker.provider_id != crate::provider_handoff::GATEWAY_ID {
         return None;
     }
-    Some(match crate::gateway::route_for(harness) {
+    let asked = crate::provider_handoff::adapter_for(harness)?.asks_gateway_for(&home)?;
+    Some(match crate::gateway::route_for(harness, &asked) {
         Ok(routed) => {
             let t = routed.target;
             let provider_kind =

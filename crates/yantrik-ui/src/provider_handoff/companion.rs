@@ -72,6 +72,12 @@ impl Handoff for Companion {
         Err("The built-in companion runs on the primary provider under AI & Intelligence".into())
     }
 
+    /// Its file's `model`, while its `base_url` is the gateway's.
+    fn asks_gateway_for(&self, home: &Path) -> Option<String> {
+        let (base_url, model, _) = read(home)?;
+        (super::is_gateway(&base_url) && !model.trim().is_empty()).then(|| model.trim().to_string())
+    }
+
     fn plan_gateway(&self, home: &Path, offer: &Offer) -> Result<Plan, String> {
         let text = serde_json::to_string_pretty(&json!({ "base_url": offer.base_url(), "model": yantrik_gateway::PICKED, "api_key": offer.token.0 }))
             .map_err(|e| e.to_string())?;

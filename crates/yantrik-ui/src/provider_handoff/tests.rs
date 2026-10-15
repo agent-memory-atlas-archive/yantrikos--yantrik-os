@@ -462,3 +462,42 @@ fn an_install_never_hands_the_mind_a_model_the_person_did_not_pick_on_its_card()
     assert!(!uses_gateway(&home.0, "mind"));
     assert!(!crate::gateway::tokens().harnesses().contains(&"mind".to_string()));
 }
+
+/// The composer's line routes what each harness's own config asks the gateway for: `picked` as
+/// "Use Yantrik models" writes it, a model set there since, and nothing once the config points
+/// elsewhere (the marker alone is not enough).
+#[test]
+fn each_harness_says_which_model_its_config_asks_the_gateway_for() {
+    let home = Home::new("asks");
+    for harness in ["deepseek", "pi", "hermes", "openclaw", companion::ID] {
+        let adapter = adapter_for(harness).unwrap();
+        apply(&home.0, &adapter.plan_gateway(&home.0, &offer()).unwrap()).unwrap();
+        assert_eq!(adapter.asks_gateway_for(&home.0).as_deref(), Some(yantrik_gateway::PICKED), "{harness}");
+    }
+    assert_eq!(adapter_for(mind::ID).unwrap().asks_gateway_for(&home.0).as_deref(), Some(yantrik_gateway::PICKED));
+
+    let set = |path: PathBuf, from: &str, to: &str| {
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains(from), "{}: {text}", path.display());
+        std::fs::write(&path, text.replacen(from, to, 1)).unwrap();
+    };
+    let cfg = home.0.join(".config/yantrik");
+    set(home.deepseek(), "\"picked\"", "\"openrouter/x\"");
+    set(cfg.join("pi.json"), "\"picked\"", "\"yantrik/openrouter/x\"");
+    set(cfg.join("openclaw.json"), "yantrik/picked", "yantrik/openrouter/x");
+    set(home.0.join(".hermes/config.yaml"), "default: picked", "default: openrouter/x");
+    set(companion::file(&home.0), "\"picked\"", "\"openrouter/x\"");
+    for harness in ["deepseek", "pi", "hermes", "openclaw", companion::ID] {
+        assert_eq!(adapter_for(harness).unwrap().asks_gateway_for(&home.0).as_deref(), Some("openrouter/x"), "{harness}");
+    }
+
+    let gateway = yantrik_gateway::base_url();
+    set(home.deepseek(), &gateway, "https://api.deepseek.com/v1");
+    set(cfg.join("pi.json"), "\"yantrik\"", "\"anthropic\"");
+    set(cfg.join("openclaw.json"), "yantrik/openrouter/x", "anthropic/claude");
+    set(home.0.join(".hermes/config.yaml"), &gateway, "https://openrouter.ai/api/v1");
+    set(companion::file(&home.0), &gateway, "https://openrouter.ai/api/v1");
+    for harness in ["deepseek", "pi", "hermes", "openclaw", companion::ID] {
+        assert_eq!(adapter_for(harness).unwrap().asks_gateway_for(&home.0), None, "{harness}");
+    }
+}
