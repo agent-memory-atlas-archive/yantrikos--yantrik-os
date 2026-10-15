@@ -428,6 +428,18 @@ sudo sh "$SCRIPT_DIR/stage-grub-theme.sh" "$ROOTFS/usr/share/yantrik/grub-theme"
     || fail "stage-grub-theme.sh failed — the boot menu would be drawn in missing-glyph boxes"
 ok "Boot menu theme staged, with fonts that draw it"
 
+# ── The installed boot menu's entries say nothing on the way ──
+# Debian builds GRUB with quiet_boot="0" written into /etc/grub.d/10_linux, and no
+# /etc/default/grub key turns it off, so the installed menu's every entry echoed "Loading Linux
+# 6.12… ..." and "Loading initial ramdisk ...": a black box of text under the theme before every
+# start (14 Oct 2026). Quiet, the plain entry says nothing; the Advanced options entries, recovery
+# mode among them, keep their lines (10_linux: quiet_boot = 0 || type != simple). Both installers
+# run the same expression again before update-grub (installer_boot.rs, QUIET_BOOT_SED).
+sudo sed -i 's/^quiet_boot="0"$/quiet_boot="1"/' "$ROOTFS/etc/grub.d/10_linux"
+sudo grep -qx 'quiet_boot="1"' "$ROOTFS/etc/grub.d/10_linux" \
+    || fail "10_linux has no quiet_boot switch — the installed boot menu would show GRUB's loading lines"
+ok "Installed boot menu's plain entry quiet"
+
 # ── The live system's shutdown says nothing about removing its medium ──
 # live-tools' system-shutdown hook ejected the disk the medium is on and waited for ENTER after
 # "Please remove the live-medium". On a Mac the installer is a partition of the internal disk

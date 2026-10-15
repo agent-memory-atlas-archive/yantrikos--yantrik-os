@@ -526,6 +526,11 @@ fi
 # The kernel line must find the root by UUID too, or the disk boots in one USB port and not the
 # next. grub-mkconfig falls back to root=/dev/sdX when udev has not made the by-uuid link yet.
 udevadm settle 2>/dev/null || true
+# The plain entry starts without GRUB's "Loading Linux …" lines; recovery mode keeps them
+# (installer_boot.rs, QUIET_BOOT_SED). A 10_linux without the switch costs the quiet, not the disk.
+sed -i 's/^quiet_boot="0"$/quiet_boot="1"/' "$M/etc/grub.d/10_linux" 2>/dev/null || true
+grep -qx 'quiet_boot="1"' "$M/etc/grub.d/10_linux" 2>/dev/null \
+    || echo -e "   ${A}The boot menu will show GRUB's loading lines: 10_linux has no quiet_boot switch.${N}"
 chroot "$M" update-grub
 if grep -qE 'root=/dev/(sd|nvme|vd|hd|mmcblk)' "$M/boot/grub/grub.cfg"; then
     echo -e "${R}grub.cfg names the root by device, not UUID; it would not boot from another port.${N}" >&2

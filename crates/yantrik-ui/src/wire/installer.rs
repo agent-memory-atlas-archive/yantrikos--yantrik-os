@@ -647,6 +647,9 @@ fn install_to_target(
     let _ = run_cmd("udevadm", &["settle"]);
     // Beside macOS on a Mac, an entry that gets back to it.
     installer_boot::write_macos_entry(mount_dir, layout);
+    // The plain entry starts without GRUB's "Loading Linux …" lines (the image's 10_linux is
+    // already quiet; this holds it for an image built before it was).
+    installer_boot::quiet_linux_entries(mount_dir);
     chroot_cmd(mount_dir, &["update-grub"])?;
     let grub_cfg = run_cmd("cat", &[&format!("{mount_dir}/boot/grub/grub.cfg")])?;
     if let Some(line) = installer_rules::root_by_device(&grub_cfg) {
@@ -679,7 +682,7 @@ fn install_to_target(
     // Regenerate initramfs without live-boot hooks, and with the unlock when the root is
     // encrypted. There a failure is the install's failure, and so is an image that came out
     // without the unlock: the machine would stop at boot with nothing asking for the passphrase.
-    progress(93, "Rebuilding initramfs...");
+    progress(93, "Preparing the system to start...");
     if layout.encrypted() {
         chroot_cmd(mount_dir, &["update-initramfs", "-u", "-k", "all"])?;
         installer_disk::verify_initramfs(mount_dir)?;

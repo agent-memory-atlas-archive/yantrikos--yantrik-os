@@ -83,6 +83,16 @@ export struct FirstRunMind {
 
 // ── Controls ────────────────────────────────────────────────────────────────────────
 
+// The label of the button that has the keyboard focus, "" when none does: the screen's
+// `focused-label`, which the tests walk with Tab to hold that every stop is one that shows.
+global FrFocus {
+    in-out property <string> label;
+    // Bumped by each button that gains the focus, which keeps the number it got: one gaining it
+    // and one losing it may say so in either order, and two may share a label (the checks'
+    // Details), so a button clears the label only while the last number is still its own.
+    in-out property <int> serial;
+}
+
 component FrButton inherits Rectangle {
     in property <string> label;
     in property <bool> primary: false;
@@ -91,6 +101,16 @@ component FrButton inherits Rectangle {
     callback clicked();
     public function focus-me() { fs.focus(); }
     out property <bool> focused: fs.has-focus;
+    property <int> focus-serial: -1;
+    changed focused => {
+        if self.focused {
+            FrFocus.serial += 1;
+            self.focus-serial = FrFocus.serial;
+            FrFocus.label = root.label;
+        } else if FrFocus.serial == self.focus-serial {
+            FrFocus.label = "";
+        }
+    }
 
     property <float> s: TextScale.factor;
     height: root.link ? txt.preferred-height + 8px : max(40px, txt.preferred-height + 18px);
@@ -526,6 +546,9 @@ export component FirstRunScreen inherits Rectangle {
     property <string> share-sentence: "Your minds will send what they remember about you, and where you are, to "
         + (root.chosen-name == "" ? "your provider" : root.chosen-name) + " when they ask it something.";
 
+    // The button that has the keyboard focus, by its label; "" when the screen itself holds it.
+    out property <string> focused-label: keys.has-focus ? "" : FrFocus.label;
+
     // Read this to me, as its button does: for the shell's own voice key and for the tests.
     public function read-me() { root.read-aloud(root.spoken); }
 
@@ -580,6 +603,10 @@ export component FirstRunScreen inherits Rectangle {
         width: root.width;
         height: root.height;
         focus-on-click: false;
+        // It holds the focus while nothing on the screen can take it, so Escape still goes back;
+        // it is never a Tab stop. It was one (14 Oct): Tab or Shift+Tab through the checks landed
+        // on the whole screen, which draws no ring and does nothing with Enter.
+        focus-on-tab-navigation: false;
         key-pressed(event) => {
             if event.text == Key.Escape { root.back(); return accept; }
             reject
