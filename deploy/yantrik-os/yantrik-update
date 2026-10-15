@@ -22,7 +22,7 @@
 #   yantrik-update rollback                                  restore the most recent backup
 #   yantrik-update status      [--porcelain]                 channel, host, build, backups
 #   yantrik-update set-channel nightly|beta|stable           change the channel, once, here
-#   yantrik-update reconcile                                 base packages the image ships and this machine lacks
+#   yantrik-update reconcile                                 base packages the image ships and this machine lacks, harness plugins
 #   yantrik-update migrate-minds                             move Yantrik Mind into its own account (#411), memory counted twice
 #   yantrik-update mind-egress apply                         hold the mind account to its egress proxy, in the kernel (root)
 #   yantrik-update selftest                                  offline checks of the two above
@@ -787,6 +787,7 @@ from it. Change it with: yantrik-update set-channel nightly" ;;
     private_config || true
     reconcile_egress_seeds || true
     reconcile_hermes_launcher || true
+    reconcile_harness_plugins || true
     reconcile_mind_egress || true
     return 0
   fi
@@ -2449,6 +2450,59 @@ reconcile_hermes_launcher() {
   return 0
 }
 
+# Bring the harness plugins an install copied into the owner's home up to this build's
+# (harnesses/lib/install/refresh-plugins.sh): Hermes loads ~/.hermes/plugins, written once at
+# install, so before this every Hermes fix reached fresh installs only (VM 541, 14 Oct). Run after
+# every apply (through `reconcile`, by the new build's updater) and on `reconcile` itself, so an
+# updated machine is fixed without a new build. It replaces only what differs, so a build with no
+# harness change does nothing; and it is run without --restart, so the owner's Hermes gateway is
+# never restarted under a turn in flight: it loads the new plugins when it next starts
+# (refresh-plugins.sh says why).
+#
+# As the owner, the way reconcile_hermes_launcher heals the launcher: root never writes into a
+# home, and root executes nothing from share/ (the refresh is the owner's own process, with
+# no-new-privs, so whatever share/ held could do no more than the owner already can). Only on a
+# tree that is root's. Its own session bus, so `systemctl --user` reaches the owner's manager; and
+# a time limit, because an update must never hang on a person's harness.
+reconcile_harness_plugins() {
+  [ "$(id -u)" = 0 ] || return 0
+  tree_is_roots || return 0
+  local owner home="" ouid="" ogid="" setpriv timeout_bin setsid_bin script log out rc=0
+  owner="$(desktop_owner)"
+  case "$owner" in
+    ''|root|*[!a-z0-9_-]*) ;;
+    *) home="$(getent passwd "$owner" | cut -d: -f6)"; ouid="$(id -u "$owner" 2>/dev/null)"; ogid="$(id -g "$owner" 2>/dev/null)" ;;
+  esac
+  case "$ouid:$ogid" in :*|*:|0:*|*:0|*[!0-9:]*) return 0 ;; esac
+  [ -n "$home" ] || return 0
+  # Nothing of Hermes's here: no process started, nothing said.
+  [ -d "$home/.hermes/plugins" ] || return 0
+  script="$PREFIX/share/harnesses/lib/install/refresh-plugins.sh"
+  [ -f "$script" ] || return 0
+  # Both looked up here, on root's PATH, and named whole: after `env -i` the PATH below starts
+  # with the owner's ~/.local/bin, and a bare name there would be a program of theirs run as root.
+  setpriv="$(command -v setpriv)" || return 0
+  timeout_bin="$(command -v timeout)" || return 0
+  setsid_bin="$(command -v setsid)" || return 0
+  log="$(mktemp)" || return 0
+  # That PATH is for the refresh, which runs as the owner: Hermes is in their ~/.local/bin, and so
+  # may be programs of theirs (python3, uv). So the refresh gets its own session with no terminal
+  # (setsid, stdin /dev/null): from root's session a program of the owner's could open /dev/tty and
+  # push keystrokes into the shell root returns to (TIOCSTI). Its output goes to a file of root's,
+  # not a pipe, and the time limit ends in a KILL: a process of the owner's that ignores TERM, or
+  # outlives the refresh holding a pipe open, cannot keep the update waiting.
+  ( cd / && exec env -i HOME="$home" USER="$owner" LOGNAME="$owner" PATH="$home/.local/bin:/usr/bin:/bin" \
+      XDG_RUNTIME_DIR="/run/user/$ouid" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$ouid/bus" \
+      "$timeout_bin" -k 10 600 "$setsid_bin" -w "$setpriv" --reuid="$ouid" --regid="$ogid" --clear-groups --no-new-privs -- \
+      /bin/sh "$script" ) </dev/null >"$log" 2>&1 9>&- || rc=$?
+  out="$(head -c 65536 "$log")"
+  rm -f "$log"
+  # The lines name files in the owner's home: drop control characters before root prints them.
+  [ -n "$out" ] && printf '%s\n' "$out" | tr -d '\000-\010\013-\037\177' | while IFS= read -r line; do info "$line"; done
+  [ "$rc" = 0 ] || warn "could not refresh $owner's harness plugins (exit $rc); the ones in place are kept. Run as $owner: sh $script"
+  return 0
+}
+
 # ── The mind's way out, held by the kernel ──────────────────────────────────────────────
 #
 # The egress proxy only governs what is sent to it. The mind's unit points HTTPS_PROXY and the
@@ -3445,6 +3499,10 @@ cmd_reconcile() {
   private_config
   reconcile_registries
   reconcile_podman_socket
+  # The launcher first: the refreshed plugins load when Hermes's gateway next starts, which a
+  # launcher still pointing into /tmp (#712) would stop dead.
+  reconcile_hermes_launcher
+  reconcile_harness_plugins
   audit_unowned /etc/polkit-1/rules.d '*.rules' polkit
   audit_unowned /etc/sysctl.d '*.conf' sysctl
   audit_unowned /etc/containers/registries.conf.d '*.conf' containers

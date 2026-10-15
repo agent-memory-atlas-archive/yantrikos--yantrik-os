@@ -14,6 +14,7 @@
 set -eu
 . "$(dirname "$0")/common.sh"
 . "$(dirname "$0")/hermes-launcher.sh"
+. "$(dirname "$0")/hermes-plugins.sh"
 
 [ $# -eq 1 ] || fail "usage: hermes.sh PLUGIN_DIR"
 plugin=$1
@@ -73,9 +74,13 @@ env_file=$(timeout 30 hermes config env-path </dev/null 2>/dev/null) || env_file
 backup_once "$config"
 backup_once "$env_file"
 
+# Written beside the installed one and swapped in whole, by the same function refresh-plugins.sh
+# uses after an update, so a reinstall and a refresh both leave exactly what ships.
 say "copying the desktop plugin into ~/.hermes"
-mkdir -p "$HOME/.hermes/plugins/yantrik"
-cp -r "$plugin/." "$HOME/.hermes/plugins/yantrik/"
+new_desktop=$(hermes_staging yantrik)-new || fail "could not make ~/.hermes/.yantrik-staging"
+hermes_desktop_plugin_build "$plugin" "$new_desktop" \
+    && hermes_swap_dir "$new_desktop" "$HOME/.hermes/plugins/yantrik" \
+    || fail "could not put the desktop plugin in ~/.hermes/plugins/yantrik"
 timeout 60 hermes plugins enable yantrik-desktop </dev/null || fail "Hermes would not enable the desktop plugin"
 
 # ── The desktop's tools, not Hermes's own ──
@@ -95,69 +100,14 @@ wire_model hermes
 # with no index: nothing is fetched from a catalog, git or PyPI here, and no TTY is needed (the Mac failure of #677 was
 # `hermes plugins install` refusing the provider's dependencies without one).
 #
-# Not into Hermes's venv: Hermes 0.21's package manager rebuilds that as a new generation from its
-# lock on an update, keeping only what its lock and its plugins' pip_dependencies name, and on VM 541
-# (13 Oct) the rebuild that followed this install dropped the provider. So the provider, the engine
-# and their two dependencies go into vendor/ beside the plugin's shim (hermes_runtime.VENDOR), built
-# for Hermes's Python, and the shim puts vendor/ at the END of sys.path: Hermes's own packages always
-# come first, and nothing of Hermes's is moved. requests is Hermes's own.
+# Built beside the installed one by hermes-plugins.sh, which says why it goes into vendor/ and not
+# Hermes's venv, then swapped in whole, so a failure leaves the earlier provider as it was.
 [ -d "$MEMORY_WHEELS" ] || fail "this image has no YantrikDB wheels at $MEMORY_WHEELS"
 say "installing the YantrikDB memory provider beside Hermes, from the image"
 plugin_dir="$HOME/.hermes/plugins/yantrikdb"
-# uv on PATH, else the one a newer Hermes keeps in ~/.hermes/tools: its venv is made by uv and has
-# no pip in it (0.21, 13 Oct), so `python -m pip` is only for an older Hermes whose venv has one.
-hermes_uv() {
-    command -v uv 2>/dev/null && return
-    # The newest by modification time: a version in the folder name does not sort as text.
-    for candidate in $(ls -td "$HOME"/.hermes/tools/uv-*/uv 2>/dev/null); do
-        [ -x "$candidate" ] && { echo "$candidate"; return; }
-    done
-}
-# Into a new folder first, swapped in whole, so a failure leaves the earlier provider as it was.
-vendor_install() {
-    uv_bin=$(hermes_uv)
-    if [ -n "$uv_bin" ]; then
-        "$uv_bin" pip install --python "$hermes_python" --target "$1" --offline --no-index \
-            --find-links "$MEMORY_WHEELS" --no-deps yantrikdb yantrikdb-hermes-plugin uuid-utils click </dev/null
-    else
-        "$hermes_python" -m pip install --target "$1" --no-index \
-            --find-links "$MEMORY_WHEELS" --no-deps yantrikdb yantrikdb-hermes-plugin uuid-utils click </dev/null
-    fi
-}
-new_plugin="$HOME/.hermes/plugins/.yantrikdb-new"
-rm -rf "$new_plugin" && mkdir -p "$new_plugin" || fail "could not make $new_plugin"
-vendor_install "$new_plugin/vendor" >/dev/null \
-    || fail "the YantrikDB memory provider did not install from $MEMORY_WHEELS"
-# The shim Hermes loads (the package's own `yantrikdb-hermes install` writes the same three lines,
-# without vendor/), and the package's plugin.yaml beside it, which Hermes reads for its hooks.
-# Without its pip_dependencies: vendor/ supplies them, and named there they would have Hermes's own
-# update fetch yantrikdb from PyPI into its venv, ahead of vendor/ (hermes_config.py, `manifest`).
-"$hermes_python" "$INSTALL_LIB/hermes_config.py" manifest \
-    "$new_plugin/vendor/yantrikdb_hermes_plugin/plugin.yaml" "$new_plugin/plugin.yaml" </dev/null \
-    || fail "the YantrikDB memory provider has no plugin.yaml Hermes could be given"
-cat > "$new_plugin/__init__.py" <<'SHIM' || fail "could not write the YantrikDB plugin's shim"
-"""Hermes user-plugin shim for the YantrikDB provider, written by Yantrik OS (harnesses/lib/install/hermes.sh).
-
-The provider and its engine are in vendor/ beside this file, not in Hermes's own environment, which
-Hermes rebuilds on an update. vendor/ goes at the end of sys.path, so Hermes's own packages come first.
-"""
-import os
-import sys
-
-_VENDOR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vendor")
-if _VENDOR not in sys.path:
-    sys.path.append(_VENDOR)
-
-from yantrikdb_hermes_plugin import YantrikDBMemoryProvider  # noqa: E402
-
-
-def register(ctx):
-    ctx.register_memory_provider(YantrikDBMemoryProvider())
-SHIM
-"$hermes_python" -c "import sys; sys.path.append(sys.argv[1]); import requests, yantrikdb, yantrikdb_hermes_plugin" \
-    "$new_plugin/vendor" </dev/null \
-    || fail "the YantrikDB memory provider is installed but does not import in Hermes's Python"
-rm -rf "$plugin_dir" && mv "$new_plugin" "$plugin_dir" || fail "could not put the YantrikDB plugin in $plugin_dir"
+new_plugin=$(hermes_staging yantrikdb)-new || fail "could not make ~/.hermes/.yantrik-staging"
+hermes_yantrikdb_plugin_build "$new_plugin" "$hermes_python"
+hermes_swap_dir "$new_plugin" "$plugin_dir" || fail "could not put the YantrikDB plugin in $plugin_dir"
 # yantrikdb as Hermes's memory, with Hermes's own MEMORY.md and USER.md off: a provider runs beside
 # them (Hermes's agent_init.py), and left on they are a second memory of the person outside
 # YantrikDB. Written by hermes_config.py, not `hermes config set`, which on a fresh Hermes 0.21
