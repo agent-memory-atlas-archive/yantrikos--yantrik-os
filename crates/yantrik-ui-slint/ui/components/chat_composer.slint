@@ -6,21 +6,21 @@
 // you are typing in it is a trap. While an attached mind works the button reads "Queue" and the
 // placeholder "Queue a message for {mind}…", which is what happens: the message waits in the
 // conversation until the turn ends. While its run waits on a question, both say "Answer". The
-// built-in, which takes words beside its work, keeps "Send follow-up".
+// built-in, which takes words beside its work, says "Send a follow-up to {mind}…" and Send.
 //
 // The row above Send says where the message goes (`destination`): "Sends your message and
 // conversation context to: <provider> · <model>", or "Stays on this machine · <model>" only when
 // that is certain, in the box, always there.
 //
-// The picker (#673) leads the row under the words: [Mind ▾] [Model ▾] [Effort ▾] [📎], the
-// one picker the mind panel also shows (components/picker_state.slint). Files handed over sit as
+// The picker (#673) leads the row under the words, lean: [📎] [● Mind ▾] [Model ▾] [⚡ ▾], the
+// one picker the mind panel also shows (components/picker_state.slint), and the mic or Send ends
+// the row. Files handed over sit as
 // chips above the words until they are sent with the message, and a file dragged over the window
 // is said to be welcome.
 //
-// The mode chip ("Mode: Ask") is the status bar chip's twin: it opens the same mind-mode choice,
-// it does not change the mode by itself, and a mode change applies to the next run. The noun is
-// in the chip's words only, so a bare "Ask" beside the field does not read as a button that asks. The starters in the
-// empty state call `fill`, which puts words in the box and never sends them.
+// The mode ("Minds: Ask") is the status bar's chip, the one place it is chosen; the box keeps
+// `mode-label` and `mode-clicked` for its callers. The starters in the empty state call `fill`,
+// which puts words in the box and never sends them.
 
 import { Theme } from "theme.slint";
 import { Icon, Icons } from "icon.slint";
@@ -118,7 +118,8 @@ export component ChatComposer inherits Rectangle {
             single-line: false;
             text <=> chat-text;
             accessible-role: text-input;
-            accessible-label: root.placeholder != "" ? root.placeholder : "Message " + root.mind-name;
+            accessible-label: root.placeholder != "" ? root.placeholder
+                : root.run-active ? "Send a follow-up to " + root.mind-name : "Message " + root.mind-name;
             key-pressed(event) => {
                 if (event.text == Key.Escape) {
                     root.escape();
@@ -137,7 +138,9 @@ export component ChatComposer inherits Rectangle {
         if input.chat-text == "" : Text {
             x: Theme.sp-3;
             y: Theme.sp-3 + root.files-h;
-            text: root.placeholder != "" ? root.placeholder : "Message " + root.mind-name + "\u{2026}";
+            text: root.placeholder != "" ? root.placeholder
+                : root.run-active ? "Send a follow-up to " + root.mind-name + "\u{2026}"
+                : "Message " + root.mind-name + "\u{2026}";
             color: Theme.chat-text-2;
             font-size: Theme.fs-title-2;
         }
@@ -150,14 +153,14 @@ export component ChatComposer inherits Rectangle {
             y: parent.height - 44px - root.destination-h;
             width: parent.width - 2 * Theme.sp-2 - Theme.sp-1;
             height: root.destination-h;
-            text: root.destination != "" ? root.destination : "Where message text goes is not known";
+            text: root.destination != "" ? root.destination : "Not known where " + root.mind-name + " sends your words";
             color: Theme.text-secondary;
             font-size: Theme.fs-label;
             horizontal-alignment: right;
             vertical-alignment: center;
             overflow: elide;
             accessible-role: text;
-            accessible-label: root.destination != "" ? root.destination : "Where message text goes is not known";
+            accessible-label: root.destination != "" ? root.destination : "Not known where " + root.mind-name + " sends your words";
         }
 
         // A file over the window: the box says it will take it.
@@ -175,8 +178,11 @@ export component ChatComposer inherits Rectangle {
             }
         }
 
-        // The row under the words: the picker and the mode chip on the left, mic and send on the
-        // right.
+        // The row under the words: the picker on the left; on the right, the mic while the box is
+        // empty and Send (or Queue, or Answer) once there are words, in the one place. The mode
+        // has its chip in the status bar, the same chip and the same choice; a second one here,
+        // with the picker's status words and a separate mic, made a row twice the Lens's width,
+        // and the box clipped Send out of sight (VM 541, 14 Oct).
         HorizontalLayout {
             x: Theme.sp-2;
             y: parent.height - 44px;
@@ -186,56 +192,20 @@ export component ChatComposer inherits Rectangle {
 
             VerticalLayout {
                 alignment: center;
-                BoundPicker { }
-            }
-
-            VerticalLayout {
-                alignment: center;
-                mode-chip := Rectangle {
-                    height: 28px;
-                    // The row carries its own padding; adding more here left a gap before the chevron.
-                    width: chip-row.preferred-width;
-                    border-radius: 14px;
-                    background: chip-ta.has-hover ? Theme.hover-fill : transparent;
-                    border-width: 1px;
-                    border-color: Theme.chat-border;
-                    accessible-role: button;
-                    accessible-label: "Mode: " + root.mode-label + ". Opens the mode choice.";
-                    accessible-action-default => { root.mode-clicked(); }
-
-                    chip-ta := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { root.mode-clicked(); }
-                    }
-                    chip-row := HorizontalLayout {
-                        padding-left: Theme.sp-3;
-                        padding-right: Theme.sp-2;
-                        spacing: Theme.sp-1;
-                        Text {
-                            text: "Mode: " + root.mode-label;
-                            color: Theme.chat-text;
-                            font-size: Theme.fs-caption;
-                            font-weight: 500;
-                            vertical-alignment: center;
-                        }
-                        VerticalLayout {
-                            alignment: center;
-                            Icon {
-                                commands: Icons.chevron-down;
-                                size: 12px;
-                                tint: Theme.chat-text-2;
-                            }
-                        }
-                    }
+                // Its room is the row's less the end's: a fixed 84px, which Answer (the widest of
+                // Send, Queue and Answer) fits, so the room never waits on the row's own layout.
+                BoundPicker {
+                    lean: true;
+                    room: root.width - 2 * Theme.sp-3 - 2 * Theme.sp-2 - Theme.sp-2 - 84px;
                 }
             }
 
             Rectangle { horizontal-stretch: 1; }
 
-            // Voice: the same button the panel always had, drawn in the new language.
             VerticalLayout {
                 alignment: center;
-                Rectangle {
+                // Voice: the same button the panel always had, in the new language.
+                if input.chat-text == "" : Rectangle {
                     width: 28px;
                     height: 28px;
                     border-radius: 14px;
@@ -250,24 +220,19 @@ export component ChatComposer inherits Rectangle {
                         mouse-cursor: pointer;
                         clicked => { root.mic(); }
                     }
-                    Rectangle {
+                    Icon {
                         x: (parent.width - self.width) / 2;
-                        y: 7px;
-                        width: 6px;
-                        height: 10px;
-                        border-radius: 3px;
-                        background: Theme.chat-text-2;
+                        y: (parent.height - self.height) / 2;
+                        commands: Icons.mic;
+                        size: 14px;
+                        tint: Theme.chat-text-2;
                     }
                 }
-            }
-
-            VerticalLayout {
-                alignment: center;
-                ChatPill {
-                    label: root.mode == "answer" ? "Answer" : root.mode == "queue" ? "Queue"
-                        : root.run-active ? "Send follow-up" : "Send";
-                    primary: input.chat-text != "";
-                    enabled: input.chat-text != "";
+                // "Send" while the built-in works too: it takes words beside its work, and the
+                // placeholder says so ("Send a follow-up…").
+                if input.chat-text != "" : ChatPill {
+                    label: root.mode == "answer" ? "Answer" : root.mode == "queue" ? "Queue" : "Send";
+                    primary: true;
                     clicked => { root.send(input.chat-text); }
                 }
             }

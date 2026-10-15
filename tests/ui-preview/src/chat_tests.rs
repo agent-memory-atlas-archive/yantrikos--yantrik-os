@@ -186,6 +186,13 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     let ui = ChatProbe::new()?;
     ui.show()?;
     w.set_size(slint::PhysicalSize::new(W, H));
+    // The composer row as VM 541 showed it (14 Oct): Hermes on a Custom model, connected.
+    let picker = ui.global::<PickerState>();
+    picker.set_mind_label("Hermes Agent".into());
+    picker.set_model_label("qwen3.5:27b \u{b7} Custom".into());
+    picker.set_efforts(ModelRc::new(VecModel::from(vec![SharedString::from("easy"), "medium".into(), "hard".into()])));
+    picker.set_status_words("connected \u{b7} qwen3.5:27b".into());
+    picker.set_status_state("connected".into());
 
     // ── 1. A conversation with a pending approval ──
     ui.set_messages(ModelRc::new(VecModel::from(conversation())));
@@ -384,7 +391,8 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     wheel(w, 20000.0);
     settle(w);
     assert!(!ui.get_following());
-    crate::click(w, PANEL_X + 150.0, 690.0);
+    // The words, not the picker row under them (the mind chip is at 690 once it has its label).
+    crate::click(w, PANEL_X + 150.0, 645.0);
     // Step 3's starter left its words in the box (a starter fills and never sends); a person
     // clears them before writing their own.
     clear_field(w);
@@ -499,9 +507,31 @@ fn timeline(w: &MinimalSoftwareWindow, ui: &ChatProbe, output: &str, before: &Pi
     for c in "Saturday".chars() {
         key(w, c.to_string());
     }
+    // With words in the box the mic gives its place to Answer, inside the box.
+    save(&settle(w), &named(output, "composer-typed"))?;
     key(w, Key::Return);
     settle(w);
     assert_eq!((ui.get_sends(), ui.get_sent().as_str()), (sends + 1, "Saturday"), "Enter hands the words on");
+
+    // Answered and going on: the card is one line in the timeline, and the live line is under
+    // the words, where the person pressed (VM 541, 14 Oct: after a tap nothing moved there).
+    let mut took = line("question", "Answered: Sat Oct 17 + Sun Oct 18", "answered");
+    took.call.name = "c1".into();
+    ui.set_questions(ModelRc::new(VecModel::from(Vec::<QuestionRequest>::new())));
+    ui.set_messages(ModelRc::new(VecModel::from(vec![
+        asking(),
+        hermes_reply("Happy to look that up \u{2014} I just need to know which days first.", true, Vec::new()),
+    ])));
+    ui.set_live_steps(ModelRc::new(VecModel::from(vec![
+        thought.clone(),
+        searched.clone(),
+        took,
+        line("status", "Thinking\u{2026}", "running"),
+    ])));
+    ui.set_composer_mode("queue".into());
+    ui.set_composer_placeholder("Queue a message for Hermes Agent\u{2026}".into());
+    ui.set_composer_asks("".into());
+    save(&settle(w), &named(output, "timeline-after-answer"))?;
 
     // Answered, and finished: the card folds to one line, and the reply's words sit under it all.
     let mut answered = line("question", "Answered: Sat Oct 17 + Sun Oct 18", "answered");

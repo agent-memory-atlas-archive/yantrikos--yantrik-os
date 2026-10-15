@@ -73,8 +73,9 @@ export component TimelineLine inherits VerticalLayout {
                     : root.state == "failed" ? "\u{2717}"
                     : root.kind == "question" && root.state == "closed" ? "\u{2013}"
                     : "\u{2713}";
-                color: root.state == "waiting" ? Theme.chat-needs-you : Theme.chat-text-2;
-                font-size: Theme.fs-caption;
+                // The live line's dot in the mind's teal: the mind is at work, here, now.
+                color: root.state == "waiting" ? Theme.chat-needs-you : root.live ? Theme.chat-mind : Theme.chat-text-2;
+                font-size: root.live ? Theme.fs-body : Theme.fs-caption;
                 vertical-alignment: center;
             }
             Text {

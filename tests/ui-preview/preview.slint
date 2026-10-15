@@ -406,6 +406,10 @@ export component ApprovalLensProbe inherits Window {
 // fixture data by src/chat_tests.rs. What the person sends is recorded there and never acted on.
 import { QuestionRequest } from "components/question_card.slint";
 export { QuestionRequest }
+// The picker's state, which the shell fills: set by src/chat_tests.rs to what VM 541 showed, so
+// the composer row is drawn with real labels.
+import { PickerState } from "components/picker_state.slint";
+export { PickerState }
 export component ChatProbe inherits Window {
     width: 1280px;
     height: 800px;

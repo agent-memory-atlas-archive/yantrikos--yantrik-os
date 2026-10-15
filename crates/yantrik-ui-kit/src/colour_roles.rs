@@ -399,7 +399,7 @@ fn the_lines_that_say_what_and_where_are_readable() {
     let row = &composer[at..at + composer[at..].find("\n        }").unwrap()];
     assert!(row.contains("color: Theme.text-secondary;") && row.contains("font-size: Theme.fs-label;"), "{row}");
     assert!(row.contains("y: parent.height - 44px - root.destination-h;"), "directly above the row Send is on");
-    assert!(composer.find("destination-row").unwrap() < composer.find(": root.run-active ? \"Send follow-up\" : \"Send\";").unwrap());
+    assert!(composer.find("destination-row").unwrap() < composer.find("label: root.mode == \"answer\" ? \"Answer\" : root.mode == \"queue\" ? \"Queue\" : \"Send\";").unwrap());
     let theme = read("crates/yantrik-design-tokens/slint/theme.slint");
     assert!(theme.contains("out property <length> fs-label: 13px * TextScale.factor;")
         && theme.contains("out property <length> fs-caption: 12px * TextScale.factor;"));
