@@ -1648,6 +1648,26 @@ with tempfile.TemporaryDirectory() as d:
     check("and the first conversation it hears of is that same scope, not a clean one",
           typed(module).startswith("REFUSED") and read(state)["lens"]["read"] == ["os_describe"],
           read(state)["lens"])
+    # A race with the person's +: a read whose mark the desktop never answered cannot be placed
+    # before the press rather than after it, so the press does not take it away (security review
+    # of #817). Nor does an answer that left the desktop before one this bridge already adopted.
+    module, state = case(tmp, "scope-unmarked-read", mode="auto", machine_ceiling="dangerous",
+                         ceiling=None, lens=lens(first))
+    typed(module)
+    desktop_says(state, scope=second, begun="person", read=[], down=True)
+    module.run_tool(module.BY_NAME["os_describe"], {"app": "calendar"})
+    desktop_says(state, down=False)
+    check("a private read whose mark failed, then the person's + heard of: still tainted",
+          typed(module).startswith("REFUSED") and went(module, "https://x.example/").startswith("REFUSED"),
+          module._SAW_PRIVATE)
+    check("and the read goes to the desktop, under the new conversation",
+          read(state)["lens"]["read"] == ["os_describe"] and not module._UNMARKED, read(state)["lens"])
+    desktop_says(state, scope=third, begun="person", read=[])
+    check("once the desktop holds it, the person's next + clears it", not typed(module).startswith("REFUSED"))
+    module.run_tool(module.BY_NAME["os_describe"], {"app": "calendar"})
+    module.adopt_scope({"follows": True, "scope": second, "begun": "person", "read": []})
+    check("a late answer naming a conversation this bridge has left is not adopted",
+          module._SCOPE["id"] == third and typed(module).startswith("REFUSED"), module._SCOPE)
     module, state = case(tmp, "scope-older-desktop", mode="auto", machine_ceiling="dangerous", ceiling=None)
     module.run_tool(module.BY_NAME["os_describe"], {"app": "calendar"})
     check("a desktop older than the scope: tainted for the process, exactly as before",

@@ -1495,6 +1495,11 @@ _SCOPE = {"id": None}
 # Calls are answered on threads of their own (a card waiting does not stop the rest), so the
 # scope and what it read change together or not at all.
 _SCOPE_LOCK = threading.Lock()
+# Reads made here that the desktop has not yet said it holds: a mark that failed, or one still on
+# its way. Kept through the person's +, because nothing says which side of the press they fell on.
+_UNMARKED = []
+# Scopes this bridge has moved on from. A late answer naming one is stale, and is not adopted.
+_LEFT = set()
 # A read of the scope is on the way to a decision the mind is waiting for, so it gets a few
 # seconds rather than SHELL_CALL_TIMEOUT. One that runs out is the same scope (fail closed).
 SCOPE_CALL_TIMEOUT = 5
@@ -1520,28 +1525,50 @@ def _scope_answer(result):
     return scope, ("person" if result.get("begun") == "person" else "start"), read
 
 
-def adopt_scope(result):
-    """Bring this bridge's taint to what the desktop said. Only the person's + ever clears it."""
+def adopt_scope(result, marked=None):
+    """Bring this bridge's taint to what the desktop said. Only the person's + ever clears it.
+
+    `marked` is the read this answer is the desktop's reply to marking, if it is one: once the
+    desktop's answer holds it, the desktop keeps it and it is no longer this bridge's alone."""
     answer = _scope_answer(result)
     if answer is None:
         return          # the same scope: nothing is cleared on anything but the desktop's word
     scope, begun, read = answer
     with _SCOPE_LOCK:
+        if scope in _LEFT:
+            # An answer that left the desktop before a later one this bridge has already adopted
+            # (calls run on threads of their own). Never a reason to go back, and never a reason
+            # to clear: the conversation it names is one the person has already moved on from.
+            return
+        if marked is not None and marked in read and marked in _UNMARKED:
+            _UNMARKED.remove(marked)
         if _SCOPE["id"] is not None and scope != _SCOPE["id"] and begun == "person":
             # The person pressed + in the Lens: a conversation that has read nothing yet — or
             # only what the desktop holds for it, if another bridge has already read into it.
-            _SAW_PRIVATE[:] = list(read)
+            # A read the desktop never confirmed (its mark failed or has not been answered yet)
+            # cannot be placed in the conversation before the press rather than this one, so it
+            # stays, and goes to the desktop: a failure keeps a read, it never loses one.
+            _LEFT.add(_SCOPE["id"])
+            mine = [r for r in dict.fromkeys(_UNMARKED) if r not in read]
+            _SAW_PRIVATE[:] = list(read) + mine
             _VISITED.clear()
             _SCOPE["id"] = scope
-            return
-        # The same conversation, a first answer, or a change the person did not make (a record
-        # that went missing): what the desktop holds is added, and what only this bridge holds
-        # goes to it.
-        mine = [r for r in dict.fromkeys(_SAW_PRIVATE) if r not in read]
-        _SAW_PRIVATE.extend([r for r in dict.fromkeys(read) if r not in _SAW_PRIVATE])
-        _SCOPE["id"] = scope
+        else:
+            # The same conversation, a first answer, or a change the person did not make (a record
+            # that went missing): what the desktop holds is added, and what only this bridge holds
+            # goes to it.
+            if _SCOPE["id"] is not None and scope != _SCOPE["id"]:
+                _LEFT.add(_SCOPE["id"])
+            mine = [r for r in dict.fromkeys(_SAW_PRIVATE) if r not in read]
+            _SAW_PRIVATE.extend([r for r in dict.fromkeys(read) if r not in _SAW_PRIVATE])
+            _SCOPE["id"] = scope
     for r in mine:
-        shell_call("taint_mark", {"read": r}, timeout=SCOPE_CALL_TIMEOUT)
+        again, _ = shell_call("taint_mark", {"read": r}, timeout=SCOPE_CALL_TIMEOUT)
+        confirmed = _scope_answer(again)
+        if confirmed is not None and r in confirmed[2]:
+            with _SCOPE_LOCK:
+                if confirmed[0] == _SCOPE["id"] and r in _UNMARKED:
+                    _UNMARKED.remove(r)
 
 
 def sync_scope():
@@ -1554,11 +1581,14 @@ def sync_scope():
 
 def saw_private(what):
     """This conversation has read something private: held here first, then kept by the desktop."""
-    _SAW_PRIVATE.append(what)
+    with _SCOPE_LOCK:
+        _SAW_PRIVATE.append(what)
+        if not TAINT_OFF:
+            _UNMARKED.append(what)
     if TAINT_OFF:
         return
     result, _ = shell_call("taint_mark", {"read": what}, timeout=SCOPE_CALL_TIMEOUT)
-    adopt_scope(result)
+    adopt_scope(result, marked=what)
 
 
 def payload_in_url(url):
