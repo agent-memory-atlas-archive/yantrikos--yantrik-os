@@ -501,3 +501,11 @@ fn each_harness_says_which_model_its_config_asks_the_gateway_for() {
         assert_eq!(adapter_for(harness).unwrap().asks_gateway_for(&home.0), None, "{harness}");
     }
 }
+
+#[test]
+fn the_mind_moved_off_the_gateway_in_its_own_settings_is_not_said_by_the_gateway() {
+    assert!(still_on_gateway("mind", Some("yantrik-gateway:picked")));
+    assert!(still_on_gateway("mind", None), "it said nothing: the marker stands");
+    assert!(!still_on_gateway("mind", Some("ollama-cloud:deepseek-v4.1-flash")));
+    assert!(still_on_gateway("hermes", Some("Hermes 0.21.5 \u{b7} deepseek")), "the others' configs are read instead");
+}

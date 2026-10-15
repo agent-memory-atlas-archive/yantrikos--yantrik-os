@@ -237,6 +237,22 @@ pub(crate) trait Handoff: Send + Sync {
     }
 }
 
+/// Whether a mind given Yantrik models is still on them, by what it reports. Only the Mind needs
+/// this: it keeps its provider in its own settings, which the desktop does not read, and can be
+/// moved off the gateway there while the marker stays. What it reports
+/// ("yantrik-gateway:picked", "ollama-cloud:deepseek-v4.1-flash") says which; when it names another
+/// provider, its own words are said, never the gateway's. Every other mind's config is read
+/// ([`Handoff::asks_gateway_for`]).
+pub(crate) fn still_on_gateway(harness: &str, detail: Option<&str>) -> bool {
+    if harness != mind::ID {
+        return true;
+    }
+    match detail.map(str::trim).filter(|d| !d.is_empty()) {
+        None => true,
+        Some(d) => d.contains(mind::SOURCE) || d.contains(yantrik_gateway::PICKED),
+    }
+}
+
 /// Whether an address is this desktop's gateway, as `plan_gateway` writes it.
 pub(crate) fn is_gateway(base_url: &str) -> bool {
     base_url.trim().trim_end_matches('/') == yantrik_gateway::base_url().trim_end_matches('/')

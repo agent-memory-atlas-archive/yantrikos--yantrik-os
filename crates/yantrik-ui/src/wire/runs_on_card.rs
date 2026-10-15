@@ -22,7 +22,7 @@ pub(crate) fn current() -> Vec<RunsOn> {
         .map(|h| h.list())
         .unwrap_or_default()
         .into_iter()
-        .map(|e| MindFact { gateway: gateway_fact(&e.id), id: e.id, name: e.name, detail: e.detail, answering: e.active, builtin: e.builtin })
+        .map(|e| MindFact { gateway: gateway_fact(&e.id, e.detail.as_deref()), id: e.id, name: e.name, detail: e.detail, answering: e.active, builtin: e.builtin })
         .collect();
     let companion = super::ai_status::companion();
     runs_on::resolve(&minds, companion.as_ref())
@@ -32,10 +32,10 @@ pub(crate) fn current() -> Vec<RunsOn> {
 /// config still points there): where the gateway sends its next call, by the gateway's own routing
 /// over the model that config asks for — `picked`, or one set there since (`gateway::route_for`).
 /// `None` for a mind with its own provider, or whose config was pointed elsewhere after the marker.
-fn gateway_fact(harness: &str) -> Option<GatewayFact> {
+fn gateway_fact(harness: &str, detail: Option<&str>) -> Option<GatewayFact> {
     let home = super::harness_provider::home_dir();
     let marker = crate::provider_handoff::marker(&home, harness)?;
-    if marker.provider_id != crate::provider_handoff::GATEWAY_ID {
+    if marker.provider_id != crate::provider_handoff::GATEWAY_ID || !crate::provider_handoff::still_on_gateway(harness, detail) {
         return None;
     }
     let asked = crate::provider_handoff::adapter_for(harness)?.asks_gateway_for(&home)?;
