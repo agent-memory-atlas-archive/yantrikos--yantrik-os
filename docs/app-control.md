@@ -362,7 +362,7 @@ content, and a content action a paired action takes back stays `standard` (`add_
 | weather | `show_location` | standard | a showing: moves an already-saved place onto the screen — the prefs line it touches is which place was being shown, not what is saved |
 | weather | `add_location` | sensitive | **regraded (#48)**: saves a place into `~/.config/yantrik/weather.json`, still saved after a restart |
 | weather | `set_units` | sensitive | **regraded (#48)**: the stored unit choice decides the units every future reading arrives in |
-| weather-service | `set_location` | standard | remembered in memory for this run only; the service writes no file — the app's `add_location` is the storing one |
+| weather-service | `set_location` | standard | moves which place describe reports on (conditions and daily forecast); remembered in memory for this run only; the service writes no file — the app's `add_location` is the storing one |
 | system-monitor-service | `find_process` | safe | reads |
 | system-monitor-service | `kill_process` | dangerous | ends what somebody else is running |
 | notifications-service | `notify`, `dismiss`, `dismiss_all`, `mark_read` | standard | a notification changes nothing and reaches nowhere outside this machine |
@@ -644,6 +644,12 @@ publishes right now is `yos describe <name>`; whether it keeps the protocol, `yo
 
 Beside them, five services answer `app.describe` on their own sockets — `weather`,
 `system-monitor`, `notifications`, `network`, `calendar` — and the first three take `app.act` too.
+The weather service's describe is the place it last reported on: current conditions in the
+summary, and in `state.forecast` the next eight days (today first) — `date`, `weekday`, `min`,
+`max` in `state.unit`, `condition`, `precipitation_probability` when Open-Meteo gives one, and
+`precipitation_mm`. They come from the same Open-Meteo call as the conditions and are kept with
+them, so describe never waits on the network for them. For somewhere else, `act set_location`
+with the place, then describe (the act's own answer already carries the new place's state).
 Blender's surface is served by a Python addon inside Blender (`apps/blender/addon`), a port of the
 runtime's dispatch.
 
