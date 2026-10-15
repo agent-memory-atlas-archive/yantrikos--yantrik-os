@@ -41,9 +41,17 @@ compositor_up() {
     pgrep -x labwc >/dev/null 2>&1
 }
 
+# The shell's marker counts only while labwc runs as the same account (the runtime directory is
+# named by its uid): anything else that can write a runtime directory (a user service, a lingering
+# account) leaving the marker early must not make plymouth quit with --retain-splash when no
+# compositor is coming, which would keep tty1 in graphics and hide the crash guard's words.
 drawn() {
     for f in "$RUN"/*/yantrik-shell-drawn; do
-        [ -e "$f" ] && return 0
+        [ -e "$f" ] || continue
+        uid="${f%/*}"
+        uid="${uid##*/}"
+        case "$uid" in '' | *[!0-9]*) continue ;; esac
+        pgrep -x -u "$uid" labwc >/dev/null 2>&1 && return 0
     done
     return 1
 }

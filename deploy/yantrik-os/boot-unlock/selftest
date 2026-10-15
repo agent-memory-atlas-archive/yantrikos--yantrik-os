@@ -282,6 +282,7 @@ esac
 STUB
 cat > "$T/sbin/pgrep" <<'STUB'
 #!/bin/sh
+printf '%s\n' "$*" >> "$STUB_LOG/pgrep"
 [ -e "$STUB_LOG/labwc" ]
 STUB
 chmod +x "$T/sbin/plymouth" "$T/sbin/pgrep"
@@ -300,6 +301,7 @@ check "with plymouth not running (plymouth.enable=0, every message shown) nothin
 rm -rf "$T/srun"; mkdir -p "$T/srun/1000"; : > "$T/srun/1000/yantrik-shell-drawn"
 SPLASH_LABWC=1 splash handoff
 check "the shell has drawn: plymouth quits and leaves its frame for the shell's" '[ "$(cat "$T/slog/quit")" = "quit --retain-splash" ]'
+check "the marker counts only with labwc running as the marker's own account" 'grep -qx -- "-x -u 1000 labwc" "$T/slog/pgrep"'
 rm -f "$T/srun/1000/yantrik-shell-drawn"
 ( sleep 0.3; : > "$T/srun/1000/yantrik-shell-drawn" ) &
 SPLASH_LABWC=1 SPLASH_SESSION=0 splash handoff; wait
@@ -307,6 +309,10 @@ check "it waits for the shell's first frame while labwc is up, however long the 
 rm -f "$T/srun/1000/yantrik-shell-drawn"
 SPLASH_SESSION=0 splash handoff
 check "no desktop ever starts: plymouth quits plainly, and the console (the crash guard's words) is back" '[ "$(cat "$T/slog/quit")" = "quit " ]'
+: > "$T/srun/1000/yantrik-shell-drawn"
+SPLASH_SESSION=0 splash handoff
+check "a marker with no labwc behind it (left early, or by another process) does not keep the console hidden" '[ "$(cat "$T/slog/quit")" = "quit " ]'
+rm -f "$T/srun/1000/yantrik-shell-drawn"
 SPLASH_LABWC=1 SPLASH_SESSION=0 SPLASH_DRAWN=0 splash handoff
 check "labwc up and the shell silent: plymouth still goes, without clearing labwc's screen to text" '[ "$(cat "$T/slog/quit")" = "quit --retain-splash" ]'
 check "the hand-off never reads input" '! grep -nE "(^|[^a-z])read |ask-for-password|/dev/tty|stty" "$HERE/splash"'
