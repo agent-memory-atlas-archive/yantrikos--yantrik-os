@@ -46,6 +46,12 @@ impl Handoff for OpenClaw {
         Err("OpenClaw keeps its providers itself (Set up OpenClaw); give it Yantrik models instead".into())
     }
 
+    /// `model` in ours, `yantrik/<model>`: what OpenClaw asks the gateway for.
+    fn asks_gateway_for(&self, home: &Path) -> Option<String> {
+        let config = super::read_json_object(&ours(home)).ok()?;
+        super::text_of(&config, "model")?.strip_prefix(&format!("{PROVIDER}/")).filter(|m| !m.is_empty()).map(str::to_string)
+    }
+
     fn plan_gateway(&self, home: &Path, offer: &Offer) -> Result<Plan, String> {
         let mut config = super::read_json_object(&ours(home))?;
         config.insert("model".into(), Value::String(format!("{PROVIDER}/{}", yantrik_gateway::PICKED)));

@@ -2,14 +2,14 @@ use super::identity::{from_reported, from_url, ProviderRef};
 use super::*;
 
 fn mind(id: &str, name: &str, detail: Option<&str>, answering: bool) -> MindFact {
-    MindFact { id: id.into(), name: name.into(), detail: detail.map(String::from), answering, builtin: false }
+    MindFact { id: id.into(), name: name.into(), detail: detail.map(String::from), answering, builtin: false, gateway: None }
 }
 
 /// VM 520 on 30 Sep 2026, verbatim: every mind's own line, and the companion from config.yaml
 /// with nothing saved in Settings.
 fn vm_520() -> (Vec<MindFact>, CompanionFact) {
     let minds = vec![
-        MindFact { id: "companion".into(), name: "Yantrik Companion".into(), detail: None, answering: false, builtin: true },
+        MindFact { id: "companion".into(), name: "Yantrik Companion".into(), detail: None, answering: false, builtin: true, gateway: None },
         mind("deepseek", "DeepSeek", Some("deepseek-v4.1-flash \u{b7} ollama.com"), false),
         mind("hermes", "Hermes Agent", Some("Hermes 0.14.0 \u{b7} deepseek-v4.1-flash"), false),
         mind("mind", "Yantrik Mind", Some("ollama-cloud:deepseek-v4.1-flash"), true),
@@ -90,7 +90,7 @@ fn addresses_are_named_by_the_catalogue_or_by_their_host() {
 
 #[test]
 fn a_companion_with_no_address_says_nothing_is_set_up_and_a_saved_one_is_named() {
-    let minds = [MindFact { id: "companion".into(), name: "Yantrik Companion".into(), detail: None, answering: true, builtin: true }];
+    let minds = [MindFact { id: "companion".into(), name: "Yantrik Companion".into(), detail: None, answering: true, builtin: true, gateway: None }];
     let rows = resolve(&minds, None);
     assert_eq!((rows[0].runs_on().as_str(), rows[0].source().as_str()), ("Nothing set up", "add a provider under Providers"));
     let saved = CompanionFact { base_url: "https://integrate.api.nvidia.com/v1".into(), model: "nvidia/x".into(), source: "saved provider".into(), provider_name: "NIM work".into(), ..CompanionFact::default() };
@@ -166,7 +166,7 @@ fn the_composer_line_says_where_words_go_or_nothing() {
 /// fallback by name.
 #[test]
 fn stays_on_this_machine_is_said_only_when_it_is_certain() {
-    let builtin = [MindFact { id: "companion".into(), name: "Yantrik Companion".into(), detail: None, answering: true, builtin: true }];
+    let builtin = [MindFact { id: "companion".into(), name: "Yantrik Companion".into(), detail: None, answering: true, builtin: true, gateway: None }];
     let line = |c: CompanionFact| resolve(&builtin, Some(&c))[0].destination();
     let at = |url: &str, model: &str| CompanionFact { base_url: url.into(), model: model.into(), source: "config.yaml".into(), ..CompanionFact::default() };
 
@@ -259,4 +259,99 @@ fn a_saved_provider_is_not_listed_again_as_in_use() {
     let in_use = in_use_not_saved(&rows, Some(&companion), &["https://ollama.com/v1".to_string()]);
     let labels: Vec<&str> = in_use.iter().map(|u| u.label.as_str()).collect();
     assert_eq!(labels, ["Custom endpoint \u{b7} aig.mycluster.cyou"]);
+}
+
+/// VM 541, 14 Oct 2026: Hermes wired to this desktop's gateway, saying only "Hermes 0.21.5 ·
+/// picked", while the gateway sent its calls to the person's pick.
+fn on_gateway(id: &str, name: &str, detail: &str, gateway: GatewayFact) -> MindFact {
+    MindFact { gateway: Some(gateway), ..mind(id, name, Some(detail), true) }
+}
+
+fn sends(base_url: &str, kind: &str, model: &str) -> GatewayFact {
+    GatewayFact::Sends { base_url: base_url.into(), provider_kind: kind.into(), model: model.into(), lane: false }
+}
+
+const TO: &str = "Sends your message and conversation context to: ";
+
+#[test]
+fn vm_541_a_mind_on_the_gateway_is_said_by_where_the_gateway_sends_it() {
+    let hermes = on_gateway("hermes", "Hermes Agent", "Hermes 0.21.5 \u{b7} picked", sends("https://aig.example/v1", "custom", "qwen3.5:27b"));
+    let rows = resolve(&[hermes], None);
+    let r = &rows[0];
+    assert_eq!(r.destination(), format!("{TO}aig.example \u{b7} qwen3.5:27b, through this desktop's gateway"));
+    assert_eq!(r.runs_on(), "Custom endpoint \u{b7} aig.example \u{b7} qwen3.5:27b");
+    assert_eq!(r.source(), "set by this desktop");
+    assert!(!r.reported, "the answering line says \"set by this desktop\"");
+    assert_eq!(crate::wire::runs_on_card::row_line(&rows, "hermes"), "Runs on Custom endpoint \u{b7} aig.example \u{b7} qwen3.5:27b \u{b7} set by this desktop");
+    assert_eq!(summary(&rows), "Custom endpoint \u{b7} aig.example runs 1 mind. No mind here runs on a signed-in account.");
+    assert!(in_use_not_saved(&rows, None, &[]).is_empty(), "the account is the person's own, already set up");
+}
+
+#[test]
+fn a_mind_on_the_gateway_forwarding_elsewhere_is_named_as_forwarding() {
+    let line = |g: GatewayFact| resolve(&[on_gateway("deepseek", "DeepSeek", "picked \u{b7} 127.0.0.1:7460", g)], None)[0].destination();
+    // An Ollama Cloud model through the Ollama on this machine.
+    assert_eq!(
+        line(sends("http://127.0.0.1:11434/v1", "ollama", "gpt-oss:120b-cloud")),
+        format!("{TO}Ollama Cloud, through Ollama at 127.0.0.1:11434 \u{b7} gpt-oss:120b-cloud, through this desktop's gateway")
+    );
+    // The Ollama Cloud account itself.
+    assert_eq!(
+        line(sends("https://ollama.com/v1", "ollama-cloud", "deepseek-v4.1-flash")),
+        format!("{TO}Ollama Cloud \u{b7} deepseek-v4.1-flash, through this desktop's gateway")
+    );
+    // A LiteLLM proxy set up on a port of its own.
+    assert_eq!(
+        line(sends("http://10.0.0.5:9000/v1", "litellm", "gpt-5")),
+        format!("{TO}a proxy that forwards it on, through 10.0.0.5:9000, on this network \u{b7} gpt-5, through this desktop's gateway")
+    );
+}
+
+#[test]
+fn a_loopback_account_through_the_gateway_is_named_as_seen_never_stays() {
+    let rows = resolve(&[on_gateway("mind", "Yantrik Mind", "yantrik-gateway:picked", sends("http://127.0.0.1:11434/v1", "ollama", "qwen3.5:9b"))], None);
+    let line = rows[0].destination();
+    assert_eq!(line, format!("{TO}Ollama at 127.0.0.1:11434 \u{b7} qwen3.5:9b, through this desktop's gateway"));
+    assert!(!line.contains("Stays"));
+}
+
+#[test]
+fn with_no_pick_a_mind_on_the_gateway_says_nothing_is_sent() {
+    let rows = resolve(&[on_gateway("hermes", "Hermes Agent", "Hermes 0.21.5 \u{b7} picked", GatewayFact::NoPick)], None);
+    assert_eq!(rows[0].destination(), "No model picked yet: nothing is sent");
+    assert_eq!(rows[0].runs_on(), "No model picked yet");
+    assert_eq!(rows[0].source(), "set by this desktop");
+    assert_eq!(summary(&rows), "No mind here runs on a signed-in account.", "not counted as a mind that does not say");
+}
+
+#[test]
+fn a_pick_the_gateway_refuses_says_what_the_gateway_does_not_the_pick() {
+    // Sharing Off for the picked account, and no private lane: the gateway's own refusal.
+    let message = yantrik_gateway::policy::not_shared("Ollama Cloud").message;
+    let refused = GatewayFact::Refused { code: "private_context_not_shared".into(), message: message.clone() };
+    let rows = resolve(&[on_gateway("hermes", "Hermes Agent", "Hermes 0.21.5 \u{b7} picked", refused)], None);
+    let line = rows[0].destination();
+    assert_eq!(
+        line,
+        format!("Nothing is sent: what your minds know about you is not shared with the picked model's account. {message}")
+    );
+    assert!(!line.starts_with(TO), "no place is named");
+    assert_eq!(rows[0].runs_on(), "Nothing is sent: the gateway refuses it");
+    // Sharing set to Private lane: the lane's model, which is the one said.
+    let lane = GatewayFact::Sends { base_url: "http://127.0.0.1:11434/v1".into(), provider_kind: "ollama".into(), model: "qwen3.5:9b".into(), lane: true };
+    assert_eq!(
+        resolve(&[on_gateway("hermes", "Hermes Agent", "picked", lane)], None)[0].destination(),
+        format!("{TO}Ollama at 127.0.0.1:11434 \u{b7} qwen3.5:9b, your private lane, through this desktop's gateway")
+    );
+}
+
+#[test]
+fn a_mind_with_its_own_provider_is_said_as_before() {
+    let own = resolve(&[mind("hermes", "Hermes Agent", Some("ollama-cloud:deepseek-v4.1-flash"), true)], None);
+    assert_eq!(own[0].destination(), format!("{TO}Ollama Cloud \u{b7} deepseek-v4.1-flash"));
+    assert_eq!(own[0].source(), "its own settings \u{b7} as it reported");
+    assert_eq!(own[0].via_gateway, None);
+    // And one saying only "picked", with no gateway marker, is not given a destination.
+    let silent = resolve(&[mind("hermes", "Hermes Agent", Some("Hermes 0.21.5 \u{b7} picked"), true)], None);
+    assert_eq!(silent[0].destination(), "");
 }

@@ -260,22 +260,15 @@ impl Gateway {
     fn forward(&self, grant: &Grant, req: &Request, out: &mut impl Write, call: &mut Call) -> Result<(), Refusal> {
         let mut body: Value = serde_json::from_slice(&req.body)
             .map_err(|_| Refusal::new(400, "bad_request", "The request body is not JSON."))?;
-        let mut asked = body.get("model").and_then(Value::as_str).unwrap_or("").to_string();
-        if asked == crate::PICKED {
-            asked = self.accounts.picked_model(&grant.harness).ok_or_else(|| {
-                Refusal::new(404, "model_not_found", "No model is picked for this mind yet: pick one in the ask bar, or add an account under Settings → AI & Intelligence.")
-            })?;
-        }
-        let r = route::parse(&asked).ok_or_else(|| {
-            Refusal::new(404, "model_not_found", format!("`{asked}` is not a model here: name one as <account>/<model>, from /v1/models."))
+        let asked = body.get("model").and_then(Value::as_str).unwrap_or("").to_string();
+        let routed = route_call(self.accounts.as_ref(), grant, &asked, |r| {
+            call.account = r.account.clone();
+            call.model = r.model.clone();
         })?;
-        call.account = r.account.clone();
-        call.model = r.model.clone();
-        let mut target = self.accounts.target(&r.account, &r.model)?;
-        if policy::decide(grant, &target, self.accounts.private_mode())? == Decision::Lane {
-            target = self.lane(&target)?;
+        let (asked, mut target) = (routed.asked, routed.target);
+        if let Some(meant) = routed.lane_for {
             // The log keeps which model answered, and which account it was meant for.
-            call.lane_for = Some(format!("{}/{}", r.account, r.model));
+            call.lane_for = Some(meant);
             call.account = target.account.clone();
             call.model = target.model.clone();
         }
@@ -326,18 +319,59 @@ impl Gateway {
     }
 }
 
-impl Gateway {
-    /// The private lane's account and model, in place of `meant` for a call that carries private
-    /// context. Refused, with the fix named, when there is none or it is not on this machine or
-    /// network: a lane never sends anything off it.
-    fn lane(&self, meant: &Target) -> Result<Target, Refusal> {
-        let lane = self.accounts.private_lane().and_then(|id| route::parse(&id)).ok_or_else(|| policy::not_shared(&meant.provider))?;
-        let target = self.accounts.target(&lane.account, &lane.model)?;
-        if !target.local {
-            return Err(policy::not_shared(&meant.provider));
-        }
-        Ok(target)
+/// Where a call goes, as the gateway decides it before any byte is sent: `asked` resolved
+/// ([`crate::PICKED`] to the harness's pick), the account's target, and the private lane in its
+/// place when the person keeps private context on this computer for that account. A refusal is
+/// what the harness is shown, and means nothing is sent.
+#[derive(Debug)]
+pub struct Routed {
+    /// `<account>/<model>`, with [`crate::PICKED`] resolved.
+    pub asked: String,
+    /// Where the call goes: the account it names, or the private lane.
+    pub target: Target,
+    /// When it goes to the private lane: the `<account>/<model>` it was meant for.
+    pub lane_for: Option<String>,
+}
+
+/// The gateway's one routing decision: what [`Gateway`] does with each call, and what the desktop
+/// says about where words typed to a mind on the gateway go (the chat composer's line), so the two
+/// cannot disagree. `parsed` sees the account and model the call names before its target is
+/// looked up (the call log keeps them even when that refuses). `accounts.target` may hand back a
+/// target with no key: nothing here reads it.
+pub fn route_call(accounts: &dyn Accounts, grant: &Grant, asked: &str, parsed: impl FnOnce(&route::Route)) -> Result<Routed, Refusal> {
+    let mut asked = asked.to_string();
+    if asked == crate::PICKED {
+        asked = accounts.picked_model(&grant.harness).ok_or_else(no_pick)?;
     }
+    let r = route::parse(&asked).ok_or_else(|| {
+        Refusal::new(404, "model_not_found", format!("`{asked}` is not a model here: name one as <account>/<model>, from /v1/models."))
+    })?;
+    parsed(&r);
+    let target = accounts.target(&r.account, &r.model)?;
+    if policy::decide(grant, &target, accounts.private_mode())? == Decision::Lane {
+        let lane = lane(accounts, &target)?;
+        return Ok(Routed { asked, target: lane, lane_for: Some(format!("{}/{}", r.account, r.model)) });
+    }
+    Ok(Routed { asked, target, lane_for: None })
+}
+
+/// The refusal for [`crate::PICKED`] when nothing is picked and nothing usable is there to pick.
+pub const NO_PICK: &str = "No model is picked for this mind yet: pick one in the ask bar, or add an account under Settings → AI & Intelligence.";
+
+fn no_pick() -> Refusal {
+    Refusal::new(404, "model_not_found", NO_PICK)
+}
+
+/// The private lane's account and model, in place of `meant` for a call that carries private
+/// context. Refused, with the fix named, when there is none or it is not on this machine or
+/// network: a lane never sends anything off it.
+fn lane(accounts: &dyn Accounts, meant: &Target) -> Result<Target, Refusal> {
+    let lane = accounts.private_lane().and_then(|id| route::parse(&id)).ok_or_else(|| policy::not_shared(&meant.provider))?;
+    let target = accounts.target(&lane.account, &lane.model)?;
+    if !target.local {
+        return Err(policy::not_shared(&meant.provider));
+    }
+    Ok(target)
 }
 
 /// Copy the answer through as it arrives, counting the tokens it reports.
