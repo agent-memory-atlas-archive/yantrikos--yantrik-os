@@ -89,11 +89,17 @@ platforms keep asking. An older Hermes, which does not ask, is unchanged.
 
 ## A question Hermes asks is answered in the chat
 
-When Hermes 0.21 asks you something before it goes on (its `clarify` tool), the question ends the
-reply it is in, with any choices numbered. Your next message is the answer: a number, the choice's
-words or your own, and Hermes's work goes on in the reply to it. `/stop` or a new conversation
-drops the question along with the work. Hermes's "⏳ Working — N min" line is shown as the reply's
-status, not in its text. An older Hermes, which has no `clarify` gateway, is unchanged.
+When Hermes 0.21 asks you something before it goes on (its `clarify` tool), the question is a card
+in the reply it is in: its choices are buttons, the one Hermes recommends is marked, and you can
+also type your own answer, in the card or in the chat box, which says it is answering. Hermes's
+work then goes on in the same reply, and the card folds to one line saying what you answered.
+`/stop` or a new conversation drops the question along with the work.
+
+On a desktop from before cards (one that does not take `harness.event`, or will not take a
+question), the question ends the reply it is in instead, with any choices numbered, and your next
+message is the answer: a number, the choice's words or your own; Hermes's work goes on in the reply
+to it. Hermes's "⏳ Working — N min" line is shown as the reply's status, not in its text. An older
+Hermes, which has no `clarify` gateway, is unchanged.
 
 ## Yantrik models
 

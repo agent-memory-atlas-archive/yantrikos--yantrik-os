@@ -19,6 +19,8 @@ pub mod agents;
 mod lens_card_layout;
 pub mod lens_work;
 pub mod lens_steps;
+pub mod lens_timeline;
+pub mod lens_queue;
 pub mod step_words;
 pub mod agents_workroom;
 mod run_heading;

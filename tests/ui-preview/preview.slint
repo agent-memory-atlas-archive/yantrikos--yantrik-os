@@ -337,7 +337,7 @@ export component LensAgentsProbe inherits Window {
 // read how tall it laid itself out, and the whole Lens with the same turn, for the picture (#211).
 // Filled with fixture data by src/lens_tests.rs.
 export { MessageData, ContentBlock } from "components/message_bubble.slint";
-import { MessageData, MessageBubble } from "components/message_bubble.slint";
+import { MessageData, ContentBlock, MessageBubble } from "components/message_bubble.slint";
 export component MessageBubbleProbe inherits Window {
     width: 640px;
     height: 800px;
@@ -401,13 +401,15 @@ export component ApprovalLensProbe inherits Window {
     }
 }
 
-// Chat v2 (the conversation panel): the whole Lens in chat mode with the run cards, the strip, the
-// composer and the panel's own width, filled with fixture data by src/chat_tests.rs. What the person
-// sends is recorded there and never acted on.
-export { WorkCardData } from "components/work_card.slint";
-import { WorkCardData } from "components/work_card.slint";
+// Chat v2 (the conversation panel): the whole Lens in chat mode with a reply's timeline, a mind's
+// question as a card in it, a queued message, the composer and the panel's own width, filled with
+// fixture data by src/chat_tests.rs. What the person sends is recorded there and never acted on.
 import { QuestionRequest } from "components/question_card.slint";
 export { QuestionRequest }
+// The picker's state, which the shell fills: set by src/chat_tests.rs to what VM 541 showed, so
+// the composer row is drawn with real labels.
+import { PickerState } from "components/picker_state.slint";
+export { PickerState }
 export component ChatProbe inherits Window {
     width: 1280px;
     height: 800px;
@@ -416,8 +418,15 @@ export component ChatProbe inherits Window {
     in property <[MessageData]> messages;
     in property <[ApprovalRequest]> approvals;
     in property <[QuestionRequest]> questions;
-    in property <[WorkCardData]> work-cards;
-    in property <WorkCardData> strip;
+    in property <[ContentBlock]> live-steps;
+    in property <int> live-steps-row: -1;
+    in property <string> composer-mode: "";
+    in property <string> composer-placeholder: "";
+    in property <string> composer-asks: "";
+    in property <string> queued-mind: "";
+    in property <string> queued-note: "";
+    in-out property <string> answered;
+    in-out property <int> cancels: 0;
     in property <int> live-runs: 0;
     in property <int> waiting-runs: 0;
     in property <string> mind-name: "Yantrik Mind";
@@ -446,8 +455,15 @@ export component ChatProbe inherits Window {
         messages: root.messages;
         approvals: root.approvals;
         questions: root.questions;
-        work-cards: root.work-cards;
-        strip: root.strip;
+        live-steps: root.live-steps;
+        live-steps-row: root.live-steps-row;
+        composer-mode: root.composer-mode;
+        composer-placeholder: root.composer-placeholder;
+        composer-asks: root.composer-asks;
+        queued-mind: root.queued-mind;
+        queued-note: root.queued-note;
+        question-answer(agent, request, answer, pressed) => { root.answered = request + ":" + answer + (pressed ? ":pressed" : ":typed"); }
+        cancel-queued => { root.cancels += 1; }
         live-runs: root.live-runs;
         waiting-runs: root.waiting-runs;
         send-message(text) => { root.sent = text; root.sends += 1; }

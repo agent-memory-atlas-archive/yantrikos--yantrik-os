@@ -1,12 +1,13 @@
-//! What the Lens's conversation shows of the runs it started: the work card under a reply, and the
-//! strip above the composer (Chat v2).
+//! Where each of the Lens conversation's runs stands, in the eight words every surface uses.
+//!
+//! This drew the work card under a reply and the strip above the composer (Chat v2). Each reply now
+//! draws its own run's work in its timeline (`lens_timeline`), so the Lens reads only how many runs
+//! are live and how many wait on the person from here; the words stay as they were, so they still
+//! agree with the Agents screen when a later surface draws a run again.
 //!
 //! Everything here is read from the Agents store, which every call, answer and refusal already
-//! passes through; nothing asks the mind and nothing is composed. The state is one of the eight
-//! words every surface uses, and the one activity line is a call the store recorded, or "Last
-//! update 10:42" when nothing is observable. There is no progress figure because nothing measures
-//! one. "Paused" is in the vocabulary but is not drawn yet: no run can be paused today, so none is
-//! ever called that.
+//! passes through; nothing asks the mind and nothing is composed. There is no progress figure
+//! because nothing measures one.
 
 use crate::agents::model::{Agent, CallState, Card, State, Turn};
 use crate::agents::{progress, RowKey};
@@ -130,15 +131,6 @@ pub fn works_of(a: &Agent, now: u64) -> Vec<Work> {
     all
 }
 
-/// The run the strip describes: one that needs the person first, else the newest live one.
-pub fn strip_of(works: &[Work]) -> Option<&Work> {
-    works
-        .iter()
-        .rev()
-        .find(|w| w.state == "needs-you")
-        .or_else(|| works.iter().rev().find(|w| w.live))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,24 +239,5 @@ mod tests {
         assert_eq!(w.label, "Stopped");
         assert!(w.activity.starts_with("Last update "), "unobservable work says when it was last heard: {}", w.activity);
         assert!(!w.can_review, "a run with nothing recorded has nothing to review");
-    }
-
-    #[test]
-    fn the_strip_follows_the_run_that_needs_the_person_first() {
-        let mk = |run: &str, state: &'static str, live: bool| Work {
-            run: run.into(),
-            title: String::new(),
-            mind: "pi".into(),
-            state,
-            label: words(state),
-            activity: String::new(),
-            live,
-            can_view_desk: live,
-            can_review: false,
-        };
-        let works = vec![mk("a#1", "needs-you", true), mk("a#2", "working", true), mk("a#0", "finished", false)];
-        assert_eq!(strip_of(&works).map(|w| w.run.as_str()), Some("a#1"));
-        assert_eq!(strip_of(&works[1..]).map(|w| w.run.as_str()), Some("a#2"));
-        assert!(strip_of(&works[2..]).is_none(), "no live run, no strip");
     }
 }

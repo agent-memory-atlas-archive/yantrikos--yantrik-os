@@ -11,14 +11,11 @@
 import { Theme } from "theme.slint";
 import { QuestionRequest, QuestionCard } from "question_card.slint";
 import { Icon, Icons } from "icon.slint";
-import { MessageData } from "message_bubble.slint";
-import { WorkCardData, WorkCard, WorkStrip } from "work_card.slint";
-import { StepLineData } from "live_steps.slint";
+import { MessageData, ContentBlock } from "message_bubble.slint";
 import { ChatMessage } from "chat_message.slint";
 import { ChatTranscript } from "chat_transcript.slint";
 import { ChatComposer } from "chat_composer.slint";
 import { ChatHeader, ChatEmpty } from "chat_chrome.slint";
-export { WorkCardData } from "work_card.slint";
 import { YButton } from "y_button.slint";
 
 // A single result in the Intent Feed.
@@ -1200,24 +1197,32 @@ export component IntentLens inherits Rectangle {
     /// Questions the mind this conversation is with asked and is waiting on (#25), oldest first.
     in property <[QuestionRequest]> questions: [];
     callback question-answer(string, string, string, bool);   // agent id, request id, answer, pressed
-    // The run's row id (`mind:main#n`), from a work card's Details or Review changes, or an agent's
-    // id from a resolved approval's "View action" — both land in the Agents screen. Also the
+    // An agent's id, from a resolved approval's "View action", which lands in the Agents screen. Also the
     // desktop's own offer, while private, to leave Private mode (`private:leave`).
     callback open-run(string);
 
     // ── Chat v2 ──
     //
-    // What the shell knows of the runs this chat started, from the Agents store: one card per
-    // run, found by the id a reply carries. Nothing here is composed by the mind.
-    in property <[WorkCardData]> work-cards: [];
-    // What the mind is doing in the reply still arriving, and that reply's row (-1: none).
-    in property <[StepLineData]> live-steps: [];
+    // The timeline of the reply still arriving (wire/lens_timeline.rs), and that reply's row (-1:
+    // none). It is the one place the Lens shows a mind's work: the card under each reply and the
+    // strip above the composer said the same thing twice more, and are gone. Nothing here is
+    // composed by the mind.
+    in property <[ContentBlock]> live-steps: [];
     in property <int> live-steps-row: -1;
-    // The run the strip describes (the live one that most needs the person), and how many runs are
-    // live in this chat, and how many of those wait on the person. `strip.run == ""` is none.
-    in property <WorkCardData> strip;
+    // How many runs are live in this chat, and how many of those wait on the person.
     in property <int> live-runs: 0;
     in property <int> waiting-runs: 0;
+    // What Enter does while the mind is busy (wire/lens_queue.rs): "" sends, "queue" holds the
+    // message until the turn ends, "answer" answers the question the run waits on, which
+    // `composer-asks` shows just above the box. The placeholder names the mode.
+    in property <string> composer-mode: "";
+    in property <string> composer-placeholder: "";
+    in property <string> composer-asks: "";
+    // The queued message's line: whose finishing sends it, and a note when it replaced another.
+    in property <string> queued-mind: "";
+    in property <string> queued-note: "";
+    // The × on the queued message: it is taken back, never sent.
+    callback cancel-queued();
     // The composer's mode chip: the mind-mode label ("Ask"). The chip opens the existing choice.
     in property <string> mode-label: "Ask";
     // Where the mind runs, as the header says it: "Built-in mind" or "Attached mind".
@@ -1241,8 +1246,6 @@ export component IntentLens inherits Rectangle {
     out property <bool> transcript-following: true;
     out property <bool> transcript-missed: false;
     out property <length> transcript-y: 0px;
-    // Whether the current-work strip is on screen.
-    out property <bool> strip-shown: root.chat-mode && root.strip.run != "";
 
     // Callbacks
     callback approval-allow(string);   // request id — a click, and nothing else, creates a grant
@@ -2234,10 +2237,10 @@ export component IntentLens inherits Rectangle {
                 //
                 // Under the header and not above the reply box, which is where it was, because
                 // everything between this block and the bottom of the panel changes while a
-                // person is aiming at a button: the current-work strip appears when a run goes
-                // live (which is when requests arrive) and the reply box grows as they type, and
-                // each moved the card by 48px or more between the press and the release of a
-                // click (review of #580). The only thing above the card now is the header, which
+                // person is aiming at a button: the line naming a waiting question appears above
+                // the reply box (the current-work strip did, before) and the box grows as they
+                // type, and each moved the card by 48px or more between the press and the release
+                // of a click (review of #580). The only thing above the card now is the header, which
                 // is one fixed height, so the card's top edge is a constant of the panel, and its
                 // height limit below reserves the worst case for what is under it, so its bottom
                 // edge — where the buttons are — is one too.
@@ -2252,19 +2255,19 @@ export component IntentLens inherits Rectangle {
                         data: item;
                         // The tallest the card may be and still leave the panel showing
                         // everything else it owes: the header, the transcript sliver below and
-                        // the strip and reply box under that — the reply box was what went off the
+                        // the question line and reply box under that — the reply box was what went off the
                         // bottom edge in #218, with the card's buttons a 3px sliver above it. The
                         // panel is the window between the two bars, less its margins; from it go
                         // the header, the composer at its tallest, the
-                        // current-work strip, the transcript's floor, this
+                        // question line (its room is the old strip's), the transcript's floor, this
                         // block's padding with its "N more waiting" line (40px), and one row
                         // (32px) per decided record sharing this block with the card. The floor
                         // keeps a card's identity rows and buttons on any panel tall enough to
                         // hold them at all.
                         //
-                        // The composer and the strip are counted at their LARGEST, whether or
-                        // not they are drawn now: a limit that read their current heights would
-                        // resize the card, and move its buttons, when either changed.
+                        // The composer and the question line are counted at their LARGEST,
+                        // whether or not they are drawn now: a limit that read their current
+                        // heights would resize the card, and move its buttons, when either changed.
                         height-limit: max(240px, root.panel-height - Theme.chat-header-height
                             - composer.bar-height-max - Theme.chat-strip-height
                             - root.transcript-min - 40px - 32px * root.approvals.length);
@@ -2321,54 +2324,52 @@ export component IntentLens inherits Rectangle {
                                 data: msg;
                                 mind-name: root.mind-name;
                                 group-start: idx == 0 || root.messages[idx - 1].role != msg.role || root.messages[idx - 1].mind != msg.mind;
-                                steps: idx == root.live-steps-row ? root.live-steps : [];
+                                live: idx == root.live-steps-row ? root.live-steps : [];
+                                questions: idx == root.live-steps-row ? root.questions : [];
+                                queued-mind: root.queued-mind;
+                                queued-note: root.queued-note;
                                 open-run(run) => { root.open-run(run); }
-                            }
-                            // The run this reply started, as one card, kept in step with the
-                            // store: the loop finds it by id, so it is updated in place and
-                            // never drawn twice. Plain talk has no run and so no card.
-                            for card in root.work-cards : VerticalLayout {
-                                if card.run == msg.run && msg.run != "" : Rectangle {
-                                    height: work-card.height + Theme.sp-1;
-                                    work-card := WorkCard {
-                                        x: Theme.sp-3 + 16px + Theme.sp-2;
-                                        y: 0;
-                                        width: parent.width - self.x - Theme.sp-4;
-                                        data: card;
-                                        view-desk(run) => { root.view-desk(run); }
-                                        details(run) => { root.open-run(run); }
-                                    }
-                                }
+                                question-answer(agent, request, answer, pressed) => { root.question-answer(agent, request, answer, pressed); }
+                                cancel-queued => { root.cancel-queued(); }
                             }
                         }
                     }
                 }
 
-                // The mind's questions, where approvals sit and for the same reason: waiting on the
-                // person, they must stay put rather than scroll away with the transcript.
-                if root.questions.length > 0 : VerticalLayout {
-                    spacing: Theme.sp-1;
-                    padding: Theme.sp-2;
-                    for q in root.questions : QuestionCard {
+                // A question of the mind's is drawn in the reply that asked it (TimelineLine).
+                // One no followed reply holds (asked before the desktop restarted, say) is pinned
+                // here instead, where approvals sit and for the same reason: waiting on the
+                // person, it must stay put rather than scroll away, and never go unseen.
+                for q in root.questions : VerticalLayout {
+                    padding-left: Theme.sp-2;
+                    padding-right: Theme.sp-2;
+                    padding-bottom: q.in-reply ? 0px : Theme.sp-2;
+                    if !q.in-reply : QuestionCard {
                         mind: q.mind;
                         prompt: q.prompt;
                         options: q.options;
                         asked: q.asked;
                         removes: q.removes;
+                        recommended: q.recommended;
                         answered(a, pressed) => { root.question-answer(q.agent, q.request, a, pressed); }
                     }
                 }
 
-                // The current-work strip: only while a run in this chat is live.
-                if root.strip-shown : WorkStrip {
-                    mind: root.strip.mind;
-                    state-label: root.strip.label;
-                    needs-you: root.strip.state == "needs-you";
-                    live-runs: root.live-runs;
-                    waiting-runs: root.waiting-runs;
-                    can-view-desk: root.strip.can-view-desk;
-                    view-desk => { root.view-desk(root.strip.run); }
-                    view-work => { root.open-in-agents(); }
+                // While the run waits on a question, the reply box answers it: the question is
+                // said just above the box, so what Enter does is never a guess.
+                if root.composer-asks != "" : Rectangle {
+                    height: 32px;
+                    background: Theme.chat-bar;
+                    asks-line := Text {
+                        x: Theme.sp-4;
+                        width: parent.width - 2 * Theme.sp-4;
+                        height: parent.height;
+                        text: root.composer-asks;
+                        color: Theme.chat-needs-you;
+                        font-size: Theme.fs-caption;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
                 }
 
                 // The first reply was not an answer: the plain sentence, and Try again.
@@ -2463,6 +2464,8 @@ export component IntentLens inherits Rectangle {
                     mode-label: root.mode-label;
                     destination: root.destination;
                     run-active: root.is-generating || root.live-runs > 0;
+                    mode: root.composer-mode;
+                    placeholder: root.composer-placeholder;
                     mic => { root.mic-pressed(); }
                     mode-clicked => { root.mode-clicked(); }
                     escape => { root.close-lens(); }

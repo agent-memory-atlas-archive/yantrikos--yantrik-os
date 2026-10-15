@@ -1325,7 +1325,7 @@ fn apply(agent: &mut Agent, event: &Event, provenance: Provenance, now: u64) -> 
         Event::Notice { text } => agent.status = cap(text).to_string(),
         // The agent asked the person something (#25): it waits, and says what it asked. The
         // question itself is kept by the host's run store, which alone takes the answer.
-        Event::Request { request_id, prompt, options } => {
+        Event::Request { request_id, prompt, options, recommended } => {
             let turn = turn_for(agent, provenance, now);
             let known = turn.items.iter().any(|i| matches!(i, Item::Question(q) if q.request == *request_id));
             if !known {
@@ -1333,6 +1333,8 @@ fn apply(agent: &mut Agent, event: &Event, provenance: Provenance, now: u64) -> 
                     request: request_id.clone(),
                     prompt: prompt.clone(),
                     options: options.clone(),
+                    // An index past the options is the agent's mistake, and marks nothing.
+                    recommended: recommended.filter(|i| *i < options.len()),
                     answer: String::new(),
                     closed: String::new(),
                     asked: now,
@@ -1531,6 +1533,8 @@ struct QuestionRecord {
     prompt: String,
     #[serde(default)]
     options: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recommended: Option<usize>,
     #[serde(default)]
     answer: String,
     #[serde(default)]
@@ -1641,6 +1645,7 @@ fn serialize(agent: &Agent) -> String {
                     request: q.request.clone(),
                     prompt: q.prompt.clone(),
                     options: q.options.clone(),
+                    recommended: q.recommended,
                     answer: q.answer.clone(),
                     closed: q.closed.clone(),
                     asked: q.asked,
@@ -1762,6 +1767,7 @@ fn parse(text: &str, now: u64) -> Option<Agent> {
                     request: q.request,
                     prompt: q.prompt,
                     options: q.options,
+                    recommended: q.recommended,
                     answer: q.answer,
                     asked: q.asked,
                 }),
@@ -1906,7 +1912,7 @@ mod tests {
         let (mut s, _) = store();
         let pi = id("pi:main");
         s.open_turn(&pi, "clean up Downloads");
-        let ask = Event::Request { request_id: "r1".into(), prompt: "Delete 3 old installers?".into(), options: vec!["Allow".into(), "Deny".into()] };
+        let ask = Event::Request { request_id: "r1".into(), prompt: "Delete 3 old installers?".into(), options: vec!["Allow".into(), "Deny".into()], recommended: None };
         s.event(&pi, &ask, Provenance::Reported);
         let agent = s.agent(&pi).unwrap();
         assert_eq!(agent.state, State::WaitingForYou);
@@ -2287,7 +2293,7 @@ mod tests {
     }
 
     fn asks(request: &str, prompt: &str) -> Event {
-        Event::Request { request_id: request.into(), prompt: prompt.into(), options: vec!["Yes".into(), "No".into()] }
+        Event::Request { request_id: request.into(), prompt: prompt.into(), options: vec!["Yes".into(), "No".into()], recommended: None }
     }
 
     /// A question waits in the session as one card, is answered once, and an approval answered

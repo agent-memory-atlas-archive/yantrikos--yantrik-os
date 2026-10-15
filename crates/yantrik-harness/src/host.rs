@@ -2098,7 +2098,7 @@ impl Host {
             tracing::warn!(harness = %who, turn = turn_id, why = %why, "event out of order; refused");
             return Ok(refused(why));
         }
-        if let Event::Request { request_id, prompt, options } = &event {
+        if let Event::Request { request_id, prompt, options, .. } = &event {
             // A question is only asked if it can be answered exactly once, which needs the store.
             let Some(store) = &self.runs else {
                 return Ok(refused("this desktop keeps no runs, so it cannot take a question".to_string()));

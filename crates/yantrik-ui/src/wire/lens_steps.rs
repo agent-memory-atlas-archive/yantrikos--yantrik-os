@@ -5,21 +5,16 @@
 //! while every step the mind took was already in the Agents store. The Lens showed none of it
 //! until the whole answer landed, and a mind at work looked like a mind that had hung.
 //!
-//! This follows the Lens's open turn in the store: the calls it made (cards), and the mind's own
-//! status lines, which the store keeps only as the latest one, so the steps they named are
-//! remembered here in the order they were first seen. Words come from `step_words` and nothing
-//! else. When the turn ends the same steps become the reply's "Show actions" fold, which is how a
-//! mind that writes no trail lines (the Mind) still says what it did.
-
-use std::cell::RefCell;
+//! This follows the Lens's open turn in the store: the calls it made (cards), the questions it
+//! asked, its thinking, and the mind's own status lines, which the store keeps only as the latest
+//! one, so the steps they named are remembered here in the order they were first seen. Words come
+//! from `step_words` and nothing else. `lens_timeline` makes the reply's one timeline of them,
+//! which is how a mind that writes no trail lines (the Mind) still says what it did.
 
 use crate::agents::model::{Agent, ApprovalOutcome, CallState, Card, Item, Turn};
-use crate::agents::{progress, AgentId};
+use crate::agents::progress;
 
 use super::step_words::{self, Phrase};
-
-/// How many finished steps sit above the current one.
-const EARLIER: usize = 2;
 
 /// From this long into a turn, the current line says how long it has been.
 const SHOW_ELAPSED_SECS: u64 = 10;
@@ -55,48 +50,95 @@ pub struct Step {
 
 /// Something the turn did, in the order it was first seen.
 #[derive(Clone, Debug, PartialEq)]
-enum Seen {
+pub enum Seen {
     /// A call, by the harness's id for it; read back from the store each time, so it settles.
     Card(String),
     /// A step the mind's status line named.
     Status(Phrase),
+    /// A question the mind asked the person, by its request id; read back too, so it folds.
+    Question(String),
+    /// The mind's thinking, all of it in one place: where it first showed.
+    Thinking,
 }
 
-/// The one turn the Lens is following, and what it has seen of it.
+/// The one turn being followed, and what has been seen of it.
 #[derive(Debug, Default)]
 pub struct Tracker {
-    turn: Option<(AgentId, u64)>,
-    /// The conversation row of the bubble the steps belong to.
-    row: Option<usize>,
+    turn: Option<(crate::agents::AgentId, u64)>,
     seen: Vec<Seen>,
-    /// What was last said, for `describe shell`: the lines shown while it runs, the fold after.
-    said: Vec<Step>,
+    /// How much thinking there was at the last look, and when it last grew: "Thought for N s" is
+    /// from the turn's start to then. The store keeps no time on thinking, so it is watched here.
+    thinking_bytes: u64,
+    thought_until: u64,
 }
 
 impl Tracker {
-    /// Follow `t` of `a`: note what is new in it, and give every step it has taken, oldest first.
-    /// A different turn starts over.
-    pub fn follow(&mut self, a: &Agent, t: &Turn) -> Vec<Step> {
+    /// Note what is new in `t` of `a` at `now`, in the order the turn has it. A different turn
+    /// starts over.
+    pub fn observe(&mut self, a: &Agent, t: &Turn, now: u64) {
         let key = (a.meta.id.clone(), t.n);
         if self.turn.as_ref() != Some(&key) {
             *self = Tracker { turn: Some(key), ..Tracker::default() };
         }
-        for card in t.cards() {
-            if !self.seen.iter().any(|s| matches!(s, Seen::Card(id) if *id == card.call)) {
-                self.seen.push(Seen::Card(card.call.clone()));
+        let mut thinking = 0;
+        for item in &t.items {
+            let seen = match item {
+                Item::Card(card) => Seen::Card(card.call.clone()),
+                Item::Question(q) => Seen::Question(q.request.clone()),
+                Item::Thinking(text) => {
+                    thinking += text.total();
+                    Seen::Thinking
+                }
+                _ => continue,
+            };
+            if !self.seen.contains(&seen) {
+                self.seen.push(seen);
             }
+        }
+        if thinking > self.thinking_bytes {
+            self.thinking_bytes = thinking;
+            self.thought_until = now;
         }
         if t.open() {
             if let Some(phrase) = step_words::of_status(&a.status) {
-                // A heartbeat repeats the line it last sent; only a new step is a step.
-                if self.seen.last() != Some(&Seen::Status(phrase.clone())) {
+                // A heartbeat repeats the line it last sent; only a new step is a step, even with a
+                // question or a call seen since.
+                let latest = self.seen.iter().rev().find(|s| matches!(s, Seen::Status(_)));
+                if latest != Some(&Seen::Status(phrase.clone())) {
                     self.seen.push(Seen::Status(phrase));
                 }
             }
         }
+    }
+
+    /// The turn being followed: its agent and number.
+    pub fn turn(&self) -> Option<&(crate::agents::AgentId, u64)> {
+        self.turn.as_ref()
+    }
+
+    /// Everything seen, oldest first.
+    pub fn seen(&self) -> &[Seen] {
+        &self.seen
+    }
+
+    /// How long the mind thought, in whole seconds from the start of `t`: at least one, so a
+    /// thought that came and went inside one look is not "0 s".
+    pub fn thought_for(&self, t: &Turn) -> u64 {
+        self.thought_until.saturating_sub(t.started).max(1)
+    }
+
+    /// Follow `t` of `a` at `now`, and give every step it has taken, oldest first.
+    pub fn follow(&mut self, a: &Agent, t: &Turn, now: u64) -> Vec<Step> {
+        self.observe(a, t, now);
+        self.steps(a, t).into_iter().map(|(_, step)| step).collect()
+    }
+
+    /// The steps among what was seen, each with where it is in `seen`.
+    pub fn steps(&self, a: &Agent, t: &Turn) -> Vec<(usize, Step)> {
         let open = t.open();
         let running_card = t.cards().any(Card::running);
-        let last = self.seen.len().saturating_sub(1);
+        // The newest step, not counting a question or thinking seen after it.
+        let last = self.seen.iter().rposition(|s| matches!(s, Seen::Card(_) | Seen::Status(_))).unwrap_or(0);
         self.seen
             .iter()
             .enumerate()
@@ -113,12 +155,13 @@ impl Tracker {
                         CallState::Untold if open && i == last => StepState::Running,
                         _ => StepState::Done,
                     };
-                    Some(said(&phrase, state))
+                    Some((i, said(&phrase, state)))
                 }
                 Seen::Status(phrase) => {
                     let current = open && i == last && !running_card && !a.status.trim().is_empty();
-                    Some(said(phrase, if current { StepState::Running } else { StepState::Done }))
+                    Some((i, said(phrase, if current { StepState::Running } else { StepState::Done })))
                 }
+                Seen::Question(_) | Seen::Thinking => None,
             })
             .collect()
     }
@@ -158,8 +201,8 @@ impl Live {
     }
 }
 
-/// "Waiting for you to allow: Delete an event from your calendar". The card itself is pinned above
-/// the conversation; this line points at it.
+/// "Waiting for you to allow: Delete an event from your calendar". The approval card itself is
+/// pinned above the conversation; this line points at it.
 fn waiting_line(t: &Turn, question: bool) -> String {
     let pending = t.items.iter().rev().find_map(|i| match i {
         Item::Approval(a) if a.outcome == ApprovalOutcome::Pending => Some(a.what.as_str()),
@@ -172,10 +215,11 @@ fn waiting_line(t: &Turn, question: bool) -> String {
     }
 }
 
-/// The lines the bubble draws: up to two finished steps, then the current one.
-pub fn shown(steps: &[Step], live: &Live) -> Vec<Step> {
+/// The one live line under a reply's steps while it runs: what it waits on, that it looks stuck,
+/// or what it is doing now, with how long the turn has run once that is worth saying.
+pub fn current_line(steps: &[Step], live: &Live) -> Step {
     let running = steps.iter().rposition(|s| s.state == StepState::Running);
-    let current = if let Some(waiting) = &live.waiting {
+    if let Some(waiting) = &live.waiting {
         Step { text: waiting.clone(), state: StepState::Waiting, action: false }
     } else if let Some(stuck) = &live.stuck {
         Step { text: stuck.clone(), state: StepState::Running, action: false }
@@ -191,11 +235,7 @@ pub fn shown(steps: &[Step], live: &Live) -> Vec<Step> {
             text
         };
         Step { text, state: StepState::Running, action: false }
-    };
-    let earlier: Vec<Step> = steps.iter().filter(|s| s.state != StepState::Running).cloned().collect();
-    let mut out: Vec<Step> = earlier[earlier.len().saturating_sub(EARLIER)..].to_vec();
-    out.push(current);
-    out
+    }
 }
 
 /// The actions of a turn that has ended, for the reply's fold: nothing is still running, and the
@@ -211,67 +251,11 @@ pub fn folded(steps: Vec<Step>) -> Vec<Step> {
         .collect()
 }
 
-thread_local! {
-    /// The Lens's one tracker. Only the UI thread reads or writes it: the tick and the pump.
-    static TRACKER: RefCell<Tracker> = RefCell::new(Tracker::default());
-}
-
-/// The lines for the Lens's open turn, bound to `row` (the streaming bubble) the first time the
-/// turn is seen. None when the active mind has no turn open.
-pub fn live_lines(agent: &AgentId, row: Option<usize>, answering: impl Fn(usize) -> bool, now: u64) -> Option<(usize, Vec<Step>)> {
-    crate::agents::store().read(|s| {
-        let a = s.agent(agent)?;
-        let t = a.open_turn()?;
-        TRACKER.with(|tracker| {
-            let mut tracker = tracker.borrow_mut();
-            let steps = tracker.follow(a, t);
-            if tracker.row.is_none() {
-                tracker.row = row;
-            }
-            let row = tracker.row?;
-            let lines = shown(&steps, &Live::of(a, t, now, answering(row)));
-            tracker.said = lines.clone();
-            Some((row, lines))
-        })
-    })
-}
-
-/// The steps of the turn whose bubble is `row`, now that its answer has ended: read once more from
-/// the store (the pump can finish before the tick sees the last call) and folded. Empty when the
-/// Lens was not following that bubble.
-pub fn fold(row: usize) -> Vec<Step> {
-    TRACKER.with(|tracker| {
-        let mut tracker = tracker.borrow_mut();
-        let Some((id, n)) = tracker.turn.clone().filter(|_| tracker.row == Some(row)) else {
-            return Vec::new();
-        };
-        let steps = crate::agents::store()
-            .read(|s| s.agent(&id).and_then(|a| a.turns.iter().find(|t| t.n == n).map(|t| tracker.follow(a, t))))
-            .unwrap_or_default();
-        tracker.said = folded(steps);
-        tracker.said.clone()
-    })
-}
-
-/// What `describe shell` says of the bubble at `row`: the lines it shows while it runs, or its
-/// fold once it ended. None for any other row.
-pub fn for_describe(row: usize) -> Option<serde_json::Value> {
-    TRACKER.with(|tracker| {
-        let tracker = tracker.borrow();
-        (tracker.row == Some(row) && !tracker.said.is_empty()).then(|| {
-            tracker
-                .said
-                .iter()
-                .map(|s| serde_json::json!({ "text": s.text, "state": s.state.word() }))
-                .collect()
-        })
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::agents::model::{AgentMeta, Approval, Provenance, State, Turn};
+    use crate::agents::AgentId;
 
     fn agent() -> Agent {
         Agent {
@@ -307,7 +291,7 @@ mod tests {
     }
 
     fn follow(tracker: &mut Tracker, a: &Agent) -> Vec<Step> {
-        tracker.follow(a, &a.turns[0])
+        tracker.follow(a, &a.turns[0], 120)
     }
 
     fn texts(steps: &[Step]) -> Vec<(&str, StepState)> {
@@ -337,11 +321,8 @@ mod tests {
             "a heartbeat repeating its line is not a new step"
         );
 
-        let lines = shown(&steps, &Live { elapsed_secs: 24, ..Live::default() });
-        assert_eq!(
-            texts(&lines),
-            [("Checked what I remember", StepState::Done), ("Searching the web\u{2026} \u{00b7} 24 s", StepState::Running)]
-        );
+        let line = current_line(&steps, &Live { elapsed_secs: 24, ..Live::default() });
+        assert_eq!((line.text.as_str(), line.state), ("Searching the web\u{2026} \u{00b7} 24 s", StepState::Running));
     }
 
     #[test]
@@ -357,27 +338,23 @@ mod tests {
         a.turns[0].items.push(card("c2", "web_fetch", "", CallState::Failed));
         a.turns[0].items.push(card("c3", "os_act", "calendar.add_event", CallState::Running));
         let steps = follow(&mut tracker, &a);
-        let lines = shown(&steps, &Live { elapsed_secs: 5, ..Live::default() });
         assert_eq!(
-            texts(&lines),
+            texts(&steps),
             [
                 ("Looked at your calendar", StepState::Done),
                 ("Couldn\u{2019}t open the web page", StepState::Failed),
-                ("Adding an event to your calendar\u{2026}", StepState::Running),
-            ],
-            "under 10 s the current line has no time on it"
+                ("Adding an event to your calendar", StepState::Running),
+            ]
         );
+        let line = current_line(&steps, &Live { elapsed_secs: 5, ..Live::default() });
+        assert_eq!(line.text, "Adding an event to your calendar\u{2026}", "under 10 s the current line has no time on it");
     }
 
     #[test]
-    fn only_the_last_two_finished_steps_sit_above_the_current_one() {
+    fn the_current_line_says_the_answer_is_being_written_or_that_it_is_thinking() {
         let steps: Vec<Step> = (0..5).map(|i| Step { text: format!("step {i}"), state: StepState::Done, action: true }).collect();
-        let lines = shown(&steps, &Live { answering: true, ..Live::default() });
-        assert_eq!(
-            texts(&lines),
-            [("step 3", StepState::Done), ("step 4", StepState::Done), ("Writing the answer\u{2026}", StepState::Running)]
-        );
-        assert_eq!(texts(&shown(&[], &Live::default())), [("Thinking\u{2026}", StepState::Running)], "a turn just opened says so at once");
+        assert_eq!(current_line(&steps, &Live { answering: true, ..Live::default() }).text, "Writing the answer\u{2026}");
+        assert_eq!(current_line(&[], &Live::default()).text, "Thinking\u{2026}", "a turn just opened says so at once");
     }
 
     #[test]
@@ -394,8 +371,7 @@ mod tests {
         a.pending_approvals.push("appr-7".into());
         let live = Live::of(&a, &a.turns[0], 130, false);
         assert_eq!(live.waiting.as_deref(), Some("Waiting for you to allow: Delete an event from your calendar"));
-        let lines = shown(&[], &live);
-        assert_eq!(lines.last().map(|s| s.state), Some(StepState::Waiting));
+        assert_eq!(current_line(&[], &live).state, StepState::Waiting);
     }
 
     #[test]

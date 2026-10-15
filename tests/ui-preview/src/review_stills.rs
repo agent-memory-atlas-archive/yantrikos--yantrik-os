@@ -297,6 +297,8 @@ fn question_erase_of(w: &MinimalSoftwareWindow, output: &str, prompt: &str, remo
         options: ModelRc::new(VecModel::from(options)),
         asked: "16:16".into(),
         removes: removes.into(),
+        recommended: -1,
+        in_reply: false,
     }])));
     ui.show()?;
     w.set_size(slint::PhysicalSize::new(1280, 800));

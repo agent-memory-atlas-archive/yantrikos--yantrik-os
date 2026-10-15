@@ -49,6 +49,9 @@ component Chip inherits Rectangle {
     in property <bool> chevron: true;
     in property <string> icon: "";
     in property <length> max-label: 150px;
+    // A status dot before the label (the lean row's mind chip): its colour, when `dot` is on.
+    in property <bool> dot: false;
+    in property <color> dot-color: Theme.text-dim;
     callback clicked();
 
     height: 28px;
@@ -72,6 +75,13 @@ component Chip inherits Rectangle {
         padding-left: root.label == "" ? 7px : 10px;
         padding-right: root.chevron ? 8px : (root.label == "" ? 7px : 10px);
         spacing: 4px;
+        if root.dot : Rectangle {
+            width: 7px;
+            height: 7px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 3.5px;
+            background: root.dot-color;
+        }
         if root.icon != "" : Icon {
             commands: root.icon;
             size: 14px;
@@ -172,6 +182,15 @@ export component ModelPicker inherits Rectangle {
     in property <bool> upward: true;
     // Narrow places (the mind panel): shorter chip labels.
     in property <bool> compact: false;
+    // The Lens composer's row, which shares its ~400px with Send: [📎] [● Mind ▾] [Model ▾] [⚡ ▾].
+    // The status is the mind chip's dot (its words are in the chip's label for a screen reader),
+    // Effort is its icon (the level is ticked in its menu), and only a problem's one press ("Set
+    // up", "Add key") takes room of its own. Drawn in full, the row was ~800px wide and the box
+    // clipped Send, the mode chip and the mic out of sight (VM 541, 14 Oct).
+    in property <bool> lean: false;
+    // The lean row's whole width, when its place gives one: the model chip takes what the others
+    // leave, so the row never runs past it.
+    in property <length> room: 0px;
     in property <length> menu-width: 320px;
 
     callback choose-mind(string);
@@ -187,34 +206,65 @@ export component ModelPicker inherits Rectangle {
     height: 28px;
     width: row.preferred-width;
 
+    // The status's colour: the mind chip's dot in the lean row, the dot before the words otherwise.
+    property <color> status-color: root.status-state == "connected" ? Theme.color-success
+        : root.status-state == "checking" || root.status-state == "own" || root.status-state == "set" ? Theme.text-dim
+        : Theme.amber;
+    // The lean row in a narrow Lens (380px): Effort gives its place to the model's name, and the
+    // mind's name is shorter. Effort is still in the mind panel's picker.
+    property <bool> tight: root.lean && root.room > 0 && root.room < 300px;
+    property <bool> effort-shown: root.efforts.length > 0 && !root.tight;
+
     row := HorizontalLayout {
         spacing: 6px;
-        mind-chip := Chip {
-            label: root.mind-label;
-            max-label: root.compact ? 72px : 150px;
-            a11y: "Mind: " + root.mind-label + ". Choose who answers.";
-            clicked => { root.opened("mind"); mind-menu.show(); }
-        }
-        model-chip := Chip {
-            label: root.model-label;
-            enabled: root.model-enabled;
-            max-label: root.compact ? 96px : 190px;
-            a11y: "Model: " + root.model-label + ". Choose the model.";
-            clicked => { root.opened("model"); model-menu.show(); }
-        }
-        if root.efforts.length > 0 : effort-chip := Chip {
-            label: root.effort != "" ? root.effort : "effort";
-            a11y: "Effort: " + root.effort + ". How hard the model thinks.";
-            clicked => { root.opened("effort"); effort-menu.show(); }
-        }
-        Chip {
+        if root.lean : Chip {
             label: "";
             icon: Icons.paperclip;
             chevron: false;
             a11y: "Attach a file";
             clicked => { root.opened("attach"); root.browse(root.browse-path); attach-menu.show(); }
         }
-        if root.show-status && root.status-words != "" : HorizontalLayout {
+        mind-chip := Chip {
+            label: root.mind-label;
+            max-label: root.tight ? 64px : root.lean ? 84px : root.compact ? 72px : 150px;
+            dot: root.lean && root.status-words != "";
+            dot-color: root.status-color;
+            a11y: "Mind: " + root.mind-label + (root.lean && root.status-words != "" ? ", " + root.status-words : "") + ". Choose who answers.";
+            clicked => { root.opened("mind"); mind-menu.show(); }
+        }
+        if !root.lean || root.fix-label == "" : model-chip := Chip {
+            label: root.model-label;
+            enabled: root.model-enabled;
+            // In the lean row: the room less the attach chip (28), the mind chip, the effort chip
+            // when it is shown (45 and its gap), two gaps (12) and this chip's padding and chevron (34).
+            max-label: !root.lean ? (root.compact ? 96px : 190px)
+                : root.room > 0 ? clamp(root.room - 28px - mind-chip.width - (root.effort-shown ? 45px + 6px : 0px) - 12px - 34px, 40px, 160px)
+                : 84px;
+            a11y: "Model: " + root.model-label + ". Choose the model.";
+            clicked => { root.opened("model"); model-menu.show(); }
+        }
+        if root.effort-shown : effort-chip := Chip {
+            label: root.lean ? "" : root.effort != "" ? root.effort : "Effort";
+            icon: root.lean ? Icons.bolt : "";
+            a11y: "Effort: " + (root.effort != "" ? root.effort : "the model's own") + ". How hard the model thinks.";
+            clicked => { root.opened("effort"); effort-menu.show(); }
+        }
+        if !root.lean : Chip {
+            label: "";
+            icon: Icons.paperclip;
+            chevron: false;
+            a11y: "Attach a file";
+            clicked => { root.opened("attach"); root.browse(root.browse-path); attach-menu.show(); }
+        }
+        // A problem in the lean row: its one press, in the model chip's place.
+        if root.lean && root.fix-label != "" : Chip {
+            label: root.fix-label;
+            chevron: false;
+            max-label: 96px;
+            a11y: root.fix-label + ": " + root.status-words;
+            clicked => { root.fix(); }
+        }
+        if root.show-status && !root.lean && root.status-words != "" : HorizontalLayout {
             spacing: 6px;
             padding-left: 4px;
             Rectangle {
@@ -222,9 +272,7 @@ export component ModelPicker inherits Rectangle {
                 height: 7px;
                 y: (parent.height - self.height) / 2;
                 border-radius: 3.5px;
-                background: root.status-state == "connected" ? Theme.color-success
-                    : root.status-state == "checking" || root.status-state == "own" || root.status-state == "set" ? Theme.text-dim
-                    : Theme.amber;
+                background: root.status-color;
             }
             Text {
                 text: root.status-words;
