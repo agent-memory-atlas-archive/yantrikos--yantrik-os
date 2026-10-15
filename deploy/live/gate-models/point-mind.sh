@@ -23,6 +23,22 @@ VM=${VM:-561}
 . ../guest.sh
 
 guest 'runuser -u yantrik-mind -- sh -s' < mind-env.sh
+# The gate is a private address, and the OS's egress proxy refuses those to a mind unless a lan
+# rule allows it. Root names the gate in /etc/yantrik/mind-person.env, a file the updater seeds
+# from, and reconciles so the rule is there now. The address comes from here, never from the
+# Mind's settings, which are the mind's to write: a mind must not choose its own lan rule.
+# Without it every model call failed with "CONNECT proxy failed: 403" once 561 took the egress
+# proxy (15 Oct 2026). The URL only; the instance key stays in the Mind's settings.
+GATE_URL=${GATE_URL:-http://10.99.0.1:8443}
+# It goes into a root shell in the VM, so it is held to an address and a port, nothing else.
+case "$GATE_URL" in *[!0-9a-z.:/]*) echo "GATE_URL must be http://<ip>:<port>" >&2; exit 1 ;; esac
+case "$GATE_URL" in http://[0-9]*.[0-9]*.[0-9]*.[0-9]*:[0-9]*) ;; *) echo "GATE_URL must be http://<ip>:<port>" >&2; exit 1 ;; esac
+guest "set -e
+install -d -m 755 /etc/yantrik
+umask 022
+printf '# The live gate, where the Mind of this instance reaches its models (deploy/live/gate-models).\nYM_LOCAL_OLLAMA_URL=%s\n' '$GATE_URL' > /etc/yantrik/mind-person.env.new
+mv /etc/yantrik/mind-person.env.new /etc/yantrik/mind-person.env
+/opt/yantrik/bin/yantrik-update reconcile 2>&1 | grep -E 'seeded|not seeded' || true" < /dev/null
 guest 'set -e
 systemctl restart yantrik-mind
 sleep 8
