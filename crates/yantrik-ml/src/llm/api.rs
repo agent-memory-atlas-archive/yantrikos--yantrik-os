@@ -752,6 +752,11 @@ impl ApiLLM {
                 Err(_) => continue,
             };
 
+            // The server's own failure, sent as an event after its 200 (crate::stream_error).
+            if let Some(error) = chunk.get("error").filter(|e| !e.is_null()) {
+                return Err(crate::stream_error::StreamError::of(error).into());
+            }
+
             let delta = &chunk["choices"][0]["delta"];
 
             for field in REASONING_FIELDS {
@@ -1013,6 +1018,9 @@ mod thinking_tests {
     const THINKS_THEN_ANSWERS: &str = include_str!("testdata/qwen3_thinks_then_answers.sse");
     const THINKS_UNTIL_LENGTH: &str = include_str!("testdata/qwen3_thinks_until_length.sse");
     const NATIVE_TOOL_CALL: &str = include_str!("testdata/qwen3_native_tool_call.sse");
+    // As VM 542's server sent it (15 Oct 2026, captured on the wire): a 200, one empty delta,
+    // keep-alive comments, then its own error event and [DONE].
+    const SERVER_ERROR_MID_STREAM: &str = include_str!("testdata/server_error_mid_stream.sse");
 
     fn custom_qwen() -> ApiLLM {
         ApiLLM::new("http://127.0.0.1:1/v1", None, MODEL).for_provider("custom")
@@ -1022,6 +1030,15 @@ mod thinking_tests {
         let mut shown = String::new();
         let result = llm.read_openai_stream(recorded.as_bytes(), &mut |t| shown.push_str(t));
         (result, shown)
+    }
+
+    #[test]
+    fn an_error_the_server_sends_inside_the_stream_is_the_replys_failure_and_not_an_empty_answer() {
+        let (result, shown) = stream(&custom_qwen(), SERVER_ERROR_MID_STREAM);
+        let err = result.expect_err("the server's error is not an empty answer");
+        let failure = err.downcast_ref::<crate::StreamError>().expect("the typed failure");
+        assert!(failure.message.starts_with("malformed tool call: {"), "{}", failure.message);
+        assert!(shown.is_empty(), "nothing was shown before it: {shown:?}");
     }
 
     #[test]

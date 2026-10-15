@@ -2249,11 +2249,11 @@ impl CompanionService {
                     self.note_llm_reachable();
                     r
                 }
-                Err(e) if thought_without_answer(&*e) => {
+                Err(e) if answered_badly(&*e).is_some() => {
                     self.note_llm_reachable();
-                    response_text = THOUGHT_WITHOUT_ANSWER.to_string();
+                    response_text = answered_badly(&*e).unwrap_or_default();
                     model_failure = Some(e.to_string());
-                    agent_loop.fail("the model thought but gave no answer");
+                    agent_loop.fail("the model was reached but gave no answer");
                     break;
                 }
                 Err(e) => {
@@ -3356,13 +3356,13 @@ impl CompanionService {
                                 }
                             }
                             Err(_) if !response_text.is_empty() => break,
-                            Err(e) if thought_without_answer(&*e) => {
+                            Err(e) if answered_badly(&*e).is_some() => {
                                 self.note_llm_reachable();
-                                response_text = THOUGHT_WITHOUT_ANSWER.to_string();
+                                response_text = answered_badly(&*e).unwrap_or_default();
                                 on_token("__REPLACE__");
                                 on_token(&response_text);
                                 model_failure = Some(e.to_string());
-                                agent_loop.fail("the model thought but gave no answer");
+                                agent_loop.fail("the model was reached but gave no answer");
                                 break;
                             }
                             Err(e) => {
@@ -3415,13 +3415,13 @@ impl CompanionService {
             }
             // The model was reached and answered with thinking alone (a Qwen3 that spent the whole
             // budget thinking, VM 542): say so, in words, rather than show an empty bubble.
-            Err(e) if thought_without_answer(&*e) => {
+            Err(e) if answered_badly(&*e).is_some() => {
                 self.note_llm_reachable();
-                response_text = THOUGHT_WITHOUT_ANSWER.to_string();
+                response_text = answered_badly(&*e).unwrap_or_default();
                 on_token("__REPLACE__");
                 on_token(&response_text);
                 model_failure = Some(e.to_string());
-                agent_loop.fail("the model thought but gave no answer");
+                agent_loop.fail("the model was reached but gave no answer");
             }
             Err(e) => {
                 self.note_llm_offline("", &e);
@@ -4168,10 +4168,16 @@ impl CompanionService {
     }
 }
 
-/// Whether a model call failed because the model thought and gave no answer. That model is
-/// reachable, so the turn is not offline; it failed, and the person is told so in words.
-fn thought_without_answer(e: &(dyn std::error::Error + Send + Sync + 'static)) -> bool {
-    e.downcast_ref::<ThoughtWithoutAnswer>().is_some()
+/// What the person is told when a model call reached the model and still gave no answer: it
+/// thought and said nothing ([`ThoughtWithoutAnswer`]), or its server reported an error inside
+/// the streamed reply ([`yantrik_ml::StreamError`], VM 542: "malformed tool call"). That model is
+/// reachable, so the turn is not offline; it failed, and the person is told so in words. None for
+/// any other failure, which is the offline path.
+fn answered_badly(e: &(dyn std::error::Error + Send + Sync + 'static)) -> Option<String> {
+    if e.downcast_ref::<ThoughtWithoutAnswer>().is_some() {
+        return Some(THOUGHT_WITHOUT_ANSWER.to_string());
+    }
+    e.downcast_ref::<yantrik_ml::StreamError>().map(yantrik_ml::stream_error::said)
 }
 
 /// What the person is told when every reply the model gave was a tool call nobody could read.
@@ -5628,6 +5634,85 @@ mod thought_without_answer_tests {
     fn the_same_holds_without_streaming() {
         let reply = companion().handle_message("Make a note called Groceries with milk, eggs and bread");
         assert_eq!(reply.message, THOUGHT_WITHOUT_ANSWER);
+        assert!(reply.model_failure.is_some() && !reply.offline_mode);
+    }
+}
+
+#[cfg(test)]
+mod stream_error_tests {
+    //! VM 542, 15 Oct 2026: the first run's "Can it answer?" got "I'm here. How can I help?" to
+    //! "Use the calculate tool to work out 17 times 23". The model's server had sent
+    //! `data: {"error": {"message": "malformed tool call: …"}}` inside the streamed reply, and the
+    //! reply ended empty. The backend now calls that [`yantrik_ml::StreamError`]; here, the turn
+    //! says what the server said and is not taken for offline.
+
+    use super::*;
+    use yantrik_ml::{LLMResponse, StreamError};
+
+    const SAID: &str = "malformed tool call: {\"name\": \"calculate\", \"arguments\": {\"expression\": \"17 * 23\"}}";
+
+    /// A model whose server answers 200 and then reports an error inside the stream.
+    struct ServerRefuses;
+
+    impl LLMBackend for ServerRefuses {
+        fn chat(
+            &self,
+            _messages: &[ChatMessage],
+            _config: &GenerationConfig,
+            _tools: Option<&[serde_json::Value]>,
+        ) -> anyhow::Result<LLMResponse> {
+            Err(StreamError { message: SAID.into() }.into())
+        }
+
+        fn chat_streaming(
+            &self,
+            messages: &[ChatMessage],
+            config: &GenerationConfig,
+            tools: Option<&[serde_json::Value]>,
+            _on_token: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<LLMResponse> {
+            self.chat(messages, config, tools)
+        }
+
+        fn count_tokens(&self, text: &str) -> anyhow::Result<usize> {
+            Ok(text.len())
+        }
+
+        fn backend_name(&self) -> &str {
+            "server-refuses"
+        }
+    }
+
+    fn companion() -> CompanionService {
+        let db = YantrikDB::new(":memory:", 384).expect("in-memory database");
+        let mut config = CompanionConfig::default();
+        config.tools.enabled = false;
+        CompanionService::new(db, std::sync::Arc::new(ServerRefuses), config)
+    }
+
+    #[test]
+    fn a_reply_the_server_ended_with_an_error_says_what_the_server_said() {
+        let mut c = companion();
+        let mut shown = String::new();
+        let reply = c.handle_message_streaming("Use the calculate tool to work out 17 times 23, and tell me the result.", |t| {
+            if t == "__REPLACE__" {
+                shown.clear();
+            } else {
+                shown.push_str(t);
+            }
+        });
+        let expected = yantrik_ml::stream_error::said(&StreamError { message: SAID.into() });
+        assert_eq!(shown, expected, "the bubble says what happened");
+        assert_eq!(reply.message, expected);
+        assert_ne!(reply.message, "I'm here. How can I help?");
+        assert!(reply.model_failure.as_deref().unwrap_or("").contains("malformed tool call"), "{:?}", reply.model_failure);
+        assert!(!reply.offline_mode, "the model was reached: this is not the offline responder");
+    }
+
+    #[test]
+    fn the_same_holds_without_streaming() {
+        let reply = companion().handle_message("Use the calculate tool to work out 17 times 23, and tell me the result.");
+        assert!(reply.message.contains("malformed tool call"), "{}", reply.message);
         assert!(reply.model_failure.is_some() && !reply.offline_mode);
     }
 }
