@@ -42,6 +42,10 @@ hermes_staging() {
 # never none, and never a second copy under ~/.hermes/plugins.
 hermes_swap_dir() {
     old="$(hermes_staging "$(basename "$2")")-old" || return 1
+    # DEST's folder, which a fresh install does not have yet: with the staging moved out of
+    # ~/.hermes/plugins (above), nothing else made it, and every fresh install failed at
+    # "could not put the desktop plugin in ~/.hermes/plugins/yantrik" (VM 542, 15 Oct 2026).
+    mkdir -p "$(dirname "$2")" || return 1
     rm -rf "$old" || return 1
     if [ -e "$2" ]; then
         mv "$2" "$old" || return 1
