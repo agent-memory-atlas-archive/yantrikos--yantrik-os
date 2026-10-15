@@ -152,7 +152,8 @@ def send(text):
 
 
 def wait_for_turn(sent_at):
-    """Wait until the Mind answers what was just sent. Returns (state, why it stopped waiting)."""
+    """Wait until the Mind answers what was just sent. Returns (state, why it stopped waiting,
+    whether a card rose during the turn)."""
     seen_busy = False
     card_seen = False
     while True:
@@ -160,10 +161,10 @@ def wait_for_turn(sent_at):
         state = shell_state()
         if state is None:
             if time.time() - sent_at > TURN_LIMIT_SECS:
-                return None, "desktop not answering"
+                return None, "desktop not answering", card_seen
             continue
         if state.get("locked"):
-            return state, "locked"
+            return state, "locked", card_seen
         if state.get("pending_approvals"):
             # A card is the Mind waiting for a person, not the turn ending: keep waiting (up to
             # the turn limit) so a person who answers it finds the mission still going. On 561
@@ -172,14 +173,14 @@ def wait_for_turn(sent_at):
                 card_seen = True
                 log(event="card waiting", actions=[a.get("action") for a in state["pending_approvals"]])
             if time.time() - sent_at > TURN_LIMIT_SECS:
-                return state, "card unanswered"
+                return state, "card unanswered", card_seen
             continue
         if state.get("thinking"):
             seen_busy = True
         if (seen_busy or time.time() - sent_at > 30) and mind_idle(state):
-            return state, "answered"
+            return state, "answered", card_seen
         if time.time() - sent_at > TURN_LIMIT_SECS:
-            return state, "turn too long"
+            return state, "turn too long", card_seen
 
 
 def check_page(m):
@@ -271,6 +272,7 @@ def run_mission(m):
     write_state(STARTED, begun | {m["id"]})
     log(mission=m["id"], event="resuming" if resuming else "starting", title=m["title"])
     text = prompt(m["keep_going"] if resuming else m["brief"], m)
+    cards = 0
     for turn in range(1, m["max_turns"] + 1):
         if time.time() - started > m["max_hours"] * 3600:
             log(mission=m["id"], event="stopped", why="time limit", turns=turn - 1)
@@ -286,13 +288,21 @@ def run_mission(m):
         if not ok:
             log(mission=m["id"], event="send failed", turn=turn, said=said)
             return
-        state, why = wait_for_turn(time.time())
+        state, why, card = wait_for_turn(time.time())
         reply = (last_reply(state) or {}).get("text", "") if state else ""
         clean, errors = check_page(m)
         log(mission=m["id"], event="turn", turn=turn, outcome=why, reply=reply[:400],
             page={True: "loads clean", False: "throws", None: "not checked"}[clean], errors=errors or None)
         if why != "answered":
             log(mission=m["id"], event="stopped", why=why, turns=turn)
+            return
+        # A card the Mind gave up waiting on ends its turn as if answered, and "keep going" only
+        # raises the next one. Two turns running with a card is a person needed: stop, and the
+        # timer tries again after its rest. On 561 the first agent_run of a new Mind session asks,
+        # and each card lapsed in 110 s while the Director kept typing (15 Oct 2026).
+        cards = cards + 1 if card else 0
+        if cards >= 2:
+            log(mission=m["id"], event="stopped", why="cards are waiting for a person", turns=turn)
             return
         if FINISHED in reply.split():
             if clean is False:

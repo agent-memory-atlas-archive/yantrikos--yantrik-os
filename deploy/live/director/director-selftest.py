@@ -28,7 +28,8 @@ d.shell_state = lambda: {"thinking": False}
 d.print = lambda *a, **k: None
 sent, replies, pages = [], [], []
 d.send = lambda text: (sent.append(text), (True, ""))[1]
-d.wait_for_turn = lambda _: ({"conversation": [{"role": "assistant", "text": replies[0][0]}]}, replies.pop(0)[1])
+d.wait_for_turn = lambda _: ({"conversation": [{"role": "assistant", "text": replies[0][0]}]}, replies[0][1],
+                              replies.pop(0)[2:] == ("card",))
 d.check_page = lambda m: pages.pop(0) if pages else (True, "")
 
 failed = 0
@@ -80,5 +81,16 @@ check("with every build finished, polish rounds go round every build in turn",
 check("a polish round works from IDEAS.md", "IDEAS.md" in sent[-1] and "{" not in sent[-1], sent[-1])
 check("a polish round is never recorded as a finished mission",
       not any(m.startswith("polish:") for m in d.finished_missions()))
+
+d.write_state(d.DONE, set())
+replies[:] = [("the command needs your OK", "answered", "card"), ("still waiting on you", "answered", "card"),
+              ("unused", "answered")]
+before = len(sent)
+d.main()
+check("two turns running with a card stop the mission for a person",
+      len(sent) - before == 2 and len(replies) == 1 and specs[0]["id"] not in d.finished_missions())
+replies[:] = [("asked, then allowed", "answered", "card"), ("FINISHED", "answered")]
+d.main()
+check("one card that a person answers does not stop the mission", specs[0]["id"] in d.finished_missions())
 
 sys.exit(1 if failed else 0)
