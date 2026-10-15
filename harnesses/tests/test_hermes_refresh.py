@@ -283,6 +283,26 @@ class RefreshTests(unittest.TestCase):
         self.assertLessEqual({p.name for p in (self.home / ".hermes" / "plugins").iterdir()},
                              {"yantrik", "someone-else"})
 
+    def test_a_fresh_install_with_no_plugins_folder_yet_gets_its_plugin(self):
+        # A fresh Hermes has no ~/.hermes/plugins. With the staging moved out of it, nothing made
+        # it, and every fresh install failed at "could not put the desktop plugin in
+        # ~/.hermes/plugins/yantrik" (VM 542, 15 Oct 2026).
+        (self.home / ".hermes").mkdir()
+        plugins = self.home / ".hermes" / "plugins"
+        self.assertFalse(plugins.exists())
+        new = self.home / ".hermes" / ".yantrik-staging" / "yantrik-new"
+        new.mkdir(parents=True)
+        (new / "adapter.py").write_text("the new adapter\n")
+        result = subprocess.run(
+            ["sh", "-c", '. "$1"; hermes_swap_dir "$2" "$3"', "sh",
+             str(INSTALL / "hermes-plugins.sh"), str(new), str(plugins / "yantrik")],
+            capture_output=True, text=True, env=self.env(),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((plugins / "yantrik" / "adapter.py").read_text(), "the new adapter\n")
+        self.assertEqual({p.name for p in plugins.iterdir()}, {"yantrik"})
+        self.assertFalse((self.home / ".hermes" / ".yantrik-staging").exists(), "the staging is cleared")
+
     def test_a_staging_copy_an_interrupted_refresh_left_is_not_a_plugin_and_is_replaced(self):
         self.install_hermes()
         dest = self.install_desktop_plugin("old\n")
