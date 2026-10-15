@@ -4,13 +4,24 @@
 //! Both are `safe` and neither takes anything that names a conversation: the caller's
 //! conversation is what the desktop can establish about the caller, never what the caller says.
 //!
+//! **Only a call the desktop can attribute to the Lens conversation follows the Lens scope.**
+//! Every other caller answers `follows: false`, and its bridge keeps its own taint for as long as
+//! it runs, as the process scope always did. A caller the desktop cannot attribute is never
+//! guessed into the Lens's conversation: it keeps its taint (fail closed).
+//!
 //! - A believed agent token for `<harness>:main` — the person's chat with that mind — follows that
-//!   harness's scope. Any other agent (a sub-agent, a role, a recipe) answers `follows: false`:
-//!   the person's + does not start that mind's conversation again, so its bridge keeps the scope
-//!   it always had, its process. A token that is not believed is refused.
-//! - No token (Hermes and OpenClaw start their bridge with none): the attached mind the caller's
-//!   process tree resolves to, by the same walk `mind_view::requester_now` makes. No mind, or more
-//!   than one by that name, is refused.
+//!   harness's scope. The token is issued for that one conversation and the bridge that carries it
+//!   serves that conversation alone, so its calls are the Lens conversation's.
+//! - Any other agent (a sub-agent, a role, a recipe) answers `follows: false`: the person's + does
+//!   not start that mind's conversation again. A token that is not believed is refused.
+//! - **No token** (Hermes and OpenClaw start their bridge with none) answers `follows: false`.
+//!   One such bridge is the gateway's, and serves every session the gateway runs: the Lens, and
+//!   also its cron jobs, its background (`/bg`) tasks and any other platform it is on. Nothing the
+//!   desktop holds says which of those a call came from. The process walk names the mind, not
+//!   the session. An open Lens turn says when the Lens is working, not that this call is its
+//!   own: a cron job can call in the same second. Following the Lens scope there would let the
+//!   person's + clear a background session that had read private state (security review of #817,
+//!   design point 1). So a tokenless bridge keeps its taint until it ends, as it did before.
 //!
 //! A refusal is what the bridge reads as "the same scope": nothing it holds is cleared.
 //!
@@ -32,8 +43,10 @@ pub fn actions(surface: ControlSurface) -> ControlSurface {
             )
             .risk("safe"),
             move |_args| {
-                let Some(harness) = callers_conversation()? else { return Ok(not_followed()) };
-                Ok(answer(&harness, &taint_scope::current(&harness)))
+                Ok(match callers_conversation()? {
+                    Caller::Lens(harness) => answer(&harness, &taint_scope::current(&harness)),
+                    Caller::Own(why) => not_followed(why),
+                })
             },
         )
         .action(
@@ -44,9 +57,13 @@ pub fn actions(surface: ControlSurface) -> ControlSurface {
             .risk("safe")
             .arg(Param::text("read").describe("What was read, by the tool's name: os_describe, shell.read_screen")),
             move |args| {
-                let Some(harness) = callers_conversation()? else { return Ok(not_followed()) };
-                let read = args["read"].as_str().unwrap_or_default();
-                Ok(answer(&harness, &taint_scope::mark(&harness, read)))
+                Ok(match callers_conversation()? {
+                    Caller::Lens(harness) => {
+                        let read = args["read"].as_str().unwrap_or_default();
+                        answer(&harness, &taint_scope::mark(&harness, read))
+                    }
+                    Caller::Own(why) => not_followed(why),
+                })
             },
         )
 }
@@ -61,77 +78,69 @@ fn answer(harness: &str, scope: &Scope) -> serde_json::Value {
     })
 }
 
-fn not_followed() -> serde_json::Value {
-    serde_json::json!({
-        "follows": false,
-        "said": "This agent's conversation is its own, not one the person starts again with + in the Lens, so its taint lasts as long as its session.",
-    })
+fn not_followed(why: &str) -> serde_json::Value {
+    serde_json::json!({ "follows": false, "said": why })
 }
 
-/// The harness whose Lens conversation the caller is in; `None` for an agent whose conversation
-/// the person's + does not start again; an error when the desktop cannot tell.
-fn callers_conversation() -> Result<Option<String>, String> {
+/// Which conversation a caller's private reads count against.
+#[derive(Debug, PartialEq, Eq)]
+enum Caller {
+    /// The Lens conversation with this harness: the person's + starts it again.
+    Lens(String),
+    /// Its own, kept for as long as its bridge runs. Why, in the person's words.
+    Own(&'static str),
+}
+
+/// Another agent's own conversation: the person's + in the Lens is not about it.
+const AN_AGENTS_OWN: &str = "This agent's conversation is its own, not one the person starts again with + in the Lens, so its taint lasts as long as its session.";
+
+/// A bridge with no token: one process serving every session of its gateway.
+const A_SHARED_BRIDGE: &str = "This bridge carries no agent token, so the desktop cannot tell which of the mind's sessions a call comes from: the Lens conversation, a scheduled job, a background task or another chat. The person's + in the Lens does not clear it, so its taint lasts as long as the bridge runs.";
+
+/// The caller's conversation, from what the desktop itself can establish; an error when a token
+/// is presented and not believed.
+fn callers_conversation() -> Result<Caller, String> {
     match crate::control_agent_terminal::calling_agent() {
-        Some(Ok(agent)) => Ok(main_harness(&agent)),
+        Some(Ok(agent)) => Ok(attributed(Some(&agent))),
         Some(Err(why)) => Err(format!("the taint scope cannot be read for this caller: {why}")),
-        None => {
-            let pid = yantrik_app_runtime::control::caller()
-                .and_then(|c| u32::try_from(c.pid).ok())
-                .filter(|p| *p > 0 && *p != std::process::id())
-                .ok_or("the taint scope cannot be read: the desktop cannot tell which process is asking")?;
-            let who = crate::caller_identity::resolve(pid as i32);
-            let name = who
-                .attached_mind
-                .ok_or("the taint scope cannot be read: the caller is not one of the minds attached here")?;
-            harness_named(&name, &crate::caller_identity::attached_minds()).map(Some)
-        }
+        None => Ok(attributed(None)),
     }
 }
 
-/// `<harness>:main` follows the harness's scope; every other agent keeps its own.
-fn main_harness(agent: &AgentId) -> Option<String> {
-    (agent.conversation() == AgentId::MAIN).then(|| agent.harness().to_string())
-}
-
-/// The one attached mind called `name`, by its harness id.
-fn harness_named(name: &str, minds: &[crate::caller_identity::Mind]) -> Result<String, String> {
-    let ids: Vec<&str> = minds.iter().filter(|m| m.name == name).map(|m| m.id.as_str()).collect();
-    match ids.as_slice() {
-        [one] => Ok((*one).to_string()),
-        [] => Err(format!("the taint scope cannot be read: {name} is not attached here")),
-        _ => Err(format!("the taint scope cannot be read: more than one attached mind is called {name}")),
+/// The rule, apart from how the token is read. Only `<harness>:main`, by a believed token, is the
+/// Lens conversation. Any other agent, and any caller with no token, keeps its own.
+fn attributed(agent: Option<&AgentId>) -> Caller {
+    match agent {
+        Some(agent) if agent.conversation() == AgentId::MAIN => Caller::Lens(agent.harness().to_string()),
+        Some(_) => Caller::Own(AN_AGENTS_OWN),
+        None => Caller::Own(A_SHARED_BRIDGE),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::caller_identity::Mind;
 
-    fn mind(id: &str, name: &str) -> Mind {
-        Mind { id: id.into(), name: name.into(), pid: None }
-    }
-
-    /// The person's chat with a mind follows the Lens; an agent the person's + does not start
-    /// again keeps its own.
+    /// The person's chat with a mind, by its own token, follows the Lens; an agent the person's +
+    /// does not start again keeps its own.
     #[test]
     fn only_a_main_conversation_follows_the_lens() {
-        assert_eq!(main_harness(&AgentId::new("pi", AgentId::MAIN)), Some("pi".to_string()));
-        assert_eq!(main_harness(&AgentId::new("pi", "c-7f3a91")), None);
-        assert_eq!(main_harness(&AgentId::new("deepseek", "c-role1")), None);
+        assert_eq!(attributed(Some(&AgentId::new("pi", AgentId::MAIN))), Caller::Lens("pi".to_string()));
+        assert_eq!(attributed(Some(&AgentId::new("pi", "c-7f3a91"))), Caller::Own(AN_AGENTS_OWN));
+        assert_eq!(attributed(Some(&AgentId::new("deepseek", "c-role1"))), Caller::Own(AN_AGENTS_OWN));
     }
 
-    /// A caller with no token is placed by the mind it resolves to, and only when that is one.
+    /// A caller with no token is a gateway's bridge, shared by the Lens and the gateway's cron
+    /// jobs, background tasks and other chats. The desktop cannot say which of them is calling,
+    /// so it never follows the Lens: the person's + does not clear it (fail closed).
     #[test]
-    fn a_caller_with_no_token_is_placed_by_its_mind_or_not_at_all() {
-        let minds = [mind("builtin", "Yantrik Mind"), mind("hermes", "Hermes Agent"), mind("pi", "Pi")];
-        assert_eq!(harness_named("Hermes Agent", &minds), Ok("hermes".to_string()));
-        assert!(harness_named("OpenClaw", &minds).is_err());
-        let twice = [mind("hermes", "Hermes Agent"), mind("hermes-2", "Hermes Agent")];
-        assert!(harness_named("Hermes Agent", &twice).is_err(), "an ambiguous name is not a conversation");
+    fn a_caller_with_no_token_keeps_its_own_taint() {
+        assert_eq!(attributed(None), Caller::Own(A_SHARED_BRIDGE));
+        assert!(A_SHARED_BRIDGE.contains("does not clear it"), "the answer tells the truth about +");
     }
 
     /// Neither action takes anything that names a conversation, and neither is graded above `safe`.
+    /// Attribution reads no process walk and no turn: only the token says a call is the Lens's.
     #[test]
     fn neither_action_takes_a_conversation_from_the_caller() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/control_taint_scope.rs");
@@ -143,5 +152,7 @@ mod tests {
         }
         assert_eq!(code.matches(".risk(\"safe\")").count(), 2);
         assert!(!code.contains("begin_by_person"), "nothing on the surface begins a scope");
+        assert_eq!(code.matches("Caller::Lens(").count(), 3, "one rule makes a caller the Lens's; two actions read it");
+        assert!(!code.contains("caller_identity::resolve"), "a process walk names the mind, not the session");
     }
 }

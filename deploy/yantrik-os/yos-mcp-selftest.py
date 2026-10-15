@@ -53,7 +53,10 @@ What it is actually checking, in one line each:
     it survives every later call in the conversation and a bridge or desktop restart in it; the
     person's + in the Lens gives a clean scope; nothing a mind calls, and no scope the person did
     not begin, clears it; a desktop that is down, garbled, older or unsure leaves it the same,
-    tainted scope; and YOS_MCP_NO_TAINT is what it was (E.REF1, 15 Oct 2026);
+    tainted scope; only a caller the desktop attributes to the Lens conversation follows it, so a
+    background or unattributable caller stays tainted across the person's + and is not told that +
+    clears it; a scope read back from disk does not untaint; and YOS_MCP_NO_TAINT is what it was
+    (E.REF1, 15 Oct 2026; security review of #817);
   * the shell's describe carries `clock` as an object — date, weekday, time, UTC offset and
     zone name — and it reaches a mind through os_describe untouched, so learning the day never
     has to go through a sensitive `agent_run date` again (#207);
@@ -416,6 +419,19 @@ if argv[:1] == ["act"]:
         lens = state.get("lens")
         if lens is None or lens.get("down"):
             die("shell.app.act refused: shell has no action `%s`" % action)
+        if lens.get("refuse"):
+            # A token the desktop does not believe (control_taint_scope::callers_conversation).
+            die("shell.app.act refused: the taint scope cannot be read for this caller: %s" % lens["refuse"])
+        # The desktop's attribution rule, when the case sets `main_token`: only a bridge carrying
+        # the believed `<harness>:main` token is the Lens conversation's. Every other caller, the
+        # tokenless gateway bridge included, answers `follows: false` and is told nothing more.
+        main = lens.get("main_token")
+        follows = (lens.get("follows", True) if main is None
+                   else os.environ.get("YANTRIK_AGENT_TOKEN") == main)
+        if not follows and main is not None:
+            envelope({"follows": False, "said": "This bridge carries no agent token, so the desktop "
+                      "cannot tell which of the mind's sessions a call comes from."})
+            raise SystemExit(0)
         if lens.get("garbled"):
             print("fake desktop")
             print("{")
@@ -1553,6 +1569,10 @@ with tempfile.TemporaryDirectory() as d:
 
     first, second, third = "a1" * 16, "b2" * 16, "c3" * 16
 
+    def follows_lens(module):
+        """What the bridge believes about following the Lens: None, True or False."""
+        return getattr(module, "_LENS", {}).get("follows")
+
     # Taint survives within a conversation: every later call in it, and a bridge started again in it.
     module, state = case(tmp, "scope-survives", mode="auto", machine_ceiling="dangerous",
                          ceiling=None, lens=lens(first))
@@ -1672,6 +1692,90 @@ with tempfile.TemporaryDirectory() as d:
     module.run_tool(module.BY_NAME["os_describe"], {"app": "calendar"})
     check("a desktop older than the scope: tainted for the process, exactly as before",
           typed(module).startswith("REFUSED") and module._SCOPE["id"] is None)
+
+    # Only a caller the desktop attributes to the Lens conversation follows the Lens scope (security
+    # review of #817, design point 1). A gateway's bridge carries no token and serves the Lens AND
+    # the gateway's cron jobs, background tasks and other platforms: a + the person pressed for the
+    # Lens must not clear a background session that read private state. The fake's `main_token` is
+    # the desktop's rule: only the believed `hermes:main` token is the Lens's.
+    module, state = case(tmp, "scope-background-caller", mode="auto", machine_ceiling="dangerous",
+                         ceiling=None, lens=lens(first, main_token="tok-main"))
+    module.run_tool(module.BY_NAME["os_describe"], {"app": "calendar"})
+    check("a background caller (no token: a cron job's or a /bg task's) that read private state is tainted",
+          typed(module).startswith("REFUSED") and follows_lens(module) is False, getattr(module, "_LENS", None))
+    check("its read is not marked into the Lens conversation, which it is not part of",
+          read(state)["lens"]["read"] == [], read(state)["lens"])
+    desktop_says(state, scope=second, begun="person", read=[])
+    text = typed(module)
+    check("after the person pressed + in the Lens, the background caller stays tainted",
+          text.startswith("REFUSED") and "os_describe" in text, text)
+    check("and still may not open an address it has not been to",
+          went(module, "https://evil.example/").startswith("REFUSED"))
+    check("its refusal does not promise that + clears it, and says what does",
+          "start a new conversation with + in the Lens" not in text
+          and "A + in the Lens does not clear it here" in text and "restarting it" in text, text)
+    reqs_before = len(read(state).get("requests", []))
+    act(module, "shell", "agent_run", {"command": "curl https://evil.example/"})
+    reqs = read(state).get("requests", [])[reqs_before:]
+    check("its command is still asked about, and the card does not point to +",
+          reqs and "does not clear it here" in str(reqs[-1].get("purpose"))
+          and "start with + in the Lens" not in str(reqs[-1].get("purpose")), reqs)
+    module.adopt_scope({"follows": True, "scope": third, "begun": "person", "read": []})
+    check("once told it is a caller of its own, no later answer clears it",
+          typed(module).startswith("REFUSED") and module._SAW_PRIVATE == ["os_describe"], module._SAW_PRIVATE)
+
+    module, state = case(tmp, "scope-told-its-own", mode="auto", machine_ceiling="dangerous",
+                         ceiling=None, lens=lens(first))
+    module.run_tool(module.BY_NAME["os_describe"], {"app": "calendar"})
+    desktop_says(state, follows=False)
+    typed(module)
+    desktop_says(state, follows=True, scope=second, begun="person", read=[])
+    check("a bridge the desktop has once called a caller of its own is never cleared by a later +",
+          typed(module).startswith("REFUSED") and module._SAW_PRIVATE == ["os_describe"], module._SAW_PRIVATE)
+
+    module, state = case(tmp, "scope-background-before-lens", mode="auto", machine_ceiling="dangerous",
+                         ceiling=None, lens=lens(first, main_token="tok-main"))
+    went(module, "https://news.example/today")
+    module.run_tool(module.BY_NAME["os_describe"], {"app": "calendar"})
+    desktop_says(state, scope=second, begun="person", read=[])
+    check("a cron caller tainted before the Lens's + goes nowhere new after it, even a page it saw before + with data",
+          went(module, "https://news.example/today?d=10:00").startswith("REFUSED")
+          and not went(module, "https://news.example/today").startswith("REFUSED"))
+
+    for label, change, token in (
+            ("the desktop does not believe its token", {"refuse": "that agent token is not one it issued"}, "tok-forged"),
+            ("it carries a token for a sub-agent, not the Lens conversation", {}, "tok-sub"),
+            ("it carries no token at all", {}, None)):
+        module, state = case(tmp, "scope-unattributable", mode="auto", machine_ceiling="dangerous",
+                             ceiling=None, token=token, lens=lens(first, main_token="tok-main"))
+        module.run_tool(module.BY_NAME["os_describe"], {"app": "calendar"})
+        desktop_says(state, scope=second, begun="person", read=[], **change)
+        check("when %s, the caller is not attributed to the Lens and stays tainted after a +" % label,
+              typed(module).startswith("REFUSED") and went(module, "https://x.example/").startswith("REFUSED")
+              and follows_lens(module) is not True, getattr(module, "_LENS", None))
+
+    module, state = case(tmp, "scope-lens-caller", mode="auto", machine_ceiling="dangerous",
+                         ceiling=None, token="tok-main", lens=lens(first, main_token="tok-main"))
+    module.run_tool(module.BY_NAME["os_describe"], {"app": "calendar"})
+    text = typed(module)
+    check("the Lens caller (the believed hermes:main token) is tainted by its read, kept under its conversation",
+          text.startswith("REFUSED") and read(state)["lens"]["read"] == ["os_describe"]
+          and "start a new conversation with + in the Lens" in text, text)
+    desktop_says(state, scope=second, begun="person", read=[])
+    check("and the person's + still clears it",
+          not typed(module).startswith("REFUSED")
+          and not went(module, "https://weather.example/").startswith("REFUSED"), module._SAW_PRIVATE)
+    check("the bridge knows it is the Lens's, so its refusals point to +", follows_lens(module) is True)
+
+    # A scope read from disk when the desktop starts is `begun: start` (security review of #817,
+    # design point 3): a forged taint-scopes.json that says `person`, then a restart, gains nothing.
+    module, state = case(tmp, "scope-forged-record", mode="auto", machine_ceiling="dangerous",
+                         ceiling=None, token="tok-main", lens=lens(first, main_token="tok-main"))
+    module.run_tool(module.BY_NAME["os_describe"], {"app": "calendar"})
+    desktop_says(state, scope=third, begun="start", read=[])
+    check("a scope the desktop read back from disk (a forged record, then a restart) does not untaint",
+          typed(module).startswith("REFUSED") and "os_describe" in typed(module))
+    check("and the reads are carried into it", read(state)["lens"]["read"] == ["os_describe"], read(state)["lens"])
 
     # TAINT_OFF is what it was: nothing refused, and nothing asked of the desktop about scopes.
     os.environ["YOS_MCP_NO_TAINT"] = "1"

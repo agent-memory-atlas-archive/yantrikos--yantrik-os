@@ -213,7 +213,10 @@ person's decision. The scope is the person's conversation as the desktop counts 
 (`crates/yantrik-ui/src/taint_scope.rs`), not the bridge process: Hermes keeps one bridge across
 every new conversation, so a process scope tainted them all (E.REF1, 15 Oct 2026). Only the press
 begins a scope — not `new_chat` on the control surface, not a typed `/new`, not a restart — and a
-desktop that cannot say which conversation a bridge is in leaves it in the same, tainted one.
+desktop that cannot say which conversation a bridge is in leaves it in the same, tainted one. Only
+a bridge the desktop attributes to the Lens conversation (a believed `<harness>:main` token)
+follows it. A tokenless gateway bridge also serves cron jobs and background sessions, so it keeps
+its taint for its lifetime, and the person's + does not clear it.
 `bypass does not switch off the taint rule` in the selftest.
 
 ### 5. Everything it did without being asked is written down

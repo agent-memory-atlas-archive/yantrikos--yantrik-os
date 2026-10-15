@@ -1476,6 +1476,18 @@ def ambiguous(pair):
 # a token it does not believe, a caller it cannot place — is the SAME scope: nothing is cleared
 # on a failure, and a bridge that never hears from it keeps the process scope it always had.
 #
+# Only a bridge the desktop ATTRIBUTES to the Lens conversation follows it. The desktop answers
+# `follows: true` only to a believed `<harness>:main` token: a bridge that serves that one
+# conversation. Every other bridge hears `follows: false`: a sub-agent's, a role's, and every
+# bridge with no token. A tokenless bridge (Hermes's, OpenClaw's) is the gateway's, and it serves
+# the gateway's cron jobs, background tasks and other platforms as well as the Lens. Nothing says
+# which of them a call came from. Following the Lens there would let the person's + clear a
+# background session that read private state, which could then send it to the web (security
+# review of #817, design point 1). Such a bridge keeps its taint for as long as it runs, the
+# process scope it always had, and once told so it never follows a scope again. A bridge the
+# desktop cannot attribute (no answer, an error, a token not believed) keeps its taint too: fail
+# closed.
+#
 # There is still deliberately NO tool to clear the taint, and no action a mind can call starts a
 # scope: a caller that can untaint itself is not constrained. A new conversation the person
 # starts is the person's decision rather than an agent's.
@@ -1500,6 +1512,11 @@ _SCOPE_LOCK = threading.Lock()
 _UNMARKED = []
 # Scopes this bridge has moved on from. A late answer naming one is stale, and is not adopted.
 _LEFT = set()
+# Whether the desktop has attributed this bridge to the Lens conversation: None until it has
+# answered, True for `follows: true`, False once it has said `follows: false`. False is for the
+# bridge's whole life: a bridge the desktop has called a caller of its own (a gateway's, shared by
+# sessions the person's + is not about) is never cleared by the Lens, whatever is said later.
+_LENS = {"follows": None}
 # A read of the scope is on the way to a decision the mind is waiting for, so it gets a few
 # seconds rather than SHELL_CALL_TIMEOUT. One that runs out is the same scope (fail closed).
 SCOPE_CALL_TIMEOUT = 5
@@ -1508,6 +1525,21 @@ SCOPE_CALL_TIMEOUT = 5
 CLEAN_SCOPE = ("start a new conversation with + in the Lens and ask there: a conversation the "
                "person starts has read nothing private. Nothing a mind does starts one — not "
                "typing /new, not a new chat asked for by a mind, not a restart")
+# What is true instead for a bridge the desktop has not attributed to the Lens conversation. Its
+# taint lasts as long as the bridge, so a + in the Lens does not clear it, and the refusal must not
+# say it does (E.REF1 was that sentence being false).
+OWN_SCOPE = ("end this mind's session and start a new one, which is the person's decision. For a "
+             "mind that serves several sessions through one bridge (Hermes, OpenClaw), that means "
+             "restarting it. A + in the Lens does not clear it here: the desktop has not placed "
+             "this bridge in the Lens conversation, and a bridge with no token of its own may also "
+             "serve the mind's other sessions (scheduled jobs, background tasks, other chats). "
+             "Nothing a mind does clears it — not typing /new, not a new chat "
+             "asked for by a mind, not a restart a mind makes")
+
+
+def clean_scope():
+    """The one true way to a clean scope for THIS bridge, as the person is told it."""
+    return CLEAN_SCOPE if _LENS["follows"] is True else OWN_SCOPE
 
 
 def _scope_answer(result):
@@ -1530,11 +1562,21 @@ def adopt_scope(result, marked=None):
 
     `marked` is the read this answer is the desktop's reply to marking, if it is one: once the
     desktop's answer holds it, the desktop keeps it and it is no longer this bridge's alone."""
+    if isinstance(result, dict) and result.get("follows") is False:
+        with _SCOPE_LOCK:
+            _LENS["follows"] = False    # a caller of its own, for this bridge's whole life
+        return
     answer = _scope_answer(result)
     if answer is None:
         return          # the same scope: nothing is cleared on anything but the desktop's word
     scope, begun, read = answer
     with _SCOPE_LOCK:
+        if _LENS["follows"] is False:
+            # Told before that this bridge is not the Lens conversation's. An answer that now says
+            # it is cannot be from the same caller, as a token and a process do not change. It is
+            # never a reason to clear: the reads stay (fail closed).
+            return
+        _LENS["follows"] = True
         if scope in _LEFT:
             # An answer that left the desktop before a later one this bridge has already adopted
             # (calls run on threads of their own). Never a reason to go back, and never a reason
@@ -1687,11 +1729,18 @@ def private_card_line(app, action):
     saw = ", ".join(dict.fromkeys(_SAW_PRIVATE))
     if (app, action) in HANDOFFS:
         return ("Carries what this conversation has read (%s). Once it is handed on, that cannot be "
-                "undone. A conversation you start with + in the Lens has read nothing private."
-                % saw)
+                "undone. %s" % (saw, fresh_card_line()))
     return ("This conversation has already read private state (%s), and a command can carry "
             "anything off this machine, so you are asked whatever the mode. What leaves cannot be "
-            "undone. A conversation you start with + in the Lens has read nothing private." % saw)
+            "undone. %s" % (saw, fresh_card_line()))
+
+
+def fresh_card_line():
+    """The card's last sentence: what gives the person a clean scope, true for this bridge."""
+    if _LENS["follows"] is True:
+        return "A conversation you start with + in the Lens has read nothing private."
+    return ("This mind's taint lasts as long as its session: a + in the Lens does not clear it "
+            "here.")
 
 
 # Every address this session has gone to, as `visited_form` spells it. Once the session has read
@@ -1734,7 +1783,7 @@ def taint_refusal(name, args):
             "Whatever is on this machine could be carried out that way, and nothing here "
             "can tell an innocent string from a secret. A person has to do this part, or "
             "%s. Tell the person exactly that; do not tell them a new chat will clear it "
-            "in any other way." % (saw, what, CLEAN_SCOPE))
+            "in any other way." % (saw, what, clean_scope()))
 
 
 
