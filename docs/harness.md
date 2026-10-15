@@ -219,6 +219,15 @@ is not spent by another through `consume_approval`. Stop on a parent stops its c
 `read_agent` answers with the agent's recent turns as text, and counts as reading private state
 for the bridge's taint rule: after it, the bridge will not type into a page.
 
+The taint lasts for the person's conversation, as the desktop counts it, not for the bridge
+process. The bridge reads which conversation it is in from the shell (`taint_scope`) and marks
+each private read to it (`taint_mark`); neither takes anything from the mind. A believed token
+for `<harness>:main`, or a tokenless bridge the shell can place as an attached mind, follows that
+mind's conversation in the Lens; any other agent's bridge keeps its own session's taint. Only the
+person's **+** in the Lens begins a clean conversation: not `new_chat` on the control surface,
+not a typed `/new`, not a restart of the desktop, the harness or the bridge. A shell that cannot
+answer leaves the bridge in the same, tainted conversation.
+
 And one more, for handing work to a role from the desktop's **agent catalog** rather than to a
 mind (design/desk-and-mind-2026-09-23.md, section 5):
 

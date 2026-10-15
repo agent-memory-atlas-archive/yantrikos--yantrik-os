@@ -101,6 +101,9 @@ mod control_agents;
 mod control_workroom;
 // The chat in one read, for the Yantrik terminal (`chat_view`).
 mod control_chat;
+// Which of the person's conversations a bridge's private reads count against (`taint_scope`,
+// `taint_mark`), for yos-mcp's taint rule.
+mod control_taint_scope;
 mod jobs;
 mod cards;
 mod card_watch;
@@ -173,6 +176,8 @@ mod running;
 mod streaming;
 mod surfaces;
 mod system_context;
+// The taint's scope: one per mind's conversation in the Lens, begun only by the person's +.
+mod taint_scope;
 mod telegram;
 mod terminal;
 mod terminal_window;

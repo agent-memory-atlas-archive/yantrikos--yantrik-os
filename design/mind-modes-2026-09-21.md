@@ -208,7 +208,12 @@ Once a session has read private state (`os_describe`, `os_perception`, `web_list
 says how much the person trusts the mind; the taint says what this session has already read. They
 are different questions, and a bypass that switched off the second one would turn "do not ask me
 about things" into "carry my private state out to a web page". There is still no tool that clears
-it; the only way back is a new session, which is a person's decision.
+it; the only way back is a new conversation the person starts with **+** in the Lens, which is a
+person's decision. The scope is the person's conversation as the desktop counts it
+(`crates/yantrik-ui/src/taint_scope.rs`), not the bridge process: Hermes keeps one bridge across
+every new conversation, so a process scope tainted them all (E.REF1, 15 Oct 2026). Only the press
+begins a scope — not `new_chat` on the control surface, not a typed `/new`, not a restart — and a
+desktop that cannot say which conversation a bridge is in leaves it in the same, tainted one.
 `bypass does not switch off the taint rule` in the selftest.
 
 ### 5. Everything it did without being asked is written down
