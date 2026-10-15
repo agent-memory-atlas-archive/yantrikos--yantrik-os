@@ -219,6 +219,20 @@ is not spent by another through `consume_approval`. Stop on a parent stops its c
 `read_agent` answers with the agent's recent turns as text, and counts as reading private state
 for the bridge's taint rule: after it, the bridge will not type into a page.
 
+The taint lasts for the person's conversation, as the desktop counts it, not for the bridge
+process. The bridge reads which conversation it is in from the shell (`taint_scope`) and marks
+each private read to it (`taint_mark`); neither takes anything from the mind. Only a bridge the
+shell attributes to the Lens conversation follows it, and that means a believed token for
+`<harness>:main`. Every other bridge keeps its own taint for as long as it runs, as the process
+scope did: another agent's bridge, and every bridge with **no token**. A tokenless bridge
+(Hermes's, OpenClaw's) is the gateway's. It serves the gateway's cron jobs, background tasks and
+other platforms as well as the Lens, and the shell cannot tell which of them a call came from. So
+the person's **+** does not clear it, and its refusals say so. Only the person's **+** in the Lens
+begins a clean conversation: not `new_chat` on the control surface, not a typed `/new`, not a
+restart of the desktop, the harness or the bridge. A scope read back from disk is reported
+`begun: start`, so a record that says otherwise clears nothing. A shell that cannot answer leaves
+the bridge in the same, tainted conversation.
+
 And one more, for handing work to a role from the desktop's **agent catalog** rather than to a
 mind (design/desk-and-mind-2026-09-23.md, section 5):
 
