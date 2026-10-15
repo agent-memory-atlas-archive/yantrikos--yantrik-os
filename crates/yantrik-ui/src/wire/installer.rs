@@ -634,7 +634,10 @@ fn install_to_target(
 
     // The boot menu's theme, from the image (stage-grub-theme.sh) to /boot, where GRUB can read it
     // on an encrypted install too: /usr is inside the encryption, /boot is not.
-    let themed = install_grub_theme(mount_dir);
+    // On UEFI only: on a legacy BIOS the themed menu stops at "unaligned pointer" instead of
+    // booting (the live image's grub.cfg says the same and why), so a BIOS install gets the
+    // plain gfxterm menu and no GRUB_THEME.
+    let themed = theme_for_boot(is_efi, || install_grub_theme(mount_dir));
 
     // Configure GRUB defaults. The kernel's line is installer_unlock's: the pre-boot screen on an
     // encrypted install, and the quiet that keeps kernel lines off the password prompt.
@@ -1579,6 +1582,13 @@ fn autologin_dropin(username: &str) -> String {
 const GRUB_THEME_SOURCE: &str = "/usr/share/yantrik/grub-theme";
 const GRUB_THEME_DIR: &str = "/boot/grub/themes/yantrik";
 
+/// Whether the installed machine's menu is themed: on UEFI, when `copy` puts the theme in place;
+/// never on a legacy BIOS, where GRUB's themed menu stops at "unaligned pointer" instead of
+/// booting (CI's SeaBIOS boot test of 6ebe7787, 15 Oct 2026). On a BIOS install nothing is copied.
+fn theme_for_boot(is_efi: bool, copy: impl FnOnce() -> bool) -> bool {
+    is_efi && copy()
+}
+
 /// Copy the boot menu's theme into the installed /boot. False when the image has none or the copy
 /// fails: GRUB then draws its plain menu, in GRUB's own unicode font, and the install goes on.
 fn install_grub_theme(mount_dir: &str) -> bool {
@@ -1999,7 +2009,7 @@ mod tests {
 
 #[cfg(test)]
 mod grub_defaults_tests {
-    use super::{autologin_dropin, grub_defaults, AUTOLOGIN_FLAGS};
+    use super::{autologin_dropin, grub_defaults, theme_for_boot, AUTOLOGIN_FLAGS};
 
     /// No serial console on the kernel's line of an installed machine: without a port, systemd's
     /// serial login prompt failed and restarted every ten seconds for as long as it ran.
@@ -2027,6 +2037,26 @@ mod grub_defaults_tests {
             assert!(!text.lines().any(|l| l.starts_with("GRUB_TERMINAL=")), "GRUB_TERMINAL would override both: {text}");
             assert!(text.is_ascii(), "{text}");
         }
+    }
+
+    /// The theme is a UEFI menu's only: on a legacy BIOS GRUB stopped at "unaligned pointer" in the
+    /// themed menu instead of booting (CI's SeaBIOS boot test, 15 Oct 2026). A BIOS install copies
+    /// no theme and so writes no GRUB_THEME; the live image sets it only under grub_platform=efi.
+    #[test]
+    fn the_boot_menu_theme_is_for_uefi_only() {
+        let mut copied = false;
+        assert!(!theme_for_boot(false, || { copied = true; true }), "a BIOS install is not themed");
+        assert!(!copied, "and nothing is copied for it");
+        assert!(theme_for_boot(true, || true), "a UEFI install is, when the copy works");
+        assert!(!theme_for_boot(true, || false), "and is not when it does not");
+        assert!(!grub_defaults(false, theme_for_boot(false, || true)).contains("GRUB_THEME"));
+
+        let iso = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../deploy/yantrik-os/build-debian-iso.sh"));
+        let guard = iso.find("if [ \"${grub_platform}\" = \"efi\" ]; then").expect("the theme's UEFI guard");
+        let set = iso.find("set theme=/boot/grub/themes/yantrik/theme.txt").expect("the theme");
+        let end = guard + iso[guard..].find("\nfi\n").expect("the guard's end");
+        assert!(guard < set && set < end, "the theme is set only inside the UEFI guard");
+        assert_eq!(iso.matches("set theme=").count(), 1, "and nowhere else");
     }
 
     /// Nothing on tty1 before the desktop, on the live image and on both installers' machines.
