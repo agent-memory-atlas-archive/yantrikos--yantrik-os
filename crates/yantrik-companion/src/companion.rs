@@ -2230,6 +2230,8 @@ impl CompanionService {
         // Discovery rounds are limited; actual tool rounds reset the counter.
         // Max rounds adapt to model capability — smaller models get fewer steps.
         let mut discovery_budget = if degraded { 0 } else { self.config.tools.max_tool_rounds };
+        // Rounds whose reply was a tool call that could not be read (`unread_call_note`).
+        let mut unread_calls = 0usize;
         let max_total_rounds = if degraded { 3 } else {
             // Use the minimum of config max_steps and profile max_agent_steps
             self.config.agent.max_steps.min(active_profile.max_agent_steps).max(3)
@@ -2329,6 +2331,15 @@ impl CompanionService {
                 parse_tool_calls(&llm_response.text)
             };
 
+            // A native call that could not be read is not an answer: tell the model and go round.
+            if tool_calls.is_empty() && llm_response.is_unread_tool_call() {
+                tracing::warn!(finish_reason = %llm_response.stop_reason, "the model's tool call could not be read; asking again");
+                unread_calls += 1;
+                messages.push(ChatMessage::assistant(&llm_response.text));
+                messages.push(ChatMessage::user(unread_call_note(&llm_response)));
+                continue;
+            }
+
             if tool_calls.is_empty() {
                 // Nudge on empty: if response is weak and we have budget, push LLM to try harder
                 if self.config.agent.nudge_on_empty && self.config.tools.enabled {
@@ -2360,15 +2371,7 @@ impl CompanionService {
 
             let text_part = extract_text_content(&llm_response.text);
 
-            // Add assistant message with proper format
-            if self.use_native_tools && !llm_response.api_tool_calls.is_empty() {
-                messages.push(ChatMessage::assistant_with_tool_calls(
-                    &llm_response.text,
-                    llm_response.api_tool_calls.clone(),
-                ));
-            } else {
-                messages.push(ChatMessage::assistant(&llm_response.text));
-            }
+            messages.push(assistant_turn(&llm_response.text, &llm_response, self.use_native_tools));
 
             let tc_pairs: Vec<(String, serde_json::Value)> = tool_calls
                 .iter()
@@ -2415,6 +2418,10 @@ impl CompanionService {
                     response_text = text;
                 }
             }
+        }
+        if response_text.is_empty() && unread_calls > 0 {
+            response_text = UNREAD_TOOL_CALL.to_string();
+            model_failure = Some(format!("{unread_calls} tool call(s) from the model could not be read"));
         }
         if response_text.is_empty() {
             response_text = "I'm here. How can I help?".to_string();
@@ -3111,6 +3118,8 @@ impl CompanionService {
 
         // Round 1: streaming
         let mut streamed_text = String::new();
+        // Rounds whose reply was a tool call that could not be read (`unread_call_note`).
+        let mut unread_calls = 0usize;
         // Compute tools_param in a temporary scope so it drops before any mutable borrow of native_tools
         let llm_response = {
             let tools_param: Option<&[serde_json::Value]> = if self.use_native_tools && !native_tools.is_empty() {
@@ -3172,7 +3181,10 @@ impl CompanionService {
                         "Tool calls detected in streaming response"
                     );
                 }
-                if tool_calls.is_empty() {
+                // A native call that could not be read is not an answer either: the follow-up
+                // rounds below tell the model so and ask again.
+                let unread = tool_calls.is_empty() && r.is_unread_tool_call();
+                if tool_calls.is_empty() && !unread {
                     response_text = if !streamed_text.is_empty() {
                         streamed_text.clone()
                     } else {
@@ -3189,7 +3201,11 @@ impl CompanionService {
                     };
 
                     on_token("__REPLACE__");
-                    let tool_names: Vec<&str> = tool_calls.iter().map(|c| c.name.as_str()).collect();
+                    let tool_names: Vec<&str> = if unread {
+                        r.api_tool_calls.iter().map(|c| c.function.name.as_str()).collect()
+                    } else {
+                        tool_calls.iter().map(|c| c.name.as_str()).collect()
+                    };
                     let progress_msg = format_tool_progress(&tool_names, 1);
                     if display_text.is_empty() {
                         on_token(&format!("{}\n", progress_msg));
@@ -3197,39 +3213,38 @@ impl CompanionService {
                         on_token(&format!("{}\n{}\n", display_text, progress_msg));
                     }
 
-                    // Add assistant message with proper format
-                    if self.use_native_tools && !r.api_tool_calls.is_empty() {
-                        messages.push(ChatMessage::assistant_with_tool_calls(
-                            full_text, r.api_tool_calls.clone(),
-                        ));
-                    } else {
-                        messages.push(ChatMessage::assistant(full_text));
-                    }
-
                     // Execute first round of tool calls
                     let tc_pairs: Vec<(String, serde_json::Value)> = tool_calls
                         .iter()
                         .map(|c| (c.name.clone(), c.arguments.clone()))
                         .collect();
-                    execute_tool_round_tracked(
-                        &self.registry, &mut self.guard, &self.db,
-                        &tc_pairs, &mut messages, &mut tool_calls_made,
-                        &mut injected_tool_names, max_perm, &self.task_manager,
-                        self.use_native_tools,
-                        &r.api_tool_calls,
-                        &mut native_tools,
-                        &mut agent_loop,
-                        self.config.agent.error_recovery,
-                        self.incognito,
-                        self.cortex.as_mut(),
-                        agent_spawner.as_ref(),
-                        self.event_bus.as_ref(),
-                        msg_trace,
-                        &self.policy_engine,
-                        &self.trust_state,
-                        self.model_family,
-                        active_profile.tier,
-                    );
+                    if unread {
+                        tracing::warn!(finish_reason = %r.stop_reason, "the model's tool call could not be read; asking again");
+                        unread_calls += 1;
+                        messages.push(ChatMessage::assistant(full_text));
+                        messages.push(ChatMessage::user(unread_call_note(&r)));
+                    } else {
+                        messages.push(assistant_turn(full_text, &r, self.use_native_tools));
+                        execute_tool_round_tracked(
+                            &self.registry, &mut self.guard, &self.db,
+                            &tc_pairs, &mut messages, &mut tool_calls_made,
+                            &mut injected_tool_names, max_perm, &self.task_manager,
+                            self.use_native_tools,
+                            &r.api_tool_calls,
+                            &mut native_tools,
+                            &mut agent_loop,
+                            self.config.agent.error_recovery,
+                            self.incognito,
+                            self.cortex.as_mut(),
+                            agent_spawner.as_ref(),
+                            self.event_bus.as_ref(),
+                            msg_trace,
+                            &self.policy_engine,
+                            &self.trust_state,
+                            self.model_family,
+                            active_profile.tier,
+                        );
+                    }
 
                     // Remaining rounds: discovery rounds are budget-limited,
                     // actual tool rounds run until the hard cap.
@@ -3253,6 +3268,13 @@ impl CompanionService {
                                 } else {
                                     parse_tool_calls(&r2.text)
                                 };
+                                if tc2.is_empty() && r2.is_unread_tool_call() {
+                                    tracing::warn!(finish_reason = %r2.stop_reason, "the model's tool call could not be read; asking again");
+                                    unread_calls += 1;
+                                    messages.push(ChatMessage::assistant(&r2.text));
+                                    messages.push(ChatMessage::user(unread_call_note(&r2)));
+                                    continue;
+                                }
                                 if tc2.is_empty() {
                                     on_token("__REPLACE__");
                                     on_token(&r2.text);
@@ -3297,13 +3319,7 @@ impl CompanionService {
                                     on_token(&format!("{}\n{}\n", round_display, progress_msg2));
                                 }
 
-                                if self.use_native_tools && !r2.api_tool_calls.is_empty() {
-                                    messages.push(ChatMessage::assistant_with_tool_calls(
-                                        &r2.text, r2.api_tool_calls.clone(),
-                                    ));
-                                } else {
-                                    messages.push(ChatMessage::assistant(&r2.text));
-                                }
+                                messages.push(assistant_turn(&r2.text, &r2, self.use_native_tools));
 
                                 let tc2_pairs: Vec<(String, serde_json::Value)> = tc2
                                     .iter()
@@ -3422,8 +3438,16 @@ impl CompanionService {
             }
         }
 
-        if response_text.is_empty() {
-            response_text = "I'm here. How can I help?".to_string();
+        // Never an empty bubble: whatever was streamed, the turn ends on words.
+        if response_text.trim().is_empty() {
+            response_text = if unread_calls > 0 {
+                model_failure = Some(format!("{unread_calls} tool call(s) from the model could not be read"));
+                UNREAD_TOOL_CALL.to_string()
+            } else {
+                "I'm here. How can I help?".to_string()
+            };
+            on_token("__REPLACE__");
+            on_token(&response_text);
         }
 
         // Record tool chain trace for learning (streaming path)
@@ -4148,6 +4172,50 @@ impl CompanionService {
 /// reachable, so the turn is not offline; it failed, and the person is told so in words.
 fn thought_without_answer(e: &(dyn std::error::Error + Send + Sync + 'static)) -> bool {
     e.downcast_ref::<ThoughtWithoutAnswer>().is_some()
+}
+
+/// What the person is told when every reply the model gave was a tool call nobody could read.
+pub const UNREAD_TOOL_CALL: &str =
+    "The model tried to use a tool, but its call could not be read; try again or choose another model.";
+
+/// What the model is told when its native call could not be read ([`yantrik_ml::LLMResponse::is_unread_tool_call`]),
+/// so the next round can call again rather than the turn ending as an empty answer.
+fn unread_call_note(r: &yantrik_ml::LLMResponse) -> String {
+    match r.unread_tool_calls().first() {
+        Some(call) => {
+            let arguments: String = call.function.arguments.chars().take(200).collect();
+            format!(
+                "Your call to `{}` could not be run: its arguments are not JSON ({arguments}). \
+                 Call it again with JSON arguments, or answer in words.",
+                call.function.name
+            )
+        }
+        None => "Your reply ended as a tool call, but no call came with it. Call the tool again, \
+                 or answer in words."
+            .to_string(),
+    }
+}
+
+/// The assistant's turn as the conversation keeps it. With the tools described in the prompt, a
+/// call the server sent natively (llama.cpp with --jinja, vLLM: they read a `<tool_call>` the
+/// model wrote into `tool_calls` whether or not the request had tools) is written back as the
+/// text call it was, so the next round reads its own call before the result, not an empty turn.
+fn assistant_turn(text: &str, r: &yantrik_ml::LLMResponse, use_native_tools: bool) -> ChatMessage {
+    if use_native_tools && !r.api_tool_calls.is_empty() {
+        return ChatMessage::assistant_with_tool_calls(text, r.api_tool_calls.clone());
+    }
+    if r.api_tool_calls.is_empty() || !text.trim().is_empty() {
+        return ChatMessage::assistant(text);
+    }
+    let calls: Vec<String> = r
+        .tool_calls
+        .iter()
+        .map(|c| {
+            let call = serde_json::json!({"name": c.name, "arguments": c.arguments});
+            format!("<tool_call>\n{call}\n</tool_call>")
+        })
+        .collect();
+    ChatMessage::assistant(calls.join("\n"))
 }
 
 /// Compute recall confidence from result scores.
@@ -6340,5 +6408,222 @@ mod vault_audit_tests {
             assert!(!catalog.contains(hidden), "the outside catalogue shows {hidden}");
         }
         assert!(catalog.contains("calculate"));
+    }
+}
+
+#[cfg(test)]
+mod native_tool_reply_tests {
+    //! VM 542, 14 Oct 2026: the first run asked the companion to use `calculate` for 17 times 23
+    //! and got an empty answer. The model, a Qwen3 behind a llama.cpp server, was on the medium
+    //! tier with the tools described in the prompt, so the request carried no `tools`; the server
+    //! answered with a native `tool_calls` reply all the same. Here the recorded stream is served
+    //! from a local port to a real [`yantrik_ml::ApiLLM`], set up the way the first run sets it up.
+
+    use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+
+    const MODEL: &str = "qwen3.8-flash-next-unsloth-ud-iq4_xs";
+    const NATIVE_CALL: &str = include_str!("../../yantrik-ml/src/llm/testdata/qwen3_native_tool_call.sse");
+    const ASK: &str = "Use the calculate tool to work out 17 times 23, and tell me the result.";
+
+    type Requests = Arc<Mutex<Vec<serde_json::Value>>>;
+
+    /// A server on a local port that answers each request with `reply(request)` (a content type
+    /// and a body) and keeps every request body it was sent.
+    fn server(reply: impl Fn(&serde_json::Value) -> (&'static str, String) + Send + 'static) -> (String, Requests) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let kept = seen.clone();
+        std::thread::spawn(move || {
+            while let Ok((mut conn, _)) = listener.accept() {
+                let mut reader = BufReader::new(conn.try_clone().unwrap());
+                let mut length = 0usize;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" || line.is_empty() {
+                        break;
+                    }
+                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = v.trim().parse().unwrap();
+                    }
+                }
+                let mut request = vec![0u8; length];
+                reader.read_exact(&mut request).unwrap();
+                let request: serde_json::Value = serde_json::from_slice(&request).unwrap();
+                let (kind, body) = match reply(&request) {
+                    ("application/json", body) if request["stream"] == true => ("text/event-stream", as_stream(&body)),
+                    other => other,
+                };
+                kept.lock().unwrap().push(request);
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                conn.write_all(head.as_bytes()).unwrap();
+                conn.write_all(body.as_bytes()).unwrap();
+            }
+        });
+        (url, seen)
+    }
+
+    /// A whole reply as the server streams it: the words, the calls, then the finish reason.
+    fn as_stream(body: &str) -> String {
+        let reply: serde_json::Value = serde_json::from_str(body).unwrap();
+        let message = &reply["choices"][0]["message"];
+        let mut calls = message["tool_calls"].clone();
+        for (i, call) in calls.as_array_mut().into_iter().flatten().enumerate() {
+            call["index"] = serde_json::json!(i);
+        }
+        let deltas = [
+            serde_json::json!({"choices": [{"delta": {"content": message["content"]}}]}),
+            serde_json::json!({"choices": [{"delta": {"tool_calls": calls}}]}),
+            serde_json::json!({"choices": [{"delta": {}, "finish_reason": reply["choices"][0]["finish_reason"]}]}),
+        ];
+        deltas.iter().map(|d| format!("data: {d}\n\n")).collect::<String>() + "data: [DONE]\n\n"
+    }
+
+    fn last_user_words(request: &serde_json::Value) -> String {
+        request["messages"].as_array().unwrap().iter().rev()
+            .find(|m| m["role"] == "user" || m["role"] == "tool")
+            .and_then(|m| m["content"].as_str())
+            .unwrap_or("")
+            .to_string()
+    }
+
+    fn words(text: &str) -> (&'static str, String) {
+        let reply = serde_json::json!({
+            "choices": [{"message": {"role": "assistant", "content": text}, "finish_reason": "stop"}],
+        });
+        ("application/json", reply.to_string())
+    }
+
+    fn native_call(name: &str, arguments: &str) -> (&'static str, String) {
+        let reply = serde_json::json!({
+            "choices": [{"message": {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "call_1", "type": "function", "function": {"name": name, "arguments": arguments}}
+            ]}, "finish_reason": "tool_calls"}],
+        });
+        ("application/json", reply.to_string())
+    }
+
+    /// The llama-server VM 542 found: the turn's first, streamed, request gets the recorded
+    /// native call, and a later one that carries the tool's result is answered from it.
+    fn the_vms_server(request: &serde_json::Value) -> (&'static str, String) {
+        if request["stream"] == true {
+            return ("text/event-stream", NATIVE_CALL.to_string());
+        }
+        let last = last_user_words(request);
+        if last.contains("391") { words("17 times 23 is 391.") } else { words("Noted.") }
+    }
+
+    /// The companion as a fresh install has it after the first run: started with no model
+    /// chosen, then given the one the first run found on the LAN.
+    fn companion(url: String) -> CompanionService {
+        let db = YantrikDB::new(":memory:", 384).expect("in-memory database");
+        let mut c = CompanionService::new(db, Arc::new(yantrik_ml::not_set_up::NotSetUpLLM), CompanionConfig::default());
+        c.swap_llm(Arc::new(yantrik_ml::ApiLLM::new(url, None, MODEL).for_provider("llamacpp")));
+        assert_eq!(c.capability_profile.tier, yantrik_ml::ModelTier::Medium);
+        assert!(!c.use_native_tools, "the tools are described in the prompt, as on the VM");
+        c
+    }
+
+    fn streamed(c: &mut CompanionService, ask: &str) -> (AgentResponse, String) {
+        let mut shown = String::new();
+        let reply = c.handle_message_streaming(ask, |t| {
+            if t == "__REPLACE__" {
+                shown.clear();
+            } else {
+                shown.push_str(t);
+            }
+        });
+        (reply, shown)
+    }
+
+    #[test]
+    fn a_medium_tier_turn_that_gets_a_native_call_runs_the_tool_and_answers_with_the_result() {
+        let (url, seen) = server(the_vms_server);
+        let mut c = companion(url);
+        let (reply, shown) = streamed(&mut c, ASK);
+        assert!(reply.message.contains("391"), "{:?}", reply.message);
+        assert!(shown.contains("391"), "the bubble shows the answer: {shown:?}");
+        assert_eq!(reply.tool_calls_made, vec!["calculate".to_string()]);
+        assert!(reply.model_failure.is_none() && !reply.offline_mode);
+
+        let seen = seen.lock().unwrap();
+        assert!(seen.iter().all(|r| r.get("tools").is_none()), "no request carried tools");
+        let follow_up = seen.iter().find(|r| r["stream"] == false).expect("a round after the tool ran");
+        let turns = follow_up["messages"].as_array().unwrap();
+        let call = &turns[turns.len() - 2];
+        assert_eq!(call["role"], "assistant");
+        assert!(
+            call["content"].as_str().unwrap().contains("\"name\":\"calculate\""),
+            "the next round reads its own call, not an empty turn: {call}"
+        );
+        assert!(last_user_words(follow_up).contains("17 * 23 = 391"), "{}", last_user_words(follow_up));
+    }
+
+    #[test]
+    fn the_same_holds_without_streaming() {
+        let (url, _) = server(|request| {
+            let last = last_user_words(request);
+            if last.contains("391") { words("17 times 23 is 391.") } else { native_call("calculate", r#"{"expression": "17 * 23"}"#) }
+        });
+        let reply = companion(url).handle_message(ASK);
+        assert!(reply.message.contains("391"), "{:?}", reply.message);
+        assert_eq!(reply.tool_calls_made, vec!["calculate".to_string()]);
+    }
+
+    #[test]
+    fn a_native_call_that_cannot_be_read_is_asked_again_and_not_shown_as_an_empty_answer() {
+        let (url, seen) = server(|request| {
+            let last = last_user_words(request);
+            if last.contains("391") {
+                words("17 times 23 is 391.")
+            } else if last.contains("could not be run") {
+                native_call("calculate", r#"{"expression": "17 * 23"}"#)
+            } else {
+                native_call("calculate", r#"{"expression": 17 * 23}"#)
+            }
+        });
+        let mut c = companion(url);
+        let (reply, shown) = streamed(&mut c, ASK);
+        assert!(reply.message.contains("391") && shown.contains("391"), "{shown:?}");
+        let seen = seen.lock().unwrap();
+        assert!(
+            seen.iter().any(|r| last_user_words(r).contains("its arguments are not JSON")),
+            "the model was told why its call did not run"
+        );
+    }
+
+    #[test]
+    fn a_model_whose_calls_can_never_be_read_ends_the_turn_in_words() {
+        let (url, _) = server(|_| native_call("calculate", "{not json"));
+        let mut c = companion(url);
+        let (reply, shown) = streamed(&mut c, ASK);
+        assert_eq!(shown, UNREAD_TOOL_CALL, "never an empty bubble");
+        assert_eq!(reply.message, UNREAD_TOOL_CALL);
+        assert!(reply.model_failure.is_some() && !reply.offline_mode);
+
+        let (url, _) = server(|_| native_call("calculate", "{not json"));
+        let reply = companion(url).handle_message(ASK);
+        assert_eq!(reply.message, UNREAD_TOOL_CALL);
+        assert!(reply.model_failure.is_some());
+    }
+
+    #[test]
+    fn a_native_call_to_a_tool_the_companion_does_not_have_is_refused_as_before() {
+        let (url, seen) = server(|request| {
+            let last = last_user_words(request);
+            if last.contains("Unknown tool") { words("I can't do that.") } else { native_call("format_disk", "{}") }
+        });
+        let reply = companion(url).handle_message(ASK);
+        assert_eq!(reply.message, "I can't do that.");
+        let seen = seen.lock().unwrap();
+        assert!(seen.iter().any(|r| last_user_words(r).contains("Unknown tool: format_disk")));
     }
 }
