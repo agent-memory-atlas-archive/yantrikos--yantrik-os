@@ -1,0 +1,86 @@
+#!/bin/sh
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# splash — hands the boot splash to the shell, so nothing between them is black
+# ═══════════════════════════════════════════════════════════════════════════════════════
+#
+# plymouth draws the Yantrik emblem from the kernel's first frame (theme/yantrik.script), asks
+# for the disk's password in the same program when there is one, and goes on drawing the emblem
+# after it. Stock, systemd quits plymouth at multi-user.target, before tty1's autologin, and the
+# screen is black for the 5-10 s until labwc and the shell draw. Here, instead (root's, from the
+# drop-ins stage-boot-unlock.sh installs):
+#
+#   splash deactivate   getty@tty1, before the autologin: plymouth stops drawing and lets go of
+#                       the display and the keyboard, and its last frame, the emblem, stays on
+#                       the screen. labwc can then take the display; plymouthd still holding it
+#                       is what would make labwc fail to start.
+#   splash handoff      plymouth-quit.service, in place of its `plymouth quit`: waits for the
+#                       shell to say it has drawn its first frame (yantrik-shell-drawn in the
+#                       session's runtime directory), then `plymouth quit --retain-splash`, so
+#                       plymouth never clears the screen the shell is on. If no compositor has
+#                       started a while after boot (labwc failed, the crash guard stopped it),
+#                       it quits plainly instead, and the console comes back with whatever the
+#                       session printed. A shell that never says so is given a longer while,
+#                       with labwc left on the screen.
+#
+# Nothing here asks for or reads anything typed: the disk's password prompt is the theme's, and
+# is over before either step runs. With plymouth not running (`plymouth.enable=0`, the boot that
+# shows every message, no plymouth in the image) both are no-ops.
+#
+# The waits are in seconds, checked every quarter second. Overridable for the selftest.
+set -u
+
+RUN="${YANTRIK_SPLASH_RUN:-/run/user}"
+SESSION_WAIT="${YANTRIK_SPLASH_SESSION_WAIT:-45}"   # seconds for a compositor to start at all
+DRAWN_WAIT="${YANTRIK_SPLASH_DRAWN_WAIT:-180}"      # seconds for the shell's first frame
+TICK="${YANTRIK_SPLASH_TICK:-0.25}"
+
+command -v plymouth >/dev/null 2>&1 || exit 0
+plymouth --ping 2>/dev/null || exit 0
+
+compositor_up() {
+    pgrep -x labwc >/dev/null 2>&1
+}
+
+drawn() {
+    for f in "$RUN"/*/yantrik-shell-drawn; do
+        [ -e "$f" ] && return 0
+    done
+    return 1
+}
+
+case "${1:-}" in
+    deactivate)
+        plymouth deactivate 2>/dev/null
+        exit 0
+        ;;
+    handoff)
+        ;;
+    *)
+        echo "usage: splash deactivate|handoff" >&2
+        exit 2
+        ;;
+esac
+
+ticks=0
+session_ticks=$((SESSION_WAIT * 4))
+drawn_ticks=$((DRAWN_WAIT * 4))
+while :; do
+    # plymouth gone by some other way (Escape and a crash, a shutdown): nothing to hand off.
+    plymouth --ping 2>/dev/null || exit 0
+    if drawn; then
+        plymouth quit --retain-splash
+        exit 0
+    fi
+    if [ "$ticks" -ge "$session_ticks" ] && ! compositor_up; then
+        # No desktop is coming. The text console back, so the crash guard's words are seen.
+        plymouth quit
+        exit 0
+    fi
+    if [ "$ticks" -ge "$drawn_ticks" ]; then
+        # labwc owns the screen; clearing it to text under labwc would be worse than its frame.
+        plymouth quit --retain-splash
+        exit 0
+    fi
+    sleep "$TICK"
+    ticks=$((ticks + 1))
+done

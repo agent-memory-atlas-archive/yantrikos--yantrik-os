@@ -403,12 +403,21 @@ sudo sh "$SCRIPT_DIR/stage-boot-unlock.sh" "$ROOTFS" \
     || fail "stage-boot-unlock.sh failed — an encrypted install would ask for its password in plain text"
 sudo chroot "$ROOTFS" plymouth-set-default-theme yantrik \
     || warn "plymouth could not select the Yantrik theme; the installed initramfs hook still names it"
+# Again, now that the theme is chosen: the live initrd (and an unencrypted install's, copied from
+# it) carries plymouth with the theme it was built with, and the one built above predates it. This
+# is what draws the boot splash on the ISO's Install and Try entries and an unencrypted install.
+sudo chroot "$ROOTFS" update-initramfs -u \
+    || fail "update-initramfs failed after choosing the plymouth theme — the live initrd would be stale"
 # The socket's group. Empty in the image; enrol makes the installed account its one member.
 sudo chroot "$ROOTFS" groupadd -f --system yantrik-boot-unlock \
     || fail "could not make group yantrik-boot-unlock — the boot-unlock socket would not start"
 for required in usr/lib/yantrik/boot-unlock/askpass usr/lib/yantrik/boot-unlock/consume \
                 etc/initramfs-tools/hooks/yantrik-unlock etc/initramfs-tools/scripts/local-bottom/yantrik-unlock \
-                usr/share/plymouth/themes/yantrik/yantrik.script usr/sbin/plymouthd \
+                usr/share/plymouth/themes/yantrik/yantrik.script usr/share/plymouth/themes/yantrik/emblem.png \
+                usr/sbin/plymouthd usr/lib/yantrik/boot-unlock/splash \
+                etc/systemd/system/plymouth-quit.service.d/yantrik-splash.conf \
+                etc/systemd/system/plymouth-quit-wait.service.d/yantrik-splash.conf \
+                etc/systemd/system/getty@tty1.service.d/yantrik-splash.conf \
                 etc/systemd/system/sockets.target.wants/yantrik-boot-unlock.socket \
                 etc/systemd/system/multi-user.target.wants/yantrik-boot-unlock-expire.service \
                 usr/bin/jq usr/sbin/cryptsetup; do
@@ -417,7 +426,15 @@ for required in usr/lib/yantrik/boot-unlock/askpass usr/lib/yantrik/boot-unlock/
 done
 sudo chroot "$ROOTFS" getent group yantrik-boot-unlock >/dev/null \
     || fail "group yantrik-boot-unlock missing from the image — the boot-unlock socket would not start"
-ok "Pre-boot unlock screen, keyscript and signed-in marker staged"
+# The splash in the live initrd itself, read back rather than assumed: without it the Install and
+# Try entries boot black, as they did before there was one. Not fatal: the image boots either way.
+INITRD_NOW=$(ls "$ROOTFS/boot/initrd.img-"* 2>/dev/null | head -1)
+if [ -n "$INITRD_NOW" ] && lsinitramfs "$INITRD_NOW" 2>/dev/null | grep -q "usr/share/plymouth/themes/yantrik/emblem.png$"; then
+    ok "Boot splash (the Yantrik emblem) is in the live initrd"
+else
+    warn "the live initrd has no Yantrik splash (usr/share/plymouth/themes/yantrik/emblem.png) — the ISO boots black until the shell draws"
+fi
+ok "Pre-boot unlock screen, boot splash, keyscript and signed-in marker staged"
 
 # ── The boot menu's theme ──
 # Made here once, from the image's own DejaVu Sans: the live image's menu is copied from it below,
@@ -1553,17 +1570,23 @@ set menu_color_highlight=white/blue
 # installer mode. Both entries used to pass it, so there was no way to boot this image and
 # simply try the desktop — an ISO that can only be installed is one nobody evaluates first.
 #
+# The Install and Try entries draw the boot splash (plymouth, the Yantrik emblem, on the
+# firmware's framebuffer via simpledrm, never on the serial line) until the shell's first frame:
+# boot-unlock/theme/yantrik.script and boot-unlock/splash. The safe-graphics entry and the one
+# showing every message keep plymouth off: one is the way out when graphics misbehave, the other
+# shows every line, and neither should depend on a splash.
+#
 # The screen is quiet in the first three: `loglevel=3` keeps the kernel's lines below errors off
 # it, and `live-config.nottyautologin` stops live-config's own tty autologin, whose drop-in sorts
 # after the image's and would put back the banner and "login: yantrik (automatic login)". The
 # image's own autologin on tty1 is what starts the desktop.
 menuentry "Install Yantrik OS" {
-    linux /live/vmlinuz boot=live yantrik.install=true live-config.username=yantrik live-config.user-fullname=yantrik live-config.nottyautologin console=tty1 console=ttyS0,115200 plymouth.enable=0 quiet loglevel=3
+    linux /live/vmlinuz boot=live yantrik.install=true live-config.username=yantrik live-config.user-fullname=yantrik live-config.nottyautologin console=tty1 console=ttyS0,115200 quiet splash plymouth.use-simpledrm plymouth.ignore-serial-consoles loglevel=3
     initrd /live/initrd
 }
 
 menuentry "Try Yantrik OS without installing" {
-    linux /live/vmlinuz boot=live live-config.username=yantrik live-config.user-fullname=yantrik live-config.nottyautologin console=tty1 console=ttyS0,115200 plymouth.enable=0 quiet loglevel=3
+    linux /live/vmlinuz boot=live live-config.username=yantrik live-config.user-fullname=yantrik live-config.nottyautologin console=tty1 console=ttyS0,115200 quiet splash plymouth.use-simpledrm plymouth.ignore-serial-consoles loglevel=3
     initrd /live/initrd
 }
 
