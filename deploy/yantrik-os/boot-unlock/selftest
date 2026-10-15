@@ -327,6 +327,8 @@ check "a deactivate that never returns is cut off within seconds, not minutes" '
 check "and plymouth is told to go, keeping its frame, so labwc can take the display" '[ "$(cat "$T/slog/quit" 2>/dev/null)" = "quit --retain-splash" ] && [ ! -e "$T/slog/pkill" ]'
 start=$(date +%s); STUB_HANG=all splash deactivate; took=$(( $(date +%s) - start ))
 check "a plymouthd that answers nothing at all is killed, within seconds" '[ "$took" -le 8 ] && grep -qx -- "-x plymouthd" "$T/slog/pkill"'
+start=$(date +%s); STUB_HANG=ping splash deactivate; took=$(( $(date +%s) - start ))
+check "before the autologin, a --ping that hangs is cut off too, and plymouth told to go" '[ "$took" -le 6 ] && [ "$(cat "$T/slog/quit" 2>/dev/null)" = "quit --retain-splash" ] && [ ! -e "$T/slog/deactivated" ]'
 start=$(date +%s); STUB_HANG=ping SPLASH_LABWC=1 splash handoff; took=$(( $(date +%s) - start ))
 check "a hand-off whose --ping hangs lets plymouth go instead of waiting on it" '[ "$took" -le 6 ] && [ "$(cat "$T/slog/quit" 2>/dev/null)" = "quit --retain-splash" ]'
 check "every plymouth call in the hand-off is bounded" '! grep -nE "^[^#]*(^|[^-a-z])plymouth (--ping|deactivate|quit)" "$HERE/splash"'
