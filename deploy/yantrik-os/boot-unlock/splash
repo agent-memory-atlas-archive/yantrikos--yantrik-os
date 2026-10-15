@@ -26,6 +26,11 @@
 # is over before either step runs. With plymouth not running (`plymouth.enable=0`, the boot that
 # shows every message, no plymouth in the image) both are no-ops.
 #
+# Every call to plymouth is bounded (PLY_WAIT seconds). A plymouthd that answers `--ping` and then
+# never answers `deactivate` held tty1's ExecStartPre, and so the desktop, for about two minutes on
+# real SeaBIOS boots (#820). One that stops answering is let go of: `quit --retain-splash`, and if
+# that does not answer either, plymouthd is killed. A frame of black is better than no desktop.
+#
 # The waits are in seconds, checked every quarter second. Overridable for the selftest.
 set -u
 
@@ -33,9 +38,35 @@ RUN="${YANTRIK_SPLASH_RUN:-/run/user}"
 SESSION_WAIT="${YANTRIK_SPLASH_SESSION_WAIT:-45}"   # seconds for a compositor to start at all
 DRAWN_WAIT="${YANTRIK_SPLASH_DRAWN_WAIT:-180}"      # seconds for the shell's first frame
 TICK="${YANTRIK_SPLASH_TICK:-0.25}"
+PLY_WAIT="${YANTRIK_SPLASH_PLY_WAIT:-5}"            # seconds any one plymouth call may take
 
 command -v plymouth >/dev/null 2>&1 || exit 0
-plymouth --ping 2>/dev/null || exit 0
+
+ply() {
+    timeout -k 1 "$PLY_WAIT" plymouth "$@" 2>/dev/null
+}
+
+# plymouthd stopped answering: free the display for labwc whatever it takes.
+let_go() {
+    ply quit --retain-splash || pkill -x plymouthd 2>/dev/null
+    return 0
+}
+
+# 0 up, 1 not running, 2 running and not answering.
+state() {
+    ply --ping
+    case $? in
+        0) return 0 ;;
+        124 | 137) return 2 ;;
+        *) return 1 ;;
+    esac
+}
+
+state
+case $? in
+    1) exit 0 ;;
+    2) let_go; exit 0 ;;
+esac
 
 compositor_up() {
     pgrep -x labwc >/dev/null 2>&1
@@ -58,7 +89,7 @@ drawn() {
 
 case "${1:-}" in
     deactivate)
-        plymouth deactivate 2>/dev/null
+        ply deactivate || let_go
         exit 0
         ;;
     handoff)
@@ -74,19 +105,23 @@ session_ticks=$((SESSION_WAIT * 4))
 drawn_ticks=$((DRAWN_WAIT * 4))
 while :; do
     # plymouth gone by some other way (Escape and a crash, a shutdown): nothing to hand off.
-    plymouth --ping 2>/dev/null || exit 0
+    state
+    case $? in
+        1) exit 0 ;;
+        2) let_go; exit 0 ;;
+    esac
     if drawn; then
-        plymouth quit --retain-splash
+        let_go
         exit 0
     fi
     if [ "$ticks" -ge "$session_ticks" ] && ! compositor_up; then
         # No desktop is coming. The text console back, so the crash guard's words are seen.
-        plymouth quit
+        ply quit || pkill -x plymouthd 2>/dev/null
         exit 0
     fi
     if [ "$ticks" -ge "$drawn_ticks" ]; then
         # labwc owns the screen; clearing it to text under labwc would be worse than its frame.
-        plymouth quit --retain-splash
+        let_go
         exit 0
     fi
     sleep "$TICK"

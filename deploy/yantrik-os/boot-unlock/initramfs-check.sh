@@ -186,6 +186,8 @@ if ln -s /usr/share/plymouth/themes/yantrik/yantrik.plymouth "$D" \
         has "^usr/share/plymouth/themes/yantrik/yantrik.script$" "the Yantrik theme"
         has "^usr/share/plymouth/themes/yantrik/emblem.png$" "the emblem the splash draws"
         lacks "boot-unlock/askpass" "nothing of the prompt"
+        grep -q "I: yantrik-unlock: the boot splash" "$T/mkinitramfs.log" \
+            && ok "the build says the splash is in" || bad "the build says the splash is in"
     else
         cat "$T/mkinitramfs.log"; bad "mkinitramfs ran"
     fi

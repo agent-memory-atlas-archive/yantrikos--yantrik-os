@@ -402,11 +402,18 @@ ok "mise ${MISE_VERSION} (sha256 checked) in /usr/local/bin"
 sudo sh "$SCRIPT_DIR/stage-boot-unlock.sh" "$ROOTFS" \
     || fail "stage-boot-unlock.sh failed — an encrypted install would ask for its password in plain text"
 sudo chroot "$ROOTFS" plymouth-set-default-theme yantrik \
-    || warn "plymouth could not select the Yantrik theme; the installed initramfs hook still names it"
+    || warn "plymouth-set-default-theme could not select the Yantrik theme; writing plymouthd.conf by hand"
+# The theme as the initramfs hooks read it (plymouthd.conf's Theme=, initramfs-hook's
+# default_is_yantrik), checked rather than assumed: without it the splash stays out of the initrd.
+if ! sudo grep -qsx 'Theme=yantrik' "$ROOTFS/etc/plymouth/plymouthd.conf"; then
+    sudo mkdir -p "$ROOTFS/etc/plymouth"
+    printf '[Daemon]\nTheme=yantrik\n' | sudo tee "$ROOTFS/etc/plymouth/plymouthd.conf" >/dev/null
+fi
 # Again, now that the theme is chosen: the live initrd (and an unencrypted install's, copied from
 # it) carries plymouth with the theme it was built with, and the one built above predates it. This
 # is what draws the boot splash on the ISO's Install and Try entries and an unencrypted install.
-sudo chroot "$ROOTFS" update-initramfs -u \
+# Every kernel's, so whichever initrd is copied into live/ below is a rebuilt one.
+sudo chroot "$ROOTFS" update-initramfs -u -k all 2>&1 | tee "$WORK_DIR/update-initramfs-splash.log" \
     || fail "update-initramfs failed after choosing the plymouth theme — the live initrd would be stale"
 # The socket's group. Empty in the image; enrol makes the installed account its one member.
 sudo chroot "$ROOTFS" groupadd -f --system yantrik-boot-unlock \
@@ -427,12 +434,21 @@ done
 sudo chroot "$ROOTFS" getent group yantrik-boot-unlock >/dev/null \
     || fail "group yantrik-boot-unlock missing from the image — the boot-unlock socket would not start"
 # The splash in the live initrd itself, read back rather than assumed: without it the Install and
-# Try entries boot black, as they did before there was one. Not fatal: the image boots either way.
+# Try entries boot black, as they did before there was one. Read with the image's own lsinitramfs,
+# in the chroot: the build host need not have initramfs-tools (the CI runner does not), and there
+# a missing or older lsinitramfs reads as "no splash". Fatal, so a black live boot cannot ship; the
+# lines above it say which theme the hooks saw and what they said. The same initrd the ISO copies.
 INITRD_NOW=$(ls "$ROOTFS/boot/initrd.img-"* 2>/dev/null | head -1)
-if [ -n "$INITRD_NOW" ] && lsinitramfs "$INITRD_NOW" 2>/dev/null | grep -q "usr/share/plymouth/themes/yantrik/emblem.png$"; then
-    ok "Boot splash (the Yantrik emblem) is in the live initrd"
+[ -n "$INITRD_NOW" ] || fail "no initrd in $ROOTFS/boot after update-initramfs"
+if sudo chroot "$ROOTFS" lsinitramfs "/boot/${INITRD_NOW##*/}" > "$WORK_DIR/live-initrd.list" 2>&1 \
+    && grep -q "usr/share/plymouth/themes/yantrik/emblem.png$" "$WORK_DIR/live-initrd.list"; then
+    ok "Boot splash (the Yantrik emblem) is in the live initrd (${INITRD_NOW##*/})"
 else
-    warn "the live initrd has no Yantrik splash (usr/share/plymouth/themes/yantrik/emblem.png) — the ISO boots black until the shell draws"
+    # What to look at, before failing: which theme the hooks saw, and what they said.
+    sudo cat "$ROOTFS/etc/plymouth/plymouthd.conf" 2>/dev/null | sed 's/^/  plymouthd.conf: /' || true
+    grep -E "yantrik|plymouth|^W:|^E:" "$WORK_DIR/update-initramfs-splash.log" | sed 's/^/  update-initramfs: /' || true
+    grep -E "plymouth" "$WORK_DIR/live-initrd.list" | head -20 | sed 's/^/  initrd: /' || true
+    fail "the live initrd (${INITRD_NOW##*/}) has no Yantrik splash (usr/share/plymouth/themes/yantrik/emblem.png) — the ISO would boot black until the shell draws"
 fi
 ok "Pre-boot unlock screen, boot splash, keyscript and signed-in marker staged"
 

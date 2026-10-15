@@ -275,22 +275,27 @@ mkdir -p "$T/sbin"
 cat > "$T/sbin/plymouth" <<'STUB'
 #!/bin/sh
 case "$1" in
-    --ping) [ -e "$STUB_LOG/plymouth-up" ] ;;
-    deactivate) : > "$STUB_LOG/deactivated" ;;
-    quit) printf '%s' "quit ${2:-}" > "$STUB_LOG/quit"; rm -f "$STUB_LOG/plymouth-up" ;;
+    --ping) [ -e "$STUB_LOG/plymouth-up" ] || exit 1; [ -z "${STUB_HANG:-}" ] || [ "$STUB_HANG" != ping ] || sleep 30 ;;
+    deactivate) case "${STUB_HANG:-}" in deactivate | all) exec sleep 30 ;; esac; : > "$STUB_LOG/deactivated" ;;
+    quit) [ "${STUB_HANG:-}" = all ] && exec sleep 30
+          printf '%s' "quit ${2:-}" > "$STUB_LOG/quit"; rm -f "$STUB_LOG/plymouth-up" ;;
 esac
+STUB
+cat > "$T/sbin/pkill" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "$STUB_LOG/pkill"
 STUB
 cat > "$T/sbin/pgrep" <<'STUB'
 #!/bin/sh
 printf '%s\n' "$*" >> "$STUB_LOG/pgrep"
 [ -e "$STUB_LOG/labwc" ]
 STUB
-chmod +x "$T/sbin/plymouth" "$T/sbin/pgrep"
+chmod +x "$T/sbin/plymouth" "$T/sbin/pgrep" "$T/sbin/pkill"
 splash() { # args... ; plymouth is up unless SPLASH_DOWN is set
     rm -rf "$T/slog"; mkdir -p "$T/slog" "$T/srun/1000"
     [ -n "${SPLASH_DOWN:-}" ] || : > "$T/slog/plymouth-up"
     [ -z "${SPLASH_LABWC:-}" ] || : > "$T/slog/labwc"
-    env PATH="$T/sbin:$PATH" STUB_LOG="$T/slog" YANTRIK_SPLASH_RUN="$T/srun" YANTRIK_SPLASH_TICK=0.05 \
+    env PATH="$T/sbin:$PATH" STUB_LOG="$T/slog" YANTRIK_SPLASH_RUN="$T/srun" YANTRIK_SPLASH_TICK=0.05 YANTRIK_SPLASH_PLY_WAIT=1 \
         YANTRIK_SPLASH_SESSION_WAIT="${SPLASH_SESSION:-45}" YANTRIK_SPLASH_DRAWN_WAIT="${SPLASH_DRAWN:-180}" \
         $SH "$HERE/splash" "$@"
 }
@@ -315,6 +320,16 @@ check "a marker with no labwc behind it (left early, or by another process) does
 rm -f "$T/srun/1000/yantrik-shell-drawn"
 SPLASH_LABWC=1 SPLASH_SESSION=0 SPLASH_DRAWN=0 splash handoff
 check "labwc up and the shell silent: plymouth still goes, without clearing labwc's screen to text" '[ "$(cat "$T/slog/quit")" = "quit --retain-splash" ]'
+# A plymouthd that answers --ping and then never answers deactivate held tty1's start, and the
+# desktop, for two minutes on real boots (#820): every call is bounded, and one that hangs is let go.
+start=$(date +%s); STUB_HANG=deactivate splash deactivate; took=$(( $(date +%s) - start ))
+check "a deactivate that never returns is cut off within seconds, not minutes" '[ "$took" -le 6 ]'
+check "and plymouth is told to go, keeping its frame, so labwc can take the display" '[ "$(cat "$T/slog/quit" 2>/dev/null)" = "quit --retain-splash" ] && [ ! -e "$T/slog/pkill" ]'
+start=$(date +%s); STUB_HANG=all splash deactivate; took=$(( $(date +%s) - start ))
+check "a plymouthd that answers nothing at all is killed, within seconds" '[ "$took" -le 8 ] && grep -qx -- "-x plymouthd" "$T/slog/pkill"'
+start=$(date +%s); STUB_HANG=ping SPLASH_LABWC=1 splash handoff; took=$(( $(date +%s) - start ))
+check "a hand-off whose --ping hangs lets plymouth go instead of waiting on it" '[ "$took" -le 6 ] && [ "$(cat "$T/slog/quit" 2>/dev/null)" = "quit --retain-splash" ]'
+check "every plymouth call in the hand-off is bounded" '! grep -nE "^[^#]*(^|[^-a-z])plymouth (--ping|deactivate|quit)" "$HERE/splash"'
 check "the hand-off never reads input" '! grep -nE "(^|[^a-z])read |ask-for-password|/dev/tty|stty" "$HERE/splash"'
 
 # ── staging ──
@@ -323,7 +338,7 @@ $SH "$HERE/../stage-boot-unlock.sh" "$root" >/dev/null
 check "the stage puts every piece where crypttab, initramfs-tools, systemd and plymouth look" \
     '[ -x "$root/usr/lib/yantrik/boot-unlock/askpass" ] && [ -x "$root/etc/initramfs-tools/hooks/yantrik-unlock" ] && [ -x "$root/etc/initramfs-tools/scripts/local-bottom/yantrik-unlock" ] && [ "$(stat -c %a "$root/usr/lib/yantrik/boot-unlock/consume")" = 700 ] && [ -L "$root/etc/systemd/system/sockets.target.wants/yantrik-boot-unlock.socket" ] && [ -f "$root/etc/systemd/system/yantrik-boot-unlock-expire.service" ] && [ -L "$root/etc/systemd/system/multi-user.target.wants/yantrik-boot-unlock-expire.service" ] && [ -f "$root/usr/share/plymouth/themes/yantrik/yantrik.script" ] && cmp -s "$HERE/theme/field.png" "$root/usr/share/plymouth/themes/yantrik/field.png"'
 check "the stage puts the splash where plymouth and systemd look" \
-    'cmp -s "$HERE/theme/emblem.png" "$root/usr/share/plymouth/themes/yantrik/emblem.png" && [ -x "$root/usr/lib/yantrik/boot-unlock/splash" ] && grep -qx "ExecStart=-/usr/lib/yantrik/boot-unlock/splash handoff" "$root/etc/systemd/system/plymouth-quit.service.d/yantrik-splash.conf" && grep -qx "Type=exec" "$root/etc/systemd/system/plymouth-quit.service.d/yantrik-splash.conf" && grep -qx "ExecStart=/bin/true" "$root/etc/systemd/system/plymouth-quit-wait.service.d/yantrik-splash.conf" && grep -qx "ExecStartPre=-/usr/lib/yantrik/boot-unlock/splash deactivate" "$root/etc/systemd/system/getty@tty1.service.d/yantrik-splash.conf"'
+    'cmp -s "$HERE/theme/emblem.png" "$root/usr/share/plymouth/themes/yantrik/emblem.png" && [ -x "$root/usr/lib/yantrik/boot-unlock/splash" ] && grep -qx "ExecStart=-/usr/lib/yantrik/boot-unlock/splash handoff" "$root/etc/systemd/system/plymouth-quit.service.d/yantrik-splash.conf" && grep -qx "Type=exec" "$root/etc/systemd/system/plymouth-quit.service.d/yantrik-splash.conf" && grep -qx "ExecStart=/bin/true" "$root/etc/systemd/system/plymouth-quit-wait.service.d/yantrik-splash.conf" && grep -qx "ExecStartPre=-/usr/bin/timeout -k 2 15 /usr/lib/yantrik/boot-unlock/splash deactivate" "$root/etc/systemd/system/getty@tty1.service.d/yantrik-splash.conf"'
 check "the splash drop-in on tty1 leaves the autologin drop-in alone" '[ ! -e "$root/etc/systemd/system/getty@tty1.service.d/autologin.conf" ]'
 check "the theme draws the emblem in the splash and hides it under the prompt" \
     'grep -q "Image(\"emblem.png\")" "$HERE/theme/yantrik.script" && awk "/^fun show_password/,/^}/" "$HERE/theme/yantrik.script" | grep -q "hidden(emblem)" && awk "/^fun show_normal/,/^}/" "$HERE/theme/yantrik.script" | grep -q "emblem.SetOpacity(1)"'

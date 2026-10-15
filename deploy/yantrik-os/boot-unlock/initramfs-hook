@@ -38,14 +38,21 @@ default_is_yantrik() {
 
 # The splash alone: no prompt, so no label plugin, font or keymap. Anything missing, and plymouth's
 # own hook has the last word, as before there was a splash.
+# When the theme is Yantrik's and something is missing, the build says what (build-debian-iso.sh
+# prints these lines when the live initrd comes out without the splash).
+no_splash() {
+    echo "W: yantrik-unlock: no boot splash in this initramfs: $1" >&2
+    return 0
+}
+
 splash_only() {
     [ -x /usr/sbin/plymouthd ] && [ -x /usr/bin/plymouth ] || return 0
     default_is_yantrik || return 0
     [ -f "$THEMES/$THEME/$THEME.script" ] && [ -f "$THEMES/$THEME/$THEME.plymouth" ] \
-        && [ -f "$THEMES/$THEME/emblem.png" ] || return 0
+        && [ -f "$THEMES/$THEME/emblem.png" ] || { no_splash "the Yantrik theme or its emblem is not installed"; return 0; }
     plugins="$(plymouth --get-splash-plugin-path 2>/dev/null)"
     plugins="${plugins%/}"
-    [ -n "$plugins" ] && [ -f "$plugins/script.so" ] || return 0
+    [ -n "$plugins" ] && [ -f "$plugins/script.so" ] || { no_splash "plymouth has no script plugin"; return 0; }
     copy_exec /usr/bin/plymouth
     copy_exec /usr/sbin/plymouthd
     [ -x /usr/libexec/plymouth/plymouthd-fd-escrow ] && copy_exec /usr/libexec/plymouth/plymouthd-fd-escrow
@@ -63,6 +70,7 @@ splash_only() {
     cp -a "$THEMES/$THEME/." "$DESTDIR$THEMES/$THEME/"
     ln -sfn "$THEMES/$THEME/$THEME.plymouth" "$DESTDIR$THEMES/default.plymouth"
     printf '[Daemon]\nTheme=%s\n' "$THEME" > "$DESTDIR/etc/plymouth/plymouthd.conf"
+    echo "I: yantrik-unlock: the boot splash (the Yantrik theme and its emblem) is in this initramfs" >&2
     return 0
 }
 
