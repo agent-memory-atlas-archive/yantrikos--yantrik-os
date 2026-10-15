@@ -3,11 +3,12 @@
 //! composer. All of them come from one `runs_on::resolve`, so they cannot disagree.
 //!
 //! Published whenever the minds change (wire::harness::publish) and whenever the companion's own
-//! address is resolved again (wire::ai_status::refresh).
+//! address is resolved again (wire::ai_status::refresh), and whenever the pick changes in the
+//! picker: a mind on the gateway runs on the pick (picker::wire).
 
 use std::sync::Mutex;
 
-use crate::runs_on::{self, MindFact, RunsOn};
+use crate::runs_on::{self, GatewayFact, MindFact, RunsOn};
 use crate::App;
 use yantrik_ui_slint::{InUseRow, RunsOnRow};
 
@@ -21,10 +22,31 @@ pub(crate) fn current() -> Vec<RunsOn> {
         .map(|h| h.list())
         .unwrap_or_default()
         .into_iter()
-        .map(|e| MindFact { id: e.id, name: e.name, detail: e.detail, answering: e.active, builtin: e.builtin })
+        .map(|e| MindFact { gateway: gateway_fact(&e.id), id: e.id, name: e.name, detail: e.detail, answering: e.active, builtin: e.builtin })
         .collect();
     let companion = super::ai_status::companion();
     runs_on::resolve(&minds, companion.as_ref())
+}
+
+/// For a mind wired to this desktop's gateway (its handoff marker names the gateway): where the
+/// gateway sends its next call, by the gateway's own routing over the pick (`gateway::route_for`).
+/// `None` for a mind with its own provider.
+fn gateway_fact(harness: &str) -> Option<GatewayFact> {
+    let home = super::harness_provider::home_dir();
+    let marker = crate::provider_handoff::marker(&home, harness)?;
+    if marker.provider_id != crate::provider_handoff::GATEWAY_ID {
+        return None;
+    }
+    Some(match crate::gateway::route_for(harness) {
+        Ok(routed) => {
+            let t = routed.target;
+            let provider_kind =
+                crate::ai_accounts::accounts().into_iter().find(|a| a.id == t.account).map(|a| a.provider_type).unwrap_or_default();
+            GatewayFact::Sends { base_url: t.base_url, provider_kind, model: t.model, lane: routed.lane_for.is_some() }
+        }
+        Err(r) if r.message == yantrik_gateway::server::NO_PICK => GatewayFact::NoPick,
+        Err(r) => GatewayFact::Refused { code: r.code.to_string(), message: r.message },
+    })
 }
 
 /// The saved providers changed: remember their addresses and show the lists again.
