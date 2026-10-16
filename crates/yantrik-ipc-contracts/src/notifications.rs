@@ -422,7 +422,7 @@ mod tests {
             useful_until: Some("2026-10-16T19:30:00Z".into()),
             supersedes: None,
             action: Some(NoticeAction { label: "Open note".into(), kind: ActionKind::OpenNote, reference: "n-7f3a".into() }),
-            harness: NoticeHarness { id: "mind".into(), uid: Some(998), verified: "yantrik-mind (pid 77)".into(), name: "Yantrik Mind".into() },
+            harness: NoticeHarness { id: "mind".into(), uid: Some(998), verified: "yantrik-mind (pid 77)".into(), name: "Yantrik Mind".into(), program: "yantrik-mind".into() },
             granted: Attention::Interrupt,
             grant_reason: GrantReason::Granted,
             held_until: None,

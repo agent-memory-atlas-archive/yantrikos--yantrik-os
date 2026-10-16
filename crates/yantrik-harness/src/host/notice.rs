@@ -84,9 +84,15 @@ impl Host {
     }
 
     /// What a poll by `harness` carries: the person's settings, and its feedback after `ack`.
-    pub(super) fn notice_poll_fields(&self, harness: &str, ack: Option<u64>) -> Option<(serde_json::Value, Vec<serde_json::Value>)> {
+    pub(super) fn notice_poll_fields(
+        &self,
+        harness: &str,
+        pid: Option<u32>,
+        uid: Option<u32>,
+        ack: Option<u64>,
+    ) -> Option<(serde_json::Value, Vec<serde_json::Value>)> {
         let desk = self.notice_desk.as_ref()?;
-        let feedback = match desk.feedback(harness, ack) {
+        let feedback = match desk.feedback(harness, pid, uid, ack) {
             Ok(items) => items,
             Err(why) => {
                 // Not delivered this time, and still held: it comes on a later poll.
@@ -155,7 +161,7 @@ mod tests {
         fn initiative(&self) -> serde_json::Value {
             json!({ "quiet": false, "off": ["discovery"], "inbox_only": [] })
         }
-        fn feedback(&self, harness: &str, ack: Option<u64>) -> Result<Vec<serde_json::Value>, String> {
+        fn feedback(&self, harness: &str, _pid: Option<u32>, _uid: Option<u32>, ack: Option<u64>) -> Result<Vec<serde_json::Value>, String> {
             if let Some(ack) = ack {
                 self.acked.lock().unwrap().push((harness.to_string(), ack));
                 self.feedback.lock().unwrap().retain(|(h, f)| h != harness || f["seq"].as_u64().unwrap() > ack);

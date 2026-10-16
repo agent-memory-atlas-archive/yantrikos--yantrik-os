@@ -28,6 +28,12 @@ pub struct NoticeSend {
     /// The id the harness attached under (`mind`, `hermes`): what dedupe, supersede and feedback
     /// are keyed by. Stable across the harness's restarts, so its cards and its feedback cursor
     /// are still its own after one.
+    ///
+    /// Shared attaches of one harness (`hermes.1`, `hermes.2`) are one sender: they post and poll
+    /// as `hermes`, under one feedback cursor, so feedback acknowledged by one instance is not
+    /// served again to another. That is intended — the person answered the harness, not one of
+    /// its processes — and a harness that wants each instance to hear for itself attaches each
+    /// under an id of its own.
     pub harness: String,
     /// The name it gave itself, shown beside what was verified and never instead of it.
     pub name: String,
@@ -49,8 +55,10 @@ pub trait NoticeDesk: Send + Sync {
     fn post(&self, send: &NoticeSend) -> Result<serde_json::Value, String>;
     /// The person's settings, as `{quiet, off, inbox_only}`.
     fn initiative(&self) -> serde_json::Value;
-    /// The feedback waiting for `harness`, after taking `ack` as read.
-    fn feedback(&self, harness: &str, ack: Option<u64>) -> Result<Vec<serde_json::Value>, String>;
+    /// The feedback waiting for `harness`, after taking `ack` as read. `pid` and `uid` are the
+    /// attach's, as the kernel said: the store serves a harness id's feedback only to the account
+    /// and program that id is bound to.
+    fn feedback(&self, harness: &str, pid: Option<u32>, uid: Option<u32>, ack: Option<u64>) -> Result<Vec<serde_json::Value>, String>;
 }
 
 /// A plain `{text}` notice sent with no turn in flight, as a notice the store can keep: the first

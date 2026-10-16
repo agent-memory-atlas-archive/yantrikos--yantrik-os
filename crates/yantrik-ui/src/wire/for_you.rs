@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use slint::{ComponentHandle, ModelRc, VecModel};
-use yantrik_ipc_contracts::notifications::notice::FeedbackKind;
+use yantrik_ipc_contracts::notifications::notice::{self, FeedbackKind};
 use yantrik_ipc_contracts::notifications::{Notification, NOTICE_FEEDBACK, NOTICE_SHOWN};
 
 use super::notifications::{act, forward_to_app, resync, with_mirror, SILENT_SCREENS};
@@ -140,7 +140,7 @@ fn card(n: &Notification) -> NoticeCardData {
     NoticeCardData {
         id: n.id.clone().into(),
         title: crate::notification_sender::one_line(&n.title).into(),
-        body: n.body.clone().into(),
+        body: notice::plain(&n.body, notice::MAX_BODY_NEWLINES).into(),
         why: notice_inbox::why_line(n).into(),
         sender: crate::notifications::sender_line(n).into(),
         family: notice.family.label().to_string().into(),
@@ -162,7 +162,7 @@ fn toast(ui: &App, n: &Notification) {
             id: n.id.clone().into(),
             app_name: name.clone().into(),
             summary: crate::notification_sender::one_line(&n.title).into(),
-            body: super::toast::brief(&n.body).into(),
+            body: super::toast::brief(&notice::plain(&n.body, 0)).into(),
             urgency: 1,
             icon_char: name.chars().next().unwrap_or('N').to_uppercase().to_string().into(),
             // The card's button is pressed from the card, in the Lens, where "Why you got this"
@@ -190,8 +190,26 @@ fn open_action(ui: &App, id: &str) {
         }
         Ok(Opening::File(path)) => {
             let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-            let how = crate::mime_dispatch::classify(&name);
-            super::open_with::launch(&how, &name, &path, Some(ui));
+            use crate::mime_dispatch::FileAction;
+            let how = match crate::mime_dispatch::classify(&name) {
+                // Never the browser: it is started with the DevTools flags that let `yos web` drive
+                // the page, and a mind that can read the screen would be reading the file. A page
+                // or a drawing a card names is opened as the text it is.
+                FileAction::Browser => FileAction::TextEditor,
+                other => other,
+            };
+            // The viewer and the player only read. Everything else gets a read-only copy
+            // (`notice_inbox::read_only_copy`): the spec opens a card's file read-only.
+            let opened = match how {
+                FileAction::ImageViewer | FileAction::MediaPlayer => Ok(path),
+                _ => notice_inbox::read_only_copy(&path, &card_copies(), &format!("{id}-{name}")),
+            };
+            match opened {
+                Ok(target) => super::open_with::launch(&how, &name, &target, Some(ui)),
+                Err(why) => {
+                    note(&format!("Not opened: {why}."));
+                }
+            }
         }
         Ok(Opening::Url { url, host }) => {
             let host2 = host.clone();
@@ -211,6 +229,12 @@ fn open_action(ui: &App, id: &str) {
     with_mirror(|m| m.mark_read_locally(id));
     resync(ui);
     tick(ui);
+}
+
+/// Where a card's read-only copies go: this account's runtime directory, which is in memory and
+/// gone at logout.
+fn card_copies() -> std::path::PathBuf {
+    std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir).join("yantrik-card-files")
 }
 
 /// Show an event in Calendar, once Calendar says it knows the id. Asked off the UI thread.

@@ -78,6 +78,16 @@ impl ShellDesk {
     }
 }
 
+/// The program behind `pid`, by the name of its executable, as a harness id is bound to it. Empty
+/// when `/proc` cannot say.
+fn program(pid: Option<u32>) -> String {
+    let found = yantrik_ipc_transport::peer_identity::resolve(pid.and_then(|p| i32::try_from(p).ok()));
+    let exe = found.direct.map(|f| f.exe).unwrap_or_default();
+    // A binary replaced by an update is still the same program to the person.
+    let exe = exe.trim_end_matches(" (deleted)");
+    exe.rsplit('/').next().unwrap_or_default().to_string()
+}
+
 fn call(method: &str, params: serde_json::Value, timeout: Duration) -> Result<serde_json::Value, String> {
     yantrik_app_runtime::service::ensure(SERVICE).map_err(|e| e.to_string())?;
     SyncRpcClient::for_service(SERVICE).with_timeout(timeout).call(method, params).map_err(|e| e.message)
@@ -88,7 +98,13 @@ impl NoticeDesk for ShellDesk {
         let verified = yantrik_ipc_transport::peer_identity::resolve(send.pid.and_then(|p| i32::try_from(p).ok())).line();
         let post = NoticePost {
             notice: send.notice.clone(),
-            harness: NoticeHarness { id: send.harness.clone(), uid: send.uid, verified, name: send.name.clone() },
+            harness: NoticeHarness {
+                id: send.harness.clone(),
+                uid: send.uid,
+                verified,
+                name: send.name.clone(),
+                program: program(send.pid),
+            },
             os_id: send.os_id,
         };
         // `title` because `notifications.add` needs one for the plain notification a notice also
@@ -102,7 +118,7 @@ impl NoticeDesk for ShellDesk {
         initiative().wire()
     }
 
-    fn feedback(&self, harness: &str, ack: Option<u64>) -> Result<Vec<serde_json::Value>, String> {
+    fn feedback(&self, harness: &str, pid: Option<u32>, uid: Option<u32>, ack: Option<u64>) -> Result<Vec<serde_json::Value>, String> {
         let revision = REVISION.load(Ordering::Relaxed);
         let mut cache = self.feedback.lock().map_err(|_| "the feedback cache is poisoned".to_string())?;
         if let Some(held) = cache.get(harness) {
@@ -111,7 +127,10 @@ impl NoticeDesk for ShellDesk {
                 return Ok(held.items.clone());
             }
         }
-        let mut params = serde_json::json!({ "harness": harness });
+        let mut params = serde_json::json!({ "harness": harness, "program": program(pid) });
+        if let Some(uid) = uid {
+            params["uid"] = uid.into();
+        }
         if let Some(ack) = ack {
             params["ack"] = ack.into();
         }

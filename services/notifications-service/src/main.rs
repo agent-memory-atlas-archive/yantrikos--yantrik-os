@@ -175,7 +175,7 @@ impl NotificationsHandler {
             return answer;
         }
         match method {
-            LIST => Ok(serde_json::to_value(self.store.list()).unwrap_or_default()),
+            LIST => Ok(serde_json::to_value(self.store.list_for(is_desktop(peer))).unwrap_or_default()),
 
             ADD => {
                 let mut request = parse_add(&params)?;
@@ -214,7 +214,7 @@ impl NotificationsHandler {
                 let Some(n) = self.store.get(&id) else {
                     return Err(bad_request(format!("no notification with id `{id}`")));
                 };
-                if !self.store.dismiss(&id) {
+                if !self.store.dismiss_by(&id, is_desktop(peer)).map_err(|why| forbidden(&why))? {
                     // It exists and was already dismissed. Not an error — the caller wanted it
                     // gone and it is gone — but say which, so a caller is never told it changed
                     // something it did not.
@@ -225,8 +225,9 @@ impl NotificationsHandler {
             }
 
             DISMISS_ALL => {
-                let showing = self.store.showing();
-                let count = self.store.dismiss_all();
+                let desktop = is_desktop(peer);
+                let showing = self.store.showing().into_iter().filter(|n| desktop || n.notice.is_none()).collect::<Vec<_>>();
+                let count = self.store.dismiss_all_by(desktop);
                 for n in &showing {
                     self.link.closed(n, freedesktop::CloseReason::DismissedByUser);
                 }
@@ -235,7 +236,7 @@ impl NotificationsHandler {
 
             MARK_READ => {
                 let id = optional_str(&params, "id")?;
-                let count = self.store.mark_read(id.as_deref());
+                let count = self.store.mark_read_by(id.as_deref(), is_desktop(peer)).map_err(|why| forbidden(&why))?;
                 Ok(serde_json::json!({ "marked_read": count }))
             }
 
@@ -282,7 +283,10 @@ impl NotificationsHandler {
                 self.desktop_only(method, peer)?;
                 let harness = required_str(&params, "harness")?;
                 let ack = params["ack"].as_u64();
-                Ok(serde_json::json!({ "notice_feedback": self.store.feedback_for(&harness, ack) }))
+                let uid = params["uid"].as_u64().and_then(|u| u32::try_from(u).ok());
+                let program = params["program"].as_str().unwrap_or_default();
+                let feedback = self.store.feedback_for(&harness, uid, program, ack).map_err(|why| forbidden(&why))?;
+                Ok(serde_json::json!({ "notice_feedback": feedback }))
             }
 
             INITIATIVE => Ok(serde_json::to_value(self.store.initiative()).unwrap_or_default()),
@@ -305,11 +309,10 @@ impl NotificationsHandler {
     /// settings are the person's, pressed on the desktop's own screen; a mind that could post
     /// them could mark its own card useful or switch another mind's family off.
     fn desktop_only(&self, method: &str, peer: Option<PeerCred>) -> Result<(), ServiceError> {
-        let who = who_is_calling(peer);
-        if owner::same_user(peer) && is_the_desktop(&who) {
+        if is_desktop(peer) {
             return Ok(());
         }
-        Err(ServiceError { code: -32003, message: format!("`{method}` is the desktop's own; {} is not the desktop", who.line()) })
+        Err(forbidden(&format!("`{method}` is the desktop's own; {} is not the desktop", who_is_calling(peer).line())))
     }
 
     /// `app.act` under a pinned authority, as the socket's dispatch runs it with
@@ -387,6 +390,9 @@ fn describe_view(store: &store::Store, link: &freedesktop::Link) -> View {
     if let Some(notice) = store.load_notice() {
         view = view.with("notice", notice.to_string());
     }
+    if let Some(note) = archive::size_note(&store.archive_path()) {
+        view = view.with("archive", note);
+    }
     view
 }
 
@@ -459,7 +465,7 @@ fn dismiss(
     let Some(n) = store.get(&id) else {
         return Err(format!("no notification with id `{id}`"));
     };
-    let changed = store.dismiss(&id);
+    let changed = store.dismiss_by(&id, is_desktop(caller().map(PeerCred::from)))?;
     if changed {
         link.closed(&n, freedesktop::CloseReason::DismissedByUser);
     }
@@ -467,8 +473,9 @@ fn dismiss(
 }
 
 fn dismiss_all(store: &store::Store, link: &freedesktop::Link) -> Result<serde_json::Value, String> {
-    let showing = store.showing();
-    let cleared = store.dismiss_all();
+    let desktop = is_desktop(caller().map(PeerCred::from));
+    let showing: Vec<_> = store.showing().into_iter().filter(|n| desktop || n.notice.is_none()).collect();
+    let cleared = store.dismiss_all_by(desktop);
     for n in &showing {
         link.closed(n, freedesktop::CloseReason::DismissedByUser);
     }
@@ -477,8 +484,19 @@ fn dismiss_all(store: &store::Store, link: &freedesktop::Link) -> Result<serde_j
 
 fn mark_read(store: &store::Store, args: &serde_json::Value) -> Result<serde_json::Value, String> {
     let id = optional_str(args, "id").map_err(|e| e.message)?;
-    let count = store.mark_read(id.as_deref());
+    let count = store.mark_read_by(id.as_deref(), is_desktop(caller().map(PeerCred::from)))?;
     Ok(serde_json::json!({ "marked_read": count }))
+}
+
+/// Whether the caller is the desktop itself, judged as `attribute` judges it: the program on the
+/// socket, under this service's own account. Feedback, the person's settings and a mind's notice
+/// are the person's, pressed on the desktop's own screen.
+fn is_desktop(peer: Option<PeerCred>) -> bool {
+    owner::same_user(peer) && is_the_desktop(&who_is_calling(peer))
+}
+
+fn forbidden(why: &str) -> ServiceError {
+    ServiceError { code: -32003, message: why.to_string() }
 }
 
 /// The grade this surface publishes for `action`, from the same table `describe` hands out, so
@@ -961,6 +979,30 @@ mod tests {
             assert!(err.message.contains("is not the desktop"), "{method}: {}", err.message);
         }
         assert!(!h.store.initiative().quiet);
+    }
+
+    #[test]
+    fn a_caller_that_is_not_the_desktop_cannot_dismiss_hide_or_read_a_minds_notice() {
+        // Finding 1 of the security review on #831: dismiss, dismiss_all and mark_read on the
+        // socket, as a mind's tool would call them (here, a caller with no credentials at all).
+        let h = handler();
+        let posted = h.store.add_notice(
+            notice::NoticePost {
+                notice: serde_json::json!({ "notice_id": "rem-1", "family": "reminder", "title": "Stretch", "why": "You asked.", "evidence": ["x"] }),
+                harness: notice::NoticeHarness { id: "mind".into(), uid: Some(999), ..Default::default() },
+                os_id: false,
+            },
+            std::path::Path::new("/"),
+        );
+        let id = posted["id"].as_str().unwrap().to_string();
+        assert!(h.dispatch(DISMISS, serde_json::json!({ "id": id }), None).is_err());
+        assert!(h.dispatch(MARK_READ, serde_json::json!({ "id": id }), None).is_err());
+        h.dispatch(MARK_READ, serde_json::json!({}), None).unwrap();
+        h.dispatch(DISMISS_ALL, serde_json::json!({}), None).unwrap();
+        let card = h.store.get(&id).unwrap();
+        assert!(!card.dismissed && !card.read, "{card:?}");
+        let listed = h.dispatch(LIST, serde_json::json!({}), None).unwrap();
+        assert!(listed[0]["notice"].get("evidence").is_none(), "{listed}");
     }
 
     #[test]

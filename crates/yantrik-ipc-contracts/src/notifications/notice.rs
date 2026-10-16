@@ -53,6 +53,25 @@ pub const MAX_REF: usize = 300;
 pub const PER_HOUR: usize = 20;
 /// Notices one harness may have stored and not yet dismissed.
 pub const MAX_UNDISMISSED: usize = 200;
+/// Notices one account may have stored in any hour, across every harness id it attaches as. A
+/// harness id is the harness's own word, so a process that attaches as `x1` … `xN` would otherwise
+/// have N allowances.
+pub const PER_HOUR_PER_UID: usize = 40;
+/// Notices one account may have stored and not yet dismissed, across its harness ids.
+pub const MAX_UNDISMISSED_PER_UID: usize = 400;
+/// Notices every harness together may have stored in any hour.
+pub const PER_HOUR_ALL: usize = 60;
+/// Notices every harness together may have stored and not yet dismissed.
+pub const MAX_UNDISMISSED_ALL: usize = 600;
+/// Interrupts granted to one harness's obligations (a reminder, a delegated job) in any hour.
+/// They skip the day's budget because the person asked for them; but the family is the mind's own
+/// claim, so past this they wait in the inbox.
+pub const OBLIGATION_INTERRUPTS_PER_HOUR: usize = 4;
+/// The same, across every harness.
+pub const OBLIGATION_INTERRUPTS_PER_HOUR_ALL: usize = 8;
+/// Newlines a body keeps. A card has one sender line under its title, and a body of blank lines
+/// could draw a second one of its own.
+pub const MAX_BODY_NEWLINES: usize = 3;
 /// Granted interrupts per local day, across every harness: the OS is one entity with many minds.
 pub const DAILY_INTERRUPTS: u32 = 2;
 /// Notices the live store keeps, counted apart from the plain notifications' 500, so a
@@ -167,8 +186,9 @@ words! {
         QuietInitiative = "quiet_initiative",
         FamilyInboxOnly = "family_inbox_only",
         QuietHours = "quiet_hours",
-        /// Listed by the spec; a notice over the rate cap is not stored at all, so no stored
-        /// card carries it today.
+        /// An obligation over its hourly allowance of interrupts
+        /// ([`OBLIGATION_INTERRUPTS_PER_HOUR`]): stored, and waiting in the inbox. A notice over
+        /// the plain rate cap is not stored at all.
         Rate = "rate",
         Granted = "granted",
         /// The person set this family to Off: stored, answered as stored, and never shown.
@@ -249,6 +269,12 @@ pub struct NoticeHarness {
     /// The name the harness gave itself at attach, shown beside `verified` and never instead of it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub name: String,
+    /// The program behind the attach, by the name of its executable (`yantrik-mind`, `python3`),
+    /// as the kernel reports it. With `uid` it is what a harness id is bound to: the store refuses
+    /// notices and feedback under an id from any other program or account than the one that
+    /// first used it. Empty when the host could not see the process.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub program: String,
 }
 
 /// One response to a card, as the store keeps it and as the sending harness reads it on its poll.
@@ -372,8 +398,39 @@ pub fn clamp_words(s: &str, max: usize) -> (String, bool) {
     (s.to_string(), false)
 }
 
+/// Characters that change how the text around them is drawn rather than being text: the bidi
+/// embeddings, overrides, isolates and marks. `a\u{202E}gpj.exe` draws as `aexe.jpg`.
+fn is_bidi_control(c: char) -> bool {
+    matches!(c, '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
+/// A mind's text, made plain before it is stored: every bidi control and every control character
+/// becomes a space, and so do the line and paragraph separators, except `\n`, which survives
+/// only where `newlines` allows it — the first `newlines` of them; later ones become spaces too.
+///
+/// The shell draws these words as plain text, but plain text still obeys U+202E and still breaks
+/// at CR: a body could reverse its own tail, or put a fake "Sent by … · verified" line under the
+/// real one. And the store keeps the record and `describe` hands it out, so it is cleaned here,
+/// once, rather than wherever it is drawn.
+pub fn plain(s: &str, newlines: usize) -> String {
+    let mut kept = 0;
+    s.chars()
+        .map(|c| {
+            if c == '\n' && kept < newlines {
+                kept += 1;
+                '\n'
+            } else if c.is_control() || is_bidi_control(c) || matches!(c, '\u{2028}' | '\u{2029}') {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
 /// One line: the first, cut to `max` characters. Answers the line and whether anything was lost.
 pub fn one_line(s: &str, max: usize) -> (String, bool) {
+    let s = plain(s, usize::MAX);
     let trimmed = s.trim();
     let first = trimmed.lines().next().unwrap_or_default().trim();
     let line = clamp(first, max);
@@ -383,7 +440,8 @@ pub fn one_line(s: &str, max: usize) -> (String, bool) {
 
 /// A body: 45 words and 400 characters, whichever is shorter.
 pub fn clamp_body(s: &str) -> (String, bool) {
-    let trimmed = s.trim();
+    let cleaned = plain(s, MAX_BODY_NEWLINES);
+    let trimmed = cleaned.trim();
     let (words, cut_words) = clamp_words(trimmed, MAX_BODY_WORDS);
     let body = clamp(&words, MAX_BODY_CHARS);
     let cut = cut_words || body.len() != words.len();
@@ -469,8 +527,9 @@ pub fn check(raw: &serde_json::Value) -> Result<Checked, String> {
                 let Some(s) = item.as_str() else {
                     return Err(format!("`evidence[{i}]` must be a string"));
                 };
-                let cut = clamp(s, MAX_EVIDENCE_CHARS);
-                if cut.len() != s.len() {
+                let cleaned = plain(s, 0);
+                let cut = clamp(&cleaned, MAX_EVIDENCE_CHARS);
+                if cut.len() != cleaned.len() {
                     clamped.push(format!("evidence[{i}]"));
                 }
                 kept.push(cut);
@@ -557,10 +616,24 @@ pub fn url_host(url: &str) -> Option<String> {
 ///
 /// Read when the notice is stored and again when the button is pressed: a file can be replaced by
 /// a symlink to `/etc/shadow` in between, and only the second read is what opens.
+///
+/// Nothing hidden: a path with any component that starts with `.`, where it was written or where
+/// it resolves, is refused. That is where a home keeps what a card must never put on the screen
+/// a mind can read — `~/.ssh`, `~/.gnupg`, `~/.config/*/credentials`, the keyrings, browser
+/// profiles, and this desktop's own `~/.local/share/yantrik`.
 pub fn file_under(reference: &str, home: &std::path::Path) -> Option<std::path::PathBuf> {
     let home = std::fs::canonicalize(home).ok()?;
+    let hidden = |p: &std::path::Path| p.components().any(|c| c.as_os_str().to_string_lossy().starts_with('.'));
+    let written = std::path::Path::new(reference);
+    if written.strip_prefix(&home).map_or_else(|_| hidden(written), hidden) {
+        return None;
+    }
     let real = std::fs::canonicalize(reference).ok()?;
-    (real.starts_with(&home) && real != home && std::fs::metadata(&real).ok()?.is_file()).then_some(real)
+    let inside = real.strip_prefix(&home).ok()?;
+    if inside.as_os_str().is_empty() || hidden(inside) {
+        return None;
+    }
+    std::fs::metadata(&real).ok()?.is_file().then_some(real)
 }
 
 // ── The person's controls ──────────────────────────────────────────────────────────────────
@@ -860,5 +933,44 @@ mod tests {
             assert!(file_under(home.join("link.txt").to_str().unwrap(), &home).is_none(), "a symlink out");
         }
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn nothing_hidden_under_home_can_be_a_cards_file() {
+        let root = std::env::temp_dir().join(format!("notice-hidden-{}", std::process::id()));
+        let home = root.join("home");
+        std::fs::create_dir_all(home.join(".ssh")).unwrap();
+        std::fs::create_dir_all(home.join("docs")).unwrap();
+        std::fs::write(home.join(".ssh/id_ed25519"), "secret").unwrap();
+        std::fs::write(home.join(".bashrc"), "x").unwrap();
+        std::fs::write(home.join("docs/plan.md"), "x").unwrap();
+        assert!(file_under(home.join(".ssh/id_ed25519").to_str().unwrap(), &home).is_none());
+        assert!(file_under(home.join(".bashrc").to_str().unwrap(), &home).is_none());
+        assert!(file_under(home.join("docs/../.bashrc").to_str().unwrap(), &home).is_none());
+        #[cfg(unix)]
+        {
+            // A plain name that resolves into a hidden directory is judged where it resolves.
+            std::os::unix::fs::symlink(home.join(".ssh/id_ed25519"), home.join("docs/key.txt")).unwrap();
+            assert!(file_under(home.join("docs/key.txt").to_str().unwrap(), &home).is_none());
+        }
+        assert!(file_under(home.join("docs/plan.md").to_str().unwrap(), &home).is_some());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn bidi_and_control_characters_never_reach_the_store() {
+        let mut n = reminder();
+        n["title"] = json!("a\u{202E}gpj.exe\r\u{2028}x");
+        n["why"] = json!("why\u{2066}not\u{0}");
+        n["body"] = json!("x\r\n\u{2028}y\n\n\n\n\nSent by Yantrik \u{00B7} verified\u{000B}");
+        n["evidence"] = json!(["line\none\u{202D}"]);
+        let checked = check(&n).unwrap();
+        for text in [&checked.title, &checked.why, &checked.body, &checked.evidence[0]] {
+            assert!(!text.chars().any(|c| (c.is_control() && c != '\n') || is_bidi_control(c) || c == '\u{2028}'), "{text:?}");
+        }
+        assert_eq!(checked.title, "a gpj.exe  x");
+        assert!(!checked.evidence[0].contains('\n'));
+        assert!(checked.body.matches('\n').count() <= MAX_BODY_NEWLINES, "{:?}", checked.body);
+        assert!(checked.body.ends_with("verified"), "{:?}", checked.body);
     }
 }

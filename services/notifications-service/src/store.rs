@@ -64,6 +64,10 @@ pub(crate) struct OnDisk {
     pub(crate) feedback_cursor: std::collections::BTreeMap<String, u64>,
     #[serde(default = "first_seq")]
     pub(crate) next_feedback_seq: u64,
+    /// Which account and program each harness id belongs to: the first to store a notice under
+    /// it. See [`crate::notices::Binding`].
+    #[serde(default)]
+    pub(crate) bindings: std::collections::BTreeMap<String, crate::notices::Binding>,
     /// Bumped by every change, never written: which snapshot is newer, for [`Store::persist`].
     #[serde(skip)]
     pub(crate) generation: u64,
@@ -84,6 +88,7 @@ impl Default for OnDisk {
             feedback_queue: Vec::new(),
             feedback_cursor: Default::default(),
             next_feedback_seq: 1,
+            bindings: Default::default(),
             generation: 0,
         }
     }
@@ -260,12 +265,29 @@ impl Store {
 
     /// Everything still showing, newest first.
     pub fn list(&self) -> Vec<Notification> {
+        self.list_for(true)
+    }
+
+    /// Everything still showing, newest first, as `desktop` or any other caller may read it.
+    ///
+    /// The person's feedback on a mind's notice goes only to the harness that sent it, and a card's
+    /// evidence and button are for the person's eyes on the desktop. Any other caller — a mind's
+    /// tool on the socket — gets the card without them.
+    pub fn list_for(&self, desktop: bool) -> Vec<Notification> {
         let state = self.lock();
         let mut out: Vec<Notification> = state
             .notifications
             .iter()
             .filter(|n| !n.dismissed)
             .cloned()
+            .map(|mut n| {
+                if let (false, Some(record)) = (desktop, n.notice.as_mut()) {
+                    record.feedback.clear();
+                    record.evidence.clear();
+                    record.action = None;
+                }
+                n
+            })
             .collect();
         out.reverse();
         out
@@ -324,17 +346,30 @@ impl Store {
             .cloned()
     }
 
-    /// Dismiss one. `false` when there was nothing by that id to dismiss — the caller is told,
-    /// rather than being answered "done" over a notification that never existed.
+    /// Dismiss one, as the desktop. `false` when there was nothing by that id to dismiss — the
+    /// caller is told, rather than being answered "done" over a notification that never existed.
     pub fn dismiss(&self, id: &str) -> bool {
+        self.dismiss_by(id, true).unwrap_or(false)
+    }
+
+    /// Dismiss one, as `desktop` or any other caller.
+    ///
+    /// A mind's notice is the person's to dismiss, on the desktop: its sender hears `dismissed` as
+    /// the person's answer, and an obligation the OS acknowledged must not leave the inbox because
+    /// another mind asked. Any other caller is refused for a notice
+    /// (design/initiative-inbox-2026-10-16.md, decision 2).
+    pub fn dismiss_by(&self, id: &str, desktop: bool) -> Result<bool, String> {
         let mut state = self.lock();
+        if !desktop && state.notifications.iter().any(|n| n.id == id && n.notice.is_some()) {
+            return Err(format!("`{id}` is a mind's notice; only the person dismisses it, on the desktop"));
+        }
         let revision = state.revision + 1;
         let Some(n) = state
             .notifications
             .iter_mut()
             .find(|n| n.id == id && !n.dismissed)
         else {
-            return false;
+            return Ok(false);
         };
         n.dismissed = true;
         n.read = true;
@@ -345,15 +380,21 @@ impl Store {
         let snapshot = snapshot(&mut state);
         drop(state);
         let _ = self.persist(&snapshot);
-        true
+        Ok(true)
     }
 
-    /// Dismiss everything showing. Answers how many actually changed.
-    pub fn dismiss_all(&self) -> usize {
+    /// Dismiss everything showing that `desktop` or any other caller may dismiss: from anything
+    /// but the desktop, a mind's notices stay (see [`Store::dismiss_by`]).
+    pub fn dismiss_all_by(&self, desktop: bool) -> usize {
         let mut state = self.lock();
         let revision = state.revision + 1;
         let mut changed = Vec::new();
-        for (index, n) in state.notifications.iter_mut().enumerate().filter(|(_, n)| !n.dismissed) {
+        for (index, n) in state
+            .notifications
+            .iter_mut()
+            .enumerate()
+            .filter(|(_, n)| !n.dismissed && (desktop || n.notice.is_none()))
+        {
             n.dismissed = true;
             n.read = true;
             n.revision = revision;
@@ -374,15 +415,27 @@ impl Store {
         changed
     }
 
-    /// Mark one read, or with `None` everything showing. Answers how many changed.
+    /// Mark one read, or with `None` everything showing, as the desktop. Answers how many changed.
     pub fn mark_read(&self, id: Option<&str>) -> usize {
+        self.mark_read_by(id, true).unwrap_or(0)
+    }
+
+    /// Mark read as `desktop` or any other caller. A read card is never toasted, so marking a
+    /// mind's notice read is hiding it: refused by id, and skipped by `None`, from anything but
+    /// the desktop.
+    pub fn mark_read_by(&self, id: Option<&str>, desktop: bool) -> Result<usize, String> {
         let mut state = self.lock();
+        if let (false, Some(want)) = (desktop, id) {
+            if state.notifications.iter().any(|n| n.id == want && n.notice.is_some()) {
+                return Err(format!("`{want}` is a mind's notice; only the person marks it read, on the desktop"));
+            }
+        }
         let revision = state.revision + 1;
         let mut changed = 0;
         for n in state.notifications.iter_mut() {
             let matches = match id {
                 Some(want) => n.id == want,
-                None => !n.dismissed,
+                None => !n.dismissed && (desktop || n.notice.is_none()),
             };
             if matches && !n.read {
                 n.read = true;
@@ -391,13 +444,13 @@ impl Store {
             }
         }
         if changed == 0 {
-            return 0;
+            return Ok(0);
         }
         state.revision = revision;
         let snapshot = snapshot(&mut state);
         drop(state);
         let _ = self.persist(&snapshot);
-        changed
+        Ok(changed)
     }
 
     /// Record that an action was invoked, and hand back the notification it was on.
@@ -536,10 +589,23 @@ pub(crate) fn prune(state: &mut OnDisk, archive_path: &Path) {
     let notices: Vec<&Notification> = state.notifications.iter().filter(|n| n.notice.is_some() && !leaving.contains(&n.id)).collect();
     if notices.len() > notice::MAX_NOTICES_STORED {
         let excess = notices.len() - notice::MAX_NOTICES_STORED;
-        // The dismissed go first, oldest first; only then the oldest still showing.
-        let mut order: Vec<&&Notification> = notices.iter().collect();
-        order.sort_by_key(|n| !n.dismissed);
-        leaving.extend(order.iter().take(excess).map(|n| n.id.clone()));
+        // The dismissed go first, oldest first. Only then a card still showing, and then the
+        // oldest of whichever harness holds the most: one sender cannot push out the cards of
+        // another, an acknowledged reminder among them, by sending more.
+        let dismissed: Vec<String> = notices.iter().filter(|n| n.dismissed).take(excess).map(|n| n.id.clone()).collect();
+        let mut more = excess - dismissed.len();
+        leaving.extend(dismissed);
+        let mut showing: std::collections::BTreeMap<&str, std::collections::VecDeque<&str>> = Default::default();
+        for n in notices.iter().filter(|n| !n.dismissed) {
+            let harness = n.notice.as_ref().map_or("", |x| x.harness.id.as_str());
+            showing.entry(harness).or_default().push_back(n.id.as_str());
+        }
+        while more > 0 {
+            let Some(cards) = showing.values_mut().max_by_key(|cards| cards.len()) else { break };
+            let Some(id) = cards.pop_front() else { break };
+            leaving.push(id.to_string());
+            more -= 1;
+        }
     }
     if leaving.is_empty() {
         return;

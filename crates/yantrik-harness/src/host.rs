@@ -1889,12 +1889,13 @@ impl Host {
         let notice_fields = match &self.notice_desk {
             None => None,
             Some(_) => {
-                let harness = {
+                let (harness, pid, uid) = {
                     let mut state = self.lock();
                     self.reap(&mut state);
-                    Self::touch(&mut state.attached, params, peer, &*self.descends)?.announced.id.clone()
+                    let attached = Self::touch(&mut state.attached, params, peer, &*self.descends)?;
+                    (attached.announced.id.clone(), attached.pid, attached.uid)
                 };
-                self.notice_poll_fields(&harness, params["feedback_ack"].as_u64())
+                self.notice_poll_fields(&harness, pid, uid, params["feedback_ack"].as_u64())
             }
         };
         // The person's grants are the shell's to read, from a file, so they are asked outside the

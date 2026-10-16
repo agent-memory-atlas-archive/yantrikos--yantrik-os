@@ -143,6 +143,55 @@ pub fn plan(action: &NoticeAction, home: &Path) -> Result<Opening, String> {
     }
 }
 
+/// The largest file a card's button copies to open. Past it the card says so, and the person
+/// opens the file from Files, where they chose it themselves.
+pub const MAX_COPY_BYTES: u64 = 32 * 1024 * 1024;
+
+/// A read-only copy of `path`, in `into`, for an app to open: the file a card's button names is
+/// opened from here, never in place.
+///
+/// Two things this settles (the security review on #831, findings 3 and 5). The spec says a card
+/// opens a file read-only, and no app here has a read-only mode: the copy is mode 0400, which the
+/// Editor answers with "This file is read-only. Use Save As." And the path was judged a moment
+/// ago by [`plan`], while the app would resolve it again later: the copy is read from a handle
+/// opened now, and refused if that handle is not the file that was judged — a component swapped
+/// for a symlink in between is caught here, and nothing after this reads the original.
+pub fn read_only_copy(path: &Path, into: &Path, name: &str) -> Result<PathBuf, String> {
+    use std::io::Read;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+    let mut file = std::fs::File::open(path).map_err(|e| format!("cannot read it: {e}"))?;
+    let meta = file.metadata().map_err(|e| format!("cannot read it: {e}"))?;
+    if !meta.is_file() {
+        return Err("it is not a file".into());
+    }
+    let opened = std::fs::read_link(format!("/proc/self/fd/{}", std::os::fd::AsRawFd::as_raw_fd(&file)))
+        .map_err(|e| format!("cannot tell what was opened: {e}"))?;
+    if opened != path {
+        return Err("it changed while it was being opened".into());
+    }
+    if meta.len() > MAX_COPY_BYTES {
+        return Err("it is too large to open from a card; open it from Files".into());
+    }
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(into).map_err(|e| format!("cannot copy it: {e}"))?;
+    std::fs::set_permissions(into, std::fs::Permissions::from_mode(0o700)).map_err(|e| format!("cannot copy it: {e}"))?;
+    let copy = into.join(name);
+    let _ = std::fs::remove_file(&copy);
+    let mut out = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o400)
+        .open(&copy)
+        .map_err(|e| format!("cannot copy it: {e}"))?;
+    let mut bytes = Vec::new();
+    (&mut file).take(MAX_COPY_BYTES + 1).read_to_end(&mut bytes).map_err(|e| format!("cannot read it: {e}"))?;
+    if bytes.len() as u64 > MAX_COPY_BYTES {
+        let _ = std::fs::remove_file(&copy);
+        return Err("it is too large to open from a card; open it from Files".into());
+    }
+    std::io::Write::write_all(&mut out, &bytes).map_err(|e| format!("cannot copy it: {e}"))?;
+    Ok(copy)
+}
+
 /// The label the button shows. A URL's button shows its host whatever the mind called it, so a
 /// label cannot dress one site up as another.
 pub fn button_label(action: &NoticeAction) -> String {
@@ -280,5 +329,28 @@ mod tests {
         let url = action(ActionKind::OpenUrl, "https://bank.example/login");
         assert_eq!(button_label(&NoticeAction { label: "Open your bank".into(), ..url }), "Open bank.example");
         let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn a_cards_file_opens_as_a_private_read_only_copy_of_what_was_judged() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("for-you-copy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("home")).unwrap();
+        let file = root.join("home/plan.md");
+        std::fs::write(&file, "the plan").unwrap();
+        let file = std::fs::canonicalize(file).unwrap();
+        let into = root.join("copies");
+        let copy = read_only_copy(&file, &into, "7-plan.md").unwrap();
+        assert_eq!(std::fs::read_to_string(&copy).unwrap(), "the plan");
+        assert_eq!(std::fs::metadata(&copy).unwrap().permissions().mode() & 0o777, 0o400);
+        assert_eq!(std::fs::metadata(&into).unwrap().permissions().mode() & 0o777, 0o700);
+        // Pressed again: a fresh copy, not an error.
+        assert!(read_only_copy(&file, &into, "7-plan.md").is_ok());
+        // A path that is now a symlink to somewhere else is not the file that was judged.
+        std::fs::write(root.join("secret"), "s").unwrap();
+        std::os::unix::fs::symlink(root.join("secret"), root.join("home/swapped.md")).unwrap();
+        assert!(read_only_copy(&root.join("home/swapped.md"), &into, "8-swapped.md").is_err());
+        let _ = std::fs::remove_dir_all(root);
     }
 }
