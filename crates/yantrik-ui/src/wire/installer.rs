@@ -2052,7 +2052,12 @@ mod grub_defaults_tests {
             // gfxterm alone: a second output (serial) makes GRUB draw its text menu, not the theme.
             assert!(text.lines().any(|l| l == "GRUB_TERMINAL_OUTPUT=\"gfxterm\""), "{text}");
             assert!(text.lines().any(|l| l == "GRUB_TERMINAL_INPUT=\"console\""), "{text}");
-            assert!(!text.contains("serial"), "no serial terminal and no serial command: {text}");
+            // The kernel line keeps plymouth.ignore-serial-consoles; GRUB's own terminals name no serial.
+            assert!(
+                !text.lines().any(|l| l.starts_with("GRUB_SERIAL_COMMAND")
+                    || (l.starts_with("GRUB_TERMINAL") && l.contains("serial"))),
+                "no serial terminal and no serial command: {text}"
+            );
             assert!(!text.lines().any(|l| l.starts_with("GRUB_TERMINAL=")), "GRUB_TERMINAL would override both: {text}");
             assert!(text.is_ascii(), "{text}");
         }
