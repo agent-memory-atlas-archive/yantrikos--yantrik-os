@@ -1914,6 +1914,7 @@ reconcile_sysctl() {
 GRUB_DEFAULTS=/etc/default/grub
 GRUB_CFG=/boot/grub/grub.cfg
 GRUB_EFI_DIR=/sys/firmware/efi
+GRUB_SCRIPTS_DIR=/etc/grub.d
 GRUB_CMDLINE_OLD='GRUB_CMDLINE_LINUX="console=ttyS0,115200 console=tty1"'
 GRUB_CMDLINE_NEW='GRUB_CMDLINE_LINUX="console=tty1"'
 GRUB_TERMINAL_INPUT_OLD='GRUB_TERMINAL_INPUT="console serial"'
@@ -1989,7 +1990,7 @@ grub_note_once() {
 }
 
 migrate_grub_defaults() {
-  local f="$GRUB_DEFAULTS" cfg="$GRUB_CFG" lines terms copy tmp cfg_copy out rc kept put_back done_what
+  local f="$GRUB_DEFAULTS" cfg="$GRUB_CFG" lines terms dterms copy tmp cfg_copy out rc kept put_back done_what
   local cmd=0 term=0 resume=""
   [ -f "$f" ] || return 0
   # A run killed part way leaves its temp files here; every name with this suffix is one this
@@ -2017,7 +2018,15 @@ migrate_grub_defaults() {
   fi
 
   if [ "$terms" = "$(printf '%s\n' "$GRUB_TERMINAL_INPUT_OLD" "$GRUB_TERMINAL_OUTPUT_OLD" "$GRUB_SERIAL_COMMAND_OLD")" ]; then
-    if grep -qE '^[[:space:]]*(export[[:space:]]+)?GRUB_THEME=' "$f" && ! [ -d "$GRUB_EFI_DIR" ]; then
+    # update-grub reads $f.d/*.cfg after $f, so what is set there counts as much as $f does.
+    dterms="$(grep -hsE '^[[:space:]]*(export[[:space:]]+)?GRUB_(TERMINAL|TERMINAL_INPUT|TERMINAL_OUTPUT|SERIAL_COMMAND)=' "$f".d/*.cfg)"
+    if [ -n "$dterms" ]; then
+      # Someone's own serial setup there, which would lose its speed with $f's serial command
+      # gone (security review of c42484eb, #835, item 2).
+      grub_note_once grub-terminal-left-alone "$(printf '%s\n%s' "$terms" "$dterms")" \
+        "$f.d sets the boot menu's terminals itself; $f's are left as they are: $(printf '%s' "$dterms" | tr '\n' ' ')"
+    elif grep -qsE '^[[:space:]]*(export[[:space:]]+)?GRUB_THEME=' "$f" "$f".d/*.cfg && ! [ -d "$GRUB_EFI_DIR" ]; then
+      # A theme in $f.d counts too (security review of c42484eb, #835, item 1).
       grub_note_once grub-terminal-left-alone "$terms" \
         "$f: the menu has a theme and this machine starts by BIOS, where GRUB stops at a themed menu; its serial terminal, which keeps the theme off, is left as it is"
     else
@@ -2027,6 +2036,7 @@ migrate_grub_defaults() {
     # The same resume as the kernel line's, for a menu still drawn on a serial terminal too.
     grub_cfg_has_serial_terminal "$cfg" \
       && ! grep -qsE -- '^[[:space:]]*(export[[:space:]]+)?GRUB_(TERMINAL|TERMINAL_INPUT|TERMINAL_OUTPUT)=.*serial' "$f" "$f".d/*.cfg \
+      && ! grep -qsE -- '^[[:space:]]*terminal_(input|output)[[:space:]].*serial' "$GRUB_SCRIPTS_DIR"/*_custom \
       && resume="${resume:+$resume, and }$cfg still draws the menu on a serial terminal too"
   elif [ "$terms" = "$(printf '%s\n' 'GRUB_TERMINAL="console serial"' "$GRUB_SERIAL_COMMAND_OLD")" ]; then
     # The installer's before 14 Oct: no theme on the machine and GRUB's text menu. Left as it
@@ -5110,7 +5120,7 @@ c.sendall((json.dumps({"ok": True, "seeded": req["rules"]}) + "\n").encode())' "
   mkdir -p "$gd/efi"
   gr_run() { # gr_run <ok|fail|by-device>: what migrate_grub_defaults said; GR_CP_FAIL=1, the put-back's copy fails
     ( GRUB_DEFAULTS="$gd/default/grub" GRUB_CFG="$gd/boot/grub.cfg" UPDATES_DIR="$gd/updates" GR_MODE="$1"
-      GRUB_EFI_DIR="$gd/efi"
+      GRUB_EFI_DIR="$gd/efi" GRUB_SCRIPTS_DIR="$gd/grub.d"
       cp() { [ -n "${GR_CP_FAIL:-}" ] && case "${3:-}" in "$GRUB_DEFAULTS".yantrik-*) true ;; *) false ;; esac \
                && { echo "cp: error writing: No space left on device" >&2; return 1; }; command cp "$@"; }
       grub_can_regenerate() { [ "$GR_MODE" != no-update-grub ]; }
@@ -5295,10 +5305,28 @@ c.sendall((json.dumps({"ok": True, "seeded": req["rules"]}) + "\n").encode())' "
     "$(cmp -s "$gd/hand" "$gd/default/grub" && echo yes || echo no)|$([ -e "$gd/calls" ] && echo yes || echo no)|$(ls "$gd/default"/grub.before-* 2>/dev/null || echo none)"
   t "serial terminal: ... and said so" "starts by BIOS" "$out"
   is "serial terminal: ... once" "" "$(gr_run ok)"
+  # A theme set in grub.d counts as much as one in the file (#835 review, item 1).
+  gt_old; sed -i '/^GRUB_THEME=/d' "$gd/default/grub"; cp -p "$gd/default/grub" "$gd/hand"; mkdir -p "$gd/default/grub.d"
+  printf 'GRUB_THEME="/boot/grub/themes/other/theme.txt"\n' > "$gd/default/grub.d/theme.cfg"
+  out="$(gr_run ok)"; rm -rf "$gd/default/grub.d"
+  is "serial terminal: BIOS with a theme in grub.d: left as it is" "yes|no|none" \
+    "$(cmp -s "$gd/hand" "$gd/default/grub" && echo yes || echo no)|$([ -e "$gd/calls" ] && echo yes || echo no)|$(ls "$gd/default"/grub.before-* 2>/dev/null || echo none)"
+  t "serial terminal: ... and said so" "starts by BIOS" "$out"
   gt_old; sed -i '/^GRUB_THEME=/d' "$gd/default/grub"; gr_run ok >/dev/null
   is "serial terminal: BIOS with no theme: gfxterm alone, as the installer writes it there" \
     "$GRUB_TERMINAL_INPUT_NEW|$GRUB_TERMINAL_OUTPUT_NEW|" "$(gt_terms)"
   mkdir -p "$gd/efi"
+
+  # Terminals set in grub.d: someone's serial setup, which would lose its speed with the file's
+  # serial command gone (#835 review, item 2).
+  gt_old; cp -p "$gd/default/grub" "$gd/hand"; mkdir -p "$gd/default/grub.d"
+  printf 'GRUB_TERMINAL_OUTPUT="gfxterm serial"\n' > "$gd/default/grub.d/serial.cfg"
+  out="$(gr_run ok)"
+  is "serial terminal: terminals set in grub.d: the file is left as it is" "yes|no|none" \
+    "$(cmp -s "$gd/hand" "$gd/default/grub" && echo yes || echo no)|$([ -e "$gd/calls" ] && echo yes || echo no)|$(ls "$gd/default"/grub.before-* 2>/dev/null || echo none)"
+  t "serial terminal: ... and said so" "sets the boot menu's terminals itself" "$out"
+  is "serial terminal: ... once" "" "$(gr_run ok)"
+  rm -rf "$gd/default/grub.d"
 
   for gm in fail by-device; do
     gt_old; cp -p "$gd/default/grub" "$gd/hand"; gcfg="$(cat "$gd/boot/grub.cfg")"
@@ -5334,6 +5362,10 @@ c.sendall((json.dumps({"ok": True, "seeded": req["rules"]}) + "\n").encode())' "
   printf 'GRUB_TERMINAL_OUTPUT="gfxterm serial"\n' > "$gd/default/grub.d/serial.cfg"
   out="$(gr_run ok)"; rm -rf "$gd/default/grub.d"
   is "serial terminal: ... nor is a machine whose grub.d asks for a serial terminal itself" "" "$(cat "$gd/calls" 2>/dev/null)"
+  gt_killed; mkdir -p "$gd/grub.d"
+  printf '%s\n' '#!/bin/sh' 'cat <<EOF' 'terminal_output gfxterm serial' 'EOF' > "$gd/grub.d/40_custom"
+  out="$(gr_run ok)"; rm -rf "$gd/grub.d"
+  is "serial terminal: ... nor one whose 40_custom puts a serial terminal in the menu (#835 review, item 4)" "" "$(cat "$gd/calls" 2>/dev/null)"
   is "serial terminal: the new lines are the installer's" "yes" \
     "$(! [ -f "$here/../../crates/yantrik-ui/src/wire/installer.rs" ] \
        || grep -qF -- "$(printf '%s\\n%s' "$GRUB_TERMINAL_INPUT_NEW" "$GRUB_TERMINAL_OUTPUT_NEW" | sed 's/"/\\"/g')" "$here/../../crates/yantrik-ui/src/wire/installer.rs" && echo yes || echo no)"
