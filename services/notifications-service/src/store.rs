@@ -94,7 +94,7 @@ struct MainFile {
     notifications: Vec<Notification>,
 }
 
-/// `notices.json`, beside the store: everything about notices.
+/// The sidecar ([`sidecar_path`]), beside the store: everything about notices.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct Sidecar {
     /// Each notice's record, by the id of the notification it is on. `created_at` is that
@@ -125,9 +125,10 @@ pub(crate) struct SidecarNotice {
     notice: notice::Notice,
 }
 
-/// `notices.json`, beside the store at `store`.
+/// The sidecar of the store at `store`: `notifications.notices.json` beside `notifications.json`.
+/// Named after the store's own file, so two stores in one directory never share one.
 pub(crate) fn sidecar_path(store: &Path) -> PathBuf {
-    store.with_file_name("notices.json")
+    store.with_extension("notices.json")
 }
 
 impl OnDisk {
