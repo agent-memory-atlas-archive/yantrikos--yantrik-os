@@ -75,6 +75,89 @@ pub fn drop_template_switch(body: &mut Value) {
     }
 }
 
+/// Sampling parameters a provider may refuse outright for a model ("`temperature` is deprecated for
+/// this model"). Every harness sends them, so the gateway takes them out rather than each harness
+/// learning which model refuses which.
+pub const DROPPABLE: [&str; 2] = ["temperature", "top_p"];
+
+/// What the provider's own words call deprecated or unsupported. A range error ("temperature must
+/// be at most 1") or a conflict ("`temperature` and `top_p` cannot both be specified") is not one of
+/// these: the parameter is allowed, the value or the pair is wrong, and the caller is shown it.
+const REFUSED: [&str; 7] =
+    ["is deprecated", "deprecated for this model", "not supported", "unsupported", "does not support", "unrecognized request argument", "unknown parameter"];
+
+/// The parameters of [`DROPPABLE`] an upstream's 400 body says the model refuses. The message
+/// must name the parameter as a word of its own and say it is deprecated or unsupported.
+pub fn refused_params(error_body: &[u8]) -> Vec<&'static str> {
+    let Ok(v) = serde_json::from_slice::<Value>(error_body) else { return Vec::new() };
+    let message = v
+        .pointer("/error/message")
+        .or_else(|| v.get("error").filter(|e| e.is_string()))
+        .or_else(|| v.get("message"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !REFUSED.iter().any(|w| message.contains(w)) {
+        return Vec::new();
+    }
+    // "`temperature` and `top_p` cannot both be specified, `top_p` is deprecated" names both, and
+    // refuses one: a parameter counts only when it is named in the same sentence as the refusal.
+    let mut found = Vec::new();
+    for sentence in message.split(['.', ';', '\n']) {
+        if !REFUSED.iter().any(|w| sentence.contains(w)) {
+            continue;
+        }
+        for p in DROPPABLE {
+            if names(sentence, p) && !found.contains(&p) {
+                found.push(p);
+            }
+        }
+    }
+    found
+}
+
+/// Whether `text` holds `word` with no identifier character either side (`top_p` is not `top_p2`).
+fn names(text: &str, word: &str) -> bool {
+    let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    text.match_indices(word).any(|(i, _)| {
+        let before = text[..i].chars().next_back();
+        let after = text[i + word.len()..].chars().next();
+        !before.is_some_and(ident) && !after.is_some_and(ident)
+    })
+}
+
+/// The parameters the gateway knows the target refuses before anything is sent: Claude 5 and later
+/// on Anthropic's own endpoint takes no `temperature`. [`Reasoning::AnthropicBudget`] is the knob
+/// only an `anthropic` account is given (`model_caps::reasoning_for`), so it names that endpoint;
+/// the same model through a router keeps whatever the router accepts, and any other model is left
+/// to the 400 and [`refused_params`].
+pub fn known_refused(target: &Target) -> &'static [&'static str] {
+    if target.reasoning != yantrik_ml::model_caps::Reasoning::AnthropicBudget {
+        return &[];
+    }
+    let f = yantrik_ml::model_caps::family(&target.model);
+    let parts: Vec<&str> = f.split('-').collect();
+    // `claude-<name>-<major>…`: `claude-sonnet-5-5`, `claude-opus-5`, `claude-fable-5-1`. The older
+    // `claude-3-5-sonnet` puts its version first and is not matched.
+    let major = match parts.as_slice() {
+        ["claude", name, version, ..] if name.chars().all(|c| c.is_ascii_alphabetic()) => {
+            version.split('.').next().and_then(|v| v.parse::<u32>().ok())
+        }
+        _ => None,
+    };
+    if major.is_some_and(|m| m >= 5) {
+        &["temperature"]
+    } else {
+        &[]
+    }
+}
+
+/// Take these parameters out of a body. Returns the ones that were there.
+pub fn drop_params(body: &mut Value, params: &[&'static str]) -> Vec<&'static str> {
+    let Some(map) = body.as_object_mut() else { return Vec::new() };
+    params.iter().copied().filter(|p| map.remove(*p).is_some()).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,5 +246,56 @@ mod tests {
         rewrite(&mut kept, &target(Reasoning::None)).unwrap();
         assert_eq!(kept["stream_options"]["include_usage"], false, "the harness's own choice stands");
         assert!(rewrite(&mut json!([1]), &target(Reasoning::None)).is_err());
+    }
+
+    /// What Anthropic's OpenAI-compatible endpoint answered for claude-sonnet-5-5 (VM 542, 16 Oct 2026).
+    const ANTHROPIC_400: &str = r#"{"error":{"code":"invalid_request_error","message":"`temperature` is deprecated for this model."}}"#;
+
+    #[test]
+    fn the_providers_refusal_names_the_parameter_to_drop() {
+        let cases: &[(&str, &[&str])] = &[
+            (ANTHROPIC_400, &["temperature"]),
+            (r#"{"error":{"message":"`top_p` is deprecated for this model."}}"#, &["top_p"]),
+            (r#"{"error":{"message":"Unsupported parameter: 'temperature' is not supported with this model."}}"#, &["temperature"]),
+            (r#"{"error":{"message":"Unsupported value: 'temperature' does not support 0.2 with this model. Only the default (1) value is supported."}}"#, &["temperature"]),
+            (r#"{"error":"Unrecognized request argument supplied: top_p"}"#, &["top_p"]),
+            (r#"{"message":"temperature and top_p are not supported for this model"}"#, &["temperature", "top_p"]),
+            // Allowed, but the value or the pair is wrong: the caller is shown it.
+            (r#"{"error":{"message":"temperature: range error, must be at most 1.0"}}"#, &[]),
+            (r#"{"error":{"message":"`temperature` and `top_p` cannot both be specified for this model."}}"#, &[]),
+            (r#"{"error":{"message":"`temperature` and `top_p` cannot both be specified. `top_p` is deprecated."}}"#, &["top_p"]),
+            // Another parameter, or no parameter of ours.
+            (r#"{"error":{"message":"`top_k` is deprecated for this model."}}"#, &[]),
+            (r#"{"error":{"message":"`temperatures` is not supported"}}"#, &[]),
+            (r#"{"error":{"message":"Unrecognized request argument supplied: chat_template_kwargs"}}"#, &[]),
+            (r#"{"error":{"message":"context length exceeded"}}"#, &[]),
+            ("temperature is deprecated", &[]),
+            ("", &[]),
+        ];
+        for (body, want) in cases {
+            assert_eq!(refused_params(body.as_bytes()), *want, "{body}");
+        }
+    }
+
+    #[test]
+    fn claude_five_on_anthropics_endpoint_is_sent_no_temperature_from_the_start() {
+        let on = |reasoning, model: &str| known_refused(&Target { model: model.into(), ..target(reasoning) });
+        for model in ["claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-5-5", "claude-fable-5-1", "claude-opus-5", "claude-sonnet-5-5-20261001"] {
+            assert_eq!(on(Reasoning::AnthropicBudget, model), &["temperature"], "{model}");
+        }
+        for model in ["claude-opus-4-1", "claude-sonnet-4-5", "claude-3-7-sonnet-latest", "claude-3-5-sonnet-latest"] {
+            assert!(on(Reasoning::AnthropicBudget, model).is_empty(), "{model}");
+        }
+        // The same model through a router, or an endpoint the person typed, is left to the 400.
+        assert!(on(Reasoning::OpenRouter, "anthropic/claude-sonnet-5-5").is_empty());
+        assert!(on(Reasoning::None, "claude-sonnet-5-5").is_empty());
+    }
+
+    #[test]
+    fn dropping_takes_out_only_what_is_there() {
+        let mut b = json!({"model": "x", "temperature": 0.7, "messages": []});
+        assert_eq!(drop_params(&mut b, &["temperature", "top_p"]), vec!["temperature"]);
+        assert_eq!(b, json!({"model": "x", "messages": []}));
+        assert!(drop_params(&mut b, &["temperature"]).is_empty());
     }
 }
