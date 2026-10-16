@@ -212,7 +212,11 @@ impl Store {
         // same deal, which is what makes "downloading… / finished" one line on screen and not
         // two.
         if let Some(target) = req.replaces_id.as_deref() {
-            if let Some(existing) = state.notifications.iter_mut().find(|n| n.id == target) {
+            // Never a mind's notice: its words are the mind's, kept as the store checked them, and
+            // a plain post (a socket `add`, or D-Bus `Notify` from any program) naming its id would
+            // put anybody's text under that mind's name and bring a dismissed card back (security
+            // review of #831, finding 1). Such an id is treated as one nobody knows.
+            if let Some(existing) = state.notifications.iter_mut().find(|n| n.id == target && n.notice.is_none()) {
                 existing.app = app;
                 existing.title = title;
                 existing.body = body;
@@ -275,20 +279,8 @@ impl Store {
     /// tool on the socket — gets the card without them.
     pub fn list_for(&self, desktop: bool) -> Vec<Notification> {
         let state = self.lock();
-        let mut out: Vec<Notification> = state
-            .notifications
-            .iter()
-            .filter(|n| !n.dismissed)
-            .cloned()
-            .map(|mut n| {
-                if let (false, Some(record)) = (desktop, n.notice.as_mut()) {
-                    record.feedback.clear();
-                    record.evidence.clear();
-                    record.action = None;
-                }
-                n
-            })
-            .collect();
+        let mut out: Vec<Notification> =
+            state.notifications.iter().filter(|n| !n.dismissed).cloned().map(|n| seen_by(n, desktop)).collect();
         out.reverse();
         out
     }
@@ -553,6 +545,18 @@ impl Store {
         *written = (*written).max(state.generation);
         Ok(())
     }
+}
+
+/// A record as `desktop` (or anything else) may read it: anything but the desktop gets a mind's
+/// notice without the person's feedback on it, its evidence or its button (security review of
+/// #831, finding 7). One rule for `list` and `since`.
+pub fn seen_by(mut n: Notification, desktop: bool) -> Notification {
+    if let (false, Some(record)) = (desktop, n.notice.as_mut()) {
+        record.feedback.clear();
+        record.evidence.clear();
+        record.action = None;
+    }
+    n
 }
 
 /// A copy of the state to write, marked newer than every copy taken before it.

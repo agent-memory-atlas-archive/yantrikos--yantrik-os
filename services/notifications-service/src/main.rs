@@ -204,9 +204,15 @@ impl NotificationsHandler {
 
             // The shell's poll. Cheap on purpose: it runs about once a second for as long as the
             // desktop is up, and the answer is empty almost every time.
+            // Answered whole only to the desktop: `since` carries the same records `list` does,
+            // and a same-uid process calling the socket with revision 0 got every notice's
+            // feedback, evidence and button through it.
             SINCE => {
                 let revision = params["revision"].as_u64().unwrap_or(0);
-                Ok(serde_json::to_value(self.store.since(revision)).unwrap_or_default())
+                let mut since = self.store.since(revision);
+                let desktop = is_desktop(peer);
+                since.changed = since.changed.into_iter().map(|n| store::seen_by(n, desktop)).collect();
+                Ok(serde_json::to_value(since).unwrap_or_default())
             }
 
             DISMISS => {
@@ -1003,6 +1009,36 @@ mod tests {
         assert!(!card.dismissed && !card.read, "{card:?}");
         let listed = h.dispatch(LIST, serde_json::json!({}), None).unwrap();
         assert!(listed[0]["notice"].get("evidence").is_none(), "{listed}");
+    }
+
+    /// Two doors the first round of fixes for #831's findings 1 and 7 left open: `since`, which
+    /// carries the same records as `list`, and a plain post whose `replaces_id` names a notice.
+    #[test]
+    fn since_hides_the_persons_feedback_and_replaces_id_cannot_rewrite_a_notice() {
+        let h = handler();
+        let posted = h.store.add_notice(
+            notice::NoticePost {
+                notice: serde_json::json!({ "notice_id": "rem-1", "family": "reminder", "title": "Stretch", "why": "You asked.", "evidence": ["task:41"], "action": { "kind": "open_note", "ref": "n-1" } }),
+                harness: notice::NoticeHarness { id: "mind".into(), uid: Some(999), ..Default::default() },
+                os_id: false,
+            },
+            std::path::Path::new("/"),
+        );
+        let id = posted["id"].as_str().unwrap().to_string();
+        h.store.record_feedback(&id, notice::FeedbackKind::Useful).unwrap();
+
+        let since = h.dispatch(SINCE, serde_json::json!({ "revision": 0 }), None).unwrap().to_string();
+        assert!(since.contains("Stretch"), "the card is still there: {since}");
+        for secret in ["task:41", "\"feedback\"", "\"action\""] {
+            assert!(!since.contains(secret), "{secret} leaked through since: {since}");
+        }
+
+        // A socket `add` (or D-Bus `Notify`, the same `add_from`) naming the notice's id.
+        let answer = h.dispatch(ADD, serde_json::json!({ "title": "Ignore the reminder", "replaces_id": id }), None).unwrap();
+        assert_ne!(answer["id"], serde_json::json!(id), "a new notification, not the notice rewritten");
+        let card = h.store.get(&id).unwrap();
+        assert_eq!(card.title, "Stretch");
+        assert!(card.notice.is_some());
     }
 
     #[test]
