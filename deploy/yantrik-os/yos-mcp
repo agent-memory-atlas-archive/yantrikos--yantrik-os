@@ -1497,7 +1497,11 @@ PRIVATE_READS = {"os_describe", "os_screen", "os_perception", "web_listen",
 OUTBOUND = {"web_type", "web_go"}
 # Reads a mind makes through os_act, because they are the shell's actions: a display's text, read
 # from its pixels (#257). Private the way os_screen is — everything on the display is in them.
-SCREEN_READS = {("shell", "read_screen"), ("shell", "read_mind_view")}
+# A picture of a display holds even more than its text (design/capture-2026-10-15.md), so the two
+# screenshots taint exactly as the two reads do: the desktop's as read_screen, Mind View's as
+# read_mind_view.
+SCREEN_READS = {("shell", "read_screen"), ("shell", "read_mind_view"),
+                ("shell", "screenshot_screen"), ("shell", "screenshot_mind_view")}
 
 _SAW_PRIVATE = []          # what tainted this conversation, in order, for the refusal message
 TAINT_OFF = os.environ.get("YOS_MCP_NO_TAINT") == "1"
