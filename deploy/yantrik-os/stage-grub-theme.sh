@@ -95,12 +95,15 @@ if [ "${1:-}" = selftest ]; then
     [ "$ground" = "#0e1018" ] || { echo "FAIL theme.txt's ground is #0e1018 ($ground)"; exit 1; }
     cfg="$T/live-grub.cfg"
     sed -n '/^set timeout=5$/,/^GRUBCFG$/p' "$HERE/build-debian-iso.sh" | sed '$d' > "$cfg"
-    awk -v want="    background_color \"$ground\"" '
+    # ... and on UEFI only: inside the gfxterm block, under its own efi guard (review of a6c728c5).
+    awk -v want="        background_color \"$ground\"" '
         /^if terminal_output gfxterm; then$/ { on = 1; next }
         on && /^fi$/ { exit }
-        on && $0 == want { found = 1 }
-        END { exit !found }' "$cfg" \
-        || { echo "FAIL the live menu's terminal is the ground once gfxterm is up"; exit 1; }
+        on && index($0, "    if [ \"${grub_platform}\" = \"efi\" ]; then") == 1 { efi = 1; next }
+        on && efi && $0 == "    fi" { efi = 0; next }
+        on && /background_color/ { if (efi && $0 == want) found = 1; else stray = 1 }
+        END { exit !(found && !stray) }' "$cfg" \
+        || { echo "FAIL the live menu's terminal is the ground once gfxterm is up, on UEFI only"; exit 1; }
     grep -qx 'sudo install -m 0755 "$SCRIPT_DIR/grub-ground" "$ROOTFS/etc/grub.d/06_yantrik_ground"' "$HERE/build-debian-iso.sh" \
         || { echo "FAIL the image carries grub-ground as /etc/grub.d/06_yantrik_ground"; exit 1; }
     touch "$T/theme.txt"

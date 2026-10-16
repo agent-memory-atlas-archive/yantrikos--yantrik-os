@@ -2083,6 +2083,14 @@ mod grub_defaults_tests {
         let end = guard + iso[guard..].find("\nfi\n").expect("the guard's end");
         assert!(guard < set && set < end, "the theme is set only inside the UEFI guard");
         assert_eq!(iso.matches("set theme=").count(), 1, "and nowhere else");
+
+        // The text installer too (review of #820 at a6c728c5): it themed a BIOS install whatever
+        // `$IS_EFI` said, and grub-ground then wrote its block for that menu as well.
+        let text = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../deploy/yantrik-os/yantrik-install.sh"));
+        let theme = text.find("GRUB_THEME=").expect("the text installer's theme line");
+        let guard = text[..theme].rfind("if $IS_EFI && ").expect("the text installer copies the theme under $IS_EFI");
+        assert!(!text[guard..theme].contains("\nfi\n"), "and the theme line is inside that branch");
+        assert_eq!(text.matches("GRUB_THEME=").count(), 1, "and nowhere else");
     }
 
     /// Nothing on tty1 before the desktop, on the live image and on both installers' machines.

@@ -1574,13 +1574,6 @@ loadfont /boot/grub/themes/yantrik/dejavusans_16.pf2
 loadfont /boot/grub/themes/yantrik/dejavusans_20.pf2
 loadfont /boot/grub/themes/yantrik/dejavusans_bold_28.pf2
 loadfont unicode
-# The terminal window GRUB loads the kernel in, after Enter, in the menu's ground: gfxterm fills
-# it with black otherwise, a black rectangle over the menu for about 3 s (#820, the OVMF film).
-# Only once gfxterm is up: background_color needs a video mode. Installed machines: grub-ground.
-if terminal_output gfxterm; then
-    insmod gfxterm_background
-    background_color "#0e1018"
-fi
 # The theme on UEFI only. On a legacy BIOS (SeaBIOS) the themed menu ran its countdown and then
 # GRUB stopped at "unaligned pointer 0x1e" instead of booting: CI's boot test of 6ebe7787 waited
 # 25 minutes for a login prompt (15 Oct 2026). The same image without the theme, fonts kept,
@@ -1588,6 +1581,17 @@ fi
 if [ "${grub_platform}" = "efi" ]; then
     set theme=/boot/grub/themes/yantrik/theme.txt
     export theme
+fi
+# The terminal window GRUB loads the kernel in, after Enter, in the menu's ground: gfxterm fills
+# it with black otherwise, a black rectangle over the menu for about 3 s (#820, the OVMF film).
+# Only once gfxterm is up: background_color needs a video mode. UEFI only, like the theme: a BIOS
+# menu has no themed ground to cover, and SeaBIOS is where GRUB's gfxterm last broke (review of
+# a6c728c5). Installed machines: grub-ground, which writes it only with the theme.
+if terminal_output gfxterm; then
+    if [ "${grub_platform}" = "efi" ]; then
+        insmod gfxterm_background
+        background_color "#0e1018"
+    fi
 fi
 
 # Speak on the serial line AS WELL AS the screen, and accept input from both.
