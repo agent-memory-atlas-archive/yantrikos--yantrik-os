@@ -1,25 +1,28 @@
 //! Local music library scan: walk a folder for audio files and read what a file name alone
 //! can tell us.
 //!
-//! Tags and durations are deliberately out of scope here: they need a metadata crate, and this
-//! issue is only the scan. So the file stem is the title, `artist`/`album`/`genre` stay empty,
-//! `duration_secs` stays `0.0` and the duration text is `"--:--"`.
+//! Tags are out of scope: they need a metadata crate. So the file stem is the title and the
+//! folder the file sits in is the album, which is how most collections are laid out on disk.
+//! A track's length is not read here; mpv reports it once the track plays.
+//!
+//! The scan runs on a worker thread (see `main.rs`), so nothing here touches the UI. It never
+//! follows a symlinked folder: a link back up the tree would recurse forever, and a link from
+//! `~/Music` to `~` would scan the whole home.
 
 use std::path::Path;
 
 /// One track found by a library scan. Pure data, no UI types.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Track {
     pub title: String,
-    pub artist: String,
+    /// The name of the folder the file is in.
     pub album: String,
-    pub genre: String,
-    pub duration_secs: f64,
     pub path: String,
 }
 
 const AUDIO_EXTENSIONS: &[&str] = &["flac", "mp3", "ogg", "opus", "wav", "m4a"];
 
-fn is_audio(path: &Path) -> bool {
+pub fn is_audio(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .map(|e| AUDIO_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
@@ -28,14 +31,23 @@ fn is_audio(path: &Path) -> bool {
 
 /// Walk `root` recursively, keeping one `Track` per recognised audio file, sorted by title so
 /// the result is stable between scans.
+#[cfg(test)]
 pub fn scan_folder(root: &Path) -> Vec<Track> {
+    scan_folder_with(root, &mut |_| {})
+}
+
+/// [`scan_folder`], calling `progress` with the running count every [`PROGRESS_EVERY`] tracks.
+pub fn scan_folder_with(root: &Path, progress: &mut dyn FnMut(usize)) -> Vec<Track> {
     let mut tracks = Vec::new();
-    walk(root, &mut tracks);
-    tracks.sort_by(|a, b| a.title.cmp(&b.title));
+    walk(root, &mut tracks, progress);
+    tracks.sort_by(|a, b| a.title.cmp(&b.title).then_with(|| a.path.cmp(&b.path)));
     tracks
 }
 
-fn walk(dir: &Path, tracks: &mut Vec<Track>) {
+/// How often a scan says how far it has got.
+pub const PROGRESS_EVERY: usize = 100;
+
+fn walk(dir: &Path, tracks: &mut Vec<Track>, progress: &mut dyn FnMut(usize)) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
         let path = entry.path();
@@ -43,37 +55,99 @@ fn walk(dir: &Path, tracks: &mut Vec<Track>) {
         // recurse until the stack overflows, and a link from ~/Music to ~ would scan the home.
         let Ok(kind) = entry.file_type() else { continue };
         if kind.is_dir() {
-            walk(&path, tracks);
+            walk(&path, tracks, progress);
         } else if is_audio(&path) {
             tracks.push(track_from(&path));
+            if tracks.len().is_multiple_of(PROGRESS_EVERY) {
+                progress(tracks.len());
+            }
         }
     }
 }
 
-fn track_from(path: &Path) -> Track {
+pub fn track_from(path: &Path) -> Track {
     let title = path
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
-    Track {
-        title,
-        artist: String::new(),
-        album: String::new(),
-        genre: String::new(),
-        duration_secs: 0.0,
-        path: path.to_string_lossy().into_owned(),
-    }
+    let album = path
+        .parent()
+        .and_then(|p| p.file_name())
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    Track { title, album, path: path.to_string_lossy().into_owned() }
 }
 
-/// `m:ss` for a known duration, `"--:--"` when it is unknown (0.0) or non-finite.
-pub fn duration_text(secs: f64) -> String {
-    if !secs.is_finite() || secs <= 0.0 {
-        return "--:--".to_string();
+/// What scanning every library folder found.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Library {
+    /// Every track once, by path, sorted by title.
+    pub tracks: Vec<Track>,
+    /// How many tracks each folder holds, in the order the folders were given. A track inside
+    /// two listed folders (one nested in the other) counts in both, and is in `tracks` once.
+    pub per_folder: Vec<usize>,
+    /// Folders that could not be read at all, with why.
+    pub unreadable: Vec<(String, String)>,
+}
+
+/// Scan every folder in `folders` and merge the results. `progress` gets the running total.
+pub fn scan_all(folders: &[String], progress: &mut dyn FnMut(usize)) -> Library {
+    let mut seen = std::collections::HashSet::new();
+    let mut library = Library::default();
+    let mut done = 0;
+    for folder in folders {
+        let root = Path::new(folder);
+        if let Err(e) = std::fs::read_dir(root) {
+            library.unreadable.push((folder.clone(), e.to_string()));
+            library.per_folder.push(0);
+            continue;
+        }
+        let found = scan_folder_with(root, &mut |n| progress(done + n));
+        done += found.len();
+        library.per_folder.push(found.len());
+        for track in found {
+            if seen.insert(track.path.clone()) {
+                library.tracks.push(track);
+            }
+        }
     }
-    let total = secs.round() as u64;
-    let minutes = total / 60;
-    let seconds = total % 60;
-    format!("{}:{:02}", minutes, seconds)
+    library.tracks.sort_by(|a, b| a.title.cmp(&b.title).then_with(|| a.path.cmp(&b.path)));
+    library
+}
+
+/// `1 track`, `2 tracks`, `0 folders`.
+pub fn count(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+/// The sentence a finished scan leaves on the status line.
+pub fn summary(library: &Library, folders: usize) -> String {
+    let mut said = format!(
+        "{} in {}",
+        count(library.tracks.len(), "track", "tracks"),
+        count(folders, "folder", "folders")
+    );
+    if !library.unreadable.is_empty() {
+        let names: Vec<&str> = library.unreadable.iter().map(|(f, _)| f.as_str()).collect();
+        said.push_str(&format!(
+            " — could not read {}: {}",
+            if names.len() == 1 { "this folder" } else { "these folders" },
+            names.join(", ")
+        ));
+    }
+    said
+}
+
+/// `m:ss`, or `h:mm:ss` past an hour; empty when mpv has not said.
+pub fn clock(secs: Option<f64>) -> String {
+    let Some(secs) = secs.filter(|s| s.is_finite() && *s >= 0.0) else { return String::new() };
+    let total = secs.floor() as u64;
+    let (h, m, s) = (total / 3600, (total / 60) % 60, total % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
 }
 
 #[cfg(test)]
@@ -112,6 +186,72 @@ mod tests {
         assert!(a.path.ends_with("a.flac"), "path is the file's own: {}", a.path);
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_album_is_the_folder_the_file_is_in() {
+        let root = temp_dir("album");
+        std::fs::create_dir_all(root.join("Artist/Album")).unwrap();
+        std::fs::write(root.join("Artist/Album/one.flac"), b"").unwrap();
+        let tracks = scan_folder(&root);
+        assert_eq!(tracks[0].album, "Album");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn every_folder_gets_its_real_count_and_a_shared_track_is_listed_once() {
+        let root = temp_dir("counts");
+        std::fs::create_dir_all(root.join("inner")).unwrap();
+        for n in 0..3 {
+            std::fs::write(root.join(format!("{n}.mp3")), b"").unwrap();
+        }
+        std::fs::write(root.join("inner/x.ogg"), b"").unwrap();
+        let missing = root.join("nope").to_string_lossy().into_owned();
+        let folders = vec![
+            root.to_string_lossy().into_owned(),
+            root.join("inner").to_string_lossy().into_owned(),
+            missing.clone(),
+        ];
+        let mut ticks = Vec::new();
+        let lib = scan_all(&folders, &mut |n| ticks.push(n));
+        assert_eq!(lib.per_folder, vec![4, 1, 0]);
+        assert_eq!(lib.tracks.len(), 4, "inner/x.ogg is in both folders and listed once");
+        assert_eq!(lib.unreadable.len(), 1);
+        assert_eq!(lib.unreadable[0].0, missing);
+        let said = summary(&lib, folders.len());
+        assert!(said.starts_with("4 tracks in 3 folders — could not read this folder: "), "{said}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_large_scan_reports_progress_as_it_goes() {
+        let root = temp_dir("progress");
+        for n in 0..250 {
+            std::fs::write(root.join(format!("{n:03}.mp3")), b"").unwrap();
+        }
+        let mut ticks = Vec::new();
+        let lib = scan_all(&[root.to_string_lossy().into_owned()], &mut |n| ticks.push(n));
+        assert_eq!(lib.tracks.len(), 250);
+        assert_eq!(ticks, vec![100, 200]);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn counts_are_plural_only_when_they_should_be() {
+        assert_eq!(count(1, "track", "tracks"), "1 track");
+        assert_eq!(count(0, "track", "tracks"), "0 tracks");
+        assert_eq!(count(2, "folder", "folders"), "2 folders");
+        let one = Library { tracks: vec![track_from(Path::new("/m/a/b.mp3"))], per_folder: vec![1], unreadable: vec![] };
+        assert_eq!(summary(&one, 1), "1 track in 1 folder");
+    }
+
+    #[test]
+    fn the_clock_reads_what_mpv_said() {
+        assert_eq!(clock(None), "");
+        assert_eq!(clock(Some(0.0)), "0:00");
+        assert_eq!(clock(Some(187.9)), "3:07");
+        assert_eq!(clock(Some(3725.0)), "1:02:05");
+        assert_eq!(clock(Some(f64::NAN)), "");
     }
 
     #[test]
