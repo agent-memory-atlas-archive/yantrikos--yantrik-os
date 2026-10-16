@@ -422,6 +422,7 @@ for required in usr/lib/yantrik/boot-unlock/askpass usr/lib/yantrik/boot-unlock/
                 etc/initramfs-tools/hooks/yantrik-unlock etc/initramfs-tools/scripts/local-bottom/yantrik-unlock \
                 usr/share/plymouth/themes/yantrik/yantrik.script usr/share/plymouth/themes/yantrik/emblem.png \
                 usr/sbin/plymouthd usr/lib/yantrik/boot-unlock/splash \
+                etc/systemd/system/yantrik-splash-release.service \
                 etc/systemd/system/plymouth-quit.service.d/yantrik-splash.conf \
                 etc/systemd/system/plymouth-quit-wait.service.d/yantrik-splash.conf \
                 etc/systemd/system/getty@tty1.service.d/yantrik-splash.conf \
@@ -1587,7 +1588,7 @@ set menu_color_highlight=white/blue
 # simply try the desktop — an ISO that can only be installed is one nobody evaluates first.
 #
 # The Install and Try entries draw the boot splash (plymouth, the Yantrik emblem, on the
-# firmware's framebuffer via simpledrm, never on the serial line) until the shell's first frame:
+# firmware's framebuffer via simpledrm, never on the serial line) until tty1's autologin:
 # boot-unlock/theme/yantrik.script and boot-unlock/splash. The safe-graphics entry and the one
 # showing every message keep plymouth off: one is the way out when graphics misbehave, the other
 # shows every line, and neither should depend on a splash.

@@ -1,43 +1,31 @@
 #!/bin/sh
 # ═══════════════════════════════════════════════════════════════════════════════════════
-# splash — hands the boot splash to the shell, so nothing between them is black
+# splash release — plymouth lets go of tty1 and the display, leaving the emblem on the screen
 # ═══════════════════════════════════════════════════════════════════════════════════════
 #
-# plymouth draws the Yantrik emblem from the kernel's first frame (theme/yantrik.script), asks
-# for the disk's password in the same program when there is one, and goes on drawing the emblem
-# after it. Stock, systemd quits plymouth at multi-user.target, before tty1's autologin, and the
-# screen is black for the 5-10 s until labwc and the shell draw. Here, instead (root's, from the
-# drop-ins stage-boot-unlock.sh installs):
+# plymouth draws the Yantrik emblem from the kernel's first frame (theme/yantrik.script), and asks
+# for the disk's password in the same program when there is one. Stock, `plymouth quit` at
+# multi-user.target clears the screen. Here it is `plymouth quit --retain-splash`: the emblem
+# stays on the screen until something draws over it.
 #
-#   splash deactivate   getty@tty1, before the autologin: plymouth stops drawing and lets go of
-#                       the display and the keyboard, and its last frame, the emblem, stays on
-#                       the screen. labwc can then take the display; plymouthd still holding it
-#                       is what would make labwc fail to start.
-#   splash handoff      plymouth-quit.service, in place of its `plymouth quit`: waits for the
-#                       shell to say it has drawn its first frame (yantrik-shell-drawn in the
-#                       session's runtime directory), then `plymouth quit --retain-splash`, so
-#                       plymouth never clears the screen the shell is on. If no compositor has
-#                       started a while after boot (labwc failed, the crash guard stopped it),
-#                       it quits plainly instead, and the console comes back with whatever the
-#                       session printed. A shell that never says so is given a longer while,
-#                       with labwc left on the screen.
+# Run by yantrik-splash-release.service, a oneshot with no terminal, ordered before
+# getty@tty1.service; and in place of plymouth-quit.service's `plymouth quit`, for anything that
+# boots without tty1's getty. It must not run in getty's own execution context. systemd takes
+# tty1 for every Exec* line of getty@tty1, ExecStartPre included, before running it, and waits
+# while plymouthd still holds that VT. On real SeaBIOS boots that wait came before this script
+# ever started: autologin, and the desktop, were about two minutes late (#820). `deactivate`
+# alone is not enough either: plymouthd keeps tty1 open until it exits. So plymouth quits here,
+# before getty asks for tty1.
 #
-# Nothing here asks for or reads anything typed: the disk's password prompt is the theme's, and
-# is over before either step runs. With plymouth not running (`plymouth.enable=0`, the boot that
-# shows every message, no plymouth in the image) both are no-ops.
+# Every call to plymouth is bounded (PLY_WAIT seconds). A plymouthd that stops answering is
+# killed, because a frame of black is better than no desktop. The unit bounds the whole step too
+# (TimeoutStartSec).
 #
-# Every call to plymouth is bounded (PLY_WAIT seconds). A plymouthd that answers `--ping` and then
-# never answers `deactivate` held tty1's ExecStartPre, and so the desktop, for about two minutes on
-# real SeaBIOS boots (#820). One that stops answering is let go of: `quit --retain-splash`, and if
-# that does not answer either, plymouthd is killed. A frame of black is better than no desktop.
-#
-# The waits are in seconds, checked every quarter second. Overridable for the selftest.
+# Nothing here asks for or reads anything typed: the disk's password prompt is the theme's, and is
+# over before this runs. With plymouth not running (`plymouth.enable=0`, the boot that shows every
+# message, no plymouth in the image) it does nothing.
 set -u
 
-RUN="${YANTRIK_SPLASH_RUN:-/run/user}"
-SESSION_WAIT="${YANTRIK_SPLASH_SESSION_WAIT:-45}"   # seconds for a compositor to start at all
-DRAWN_WAIT="${YANTRIK_SPLASH_DRAWN_WAIT:-180}"      # seconds for the shell's first frame
-TICK="${YANTRIK_SPLASH_TICK:-0.25}"
 PLY_WAIT="${YANTRIK_SPLASH_PLY_WAIT:-5}"            # seconds any one plymouth call may take
 
 command -v plymouth >/dev/null 2>&1 || exit 0
@@ -46,84 +34,23 @@ ply() {
     timeout -k 1 "$PLY_WAIT" plymouth "$@" 2>/dev/null
 }
 
-# plymouthd stopped answering: free the display for labwc whatever it takes.
-let_go() {
-    ply quit --retain-splash || pkill -x plymouthd 2>/dev/null
-    return 0
-}
-
-# 0 up, 1 not running, 2 running and not answering.
-state() {
-    ply --ping
-    case $? in
-        0) return 0 ;;
-        124 | 137) return 2 ;;
-        *) return 1 ;;
-    esac
-}
-
-state
-case $? in
-    1) exit 0 ;;
-    2) let_go; exit 0 ;;
-esac
-
-compositor_up() {
-    pgrep -x labwc >/dev/null 2>&1
-}
-
-# The shell's marker counts only while labwc runs as the same account (the runtime directory is
-# named by its uid): anything else that can write a runtime directory (a user service, a lingering
-# account) leaving the marker early must not make plymouth quit with --retain-splash when no
-# compositor is coming, which would keep tty1 in graphics and hide the crash guard's words.
-drawn() {
-    for f in "$RUN"/*/yantrik-shell-drawn; do
-        [ -e "$f" ] || continue
-        uid="${f%/*}"
-        uid="${uid##*/}"
-        case "$uid" in '' | *[!0-9]*) continue ;; esac
-        pgrep -x -u "$uid" labwc >/dev/null 2>&1 && return 0
-    done
-    return 1
-}
-
 case "${1:-}" in
-    deactivate)
-        ply deactivate || let_go
-        exit 0
-        ;;
-    handoff)
-        ;;
+    release) ;;
     *)
-        echo "usage: splash deactivate|handoff" >&2
+        echo "usage: splash release" >&2
         exit 2
         ;;
 esac
 
-ticks=0
-session_ticks=$((SESSION_WAIT * 4))
-drawn_ticks=$((DRAWN_WAIT * 4))
-while :; do
-    # plymouth gone by some other way (Escape and a crash, a shutdown): nothing to hand off.
-    state
-    case $? in
-        1) exit 0 ;;
-        2) let_go; exit 0 ;;
-    esac
-    if drawn; then
-        let_go
-        exit 0
-    fi
-    if [ "$ticks" -ge "$session_ticks" ] && ! compositor_up; then
-        # No desktop is coming. The text console back, so the crash guard's words are seen.
-        ply quit || pkill -x plymouthd 2>/dev/null
-        exit 0
-    fi
-    if [ "$ticks" -ge "$drawn_ticks" ]; then
-        # labwc owns the screen; clearing it to text under labwc would be worse than its frame.
-        let_go
-        exit 0
-    fi
-    sleep "$TICK"
-    ticks=$((ticks + 1))
-done
+ply --ping
+case $? in
+    0) ;;
+    124 | 137) ;;   # running, and not answering: below, it is killed if quit does not answer
+    *) exit 0 ;;    # not running
+esac
+
+ply quit --retain-splash && exit 0
+pkill -x plymouthd 2>/dev/null
+sleep 1
+pkill -KILL -x plymouthd 2>/dev/null
+exit 0

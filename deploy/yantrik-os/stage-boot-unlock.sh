@@ -15,9 +15,9 @@
 #   - consume and enrol, root's, the socket that lets the session ask consume, once, and the
 #     service that deletes an unused marker once its window is over;
 #   - the Yantrik plymouth theme: the boot splash (the emblem) and the pre-boot screen;
-#   - splash, and the drop-ins that keep the splash up until the shell has drawn: plymouth lets
-#     go of the display before tty1's autologin and quits with --retain-splash once the shell's
-#     first frame is up, and the gettys no longer wait for it to exit.
+#   - splash and yantrik-splash-release.service, which make plymouth quit with --retain-splash
+#     before tty1's autologin (the emblem stays on the screen), and the drop-ins that order
+#     getty@tty1 after it and keep plymouth-quit from clearing the screen.
 # The keyscript pieces do nothing unless crypttab names the keyscript. The splash pieces do
 # nothing when plymouth is not running (plymouth.enable=0, the boot showing every message).
 #
@@ -33,7 +33,8 @@ THEME=/usr/share/plymouth/themes/yantrik
 
 for f in askpass local-bottom initramfs-hook consume enrol yantrik-boot-unlock.socket \
          yantrik-boot-unlock@.service yantrik-boot-unlock-expire.service theme/yantrik.plymouth theme/yantrik.script theme/field.png theme/emblem.png \
-         splash splash.d/getty-tty1.conf splash.d/plymouth-quit.conf splash.d/plymouth-quit-wait.conf; do
+         splash splash.d/yantrik-splash-release.service splash.d/getty-tty1.conf splash.d/plymouth-quit.conf \
+         splash.d/plymouth-quit-wait.conf; do
     [ -f "$SRC/$f" ] || { echo "stage-boot-unlock: missing $SRC/$f" >&2; exit 1; }
 done
 
@@ -65,6 +66,7 @@ put 0644 "$SRC/theme/field.png"        "$ROOTFS$THEME/field.png"
 put 0644 "$SRC/theme/emblem.png"       "$ROOTFS$THEME/emblem.png"
 put 0755 "$SRC/splash"                 "$ROOTFS$LIB/splash"
 UNITS=/etc/systemd/system
+put 0644 "$SRC/splash.d/yantrik-splash-release.service" "$ROOTFS$UNITS/yantrik-splash-release.service"
 put 0644 "$SRC/splash.d/getty-tty1.conf"         "$ROOTFS$UNITS/getty@tty1.service.d/yantrik-splash.conf"
 put 0644 "$SRC/splash.d/plymouth-quit.conf"      "$ROOTFS$UNITS/plymouth-quit.service.d/yantrik-splash.conf"
 put 0644 "$SRC/splash.d/plymouth-quit-wait.conf" "$ROOTFS$UNITS/plymouth-quit-wait.service.d/yantrik-splash.conf"
@@ -77,4 +79,4 @@ install -d -m 0755 $own "$ROOTFS/etc/systemd/system/multi-user.target.wants"
 ln -sfn /etc/systemd/system/yantrik-boot-unlock-expire.service \
     "$ROOTFS/etc/systemd/system/multi-user.target.wants/yantrik-boot-unlock-expire.service"
 
-echo "stage-boot-unlock: keyscript, initramfs hook, marker, root helper (socket and expiry enabled), plymouth theme and splash hand-off staged in $ROOTFS"
+echo "stage-boot-unlock: keyscript, initramfs hook, marker, root helper (socket and expiry enabled), plymouth theme and splash release staged in $ROOTFS"
