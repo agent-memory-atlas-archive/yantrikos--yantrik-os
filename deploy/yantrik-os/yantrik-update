@@ -2027,7 +2027,10 @@ grub_theme_place() {
   [ -d "$GRUB_EFI_DIR" ] || return 1
   grep -qsE '^[[:space:]]*(export[[:space:]]+)?GRUB_THEME=' "$1" "$1".d/*.cfg && return 1
   { [ -f "$src/theme.txt" ] && ! [ -L "$src" ]; } || return 1
-  if [ -n "$(find "$src" \( ! -user "$(id -u)" -o \( ! -type l -perm /022 \) \) -print -quit 2>/dev/null)" ]; then
+  # Its parent too, so the guarantee does not rest on how the image lays out /usr/share
+  # (security delta review of f27f9e04, #835, item 4).
+  if [ -n "$(find "$src" \( ! -user "$(id -u)" -o \( ! -type l -perm /022 \) \) -print -quit 2>/dev/null)" ] \
+     || [ -n "$(find "${src%/*}" -maxdepth 0 \( ! -user "$(id -u)" -o -perm /022 \) -print 2>/dev/null)" ]; then
     grub_note_once grub-theme-left-alone "$src" "$src is not root's alone to write; the boot menu is given no theme from it"
     return 1
   fi
@@ -2088,8 +2091,15 @@ migrate_grub_defaults() {
       # gone (security review of c42484eb, #835, item 2).
       grub_note_once grub-terminal-left-alone "$(printf '%s\n%s' "$terms" "$dterms")" \
         "$f.d sets the boot menu's terminals itself; $f's are left as they are: $(printf '%s' "$dterms" | tr '\n' ' ')"
-    elif grep -qsE '^[[:space:]]*(export[[:space:]]+)?GRUB_THEME=' "$f" "$f".d/*.cfg && ! [ -d "$GRUB_EFI_DIR" ]; then
-      # A theme in $f.d counts too (security review of c42484eb, #835, item 1).
+    elif grep -qsE '^[[:space:]]*terminal_(input|output)[[:space:]].*serial' "$GRUB_SCRIPTS_DIR"/*_custom; then
+      # A serial terminal a custom menu script asks for, which would lose its speed the same way
+      # (security delta review of f27f9e04, #835, item 1).
+      grub_note_once grub-terminal-left-alone "$(printf '%s\n%s' "$terms" "$GRUB_SCRIPTS_DIR")" \
+        "$GRUB_SCRIPTS_DIR has a custom menu script with a serial terminal; $f's terminals are left as they are"
+    elif ! [ -d "$GRUB_EFI_DIR" ] && { grep -qsE '^[[:space:]]*(export[[:space:]]+)?GRUB_THEME=' "$f" "$f".d/*.cfg \
+           || grep -qsE '^[[:space:]]*(set[[:space:]]+)?theme=' "$GRUB_SCRIPTS_DIR"/*_custom; }; then
+      # A theme in $f.d counts too (security review of c42484eb, #835, item 1), and so does one a
+      # custom menu script sets (security delta review of f27f9e04, #835, item 1).
       grub_note_once grub-terminal-left-alone "$terms" \
         "$f: the menu has a theme and this machine starts by BIOS, where GRUB stops at a themed menu; its serial terminal, which keeps the theme off, is left as it is"
     else
@@ -5494,12 +5504,41 @@ c.sendall((json.dumps({"ok": True, "seeded": req["rules"]}) + "\n").encode())' "
   rmdir "$gd/efi"; ga_old; gr_run ok >/dev/null; mkdir -p "$gd/efi"
   is "theme: BIOS: never given one" "$(ga_new)|no" "$(cat "$gd/default/grub")|$([ -e "$gth" ] && echo yes || echo no)"
   # Killed after the theme was copied and the file rewritten: the next run finishes it.
-  ga_old; cp -p "$gd/default/grub" "$gd/default/grub.before-20261016T000000Z"; cp -a "$gd/theme-src" "$gth"
+  ga_old; cp -p "$gd/default/grub" "$gd/default/grub.before-20261016T000000Z"
+  mkdir -p "${gth%/*}"; cp -a "$gd/theme-src" "$gth"
   grub_defaults_rewrite 0 2 "$gd/default/grub.before-20261016T000000Z" 1 > "$gd/default/grub"
   out="$(gr_run ok)"
   is "theme: an interrupted run is finished by the next one" "regenerate|terminal_output gfxterm" \
     "$(cat "$gd/calls" 2>/dev/null)|$(grep terminal_output "$gd/boot/grub.cfg")"
+  is "theme: ... the copied theme is still the image's, and nothing is left beside it" "same|" \
+    "$(diff -r "$gd/theme-src" "$gth" >/dev/null 2>&1 && echo same || echo differs)|$(find "$gd/default" "$gd/boot" -name '*.yantrik-*')"
+  # The image tree's parent writable by others: not copied either (#835 delta review, item 4).
+  rm -rf "$gd/boot/themes"; chmod g+w "$gd"; ga_old; out="$(gr_run ok)"; chmod g-w "$gd"
+  is "theme: an image tree whose parent others could write is not copied as root" "$(ga_new)|no" \
+    "$(cat "$gd/default/grub")|$([ -e "$gth" ] && echo yes || echo no)"
   rm -rf "$gd/boot/themes" "$gd/theme-src"
+
+  # A custom menu script in /etc/grub.d with a serial terminal, or on BIOS a theme (#835 delta
+  # review, item 1): the first migration leaves the file alone, as the resume does.
+  mkdir -p "$gd/grub.d"
+  printf '%s\n' '#!/bin/sh' 'cat <<EOF' 'terminal_output gfxterm serial' 'EOF' > "$gd/grub.d/40_custom"
+  for gform in gt ga; do
+    "${gform}_old"; cp -p "$gd/default/grub" "$gd/hand"; out="$(gr_run ok)"
+    is "custom script: a serial terminal in 40_custom ($gform): the file is left as it is" "yes|no|none" \
+      "$(cmp -s "$gd/hand" "$gd/default/grub" && echo yes || echo no)|$([ -e "$gd/calls" ] && echo yes || echo no)|$(ls "$gd/default"/grub.before-* 2>/dev/null || echo none)"
+    t "custom script: ... and said so" "custom menu script with a serial terminal" "$out"
+  done
+  printf '%s\n' '#!/bin/sh' 'cat <<EOF' 'set theme=/boot/grub/themes/mine/theme.txt' 'EOF' > "$gd/grub.d/40_custom"
+  rmdir "$gd/efi"
+  ga_old; cp -p "$gd/default/grub" "$gd/hand"; out="$(gr_run ok)"
+  is "custom script: on BIOS a theme set in 40_custom: the file is left as it is" "yes|no" \
+    "$(cmp -s "$gd/hand" "$gd/default/grub" && echo yes || echo no)|$([ -e "$gd/calls" ] && echo yes || echo no)"
+  t "custom script: ... and said so" "starts by BIOS" "$out"
+  mkdir -p "$gd/efi"
+  ga_old; gr_run ok >/dev/null
+  is "custom script: on UEFI the same script does not stop the move to gfxterm" "$GRUB_TERMINAL_OUTPUT_NEW" \
+    "$(grep '^GRUB_TERMINAL_OUTPUT=' "$gd/default/grub")"
+  rm -rf "$gd/grub.d" "$gd/boot/themes"
 
   # A machine that starts by BIOS with a theme line (installed 14 to 15 Oct, before 4123296): the
   # serial terminal is what keeps GRUB off the themed menu that stops it, so it stays.
