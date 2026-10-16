@@ -636,6 +636,7 @@ publishes right now is `yos describe <name>`; whether it keeps the protocol, `yo
 | `presentation` | `app-presentation.sock` | `slides` | slide decks |
 | `shell` | `app-shell.sock` | — | the desktop itself: screens, windows, files, opening apps, approvals |
 | `snippets` | `app-snippets.sock` | `snippet-manager` | reusable pieces of code and text |
+| `spreadsheet` | `app-spreadsheet.sock` | `ysheets`, `sheets` | a sheet of numbers and formulas, opened from and saved to CSV files |
 | `studio` | `app-studio.sock` | — | make pictures from a sentence, on your own GPU or a hosted service; they land as files |
 | `system-monitor` | `app-system-monitor.sock` | `sysmonitor` | CPU, memory, disk and processes |
 | `terminal` | `app-terminal.sock` | — | a shell: run commands |
