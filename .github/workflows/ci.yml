@@ -236,6 +236,11 @@ jobs:
       - name: The Mind's launcher gives it its name and its person's
         run: python3 deploy/yantrik-os/yantrik-mind-launch-selftest.py
 
+      # The live instance's Director: it resumes a stopped build, holds a FINISHED to the page
+      # loading clean, and goes round the finished builds in polish rounds rather than idling.
+      - name: The live Director keeps its Mind building
+        run: python3 deploy/live/director/director-selftest.py
+
       # First boot left git with no identity, so `git commit` from a mind, an editor or a
       # harness died with "Please tell me who you are" (#680). This runs the session's
       # defaulting block under a temporary HOME with the account faked.
