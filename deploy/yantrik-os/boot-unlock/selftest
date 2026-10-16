@@ -269,8 +269,26 @@ check "only group yantrik-boot-unlock may connect, and consume is told the asker
 # ── the text installer never encrypts: it boots as the desktop installer's unencrypted line ──
 INSTALL_SH="$HERE/../yantrik-install.sh"
 UNLOCK_RS="$HERE/../../../crates/yantrik-ui/src/wire/installer_unlock.rs"
-LINE="quiet splash loglevel=3 plymouth.use-simpledrm plymouth.ignore-serial-consoles"
+LINE="quiet splash loglevel=3 plymouth.use-simpledrm plymouth.ignore-serial-consoles vt.global_cursor_default=0 vt.default_red=0x0e vt.default_grn=0x11 vt.default_blu=0x17"
 check "the text installer writes the splash line, as cmdline_default(false)" 'grep -qF "GRUB_CMDLINE_LINUX_DEFAULT=\"$LINE\"" "$INSTALL_SH" && grep -qF "\"$LINE\"" "$UNLOCK_RS" && ! grep -q "plymouth.enable=0" "$INSTALL_SH"'
+
+# ── GRUB to plymouth's first frame (#820, the OVMF film: about 2 s of black with a cursor) ──
+# The live image's Install and Try entries boot the installed machine's line, after `set
+# gfxpayload=keep`; the safe-graphics entry and the one showing every message keep neither.
+ISO_SH="$HERE/../build-debian-iso.sh"
+entry() { awk -v name="menuentry \"$1\" {" '$0 == name { on = 1; next } on && /^}/ { exit } on' "$ISO_SH"; }
+for name in "Install Yantrik OS" "Try Yantrik OS without installing"; do
+    check "the live entry \"$name\" keeps GRUB's mode and boots the splash line" \
+        'body="$(entry "$name")" && printf "%s\n" "$body" | head -1 | grep -qx "    set gfxpayload=keep" && printf "%s\n" "$body" | grep "^    linux " | grep -qF "console=ttyS0,115200 $LINE"'
+done
+for name in "Install Yantrik OS with safe graphics" "Try Yantrik OS, showing every boot message"; do
+    check "the live entry \"$name\" keeps the text console as it was" \
+        'body="$(entry "$name")" && [ -n "$body" ] && ! printf "%s\n" "$body" | grep -qE "gfxpayload|vt\.|splash" && printf "%s\n" "$body" | grep -q "plymouth.enable=0 nomodeset"'
+done
+check "the console's cursor comes back for every console opened after boot" \
+    'grep -qx "w /sys/module/vt/parameters/global_cursor_default - - - - 1" "$HERE/splash.d/cursor.conf"'
+check "console turns tty1's cursor back on, after text mode" \
+    'grep -F "ioctl(\$t, 0x4B3A, 0) or exit 1; syswrite(\$t, \"\\e[?25h\")" "$HERE/splash" >/dev/null'
 
 # ── the splash (splash): release, handoff, console, against stubs of plymouth, pkill, pgrep, perl ──
 mkdir -p "$T/sbin"
@@ -386,6 +404,7 @@ check "the stage puts every piece where crypttab, initramfs-tools, systemd and p
     '[ -x "$root/usr/lib/yantrik/boot-unlock/askpass" ] && [ -x "$root/etc/initramfs-tools/hooks/yantrik-unlock" ] && [ -x "$root/etc/initramfs-tools/scripts/local-bottom/yantrik-unlock" ] && [ "$(stat -c %a "$root/usr/lib/yantrik/boot-unlock/consume")" = 700 ] && [ -L "$root/etc/systemd/system/sockets.target.wants/yantrik-boot-unlock.socket" ] && [ -f "$root/etc/systemd/system/yantrik-boot-unlock-expire.service" ] && [ -L "$root/etc/systemd/system/multi-user.target.wants/yantrik-boot-unlock-expire.service" ] && [ -f "$root/usr/share/plymouth/themes/yantrik/yantrik.script" ] && cmp -s "$HERE/theme/field.png" "$root/usr/share/plymouth/themes/yantrik/field.png"'
 check "the stage puts the splash where plymouth and systemd look" \
     'cmp -s "$HERE/theme/emblem.png" "$root/usr/share/plymouth/themes/yantrik/emblem.png" && [ -x "$root/usr/lib/yantrik/boot-unlock/splash" ] && cmp -s "$HERE/splash.d/yantrik-splash-release.service" "$root/etc/systemd/system/yantrik-splash-release.service" && cmp -s "$HERE/splash.d/yantrik-splash-handoff.service" "$root/etc/systemd/system/yantrik-splash-handoff.service" && cmp -s "$HERE/splash.d/getty-tty1.conf" "$root/etc/systemd/system/getty@tty1.service.d/yantrik-splash.conf" && cmp -s "$HERE/splash.d/plymouth-quit.conf" "$root/etc/systemd/system/plymouth-quit.service.d/yantrik-splash.conf" && grep -qx "ExecStart=/bin/true" "$root/etc/systemd/system/plymouth-quit-wait.service.d/yantrik-splash.conf"'
+check "the stage gives consoles opened after boot their cursor" 'cmp -s "$HERE/splash.d/cursor.conf" "$root/etc/tmpfiles.d/yantrik-splash-cursor.conf"'
 check "the splash drop-in on tty1 leaves the autologin drop-in alone" '[ ! -e "$root/etc/systemd/system/getty@tty1.service.d/autologin.conf" ]'
 check "the theme draws the emblem in the splash and hides it under the prompt" \
     'grep -q "Image(\"emblem.png\")" "$HERE/theme/yantrik.script" && awk "/^fun show_password/,/^}/" "$HERE/theme/yantrik.script" | grep -q "hidden(emblem)" && awk "/^fun show_normal/,/^}/" "$HERE/theme/yantrik.script" | grep -q "emblem.SetOpacity(1)"'

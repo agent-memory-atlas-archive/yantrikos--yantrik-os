@@ -47,9 +47,21 @@ pub fn keyscript_installed(mount_dir: &str) -> bool {
 /// An unencrypted install used to say `plymouth.enable=0`, so it booted as before plymouth was in
 /// the image: black from GRUB to the shell. It draws the same splash now, and has nothing to ask.
 /// plymouth's frame stays up until labwc holds the display (deploy/yantrik-os/boot-unlock/splash).
+///
+/// Between GRUB and plymouth's first frame (about 2 s on OVMF, #820) the screen is the kernel's
+/// console, which was black with a blinking cursor. [`CONSOLE_GROUND`] makes the console's black
+/// the splash's ground (#0e1117), so that moment is the same colour as GRUB before it and plymouth
+/// after it, and `vt.global_cursor_default=0` takes the cursor off it. The cursor comes back for
+/// every console opened after boot (boot-unlock/splash.d/cursor.conf) and on tty1 when the crash
+/// guard writes there (`splash console`). Neither touches the disk's password prompt: it is
+/// plymouth's, and cryptsetup's text prompt, when plymouth is not there, still writes its words.
 pub fn cmdline_default(_encrypted: bool) -> &'static str {
-    "quiet splash loglevel=3 plymouth.use-simpledrm plymouth.ignore-serial-consoles"
+    "quiet splash loglevel=3 plymouth.use-simpledrm plymouth.ignore-serial-consoles vt.global_cursor_default=0 vt.default_red=0x0e vt.default_grn=0x11 vt.default_blu=0x17"
 }
+
+/// The kernel console's colour 0 ("black"), the splash's ground, as `cmdline_default` sets it.
+/// Only the first entry of each of vt.default_{red,grn,blu} is given; the other 15 colours stay.
+pub const CONSOLE_GROUND: [u8; 3] = [0x0e, 0x11, 0x17];
 
 /// Record whose password opens the disk, after it is set. A failure costs only the signed-in
 /// start (the lock screen asks, as it always has), so it is logged, not fatal.
@@ -115,7 +127,16 @@ mod tests {
             assert!(words.contains(&"plymouth.use-simpledrm"), "the firmware's framebuffer, no GPU driver: {line}");
             assert!(words.contains(&"plymouth.ignore-serial-consoles"), "never on the serial line: {line}");
             assert!(!line.contains("plymouth.enable=0"), "{line}");
+            // GRUB to plymouth's first frame: the console in the splash's ground, with no cursor
+            // (#820, the OVMF film: about 2 s of black with a blinking cursor).
+            assert!(words.contains(&"vt.global_cursor_default=0"), "{line}");
+            let [r, g, b] = CONSOLE_GROUND;
+            for word in [format!("vt.default_red={r:#04x}"), format!("vt.default_grn={g:#04x}"), format!("vt.default_blu={b:#04x}")] {
+                assert!(words.contains(&word.as_str()), "{word} in {line}");
+            }
         }
+        // The splash's ground (boot-unlock/theme/yantrik.script, boot.slint): #0e1117.
+        assert_eq!(CONSOLE_GROUND, [0x0e, 0x11, 0x17]);
         assert_eq!(cmdline_default(true), cmdline_default(false), "one boot line; only the prompt differs");
     }
 

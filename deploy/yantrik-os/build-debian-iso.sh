@@ -1612,17 +1612,32 @@ set menu_color_highlight=white/blue
 # showing every message keep plymouth off: one is the way out when graphics misbehave, the other
 # shows every line, and neither should depend on a splash.
 #
+# From Enter to plymouth's first frame, the Install and Try entries keep the picture dark and
+# still (#820, the OVMF film: a black rectangle in GRUB, then about 2 s of black with a blinking
+# cursor):
+# - `set gfxpayload=keep`: the kernel starts in the mode the menu was drawn in. On BIOS it would
+#   otherwise start in VGA text mode, with no framebuffer for plymouth until a DRM driver loads;
+#   on UEFI GRUB would shut its video down and set it up again on the way.
+# - `vt.default_red=0x0e vt.default_grn=0x11 vt.default_blu=0x17`: the kernel console's black is
+#   the splash's ground (#0e1117), so the moment before plymouth draws is that colour, not black.
+# - `vt.global_cursor_default=0`: and no cursor blinks in it. Consoles opened after boot get their
+#   cursor back (boot-unlock/splash.d/cursor.conf), and tty1 does when the crash guard writes.
+# The same line as an installed machine's (installer_unlock.rs, cmdline_default). None of it is
+# on the serial line, which the boot test reads, or on the last two entries.
+#
 # The screen is quiet in the first three: `loglevel=3` keeps the kernel's lines below errors off
 # it, and `live-config.nottyautologin` stops live-config's own tty autologin, whose drop-in sorts
 # after the image's and would put back the banner and "login: yantrik (automatic login)". The
 # image's own autologin on tty1 is what starts the desktop.
 menuentry "Install Yantrik OS" {
-    linux /live/vmlinuz boot=live yantrik.install=true live-config.username=yantrik live-config.user-fullname=yantrik live-config.nottyautologin console=tty1 console=ttyS0,115200 quiet splash plymouth.use-simpledrm plymouth.ignore-serial-consoles loglevel=3
+    set gfxpayload=keep
+    linux /live/vmlinuz boot=live yantrik.install=true live-config.username=yantrik live-config.user-fullname=yantrik live-config.nottyautologin console=tty1 console=ttyS0,115200 quiet splash loglevel=3 plymouth.use-simpledrm plymouth.ignore-serial-consoles vt.global_cursor_default=0 vt.default_red=0x0e vt.default_grn=0x11 vt.default_blu=0x17
     initrd /live/initrd
 }
 
 menuentry "Try Yantrik OS without installing" {
-    linux /live/vmlinuz boot=live live-config.username=yantrik live-config.user-fullname=yantrik live-config.nottyautologin console=tty1 console=ttyS0,115200 quiet splash plymouth.use-simpledrm plymouth.ignore-serial-consoles loglevel=3
+    set gfxpayload=keep
+    linux /live/vmlinuz boot=live live-config.username=yantrik live-config.user-fullname=yantrik live-config.nottyautologin console=tty1 console=ttyS0,115200 quiet splash loglevel=3 plymouth.use-simpledrm plymouth.ignore-serial-consoles vt.global_cursor_default=0 vt.default_red=0x0e vt.default_grn=0x11 vt.default_blu=0x17
     initrd /live/initrd
 }
 

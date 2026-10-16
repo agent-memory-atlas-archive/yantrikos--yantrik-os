@@ -1617,10 +1617,17 @@ fn install_grub_theme(mount_dir: &str) -> bool {
 /// The screen is gfxterm, not the firmware's console, so the menu is drawn with a font that has
 /// its characters (GRUB's unicode font, or the theme's) and, `themed`, in the theme the live
 /// image's menu has.
+///
+/// `GRUB_GFXPAYLOAD_LINUX=keep`: the kernel starts in the mode the menu was drawn in. On BIOS it
+/// otherwise starts in VGA text mode, with no framebuffer for plymouth until a DRM driver loads; on
+/// UEFI GRUB otherwise shuts its video down and sets it up again on the way to the kernel. "keep"
+/// is the mode the person has just seen working, text included when GRUB had no graphics. Between
+/// Enter and the kernel, GRUB's terminal is the ground, not black: the image's
+/// /etc/grub.d/06_yantrik_ground (deploy/yantrik-os/grub-ground).
 fn grub_defaults(encrypted: bool, themed: bool) -> String {
     let theme = if themed { format!("GRUB_THEME=\"{GRUB_THEME_DIR}/theme.txt\"\n") } else { String::new() };
     format!(
-        "GRUB_DEFAULT=0\nGRUB_TIMEOUT=3\nGRUB_DISTRIBUTOR=\"Yantrik OS\"\nGRUB_CMDLINE_LINUX_DEFAULT=\"{}\"\nGRUB_CMDLINE_LINUX=\"console=tty1\"\nGRUB_TERMINAL_INPUT=\"console serial\"\nGRUB_TERMINAL_OUTPUT=\"gfxterm serial\"\nGRUB_GFXMODE=auto\nGRUB_SERIAL_COMMAND=\"serial --speed=115200\"\n{theme}",
+        "GRUB_DEFAULT=0\nGRUB_TIMEOUT=3\nGRUB_DISTRIBUTOR=\"Yantrik OS\"\nGRUB_CMDLINE_LINUX_DEFAULT=\"{}\"\nGRUB_CMDLINE_LINUX=\"console=tty1\"\nGRUB_TERMINAL_INPUT=\"console serial\"\nGRUB_TERMINAL_OUTPUT=\"gfxterm serial\"\nGRUB_GFXMODE=auto\nGRUB_GFXPAYLOAD_LINUX=keep\nGRUB_SERIAL_COMMAND=\"serial --speed=115200\"\n{theme}",
         installer_unlock::cmdline_default(encrypted)
     )
 }
@@ -2031,6 +2038,21 @@ mod grub_defaults_tests {
             assert!(!text.lines().any(|l| l.starts_with("GRUB_TERMINAL=")), "GRUB_TERMINAL would override both: {text}");
             assert!(text.is_ascii(), "{text}");
         }
+    }
+
+    /// From GRUB to plymouth (#820): the kernel keeps the mode the menu was drawn in, so plymouth
+    /// has a framebuffer from the start on BIOS too, and the kernel's line is the splash's.
+    #[test]
+    fn an_installed_machine_keeps_grubs_graphics_into_the_splash() {
+        for (encrypted, themed) in [(false, false), (false, true), (true, false), (true, true)] {
+            let text = grub_defaults(encrypted, themed);
+            assert!(text.lines().any(|l| l == "GRUB_GFXPAYLOAD_LINUX=keep"), "{text}");
+            let wanted = format!("GRUB_CMDLINE_LINUX_DEFAULT=\"{}\"", super::installer_unlock::cmdline_default(encrypted));
+            assert!(text.lines().any(|l| l == wanted), "{text}");
+        }
+        // The text installer writes the same.
+        let script = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../deploy/yantrik-os/yantrik-install.sh"));
+        assert!(script.contains("GRUB_GFXPAYLOAD_LINUX=keep"), "yantrik-install.sh");
     }
 
     /// Nothing on tty1 before the desktop, on the live image and on both installers' machines.

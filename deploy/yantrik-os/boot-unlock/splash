@@ -28,9 +28,9 @@
 #             nothing. Once labwc holds the display (it has a DRM device open), plymouth quits
 #             with --retain-splash: labwc's frame is on the screen by then, so removing plymouth's
 #             changes nothing. Bounded by the fallbacks below.
-#   console   tty1 back in text mode, for the crash guard's words (.bash_profile) and the
-#             handoff's no-desktop fallback: plymouth leaves tty1 in graphics mode, and getty@tty1
-#             no longer switches it back on its own (splash.d/getty-tty1.conf).
+#   console   tty1 back in text mode, with its cursor, for the crash guard's words (.bash_profile)
+#             and the handoff's no-desktop fallback: plymouth leaves tty1 in graphics mode, and
+#             getty@tty1 no longer switches it back on its own (splash.d/getty-tty1.conf).
 #
 # Nothing here may run in getty@tty1's own execution context: systemd takes tty1 for every Exec*
 # line of that unit before running it, and waited there while plymouthd still held the VT. On
@@ -56,9 +56,11 @@ PROC="${YANTRIK_SPLASH_PROC:-/proc}"
 TTY="${YANTRIK_SPLASH_TTY:-/dev/tty1}"
 
 # KDSETMODE(tty, KD_TEXT): the kernel console draws tty1 again, with what was written to it.
+# Then its cursor on (DECTCEM, ESC [ ? 25 h): the splash's kernel line hides it until plymouth
+# draws (vt.global_cursor_default=0), and tty1 was opened with that default.
 # perl-base is Essential in Debian; root, or the account tty1 is the controlling terminal of.
 text_console() {
-    perl -e 'open(my $t, "+<", $ARGV[0]) or exit 1; ioctl($t, 0x4B3A, 0) or exit 1' "$TTY" 2>/dev/null
+    perl -e 'open(my $t, "+<", $ARGV[0]) or exit 1; ioctl($t, 0x4B3A, 0) or exit 1; syswrite($t, "\e[?25h")' "$TTY" 2>/dev/null
     return 0
 }
 

@@ -449,8 +449,9 @@ esac
 step "Installing bootloader..."
 # This installer never encrypts, so there is nothing to ask for at boot: the desktop installer's
 # unencrypted line (installer_unlock.rs, cmdline_default(false)): the boot splash, from the kernel's
-# first frame to the shell's, and no prompt in it.
-printf 'GRUB_DEFAULT=0\nGRUB_TIMEOUT=3\nGRUB_DISTRIBUTOR="Yantrik OS"\nGRUB_CMDLINE_LINUX_DEFAULT="quiet splash loglevel=3 plymouth.use-simpledrm plymouth.ignore-serial-consoles"\nGRUB_CMDLINE_LINUX=""\nGRUB_TERMINAL_OUTPUT="gfxterm"\nGRUB_GFXMODE=auto\n' > "$M/etc/default/grub"
+# first frame to the shell's, and no prompt in it. GRUB's graphics carry into the kernel, and the
+# console before plymouth is the splash's ground with no cursor (installer.rs, grub_defaults).
+printf 'GRUB_DEFAULT=0\nGRUB_TIMEOUT=3\nGRUB_DISTRIBUTOR="Yantrik OS"\nGRUB_CMDLINE_LINUX_DEFAULT="quiet splash loglevel=3 plymouth.use-simpledrm plymouth.ignore-serial-consoles vt.global_cursor_default=0 vt.default_red=0x0e vt.default_grn=0x11 vt.default_blu=0x17"\nGRUB_CMDLINE_LINUX=""\nGRUB_TERMINAL_OUTPUT="gfxterm"\nGRUB_GFXMODE=auto\nGRUB_GFXPAYLOAD_LINUX=keep\n' > "$M/etc/default/grub"
 # The boot menu's theme, as the desktop installer copies it (installer.rs, install_grub_theme).
 if [ -f "$M/usr/share/yantrik/grub-theme/theme.txt" ]; then
     mkdir -p "$M/boot/grub/themes" && rm -rf "$M/boot/grub/themes/yantrik" \

@@ -35,7 +35,7 @@ THEME=/usr/share/plymouth/themes/yantrik
 for f in askpass local-bottom initramfs-hook consume enrol yantrik-boot-unlock.socket \
          yantrik-boot-unlock@.service yantrik-boot-unlock-expire.service theme/yantrik.plymouth theme/yantrik.script theme/field.png theme/emblem.png \
          splash splash.d/yantrik-splash-release.service splash.d/yantrik-splash-handoff.service splash.d/getty-tty1.conf splash.d/plymouth-quit.conf \
-         splash.d/plymouth-quit-wait.conf; do
+         splash.d/plymouth-quit-wait.conf splash.d/cursor.conf; do
     [ -f "$SRC/$f" ] || { echo "stage-boot-unlock: missing $SRC/$f" >&2; exit 1; }
 done
 
@@ -72,6 +72,7 @@ put 0644 "$SRC/splash.d/yantrik-splash-handoff.service" "$ROOTFS$UNITS/yantrik-s
 put 0644 "$SRC/splash.d/getty-tty1.conf"         "$ROOTFS$UNITS/getty@tty1.service.d/yantrik-splash.conf"
 put 0644 "$SRC/splash.d/plymouth-quit.conf"      "$ROOTFS$UNITS/plymouth-quit.service.d/yantrik-splash.conf"
 put 0644 "$SRC/splash.d/plymouth-quit-wait.conf" "$ROOTFS$UNITS/plymouth-quit-wait.service.d/yantrik-splash.conf"
+put 0644 "$SRC/splash.d/cursor.conf"            "$ROOTFS/etc/tmpfiles.d/yantrik-splash-cursor.conf"
 
 # Enabled by hand, as `systemctl enable` would, so this works on a scratch dir with no systemd.
 install -d -m 0755 $own "$ROOTFS/etc/systemd/system/sockets.target.wants"
