@@ -177,6 +177,11 @@ impl Store {
     ///
     /// `home` is the person's home, which an `open_file` button must resolve under.
     pub fn add_notice(&self, post: NoticePost, home: &std::path::Path) -> serde_json::Value {
+        // Before anything changes, in memory too: a store that cannot write must not bind an id
+        // or spend the budget for a card it will not keep.
+        if let Some(why) = self.blocked() {
+            return answer::retry(notice::RETRY_UNAVAILABLE_SECS, why);
+        }
         let now = Utc::now();
         let harness = post.harness;
         if harness.id.trim().is_empty() {
@@ -344,6 +349,9 @@ impl Store {
 
     /// The person pressed a feedback button on a card. Answers the feedback as recorded.
     pub fn record_feedback(&self, id: &str, kind: FeedbackKind) -> Result<Feedback, String> {
+        if let Some(why) = self.blocked() {
+            return Err(why.to_string());
+        }
         if !FeedbackKind::BUTTONS.contains(&kind) {
             return Err(format!("`{}` is not a feedback button", kind.as_str()));
         }
@@ -483,6 +491,9 @@ impl Store {
     /// Forget what `harness` is bound to, so the next notice under it binds it afresh. The
     /// person's way out when something took an id first. Answers whether there was a binding.
     pub fn unbind(&self, harness: &str) -> Result<bool, String> {
+        if let Some(why) = self.blocked() {
+            return Err(why.to_string());
+        }
         let mut state = self.lock();
         if state.bindings.remove(harness).is_none() {
             return Ok(false);
@@ -506,6 +517,9 @@ impl Store {
 
     /// Change them. The store holds them, so the decision and the screen read the same settings.
     pub fn set_initiative(&self, change: impl FnOnce(&mut Initiative) -> Result<(), String>) -> Result<Initiative, String> {
+        if let Some(why) = self.blocked() {
+            return Err(why.to_string());
+        }
         let mut state = self.lock();
         let mut next = state.initiative.clone();
         change(&mut next)?;
@@ -894,6 +908,40 @@ mod tests {
     }
 
     #[test]
+    fn a_blocked_store_changes_nothing_it_cannot_keep() {
+        let (store, dir) = temp_store();
+        store.add_notice(post("mind", notice("rem-1", "reminder", "inbox")), &home());
+        drop(store);
+        let sidecar = crate::store::sidecar_path(&dir.join("notifications.json"));
+        std::fs::remove_file(&sidecar).unwrap();
+        std::fs::create_dir(&sidecar).unwrap();
+        let store = Store::open(dir.join("notifications.json"));
+        assert!(store.load_notice().is_some_and(|n| n.contains("restarted")), "{:?}", store.load_notice());
+        let answer = store.add_notice(post_as("squatter", 4242, "evil", notice("x", "machine", "inbox")), &home());
+        assert!(answer["retry_after_secs"].as_u64().is_some(), "{answer}");
+        assert!(store.bindings().is_empty(), "no id was bound by a post that was not kept");
+        assert!(store.unbind("mind").is_err() && store.set_initiative(|s| { s.quiet = true; Ok(()) }).is_err());
+        assert!(!store.initiative().quiet);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_sidecar_that_is_there_but_dangles_blocks_writes() {
+        let (store, dir) = temp_store();
+        store.add_notice(post("mind", notice("rem-1", "reminder", "inbox")), &home());
+        drop(store);
+        let sidecar = crate::store::sidecar_path(&dir.join("notifications.json"));
+        std::fs::remove_file(&sidecar).unwrap();
+        // A volume not mounted yet, say.
+        std::os::unix::fs::symlink(dir.join("not-mounted/notices"), &sidecar).unwrap();
+        let store = Store::open(dir.join("notifications.json"));
+        assert_eq!(store.add_notice(post("mind", notice("rem-2", "reminder", "inbox")), &home())["stored"], false);
+        assert!(std::fs::symlink_metadata(&sidecar).unwrap().file_type().is_symlink(), "the link is not replaced");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn a_store_that_ran_with_the_first_sidecar_name_reads_it() {
         let dir = std::env::temp_dir().join(format!("yantrik-notices-legacy-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -904,9 +952,17 @@ mod tests {
         store.set_initiative(|s| { s.quiet = true; Ok(()) }).unwrap();
         drop(store);
         std::fs::rename(crate::store::sidecar_path(&path), dir.join("notices.json")).unwrap();
-        let store = Store::open(path);
+        let store = Store::open(path.clone());
         assert!(store.initiative().quiet);
         assert!(store.list().iter().any(|n| n.notice.is_some()));
+        // Read once: the first write puts the old file aside, so it never comes back.
+        store.set_initiative(|s| { s.quiet = false; Ok(()) }).unwrap();
+        drop(store);
+        assert!(!dir.join("notices.json").exists());
+        assert!(std::fs::read_dir(&dir).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().starts_with("notices.json.migrated-")));
+        std::fs::remove_file(crate::store::sidecar_path(&path)).unwrap();
+        let store = Store::open(path);
+        assert!(!store.initiative().quiet, "the old settings did not come back");
         let _ = std::fs::remove_dir_all(dir);
     }
 

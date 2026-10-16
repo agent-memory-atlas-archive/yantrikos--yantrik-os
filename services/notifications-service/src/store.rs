@@ -223,6 +223,9 @@ pub struct Store {
     /// Why nothing may be written: the sidecar is on the disk and could not be read, so a write
     /// would replace it. `None` on every healthy start.
     blocked: Option<String>,
+    /// The sidecar under its first name, read at this start, to be put aside once the new one is
+    /// written, so a later start without the new one never reads it again.
+    legacy: Mutex<Option<PathBuf>>,
 }
 
 /// Where the store lives. `$XDG_DATA_HOME`, then `~/.local/share`, then a temp directory so the
@@ -286,12 +289,13 @@ impl Store {
         };
         // The sidecar's name before 2b38018 was `notices.json`; a store that ran that build reads
         // it once, and writes the new name from then on.
+        // Present unless the kernel says plainly that nothing is there: a dangling symlink (a
+        // volume not mounted yet) or a stat that fails is a sidecar that cannot be read, not a
+        // fresh start, and must not be replaced.
+        let present = !matches!(std::fs::symlink_metadata(&sidecar), Err(e) if e.kind() == std::io::ErrorKind::NotFound);
         let legacy = path.with_file_name("notices.json");
-        let read_from = if !sidecar.exists() && path.file_name().is_some_and(|n| n == "notifications.json") && legacy.exists() {
-            legacy
-        } else {
-            sidecar.clone()
-        };
+        let migrating = !present && path.file_name().is_some_and(|n| n == "notifications.json") && legacy.is_file();
+        let read_from = if migrating { legacy.clone() } else { sidecar.clone() };
         match std::fs::read_to_string(&read_from) {
             Ok(text) => match serde_json::from_str::<Sidecar>(&text) {
                 Ok(read) => {
@@ -308,7 +312,7 @@ impl Store {
                         Ok(()) => say(format!("{} could not be parsed ({e}); it was moved to {}", read_from.display(), aside.display())),
                         Err(moved) => {
                             let said = format!(
-                                "{} could not be parsed ({e}) and could not be moved aside ({moved}); nothing is stored until it is moved",
+                                "{} could not be parsed ({e}) and could not be moved aside ({moved}); nothing is stored until it is moved and the service is restarted",
                                 read_from.display()
                             );
                             blocked = Some(said.clone());
@@ -317,9 +321,12 @@ impl Store {
                     }
                 }
             },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && !present => {}
             Err(e) => {
-                let said = format!("{} could not be read ({e}); nothing is stored until it can be", read_from.display());
+                let said = format!(
+                    "{} could not be read ({e}); nothing is stored until it can be read and the service is restarted",
+                    read_from.display()
+                );
                 blocked = Some(said.clone());
                 say(said);
             }
@@ -337,8 +344,15 @@ impl Store {
             written: Mutex::new(0),
             load_notice,
             reserved: Mutex::new(reserved),
+            legacy: Mutex::new((migrating && blocked.is_none() && legacy.is_file()).then_some(legacy)),
             blocked,
         }
+    }
+
+    /// Why nothing may be written, when the store is in that state. Every change that cannot be
+    /// kept is refused before it touches memory.
+    pub(crate) fn blocked(&self) -> Option<&str> {
+        self.blocked.as_deref()
     }
 
     /// The harness ids reserved for an account, by id.
@@ -401,7 +415,9 @@ impl Store {
         // it passed as `replaces_id` is the id it can go on closing. Our own senders get the
         // same deal, which is what makes "downloading… / finished" one line on screen and not
         // two.
-        if let Some(target) = req.replaces_id.as_deref() {
+        // Not while blocked: the person's notices were not joined back, so they look like plain
+        // cards, and a plain post could rewrite one's words until the next start.
+        if let Some(target) = req.replaces_id.as_deref().filter(|_| self.blocked.is_none()) {
             // Never a mind's notice: its words are the mind's, kept as the store checked them, and
             // a plain post (a socket `add`, or D-Bus `Notify` from any program) naming its id would
             // put anybody's text under that mind's name and bring a dismissed card back (security
@@ -741,6 +757,15 @@ impl Store {
         replace_file(&sidecar_path(&self.path), sidecar.as_bytes())?;
         replace_file(&self.path, main.as_bytes())?;
         *written = (*written).max(state.generation);
+        // The new sidecar holds everything the old one did: put the old one aside, never delete it.
+        let mut legacy = self.legacy.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(old) = legacy.take() {
+            let aside = old.with_extension(format!("json.migrated-{}", Utc::now().timestamp()));
+            if let Err(e) = std::fs::rename(&old, &aside) {
+                tracing::warn!(path = %old.display(), error = %e, "cannot put the old notice sidecar aside; will try again on the next write");
+                *legacy = Some(old);
+            }
+        }
         Ok(())
     }
 }
