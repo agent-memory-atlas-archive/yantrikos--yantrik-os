@@ -817,7 +817,6 @@ impl CompanionService {
         // Additional tools selected dynamically per query via select_tools_for_query().
         // Full tool set discoverable via discover_tools meta-tool.
         let max_perm = parse_permission(&config.tools.max_permission);
-        let use_native_tools = llm.backend_name() == "api" && capability_profile.uses_native_tools();
         let judge = crate::judge_route::build_judge(&config.judge, &llm, crate::judge_route::chat_locality(&config.llm));
         let decisions = crate::decisions::Decisions::default();
         decisions.publish(judge.clone(), &config.judge, false, crate::judge_route::chat_locality(&config.llm));
@@ -827,36 +826,17 @@ impl CompanionService {
                            locality = info.locality.as_str(), "decision model");
         }
 
-        // Native tools: only ALWAYS_TOOLS (6 tools) — rest added dynamically per query
+        // Native tools: only ALWAYS_TOOLS (6 tools) — rest added dynamically per query.
+        // Text-injected tools: only for non-API backends (also uses ALWAYS_TOOLS).
+        // `swap_llm` derives the same three from the new backend (`tool_mode`).
         tracing::debug!(always_on = ALWAYS_TOOLS.len(), "Dynamic tool selection initialized");
-        let native_core_tools = if config.tools.enabled {
-            registry.definitions_for(ALWAYS_TOOLS, max_perm)
-        } else {
-            Vec::new()
-        };
-
-        // Text-injected tools: only for non-API backends (also uses ALWAYS_TOOLS)
-        let tools_system_message = if config.tools.enabled && !use_native_tools {
-            let core_defs = registry.definitions_for(ALWAYS_TOOLS, max_perm);
-            tracing::info!(
-                always = core_defs.len(),
-                total = registry.definitions(max_perm).len(),
-                "Tools prefix: text-injected for {} backend (dynamic selection active)",
-                llm.backend_name(),
-            );
-            template_for_family(capability_profile.family)
-                .format_tools_compact(&core_defs, capability_profile.tier)
-        } else {
-            if config.tools.enabled {
-                tracing::info!(
-                    always = native_core_tools.len(),
-                    total = registry.definitions(max_perm).len(),
-                    "Native tool calling: {} always-on + dynamic per-query selection",
-                    native_core_tools.len(),
-                );
-            }
-            String::new()
-        };
+        let crate::tool_mode::ToolMode {
+            native: use_native_tools,
+            prefix: tools_system_message,
+            native_core: native_core_tools,
+        } = crate::tool_mode::for_backend(
+            &*llm, &capability_profile, &registry, ALWAYS_TOOLS, config.tools.enabled, max_perm,
+        );
 
         // Sync tool cache — still used by discover_tools for category metadata
         ToolCache::ensure_table(&db.conn());
@@ -1206,6 +1186,17 @@ impl CompanionService {
         self.capability_profile = yantrik_ml::ModelCapabilityProfile::from_model_name(&model_id);
         self.model_family = self.capability_profile.family;
         self.llm = new_llm;
+        // The tools follow the new backend as at start-up. Until 16 Oct 2026 they kept the
+        // start-up backend's: a fresh install on the not-set-up backend that then chose Claude
+        // (VM 542) sent Claude no `tools` and told it to write `<tool_call>` XML, so it answered
+        // with raw markup the person saw as the reply.
+        let mode = crate::tool_mode::for_backend(
+            &*self.llm, &self.capability_profile, &self.registry, ALWAYS_TOOLS,
+            self.config.tools.enabled, parse_permission(&self.config.tools.max_permission),
+        );
+        self.use_native_tools = mode.native;
+        self.tools_system_message = mode.prefix;
+        self.native_core_tools = mode.native_core;
         // A decision model that is the chat model follows it.
         if self.config.judge.kind() == yantrik_companion_core::judge_config::JudgeKind::ChatModel {
             self.judge = crate::judge_route::build_judge(&self.config.judge, &self.llm, crate::judge_route::chat_locality(&self.config.llm));
@@ -6613,8 +6604,43 @@ mod native_tool_reply_tests {
         let mut c = CompanionService::new(db, Arc::new(yantrik_ml::not_set_up::NotSetUpLLM), CompanionConfig::default());
         c.swap_llm(Arc::new(yantrik_ml::ApiLLM::new(url, None, MODEL).for_provider("llamacpp")));
         assert_eq!(c.capability_profile.tier, yantrik_ml::ModelTier::Medium);
-        assert!(!c.use_native_tools, "the tools are described in the prompt, as on the VM");
+        // Since 16 Oct 2026 the swap gives a Qwen behind an API native tools, as start-up always
+        // did. These tests keep the case the VM met on 14 Oct: tools described in the prompt and
+        // a server that answers with native calls all the same.
+        assert!(c.use_native_tools, "the swap follows the new backend");
+        c.use_native_tools = false;
         c
+    }
+
+    /// The companion as VM 542 had it on 16 Oct 2026: started with no model chosen, then given
+    /// Claude in Settings (served here from a local port), with its tools on.
+    fn on_claude(url: String) -> CompanionService {
+        let db = YantrikDB::new(":memory:", 384).expect("in-memory database");
+        let mut config = CompanionConfig::default();
+        config.tools.enabled = true;
+        let mut c = CompanionService::new(db, Arc::new(yantrik_ml::not_set_up::NotSetUpLLM), config);
+        assert!(!c.use_native_tools && !c.tools_system_message.is_empty(), "start-up describes the tools");
+        c.swap_llm(Arc::new(yantrik_ml::ApiLLM::new(url, None, "claude-sonnet-5-5").for_provider("anthropic")));
+        c
+    }
+
+    #[test]
+    fn a_swap_to_claude_gives_native_tools_only_and_a_swap_back_describes_them_again() {
+        let mut c = on_claude("http://127.0.0.1:9/v1".into());
+        assert_eq!(c.capability_profile.family, yantrik_ml::ModelFamily::Anthropic);
+        assert!(c.use_native_tools, "Claude gets native tools");
+        assert!(c.tools_system_message.is_empty(), "and no tools described in the prompt");
+        assert!(!c.native_core_tools.is_empty());
+
+        c.swap_llm(Arc::new(yantrik_ml::not_set_up::NotSetUpLLM));
+        assert!(!c.use_native_tools && !c.tools_system_message.is_empty(), "the prompt follows the backend back");
+    }
+
+    #[test]
+    fn claude_can_call_a_tool_and_then_answer() {
+        let c = on_claude("http://127.0.0.1:9/v1".into());
+        let rounds = c.config.agent.max_steps.min(c.capability_profile.max_agent_steps).max(3);
+        assert!(c.capability_profile.max_agent_steps > 1 && rounds > 1, "a call and then an answer: {rounds}");
     }
 
     fn streamed(c: &mut CompanionService, ask: &str) -> (AgentResponse, String) {
