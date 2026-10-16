@@ -106,6 +106,12 @@ pub fn take(shot: Shot) -> Result<Taken, String> {
     }
     let at = Local::now();
     let png = grab::grab_bytes(shot.display, region.as_deref(), Format::Png, shot.pointer)?;
+    // And again after: a lock that landed while grim ran (up to its 10 s limit) may be in the
+    // picture, or what it was about to cover. The picture is only in memory here, so dropping it
+    // keeps nothing: no file, no clipboard (security review of #828, finding 6).
+    if super::locked_now() {
+        return Err("the screen locked while the picture was being taken, so it was thrown away".into());
+    }
     match shot.keep {
         Keep::Clipboard => copy_to_clipboard(&png).map(|()| Taken::Copied),
         Keep::File | Keep::FileAndClipboard => {
@@ -169,5 +175,19 @@ mod tests {
         assert!(src.contains("grab::grab_bytes("));
         assert!(src.contains("names::create_fresh(Kind::Screenshot"));
         assert!(!src.contains("fresh_path"), "a name checked, then opened by someone else");
+    }
+
+    /// Security review of #828, finding 6: the lock is asked before grim runs and again after it
+    /// returns, before anything is kept - a file or the clipboard.
+    #[test]
+    fn a_lock_that_lands_during_the_grab_keeps_nothing() {
+        let src = include_str!("shot.rs");
+        let src = src.split("#[cfg(test)]").next().unwrap();
+        let take = &src[src.find("pub fn take(").unwrap()..];
+        let grab = take.find("grab::grab_bytes(").unwrap();
+        let before = take[..grab].rfind("super::locked_now()").expect("asked before the grab");
+        let after = grab + take[grab..].find("super::locked_now()").expect("asked again after it");
+        let kept = [take.find("copy_to_clipboard(&png)").unwrap(), take.find("save(&png").unwrap()];
+        assert!(before < grab && kept.iter().all(|k| after < *k), "the second ask comes before anything is kept");
     }
 }
