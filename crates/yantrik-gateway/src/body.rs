@@ -59,6 +59,36 @@ pub fn rewrite(body: &mut Value, target: &Target) -> Result<Option<Effort>, Refu
     Ok(if target.reasoning == yantrik_ml::model_caps::Reasoning::None { None } else { applied })
 }
 
+/// Anthropic's rule while extended thinking is on: `temperature` only at 1, `top_p` only at 0.95
+/// or above, and no `top_k`. The gateway is what turns thinking on (the effort mapping above), so it
+/// is the gateway that makes the rest of the body fit: a caller that never asked for thinking cannot
+/// know its sampling has become invalid. On 542 every Mind turn on Claude Sonnet 5.5 was refused with
+/// "`top_p` must be greater than or equal to 0.95 or unset when thinking is enabled or in adaptive
+/// mode" (16 Oct 2026). That is a range error, which `refused_params` rightly does not act on, so
+/// it is fixed here, from the rule, before the first send. Nothing changes when thinking is off.
+pub fn fit_sampling_to_thinking(map: &mut Map<String, Value>) -> Vec<&'static str> {
+    let on = match map.get("thinking") {
+        Some(Value::Object(t)) => !matches!(t.get("type").and_then(Value::as_str), Some("disabled")),
+        _ => false,
+    };
+    let mut dropped = Vec::new();
+    if !on {
+        return dropped;
+    }
+    if map.get("temperature").is_some_and(|v| v.as_f64() != Some(1.0)) {
+        map.remove("temperature");
+        dropped.push("temperature");
+    }
+    if map.get("top_p").is_some_and(|v| v.as_f64().is_none_or(|p| p < 0.95)) {
+        map.remove("top_p");
+        dropped.push("top_p");
+    }
+    if map.remove("top_k").is_some() {
+        dropped.push("top_k");
+    }
+    dropped
+}
+
 /// Take the gateway's own template switch back out of a body, leaving the rest of a caller's
 /// `chat_template_kwargs` as it was: for a server that answered 400 to it.
 pub fn drop_template_switch(body: &mut Value) {
@@ -167,6 +197,50 @@ pub fn known_refused(target: &Target) -> &'static [&'static str] {
 pub fn drop_params(body: &mut Value, params: &[&'static str]) -> Vec<&'static str> {
     let Some(map) = body.as_object_mut() else { return Vec::new() };
     params.iter().copied().filter(|p| map.remove(*p).is_some()).collect()
+}
+
+#[cfg(test)]
+mod thinking_sampling_tests {
+    use super::fit_sampling_to_thinking;
+    use serde_json::{json, Value};
+
+    fn fit(v: Value) -> (Value, Vec<&'static str>) {
+        let mut v = v;
+        let d = fit_sampling_to_thinking(v.as_object_mut().unwrap());
+        (v, d)
+    }
+
+    #[test]
+    fn with_thinking_on_a_low_top_p_a_temperature_and_top_k_are_taken_out() {
+        let (b, d) = fit(json!({"model": "m", "thinking": {"type": "enabled", "budget_tokens": 1024},
+                                 "temperature": 0.7, "top_p": 0.9, "top_k": 40}));
+        assert_eq!(d, vec!["temperature", "top_p", "top_k"]);
+        assert!(b.get("temperature").is_none() && b.get("top_p").is_none() && b.get("top_k").is_none());
+        assert_eq!(b["thinking"]["budget_tokens"], 1024, "the thinking itself is untouched");
+    }
+
+    #[test]
+    fn values_the_rule_allows_stay() {
+        let (b, d) = fit(json!({"thinking": {"type": "adaptive"}, "temperature": 1.0, "top_p": 0.95}));
+        assert!(d.is_empty());
+        assert_eq!((b["temperature"].as_f64(), b["top_p"].as_f64()), (Some(1.0), Some(0.95)));
+    }
+
+    #[test]
+    fn with_thinking_off_or_absent_nothing_changes() {
+        for body in [json!({"temperature": 0.2, "top_p": 0.5, "top_k": 3}),
+                     json!({"thinking": {"type": "disabled"}, "temperature": 0.2, "top_p": 0.5, "top_k": 3})] {
+            let (b, d) = fit(body.clone());
+            assert!(d.is_empty());
+            assert_eq!(b, body);
+        }
+    }
+
+    #[test]
+    fn a_top_p_that_is_not_a_number_is_taken_out_under_thinking() {
+        let (_, d) = fit(json!({"thinking": {"type": "enabled"}, "top_p": "0.9"}));
+        assert_eq!(d, vec!["top_p"]);
+    }
 }
 
 #[cfg(test)]

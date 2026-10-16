@@ -303,6 +303,10 @@ impl Gateway {
             known.extend(refused.get(&model_id).into_iter().flatten().filter(|p| !known.contains(p)).collect::<Vec<_>>());
         }
         note_dropped(call, body::drop_params(&mut body, &known));
+        // Thinking, once the effort mapping turned it on, narrows what sampling the provider takes.
+        if let Some(map) = body.as_object_mut() {
+            note_dropped(call, body::fit_sampling_to_thinking(map));
+        }
         let bytes = serde_json::to_vec(&body).map_err(|_| Refusal::new(400, "bad_request", "The request could not be re-encoded."))?;
         let mut reply = self
             .upstream
