@@ -57,25 +57,49 @@ pub fn is_anthropic(base_url: &str) -> bool {
     host_of(base_url).eq_ignore_ascii_case(ANTHROPIC_HOST)
 }
 
-/// A provider's error body, short enough to say what went wrong: the key masked first, then cut,
-/// so a key echoed across the cut cannot leave its head behind.
+/// Text from a provider, made safe to show and to log: only characters that print. Control
+/// characters (C0 and C1, so ESC, NUL and BEL), bidirectional overrides and isolates, zero-width
+/// characters and the byte-order mark are dropped, and every run of whitespace (newlines too)
+/// becomes one space. An endpoint the person configured writes this text; without this a bidi
+/// override could make "X refused the request: …" read as something else in the UI, and an
+/// escape sequence would reach any terminal or log viewer that shows it raw.
+pub fn sanitize(text: &str) -> String {
+    let invisible = |c: char| {
+        matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}')
+    };
+    let printable: String = text
+        .chars()
+        .filter_map(|c| if c.is_whitespace() { Some(' ') } else if c.is_control() || invisible(c) { None } else { Some(c) })
+        .collect();
+    printable.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// A provider's error body, short enough to say what went wrong and safe to show: cleaned
+/// ([`sanitize`]), the key masked, then cut, so a key echoed across the cut cannot leave its head
+/// behind.
 pub fn excerpt(body: &str, key: Option<&str>) -> String {
+    let clean = sanitize(body);
     let masked = match key.filter(|k| k.len() >= 8) {
-        Some(k) => body.replace(k, "<key>"),
-        None => body.to_string(),
+        Some(k) => clean.replace(k, "<key>"),
+        None => clean,
     };
     masked.chars().take(200).collect()
 }
 
-/// The provider's own words from an error body: `error.message` (OpenAI's shape, Anthropic's in
-/// both its APIs, llama.cpp's), a bare `error` string, or a top-level `message`. One line.
-pub fn provider_message(body: &str) -> Option<String> {
-    let json: serde_json::Value = serde_json::from_str(body).ok()?;
+/// The provider's own words in an error body, as it wrote them: `error.message` (OpenAI's shape,
+/// Anthropic's in both its APIs, llama.cpp's), a bare `error` string, or a top-level `message`.
+fn raw_message(body: &[u8]) -> Option<String> {
+    let json: serde_json::Value = serde_json::from_slice(body).ok()?;
     let message = json["error"]["message"]
         .as_str()
         .or_else(|| json["error"].as_str())
         .or_else(|| json["message"].as_str())?;
-    let line = message.split_whitespace().collect::<Vec<_>>().join(" ");
+    Some(message.to_string())
+}
+
+/// The provider's own words from an error body ([`raw_message`]), cleaned ([`sanitize`]): one line.
+pub fn provider_message(body: &str) -> Option<String> {
+    let line = sanitize(&raw_message(body.as_bytes())?);
     (!line.is_empty()).then_some(line)
 }
 
@@ -337,6 +361,25 @@ mod tests {
         let mut sent = serde_json::json!({"temperature": unchosen.temperature});
         prepare("https://api.openai.com/v1", "gpt-4o", &unchosen, &mut sent);
         assert_eq!(sent["temperature"], unchosen.temperature);
+    }
+
+    #[test]
+    fn provider_text_keeps_only_what_prints() {
+        // A bidi override that would turn the sentence around, a clear-screen escape, a bell, a
+        // NUL, zero-width characters, a BOM, an isolate and a C1 control, with newlines and tabs.
+        let said = "\u{202e}txet\x1b[2J\x07 is\0 de\u{200b}pre\u{feff}cated\n\tfor\u{2066} this\u{9b} model\u{2069}.";
+        assert_eq!(sanitize(said), "txet[2J is deprecated for this model.");
+        assert_eq!(excerpt(said, None), "txet[2J is deprecated for this model.");
+
+        let body = serde_json::json!({"error": {"message": said}}).to_string();
+        assert_eq!(provider_message(&body).as_deref(), Some("txet[2J is deprecated for this model."));
+        let r = ProviderRefused::of(400, "https://api.anthropic.com/v1", &body, None).unwrap();
+        assert_eq!(r.to_string(), "Claude refused the request: txet[2J is deprecated for this model");
+        assert!(!r.said().chars().any(|c| c.is_control() || ('\u{2000}'..='\u{20ff}').contains(&c)), "{:?}", r.said());
+
+        // The key is masked after cleaning, so a key split by an invisible character is still masked.
+        let key = "sk-0123456789abcdef";
+        assert_eq!(excerpt("bad key sk-01234\u{200b}56789abcdef", Some(key)), "bad key <key>");
     }
 
     #[test]

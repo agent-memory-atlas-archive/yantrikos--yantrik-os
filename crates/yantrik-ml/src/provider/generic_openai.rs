@@ -482,12 +482,24 @@ impl GenericOpenAIBackend {
     /// Send `body`, once more without a sampling parameter the model says it will not take
     /// (crate::refusal), and any other refusal as an error naming the host and what it said.
     fn send_openai_request(&self, body: &serde_json::Value) -> Result<ureq::Body> {
-        let host = error_host(&self.openai_endpoint_url());
         match crate::refusal::send_dropping_refused(&self.base_url, &self.model, body, |b| self.post_openai(b))? {
             Ok(resp) => Ok(resp),
-            // A provider's error can echo what it was sent: the key is masked, and the rest is cut
-            // short enough to say what went wrong without carrying the conversation into a log.
-            Err((status, text)) => anyhow::bail!("HTTP {status} from {host}: {}", error_excerpt(&text, self.api_key.as_deref())),
+            Err((status, text)) => Err(self.refused(status, &text)),
+        }
+    }
+
+    /// The error for a request the provider did not answer: a 4xx refusal is
+    /// [`crate::ProviderRefused`], its reason in the provider's own words, cleaned, as `ApiLLM`
+    /// gives it. Anything else names the host and an excerpt: a provider's error can echo what it
+    /// was sent, so the key is masked and the rest cleaned and cut short enough to say what went
+    /// wrong without carrying the conversation into a log.
+    fn refused(&self, status: u16, text: &str) -> anyhow::Error {
+        match crate::ProviderRefused::of(status, &self.base_url, text, self.api_key.as_deref()) {
+            Some(refused) => refused.into(),
+            None => {
+                let host = error_host(&self.openai_endpoint_url());
+                anyhow::anyhow!("HTTP {status} from {host}: {}", error_excerpt(text, self.api_key.as_deref()))
+            }
         }
     }
 
@@ -858,5 +870,18 @@ mod error_text_tests {
         assert!(!excerpt.contains("gsk_0123"), "{excerpt}");
         assert!(excerpt.contains("<key>"));
         assert!(excerpt.chars().count() <= 200);
+    }
+
+    #[test]
+    fn a_4xx_is_the_providers_cleaned_reason_and_anything_else_a_cleaned_excerpt() {
+        let key = "gsk_0123456789abcdefghijklmnopqrstuvwxyz";
+        let be = super::GenericOpenAIBackend::for_provider("groq", "https://api.groq.com/openai/v1".to_string(), Some(key.to_string()), "m");
+        let body = format!("{{\"error\":{{\"message\":\"\u{202e}no\\u001b[2J such\\nmodel {key}\"}}}}");
+        let e = be.refused(404, &body);
+        let refused = e.downcast_ref::<crate::ProviderRefused>().expect("a 4xx is ProviderRefused");
+        assert_eq!(refused.reason, "no[2J such model <key>");
+        let e = be.refused(503, "upstream\u{1b}[2J\ndown\u{202e}");
+        assert!(e.downcast_ref::<crate::ProviderRefused>().is_none());
+        assert_eq!(e.to_string(), "HTTP 503 from api.groq.com: upstream[2J down");
     }
 }
