@@ -26,6 +26,7 @@ Runs on the live instance (VM 561) as the desktop's account, from yantrik-live-d
 Missions are in missions.json beside it. Progress goes to ~/director/log.jsonl, one line a turn.
 Stdlib only; the image ships no Python packages for it.
 """
+import difflib
 import json
 import os
 import re
@@ -174,6 +175,26 @@ def show_mind_view():
                    capture_output=True, text=True, timeout=30)
 
 
+def new_chat():
+    """Start the Mind on a fresh conversation, so a mission begins from its brief and not from
+    the day's history. On 561 the Mind answered nine "keep going" turns in a second each with
+    "every command needs your approval", calling nothing, while a session rule allowed every
+    command: earlier missions' lapsed cards were still in the conversation (16 Oct 2026).
+    Best effort: a desktop that will not start one leaves the old conversation, which only costs
+    what it cost before."""
+    done = subprocess.run([YOS, "act", "shell", "new_chat"], capture_output=True, text=True, timeout=60)
+    return done.returncode == 0, (done.stdout + done.stderr).strip()[:300]
+
+
+def same_answer(a, b):
+    """Whether two replies are the same answer: the Mind saying again what it just said, give or
+    take a word ("I can't make progress" / "I still can't make progress"). Only the opening is
+    compared, where the answer is; a long reply that starts alike and goes on differently is a
+    different turn."""
+    a, b = " ".join(a.split())[:400], " ".join(b.split())[:400]
+    return bool(a) and bool(b) and difflib.SequenceMatcher(None, a, b).ratio() >= 0.9
+
+
 def send(text):
     done = subprocess.run([YOS, "act", "shell", "send_message", f"text={text}"],
                           capture_output=True, text=True, timeout=60)
@@ -305,7 +326,12 @@ def run_mission(m):
     write_state(STARTED, begun | {m["id"]})
     log(mission=m["id"], event="resuming" if resuming else "starting", title=m["title"])
     text = prompt(m["keep_going"] if resuming else m["brief"], m)
+    if not resuming:
+        ok, said = new_chat()
+        if not ok:
+            log(mission=m["id"], event="fresh chat refused", said=said)
     cards = 0
+    previous = ""
     for turn in range(1, m["max_turns"] + 1):
         if time.time() - started > m["max_hours"] * 3600:
             log(mission=m["id"], event="stopped", why="time limit", turns=turn - 1)
@@ -347,6 +373,12 @@ def run_mission(m):
                 log(mission=m["id"], event="finished", turns=turn, page_checked=clean is True,
                     minutes=round((time.time() - started) / 60))
                 return
+        # The same answer twice is a Mind that is not working the mission, whatever the reason;
+        # typing "keep going" at it again only fills the stream with the same words.
+        if same_answer(reply, previous):
+            log(mission=m["id"], event="stopped", why="the same answer twice", turns=turn)
+            return
+        previous = reply
         time.sleep(BETWEEN_TURNS_SECS)
         text = prompt(FIX_FIRST, m, errors) if clean is False else prompt(m["keep_going"], m)
     log(mission=m["id"], event="stopped", why="turn limit")

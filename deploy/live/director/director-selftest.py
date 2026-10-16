@@ -32,6 +32,8 @@ d.send = lambda text: (sent.append(text), (True, ""))[1]
 d.wait_for_turn = lambda _: ({"conversation": [{"role": "assistant", "text": replies[0][0]}]}, replies[0][1],
                               replies.pop(0)[2:] == ("card",))
 d.check_page = lambda m: pages.pop(0) if pages else (True, "")
+chats = []
+d.new_chat = lambda: (chats.append(len(sent)), (True, ""))[1]
 
 failed = 0
 
@@ -128,6 +130,36 @@ check("two turns running with a card stop the mission for a person",
 replies[:] = [("asked, then allowed", "answered", "card"), ("FINISHED", "answered")]
 d.main()
 check("one card that a person answers does not stop the mission", specs[0]["id"] in d.finished_missions())
+
+d.write_state(d.DONE, set())
+d.write_state(d.STARTED, set())
+replies[:] = [("FINISHED", "answered")]
+chats.clear()
+before = len(sent)
+d.main()
+check("a mission started from its brief gets a fresh conversation first",
+      chats == [before], repr(chats))
+os.makedirs(os.path.join(d.PROJECTS, specs[1]["folder"]), exist_ok=True)
+open(os.path.join(d.PROJECTS, specs[1]["folder"], "PLAN.md"), "w").close()
+d.write_state(d.STARTED, {specs[1]["id"]})
+replies[:] = [("FINISHED", "answered")]
+chats.clear()
+d.main()
+check("a resumed build keeps its conversation", chats == [] and sent[-1].startswith("Please keep going"), repr(chats))
+
+d.write_state(d.DONE, set())
+d.write_state(d.STARTED, set())
+replies[:] = [("I can't make progress: every command needs your approval.", "answered"),
+              ("I still can't make progress: every command needs your approval.", "answered"),
+              ("unused", "answered")]
+before = len(sent)
+d.main()
+log = [json.loads(line) for line in open(d.LOG, encoding="utf-8")]
+check("the same answer twice stops the mission",
+      len(sent) - before == 2 and len(replies) == 1 and log[-1].get("why") == "the same answer twice", repr(log[-1]))
+check("answers that differ are not taken for a repeat",
+      not d.same_answer("Step 1 done: layers.js written.", "Step 2 done: the palette now saves.")
+      and not d.same_answer("", ""))
 
 with open(os.path.join(HERE, "yantrik-live-director.service"), encoding="utf-8") as f:
     unit = [line.strip() for line in f]
