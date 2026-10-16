@@ -14,3 +14,8 @@ Environment=HOME=/home/yantrik
 ExecStart=/usr/bin/python3 /opt/yantrik-live/director/director.py
 NoNewPrivileges=yes
 PrivateTmp=yes
+# No IP at all. The Director speaks to the desktop over its unix socket only, and check-page loads
+# a page the Mind wrote, as this account: outside the Mind's egress policy, its fetch, image and
+# socket requests would go wherever the page says, on every turn of every polish round (security
+# review of #822). Unix sockets are not IP, so `yos` is untouched; the page loads with no network.
+IPAddressDeny=any

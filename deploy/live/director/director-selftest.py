@@ -93,4 +93,9 @@ replies[:] = [("asked, then allowed", "answered", "card"), ("FINISHED", "answere
 d.main()
 check("one card that a person answers does not stop the mission", specs[0]["id"] in d.finished_missions())
 
+with open(os.path.join(HERE, "yantrik-live-director.service"), encoding="utf-8") as f:
+    unit = [line.strip() for line in f]
+check("the Director's service has no IP, so a page the Mind wrote reaches no network when checked",
+      "IPAddressDeny=any" in unit and not any(line.startswith("IPAddressAllow") for line in unit))
+
 sys.exit(1 if failed else 0)
