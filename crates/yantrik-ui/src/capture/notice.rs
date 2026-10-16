@@ -179,7 +179,7 @@ impl Who {
     pub fn words(&self) -> String {
         match self {
             Who::Person => "the person".into(),
-            Who::Mind(name) => name.clone(),
+            Who::Mind { name, .. } => name.clone(),
         }
     }
 }

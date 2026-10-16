@@ -82,10 +82,17 @@ fn person_only(action: &str) -> Result<(), String> {
     }
 }
 
+/// Who is calling, named for the person and identified for "only yours". Read on the
+/// dispatching thread, where the caller is in scope.
 fn who_now() -> Who {
     match requester_now() {
         Requester::Person => Who::Person,
-        Requester::Mind(name) => Who::Mind(name),
+        Requester::Mind(said) => {
+            let id = crate::mind_view::mind_id_now();
+            // An agent with a token is "an agent" to the router; the person is told which.
+            let name = crate::mind_view::agent_words_now().unwrap_or(said);
+            Who::Mind { name, id }
+        }
     }
 }
 
@@ -121,7 +128,7 @@ fn screenshot_for(display: Display, args: &serde_json::Value) -> Result<serde_js
         }
         let shot::Taken::Saved(path) = taken? else { return Err("the picture was not saved".to_string()) };
         let by = match &who {
-            Who::Mind(name) => name.clone(),
+            Who::Mind { name, .. } => name.clone(),
             Who::Person => "You".to_string(),
         };
         notice::screenshot_by_mind(&by, &path, desktop);
@@ -225,7 +232,7 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                 let who = who_now();
                 let work = move || {
                     let path = recorder::start(target, Audio::None, who.clone())?;
-                    if let Who::Mind(name) = &who {
+                    if let Who::Mind { name, .. } = &who {
                         notice::recording_by_mind(name);
                     }
                     Ok(serde_json::json!({ "recording": true, "saving_to": path.to_string_lossy(), "stop_with": "record_stop" }))
@@ -241,7 +248,7 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                 let who = who_now();
                 let work = move || {
                     let (why, only) = match &who {
-                        Who::Mind(name) => (Why::Mind(name.clone()), Some(who.clone())),
+                        Who::Mind { name, .. } => (Why::Mind(name.clone()), Some(who.clone())),
                         Who::Person => (Why::Person, None),
                     };
                     match recorder::stop(why, only.as_ref())? {

@@ -34,7 +34,24 @@ use crate::{App, CaptureState};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Who {
     Person,
-    Mind(String),
+    /// A mind. `name` is what the person is told and `describe shell` says. `id` is which mind it
+    /// is (`mind_view::mind_id_now`): the agent's id for a believed token, else the attached
+    /// mind. A name is not an identity: every agent with a token was "an agent", so any of them
+    /// could stop another's recording (security review of #828, finding 4). `None` when the shell
+    /// could not tell, which owns nothing.
+    Mind { name: String, id: Option<String> },
+}
+
+impl Who {
+    /// Whether `asker` is the one who started this: the person for the person's, the same mind
+    /// by its id for a mind's. A mind the shell could not tell owns nothing, not even its own.
+    pub fn started_by(&self, asker: &Who) -> bool {
+        match (self, asker) {
+            (Who::Person, Who::Person) => true,
+            (Who::Mind { id: Some(mine), .. }, Who::Mind { id: Some(theirs), .. }) => mine == theirs,
+            _ => false,
+        }
+    }
 }
 
 /// The shell's window, for the workers that need to ask it something or change what it shows.

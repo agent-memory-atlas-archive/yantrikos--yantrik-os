@@ -244,7 +244,7 @@ pub fn stop(why: Why, only_by: Option<&Who>) -> Result<Option<PathBuf>, String> 
         let mut guard = state();
         let Some(rec) = guard.as_mut() else { return Ok(None) };
         if let Some(who) = only_by {
-            if &rec.who != who {
+            if !rec.who.started_by(who) {
                 return Err("the recording running now was not started by you, so it was left running; \
                             the person stops it with the red dot"
                     .into());
@@ -471,6 +471,39 @@ mod tests {
         let power = include_str!("../control_power.rs");
         let run = &power[power.find("pub fn run(verb: Verb)").expect("power's run")..];
         assert!(run[..run.find("verb.command()").unwrap()].contains("crate::capture::before_session_ends"), "logout stops it first");
+    }
+
+    /// Security review of #828, finding 4: "only yours" is by which mind, not by its name. Two
+    /// agents with tokens were both "an agent", so either stopped the other's recording.
+    #[test]
+    fn a_mind_stops_only_the_recording_it_started() {
+        let mind = |name: &str, id: Option<&str>| Who::Mind { name: name.into(), id: id.map(String::from) };
+        let pi = mind("an agent", Some("agent:pi:c-1"));
+        let other = mind("an agent", Some("agent:hermes:main"));
+        assert!(pi.started_by(&pi.clone()));
+        assert!(!pi.started_by(&other), "same name, another agent");
+        assert!(!pi.started_by(&Who::Person), "the person stops it with Why::Person and no `only_by`");
+        assert!(!mind("a mind", None).started_by(&mind("a mind", None)), "a mind the shell cannot tell owns nothing");
+        assert!(Who::Person.started_by(&Who::Person));
+
+        // And the stop itself refuses another agent, before any unit is touched.
+        *state() = Some(Running {
+            unit: "yantrik-capture-rec-test".into(),
+            path: PathBuf::from("/nonexistent/Recording.mp4"),
+            started: Instant::now(),
+            wall: Local::now(),
+            target: Target::MindView,
+            audio: Audio::None,
+            who: pi,
+            encoder: Encoder::X264,
+            stopping: false,
+            retried: false,
+        });
+        let refused = stop(Why::Mind("an agent".into()), Some(&other));
+        let still = state().as_ref().map(|r| r.stopping);
+        *state() = None;
+        assert!(refused.unwrap_err().contains("not started by you"));
+        assert_eq!(still, Some(false), "left running, and not marked as stopping");
     }
 
     #[test]
