@@ -123,6 +123,8 @@ grep -q 'XKBLAYOUT="de"' "$ROOT/etc/default/keyboard" 2>/dev/null \
     && ok "the layout is the one chosen" || bad "the layout is the one chosen"
 grep -qx 'Theme=yantrik' "$ROOT/etc/plymouth/plymouthd.conf" 2>/dev/null \
     && ok "plymouthd.conf names the Yantrik theme" || bad "plymouthd.conf names the Yantrik theme"
+grep -qx 'ShowDelay=0' "$ROOT/etc/plymouth/plymouthd.conf" 2>/dev/null \
+    && ok "and shows it without a delay" || bad "and shows it without a delay"
 grep -q "keyscript=$KS" "$ROOT/cryptroot/crypttab" 2>/dev/null \
     && ok "the initramfs crypttab names the keyscript" || bad "the initramfs crypttab names the keyscript"
 for s in "$ROOT$KS" "$ROOT/scripts/local-bottom/yantrik-unlock"; do

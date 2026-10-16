@@ -36,6 +36,9 @@ default_is_yantrik() {
     [ "$(readlink -f "$THEMES/default.plymouth" 2>/dev/null)" = "$THEMES/$THEME/$THEME.plymouth" ]
 }
 
+# ShowDelay=0 wherever the Yantrik theme is named: plymouth shows its first frame as soon as it has a
+# display, not after a distribution's default delay, which would be black after GRUB (#820).
+#
 # The splash alone: no prompt, so no label plugin, font or keymap. Anything missing, and plymouth's
 # own hook has the last word, as before there was a splash.
 # When the theme is Yantrik's and something is missing, the build says what (build-debian-iso.sh
@@ -69,7 +72,7 @@ splash_only() {
     mkdir -p "$DESTDIR$THEMES/$THEME" "$DESTDIR/etc/plymouth"
     cp -a "$THEMES/$THEME/." "$DESTDIR$THEMES/$THEME/"
     ln -sfn "$THEMES/$THEME/$THEME.plymouth" "$DESTDIR$THEMES/default.plymouth"
-    printf '[Daemon]\nTheme=%s\n' "$THEME" > "$DESTDIR/etc/plymouth/plymouthd.conf"
+    printf '[Daemon]\nTheme=%s\nShowDelay=0\n' "$THEME" > "$DESTDIR/etc/plymouth/plymouthd.conf"
     echo "I: yantrik-unlock: the boot splash (the Yantrik theme and its emblem) is in this initramfs" >&2
     return 0
 }
@@ -158,5 +161,5 @@ fi
     && cp -a /usr/share/X11/xkb "$DESTDIR/usr/share/X11/"
 
 mkdir -p "$DESTDIR/etc/plymouth"
-printf '[Daemon]\nTheme=%s\n' "$THEME" > "$DESTDIR/etc/plymouth/plymouthd.conf"
+printf '[Daemon]\nTheme=%s\nShowDelay=0\n' "$THEME" > "$DESTDIR/etc/plymouth/plymouthd.conf"
 exit 0

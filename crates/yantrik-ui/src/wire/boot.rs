@@ -16,11 +16,13 @@
 //! finished is not ticked, and the desktop arrives anyway with the machine rail showing what is
 //! still down. Showing the desktop is not a claim that everything worked.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::ffi::OsString;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use slint::{ComponentHandle, Model, ModelRc, SharedString, Timer, TimerMode, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, RenderingState, SharedString, Timer, TimerMode, VecModel};
 use yantrik_shell_core::service_manager::{ServiceManager, ServiceStatus};
 
 use crate::app_context::AppContext;
@@ -61,6 +63,7 @@ pub fn wire(ui: &App, ctx: &AppContext, services: ServiceManager) {
     // itself on boot was a number that named no build.
     ui.set_version(SharedString::from(yantrik_version::version()));
     push(ui, &[false; 4]);
+    say_drawn(ui);
 
     let started = Instant::now();
     let bridge = ctx.bridge.clone();
@@ -153,4 +156,53 @@ fn push(ui: &App, flags: &[bool; 4]) {
     let done = flags.iter().filter(|f| **f).count();
     ui.set_progress(done as f32 / STAGES.len() as f32);
     ui.set_boot_stages(ModelRc::new(VecModel::from(rows)));
+}
+
+/// What the shell leaves in its runtime directory once its first frame is drawn. The boot splash
+/// (plymouth, deploy/yantrik-os/boot-unlock/splash) waits for it before quitting, and quits with
+/// --retain-splash, so nothing between the splash and this screen is black. It holds nothing.
+const DRAWN: &str = "yantrik-shell-drawn";
+
+fn drawn_path(runtime_dir: Option<OsString>) -> Option<PathBuf> {
+    runtime_dir.filter(|d| !d.is_empty()).map(|d| PathBuf::from(d).join(DRAWN))
+}
+
+/// Leave the marker once, after the first frame. Slint's software renderer has no rendering
+/// notifier; there, a short while after the event loop starts stands in for it, which is after
+/// the window is shown and its first frame asked for.
+fn say_drawn(ui: &App) {
+    let Some(path) = drawn_path(std::env::var_os("XDG_RUNTIME_DIR")) else { return };
+    let said = Rc::new(Cell::new(false));
+    let say = move || {
+        if said.replace(true) {
+            return;
+        }
+        if let Err(e) = std::fs::write(&path, b"") {
+            tracing::warn!(error = %e, path = %path.display(), "Could not tell the boot splash the shell has drawn; it quits on its own deadline");
+        }
+    };
+    let after_frame = say.clone();
+    let notified = ui.window().set_rendering_notifier(move |state, _| {
+        if matches!(state, RenderingState::AfterRendering) {
+            after_frame();
+        }
+    });
+    if notified.is_err() {
+        Timer::single_shot(Duration::from_millis(500), say);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_drawn_marker_is_where_the_splash_looks() {
+        let script = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../deploy/yantrik-os/boot-unlock/splash"));
+        assert!(script.contains(&format!("\"$RUN\"/*/{DRAWN}")), "splash waits for {DRAWN} in each session's runtime dir");
+        assert!(script.contains("RUN=\"${YANTRIK_SPLASH_RUN:-/run/user}\""));
+        assert_eq!(drawn_path(Some("/run/user/1000".into())), Some(PathBuf::from("/run/user/1000/yantrik-shell-drawn")));
+        assert_eq!(drawn_path(Some("".into())), None, "no runtime dir, no marker in the working directory");
+        assert_eq!(drawn_path(None), None);
+    }
 }
