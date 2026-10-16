@@ -1563,6 +1563,9 @@ pub fn wire(ui: &App, bridge: std::sync::Arc<crate::bridge::CompanionBridge>) {
         }
         if let Some(ui) = private_ui.upgrade() {
             ui.set_private_mode(crate::private_mode::is_on());
+            // The gateway refuses accounts off this machine while private: the composer's line
+            // for a mind on it says so, and says where words go again once it is off.
+            crate::wire::runs_on_card::publish(&ui);
         }
     });
 

@@ -35,6 +35,8 @@ const REFRESH: std::time::Duration = std::time::Duration::from_secs(2);
 /// registry, which is in memory.
 const SETTINGS_SCREEN: i32 = 7;
 const HARNESSES_SECTION: i32 = 8;
+/// The first run (`onboarding_first_run.slint`), which says how the default mind's install is going.
+const FIRST_RUN_SCREEN: i32 = 2;
 
 static HOST: OnceLock<Host> = OnceLock::new();
 
@@ -54,6 +56,8 @@ pub fn host() -> Option<&'static Host> {
 /// Named once here so the chat path can ask "is the builtin driving?" without a string literal
 /// of its own drifting away from this one.
 pub const BUILTIN_ID: &str = "companion";
+/// And its name, on its row and on every reply it signs.
+pub const BUILTIN_NAME: &str = "Yantrik Companion";
 
 struct Companion {
     bridge: Arc<CompanionBridge>,
@@ -65,7 +69,7 @@ impl Harness for Companion {
     }
 
     fn name(&self) -> &str {
-        "Yantrik Companion"
+        BUILTIN_NAME
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -297,6 +301,10 @@ pub fn wire(ui: &App, ctx: &AppContext) {
 
     crate::wire::harness_provider::wire(ui);
 
+    // An install of the default mind the first run started and a restart interrupted carries on
+    // (once; `default_mind::begin` keeps count). Nothing starts here that the first run did not.
+    crate::default_mind::start(crate::default_mind::When::Restart);
+
     publish(ui, &host);
 
     let timer = Timer::default();
@@ -307,6 +315,14 @@ pub fn wire(ui: &App, ctx: &AppContext) {
             let Some(ui) = weak.upgrade() else { return };
             restore_choice(&host);
             publish(&ui, &host);
+            // The first run's line about the default mind, only while the first run is drawn:
+            // it reads a file, and nothing else shows it.
+            if ui.get_current_screen() == FIRST_RUN_SCREEN {
+                let words: slint::SharedString = crate::default_mind::words_now().into();
+                if ui.get_fr_default_mind_words() != words {
+                    ui.set_fr_default_mind_words(words);
+                }
+            }
         });
     }
     // Keep timer alive
@@ -351,6 +367,8 @@ pub fn catalogue_for_describe() -> serde_json::Value {
                     "can_assign_provider": row.can_assign_provider,
                     "can_revert_provider": row.can_revert_provider,
                     "builtin": row.builtin,
+                    // The mind that answers for a person who never chose one.
+                    "default": row.default,
                     "docs": row.docs,
                 })
             })
@@ -445,17 +463,46 @@ fn report(ui: &App, id: &str, outcome: Result<String, String>) {
 ///
 /// Silent when there is nothing to do, and it does not fight the person: choosing any mind
 /// saves that choice, so switching back to the built-in makes the built-in the preference.
+/// A person who never chose gets the default mind (`settings::DEFAULT_MIND`) the same way, once
+/// it is proven, and is told so once.
 fn restore_choice(host: &Host) {
-    let want = crate::wire::settings::preferred_mind();
-    if want.is_empty() || host.active_id() == want {
-        return;
+    let chosen = crate::wire::settings::chosen_mind();
+    if hand_over(host, &chosen, crate::default_mind::proven()) == Some(Handover::ByDefault) {
+        crate::default_mind::handed_over();
+    }
+}
+
+/// Why [`hand_over`] moved the conversation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Handover {
+    Chosen,
+    ByDefault,
+}
+
+/// Move the conversation to the preferred mind if it is attached and not already answering.
+///
+/// A chosen mind is handed over the moment it attaches, as it always was. The default mind,
+/// which nobody chose, waits for `default_proven` as well: it attaches part-way through its
+/// install, before its memory is proven, and the built-in keeps answering until all three
+/// proofs have passed.
+fn hand_over(host: &Host, chosen: &str, default_proven: bool) -> Option<Handover> {
+    let want = crate::wire::settings::preference(chosen);
+    let by_default = chosen.is_empty();
+    if host.active_id() == want || (by_default && !default_proven) {
+        return None;
     }
     if !host.list().iter().any(|e| e.id == want) {
-        return;
+        return None;
     }
-    match host.set_active(&want) {
-        Ok(()) => tracing::info!(harness = %want, "Answering again with the chosen mind"),
-        Err(e) => tracing::warn!(harness = %want, error = %e, "Could not restore the chosen mind"),
+    match host.set_active(want) {
+        Ok(()) => {
+            tracing::info!(harness = %want, by_default, "Answering again with the preferred mind");
+            Some(if by_default { Handover::ByDefault } else { Handover::Chosen })
+        }
+        Err(e) => {
+            tracing::warn!(harness = %want, error = %e, "Could not restore the preferred mind");
+            None
+        }
     }
 }
 
@@ -571,8 +618,11 @@ fn publish_catalogue(ui: &App, entries: &[yantrik_harness::Entry]) {
             configure_label: row.configure.into(),
             provider_line: row.provider_line.into(),
             can_assign_provider: row.can_assign_provider,
+            can_use_saved: row.can_use_saved,
             can_revert_provider: row.can_revert_provider,
             docs: row.docs.into(),
+            is_default: row.default,
+            install_label: row.install_label.into(),
         })
         .collect();
 
@@ -746,9 +796,18 @@ fn first_party_claim_refused(
 ) -> Option<String> {
     if method != yantrik_harness::protocol::ATTACH
         || params["id"].as_str() != Some(crate::memory_grants::FIRST_PARTY_MIND)
-        || !door_served
-        || uid.is_some_and(is_mind)
     {
+        return None;
+    }
+    // The Mind never attaches shared, so a shared `mind` is always an impostor, whatever the uid
+    // and whether or not the door is served.
+    if params["shared"].as_bool() == Some(true) {
+        return Some(format!(
+            "`{}` is the id of the person's own Yantrik Mind, which never attaches shared; attach under a different id",
+            crate::memory_grants::FIRST_PARTY_MIND
+        ));
+    }
+    if !door_served || uid.is_some_and(is_mind) {
         return None;
     }
     Some(format!(
@@ -838,6 +897,14 @@ mod tests {
 
         // No door, as before the account migration: the Mind runs as the person and attaches so.
         assert_eq!(refused(&attach("mind"), Some(1000), false), None);
+
+        // A shared `mind` is always an impostor: the Mind never attaches shared, so it is refused
+        // from the person's uid and from the mind uid, with the door served and not served.
+        let shared = |id: &str| serde_json::json!({ "id": id, "name": "Yantrik Mind", "shared": true });
+        for (uid, door) in [(Some(1000), true), (Some(990), true), (Some(1000), false), (Some(990), false)] {
+            let why = refused(&shared("mind"), uid, door).expect("a shared mind is refused");
+            assert!(why.contains("never attaches shared"), "{why}");
+        }
     }
 
     /// The socket hands the host the account the kernel named at accept, beside the pid, and the
@@ -940,6 +1007,77 @@ mod tests {
         // An id the registry does not hold gets `set_active`'s sentence — the list of what is
         // attached — not a row's.
         assert_eq!(row_refusal(&pi_machine(None), &host.list(), "hermes"), None);
+    }
+}
+
+#[cfg(test)]
+mod handover_tests {
+    use super::*;
+    use yantrik_harness::protocol;
+
+    struct Builtin;
+
+    impl Harness for Builtin {
+        fn id(&self) -> &str {
+            BUILTIN_ID
+        }
+        fn name(&self) -> &str {
+            BUILTIN_NAME
+        }
+        fn capabilities(&self) -> Capabilities {
+            Capabilities { streaming: true, tools: true, memory: true }
+        }
+        fn health(&self) -> Health {
+            Health::Ready
+        }
+        fn send(&self, _turn: Turn) -> Answer {
+            std::sync::mpsc::channel().1
+        }
+    }
+
+    fn host() -> Host {
+        Host::new(vec![Arc::new(Builtin)])
+    }
+
+    fn attach(host: &Host, id: &str) {
+        host.handle(protocol::ATTACH, &serde_json::json!({ "id": id, "name": id })).unwrap();
+    }
+
+    #[test]
+    fn the_built_in_answers_until_hermes_attaches_and_is_proven_then_hermes_does() {
+        let host = host();
+        assert_eq!(host.active_id(), BUILTIN_ID);
+        assert_eq!(hand_over(&host, "", true), None, "Hermes is not here yet");
+        attach(&host, "hermes");
+        assert_eq!(hand_over(&host, "", false), None, "attached mid-install, its memory not proven yet");
+        assert_eq!(host.active_id(), BUILTIN_ID);
+        assert_eq!(hand_over(&host, "", true), Some(Handover::ByDefault));
+        assert_eq!(host.active_id(), "hermes");
+        assert_eq!(hand_over(&host, "", true), None, "said and done once, not at every tick");
+    }
+
+    #[test]
+    fn a_chosen_mind_is_handed_over_on_attach_as_before() {
+        let host = host();
+        attach(&host, "pi");
+        attach(&host, "hermes");
+        assert_eq!(hand_over(&host, "pi", false), Some(Handover::Chosen));
+        assert_eq!(host.active_id(), "pi");
+        // Hermes chosen by name needs no proof: the person asked for it.
+        assert_eq!(hand_over(&host, "hermes", false), Some(Handover::Chosen));
+        assert_eq!(host.active_id(), "hermes");
+    }
+
+    #[test]
+    fn the_default_never_overrides_a_choice_the_built_in_included() {
+        let host = host();
+        attach(&host, "hermes");
+        assert_eq!(hand_over(&host, BUILTIN_ID, true), None);
+        assert_eq!(host.active_id(), BUILTIN_ID);
+        attach(&host, "pi");
+        assert_eq!(hand_over(&host, "pi", true), Some(Handover::Chosen));
+        assert_eq!(hand_over(&host, "pi", true), None);
+        assert_eq!(host.active_id(), "pi", "a proven Hermes does not take a chosen Pi's place");
     }
 }
 
