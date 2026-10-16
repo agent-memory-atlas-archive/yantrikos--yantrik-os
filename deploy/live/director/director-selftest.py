@@ -175,7 +175,7 @@ d.main()
 log = [json.loads(line) for line in open(d.LOG, encoding="utf-8")]
 refused = [e for e in log if e.get("event") == "finished refused" and e.get("why") == "nothing in the folder changed"]
 check("a FINISHED over a folder nothing was written to is refused, and the Mind is told so",
-      refused and len(sent) - before == 2 and "no file was written" in sent[-1], sent[-1])
+      refused and len(sent) - before == 2 and "none of its code changed" in sent[-1], sent[-1])
 check("a FINISHED once something was written finishes the round", specs[0]["id"] in d.finished_missions())
 
 root = os.path.join(d.PROJECTS, "printcheck")
@@ -185,9 +185,14 @@ open(os.path.join(root, "a.js"), "w").write("1")
 first = real_folder_print(m)
 open(os.path.join(root, ".git", "x"), "w").write("hidden")
 same = real_folder_print(m) == first
+open(os.path.join(root, "IDEAS.md"), "w").write("- [x] done")
+open(os.path.join(root, "a.js.bak"), "w").write("1")
+open(os.path.join(root, "a.js"), "w").write("1")
+notes_only = real_folder_print(m) == first
 open(os.path.join(root, "a.js"), "w").write("12")
-check("the folder print changes when a file is written, not for hidden entries",
-      same and real_folder_print(m) != first and real_folder_print({"fields": {"folder": "missing"}}) == ())
+check("the folder print changes when code is written, not for notes, backups, rewrites or hidden entries",
+      same and notes_only and real_folder_print(m) != first
+      and real_folder_print({"fields": {"folder": "missing"}}) == ())
 
 with open(os.path.join(HERE, "yantrik-live-director.service"), encoding="utf-8") as f:
     unit = [line.strip() for line in f]
