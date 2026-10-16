@@ -73,7 +73,9 @@ pub fn open(ui: &App, record: bool) {
         let w = slot.as_ref().expect("just made");
         crate::wire::theme::sync_window_theme!(ui, w);
         w.set_kind(i32::from(record));
-        w.set_recording(recorder::running());
+        // The button stops the person's own recording; over a mind's it is Start, which stops
+        // the mind's first (recorder::makes_way).
+        w.set_recording(recorder::running_for_person());
         w.set_compact(width > 0.0 && width < COMPACT_BELOW);
         if let Err(e) = w.show() {
             tracing::warn!(error = %e, "could not show the capture bar");
@@ -122,7 +124,7 @@ fn make() -> Result<CaptureBarWindow, slint::PlatformError> {
         if w.get_kind() == 0 {
             let area = if region { Area::Drag } else { Area::Screen };
             person_shot(area, delay, w.get_pointer() == 1, Keep::FileAndClipboard);
-        } else if recorder::running() {
+        } else if recorder::running_for_person() {
             hide();
             std::thread::spawn(|| {
                 let _ = recorder::stop(Why::Person, None);

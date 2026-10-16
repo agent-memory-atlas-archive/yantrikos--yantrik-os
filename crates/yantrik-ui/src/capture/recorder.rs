@@ -29,6 +29,16 @@ use super::Who;
 /// hundred milliseconds normally; the unit is given this long before systemd kills it.
 const STOP_TIMEOUT_SECS: u64 = 15;
 
+/// The longest a mind's recording runs (`RuntimeMaxSec`): it was the person's work at the person's
+/// weight with no end, so once "allow for this session" covered `record_start`, a mind could
+/// leave one running until the disk guard tripped (security review of #828, finding 5). systemd
+/// stops it with the unit's SIGINT, which finishes the file.
+pub const MIND_MAX_SECS: u64 = 30 * 60;
+
+/// A mind's recording's CPU weight, a fifth of the default 100: an agent's work yields to the
+/// person's. There is no agents' slice yet to put it in, so the weight is on the unit itself.
+pub const MIND_CPU_WEIGHT: u32 = 20;
+
 /// How often the watch looks: the elapsed time on the bar, and whether the unit still runs.
 const TICK: Duration = Duration::from_secs(1);
 
@@ -90,6 +100,10 @@ pub enum Why {
     Leftover,
     /// wf-recorder ended by itself.
     Ended,
+    /// A mind's recording reached [`MIND_MAX_SECS`].
+    MindLimit,
+    /// The person started a recording of their own over a mind's.
+    PersonStarted,
 }
 
 impl Why {
@@ -106,6 +120,8 @@ impl Why {
             )),
             Why::Leftover => Some("It was still running when the desktop restarted, so it was stopped.".into()),
             Why::Ended => Some("The recorder ended by itself.".into()),
+            Why::MindLimit => Some(format!("It stopped after {} minutes, the longest a mind may record.", MIND_MAX_SECS / 60)),
+            Why::PersonStarted => Some("It stopped because you started a recording of your own.".into()),
         }
     }
 }
@@ -145,7 +161,7 @@ fn next_unit() -> String {
 }
 
 /// The whole command line that starts a recording. Pure, so the tests read exactly what runs.
-pub fn command(unit: &str, wayland: &str, target: &Target, audio: Audio, enc: &Encoder, path: &Path) -> Vec<String> {
+pub fn command(unit: &str, wayland: &str, target: &Target, audio: Audio, enc: &Encoder, path: &Path, who: &Who) -> Vec<String> {
     let mut argv: Vec<String> = vec![
         "systemd-run".into(),
         "--user".into(),
@@ -163,9 +179,12 @@ pub fn command(unit: &str, wayland: &str, target: &Target, audio: Audio, enc: &E
         // The display to record. WAYLAND_SOCKET is not passed: the unit is started by the user
         // manager, which has the session's environment, not the shell's handed socket.
         format!("--setenv=WAYLAND_DISPLAY={wayland}"),
-        "--".into(),
-        "wf-recorder".into(),
     ];
+    if let Who::Mind { .. } = who {
+        argv.push(format!("--property=RuntimeMaxSec={MIND_MAX_SECS}"));
+        argv.push(format!("--property=CPUWeight={MIND_CPU_WEIGHT}"));
+    }
+    argv.extend(["--".to_string(), "wf-recorder".to_string()]);
     argv.extend(enc.args());
     if let Target::Desktop { region: Some(g) } = target {
         argv.extend(["-g".to_string(), g.clone()]);
@@ -191,8 +210,30 @@ pub fn running() -> bool {
     state().is_some()
 }
 
+/// Whether the person's own recording is running: what the bar's button stops. A mind's is
+/// stopped by the red dot, or by the person starting their own over it.
+pub fn running_for_person() -> bool {
+    state().as_ref().is_some_and(|r| r.who == Who::Person)
+}
+
+/// Whether `starting` may start while `running` runs: `Ok(true)` when what runs must be stopped
+/// first. The person's recording outranks a mind's, which once kept the person from recording
+/// their own screen until they found the dot (security review of #828, finding 5); nothing else
+/// starts over a running recording.
+pub fn makes_way(running: Option<&Who>, starting: &Who) -> Result<bool, String> {
+    match (running, starting) {
+        (None, _) => Ok(false),
+        (Some(Who::Mind { .. }), Who::Person) => Ok(true),
+        (Some(_), _) => Err("a recording is already running; stop it first (the red dot in the status bar)".into()),
+    }
+}
+
 /// Start one. Blocking (systemd-run, vainfo): call it on a worker.
 pub fn start(target: Target, audio: Audio, who: Who) -> Result<PathBuf, String> {
+    let running_now = state().as_ref().map(|r| r.who.clone());
+    if makes_way(running_now.as_ref(), &who)? {
+        let _ = stop(Why::PersonStarted, None)?;
+    }
     if running() {
         return Err("a recording is already running; stop it first (the red dot in the status bar)".into());
     }
@@ -210,7 +251,7 @@ pub fn start(target: Target, audio: Audio, who: Who) -> Result<PathBuf, String> 
     let path = names::fresh_path(Kind::Recording, &home, &wall)?;
     let enc = encoder::probe();
     let unit = next_unit();
-    launch(&unit, &wayland, &target, audio, &enc, &path)?;
+    launch(&unit, &wayland, &target, audio, &enc, &path, &who)?;
     tracing::info!(unit, path = %path.display(), encoder = enc.name(), records = target.word(), "Recording started");
     *state() = Some(Running {
         unit: unit.clone(),
@@ -232,8 +273,8 @@ pub fn start(target: Target, audio: Audio, who: Who) -> Result<PathBuf, String> 
     Ok(path)
 }
 
-fn launch(unit: &str, wayland: &str, target: &Target, audio: Audio, enc: &Encoder, path: &Path) -> Result<(), String> {
-    let argv = command(unit, wayland, target, audio, enc, path);
+fn launch(unit: &str, wayland: &str, target: &Target, audio: Audio, enc: &Encoder, path: &Path, who: &Who) -> Result<(), String> {
+    let argv = command(unit, wayland, target, audio, enc, path, who);
     run(&argv, Duration::from_secs(10), "systemd-run").map(|_| ())
 }
 
@@ -327,12 +368,16 @@ fn watch(unit: String) {
     loop {
         std::thread::sleep(TICK);
         tick += 1;
-        let (started, dir, encoder, retried) = {
+        let (started, dir, encoder, retried, by_mind) = {
             let guard = state();
             match guard.as_ref() {
-                Some(r) if r.unit == unit && !r.stopping => {
-                    (r.started, r.path.parent().map(Path::to_path_buf), r.encoder.clone(), r.retried)
-                }
+                Some(r) if r.unit == unit && !r.stopping => (
+                    r.started,
+                    r.path.parent().map(Path::to_path_buf),
+                    r.encoder.clone(),
+                    r.retried,
+                    matches!(r.who, Who::Mind { .. }),
+                ),
                 _ => return,
             }
         };
@@ -356,7 +401,10 @@ fn watch(unit: String) {
             };
             if let Some(rec) = rec {
                 super::show_recording(false, "");
-                finished(&rec, &Why::Ended);
+                // systemd ended a mind's at its limit; a few seconds' slack for the ticks.
+                let limit = Duration::from_secs(MIND_MAX_SECS.saturating_sub(5));
+                let why = if by_mind && started.elapsed() >= limit { Why::MindLimit } else { Why::Ended };
+                finished(&rec, &why);
             }
             return;
         }
@@ -365,16 +413,16 @@ fn watch(unit: String) {
 
 /// Start the same recording again with the CPU encoder, under the same unit name and file.
 fn retry_on_cpu(unit: &str) -> bool {
-    let (wayland, target, audio, path) = {
+    let (wayland, target, audio, path, who) = {
         let guard = state();
         let Some(r) = guard.as_ref().filter(|r| r.unit == unit) else { return false };
         let Ok(wayland) = r.target.display().wayland() else { return false };
-        (wayland, r.target.clone(), r.audio, r.path.clone())
+        (wayland, r.target.clone(), r.audio, r.path.clone(), r.who.clone())
     };
     tracing::warn!(unit, "The GPU encoder ended the recording at once; starting it again on the CPU");
     // What the refused start left is not a recording; wf-recorder would ask before overwriting it.
     let _ = std::fs::remove_file(&path);
-    if launch(unit, &wayland, &target, audio, &Encoder::X264, &path).is_err() {
+    if launch(unit, &wayland, &target, audio, &Encoder::X264, &path, &who).is_err() {
         return false;
     }
     if let Some(r) = state().as_mut().filter(|r| r.unit == unit) {
@@ -429,7 +477,7 @@ mod tests {
     #[test]
     fn a_recording_runs_in_a_transient_unit_that_stops_with_sigint() {
         let path = Path::new("/home/p/Videos/Recordings/Recording 2026-10-15 at 14.32.07.mp4");
-        let argv = command("yantrik-capture-rec-7", "wayland-0", &Target::Desktop { region: None }, Audio::None, &Encoder::X264, path);
+        let argv = command("yantrik-capture-rec-7", "wayland-0", &Target::Desktop { region: None }, Audio::None, &Encoder::X264, path, &Who::Person);
         assert_eq!(&argv[..4], ["systemd-run", "--user", "--unit=yantrik-capture-rec-7", "--collect"]);
         assert!(argv.contains(&"--property=KillSignal=SIGINT".to_string()), "{argv:?}");
         assert!(argv.contains(&"--setenv=WAYLAND_DISPLAY=wayland-0".to_string()));
@@ -440,15 +488,38 @@ mod tests {
         assert_eq!(argv.last().unwrap(), &path.to_string_lossy());
         assert!(!argv.iter().any(|a| a.starts_with("--audio")), "no audio unless chosen");
         assert!(!argv.iter().any(|a| a == "-g"), "the whole screen has no geometry");
+        assert!(!argv.iter().any(|a| a.starts_with("--property=RuntimeMaxSec")), "the person's has no end but theirs");
+    }
+
+    /// Security review of #828, finding 5: a mind's recording ends by itself, yields the CPU, and
+    /// never keeps the person from recording their own screen.
+    #[test]
+    fn a_minds_recording_is_capped_light_and_gives_way_to_the_persons() {
+        let mind = Who::Mind { name: "pi".into(), id: Some("agent:pi:main".into()) };
+        let argv = command("u", "wayland-1", &Target::MindView, Audio::None, &Encoder::X264, Path::new("/x.mp4"), &mind);
+        let unit = &argv[..argv.iter().position(|a| a == "--").unwrap()];
+        assert!(unit.contains(&format!("--property=RuntimeMaxSec={MIND_MAX_SECS}")), "{argv:?}");
+        assert!(unit.contains(&format!("--property=CPUWeight={MIND_CPU_WEIGHT}")), "{argv:?}");
+        assert_eq!(MIND_MAX_SECS, 1800);
+        const { assert!(MIND_CPU_WEIGHT < 100, "under the default weight") };
+
+        assert_eq!(makes_way(None, &Who::Person), Ok(false));
+        assert_eq!(makes_way(None, &mind), Ok(false));
+        assert_eq!(makes_way(Some(&mind), &Who::Person), Ok(true), "the person's Start stops a mind's");
+        assert!(makes_way(Some(&Who::Person), &mind).is_err(), "a mind never stops the person's");
+        assert!(makes_way(Some(&mind), &mind).is_err(), "nor another mind's");
+        assert!(makes_way(Some(&Who::Person), &Who::Person).is_err());
+        assert!(Why::MindLimit.sentence().unwrap().contains("30 minutes"));
+        assert!(Why::PersonStarted.sentence().unwrap().contains("recording of your own"));
     }
 
     #[test]
     fn a_region_and_sound_reach_the_recorder() {
         let region = Target::Desktop { region: Some("10,20 640x400".into()) };
-        let argv = command("u", "wayland-0", &region, Audio::System, &Encoder::X264, Path::new("/x.mp4"));
+        let argv = command("u", "wayland-0", &region, Audio::System, &Encoder::X264, Path::new("/x.mp4"), &Who::Person);
         assert!(argv.windows(2).any(|w| w == ["-g", "10,20 640x400"]), "{argv:?}");
         assert!(argv.contains(&"--audio=@DEFAULT_MONITOR@".to_string()));
-        let argv = command("u", "wayland-0", &region, Audio::Mic, &Encoder::X264, Path::new("/x.mp4"));
+        let argv = command("u", "wayland-0", &region, Audio::Mic, &Encoder::X264, Path::new("/x.mp4"), &Who::Person);
         assert!(argv.contains(&"--audio=@DEFAULT_SOURCE@".to_string()));
         assert_eq!(region.word(), "region");
         assert_eq!(Target::MindView.word(), "mind_view");

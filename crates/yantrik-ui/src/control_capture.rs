@@ -56,10 +56,12 @@ pub(crate) const SCREENSHOT_SCREEN_PURPOSE: &str = concat!(
 
 const SCREENSHOT_MIND_VIEW_PURPOSE: &str = "Take a picture of Mind View, the display minds' own apps \
     draw on, or of a rectangle of it, to check your own work. Saved as a PNG in \
-    ~/Pictures/Screenshots; answers its path, and the person is told which mind took it";
+    ~/Pictures/Screenshots; answers its path, and the person is told which mind took it. One every \
+    2 s. Opening it again is open_capture, which asks the person; read_mind_view reads Mind View \
+    as it is now";
 
 const RECORD_START_PURPOSE: &str = "Record Mind View to a video in ~/Videos/Recordings until \
-    record_stop. Only Mind View: the person's desktop is never recorded for a mind. A red dot in \
+    record_stop, for at most 30 minutes. Only Mind View: the person's desktop is never recorded for a mind. A red dot in \
     the person's status bar shows while it runs, and they can stop it there. Nothing records \
     while the screen is locked; locking stops it";
 
@@ -161,6 +163,27 @@ fn region_param() -> Param {
         .optional()
 }
 
+/// The least time between two minds' screenshots. `screenshot_mind_view` is safe, so a looping
+/// mind filled the person's Pictures with 4K PNGs and their notifications with one each, as fast
+/// as grim ran (security review of #828, finding 5).
+pub(crate) const MIND_SHOT_GAP: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// When the last mind's screenshot was taken.
+static LAST_MIND_SHOT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+/// Refuse a mind's screenshot within [`MIND_SHOT_GAP`] of the last one. Pure: `last` is when the
+/// last was taken. The refusal says how long to wait.
+pub(crate) fn mind_shot_gap(last: Option<std::time::Instant>, now: std::time::Instant) -> Result<(), String> {
+    match last.map(|last| now.saturating_duration_since(last)) {
+        Some(since) if since < MIND_SHOT_GAP => Err(format!(
+            "a mind takes one screenshot every {} s; the last was {:.1} s ago, so try again in a moment",
+            MIND_SHOT_GAP.as_secs(),
+            since.as_secs_f32()
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// A screenshot for a caller: saved (never on the clipboard), the person told who took it.
 fn screenshot_for(display: Display, args: &serde_json::Value) -> Result<serde_json::Value, String> {
     let area = match region(args)? {
@@ -169,6 +192,21 @@ fn screenshot_for(display: Display, args: &serde_json::Value) -> Result<serde_js
     };
     // Who is asking is known here, on the dispatching thread; the worker cannot tell.
     let who = who_now();
+    if let Who::Mind { .. } = &who {
+        let mut last = LAST_MIND_SHOT.lock().unwrap_or_else(|p| p.into_inner());
+        let now = std::time::Instant::now();
+        mind_shot_gap(*last, now)?;
+        // And not onto a full disk: the 1 GB a recording keeps clear, kept clear of these too.
+        let home = names::home()?;
+        let free = crate::capture::disk::free_bytes(&home);
+        if !crate::capture::disk::room(free) {
+            return Err(format!(
+                "the disk has {} free, and a mind's screenshot leaves at least 1 GB clear, so none was taken",
+                crate::capture::disk::words(free.unwrap_or(0))
+            ));
+        }
+        *last = Some(now);
+    }
     let work = move || {
         let desktop = display == Display::Desktop;
         if desktop {
@@ -432,6 +470,25 @@ mod tests {
             assert!(saved_capture(not, &home).is_err(), "{not:?}");
         }
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Security review of #828, finding 5: a looping mind cannot fill the person's Pictures and
+    /// notifications as fast as grim runs.
+    #[test]
+    fn a_mind_takes_one_screenshot_every_two_seconds() {
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        assert!(mind_shot_gap(None, now).is_ok(), "the first");
+        let err = mind_shot_gap(Some(now - Duration::from_millis(500)), now).unwrap_err();
+        assert!(err.contains("one screenshot every 2 s"), "{err}");
+        assert!(mind_shot_gap(Some(now - MIND_SHOT_GAP), now).is_ok());
+        assert!(mind_shot_gap(Some(now - Duration::from_secs(60)), now).is_ok());
+        // Held where both screenshots pass, for a mind only: the person's keys are never slowed.
+        let src = include_str!("control_capture.rs");
+        let src = src.split("#[cfg(test)]").next().unwrap();
+        let shot = &src[src.find("fn screenshot_for(").unwrap()..];
+        let shot = &shot[..shot.find("let work = move").unwrap()];
+        assert!(shot.contains("if let Who::Mind { .. } = &who") && shot.contains("mind_shot_gap(*last, now)?"));
     }
 
     #[test]
