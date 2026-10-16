@@ -8,7 +8,7 @@ use yantrikdb_core::YantrikDB;
 use yantrik_ml::{
     ChatMessage, GenerationConfig, LLMBackend, ToolCall, ToolCallMode,
     ModelCapabilityProfile, ModelFamily, ToolFamily,
-    parse_tool_calls, extract_text_content, ThoughtWithoutAnswer, THOUGHT_WITHOUT_ANSWER,
+    ThoughtWithoutAnswer, THOUGHT_WITHOUT_ANSWER,
     ChatTemplate, template_for_family,
     CognitiveRouter, RouteDecision,
 };
@@ -35,6 +35,7 @@ use crate::proactive::ProactiveEngine;
 use crate::sanitize;
 use crate::security::SecurityGuard;
 use crate::tool_cache::ToolCache;
+use crate::tool_markup;
 use crate::tool_traces::ToolTraces;
 use crate::tools::{self, PermissionLevel, ToolContext, ToolRegistry, parse_permission};
 use crate::types::{AgentResponse, CompanionState, ProactiveMessage};
@@ -1574,7 +1575,7 @@ impl CompanionService {
 
                     match self.llm.chat(&messages, &gen_config, None) {
                         Ok(r) => {
-                            let text = extract_text_content(&r.text);
+                            let text = tool_markup::text_outside(&r.text);
                             let text = if text.is_empty() { r.text } else { text };
                             let text = strip_think_tags(&text);
                             vars.insert(store_as.clone(), text);
@@ -2028,14 +2029,14 @@ impl CompanionService {
 
             let mut response_text = match self.llm.chat(&final_messages, &gen_config, None) {
                 Ok(r) => {
-                    let text = extract_text_content(&r.text);
+                    let text = tool_markup::text_outside(&r.text);
                     if text.is_empty() { r.text } else { text }
                 }
                 Err(_) => format!("Here's what I found: {}", &tool_result[..tool_result.len().min(500)]),
             };
 
             // Clean up response
-            response_text = extract_text_content(&response_text);
+            response_text = tool_markup::text_outside(&response_text);
             response_text = strip_think_tags(&response_text);
             response_text = self.guard.check_response(&response_text, &self.db);
 
@@ -2235,7 +2236,7 @@ impl CompanionService {
             } else {
                 None
             };
-            let llm_response = match self.llm.chat(&messages, &gen_config, tools_param) {
+            let mut llm_response = match self.llm.chat(&messages, &gen_config, tools_param) {
                 Ok(r) => {
                     self.note_llm_reachable();
                     r
@@ -2262,6 +2263,11 @@ impl CompanionService {
                     break;
                 }
             };
+
+            // Calls a native-tool model wrote as text run as native ones (VM 542, 16 Oct 2026).
+            if self.use_native_tools {
+                tool_markup::adopt_text_calls(&mut llm_response, None);
+            }
 
             // Use native tool_calls if available, fall back to text parsing.
             // For StructuredJSON mode: parse via StructuredDecisionParser first.
@@ -2309,17 +2315,17 @@ impl CompanionService {
                                     continue; // Retry with repair prompt
                                 }
                                 // No repair loop — fall back to text parsing
-                                parse_tool_calls(&llm_response.text)
+                                tool_markup::calls_in(&llm_response.text)
                             }
                         }
                     }
                     Err(_) => {
                         // Structured parse failed — fall back to standard tool call parsing
-                        parse_tool_calls(&llm_response.text)
+                        tool_markup::calls_in(&llm_response.text)
                     }
                 }
             } else {
-                parse_tool_calls(&llm_response.text)
+                tool_markup::calls_in(&llm_response.text)
             };
 
             // A native call that could not be read is not an answer: tell the model and go round.
@@ -2353,14 +2359,14 @@ impl CompanionService {
             let has_real_tool = tool_calls.iter().any(|c| c.name != "discover_tools");
             if !has_real_tool {
                 if discovery_budget == 0 {
-                    response_text = extract_text_content(&llm_response.text);
+                    response_text = tool_markup::text_outside(&llm_response.text);
                     agent_loop.complete();
                     break;
                 }
                 discovery_budget -= 1;
             }
 
-            let text_part = extract_text_content(&llm_response.text);
+            let text_part = tool_markup::text_outside(&llm_response.text);
 
             messages.push(assistant_turn(&llm_response.text, &llm_response, self.use_native_tools));
 
@@ -2404,11 +2410,16 @@ impl CompanionService {
                 "Summarize what you accomplished in 1-2 sentences. Do NOT call any more tools."
             ));
             if let Ok(summary) = self.llm.chat(&messages, &gen_config, None) {
-                let text = extract_text_content(&summary.text);
+                let text = tool_markup::text_outside(&summary.text);
                 if !text.is_empty() {
                     response_text = text;
                 }
             }
+        }
+        // The last line of defence: tool-call markup is never the reply (VM 542, 16 Oct 2026).
+        if tool_markup::is_markup_only(&response_text) {
+            response_text = tool_markup::UNUSABLE_REPLY.to_string();
+            model_failure.get_or_insert_with(|| "the reply was tool-call markup that could not be run".into());
         }
         if response_text.is_empty() && unread_calls > 0 {
             response_text = UNREAD_TOOL_CALL.to_string();
@@ -2439,7 +2450,7 @@ impl CompanionService {
         }
 
         // Clean up tool call XML and Qwen3.5 thinking blocks from final response
-        response_text = extract_text_content(&response_text);
+        response_text = tool_markup::text_outside(&response_text);
         response_text = strip_think_tags(&response_text);
 
         // Hallucination Firewall — verify factual claims against ground truth
@@ -2923,7 +2934,7 @@ impl CompanionService {
                     on_token(token);
                 }) {
                     Ok(r) => {
-                        response_text = extract_text_content(&r.text);
+                        response_text = tool_markup::text_outside(&r.text);
                         if response_text.is_empty() { response_text = r.text; }
                     }
                     Err(_) => {
@@ -3125,8 +3136,12 @@ impl CompanionService {
         };
 
         match llm_response {
-            Ok(r) => {
+            Ok(mut r) => {
                 self.note_llm_reachable();
+                // Calls a native-tool model wrote as text run as native ones (VM 542, 16 Oct 2026).
+                if self.use_native_tools {
+                    tool_markup::adopt_text_calls(&mut r, Some(&streamed_text).filter(|t| !t.is_empty()).map(String::as_str));
+                }
                 let full_text = if !streamed_text.is_empty() { &streamed_text } else { &r.text };
 
                 // Use native tool_calls if available, fall back to text parsing.
@@ -3154,14 +3169,14 @@ impl CompanionService {
                                 ValidationResult::Invalid(_issues) => {
                                     // In streaming path, repair loop defers to the non-streaming
                                     // follow-up rounds. Fall back to standard text parsing.
-                                    parse_tool_calls(full_text)
+                                    tool_markup::calls_in(full_text)
                                 }
                             }
                         }
-                        Err(_) => parse_tool_calls(full_text),
+                        Err(_) => tool_markup::calls_in(full_text),
                     }
                 } else {
-                    parse_tool_calls(full_text)
+                    tool_markup::calls_in(full_text)
                 };
 
                 if !tool_calls.is_empty() {
@@ -3183,7 +3198,7 @@ impl CompanionService {
                     };
                 } else {
                     // Tool calls found — enter multi-round tool loop (non-streaming)
-                    let last_text_part = extract_text_content(full_text);
+                    let last_text_part = tool_markup::text_outside(full_text);
 
                     let display_text = if last_text_part.len() > 120 {
                         String::new()
@@ -3252,12 +3267,15 @@ impl CompanionService {
                             None
                         };
                         match self.llm.chat(&messages, &gen_config, tools_param) {
-                            Ok(r2) => {
+                            Ok(mut r2) => {
                                 self.note_llm_reachable();
+                                if self.use_native_tools {
+                                    tool_markup::adopt_text_calls(&mut r2, None);
+                                }
                                 let tc2: Vec<ToolCall> = if !r2.tool_calls.is_empty() {
                                     r2.tool_calls.clone()
                                 } else {
-                                    parse_tool_calls(&r2.text)
+                                    tool_markup::calls_in(&r2.text)
                                 };
                                 if tc2.is_empty() && r2.is_unread_tool_call() {
                                     tracing::warn!(finish_reason = %r2.stop_reason, "the model's tool call could not be read; asking again");
@@ -3277,7 +3295,7 @@ impl CompanionService {
                                 let has_real_tool = tc2.iter().any(|c| c.name != "discover_tools");
                                 if !has_real_tool {
                                     if discovery_budget == 0 {
-                                        let fallback = extract_text_content(&r2.text);
+                                        let fallback = tool_markup::text_outside(&r2.text);
                                         if !fallback.is_empty() {
                                             on_token("__REPLACE__");
                                             on_token(&fallback);
@@ -3289,7 +3307,7 @@ impl CompanionService {
                                     discovery_budget -= 1;
                                 }
 
-                                let round_text = extract_text_content(&r2.text);
+                                let round_text = tool_markup::text_outside(&r2.text);
                                 let names2: Vec<&str> = tc2.iter().map(|c| c.name.as_str()).collect();
                                 tracing::info!(
                                     count = tc2.len(),
@@ -3384,7 +3402,7 @@ impl CompanionService {
                         ));
                         match self.llm.chat(&messages, &gen_config, None) {
                             Ok(summary) => {
-                                let text = extract_text_content(&summary.text);
+                                let text = tool_markup::text_outside(&summary.text);
                                 if !text.is_empty() {
                                     on_token("__REPLACE__");
                                     on_token(&text);
@@ -3429,6 +3447,14 @@ impl CompanionService {
             }
         }
 
+        // The last line of defence: tool-call markup is never the reply, and a bubble that
+        // streamed it is replaced (VM 542, 16 Oct 2026).
+        if tool_markup::is_markup_only(&response_text) {
+            response_text = tool_markup::UNUSABLE_REPLY.to_string();
+            model_failure.get_or_insert_with(|| "the reply was tool-call markup that could not be run".into());
+            on_token("__REPLACE__");
+            on_token(&response_text);
+        }
         // Never an empty bubble: whatever was streamed, the turn ends on words.
         if response_text.trim().is_empty() {
             response_text = if unread_calls > 0 {
@@ -3461,7 +3487,7 @@ impl CompanionService {
             );
         }
 
-        response_text = extract_text_content(&response_text);
+        response_text = tool_markup::text_outside(&response_text);
         response_text = strip_think_tags(&response_text);
 
         // Hallucination Firewall — verify factual claims against ground truth (streaming path)
@@ -4199,7 +4225,8 @@ fn unread_call_note(r: &yantrik_ml::LLMResponse) -> String {
 /// text call it was, so the next round reads its own call before the result, not an empty turn.
 fn assistant_turn(text: &str, r: &yantrik_ml::LLMResponse, use_native_tools: bool) -> ChatMessage {
     if use_native_tools && !r.api_tool_calls.is_empty() {
-        return ChatMessage::assistant_with_tool_calls(text, r.api_tool_calls.clone());
+        // Calls the model wrote as text are carried as `tool_calls`, not repeated in the words.
+        return ChatMessage::assistant_with_tool_calls(tool_markup::text_outside(text), r.api_tool_calls.clone());
     }
     if r.api_tool_calls.is_empty() || !text.trim().is_empty() {
         return ChatMessage::assistant(text);
@@ -6641,6 +6668,51 @@ mod native_tool_reply_tests {
         let c = on_claude("http://127.0.0.1:9/v1".into());
         let rounds = c.config.agent.max_steps.min(c.capability_profile.max_agent_steps).max(3);
         assert!(c.capability_profile.max_agent_steps > 1 && rounds > 1, "a call and then an answer: {rounds}");
+    }
+
+    const CLAUDE_CALL: &str =
+        "<invoke name=\"calculate\">\n<parameter name=\"expression\">17 * 23</parameter>\n</invoke>";
+
+    #[test]
+    fn a_call_claude_writes_as_text_runs_and_the_answer_follows() {
+        for streaming in [false, true] {
+            // Once the tool's result is in the conversation, Claude answers from it.
+            let (url, seen) = server(|request| {
+                if request["messages"].to_string().contains("= 391") { words("17 times 23 is 391.") } else { words(CLAUDE_CALL) }
+            });
+            let mut c = on_claude(url);
+            let (reply, shown) = if streaming { streamed(&mut c, ASK) } else { (c.handle_message(ASK), String::new()) };
+            assert_eq!(reply.message, "17 times 23 is 391.", "streaming={streaming}");
+            assert!(!shown.contains("<invoke"), "{shown:?}");
+            assert_eq!(reply.tool_calls_made, vec!["calculate".to_string()]);
+
+            let seen = seen.lock().unwrap();
+            let first = seen.iter().find(|r| r["tools"].is_array()).expect("Claude was sent native tools");
+            let system = first["messages"][0]["content"].as_str().unwrap();
+            assert!(!system.contains("<tool_call> XML"), "and not told to write tool-call XML");
+            let follow_up = seen.iter()
+                .map(|r| r["messages"].as_array().unwrap())
+                .find(|m| m.last().is_some_and(|t| t["role"] == "tool"))
+                .expect("a round that carries the tool's result");
+            let call = &follow_up[follow_up.len() - 2];
+            let id = call["tool_calls"][0]["id"].as_str().expect("the call has an id");
+            assert!(id.starts_with("text_call_"), "{call}");
+            assert_eq!(follow_up[follow_up.len() - 1]["tool_call_id"], id, "the result answers that call");
+        }
+    }
+
+    #[test]
+    fn a_reply_that_is_only_markup_is_never_shown() {
+        for streaming in [false, true] {
+            let (url, _) = server(|_| words("<function_calls>\n<something_else/>\n</function_calls>"));
+            let mut c = on_claude(url);
+            let (reply, shown) = if streaming { streamed(&mut c, ASK) } else { (c.handle_message(ASK), String::new()) };
+            assert_eq!(reply.message, crate::tool_markup::UNUSABLE_REPLY, "streaming={streaming}");
+            if streaming {
+                assert_eq!(shown, crate::tool_markup::UNUSABLE_REPLY);
+            }
+            assert!(reply.model_failure.is_some());
+        }
     }
 
     fn streamed(c: &mut CompanionService, ask: &str) -> (AgentResponse, String) {
