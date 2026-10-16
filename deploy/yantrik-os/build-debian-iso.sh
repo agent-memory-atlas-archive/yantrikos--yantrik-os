@@ -407,7 +407,7 @@ sudo chroot "$ROOTFS" plymouth-set-default-theme yantrik \
 # default_is_yantrik), checked rather than assumed: without it the splash stays out of the initrd.
 if ! sudo grep -qsx 'Theme=yantrik' "$ROOTFS/etc/plymouth/plymouthd.conf"; then
     sudo mkdir -p "$ROOTFS/etc/plymouth"
-    printf '[Daemon]\nTheme=yantrik\n' | sudo tee "$ROOTFS/etc/plymouth/plymouthd.conf" >/dev/null
+    printf '[Daemon]\nTheme=yantrik\nShowDelay=0\n' | sudo tee "$ROOTFS/etc/plymouth/plymouthd.conf" >/dev/null
 fi
 # Again, now that the theme is chosen: the live initrd (and an unencrypted install's, copied from
 # it) carries plymouth with the theme it was built with, and the one built above predates it. This

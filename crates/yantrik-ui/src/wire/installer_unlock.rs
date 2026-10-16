@@ -7,7 +7,7 @@
 //!   crypttab naming a keyscript the initramfs cannot carry is a disk nothing asks to open.
 //! - `enrol` records whose password it is (a digest of their shadow entry, never the password).
 //! - the boot line is the same encrypted or not: plymouth draws the boot splash (the Yantrik
-//!   emblem) from the kernel's first frame to tty1's autologin, and on an encrypted install asks for
+//!   emblem) from the kernel's first frame to the shell's, and on an encrypted install asks for
 //!   the disk's password in between, in the same program (theme/yantrik.script).
 //! - the initramfs is checked for the keyscript and the marker, and for whether the Yantrik
 //!   screen or the text prompt will ask.
@@ -46,7 +46,7 @@ pub fn keyscript_installed(mount_dir: &str) -> bool {
 ///
 /// An unencrypted install used to say `plymouth.enable=0`, so it booted as before plymouth was in
 /// the image: black from GRUB to the shell. It draws the same splash now, and has nothing to ask.
-/// plymouth quits with --retain-splash before tty1's autologin (deploy/yantrik-os/boot-unlock/splash).
+/// plymouth's frame stays up until labwc holds the display (deploy/yantrik-os/boot-unlock/splash).
 pub fn cmdline_default(_encrypted: bool) -> &'static str {
     "quiet splash loglevel=3 plymouth.use-simpledrm plymouth.ignore-serial-consoles"
 }
