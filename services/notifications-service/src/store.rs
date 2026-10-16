@@ -68,6 +68,9 @@ pub(crate) struct OnDisk {
     /// it. See [`notice::HarnessBinding`].
     #[serde(default)]
     pub(crate) bindings: std::collections::BTreeMap<String, notice::HarnessBinding>,
+    /// Notice records the archive has yet to take. See [`Sidecar`].
+    #[serde(skip)]
+    pub(crate) orphans: Vec<(String, SidecarNotice)>,
     /// Bumped by every change, never written: which snapshot is newer, for [`Store::persist`].
     #[serde(skip)]
     pub(crate) generation: u64,
@@ -75,6 +78,114 @@ pub(crate) struct OnDisk {
 
 fn first_seq() -> u64 {
     1
+}
+
+/// The main file as it is written: only what a build from before notices also writes.
+///
+/// A rollback to such a build is a supported path (`yantrik-update rollback`), and that build
+/// rewrites this file from its own struct, dropping every field it does not know. So nothing it
+/// does not know is kept here: a notice's record, the day's budget, the person's settings, the
+/// feedback and its cursors and the harness bindings all live in [`Sidecar`], a file the old build
+/// never opens, and are joined back on start (the driven test of #831 on VM 520).
+#[derive(Serialize)]
+struct MainFile {
+    revision: u64,
+    next_id: u64,
+    notifications: Vec<Notification>,
+}
+
+/// `notices.json`, beside the store: everything about notices.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct Sidecar {
+    /// Each notice's record, by the id of the notification it is on. `created_at` is that
+    /// notification's, so a record is joined back only to the notification it was made with.
+    #[serde(default)]
+    notices: std::collections::BTreeMap<String, SidecarNotice>,
+    #[serde(default)]
+    budget: crate::notices::Budget,
+    #[serde(default)]
+    initiative: notice::Initiative,
+    #[serde(default)]
+    feedback_queue: Vec<crate::notices::Queued>,
+    #[serde(default)]
+    feedback_cursor: std::collections::BTreeMap<String, u64>,
+    #[serde(default = "first_seq")]
+    next_feedback_seq: u64,
+    #[serde(default)]
+    bindings: std::collections::BTreeMap<String, notice::HarnessBinding>,
+    /// Records whose notification was gone when the store was opened, and that the archive
+    /// could not take yet. Kept until it can.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    orphans: Vec<(String, SidecarNotice)>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct SidecarNotice {
+    created_at: String,
+    notice: notice::Notice,
+}
+
+/// `notices.json`, beside the store at `store`.
+pub(crate) fn sidecar_path(store: &Path) -> PathBuf {
+    store.with_file_name("notices.json")
+}
+
+impl OnDisk {
+    /// The two files' contents: the main file with no notice in it, and the sidecar.
+    fn split(&self) -> (MainFile, Sidecar) {
+        let mut notices = std::collections::BTreeMap::new();
+        let notifications = self
+            .notifications
+            .iter()
+            .map(|n| {
+                let mut plain = n.clone();
+                if let Some(record) = plain.notice.take() {
+                    notices.insert(n.id.clone(), SidecarNotice { created_at: n.created_at.clone(), notice: record });
+                }
+                plain
+            })
+            .collect();
+        let main = MainFile { revision: self.revision, next_id: self.next_id, notifications };
+        let sidecar = Sidecar {
+            notices,
+            budget: self.budget.clone(),
+            initiative: self.initiative.clone(),
+            feedback_queue: self.feedback_queue.clone(),
+            feedback_cursor: self.feedback_cursor.clone(),
+            next_feedback_seq: self.next_feedback_seq,
+            bindings: self.bindings.clone(),
+            orphans: self.orphans.clone(),
+        };
+        (main, sidecar)
+    }
+
+    /// Join `sidecar` back in. A record whose notification is gone, or is now a different one,
+    /// is answered as `orphans`, for the archive: never simply dropped.
+    fn join(&mut self, sidecar: Sidecar) -> Vec<(String, SidecarNotice)> {
+        let mut records = sidecar.notices;
+        for n in self.notifications.iter_mut() {
+            let matches = records.get(&n.id).is_some_and(|r| r.created_at == n.created_at);
+            if matches {
+                let record = records.remove(&n.id).expect("checked above");
+                // A record written inline by an earlier build of this PR stands as it is; the
+                // sidecar's is newer only when the main file had none.
+                if n.notice.is_none() {
+                    n.notice = Some(record.notice);
+                }
+            }
+        }
+        self.budget = sidecar.budget;
+        self.initiative = sidecar.initiative;
+        self.feedback_queue = sidecar.feedback_queue;
+        self.feedback_cursor = sidecar.feedback_cursor;
+        self.next_feedback_seq = self.next_feedback_seq.max(sidecar.next_feedback_seq);
+        for (id, binding) in sidecar.bindings {
+            self.bindings.entry(id).or_insert(binding);
+        }
+        let mut orphans = sidecar.orphans;
+        orphans.extend(records);
+        orphans
+    }
 }
 
 impl Default for OnDisk {
@@ -89,6 +200,7 @@ impl Default for OnDisk {
             feedback_cursor: Default::default(),
             next_feedback_seq: 1,
             bindings: Default::default(),
+            orphans: Vec::new(),
             generation: 0,
         }
     }
@@ -156,6 +268,31 @@ impl Store {
                 Some(format!("{} could not be read: {e}", path.display())),
             ),
         };
+
+        let (mut state, mut load_notice) = (state, load_notice);
+        let sidecar = sidecar_path(&path);
+        match std::fs::read_to_string(&sidecar) {
+            Ok(text) => match serde_json::from_str::<Sidecar>(&text) {
+                Ok(read) => {
+                    let orphans = state.join(read);
+                    state.orphans = archive_orphans(&archive::path_beside(&path), orphans);
+                    crate::notices::bind_existing(&mut state);
+                }
+                Err(e) => {
+                    // Moved aside rather than overwritten by the next write: whatever it held is
+                    // still on the disk for a person to look at.
+                    let aside = sidecar.with_extension(format!("json.unreadable-{}", Utc::now().timestamp()));
+                    let _ = std::fs::rename(&sidecar, &aside);
+                    let said = format!("{} could not be parsed ({e}); it was moved to {}", sidecar.display(), aside.display());
+                    load_notice = Some(load_notice.map_or(said.clone(), |n| format!("{n}; {said}")));
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                let said = format!("{} could not be read: {e}", sidecar.display());
+                load_notice = Some(load_notice.map_or(said.clone(), |n| format!("{n}; {said}")));
+            }
+        }
 
         let mut reserved = std::collections::BTreeMap::new();
         // Not in tests, whose stores post as `mind` from any uid, whatever machine runs them.
@@ -555,27 +692,19 @@ impl Store {
                 return Err(format!("cannot create {}: {e}", dir.display()));
             }
         }
-        let json = match serde_json::to_string(state) {
-            Ok(j) => j,
-            Err(e) => {
+        let (main, sidecar) = state.split();
+        let (main, sidecar) = match (serde_json::to_string(&main), serde_json::to_string(&sidecar)) {
+            (Ok(m), Ok(s)) => (m, s),
+            (Err(e), _) | (_, Err(e)) => {
                 tracing::error!(error = %e, "cannot serialise the notification store");
                 return Err(format!("cannot serialise the store: {e}"));
             }
         };
-        // Named after the process, so two services started by mistake cannot rename each other's
-        // half-written temp file over the real one.
-        let temp = self.path.with_extension(format!("tmp{}", std::process::id()));
-        if let Err(e) = archive::write_synced(&temp, json.as_bytes()) {
-            tracing::warn!(path = %temp.display(), error = %e, "cannot write the notification store");
-            let _ = std::fs::remove_file(&temp);
-            return Err(format!("cannot write {}: {e}", temp.display()));
-        }
-        if let Err(e) = std::fs::rename(&temp, &self.path) {
-            tracing::warn!(path = %self.path.display(), error = %e, "cannot replace the notification store");
-            let _ = std::fs::remove_file(&temp);
-            return Err(format!("cannot replace {}: {e}", self.path.display()));
-        }
-        archive::sync_dir(&self.path);
+        // The sidecar first: a notice is only answered `stored` once both are down, and a crash
+        // between the two leaves a record whose notification is not there yet, which the next
+        // start archives rather than loses.
+        replace_file(&sidecar_path(&self.path), sidecar.as_bytes())?;
+        replace_file(&self.path, main.as_bytes())?;
         *written = (*written).max(state.generation);
         Ok(())
     }
@@ -591,6 +720,47 @@ fn redacted(mut n: Notification, desktop: bool) -> Notification {
         record.action = None;
     }
     n
+}
+
+/// Write `bytes` over `path`: a temp file beside it, flushed to the disk, renamed over, and the
+/// directory flushed so the rename is on the disk too.
+fn replace_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    // Named after the process, so two services started by mistake cannot rename each other's
+    // half-written temp file over the real one.
+    let temp = path.with_extension(format!("tmp{}", std::process::id()));
+    if let Err(e) = archive::write_synced(&temp, bytes) {
+        tracing::warn!(path = %temp.display(), error = %e, "cannot write the notification store");
+        let _ = std::fs::remove_file(&temp);
+        return Err(format!("cannot write {}: {e}", temp.display()));
+    }
+    if let Err(e) = std::fs::rename(&temp, path) {
+        tracing::warn!(path = %path.display(), error = %e, "cannot replace the notification store");
+        let _ = std::fs::remove_file(&temp);
+        return Err(format!("cannot replace {}: {e}", path.display()));
+    }
+    archive::sync_dir(path);
+    Ok(())
+}
+
+/// Append notice records whose notification is gone to the archive. Answers what it could not
+/// append, which the sidecar keeps until a later start can.
+fn archive_orphans(archive_path: &Path, orphans: Vec<(String, SidecarNotice)>) -> Vec<(String, SidecarNotice)> {
+    if orphans.is_empty() {
+        return orphans;
+    }
+    let lines = orphans.iter().map(|(id, record)| {
+        serde_json::json!({ "orphan_of": id, "created_at": record.created_at, "notice": record.notice })
+    });
+    match archive::append_values(archive_path, lines) {
+        Ok(()) => {
+            tracing::info!(count = orphans.len(), "notice records whose notification was gone, archived");
+            Vec::new()
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "cannot archive notice records whose notification was gone; kept for the next start");
+            orphans
+        }
+    }
 }
 
 /// A copy of the state to write, marked newer than every copy taken before it.

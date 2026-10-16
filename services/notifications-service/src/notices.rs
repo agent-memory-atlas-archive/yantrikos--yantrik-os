@@ -821,6 +821,56 @@ mod tests {
     }
 
     #[test]
+    fn a_rollback_to_a_build_from_before_notices_loses_nothing() {
+        // The driven test of #831 on VM 520: an older service rewrites notifications.json from its
+        // own struct, dropping every field it does not know.
+        let (store, dir) = temp_store();
+        let id = store.add_notice(post_as("mind", 999, "", notice("rem-1", "reminder", "interrupt")), &home())["id"].as_str().unwrap().to_string();
+        store.record_feedback(&id, FeedbackKind::NotNow).unwrap();
+        store.set_initiative(|s| { s.quiet = true; Ok(()) }).unwrap();
+        drop(store);
+        let main = dir.join("notifications.json");
+        let written = std::fs::read_to_string(&main).unwrap();
+        assert!(!written.contains("\"notice\"") && !written.contains("initiative"), "the main file holds only what an old build knows: {written}");
+
+        // The old build, as it would: its own three fields, a notification of its own, written back.
+        let mut old: serde_json::Value = serde_json::from_str(&written).unwrap();
+        old.as_object_mut().unwrap().retain(|k, _| ["revision", "next_id", "notifications"].contains(&k.as_str()));
+        let next = old["next_id"].as_u64().unwrap();
+        old["notifications"].as_array_mut().unwrap().push(json!({
+            "id": next.to_string(), "app": "a", "title": "while rolled back", "body": "", "urgency": "normal",
+            "created_at": "2026-10-16T12:00:00Z", "read": false, "dismissed": false, "actions": [], "source": "yantrik", "revision": 1
+        }));
+        old["next_id"] = (next + 1).into();
+        std::fs::write(&main, old.to_string()).unwrap();
+
+        // Forward again.
+        let store = Store::open(main.clone());
+        let card = store.get(&id).unwrap();
+        let record = card.notice.expect("the notice record is joined back");
+        assert_eq!(record.feedback.len(), 1);
+        assert_eq!(record.harness.uid, Some(999));
+        assert!(store.initiative().quiet, "the person's settings survived");
+        assert_eq!(store.feedback_for("mind", Some(999), "", None).unwrap().len(), 1, "and the feedback queue");
+        assert!(store.get(&next.to_string()).is_some_and(|n| n.notice.is_none()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_notice_record_whose_notification_is_gone_goes_to_the_archive() {
+        let (store, dir) = temp_store();
+        store.add_notice(post("mind", notice("rem-1", "reminder", "inbox")), &home());
+        drop(store);
+        // An old build that started empty, say because it could not read the file.
+        std::fs::write(dir.join("notifications.json"), r#"{"revision":1,"next_id":1,"notifications":[]}"#).unwrap();
+        let store = Store::open(dir.join("notifications.json"));
+        assert!(store.list().is_empty());
+        let archive = std::fs::read_to_string(dir.join("notices-archive.jsonl")).expect("an archive");
+        assert!(archive.contains("\"orphan_of\"") && archive.contains("rem-1"), "{archive}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn an_accounts_uid_is_read_from_the_password_file() {
         assert_eq!(account_uid("root"), Some(0));
         assert_eq!(account_uid("no-such-account-here"), None);

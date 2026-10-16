@@ -31,10 +31,15 @@ pub fn path_beside(store: &Path) -> PathBuf {
 /// Append these records, one per line, and flush them to the disk. Nothing to append is not a
 /// write at all.
 pub fn append<'a>(path: &Path, records: impl Iterator<Item = &'a Notification>) -> std::io::Result<()> {
+    let values: Vec<serde_json::Value> = records.map(serde_json::to_value).collect::<Result<_, _>>().map_err(std::io::Error::other)?;
+    append_values(path, values.into_iter())
+}
+
+/// Append these JSON values, one per line, and flush them to the disk.
+pub fn append_values(path: &Path, records: impl Iterator<Item = serde_json::Value>) -> std::io::Result<()> {
     let mut lines = String::new();
     for record in records {
-        let line = serde_json::to_string(record).map_err(std::io::Error::other)?;
-        lines.push_str(&line);
+        lines.push_str(&record.to_string());
         lines.push('\n');
     }
     if lines.is_empty() {
