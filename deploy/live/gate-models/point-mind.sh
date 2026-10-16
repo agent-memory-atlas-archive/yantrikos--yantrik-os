@@ -34,8 +34,8 @@ guest 'runuser -u yantrik-mind -- sh -s' < mind-env.sh
 GATE_HOST=${GATE_HOST:-10.99.0.1}
 GATE_PORT=${GATE_PORT:-8443}
 # They go into a root shell in the VM, so they are held to an IPv4 address and a port.
-case "$GATE_HOST" in *[!0-9.]*|'') echo "GATE_HOST must be an IPv4 address" >&2; exit 1 ;; esac
-case "$GATE_PORT" in *[!0-9]*|'') echo "GATE_PORT must be a port number" >&2; exit 1 ;; esac
+printf '%s' "$GATE_HOST" | grep -Eqx '([0-9]{1,3}\.){3}[0-9]{1,3}' || { echo "GATE_HOST must be an IPv4 address" >&2; exit 1; }
+printf '%s' "$GATE_PORT" | grep -Eqx '[1-9][0-9]{0,4}' || { echo "GATE_PORT must be a port number" >&2; exit 1; }
 guest "python3 -I -c '
 import json, socket
 rule = {\"host\": \"$GATE_HOST\", \"ports\": [$GATE_PORT], \"http\": True, \"lan\": True,
