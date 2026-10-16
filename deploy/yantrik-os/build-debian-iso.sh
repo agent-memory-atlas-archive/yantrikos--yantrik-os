@@ -423,6 +423,7 @@ for required in usr/lib/yantrik/boot-unlock/askpass usr/lib/yantrik/boot-unlock/
                 usr/share/plymouth/themes/yantrik/yantrik.script usr/share/plymouth/themes/yantrik/emblem.png \
                 usr/sbin/plymouthd usr/lib/yantrik/boot-unlock/splash \
                 etc/systemd/system/yantrik-splash-release.service \
+                etc/systemd/system/yantrik-splash-handoff.service \
                 etc/systemd/system/plymouth-quit.service.d/yantrik-splash.conf \
                 etc/systemd/system/plymouth-quit-wait.service.d/yantrik-splash.conf \
                 etc/systemd/system/getty@tty1.service.d/yantrik-splash.conf \
@@ -1176,6 +1177,10 @@ if [ "$(tty)" = "/dev/tty1" ] && [ -z "$WAYLAND_DISPLAY" ]; then
         NOW=$(date +%s)
         # If crashed less than 10 seconds ago, stop looping
         if [ $((NOW - LAST_CRASH)) -lt 10 ]; then
+            # tty1 back in text mode, or none of this is seen: the boot splash leaves it in
+            # graphics mode for labwc (boot-unlock/splash), and a labwc that never took the
+            # screen never gave it back.
+            /usr/lib/yantrik/boot-unlock/splash console 2>/dev/null
             echo
             echo "============================================="
             echo "  Yantrik OS — Desktop failed to start"
@@ -1201,6 +1206,7 @@ if [ "$(tty)" = "/dev/tty1" ] && [ -z "$WAYLAND_DISPLAY" ]; then
     # If labwc ran less than 5 seconds, it probably crashed
     if [ $((EXIT_TIME - START_TIME)) -lt 5 ]; then
         echo "$EXIT_TIME" > "$CRASH_FILE"
+        /usr/lib/yantrik/boot-unlock/splash console 2>/dev/null
     else
         rm -f "$CRASH_FILE"
         # A session that ran and then ended (labwc crashed hours in, or was killed) ends the

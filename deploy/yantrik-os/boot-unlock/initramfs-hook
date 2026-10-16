@@ -45,6 +45,14 @@ no_splash() {
     return 0
 }
 
+# The theme, and the splash at once: ShowDelay=0 whatever the distribution's plymouthd.defaults
+# says, since a delay is time on a black screen between GRUB and the emblem (#820). DeviceTimeout
+# is left alone: with plymouth.use-simpledrm the firmware's framebuffer is drawn on at once, and the
+# timeout only decides how long plymouth waits for a GPU driver before it gives up on one.
+plymouthd_conf() {
+    printf '[Daemon]\nTheme=%s\nShowDelay=0\n' "$THEME" > "$DESTDIR/etc/plymouth/plymouthd.conf"
+}
+
 splash_only() {
     [ -x /usr/sbin/plymouthd ] && [ -x /usr/bin/plymouth ] || return 0
     default_is_yantrik || return 0
@@ -69,7 +77,7 @@ splash_only() {
     mkdir -p "$DESTDIR$THEMES/$THEME" "$DESTDIR/etc/plymouth"
     cp -a "$THEMES/$THEME/." "$DESTDIR$THEMES/$THEME/"
     ln -sfn "$THEMES/$THEME/$THEME.plymouth" "$DESTDIR$THEMES/default.plymouth"
-    printf '[Daemon]\nTheme=%s\n' "$THEME" > "$DESTDIR/etc/plymouth/plymouthd.conf"
+    plymouthd_conf
     echo "I: yantrik-unlock: the boot splash (the Yantrik theme and its emblem) is in this initramfs" >&2
     return 0
 }
@@ -158,5 +166,5 @@ fi
     && cp -a /usr/share/X11/xkb "$DESTDIR/usr/share/X11/"
 
 mkdir -p "$DESTDIR/etc/plymouth"
-printf '[Daemon]\nTheme=%s\n' "$THEME" > "$DESTDIR/etc/plymouth/plymouthd.conf"
+plymouthd_conf
 exit 0
