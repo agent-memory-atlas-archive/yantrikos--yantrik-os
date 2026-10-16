@@ -54,6 +54,8 @@ pub const MAX_ACTIONS: usize = 4;
 pub const MAX_ACTION_ID: usize = 64;
 /// Longest action label kept. A button, not a sentence.
 pub const MAX_ACTION_LABEL: usize = 48;
+/// Longest picture path kept: a path, not a payload.
+pub const MAX_IMAGE_PATH: usize = 512;
 /// How many notifications the store keeps. Oldest are dropped first.
 pub const MAX_STORED: usize = 500;
 /// How long a dismissed notification is kept before it is pruned. A week, so "what did that
@@ -222,6 +224,9 @@ pub struct Notification {
     /// freedesktop notification, whose door has not asked the bus who was behind it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sender: Option<Sender>,
+    /// The picture the sender attached, as [`AddRequest::image`] describes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
     /// The store revision at which this notification last changed. `since` compares against it.
     pub revision: u64,
 }
@@ -289,6 +294,11 @@ pub struct AddRequest {
     /// by the freedesktop `replaces_id` argument.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replaces_id: Option<String>,
+    /// A picture of what the notification is about, as an absolute path: a screenshot's
+    /// thumbnail. The shell draws it only on a notification the desktop itself sent, and only
+    /// for a capture it saved, so a caller cannot make the shell load any file it names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
 }
 
 /// The answer to [`SINCE`]: where the store is now, and everything that changed to get there.

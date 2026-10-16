@@ -463,6 +463,7 @@ mod tests {
             source: Source::Yantrik,
             replaces_id: None,
             sender: None,
+            image: None,
             revision: 1,
         }
     }
