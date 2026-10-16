@@ -26,6 +26,7 @@ Runs on the live instance (VM 561) as the desktop's account, from yantrik-live-d
 Missions are in missions.json beside it. Progress goes to ~/director/log.jsonl, one line a turn.
 Stdlib only; the image ships no Python packages for it.
 """
+import difflib
 import json
 import os
 import re
@@ -83,6 +84,11 @@ FIX_FIRST = (
     "action, and check it again by running `{check}`. Then read the code and {notes} side by side, and "
     "untick any line whose code is not really there yet: a line is ticked only when it works. Then carry "
     "on with the first line that is not ticked.")
+NOTHING_CHANGED = (
+    "You said FINISHED on {name}, but nothing in the {folder} folder has changed since this round "
+    "started: no file was written. Reading files is not the step. Do the step now through the shell's "
+    "agent_run action, writing the code into the files, check the page by running `{check}`, tick the "
+    "line only when its code is really there, and only then say FINISHED on its own line.")
 POLISH = (
     "Please make {name} better by one step. It is in the {folder} folder inside the Projects folder in "
     "your home folder. Read IDEAS.md there through the shell's agent_run action. If it is missing, or "
@@ -172,6 +178,26 @@ def show_mind_view():
         return
     subprocess.run([YOS, "act", "shell", "focus_window", "title=Mind View"],
                    capture_output=True, text=True, timeout=30)
+
+
+def new_chat():
+    """Start the Mind on a fresh conversation, so a mission begins from its brief and not from
+    the day's history. On 561 the Mind answered nine "keep going" turns in a second each with
+    "every command needs your approval", calling nothing, while a session rule allowed every
+    command: earlier missions' lapsed cards were still in the conversation (16 Oct 2026).
+    Best effort: a desktop that will not start one leaves the old conversation, which only costs
+    what it cost before."""
+    done = subprocess.run([YOS, "act", "shell", "new_chat"], capture_output=True, text=True, timeout=60)
+    return done.returncode == 0, (done.stdout + done.stderr).strip()[:300]
+
+
+def same_answer(a, b):
+    """Whether two replies are the same answer: the Mind saying again what it just said, give or
+    take a word ("I can't make progress" / "I still can't make progress"). Only the opening is
+    compared, where the answer is; a long reply that starts alike and goes on differently is a
+    different turn."""
+    a, b = " ".join(a.split())[:400], " ".join(b.split())[:400]
+    return bool(a) and bool(b) and difflib.SequenceMatcher(None, a, b).ratio() >= 0.9
 
 
 def send(text):
@@ -270,6 +296,25 @@ def polish(b):
                 brief=POLISH, keep_going=POLISH_KEEP_GOING, max_turns=POLISH_TURNS, max_hours=POLISH_HOURS)
 
 
+def folder_print(m):
+    """What the mission's folder holds, by name, size and modification time: two prints differ
+    when anything in it was written. Hidden entries and the page check's own leavings are not
+    counted; a missing folder prints empty."""
+    root = os.path.join(PROJECTS, m["fields"]["folder"])
+    seen = []
+    for top, dirs, files in os.walk(root):
+        dirs[:] = sorted(x for x in dirs if not x.startswith("."))
+        for name in sorted(files):
+            if name.startswith("."):
+                continue
+            try:
+                st = os.stat(os.path.join(top, name))
+            except OSError:
+                continue
+            seen.append((os.path.relpath(os.path.join(top, name), root), st.st_size, st.st_mtime_ns))
+    return tuple(seen)
+
+
 def prompt(template, m, errors=""):
     return template.format(errors=errors, **m["fields"])
 
@@ -305,7 +350,16 @@ def run_mission(m):
     write_state(STARTED, begun | {m["id"]})
     log(mission=m["id"], event="resuming" if resuming else "starting", title=m["title"])
     text = prompt(m["keep_going"] if resuming else m["brief"], m)
+    if not resuming:
+        ok, said = new_chat()
+        if not ok:
+            log(mission=m["id"], event="fresh chat refused", said=said)
     cards = 0
+    previous = ""
+    # A FINISHED counts only over a folder that changed. On 561 the Mind read Beatgrid's files
+    # eight times, wrote nothing, and said FINISHED over a description of code it had not
+    # written; the page, untouched, checked clean (16 Oct 2026).
+    before = folder_print(m)
     for turn in range(1, m["max_turns"] + 1):
         if time.time() - started > m["max_hours"] * 3600:
             log(mission=m["id"], event="stopped", why="time limit", turns=turn - 1)
@@ -337,7 +391,10 @@ def run_mission(m):
         if cards >= 2:
             log(mission=m["id"], event="stopped", why="cards are waiting for a person", turns=turn)
             return
-        if said_finished(reply):
+        unchanged = said_finished(reply) and folder_print(m) == before
+        if unchanged:
+            log(mission=m["id"], event="finished refused", turn=turn, why="nothing in the folder changed")
+        elif said_finished(reply):
             if clean is False:
                 # The Mind's word against the page's: the page wins, and the mission goes on.
                 log(mission=m["id"], event="finished refused", turn=turn, why="the page throws")
@@ -347,8 +404,19 @@ def run_mission(m):
                 log(mission=m["id"], event="finished", turns=turn, page_checked=clean is True,
                     minutes=round((time.time() - started) / 60))
                 return
+        # The same answer twice is a Mind that is not working the mission, whatever the reason;
+        # typing "keep going" at it again only fills the stream with the same words.
+        if same_answer(reply, previous):
+            log(mission=m["id"], event="stopped", why="the same answer twice", turns=turn)
+            return
+        previous = reply
         time.sleep(BETWEEN_TURNS_SECS)
-        text = prompt(FIX_FIRST, m, errors) if clean is False else prompt(m["keep_going"], m)
+        if clean is False:
+            text = prompt(FIX_FIRST, m, errors)
+        elif unchanged:
+            text = prompt(NOTHING_CHANGED, m)
+        else:
+            text = prompt(m["keep_going"], m)
     log(mission=m["id"], event="stopped", why="turn limit")
 
 

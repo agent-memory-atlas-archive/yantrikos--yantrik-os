@@ -32,6 +32,12 @@ d.send = lambda text: (sent.append(text), (True, ""))[1]
 d.wait_for_turn = lambda _: ({"conversation": [{"role": "assistant", "text": replies[0][0]}]}, replies[0][1],
                               replies.pop(0)[2:] == ("card",))
 d.check_page = lambda m: pages.pop(0) if pages else (True, "")
+# Every turn writes something, unless a check says the Mind wrote nothing.
+real_folder_print = d.folder_print
+prints, scripted = [0], []
+d.folder_print = lambda m: scripted.pop(0) if scripted else (prints.__setitem__(0, prints[0] + 1), prints[0])[1]
+chats = []
+d.new_chat = lambda: (chats.append(len(sent)), (True, ""))[1]
 
 failed = 0
 
@@ -128,6 +134,60 @@ check("two turns running with a card stop the mission for a person",
 replies[:] = [("asked, then allowed", "answered", "card"), ("FINISHED", "answered")]
 d.main()
 check("one card that a person answers does not stop the mission", specs[0]["id"] in d.finished_missions())
+
+d.write_state(d.DONE, set())
+d.write_state(d.STARTED, set())
+replies[:] = [("FINISHED", "answered")]
+chats.clear()
+before = len(sent)
+d.main()
+check("a mission started from its brief gets a fresh conversation first",
+      chats == [before], repr(chats))
+os.makedirs(os.path.join(d.PROJECTS, specs[1]["folder"]), exist_ok=True)
+open(os.path.join(d.PROJECTS, specs[1]["folder"], "PLAN.md"), "w").close()
+d.write_state(d.STARTED, {specs[1]["id"]})
+replies[:] = [("FINISHED", "answered")]
+chats.clear()
+d.main()
+check("a resumed build keeps its conversation", chats == [] and sent[-1].startswith("Please keep going"), repr(chats))
+
+d.write_state(d.DONE, set())
+d.write_state(d.STARTED, set())
+replies[:] = [("I can't make progress: every command needs your approval.", "answered"),
+              ("I still can't make progress: every command needs your approval.", "answered"),
+              ("unused", "answered")]
+before = len(sent)
+d.main()
+log = [json.loads(line) for line in open(d.LOG, encoding="utf-8")]
+check("the same answer twice stops the mission",
+      len(sent) - before == 2 and len(replies) == 1 and log[-1].get("why") == "the same answer twice", repr(log[-1]))
+check("answers that differ are not taken for a repeat",
+      not d.same_answer("Step 1 done: layers.js written.", "Step 2 done: the palette now saves.")
+      and not d.same_answer("", ""))
+
+d.write_state(d.DONE, set())
+d.write_state(d.STARTED, set())
+scripted[:] = [-1, -1, -2]  # at the start, after turn 1 (nothing written), after turn 2
+replies[:] = [("FINISHED\n\nI wrote the save/load code and the check came back clean.", "answered"),
+              ("Done for real this time.\n\nFINISHED", "answered")]
+before = len(sent)
+d.main()
+log = [json.loads(line) for line in open(d.LOG, encoding="utf-8")]
+refused = [e for e in log if e.get("event") == "finished refused" and e.get("why") == "nothing in the folder changed"]
+check("a FINISHED over a folder nothing was written to is refused, and the Mind is told so",
+      refused and len(sent) - before == 2 and "no file was written" in sent[-1], sent[-1])
+check("a FINISHED once something was written finishes the round", specs[0]["id"] in d.finished_missions())
+
+root = os.path.join(d.PROJECTS, "printcheck")
+os.makedirs(os.path.join(root, ".git"), exist_ok=True)
+m = {"fields": {"folder": "printcheck"}}
+open(os.path.join(root, "a.js"), "w").write("1")
+first = real_folder_print(m)
+open(os.path.join(root, ".git", "x"), "w").write("hidden")
+same = real_folder_print(m) == first
+open(os.path.join(root, "a.js"), "w").write("12")
+check("the folder print changes when a file is written, not for hidden entries",
+      same and real_folder_print(m) != first and real_folder_print({"fields": {"folder": "missing"}}) == ())
 
 with open(os.path.join(HERE, "yantrik-live-director.service"), encoding="utf-8") as f:
     unit = [line.strip() for line in f]
