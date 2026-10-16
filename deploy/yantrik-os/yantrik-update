@@ -1936,7 +1936,7 @@ grub_defaults_rewritten_from() {
 }
 
 migrate_grub_cmdline() {
-  local f="$GRUB_DEFAULTS" cfg="$GRUB_CFG" lines note copy tmp cfg_copy out rc resume="" kept
+  local f="$GRUB_DEFAULTS" cfg="$GRUB_CFG" lines note copy tmp cfg_copy out rc resume="" kept put_back
   [ -f "$f" ] || return 0
   # A run killed part way leaves its temp files here; every name with this suffix is one this
   # function made, and nothing else runs it at the same time (security review of 5f826b95,
@@ -1999,11 +1999,21 @@ migrate_grub_cmdline() {
     out="the new menu names the root by its device, not its UUID"; rc=1
   fi
   if [ "$rc" != 0 ]; then
-    # Back as it was, each by a rename, so no reader ever sees half a file.
-    tmp="$(mktemp "$f.yantrik-XXXXXX")" && cp -p "$copy" "$tmp" && mv -f "$tmp" "$f" \
-      || warn "could not put $f back; the copy is $copy"
-    mv -f "$cfg_copy" "$cfg" || warn "could not put $cfg back; the copy is $cfg_copy"
-    warn "could not regenerate the boot menu ($(printf '%s' "$out" | tail -n 1)); $f and $cfg are as they were"
+    # Back as it was, each by a rename, so no reader ever sees half a file. A step that fails
+    # takes its temp file with it, and the last line says "as they were" only when both did go
+    # back (security review of 5f826b95, #829, item 3).
+    put_back=yes
+    if ! tmp="$(mktemp "$f.yantrik-XXXXXX")"; then
+      warn "could not put $f back; the copy is $copy"; put_back=""
+    elif ! cp -p "$copy" "$tmp" || ! mv -f "$tmp" "$f"; then
+      rm -f "$tmp"; warn "could not put $f back; the copy is $copy"; put_back=""
+    fi
+    mv -f "$cfg_copy" "$cfg" || { warn "could not put $cfg back; the copy is $cfg_copy"; put_back=""; }
+    if [ -n "$put_back" ]; then
+      warn "could not regenerate the boot menu ($(printf '%s' "$out" | tail -n 1)); $f and $cfg are as they were"
+    else
+      warn "could not regenerate the boot menu ($(printf '%s' "$out" | tail -n 1)), nor put everything back; see above"
+    fi
     return 0
   fi
   rm -f "$cfg_copy"
@@ -5001,8 +5011,10 @@ c.sendall((json.dumps({"ok": True, "seeded": req["rules"]}) + "\n").encode())' "
     printf 'linux /vmlinuz root=UUID=1234 console=ttyS0,115200 console=tty1\n' > "$gd/boot/grub.cfg"
     rm -f "$gd/default/grub".before-* "$gd/calls" "$gd/updates/grub-cmdline-left-alone"
   }
-  gr_run() { # gr_run <ok|fail|by-device>: what migrate_grub_cmdline said
+  gr_run() { # gr_run <ok|fail|by-device>: what migrate_grub_cmdline said; GR_CP_FAIL=1, the put-back's copy fails
     ( GRUB_DEFAULTS="$gd/default/grub" GRUB_CFG="$gd/boot/grub.cfg" UPDATES_DIR="$gd/updates" GR_MODE="$1"
+      cp() { [ -n "${GR_CP_FAIL:-}" ] && case "${3:-}" in "$GRUB_DEFAULTS".yantrik-*) true ;; *) false ;; esac \
+               && { echo "cp: error writing: No space left on device" >&2; return 1; }; command cp "$@"; }
       grub_can_regenerate() { return 0; }
       grub_regenerate() {
         printf 'regenerate\n' >> "$gd/calls"
@@ -5069,6 +5081,11 @@ c.sendall((json.dumps({"ok": True, "seeded": req["rules"]}) + "\n").encode())' "
   done
   gr_run fail >/dev/null
   is "serial console: a second failed run keeps the one copy" "1" "$(find "$gd/default" -name 'grub.before-*' | wc -l)"
+  # The put-back of the file failing, /etc full (#829 review, item 3).
+  gr_old "$GRUB_CMDLINE_OLD"; out="$(GR_CP_FAIL=1 gr_run fail)"
+  is "serial console: a put-back that fails leaves no temp file" "" "$(find "$gd/default" "$gd/boot" -name '*.yantrik-*')"
+  t "serial console: ... says which file did not go back" "could not put $gd/default/grub back" "$out"
+  is "serial console: ... and does not say both are as they were" "no" "$(printf '%s' "$out" | grep -q 'are as they were' && echo yes || echo no)"
 
   # A run killed after $f was rewritten and before the menu was (#829 review, item 2): the next
   # one finishes the job instead of stopping at "already the new line".
@@ -5088,7 +5105,7 @@ c.sendall((json.dumps({"ok": True, "seeded": req["rules"]}) + "\n").encode())' "
   gr_killed; rm -f "$gd/default"/grub.before-*; out="$(gr_run ok)"
   is "serial console: the new line with no copy of ours beside it is not regenerated" "" "$(cat "$gd/calls" 2>/dev/null)$out"
   gr_killed; mkdir -p "$gd/default/grub.d"
-  printf 'GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT console=ttyS0,115200"\n' > "$gd/default/grub.d/serial.cfg"
+  printf 'GRUB_CMDLINE_LINUX_DEFAULT="quiet console=ttyS0,115200"\n' > "$gd/default/grub.d/serial.cfg"
   out="$(gr_run ok)"; rm -rf "$gd/default/grub.d"
   is "serial console: ... nor is a machine whose grub.d asks for that console itself" "" "$(cat "$gd/calls" 2>/dev/null)"
   is "serial console: the new line is the installer's" "yes" \
