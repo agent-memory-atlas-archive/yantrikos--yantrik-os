@@ -277,6 +277,32 @@ pub struct NoticeHarness {
     pub program: String,
 }
 
+/// What a harness id belongs to: the account the kernel named at attach and the program behind
+/// it, as the first notice stored under the id found them. The store refuses notices and feedback
+/// under the id from anything else.
+///
+/// `program` is empty when the shell could not see the executable, which is the case for a mind
+/// that runs under its own account (`yantrik-mind`); the id is then bound by the account alone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessBinding {
+    pub uid: Option<u32>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub program: String,
+}
+
+impl HarnessBinding {
+    /// Whether `uid` running `program` is what this id belongs to.
+    pub fn admits(&self, uid: Option<u32>, program: &str) -> bool {
+        self.uid == uid && (self.program.is_empty() || self.program == program)
+    }
+
+    /// One line for Settings: "account 999" or "account 1000 · python3".
+    pub fn line(&self) -> String {
+        let account = self.uid.map_or_else(|| "an unknown account".to_string(), |u| format!("account {u}"));
+        if self.program.is_empty() { account } else { format!("{account} · {}", self.program) }
+    }
+}
+
 /// One response to a card, as the store keeps it and as the sending harness reads it on its poll.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Feedback {

@@ -546,7 +546,7 @@ mod tests {
                 note("1", "Downloads", "2026-09-21T09:00:00Z"),
                 note("2", "Calendar", "2026-09-21T09:01:00Z"),
             ],
-            initiative: None,
+            initiative: None, harness_bindings: None,
         });
         assert!(applied.fresh.is_empty());
         assert_eq!(mirror.unread_count(), 2);
@@ -556,11 +556,11 @@ mod tests {
     #[test]
     fn a_new_notification_after_that_is_a_toast() {
         let mut mirror = NotificationMirror::new();
-        mirror.apply(Since { revision: 1, changed: vec![note("1", "A", "2026-09-21T09:00:00Z")], initiative: None });
+        mirror.apply(Since { revision: 1, changed: vec![note("1", "A", "2026-09-21T09:00:00Z")], initiative: None, harness_bindings: None });
         let applied = mirror.apply(Since {
             revision: 2,
             changed: vec![note("2", "B", "2026-09-21T09:05:00Z")],
-            initiative: None,
+            initiative: None, harness_bindings: None,
         });
         assert_eq!(applied.fresh.len(), 1);
         assert_eq!(applied.fresh[0].id, "2");
@@ -569,15 +569,15 @@ mod tests {
     #[test]
     fn being_read_or_dismissed_does_not_re_raise_a_toast() {
         let mut mirror = NotificationMirror::new();
-        mirror.apply(Since { revision: 1, changed: vec![note("1", "A", "2026-09-21T09:00:00Z")], initiative: None });
+        mirror.apply(Since { revision: 1, changed: vec![note("1", "A", "2026-09-21T09:00:00Z")], initiative: None, harness_bindings: None });
         let mut read = note("1", "A", "2026-09-21T09:00:00Z");
         read.read = true;
-        let applied = mirror.apply(Since { revision: 2, changed: vec![read], initiative: None });
+        let applied = mirror.apply(Since { revision: 2, changed: vec![read], initiative: None, harness_bindings: None });
         assert!(applied.fresh.is_empty());
         assert!(applied.gone.is_empty(), "reading a notification does not take its toast down");
         let mut gone = note("1", "A", "2026-09-21T09:00:00Z");
         gone.dismissed = true;
-        let applied = mirror.apply(Since { revision: 3, changed: vec![gone], initiative: None });
+        let applied = mirror.apply(Since { revision: 3, changed: vec![gone], initiative: None, harness_bindings: None });
         assert!(applied.fresh.is_empty());
         assert_eq!(applied.gone, vec!["1".to_string()], "`dismiss(id)` takes the toast with it");
         assert_eq!(mirror.unread_count(), 0);
@@ -592,7 +592,7 @@ mod tests {
         // critical toast never expires on its own, so the only way down was its own × — which
         // nothing published could press.
         let mut mirror = NotificationMirror::new();
-        mirror.apply(Since { revision: 1, changed: vec![], initiative: None });
+        mirror.apply(Since { revision: 1, changed: vec![], initiative: None, harness_bindings: None });
         let mut first = note("1", "Yantrik", "2026-09-22T18:00:00Z");
         first.urgency = Urgency::Critical;
         let mut second = note("2", "Yantrik", "2026-09-22T18:01:00Z");
@@ -600,7 +600,7 @@ mod tests {
         let applied = mirror.apply(Since {
             revision: 2,
             changed: vec![first.clone(), second.clone()],
-            initiative: None,
+            initiative: None, harness_bindings: None,
         });
         assert_eq!(applied.fresh.len(), 2, "both are raised");
         assert!(applied.gone.is_empty());
@@ -611,7 +611,7 @@ mod tests {
             n.read = true;
             n.revision = 3;
         }
-        let applied = mirror.apply(Since { revision: 3, changed: vec![first, second], initiative: None });
+        let applied = mirror.apply(Since { revision: 3, changed: vec![first, second], initiative: None, harness_bindings: None });
         assert!(applied.fresh.is_empty(), "a dismissal is not news");
         assert_eq!(applied.gone, vec!["1".to_string(), "2".to_string()]);
         assert!(mirror.showing().is_empty(), "the centre and the toasts agree");
@@ -624,12 +624,12 @@ mod tests {
         mirror.apply(Since {
             revision: 1,
             changed: vec![note("1", "Downloads", "2026-09-21T09:00:00Z")],
-            initiative: None,
+            initiative: None, harness_bindings: None,
         });
         let applied = mirror.apply(Since {
             revision: 2,
             changed: vec![note("1", "Downloads", "2026-09-21T09:07:00Z")],
-            initiative: None,
+            initiative: None, harness_bindings: None,
         });
         assert_eq!(applied.fresh.len(), 1);
         assert_eq!(mirror.showing().len(), 1, "it replaced, it did not add");
@@ -643,19 +643,19 @@ mod tests {
         assert!(!mirror.service_up());
         assert!(mirror.notice().is_some());
         // And a successful poll clears it without anyone having to remember to.
-        mirror.apply(Since { revision: 1, changed: vec![], initiative: None });
+        mirror.apply(Since { revision: 1, changed: vec![], initiative: None, harness_bindings: None });
         assert!(mirror.service_up());
     }
 
     #[test]
     fn the_mirror_is_bounded() {
         let mut mirror = NotificationMirror::new();
-        mirror.apply(Since { revision: 1, changed: vec![], initiative: None });
+        mirror.apply(Since { revision: 1, changed: vec![], initiative: None, harness_bindings: None });
         for i in 0..(MAX_MIRRORED + 20) {
             mirror.apply(Since {
                 revision: i as u64 + 2,
                 changed: vec![note(&i.to_string(), "Flood", "2026-09-21T09:00:00Z")],
-                initiative: None,
+                initiative: None, harness_bindings: None,
             });
         }
         assert_eq!(mirror.showing().len(), MAX_MIRRORED);

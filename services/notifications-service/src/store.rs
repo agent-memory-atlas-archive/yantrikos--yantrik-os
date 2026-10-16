@@ -65,9 +65,9 @@ pub(crate) struct OnDisk {
     #[serde(default = "first_seq")]
     pub(crate) next_feedback_seq: u64,
     /// Which account and program each harness id belongs to: the first to store a notice under
-    /// it. See [`crate::notices::Binding`].
+    /// it. See [`notice::HarnessBinding`].
     #[serde(default)]
-    pub(crate) bindings: std::collections::BTreeMap<String, crate::notices::Binding>,
+    pub(crate) bindings: std::collections::BTreeMap<String, notice::HarnessBinding>,
     /// Bumped by every change, never written: which snapshot is newer, for [`Store::persist`].
     #[serde(skip)]
     pub(crate) generation: u64,
@@ -105,6 +105,8 @@ pub struct Store {
     /// than only logged: a store that silently began empty is exactly the failure this service
     /// was rewritten to stop hiding.
     load_notice: Option<String>,
+    /// Harness ids only one account may use ([`crate::notices::MIND_ID`]), read once at open.
+    reserved: Mutex<std::collections::BTreeMap<String, u32>>,
 }
 
 /// Where the store lives. `$XDG_DATA_HOME`, then `~/.local/share`, then a temp directory so the
@@ -135,6 +137,7 @@ impl Store {
                     on_disk.next_id = on_disk.next_id.max(highest + 1);
                     let newest_rev = on_disk.notifications.iter().map(|n| n.revision).max();
                     on_disk.revision = on_disk.revision.max(newest_rev.unwrap_or(0));
+                    crate::notices::bind_existing(&mut on_disk);
                     (on_disk, None)
                 }
                 Err(e) => (
@@ -154,12 +157,30 @@ impl Store {
             ),
         };
 
+        let mut reserved = std::collections::BTreeMap::new();
+        // Not in tests, whose stores post as `mind` from any uid, whatever machine runs them.
+        let mind = if cfg!(test) { None } else { crate::notices::account_uid(crate::notices::MIND_ACCOUNT) };
+        if let Some(uid) = mind {
+            reserved.insert(crate::notices::MIND_ID.to_string(), uid);
+        }
         Self {
             path,
             state: Mutex::new(state),
             written: Mutex::new(0),
             load_notice,
+            reserved: Mutex::new(reserved),
         }
+    }
+
+    /// The harness ids reserved for an account, by id.
+    pub(crate) fn reserved(&self) -> std::collections::BTreeMap<String, u32> {
+        self.reserved.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Reserve `id` for `uid`, as `open` does for the Mind on a machine with its account.
+    #[cfg(test)]
+    pub(crate) fn reserve(&self, id: &str, uid: u32) {
+        self.reserved.lock().unwrap().insert(id.to_string(), uid);
     }
 
     /// Why the store began empty, when it should not have.
@@ -280,14 +301,7 @@ impl Store {
             .iter()
             .filter(|n| !n.dismissed)
             .cloned()
-            .map(|mut n| {
-                if let (false, Some(record)) = (desktop, n.notice.as_mut()) {
-                    record.feedback.clear();
-                    record.evidence.clear();
-                    record.action = None;
-                }
-                n
-            })
+            .map(|n| redacted(n, desktop))
             .collect();
         out.reverse();
         out
@@ -299,6 +313,12 @@ impl Store {
     /// sender is told it `expired`: the poll runs once a second for as long as the desktop is up,
     /// so this is the clock the store already has.
     pub fn since(&self, revision: u64) -> Since {
+        self.since_for(revision, true)
+    }
+
+    /// What changed since `revision`, as `desktop` or any other caller may read it: redacted as
+    /// [`Store::list_for`] redacts, and with the harness bindings for the desktop only.
+    pub fn since_for(&self, revision: u64, desktop: bool) -> Since {
         self.expire_due(Utc::now());
         let state = self.lock();
         Since {
@@ -308,8 +328,10 @@ impl Store {
                 .iter()
                 .filter(|n| n.revision > revision)
                 .cloned()
+                .map(|n| redacted(n, desktop))
                 .collect(),
             initiative: Some(state.initiative.clone()),
+            harness_bindings: desktop.then(|| state.bindings.clone()),
         }
     }
 
@@ -553,6 +575,18 @@ impl Store {
         *written = (*written).max(state.generation);
         Ok(())
     }
+}
+
+/// `n` as `desktop` or any other caller may read it: the person's feedback on a mind's notice goes
+/// only to the harness that sent it, and a card's evidence and button are for the person's eyes on
+/// the desktop.
+fn redacted(mut n: Notification, desktop: bool) -> Notification {
+    if let (false, Some(record)) = (desktop, n.notice.as_mut()) {
+        record.feedback.clear();
+        record.evidence.clear();
+        record.action = None;
+    }
+    n
 }
 
 /// A copy of the state to write, marked newer than every copy taken before it.

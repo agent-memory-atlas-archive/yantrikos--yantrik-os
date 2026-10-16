@@ -20,6 +20,13 @@ export struct FamilyRowData {
     can-be-off: bool,
 }
 
+// A harness id and what it belongs to, with a Forget button.
+export struct BindingRowData {
+    id: string,
+    // "account 1000 · python3".
+    holder: string,
+}
+
 export global InitiativeState {
     in property <bool> quiet: false;
     in property <[FamilyRowData]> families: [];
@@ -30,6 +37,9 @@ export global InitiativeState {
     callback set-quiet(bool);
     callback set-family(string, string);
     callback next-quiet-hours();
+    // Harness ids and the account and program each belongs to (the first to post under it).
+    in property <[BindingRowData]> bindings: [];
+    callback forget(string);
 }
 
 // One choice of three, drawn as a button that shows whether it is the current one.
@@ -122,6 +132,35 @@ export component InitiativeSettings inherits VerticalLayout {
                     Choice { family: row.family; value: "on"; current: row.setting; label: "On"; }
                     Choice { family: row.family; value: "inbox_only"; current: row.setting; label: "Inbox only"; }
                     if row.can-be-off : Choice { family: row.family; value: "off"; current: row.setting; label: "Off"; }
+                }
+            }
+
+            if InitiativeState.bindings.length > 0 : VerticalLayout {
+                spacing: Theme.sp-1;
+                Text { text: "Who each mind's name belongs to"; color: Theme.text-primary; font-size: Theme.fs-body; font-weight: 600; }
+                Text {
+                    text: "A mind's cards are kept under the name it attached with, and only the account and program that first used that name may send under it. If something else took a name first, Forget it; the next mind to send under it keeps it.";
+                    color: Theme.text-dim;
+                    font-size: Theme.fs-caption;
+                    wrap: word-wrap;
+                }
+                for row in InitiativeState.bindings : HorizontalLayout {
+                    spacing: Theme.sp-3;
+                    Text {
+                        horizontal-stretch: 1;
+                        text: row.id + " — " + row.holder;
+                        color: Theme.text-secondary;
+                        font-size: Theme.fs-caption;
+                        vertical-alignment: center;
+                        wrap: word-wrap;
+                    }
+                    YButton {
+                        label: "Forget";
+                        variant: 1;
+                        size: 0;
+                        tooltip: "Forget who " + row.id + " belongs to";
+                        clicked => { InitiativeState.forget(row.id); }
+                    }
                 }
             }
 

@@ -26,5 +26,6 @@ methods = [
     "notifications.notice_feedback_poll",
     "notifications.initiative",
     "notifications.initiative_set",
+    "notifications.notice_unbind",
 ]
 autostart = true

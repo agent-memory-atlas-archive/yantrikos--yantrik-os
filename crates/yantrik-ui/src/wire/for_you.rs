@@ -198,12 +198,12 @@ fn open_action(ui: &App, id: &str) {
                 FileAction::Browser => FileAction::TextEditor,
                 other => other,
             };
-            // The viewer and the player only read. Everything else gets a read-only copy
-            // (`notice_inbox::read_only_copy`): the spec opens a card's file read-only.
-            let opened = match how {
-                FileAction::ImageViewer | FileAction::MediaPlayer => Ok(path),
-                _ => notice_inbox::read_only_copy(&path, &card_copies(), &format!("{id}-{name}")),
-            };
+            // Every kind opens a read-only copy (`notice_inbox::read_only_copy`): the spec opens a
+            // card's file read-only, and an app handed the original would resolve the path again
+            // later, after the check, when a component could have become a symlink.
+            let opened = card_copies()
+                .ok_or_else(|| "there is no private place to copy it to (XDG_RUNTIME_DIR is not set)".to_string())
+                .and_then(|into| notice_inbox::read_only_copy(&path, &into, &format!("{id}-{name}")));
             match opened {
                 Ok(target) => super::open_with::launch(&how, &name, &target, Some(ui)),
                 Err(why) => {
@@ -231,10 +231,10 @@ fn open_action(ui: &App, id: &str) {
     tick(ui);
 }
 
-/// Where a card's read-only copies go: this account's runtime directory, which is in memory and
-/// gone at logout.
-fn card_copies() -> std::path::PathBuf {
-    std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir).join("yantrik-card-files")
+/// Where a card's read-only copies go: this account's runtime directory, which is in memory, only
+/// this account's, and gone at logout. Never the shared temp directory: `None` refuses instead.
+fn card_copies() -> Option<std::path::PathBuf> {
+    std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()).map(|d| std::path::PathBuf::from(d).join("yantrik-card-files"))
 }
 
 /// Show an event in Calendar, once Calendar says it knows the id. Asked off the UI thread.
