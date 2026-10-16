@@ -334,12 +334,12 @@ fn watch(unit: String) {
             }
         };
         super::show_recording(true, &elapsed_words(started.elapsed()));
-        let free = if tick % DISK_EVERY == 0 { dir.as_deref().and_then(disk::free_bytes) } else { None };
+        let free = if tick.is_multiple_of(DISK_EVERY) { dir.as_deref().and_then(disk::free_bytes) } else { None };
         if let Some(why) = verdict(super::locked_now(), free) {
             let _ = stop(why, None);
             return;
         }
-        if tick % 2 == 0 && !is_active(&unit) {
+        if tick.is_multiple_of(2) && !is_active(&unit) {
             let gpu_refused = matches!(encoder, Encoder::Vaapi(_)) && !retried && started.elapsed() < GPU_GRACE;
             if gpu_refused && retry_on_cpu(&unit) {
                 continue;

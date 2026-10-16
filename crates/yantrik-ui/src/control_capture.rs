@@ -267,7 +267,7 @@ mod tests {
         let mut out = Vec::new();
         for (i, _) in src.match_indices("Action::new(") {
             let rest = &src[i + "Action::new(".len()..];
-            let name_end = rest.find(|c: char| c == ',' || c == ')').unwrap();
+            let name_end = rest.find([',', ')']).unwrap();
             let name = rest[..name_end].trim().trim_matches('"').to_string();
             let risk = &rest[rest.find(".risk(\"").unwrap() + 7..];
             out.push((name, risk[..risk.find('"').unwrap()].to_string()));
