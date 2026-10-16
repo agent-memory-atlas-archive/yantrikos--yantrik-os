@@ -801,6 +801,9 @@ if [ "$(tty)" = "/dev/tty1" ] && [ -z "$WAYLAND_DISPLAY" ]; then
         LAST_CRASH=$(cat "$CRASH_FILE" 2>/dev/null || echo 0)
         NOW=$(date +%s)
         if [ $((NOW - LAST_CRASH)) -lt 10 ]; then
+            # tty1 back in text mode, or none of this is seen: the boot splash leaves it in
+            # graphics mode for labwc (boot-unlock/splash).
+            /usr/lib/yantrik/boot-unlock/splash console 2>/dev/null
             echo "  Yantrik OS — Desktop failed to start"
             echo "  Check: cat /opt/yantrik/logs/labwc.log"
             exec /bin/bash --login
@@ -815,6 +818,7 @@ if [ "$(tty)" = "/dev/tty1" ] && [ -z "$WAYLAND_DISPLAY" ]; then
 
     if [ $((EXIT_TIME - START_TIME)) -lt 5 ]; then
         echo "$EXIT_TIME" > "$CRASH_FILE"
+        /usr/lib/yantrik/boot-unlock/splash console 2>/dev/null
     else
         rm -f "$CRASH_FILE"
         # A session that ran and then ended (labwc crashed hours in, or was killed) ends the
@@ -1616,17 +1620,29 @@ fn install_grub_theme(mount_dir: &str) -> bool {
 /// CI boot test reads the serial line, and this file used to copy it. On an installed machine with
 /// no serial port (nearly every laptop) that made systemd start a serial login prompt that failed
 /// and restarted every ten seconds for as long as the machine ran: 3,056 times in 8.7 hours on the
-/// fresh-install VM (12 Oct). GRUB keeps its serial terminal, which costs nothing without a port,
-/// so a machine that does have one still shows the boot menu there; add `console=ttyS0,115200` to
-/// GRUB_CMDLINE_LINUX by hand to debug one over serial.
+/// fresh-install VM (12 Oct). Add `console=ttyS0,115200` to GRUB_CMDLINE_LINUX by hand to debug
+/// one over serial.
 ///
-/// The screen is gfxterm, not the firmware's console, so the menu is drawn with a font that has
-/// its characters (GRUB's unicode font, or the theme's) and, `themed`, in the theme the live
-/// image's menu has.
+/// The screen is gfxterm and nothing else, so the menu is drawn with a font that has its
+/// characters (GRUB's unicode font, or the theme's) and, `themed`, in the theme the live image's
+/// menu has. GRUB used to keep a serial terminal beside it, which was thought to cost nothing
+/// without a port. It cost the theme: with a second output GRUB draws its text menu, so no
+/// installed machine ever showed the Yantrik menu, and the screen stayed black with a cursor for
+/// 7.5 s between Enter and plymouth (VM 543, an encrypted install of de5d3456, 16 Oct 2026; the
+/// same machine with gfxterm alone drew the theme and showed no black at all). The live image
+/// appends its serial line only when a port answers (build-debian-iso.sh), which is why its menu
+/// was themed.
+///
+/// `GRUB_GFXPAYLOAD_LINUX=keep`: the kernel starts in the mode the menu was drawn in. On BIOS it
+/// otherwise starts in VGA text mode, with no framebuffer for plymouth until a DRM driver loads; on
+/// UEFI GRUB otherwise shuts its video down and sets it up again on the way to the kernel. "keep"
+/// is the mode the person has just seen working, text included when GRUB had no graphics. Between
+/// Enter and the kernel, GRUB's terminal is the ground, not black: the image's
+/// /etc/grub.d/06_yantrik_ground (deploy/yantrik-os/grub-ground).
 fn grub_defaults(encrypted: bool, themed: bool) -> String {
     let theme = if themed { format!("GRUB_THEME=\"{GRUB_THEME_DIR}/theme.txt\"\n") } else { String::new() };
     format!(
-        "GRUB_DEFAULT=0\nGRUB_TIMEOUT=3\nGRUB_DISTRIBUTOR=\"Yantrik OS\"\nGRUB_CMDLINE_LINUX_DEFAULT=\"{}\"\nGRUB_CMDLINE_LINUX=\"console=tty1\"\nGRUB_TERMINAL_INPUT=\"console serial\"\nGRUB_TERMINAL_OUTPUT=\"gfxterm serial\"\nGRUB_GFXMODE=auto\nGRUB_SERIAL_COMMAND=\"serial --speed=115200\"\n{theme}",
+        "GRUB_DEFAULT=0\nGRUB_TIMEOUT=3\nGRUB_DISTRIBUTOR=\"Yantrik OS\"\nGRUB_CMDLINE_LINUX_DEFAULT=\"{}\"\nGRUB_CMDLINE_LINUX=\"console=tty1\"\nGRUB_TERMINAL_INPUT=\"console\"\nGRUB_TERMINAL_OUTPUT=\"gfxterm\"\nGRUB_GFXMODE=auto\nGRUB_GFXPAYLOAD_LINUX=keep\n{theme}",
         installer_unlock::cmdline_default(encrypted)
     )
 }
@@ -2033,10 +2049,33 @@ mod grub_defaults_tests {
         let plain = grub_defaults(true, false);
         assert!(!plain.contains("GRUB_THEME"), "{plain}");
         for text in [themed, plain] {
-            assert!(text.lines().any(|l| l == "GRUB_TERMINAL_OUTPUT=\"gfxterm serial\""), "{text}");
+            // gfxterm alone: a second output (serial) makes GRUB draw its text menu, not the theme.
+            assert!(text.lines().any(|l| l == "GRUB_TERMINAL_OUTPUT=\"gfxterm\""), "{text}");
+            assert!(text.lines().any(|l| l == "GRUB_TERMINAL_INPUT=\"console\""), "{text}");
+            // The kernel line keeps plymouth.ignore-serial-consoles; GRUB's own terminals name no serial.
+            assert!(
+                !text.lines().any(|l| l.starts_with("GRUB_SERIAL_COMMAND")
+                    || (l.starts_with("GRUB_TERMINAL") && l.contains("serial"))),
+                "no serial terminal and no serial command: {text}"
+            );
             assert!(!text.lines().any(|l| l.starts_with("GRUB_TERMINAL=")), "GRUB_TERMINAL would override both: {text}");
             assert!(text.is_ascii(), "{text}");
         }
+    }
+
+    /// From GRUB to plymouth (#820): the kernel keeps the mode the menu was drawn in, so plymouth
+    /// has a framebuffer from the start on BIOS too, and the kernel's line is the splash's.
+    #[test]
+    fn an_installed_machine_keeps_grubs_graphics_into_the_splash() {
+        for (encrypted, themed) in [(false, false), (false, true), (true, false), (true, true)] {
+            let text = grub_defaults(encrypted, themed);
+            assert!(text.lines().any(|l| l == "GRUB_GFXPAYLOAD_LINUX=keep"), "{text}");
+            let wanted = format!("GRUB_CMDLINE_LINUX_DEFAULT=\"{}\"", super::installer_unlock::cmdline_default(encrypted));
+            assert!(text.lines().any(|l| l == wanted), "{text}");
+        }
+        // The text installer writes the same.
+        let script = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../deploy/yantrik-os/yantrik-install.sh"));
+        assert!(script.contains("GRUB_GFXPAYLOAD_LINUX=keep"), "yantrik-install.sh");
     }
 
     /// The theme is a UEFI menu's only: on a legacy BIOS GRUB stopped at "unaligned pointer" in the
@@ -2057,6 +2096,14 @@ mod grub_defaults_tests {
         let end = guard + iso[guard..].find("\nfi\n").expect("the guard's end");
         assert!(guard < set && set < end, "the theme is set only inside the UEFI guard");
         assert_eq!(iso.matches("set theme=").count(), 1, "and nowhere else");
+
+        // The text installer too (review of #820 at a6c728c5): it themed a BIOS install whatever
+        // `$IS_EFI` said, and grub-ground then wrote its block for that menu as well.
+        let text = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../deploy/yantrik-os/yantrik-install.sh"));
+        let theme = text.find("GRUB_THEME=").expect("the text installer's theme line");
+        let guard = text[..theme].rfind("if $IS_EFI && ").expect("the text installer copies the theme under $IS_EFI");
+        assert!(!text[guard..theme].contains("\nfi\n"), "and the theme line is inside that branch");
+        assert_eq!(text.matches("GRUB_THEME=").count(), 1, "and nowhere else");
     }
 
     /// Nothing on tty1 before the desktop, on the live image and on both installers' machines.
