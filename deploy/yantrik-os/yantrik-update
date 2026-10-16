@@ -1928,7 +1928,13 @@ migrate_grub_cmdline() {
     note="$UPDATES_DIR/grub-cmdline-left-alone"
     if [ "$(cat "$note" 2>/dev/null)" != "$lines" ]; then
       info "$f: the kernel line is not one a Yantrik installer wrote; left as it is: ${lines:-(none)}"
-      { printf '%s\n' "$lines" > "$note"; } 2>/dev/null || true
+      # Written beside it and renamed over it, never through it: updates/ was the desktop
+      # user's before cmd_migrate_ownership, and a link left there from then would have root
+      # truncate whatever it points at, sudoers or grub.cfg (security review of 5f826b95, #829,
+      # item 1). The rename replaces the link itself; -T so a link to a directory is not
+      # moved into.
+      tmp="$(mktemp "$note.XXXXXX" 2>/dev/null)" \
+        && { { printf '%s\n' "$lines" > "$tmp" && mv -fT "$tmp" "$note"; } 2>/dev/null || rm -f "$tmp"; }
     fi
     return 0
   fi
@@ -4997,6 +5003,19 @@ c.sendall((json.dumps({"ok": True, "seeded": req["rules"]}) + "\n").encode())' "
     "$(cmp -s "$gd/hand" "$gd/default/grub" && echo yes || echo no)|$([ -e "$gd/calls" ] && echo yes || echo no)|$(ls "$gd/default"/grub.before-* 2>/dev/null || echo none)"
   t "serial console: ... and said so" "not one a Yantrik installer wrote" "$out"
   is "serial console: ... once, not at every update" "" "$(gr_run ok)"
+  # A link planted in updates/ while it was the desktop user's (#829 review, item 1).
+  gr_old 'GRUB_CMDLINE_LINUX="console=ttyS0,115200 console=tty1 nomodeset"'
+  printf 'keep\n' > "$gd/victim"; mkdir -p "$gd/victim-dir"
+  ln -s "$gd/victim" "$gd/updates/grub-cmdline-left-alone"
+  gr_run ok >/dev/null
+  is "serial console: a note file that is a link leaves what it points at alone" "keep" "$(cat "$gd/victim")"
+  is "serial console: ... and the note is a file of its own" "yes|$(grep '^GRUB_CMDLINE_LINUX=' "$gd/default/grub")" \
+    "$([ -f "$gd/updates/grub-cmdline-left-alone" ] && ! [ -L "$gd/updates/grub-cmdline-left-alone" ] && echo yes || echo no)|$(cat "$gd/updates/grub-cmdline-left-alone")"
+  gr_old 'GRUB_CMDLINE_LINUX="console=ttyS0,115200 console=tty1 nomodeset"'
+  ln -s "$gd/victim-dir" "$gd/updates/grub-cmdline-left-alone"
+  gr_run ok >/dev/null
+  is "serial console: ... a link to a directory puts nothing in it" "" "$(ls -A "$gd/victim-dir")"
+  rm -rf "$gd/victim" "$gd/victim-dir"
   gr_old 'GRUB_CMDLINE_LINUX="console=ttyS0,115200 console=tty1"'
   printf 'GRUB_CMDLINE_LINUX="console=ttyS0,115200"\n' >> "$gd/default/grub"; cp -p "$gd/default/grub" "$gd/hand"
   gr_run ok >/dev/null
