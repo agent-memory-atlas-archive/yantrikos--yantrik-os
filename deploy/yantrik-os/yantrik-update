@@ -2023,10 +2023,20 @@ migrate_grub_cmdline() {
 # And the loop running now, without waiting for that start: stopped only when the port gives an
 # I/O error, which is what agetty fails on. Stopped, never masked: a machine that does have a port
 # and is started with console=ttyS0 by hand still gets its prompt there.
+# The probe is held to a few seconds: stty opens the port without blocking, but a stuck UART or
+# USB-serial driver could still hang it, and this runs as root in the middle of an update with
+# the other reconciles still to come (security review of 5f826b95, #829, item 4). A port that
+# does not answer in time is left running. A variable, so the selftest need not wait 5 s.
+SERIAL_PROBE_SECS=5
 stop_serial_getty_loop() {
-  local unit=serial-getty@ttyS0.service err
+  local unit=serial-getty@ttyS0.service err rc
   case "$(systemctl is-active "$unit" 2>/dev/null)" in active|activating|reloading) ;; *) return 0 ;; esac
-  err="$(stty -F /dev/ttyS0 2>&1 >/dev/null)" && return 0
+  err="$(timeout -k 2 "$SERIAL_PROBE_SECS" stty -F /dev/ttyS0 2>&1 >/dev/null)"; rc=$?
+  [ "$rc" = 0 ] && return 0
+  if [ "$rc" = 124 ] || [ "$rc" = 137 ]; then
+    info "/dev/ttyS0 did not answer within ${SERIAL_PROBE_SECS}s; $unit left running"
+    return 0
+  fi
   case "$err" in *"Input/output error"*) ;; *) return 0 ;; esac
   if systemctl stop "$unit" >/dev/null 2>&1; then
     info "stopped $unit: this machine has no serial port, and it was restarting every ten seconds"
@@ -5113,10 +5123,15 @@ c.sendall((json.dumps({"ok": True, "seeded": req["rules"]}) + "\n").encode())' "
        || grep -qF -- "$(printf '%s' "$GRUB_CMDLINE_NEW" | sed 's/"/\\"/g')" "$here/../../crates/yantrik-ui/src/wire/installer.rs" && echo yes || echo no)"
 
   # The loop running now: stopped only when the port gives the I/O error agetty fails on.
-  sg_run() { # sg_run <is-active answer> <stty's error, empty when it answers>: the systemctl stop made
-    ( SG_STATE="$1" SG_ERR="$2"
+  # stty is a program on PATH here, not a function, because the probe runs it under timeout.
+  mkdir -p "$gd/bin"
+  # shellcheck disable=SC2016  # the stub's own script, expanded when it runs
+  printf '%s\n' '#!/bin/sh' '[ -z "$SG_SLEEP" ] || sleep "$SG_SLEEP"' \
+    '[ -z "$SG_ERR" ] || { printf "stty: /dev/ttyS0: %s\n" "$SG_ERR" >&2; exit 1; }' > "$gd/bin/stty"
+  chmod +x "$gd/bin/stty"
+  sg_run() { # sg_run <is-active answer> <stty's error, empty when it answers> [seconds stty hangs]: the systemctl stop made
+    ( SG_STATE="$1"; export SG_ERR="$2" SG_SLEEP="${3:-}"; PATH="$gd/bin:$PATH"; SERIAL_PROBE_SECS=1
       systemctl() { if [ "$1" = is-active ]; then printf '%s\n' "$SG_STATE"; else printf '%s\n' "$*" >> "$gd/sg"; fi; }
-      stty() { [ -z "$SG_ERR" ] || { printf 'stty: /dev/ttyS0: %s\n' "$SG_ERR" >&2; return 1; }; }
       rm -f "$gd/sg"; stop_serial_getty_loop >/dev/null 2>&1; cat "$gd/sg" 2>/dev/null )
   }
   is "serial getty: restarting on a port with no UART: stopped" "stop serial-getty@ttyS0.service" \
@@ -5125,6 +5140,10 @@ c.sendall((json.dumps({"ok": True, "seeded": req["rules"]}) + "\n").encode())' "
   is "serial getty: a port that answers: left running" "" "$(sg_run active '')"
   is "serial getty: another error: left running" "" "$(sg_run active 'No such file or directory')"
   is "serial getty: not running: nothing to stop" "" "$(sg_run inactive 'Input/output error')"
+  # A probe that hangs (#829 review, item 4): given up on after SERIAL_PROBE_SECS, port left running.
+  local sg_t0; sg_t0="$(date +%s)"
+  is "serial getty: a port whose probe hangs: left running" "" "$(sg_run active 'Input/output error' 10)"
+  is "serial getty: ... and the update is not held up" "yes" "$([ $(( $(date +%s) - sg_t0 )) -lt 6 ] && echo yes || echo no)"
   is "serial getty: never masked" "no" "$(declare -f stop_serial_getty_loop | grep -q mask && echo yes || echo no)"
   is "serial console: reconcile and an up-to-date apply both run it" "yes" \
     "$(declare -f cmd_reconcile | grep -q reconcile_serial_console && declare -f cmd_apply | grep -q reconcile_serial_console && echo yes || echo no)"
