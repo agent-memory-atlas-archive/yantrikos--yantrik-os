@@ -313,25 +313,28 @@ impl Gateway {
             // same way. Its start is read to see what it refuses, and passed on as it was if not this.
             let mut peek = Vec::new();
             let _ = (&mut reply.body).take(ERROR_PEEK).read_to_end(&mut peek);
-            let refused = body::refused_params(&peek);
+            let refused = body::refused_params(&peek, &body);
             let dropped = body::drop_params(&mut body, &refused);
             if dropped.is_empty() {
                 let rest = std::mem::replace(&mut reply.body, Box::new(std::io::empty()));
                 reply.body = Box::new(std::io::Cursor::new(peek).chain(rest));
             } else {
-                // The provider said the model refuses it, so it is remembered whatever the second
-                // answer: a 400 for another reason would not have named it.
-                if let Ok(mut remembered) = self.params_refused.lock() {
-                    let entry = remembered.entry(model_id.clone()).or_default();
-                    entry.extend(dropped.iter().filter(|p| !entry.contains(p)).collect::<Vec<_>>());
-                }
-                tracing::info!(model = %model_id, params = ?dropped, "the model's provider refused these parameters; they are sent no more this run");
-                note_dropped(call, dropped);
+                note_dropped(call, dropped.clone());
                 let bytes = serde_json::to_vec(&body).map_err(|_| Refusal::new(400, "bad_request", "The request could not be re-encoded."))?;
                 reply = self
                     .upstream
                     .chat(&target.base_url, target.key.as_deref(), &bytes)
                     .map_err(|u| Refusal::new(502, u.code, u.message))?;
+                // Remembered for every harness only when dropping it was the difference. The error
+                // text can echo what a caller sent, so a 400 alone is one caller's word; a success
+                // without the parameter is the provider's.
+                if (200..300).contains(&reply.status) {
+                    if let Ok(mut remembered) = self.params_refused.lock() {
+                        let entry = remembered.entry(model_id.clone()).or_default();
+                        entry.extend(dropped.iter().filter(|p| !entry.contains(p)).collect::<Vec<_>>());
+                    }
+                    tracing::info!(model = %model_id, params = ?dropped, "the model's provider refused these parameters; they are sent no more this run");
+                }
             }
         }
         if reply.status == 400 && target.reasoning == switch && effort.is_some() {

@@ -715,3 +715,71 @@ fn a_400_that_names_no_refused_parameter_reaches_the_caller_whole_and_keeps_temp
     assert!(g.params_refused.lock().unwrap().is_empty());
     assert!(g.log.last_for("mind").unwrap().dropped.is_empty());
 }
+
+/// Answers 400 naming the first key it does not know, as OpenAI-compatible servers do, and the
+/// temperature refusal to a body that carries it.
+struct EchoesUnknownKeys(Mutex<usize>);
+
+impl Upstream for EchoesUnknownKeys {
+    fn chat(&self, _base_url: &str, _key: Option<&str>, body: &[u8]) -> Result<Reply, Unreachable> {
+        *self.0.lock().unwrap() += 1;
+        let v: Value = serde_json::from_slice(body).unwrap();
+        let known = ["model", "messages", "temperature", "stream", "stream_options"];
+        let unknown = v.as_object().unwrap().keys().find(|k| !known.contains(&k.as_str())).cloned();
+        let text = match unknown {
+            Some(k) => json!({"error": {"message": format!("Unrecognized request argument supplied: {k}")}}).to_string(),
+            None if v.get("temperature").is_some() => TEMPERATURE_DEPRECATED.to_string(),
+            None => return Ok(Reply { status: 200, content_type: "application/json".into(), body: Box::new(Cursor::new(b"{}".to_vec())) }),
+        };
+        Ok(Reply { status: 400, content_type: "application/json".into(), body: Box::new(Cursor::new(text.into_bytes())) })
+    }
+}
+
+fn with_upstream(upstream: Arc<dyn Upstream>) -> (Gateway, String) {
+    let tokens = Arc::new(Tokens::in_memory());
+    let pi = mint().unwrap();
+    tokens.register(&pi, Grant { harness: "pi".into(), private_context: false }).unwrap();
+    let g = Gateway {
+        tokens,
+        accounts: Arc::new(Fake { private_mode: false, cloud: Sharing::Share, lane: None }),
+        upstream,
+        log: Arc::new(CallLog::in_memory()),
+        template_refused: Default::default(),
+        params_refused: Default::default(),
+    };
+    (g, pi)
+}
+
+#[test]
+fn a_caller_cannot_make_the_gateway_drop_temperature_for_everyone_with_a_key_the_upstream_echoes() {
+    for key in ["x temperature", "x. temperature is not supported"] {
+        let calls = Arc::new(EchoesUnknownKeys(Mutex::new(0)));
+        let (g, pi) = with_upstream(calls.clone());
+        let ask = json!({"model": "elsewhere/claude-sonnet-5-5", "messages": [], "temperature": 0.7, key: 1});
+        let (status, _) = answer(&g, &request("POST", "/v1/chat/completions", Some(&pi), ask));
+        assert_eq!(status, 400, "{key}");
+        assert_eq!(*calls.0.lock().unwrap(), 1, "the echo is not taken as the model's refusal: {key}");
+        assert!(g.params_refused.lock().unwrap().is_empty(), "{key}");
+    }
+}
+
+#[test]
+fn a_retry_that_still_fails_is_not_remembered() {
+    // Refuses temperature, and every other request too.
+    struct StillRefuses(Mutex<Vec<Value>>);
+    impl Upstream for StillRefuses {
+        fn chat(&self, _base_url: &str, _key: Option<&str>, body: &[u8]) -> Result<Reply, Unreachable> {
+            self.0.lock().unwrap().push(serde_json::from_slice(body).unwrap());
+            Ok(Reply { status: 400, content_type: "application/json".into(), body: Box::new(Cursor::new(TEMPERATURE_DEPRECATED.as_bytes().to_vec())) })
+        }
+    }
+    let upstream = Arc::new(StillRefuses(Mutex::new(Vec::new())));
+    let (g, pi) = with_upstream(upstream.clone());
+    let (status, _) = answer(&g, &request("POST", "/v1/chat/completions", Some(&pi), mind_body("elsewhere/claude-sonnet-5-5", false)));
+    assert_eq!(status, 400);
+    let sent = upstream.0.lock().unwrap();
+    assert_eq!(sent.len(), 2, "asked again once without it");
+    assert!(sent[1].get("temperature").is_none());
+    assert!(g.params_refused.lock().unwrap().is_empty(), "dropping it was not the difference, so nothing is remembered");
+    assert_eq!(g.log.last_for("pi").unwrap().dropped, vec!["temperature".to_string()], "this call's log still says what it dropped");
+}

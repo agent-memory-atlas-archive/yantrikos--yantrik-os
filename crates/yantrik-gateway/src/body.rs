@@ -86,9 +86,20 @@ pub const DROPPABLE: [&str; 2] = ["temperature", "top_p"];
 const REFUSED: [&str; 7] =
     ["is deprecated", "deprecated for this model", "not supported", "unsupported", "does not support", "unrecognized request argument", "unknown parameter"];
 
-/// The parameters of [`DROPPABLE`] an upstream's 400 body says the model refuses. The message
-/// must name the parameter as a word of its own and say it is deprecated or unsupported.
-pub fn refused_params(error_body: &[u8]) -> Vec<&'static str> {
+/// The parameters of [`DROPPABLE`] that `sent` carries and an upstream's 400 body says the model
+/// refuses. The message must name the parameter as a word of its own and say it is deprecated or
+/// unsupported. Providers echo an unknown key's name in their 400, so when `sent` has another key
+/// holding the parameter's name (`"x temperature"`), the message may be that echo, and the
+/// parameter is not taken as refused.
+pub fn refused_params(error_body: &[u8], sent: &Value) -> Vec<&'static str> {
+    let Some(sent) = sent.as_object() else { return Vec::new() };
+    refused_in(error_body)
+        .into_iter()
+        .filter(|p| sent.contains_key(*p) && !sent.keys().any(|k| k != p && k.to_ascii_lowercase().contains(p)))
+        .collect()
+}
+
+fn refused_in(error_body: &[u8]) -> Vec<&'static str> {
     let Ok(v) = serde_json::from_slice::<Value>(error_body) else { return Vec::new() };
     let message = v
         .pointer("/error/message")
@@ -272,9 +283,21 @@ mod tests {
             ("temperature is deprecated", &[]),
             ("", &[]),
         ];
+        let sent = json!({"model": "x", "messages": [], "temperature": 0.7, "top_p": 0.9});
         for (body, want) in cases {
-            assert_eq!(refused_params(body.as_bytes()), *want, "{body}");
+            assert_eq!(refused_params(body.as_bytes(), &sent), *want, "{body}");
         }
+    }
+
+    #[test]
+    fn a_refusal_that_may_echo_the_callers_own_key_or_names_what_was_not_sent_drops_nothing() {
+        let echoed = |key: &str| json!({"error": {"message": format!("Unrecognized request argument supplied: {key}")}}).to_string();
+        for key in ["x temperature", "x. temperature is not supported", "my_temperature"] {
+            let sent = json!({"model": "x", "temperature": 0.7, key: 1});
+            assert!(refused_params(echoed(key).as_bytes(), &sent).is_empty(), "{key}");
+        }
+        let without = json!({"model": "x", "messages": []});
+        assert!(refused_params(ANTHROPIC_400.as_bytes(), &without).is_empty(), "nothing to drop");
     }
 
     #[test]
