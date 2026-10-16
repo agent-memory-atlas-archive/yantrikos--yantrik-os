@@ -505,6 +505,44 @@ class HermesConfigTests(unittest.TestCase):
         self.assertIn("YANTRIKDB_AGENT_NAME hermes", memory, "every write carries its harness")
         self.assertIn("TODO(#586)", memory, "the shared mode waits on the tamper-proof door, said plainly")
 
+
+class HermesYaml11Tests(unittest.TestCase):
+    """Hermes's own Python: ruamel.yaml and no PyYAML, which the class above needs."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.dir.name, "config.yaml")
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def test_off_stays_a_string_where_hermes_writes_with_ruamel(self):
+        # Hermes 0.21's Python has no PyYAML, so apply() writes with ruamel.yaml. As YAML 1.2 that
+        # wrote `profile_build: off` unquoted, Hermes read it back as YAML 1.1 (hermes_yaml.py), got
+        # False and still made the offer (VM 542, 15 Oct 2026). Read here as Hermes reads it.
+        try:
+            from ruamel.yaml import YAML
+        except ImportError:
+            self.skipTest("ruamel.yaml is not installed here")
+        with open(self.path, "w", encoding="utf-8") as f:
+            f.write("model:\n  default: x\n")
+        os.chmod(self.path, 0o600)
+        saved = sys.modules.get("yaml")
+        sys.modules["yaml"] = None  # `import yaml` raises ImportError: the ruamel branch
+        try:
+            hermes_config.apply(self.path)
+        finally:
+            if saved is None:
+                del sys.modules["yaml"]
+            else:
+                sys.modules["yaml"] = saved
+        as_hermes = YAML(typ="safe", pure=True)
+        as_hermes.version = (1, 1)
+        with open(self.path, encoding="utf-8") as f:
+            text = f.read()
+        self.assertEqual(as_hermes.load(text)["onboarding"]["profile_build"], "off", text)
+        self.assertNotIn("%YAML", text, "no directive, as Hermes's own safe_dump writes none")
+
 @unittest.skipIf(yaml is None, "PyYAML is not installed")
 class HermesMemoryTests(unittest.TestCase):
     """`memory`: YantrikDB as Hermes's one memory, written without `hermes config set`."""

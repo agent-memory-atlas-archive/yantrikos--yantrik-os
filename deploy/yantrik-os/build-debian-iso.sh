@@ -1581,8 +1581,14 @@ if terminal_output gfxterm; then
     insmod gfxterm_background
     background_color "#0e1018"
 fi
-set theme=/boot/grub/themes/yantrik/theme.txt
-export theme
+# The theme on UEFI only. On a legacy BIOS (SeaBIOS) the themed menu ran its countdown and then
+# GRUB stopped at "unaligned pointer 0x1e" instead of booting: CI's boot test of 6ebe7787 waited
+# 25 minutes for a login prompt (15 Oct 2026). The same image without the theme, fonts kept,
+# booted and passed all 15 checks. A BIOS machine gets the DejaVu menu without the theme.
+if [ "${grub_platform}" = "efi" ]; then
+    set theme=/boot/grub/themes/yantrik/theme.txt
+    export theme
+fi
 
 # Speak on the serial line AS WELL AS the screen, and accept input from both.
 # `--append`, so this adds the serial line to the screen rather than replacing it.

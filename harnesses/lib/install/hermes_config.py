@@ -88,12 +88,26 @@ def _yaml():
     except ImportError:
         from ruamel.yaml import YAML
         from ruamel.yaml.error import YAMLError
+        from ruamel.yaml.resolver import VersionedResolver
+
+        # Hermes reads its config as YAML 1.1 (hermes_yaml.py, "Shared YAML 1.1 policy"), where a
+        # bare `off`, `on`, `yes` or `no` is a boolean. Written as YAML 1.2, the default here,
+        # `profile_build: "off"` went out unquoted and came back as False, so Hermes still made
+        # its profile offer (VM 542, 15 Oct 2026). Written and read as 1.1, the way Hermes's own
+        # safe_dump does, such strings are quoted and stay strings, with no %YAML directive.
+        class Yaml11Resolver(VersionedResolver):
+            @property
+            def processing_version(self):
+                return (1, 1)
 
         def load(text):
-            return YAML(typ="safe", pure=True).load(text)
+            y = YAML(typ="safe", pure=True)
+            y.version = (1, 1)
+            return y.load(text)
 
         def dump(data, f):
             y = YAML(typ="safe", pure=True)
+            y.Resolver = Yaml11Resolver
             y.default_flow_style = False
             y.allow_unicode = True
             y.dump(data, f)

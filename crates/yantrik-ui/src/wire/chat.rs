@@ -495,6 +495,13 @@ fn wire_new_chat(ui: &App, ctx: &AppContext) {
         // of what was said before (agents/handover.rs). Set only now, past the refusal above.
         crate::agents::store().new_conversation();
         let active = super::harness::host().map(|h| h.active_id());
+        // And, when this is the person's own press of +, a taint scope that has read nothing for
+        // the mind that is sent /new (`taint_scope`). Not for `new_chat` on the control surface,
+        // which invokes this same callback: a caller there may be a mind that passes for the
+        // person, and only the person may untaint a conversation.
+        if crate::taint_scope::is_press() {
+            crate::taint_scope::begin_by_person(active.as_deref().unwrap_or(super::harness::BUILTIN_ID));
+        }
         match active.as_deref() {
             None | Some(super::harness::BUILTIN_ID) => {
                 if let Err(e) = bridge.handle().new_conversation() {

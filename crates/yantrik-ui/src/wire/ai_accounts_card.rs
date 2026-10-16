@@ -147,6 +147,9 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(ui) = weak.upgrade() {
                 ui.global::<AiAccountsState>().set_refreshing(false);
+                // The catalogue is what `picked` resolves against: an account added, removed or
+                // listed again can change where a mind on the gateway sends its words.
+                crate::wire::runs_on_card::publish(&ui);
                 render(&ui);
             }
         });
@@ -171,6 +174,8 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         if let Err(e) = consent::set(&consent::path(), &a.id, sharing) {
             tracing::warn!(error = %e, "the private-context choice was not saved");
         }
+        // A mind on the gateway may now be refused, or sent again: the composer's line says so.
+        crate::wire::runs_on_card::publish(&ui);
         render(&ui);
     });
     let weak = ui.as_weak();
@@ -182,6 +187,7 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                 tracing::warn!(error = %e, "the private lane was not saved");
             }
         }
+        crate::wire::runs_on_card::publish(&ui);
         render(&ui);
     });
     render(ui);

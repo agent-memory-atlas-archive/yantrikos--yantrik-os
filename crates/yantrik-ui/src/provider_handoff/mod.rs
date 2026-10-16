@@ -228,6 +228,39 @@ pub(crate) trait Handoff: Send + Sync {
     fn private_context(&self) -> bool {
         true
     }
+    /// The model its own config asks the gateway for now: `picked`, or an `<account>/<model>` set
+    /// there since. `None` when that config no longer points at the gateway, or cannot be read:
+    /// then the gateway cannot say where its words go, and only what it reports is said. The
+    /// Mind keeps its provider itself (no file here), and was given `picked`.
+    fn asks_gateway_for(&self, _home: &Path) -> Option<String> {
+        Some(yantrik_gateway::PICKED.into())
+    }
+}
+
+/// Whether a mind given Yantrik models is still on them, by what it reports. Only the Mind needs
+/// this: it keeps its provider in its own settings, which the desktop does not read, and can be
+/// moved off the gateway there while the marker stays. What it reports
+/// ("yantrik-gateway:picked", "ollama-cloud:deepseek-v4.1-flash") says which; when it names another
+/// provider, its own words are said, never the gateway's. Every other mind's config is read
+/// ([`Handoff::asks_gateway_for`]).
+pub(crate) fn still_on_gateway(harness: &str, detail: Option<&str>) -> bool {
+    if harness != mind::ID {
+        return true;
+    }
+    match detail.map(str::trim).filter(|d| !d.is_empty()) {
+        None => true,
+        Some(d) => d.contains(mind::SOURCE) || d.contains(yantrik_gateway::PICKED),
+    }
+}
+
+/// Whether an address is this desktop's gateway, as `plan_gateway` writes it.
+pub(crate) fn is_gateway(base_url: &str) -> bool {
+    base_url.trim().trim_end_matches('/') == yantrik_gateway::base_url().trim_end_matches('/')
+}
+
+/// A non-empty string value of a JSON object.
+pub(crate) fn text_of(m: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<String> {
+    m.get(key).and_then(serde_json::Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
 }
 
 /// The harnesses that know how to take a provider, by id.

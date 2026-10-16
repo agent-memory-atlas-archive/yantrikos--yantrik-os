@@ -45,6 +45,16 @@ impl Handoff for Pi {
         Err("Pi keeps its providers itself; give it Yantrik models instead, or set it up with its own `pi` login".into())
     }
 
+    /// `model` in pi.json while `provider` is ours: what `--model` asks the gateway for.
+    fn asks_gateway_for(&self, home: &Path) -> Option<String> {
+        let config = super::read_json_object(&pi_json(home)).ok()?;
+        if super::text_of(&config, "provider")? != PROVIDER {
+            return None;
+        }
+        let model = super::text_of(&config, "model")?;
+        Some(model.strip_prefix(&format!("{PROVIDER}/")).map(str::to_string).unwrap_or(model))
+    }
+
     fn plan_gateway(&self, home: &Path, offer: &Offer) -> Result<Plan, String> {
         let mut config = super::read_json_object(&pi_json(home))?;
         config.insert("provider".into(), Value::String(PROVIDER.into()));

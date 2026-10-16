@@ -67,7 +67,15 @@ pub struct Gateway {
     /// A `custom` account is any endpoint the person typed, so a hosted service serving a Qwen3 can
     /// sit behind one; it is asked once more without the switch, and never sent it again this session.
     pub template_refused: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// Sampling parameters ([`body::DROPPABLE`]) a model's provider answered 400 to, by
+    /// `<account>/<model>`: "`temperature` is deprecated for this model". The call goes again
+    /// without it, once, and later calls to that model are sent none for as long as the gateway runs.
+    pub params_refused: Arc<Mutex<std::collections::HashMap<String, Vec<&'static str>>>>,
 }
+
+/// How much of a refusing upstream's body is read to see which parameter it names. An error body
+/// is a few hundred bytes; past this the rest is still passed through to the harness, unread.
+const ERROR_PEEK: u64 = 16 * 1024;
 
 /// The most connections served at once. The mind account can reach this port (its kernel loopback
 /// set opens it), and a thread per connection with no bound would let it, or anything else on this
@@ -246,6 +254,7 @@ impl Gateway {
             completion_tokens: 0,
             ms: 0,
             lane_for: None,
+            dropped: Vec::new(),
         };
         let result = self.forward(grant, req, out, &mut call);
         if let Err(refusal) = result {
@@ -260,22 +269,15 @@ impl Gateway {
     fn forward(&self, grant: &Grant, req: &Request, out: &mut impl Write, call: &mut Call) -> Result<(), Refusal> {
         let mut body: Value = serde_json::from_slice(&req.body)
             .map_err(|_| Refusal::new(400, "bad_request", "The request body is not JSON."))?;
-        let mut asked = body.get("model").and_then(Value::as_str).unwrap_or("").to_string();
-        if asked == crate::PICKED {
-            asked = self.accounts.picked_model(&grant.harness).ok_or_else(|| {
-                Refusal::new(404, "model_not_found", "No model is picked for this mind yet: pick one in the ask bar, or add an account under Settings → AI & Intelligence.")
-            })?;
-        }
-        let r = route::parse(&asked).ok_or_else(|| {
-            Refusal::new(404, "model_not_found", format!("`{asked}` is not a model here: name one as <account>/<model>, from /v1/models."))
+        let asked = body.get("model").and_then(Value::as_str).unwrap_or("").to_string();
+        let routed = route_call(self.accounts.as_ref(), grant, &asked, |r| {
+            call.account = r.account.clone();
+            call.model = r.model.clone();
         })?;
-        call.account = r.account.clone();
-        call.model = r.model.clone();
-        let mut target = self.accounts.target(&r.account, &r.model)?;
-        if policy::decide(grant, &target, self.accounts.private_mode())? == Decision::Lane {
-            target = self.lane(&target)?;
+        let (asked, mut target) = (routed.asked, routed.target);
+        if let Some(meant) = routed.lane_for {
             // The log keeps which model answered, and which account it was meant for.
-            call.lane_for = Some(format!("{}/{}", r.account, r.model));
+            call.lane_for = Some(meant);
             call.account = target.account.clone();
             call.model = target.model.clone();
         }
@@ -293,11 +295,52 @@ impl Gateway {
         }
         let effort = body::rewrite(&mut body, &target)?;
         call.effort = effort.map(|e| e.as_str().to_string());
+        // What this model is known to refuse goes before the first send: from the model's caps, or
+        // from its provider's own 400 earlier in this run.
+        let model_id = format!("{}/{}", target.account, target.model);
+        let mut known: Vec<&'static str> = body::known_refused(&target).to_vec();
+        if let Ok(refused) = self.params_refused.lock() {
+            known.extend(refused.get(&model_id).into_iter().flatten().filter(|p| !known.contains(p)).collect::<Vec<_>>());
+        }
+        note_dropped(call, body::drop_params(&mut body, &known));
+        // Thinking, once the effort mapping turned it on, narrows what sampling the provider takes.
+        if let Some(map) = body.as_object_mut() {
+            note_dropped(call, body::fit_sampling_to_thinking(map));
+        }
         let bytes = serde_json::to_vec(&body).map_err(|_| Refusal::new(400, "bad_request", "The request could not be re-encoded."))?;
         let mut reply = self
             .upstream
             .chat(&target.base_url, target.key.as_deref(), &bytes)
             .map_err(|u| Refusal::new(502, u.code, u.message))?;
+        if reply.status == 400 {
+            // The 400 arrives whole before any stream starts, so a streamed call is asked again the
+            // same way. Its start is read to see what it refuses, and passed on as it was if not this.
+            let mut peek = Vec::new();
+            let _ = (&mut reply.body).take(ERROR_PEEK).read_to_end(&mut peek);
+            let refused = body::refused_params(&peek, &body);
+            let dropped = body::drop_params(&mut body, &refused);
+            if dropped.is_empty() {
+                let rest = std::mem::replace(&mut reply.body, Box::new(std::io::empty()));
+                reply.body = Box::new(std::io::Cursor::new(peek).chain(rest));
+            } else {
+                note_dropped(call, dropped.clone());
+                let bytes = serde_json::to_vec(&body).map_err(|_| Refusal::new(400, "bad_request", "The request could not be re-encoded."))?;
+                reply = self
+                    .upstream
+                    .chat(&target.base_url, target.key.as_deref(), &bytes)
+                    .map_err(|u| Refusal::new(502, u.code, u.message))?;
+                // Remembered for every harness only when dropping it was the difference. The error
+                // text can echo what a caller sent, so a 400 alone is one caller's word; a success
+                // without the parameter is the provider's.
+                if (200..300).contains(&reply.status) {
+                    if let Ok(mut remembered) = self.params_refused.lock() {
+                        let entry = remembered.entry(model_id.clone()).or_default();
+                        entry.extend(dropped.iter().filter(|p| !entry.contains(p)).collect::<Vec<_>>());
+                    }
+                    tracing::info!(model = %model_id, params = ?dropped, "the model's provider refused these parameters; they are sent no more this run");
+                }
+            }
+        }
         if reply.status == 400 && target.reasoning == switch && effort.is_some() {
             // The switch was the gateway's, not the caller's: the call goes again without it, once.
             body::drop_template_switch(&mut body);
@@ -326,17 +369,67 @@ impl Gateway {
     }
 }
 
-impl Gateway {
-    /// The private lane's account and model, in place of `meant` for a call that carries private
-    /// context. Refused, with the fix named, when there is none or it is not on this machine or
-    /// network: a lane never sends anything off it.
-    fn lane(&self, meant: &Target) -> Result<Target, Refusal> {
-        let lane = self.accounts.private_lane().and_then(|id| route::parse(&id)).ok_or_else(|| policy::not_shared(&meant.provider))?;
-        let target = self.accounts.target(&lane.account, &lane.model)?;
-        if !target.local {
-            return Err(policy::not_shared(&meant.provider));
+/// Where a call goes, as the gateway decides it before any byte is sent: `asked` resolved
+/// ([`crate::PICKED`] to the harness's pick), the account's target, and the private lane in its
+/// place when the person keeps private context on this computer for that account. A refusal is
+/// what the harness is shown, and means nothing is sent.
+#[derive(Debug)]
+pub struct Routed {
+    /// `<account>/<model>`, with [`crate::PICKED`] resolved.
+    pub asked: String,
+    /// Where the call goes: the account it names, or the private lane.
+    pub target: Target,
+    /// When it goes to the private lane: the `<account>/<model>` it was meant for.
+    pub lane_for: Option<String>,
+}
+
+/// The gateway's one routing decision: what [`Gateway`] does with each call, and what the desktop
+/// says about where words typed to a mind on the gateway go (the chat composer's line), so the two
+/// cannot disagree. `parsed` sees the account and model the call names before its target is
+/// looked up (the call log keeps them even when that refuses). `accounts.target` may hand back a
+/// target with no key: nothing here reads it.
+pub fn route_call(accounts: &dyn Accounts, grant: &Grant, asked: &str, parsed: impl FnOnce(&route::Route)) -> Result<Routed, Refusal> {
+    let mut asked = asked.to_string();
+    if asked == crate::PICKED {
+        asked = accounts.picked_model(&grant.harness).ok_or_else(no_pick)?;
+    }
+    let r = route::parse(&asked).ok_or_else(|| {
+        Refusal::new(404, "model_not_found", format!("`{asked}` is not a model here: name one as <account>/<model>, from /v1/models."))
+    })?;
+    parsed(&r);
+    let target = accounts.target(&r.account, &r.model)?;
+    if policy::decide(grant, &target, accounts.private_mode())? == Decision::Lane {
+        let lane = lane(accounts, &target)?;
+        return Ok(Routed { asked, target: lane, lane_for: Some(format!("{}/{}", r.account, r.model)) });
+    }
+    Ok(Routed { asked, target, lane_for: None })
+}
+
+/// The refusal for [`crate::PICKED`] when nothing is picked and nothing usable is there to pick.
+pub const NO_PICK: &str = "No model is picked for this mind yet: pick one in the ask bar, or add an account under Settings → AI & Intelligence.";
+
+fn no_pick() -> Refusal {
+    Refusal::new(404, "model_not_found", NO_PICK)
+}
+
+/// The private lane's account and model, in place of `meant` for a call that carries private
+/// context. Refused, with the fix named, when there is none or it is not on this machine or
+/// network: a lane never sends anything off it.
+fn lane(accounts: &dyn Accounts, meant: &Target) -> Result<Target, Refusal> {
+    let lane = accounts.private_lane().and_then(|id| route::parse(&id)).ok_or_else(|| policy::not_shared(&meant.provider))?;
+    let target = accounts.target(&lane.account, &lane.model)?;
+    if !target.local {
+        return Err(policy::not_shared(&meant.provider));
+    }
+    Ok(target)
+}
+
+/// Add what was taken out of a call's body to its log line: the parameter's name, never its value.
+fn note_dropped(call: &mut Call, dropped: Vec<&'static str>) {
+    for p in dropped {
+        if !call.dropped.iter().any(|d| d == p) {
+            call.dropped.push(p.to_string());
         }
-        Ok(target)
     }
 }
 

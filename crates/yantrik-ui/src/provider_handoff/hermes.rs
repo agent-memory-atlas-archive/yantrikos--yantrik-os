@@ -42,6 +42,14 @@ impl Handoff for Hermes {
         Err("Hermes chooses its model itself (Choose model); give it Yantrik models instead".into())
     }
 
+    /// `model.default`, while `model.base_url` is the gateway's.
+    fn asks_gateway_for(&self, home: &Path) -> Option<String> {
+        let doc: Value = serde_yaml::from_str(&super::read_config(&config(home)).ok()??).ok()?;
+        let model = doc.get("model")?;
+        let s = |k: &str| model.get(k).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+        super::is_gateway(&s("base_url")?).then(|| s("default")).flatten()
+    }
+
     fn plan_gateway(&self, home: &Path, offer: &Offer) -> Result<Plan, String> {
         let path = config(home);
         let mut doc: Mapping = match super::read_config(&path)? {

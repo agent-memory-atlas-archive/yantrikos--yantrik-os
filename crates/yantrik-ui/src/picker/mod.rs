@@ -394,8 +394,10 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                 c.pick_effort(&mind, first);
             }
         }
-        // A mind on Yantrik models asks for `picked`, so this is its next call's model.
+        // A mind on Yantrik models asks for `picked`, so this is its next call's model, and the
+        // composer's line says where its words go now.
         save_choices();
+        crate::wire::runs_on_card::publish(&ui);
         render(&ui, &b);
     });
     let (w, b) = (ui.as_weak(), bridge.clone());

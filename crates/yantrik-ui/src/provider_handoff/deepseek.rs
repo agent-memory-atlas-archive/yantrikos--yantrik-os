@@ -87,6 +87,12 @@ impl Handoff for DeepSeek {
         })
     }
 
+    /// `model`, while `base_url` is the gateway's.
+    fn asks_gateway_for(&self, home: &Path) -> Option<String> {
+        let config = super::read_json_object(&home.join(".config/yantrik/deepseek.json")).ok()?;
+        super::is_gateway(&super::text_of(&config, "base_url")?).then(|| super::text_of(&config, "model")).flatten()
+    }
+
     /// The gateway is one more OpenAI-compatible endpoint to it: `base_url`, `model` and the token
     /// as `api_key`, and the rest of the file as it was.
     fn plan_gateway(&self, home: &Path, offer: &super::Offer) -> Result<Plan, String> {

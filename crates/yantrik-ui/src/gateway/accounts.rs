@@ -11,7 +11,17 @@ use crate::bridge::CompanionBridge;
 use crate::wire::settings::ProviderStore;
 
 pub(super) struct ShellAccounts {
-    pub bridge: Arc<CompanionBridge>,
+    pub keys: Keys,
+}
+
+/// Whether a target carries its key.
+pub(super) enum Keys {
+    /// Read at the moment of the call, from the vault (through the companion's bridge) or the saved
+    /// provider: what the server forwards with.
+    Read(Arc<CompanionBridge>),
+    /// Never read: only where a call would go, for the chat composer's line ([`super::route_for`]).
+    /// The address is the account's own, with any part only the vault holds left as written.
+    NotRead,
 }
 
 /// Where a call carrying private context to this account goes ([`consent::Consent::sharing_for`]).
@@ -48,16 +58,21 @@ impl yantrik_gateway::Accounts for ShellAccounts {
             .find(&ai_accounts::models::gateway_id(account, model))
             .map(|m| m.caps.clone())
             .unwrap_or_else(|| caps_for(&a.provider_type, model, None, None));
-        let saved = ProviderStore::load().entries;
-        let vault = |id: &str| ai_accounts::vault_value(&self.bridge, id);
-        let resolved = keys::resolve(a, &saved, &vault).map_err(|why| {
-            let code = match why {
-                keys::Missing::Key => "key_missing",
-                keys::Missing::Vault => "vault_locked",
-                keys::Missing::Address => "address_incomplete",
-            };
-            Refusal::new(503, code, format!("{} cannot be used now: {why}.", a.name))
-        })?;
+        let resolved = match &self.keys {
+            Keys::Read(bridge) => {
+                let saved = ProviderStore::load().entries;
+                let vault = |id: &str| ai_accounts::vault_value(bridge, id);
+                keys::resolve(a, &saved, &vault).map_err(|why| {
+                    let code = match why {
+                        keys::Missing::Key => "key_missing",
+                        keys::Missing::Vault => "vault_locked",
+                        keys::Missing::Address => "address_incomplete",
+                    };
+                    Refusal::new(503, code, format!("{} cannot be used now: {why}.", a.name))
+                })?
+            }
+            Keys::NotRead => keys::Resolved { base_url: a.base_url.clone(), key: None },
+        };
         let allowed = consent::load(&consent::path());
         Ok(Target {
             account: a.id.clone(),

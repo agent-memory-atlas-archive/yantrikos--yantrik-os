@@ -67,6 +67,17 @@ pub fn log() -> Arc<CallLog> {
     LOG.get_or_init(|| Arc::new(CallLog::at(log_path()))).clone()
 }
 
+/// Where a call from `harness` asking for `asked` ([`yantrik_gateway::PICKED`], or the model its
+/// config names) goes, decided by the gateway's own routing (`server::route_call`) over the same
+/// accounts, pick, consent and Private mode it serves with: what the chat composer's line says for
+/// a mind on the gateway. No key is read. Every grant carries private context (`tokens()` marks
+/// them all so), and so does this one.
+pub(crate) fn route_for(harness: &str, asked: &str) -> Result<yantrik_gateway::server::Routed, yantrik_gateway::Refusal> {
+    let accounts = accounts::ShellAccounts { keys: accounts::Keys::NotRead };
+    let grant = yantrik_gateway::Grant { harness: harness.to_string(), private_context: true };
+    yantrik_gateway::server::route_call(&accounts, &grant, asked, |_| {})
+}
+
 /// `Ok` while listening; else why not ("127.0.0.1:7460 is in use").
 pub fn state() -> Result<(), String> {
     match (GATEWAY.get(), DOWN.get()) {
@@ -93,10 +104,11 @@ pub fn start(bridge: Arc<CompanionBridge>) {
     };
     let gateway = Arc::new(Gateway {
         tokens: tokens(),
-        accounts: Arc::new(accounts::ShellAccounts { bridge }),
+        accounts: Arc::new(accounts::ShellAccounts { keys: accounts::Keys::Read(bridge) }),
         upstream: Arc::new(Http::default()),
         log: log(),
         template_refused: Default::default(),
+        params_refused: Default::default(),
     });
     if GATEWAY.set(gateway.clone()).is_ok() {
         let _ = std::thread::Builder::new().name("model-gateway".into()).spawn(move || gateway.serve(listener));
