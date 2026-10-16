@@ -350,8 +350,8 @@ conversation. Point the machine at something with a GPU on your LAN, or at a pro
 
 ### An app I expected is not there
 
-Music and ySheets are **shelved** — deliberately not in this build, because there was nothing
-behind their screens. The shell says so when you ask for one, with the reason and what would
+ySheets is **shelved** — deliberately not in this build, because there is nothing behind its
+screen yet (Music was too, and came back in October 2026). The shell says so when you ask for it, with the reason and what would
 bring it back. [`design/shelved-2026-09-20.md`](../design/shelved-2026-09-20.md) is the full
 account.
 

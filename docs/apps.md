@@ -5,8 +5,8 @@ Apps screen.
 
 Every app has AI integration — you can ask the companion to help with tasks directly inside each app, or use the dedicated AI panels built into the office apps.
 
-> **Two apps are shelved and are not in this build: ySheets and Music.** They are described
-> below, marked, rather than quietly deleted, so that a page promising them cannot outlive the
+> **One app is shelved and is not in this build: ySheets.** It is described below, marked,
+> rather than quietly deleted, so that a page promising them cannot outlive the
 > decision. The account is [`design/shelved-2026-09-20.md`](../design/shelved-2026-09-20.md)
 > and the list the shell actually reads is `SHELVED` in
 > `crates/yantrik-ui/src/wire/dock.rs`.
@@ -104,24 +104,26 @@ Event management with schedule awareness.
 
 ## Media Apps
 
-### Music — SHELVED, not in this build
+### Music
 
-**Shelved on 20 September 2026**, the same way and for the same kind of reason as ySheets:
-refused by name with the reason, absent from the launcher, the Lens and the release bundle.
+Plays the music in your folders through mpv. Shelved on 20 September 2026 because nothing
+played; back since October 2026 (#728).
 
-**Why:** nothing plays audio yet — there is no playback engine, no scanner and no library
-behind the screen. 2168 lines of Slint were driven by 312 of Rust, of which 23 of 34 handlers
-did nothing, including every one that would make a sound. Double-clicking a song logged
-`"Play track index N (stub)"`. The only way a track ever appeared on that screen was
-`YANTRIK_MUSIC_DEMO=1`, which fills the library with twelve invented tracks and is honestly
-labelled a design fixture.
+**Features:**
+- A library from the folders you list under **Folders** (`~/Music` on a first run): every
+  mp3, flac, ogg, opus, wav and m4a file, titled by its file name, grouped by its folder. The
+  scan runs in the background; linked folders inside are not followed.
+- Search the library; pick a track and the list becomes the queue. The next track plays when
+  one ends.
+- Play/pause, stop, next/previous, seek, volume and mute, drawn from what mpv reports.
+- Opens a sound file passed to it (`yantrik-music-player song.flac`, or `%f` from a launcher);
+  a second launch hands the file to the open window.
+- If mpv is missing or stops, the window says so; the next play starts it again.
+- Driven by a mind as `music`: `yos act music play index=1`, `pause`, `next`, `previous`,
+  `seek seconds=30`, `set_volume percent=40`, `play_file path=~/Music/song.flac`, `rescan`.
 
-**What brings it back:** mpv driven over its JSON IPC socket, a folder scan filling a small
-library store, and play/pause/next/queue and `open <file>` working.
-
-**Audio does still play on this machine** — that is a different claim, and worth separating.
-The shell's own media screen (below) drives a real `mpv` over a real IPC socket, and every
-audio file type the desktop classifies routes to it. It never routed to the Music app.
+Not here, because nothing would back them yet: playlists, artist/album/genre views, shuffle,
+repeat, speed and an equaliser. Tags are not read.
 
 ### Image Viewer
 
