@@ -212,7 +212,7 @@ mod tests {
 
     #[test]
     fn unread_interrupts_come_first_then_newest_first() {
-        let items = vec![
+        let items = [
             card("1", Attention::Interrupt, false),
             card("2", Attention::Inbox, false),
             card("3", Attention::Inbox, false),
