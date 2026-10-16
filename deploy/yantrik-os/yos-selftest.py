@@ -471,6 +471,20 @@ def main():
         started.clear()
         out, err, code = run(lambda: yos.cmd_act(["calendar", "list_events"]))
         check("an answering calendar is not started a second time", started == [], started)
+        # A token given on the command line, not in the environment, is the one the start carries
+        # (security review of #833, note 2).
+        calendar.stopping = True
+        calendar.listener.close()
+        os.unlink(calendar.path)
+        services.remove(calendar)
+        shell.calls.clear()
+        out, err, code = run(lambda: yos.cmd_act(["calendar", "list_events", "--agent-token", "tok-flag"]))
+        acts = [c for c in shell.calls if c["method"] == "app.act"]
+        check("a --agent-token start carries that token",
+              started == ["calendar"] and acts and acts[0]["params"].get("agent_token") == "tok-flag",
+              "started %r, sent %s" % (started, json.dumps(acts[0]["params"] if acts else None)))
+        calendar = services[-1]
+        started.clear()
         out, err, code = run(lambda: yos.cmd_act(["app-calendar", "list_events"]))
         check("and naming the window starts no service", started == [] and code == 1, (started, err))
         # The cases below put their own calendar here.
