@@ -90,9 +90,10 @@ check("a polish round works from IDEAS.md", "IDEAS.md" in sent[-1] and "{" not i
 check("a polish round is never recorded as a finished mission",
       not any(m.startswith("polish:") for m in d.finished_missions()))
 
-check("FINISHED counts as a word, bare or in markdown, and lowercase prose does not",
+check("FINISHED counts on a line of its own, bare or in markdown, never inside a sentence",
       d.said_finished("All done.\n\nFINISHED") and d.said_finished("**FINISHED**")
-      and not d.said_finished("Orrery is finished, every step is ticked") and not d.said_finished("UNFINISHED"))
+      and not d.said_finished("Orrery is finished, every step is ticked") and not d.said_finished("UNFINISHED")
+      and not d.said_finished("So nothing is finished, and I'm not going to write FINISHED on a line for work that isn't there."))
 
 # A reply past describe's clip is read whole with read_message, where its FINISHED is.
 calls = []
@@ -105,7 +106,7 @@ class Done:
 
 def fake_run(argv, **_):
     calls.append(argv)
-    whole = json.dumps({"index": 9, "text": "x" * 700 + " FINISHED"}, indent=2)
+    whole = json.dumps({"index": 9, "text": "x" * 700 + chr(10) + chr(10) + "FINISHED"}, indent=2)
     return Done("Yantrik, desktop\naccepted: True\n" + whole + "\n{\"state\": 1}\n")
 
 

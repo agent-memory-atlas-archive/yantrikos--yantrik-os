@@ -146,8 +146,10 @@ def whole_text(turn):
 
 
 def said_finished(reply):
-    """FINISHED as a word of its own, bare or in markdown (`**FINISHED**`), never "finished"."""
-    return re.search(rf"(?<![A-Za-z]){FINISHED}(?![A-Za-z])", reply) is not None
+    """FINISHED on a line of its own, as every brief asks, bare or in markdown (`**FINISHED**`).
+    Not the word inside a sentence: on 561 a polish round was taken as done over "I'm not going to
+    write FINISHED on a line for work that isn't there" (16 Oct 2026)."""
+    return re.search(rf"(?m)^[^A-Za-z0-9]*{FINISHED}[^A-Za-z0-9]*$", reply) is not None
 
 
 def mind_idle(state):
