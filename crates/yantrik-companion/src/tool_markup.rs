@@ -11,7 +11,6 @@ use std::collections::HashSet;
 
 use yantrik_ml::{ApiToolCall, ApiToolCallFunction, LLMResponse, ToolCall};
 
-use crate::policy_engine::ActionContext;
 use crate::tools::{PermissionLevel, ToolRegistry};
 
 /// Shown instead of a reply that was only tool-call markup the companion could not run.
@@ -36,11 +35,34 @@ const MAX_WRITTEN_CALLS: usize = 6;
 /// The words a written reply may have before its first call ("Let me check.").
 const MAX_LEAD_IN: usize = 200;
 
+/// The only tools a call written as text may reach: read-only or reversible, in-house, and
+/// with no argument that names a URL or a command. The security delta review of #830 (16 Oct
+/// 2026) found that a denylist of risky names let 186 of 222 registered tools through,
+/// `http_fetch`, `browser_type_xy` and `vault_list` among them, so this fails closed: a tool
+/// registered tomorrow is refused from text until someone reviews it and adds it here.
+/// `discover_tools` and `remember` are here because the VM 542 asks needed them.
+pub const WRITTEN_CALLABLE: &[&str] = &[
+    "discover_tools",
+    "recall",
+    "recall_preferences",
+    "remember",
+    "calculate",
+    "date_calc",
+    "unit_convert",
+    "get_weather",
+    "web_search",
+    "calendar_today",
+    "calendar_list_events",
+    "system_info",
+    "disk_usage",
+    "memory_stats",
+];
+
 /// What a call written as text may reach. The security review of #830 (16 Oct 2026) showed
 /// that reading every block anywhere in a reply runs markup the model only quoted: a pasted
 /// email's `<invoke name="run_command">` inside a code fence, with "I would not run it" after.
-/// So a written call must be offered this turn, and must be no more than a reversible,
-/// in-house action: a text-parsed call is never trusted more than a native one.
+/// So a written call must be offered this turn and be on [`WRITTEN_CALLABLE`]: a text-parsed
+/// call reaches less than a native one, never more.
 pub struct Gate<'a> {
     pub offered: HashSet<String>,
     pub registry: &'a ToolRegistry,
@@ -67,10 +89,9 @@ impl<'a> Gate<'a> {
     }
 
     fn allows(&self, name: &str) -> bool {
-        let risk = ActionContext::from_tool(name);
-        self.offered.contains(name)
+        WRITTEN_CALLABLE.contains(&name)
+            && self.offered.contains(name)
             && !self.registry.definitions_for(&[name], PermissionLevel::Standard).is_empty()
-            && !(risk.irreversible || risk.external_facing || risk.touches_secrets)
     }
 }
 
@@ -325,6 +346,31 @@ mod tests {
         // One call it may not make spoils the reply: none of it runs.
         assert!(calls_in(&format!("{WEATHER}\n{run}"), &gate(&reg, OFFERED)).is_empty());
         assert!(is_markup_only(run), "and the reply is replaced, not shown");
+    }
+
+    /// The delta review's registry walk, kept: every registered tool a written call may reach
+    /// is one reviewed onto `WRITTEN_CALLABLE`, and every name there is a registered tool.
+    #[test]
+    fn a_written_call_reaches_only_reviewed_tools_of_the_whole_registry() {
+        let reg = registry();
+        let all: Vec<String> = reg
+            .definitions(PermissionLevel::Dangerous)
+            .iter()
+            .filter_map(|d| d["function"]["name"].as_str().map(String::from))
+            .collect();
+        let everything = Gate::new(&reg, &[], &[], &all.iter().cloned().collect(), &[]);
+        let allowed: Vec<&str> = all.iter().map(String::as_str).filter(|n| everything.allows(n)).collect();
+        for name in &allowed {
+            assert!(WRITTEN_CALLABLE.contains(name), "{name} is reachable from text without review");
+        }
+        for name in WRITTEN_CALLABLE {
+            assert!(allowed.contains(name), "{name} is listed but not a registered tool at Standard or below");
+        }
+        for refused in ["http_fetch", "web_fetch", "open_url", "browser_type_xy", "browser_click_xy", "vault_list",
+                        "vault_generate_password", "calendar_delete_event", "forget_memory", "script_write",
+                        "run_automation", "spawn_agents", "run_command", "write_file"] {
+            assert!(!everything.allows(refused), "{refused}");
+        }
     }
 
     #[test]
