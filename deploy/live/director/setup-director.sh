@@ -18,6 +18,14 @@ for u in yantrik-live-director.service yantrik-live-director.timer; do
   guest "set -e; cat > /etc/systemd/system/$u; chmod 644 /etc/systemd/system/$u" < "$u"
 done
 guest 'set -e; python3 -c "import json; json.load(open(\"/opt/yantrik-live/director/missions.json\"))"; systemctl daemon-reload' < /dev/null
+
+# The Mind's desktop bridge without the private-read taint (yos-mcp-sealed says why), named in the
+# Mind's MCP settings. Root writes the wrapper; the settings are the Mind's file, so they are
+# written as its account, never by root through a path that account could have linked elsewhere.
+guest 'set -e; cat > /opt/yantrik-live/yos-mcp-sealed.new; chmod 755 /opt/yantrik-live/yos-mcp-sealed.new; mv /opt/yantrik-live/yos-mcp-sealed.new /opt/yantrik-live/yos-mcp-sealed' < yos-mcp-sealed
+guest 'set -e
+runuser -u yantrik-mind -- sh -c "cd /var/lib/yantrik-mind/.config/yantrik-mind && { [ -e mcp.json.before-sealed ] || cp mcp.json mcp.json.before-sealed; } && printf %s \"{\\\"mcpServers\\\": {\\\"yantrik-os\\\": {\\\"command\\\": \\\"/opt/yantrik-live/yos-mcp-sealed\\\"}}}\" > mcp.json.new && mv mcp.json.new mcp.json"
+echo "the Mind bridge is sealed; restart yantrik-mind for it to take effect"' < /dev/null
 if [ "$ENABLE" = 1 ]; then
   guest 'systemctl enable --now yantrik-live-director.timer >/dev/null 2>&1; systemctl is-active yantrik-live-director.timer' < /dev/null
 else
