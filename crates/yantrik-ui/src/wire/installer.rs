@@ -1620,13 +1620,18 @@ fn install_grub_theme(mount_dir: &str) -> bool {
 /// CI boot test reads the serial line, and this file used to copy it. On an installed machine with
 /// no serial port (nearly every laptop) that made systemd start a serial login prompt that failed
 /// and restarted every ten seconds for as long as the machine ran: 3,056 times in 8.7 hours on the
-/// fresh-install VM (12 Oct). GRUB keeps its serial terminal, which costs nothing without a port,
-/// so a machine that does have one still shows the boot menu there; add `console=ttyS0,115200` to
-/// GRUB_CMDLINE_LINUX by hand to debug one over serial.
+/// fresh-install VM (12 Oct). Add `console=ttyS0,115200` to GRUB_CMDLINE_LINUX by hand to debug
+/// one over serial.
 ///
-/// The screen is gfxterm, not the firmware's console, so the menu is drawn with a font that has
-/// its characters (GRUB's unicode font, or the theme's) and, `themed`, in the theme the live
-/// image's menu has.
+/// The screen is gfxterm and nothing else, so the menu is drawn with a font that has its
+/// characters (GRUB's unicode font, or the theme's) and, `themed`, in the theme the live image's
+/// menu has. GRUB used to keep a serial terminal beside it, which was thought to cost nothing
+/// without a port. It cost the theme: with a second output GRUB draws its text menu, so no
+/// installed machine ever showed the Yantrik menu, and the screen stayed black with a cursor for
+/// 7.5 s between Enter and plymouth (VM 543, an encrypted install of de5d3456, 16 Oct 2026; the
+/// same machine with gfxterm alone drew the theme and showed no black at all). The live image
+/// appends its serial line only when a port answers (build-debian-iso.sh), which is why its menu
+/// was themed.
 ///
 /// `GRUB_GFXPAYLOAD_LINUX=keep`: the kernel starts in the mode the menu was drawn in. On BIOS it
 /// otherwise starts in VGA text mode, with no framebuffer for plymouth until a DRM driver loads; on
@@ -1637,7 +1642,7 @@ fn install_grub_theme(mount_dir: &str) -> bool {
 fn grub_defaults(encrypted: bool, themed: bool) -> String {
     let theme = if themed { format!("GRUB_THEME=\"{GRUB_THEME_DIR}/theme.txt\"\n") } else { String::new() };
     format!(
-        "GRUB_DEFAULT=0\nGRUB_TIMEOUT=3\nGRUB_DISTRIBUTOR=\"Yantrik OS\"\nGRUB_CMDLINE_LINUX_DEFAULT=\"{}\"\nGRUB_CMDLINE_LINUX=\"console=tty1\"\nGRUB_TERMINAL_INPUT=\"console serial\"\nGRUB_TERMINAL_OUTPUT=\"gfxterm serial\"\nGRUB_GFXMODE=auto\nGRUB_GFXPAYLOAD_LINUX=keep\nGRUB_SERIAL_COMMAND=\"serial --speed=115200\"\n{theme}",
+        "GRUB_DEFAULT=0\nGRUB_TIMEOUT=3\nGRUB_DISTRIBUTOR=\"Yantrik OS\"\nGRUB_CMDLINE_LINUX_DEFAULT=\"{}\"\nGRUB_CMDLINE_LINUX=\"console=tty1\"\nGRUB_TERMINAL_INPUT=\"console\"\nGRUB_TERMINAL_OUTPUT=\"gfxterm\"\nGRUB_GFXMODE=auto\nGRUB_GFXPAYLOAD_LINUX=keep\n{theme}",
         installer_unlock::cmdline_default(encrypted)
     )
 }
@@ -2044,7 +2049,10 @@ mod grub_defaults_tests {
         let plain = grub_defaults(true, false);
         assert!(!plain.contains("GRUB_THEME"), "{plain}");
         for text in [themed, plain] {
-            assert!(text.lines().any(|l| l == "GRUB_TERMINAL_OUTPUT=\"gfxterm serial\""), "{text}");
+            // gfxterm alone: a second output (serial) makes GRUB draw its text menu, not the theme.
+            assert!(text.lines().any(|l| l == "GRUB_TERMINAL_OUTPUT=\"gfxterm\""), "{text}");
+            assert!(text.lines().any(|l| l == "GRUB_TERMINAL_INPUT=\"console\""), "{text}");
+            assert!(!text.contains("serial"), "no serial terminal and no serial command: {text}");
             assert!(!text.lines().any(|l| l.starts_with("GRUB_TERMINAL=")), "GRUB_TERMINAL would override both: {text}");
             assert!(text.is_ascii(), "{text}");
         }

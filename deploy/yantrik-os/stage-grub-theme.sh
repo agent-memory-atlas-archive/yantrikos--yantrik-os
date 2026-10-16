@@ -107,7 +107,7 @@ if [ "${1:-}" = selftest ]; then
     grep -qx 'sudo install -m 0755 "$SCRIPT_DIR/grub-ground" "$ROOTFS/etc/grub.d/06_yantrik_ground"' "$HERE/build-debian-iso.sh" \
         || { echo "FAIL the image carries grub-ground as /etc/grub.d/06_yantrik_ground"; exit 1; }
     touch "$T/theme.txt"
-    out="$(GRUB_THEME="$T/theme.txt" GRUB_TERMINAL_OUTPUT="gfxterm serial" sh "$HERE/grub-ground")"
+    out="$(GRUB_THEME="$T/theme.txt" GRUB_TERMINAL_OUTPUT="gfxterm" sh "$HERE/grub-ground")"
     printf '%s\n' "$out" | grep -qx "  background_color \"$ground\"" \
         || { echo "FAIL an installed themed menu's terminal is the ground"; exit 1; }
     [ -z "$(GRUB_TERMINAL_OUTPUT="gfxterm serial" sh "$HERE/grub-ground")" ] \
