@@ -50,8 +50,11 @@
 //! moment the call arrives, which is the one moment the peer is certainly still there, and the
 //! shell draws them in the card's words. Nothing in the request can set any of it.
 
+mod archive;
 mod freedesktop;
+mod grant;
 mod names;
+mod notices;
 mod reminders;
 mod store;
 
@@ -175,9 +178,19 @@ impl NotificationsHandler {
             LIST => Ok(serde_json::to_value(self.store.list()).unwrap_or_default()),
 
             ADD => {
-                let request = parse_add(&params)?;
+                let mut request = parse_add(&params)?;
                 let who = who_is_calling(peer);
                 let (app, sender) = attribute(&request.app, &who, owner::same_user(peer));
+                // A mind's notice, posted by the harness host on its behalf. Only the desktop may
+                // say which harness sent one and spend the day's budget for it; from anything
+                // else the notice is stripped and the rest stored as the plain notification it
+                // also is, so `yos notify` from a mind's tool cannot forge another harness's card.
+                if let Some(post) = request.notice.take() {
+                    if sender.desktop {
+                        return Ok(self.store.add_notice(post, &home_dir()));
+                    }
+                    tracing::warn!(sender = %who.line(), "a notice from a caller that is not the desktop; stored as a plain notification");
+                }
                 let stored = self.store.add_from(AddRequest { app, ..request }, Some(sender));
                 tracing::info!(
                     id = %stored.id,
@@ -246,11 +259,57 @@ impl NotificationsHandler {
                 }))
             }
 
+            NOTICE_FEEDBACK => {
+                self.desktop_only(method, peer)?;
+                let id = required_str(&params, "id")?;
+                let word = required_str(&params, "kind")?;
+                let kind = notice::FeedbackKind::parse(&word)
+                    .ok_or_else(|| bad_request(format!("`{word}` is not a feedback kind")))?;
+                let recorded = self.store.record_feedback(&id, kind).map_err(bad_request)?;
+                Ok(serde_json::to_value(recorded).unwrap_or_default())
+            }
+
+            NOTICE_SHOWN => {
+                self.desktop_only(method, peer)?;
+                let id = required_str(&params, "id")?;
+                let shown_as = params["shown_as"].as_str();
+                let opened = params["opened"].as_bool().unwrap_or(false);
+                self.store.mark_shown(&id, shown_as, opened).map_err(bad_request)?;
+                Ok(serde_json::json!({ "id": id }))
+            }
+
+            NOTICE_FEEDBACK_POLL => {
+                self.desktop_only(method, peer)?;
+                let harness = required_str(&params, "harness")?;
+                let ack = params["ack"].as_u64();
+                Ok(serde_json::json!({ "notice_feedback": self.store.feedback_for(&harness, ack) }))
+            }
+
+            INITIATIVE => Ok(serde_json::to_value(self.store.initiative()).unwrap_or_default()),
+
+            INITIATIVE_SET => {
+                self.desktop_only(method, peer)?;
+                let changed = self.store.set_initiative(|settings| apply_initiative(settings, &params)).map_err(bad_request)?;
+                Ok(serde_json::to_value(changed).unwrap_or_default())
+            }
+
             other => Err(ServiceError {
                 code: -32601,
                 message: format!("Unknown method: {other}"),
             }),
         }
+    }
+
+    /// Refuse `method` unless the caller is the desktop itself, judged as `attribute` judges it:
+    /// the program on the socket, under this service's own account. Feedback and the person's
+    /// settings are the person's, pressed on the desktop's own screen; a mind that could post
+    /// them could mark its own card useful or switch another mind's family off.
+    fn desktop_only(&self, method: &str, peer: Option<PeerCred>) -> Result<(), ServiceError> {
+        let who = who_is_calling(peer);
+        if owner::same_user(peer) && is_the_desktop(&who) {
+            return Ok(());
+        }
+        Err(ServiceError { code: -32003, message: format!("`{method}` is the desktop's own; {} is not the desktop", who.line()) })
     }
 
     /// `app.act` under a pinned authority, as the socket's dispatch runs it with
@@ -305,6 +364,8 @@ fn describe_view(store: &store::Store, link: &freedesktop::Link) -> View {
                 "read": n.read,
                 "at": n.created_at,
                 "actions": n.actions.iter().map(|a| a.id.clone()).collect::<Vec<_>>(),
+                // A mind's notice says which kind it is; the rest of it is the shell's to draw.
+                "family": n.notice.as_ref().map(|x| x.family.as_str().to_string()),
             })
         })
         .collect();
@@ -602,6 +663,39 @@ fn attribute(app_given: &str, who: &Program, same_user: bool) -> (String, Sender
     (app, sender)
 }
 
+// ── Notices ─────────────────────────────────────────────────────────────────────────────────
+
+/// The person's home, which an `open_file` button must resolve under.
+fn home_dir() -> std::path::PathBuf {
+    std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_else(|| std::path::PathBuf::from("/nonexistent"))
+}
+
+/// One change to the initiative settings: `quiet`, a `family` with its `setting`, or
+/// `quiet_hours` (`{start, end}`, or `null` for none).
+fn apply_initiative(settings: &mut notice::Initiative, params: &serde_json::Value) -> Result<(), String> {
+    if let Some(quiet) = params["quiet"].as_bool() {
+        settings.quiet = quiet;
+    }
+    if let Some(word) = params["family"].as_str() {
+        let family = notice::Family::parse(word).ok_or_else(|| format!("`{word}` is not a family"))?;
+        let setting = params["setting"].as_str().unwrap_or_default();
+        let setting = notice::FamilySetting::parse(setting).ok_or("`setting` must be `on`, `inbox_only` or `off`")?;
+        settings.set(&family, setting)?;
+    }
+    match params.get("quiet_hours") {
+        None => {}
+        Some(serde_json::Value::Null) => settings.quiet_hours = None,
+        Some(value) => {
+            let hours: notice::QuietHours = serde_json::from_value(value.clone()).map_err(|e| format!("`quiet_hours`: {e}"))?;
+            if hours.start > 23 || hours.end > 23 {
+                return Err("`quiet_hours` are hours of the day, 0 to 23".into());
+            }
+            settings.quiet_hours = Some(hours);
+        }
+    }
+    Ok(())
+}
+
 // ── Parsing ─────────────────────────────────────────────────────────────────────────────────
 
 fn bad_request(message: String) -> ServiceError {
@@ -729,6 +823,12 @@ fn parse_add(params: &serde_json::Value) -> Result<AddRequest, ServiceError> {
             _ => Source::Yantrik,
         },
         replaces_id: optional_str(params, "replaces_id")?,
+        notice: match params.get("notice") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(value) => Some(
+                serde_json::from_value(value.clone()).map_err(|e| bad_request(format!("`notice`: {e}")))?,
+            ),
+        },
     })
 }
 
@@ -825,6 +925,53 @@ mod tests {
             optional_str(&serde_json::json!({ "id": "" }), "id").unwrap(),
             Some(String::new())
         );
+    }
+
+    #[test]
+    fn a_notice_from_a_caller_that_is_not_the_desktop_is_stored_as_a_plain_notification() {
+        // The contract test from design/initiative-inbox-2026-10-16.md: a caller the store cannot
+        // establish as the desktop (here, nobody at all) gets its notice stripped. The notification
+        // itself still lands, as `yos notify` would have put it.
+        let h = handler();
+        let answer = h
+            .dispatch(
+                ADD,
+                serde_json::json!({
+                    "title": "Stretch",
+                    "notice": {
+                        "notice": { "notice_id": "rem-1", "family": "reminder", "title": "Stretch", "why": "You asked.", "attention": "interrupt" },
+                        "harness": { "id": "mind", "verified": "forged" }
+                    }
+                }),
+                None,
+            )
+            .expect("stored plain");
+        assert!(answer.get("stored").is_none(), "answered as a plain notification: {answer}");
+        let stored = h.store.list();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].notice, None, "no notice record survives from a caller that is not the desktop");
+        // And the desktop-only methods refuse it.
+        for (method, params) in [
+            (NOTICE_FEEDBACK, serde_json::json!({ "id": stored[0].id, "kind": "useful" })),
+            (NOTICE_FEEDBACK_POLL, serde_json::json!({ "harness": "mind" })),
+            (INITIATIVE_SET, serde_json::json!({ "quiet": true })),
+            (NOTICE_SHOWN, serde_json::json!({ "id": stored[0].id, "shown_as": "toast" })),
+        ] {
+            let err = h.dispatch(method, params, None).unwrap_err();
+            assert!(err.message.contains("is not the desktop"), "{method}: {}", err.message);
+        }
+        assert!(!h.store.initiative().quiet);
+    }
+
+    #[test]
+    fn initiative_changes_are_checked() {
+        let mut settings = notice::Initiative::default();
+        apply_initiative(&mut settings, &serde_json::json!({ "family": "discovery", "setting": "off", "quiet_hours": { "start": 22, "end": 7 } })).unwrap();
+        assert_eq!(settings.setting(&notice::Family::Discovery), notice::FamilySetting::Off);
+        assert!(apply_initiative(&mut settings, &serde_json::json!({ "family": "reminder", "setting": "off" })).is_err());
+        assert!(apply_initiative(&mut settings, &serde_json::json!({ "quiet_hours": { "start": 25, "end": 7 } })).is_err());
+        apply_initiative(&mut settings, &serde_json::json!({ "quiet_hours": null })).unwrap();
+        assert_eq!(settings.quiet_hours, None);
     }
 
     // ── Who sent it ──
