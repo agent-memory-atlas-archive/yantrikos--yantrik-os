@@ -21,6 +21,7 @@ tmp = tempfile.mkdtemp()
 d.STATE_DIR = tmp
 for k in ("LOG", "DONE", "STARTED", "POLISHED"):
     setattr(d, k, os.path.join(tmp, os.path.basename(getattr(d, k))))
+d.PROJECTS = os.path.join(tmp, "Projects")
 d.BETWEEN_TURNS_SECS = 0
 d.time.sleep = lambda s: None
 d.show_mind_view = lambda: None
@@ -55,10 +56,17 @@ d.main()
 check("the first unfinished build starts with its brief",
       sent[-1].startswith("Please build") and second["name"] in sent[-1] and "{" not in sent[-1], sent[-1])
 
+replies[:] = [("still nothing", "card unanswered")]
+d.main()
+check("a stopped build with no plan yet is started again with its brief, not keep going",
+      sent[-1].startswith("Please build") and second["name"] in sent[-1], sent[-1])
+
+os.makedirs(os.path.join(d.PROJECTS, second["folder"]))
+open(os.path.join(d.PROJECTS, second["folder"], "PLAN.md"), "w").close()
 replies[:] = [("step done", "answered"), ("FINISHED", "answered")]
 pages[:] = [(False, "Uncaught TypeError: x is {not} a function"), (True, "")]
 d.main()
-check("a stopped build is resumed with keep going", sent[-2].startswith("Please keep going on " + second["name"]), sent[-2])
+check("a stopped build with a plan is resumed with keep going", sent[-2].startswith("Please keep going on " + second["name"]), sent[-2])
 check("a page that throws puts its errors, braces and all, at the head of the next prompt",
       "x is {not} a function" in sent[-1] and "PLAN.md side by side" in sent[-1], sent[-1])
 check("a FINISHED over a clean page finishes the build", second["id"] in d.finished_missions())
@@ -81,6 +89,33 @@ check("with every build finished, polish rounds go round every build in turn",
 check("a polish round works from IDEAS.md", "IDEAS.md" in sent[-1] and "{" not in sent[-1], sent[-1])
 check("a polish round is never recorded as a finished mission",
       not any(m.startswith("polish:") for m in d.finished_missions()))
+
+check("FINISHED counts as a word, bare or in markdown, and lowercase prose does not",
+      d.said_finished("All done.\n\nFINISHED") and d.said_finished("**FINISHED**")
+      and not d.said_finished("Orrery is finished, every step is ticked") and not d.said_finished("UNFINISHED"))
+
+# A reply past describe's clip is read whole with read_message, where its FINISHED is.
+calls = []
+
+
+class Done:
+    def __init__(self, stdout):
+        self.stdout, self.returncode = stdout, 0
+
+
+def fake_run(argv, **_):
+    calls.append(argv)
+    whole = json.dumps({"index": 9, "text": "x" * 700 + " FINISHED"}, indent=2)
+    return Done("Yantrik, desktop\naccepted: True\n" + whole + "\n{\"state\": 1}\n")
+
+
+real_run, d.subprocess.run = d.subprocess.run, fake_run
+whole = d.whole_text({"index": 9, "text": "x" * 600 + "… (709 characters total)", "clipped": True})
+d.subprocess.run = real_run
+check("a clipped reply is read whole, so a FINISHED past the clip is seen",
+      d.said_finished(whole) and calls and calls[0][-2:] == ["read_message", "index=9"], whole[-40:])
+check("an unclipped reply is taken as it is, with no extra call",
+      d.whole_text({"index": 3, "text": "short FINISHED"}) == "short FINISHED")
 
 d.write_state(d.DONE, set())
 replies[:] = [("the command needs your OK", "answered", "card"), ("still waiting on you", "answered", "card"),

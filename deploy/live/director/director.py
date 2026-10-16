@@ -28,6 +28,7 @@ Stdlib only; the image ships no Python packages for it.
 """
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -40,6 +41,7 @@ DONE = os.path.join(STATE_DIR, "done.json")
 STARTED = os.path.join(STATE_DIR, "started.json")
 POLISHED = os.path.join(STATE_DIR, "polished.json")
 CHECK_PAGE = os.path.join(HERE, "check-page")
+PROJECTS = os.path.expanduser("~/Projects")
 
 POLL_SECS = 5
 # A beat between turns, so someone watching sees the result of one step before the next begins.
@@ -121,6 +123,31 @@ def shell_state():
 def last_reply(state):
     turns = state.get("conversation") or []
     return turns[-1] if turns else None
+
+
+def whole_text(turn):
+    """A turn's whole text. `describe` clips each message to 600 characters and marks it
+    `clipped`; the Mind ends its reply with FINISHED, which is the part the clip cuts. On 561 every
+    Orrery reply ran past the clip and the mission never finished (15 Oct 2026). `read_message`
+    returns the rest; if it cannot, the clipped text is all there is."""
+    if not turn:
+        return ""
+    text = turn.get("text") or ""
+    if not turn.get("clipped") or turn.get("index") is None:
+        return text
+    try:
+        out = subprocess.run([YOS, "act", "shell", "read_message", f"index={turn['index']}"],
+                             capture_output=True, text=True, timeout=30).stdout
+        start = out.find("\n{")
+        whole, _ = json.JSONDecoder().raw_decode(out[start + 1:]) if start >= 0 else ({}, 0)
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return text
+    return whole.get("text") or text if isinstance(whole, dict) else text
+
+
+def said_finished(reply):
+    """FINISHED as a word of its own, bare or in markdown (`**FINISHED**`), never "finished"."""
+    return re.search(rf"(?<![A-Za-z]){FINISHED}(?![A-Za-z])", reply) is not None
 
 
 def mind_idle(state):
@@ -268,7 +295,11 @@ def run_mission(m):
     # A build stopped part way (a card, a limit, the screen locked) is picked up where it is, not
     # started over: the brief would have the Mind write a fresh plan over its own ticks.
     begun = read_state(STARTED, set())
-    resuming = m["id"] in begun and not m["id"].startswith("polish:")
+    # Only once the plan exists: a start that never reached the Mind (the model unreachable, a
+    # card) left nothing to keep going on, and "keep going" carries none of the brief. On 561 the
+    # Mind built Orrery from its name alone and said it had never seen the brief (15 Oct 2026).
+    planned = os.path.exists(os.path.join(PROJECTS, m["fields"]["folder"], "PLAN.md"))
+    resuming = m["id"] in begun and planned and not m["id"].startswith("polish:")
     write_state(STARTED, begun | {m["id"]})
     log(mission=m["id"], event="resuming" if resuming else "starting", title=m["title"])
     text = prompt(m["keep_going"] if resuming else m["brief"], m)
@@ -289,7 +320,7 @@ def run_mission(m):
             log(mission=m["id"], event="send failed", turn=turn, said=said)
             return
         state, why, card = wait_for_turn(time.time())
-        reply = (last_reply(state) or {}).get("text", "") if state else ""
+        reply = whole_text(last_reply(state)) if state else ""
         clean, errors = check_page(m)
         log(mission=m["id"], event="turn", turn=turn, outcome=why, reply=reply[:400],
             page={True: "loads clean", False: "throws", None: "not checked"}[clean], errors=errors or None)
@@ -304,7 +335,7 @@ def run_mission(m):
         if cards >= 2:
             log(mission=m["id"], event="stopped", why="cards are waiting for a person", turns=turn)
             return
-        if FINISHED in reply.split():
+        if said_finished(reply):
             if clean is False:
                 # The Mind's word against the page's: the page wins, and the mission goes on.
                 log(mission=m["id"], event="finished refused", turn=turn, why="the page throws")
