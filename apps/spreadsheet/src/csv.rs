@@ -1,108 +1,147 @@
-//! Minimal CSV reading and writing for the spreadsheet MVP.
+//! CSV, read and written the way RFC 4180 and every spreadsheet do it.
 //!
-//! Deliberately small: one dialect only. Fields are separated by commas, a field may be
-//! wrapped in double quotes (so it can hold a comma), and a quote inside a quoted field is
-//! escaped by doubling it. There are no multi-line quoted fields.
+//! The first version split the text on `\n` before it looked at quotes, so a cell with a line
+//! break in it was written correctly and read back as broken rows; it did not quote `\r` and
+//! kept Excel's byte-order mark as part of the first cell (review of #727, finding 2). This reads
+//! character by character with the quote state in hand, so a quoted field may hold commas,
+//! doubled quotes, `\n`, `\r` and `\r\n`, and the mark is dropped.
+//!
+//! A blank line in the middle of a file is a row of one empty cell, not nothing: skipping it
+//! moved every row below it up by one, and with it every reference into them.
 
-/// Split `text` into rows of fields.
-///
-/// Lines are split on `\n` (a trailing `\r` is dropped), each line is split on commas, and a
-/// quoted field may contain a comma. A trailing empty line is skipped.
-pub fn parse_csv(text: &str) -> Vec<Vec<String>> {
+/// Rows of fields, or a sentence saying where the file stops making sense.
+pub fn parse(text: &str) -> Result<Vec<Vec<String>>, String> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut rows = Vec::new();
-    for line in text.split('\n') {
-        let line = line.strip_suffix('\r').unwrap_or(line);
-        if line.is_empty() {
-            // A blank line is not a row; the final newline of a file leaves one here.
-            continue;
-        }
-        rows.push(parse_line(line));
-    }
-    rows
-}
-
-fn parse_line(line: &str) -> Vec<String> {
-    let mut fields = Vec::new();
+    let mut row: Vec<String> = Vec::new();
     let mut field = String::new();
-    let mut in_quotes = false;
-    let mut chars = line.chars().peekable();
+    let mut quoted = false;
+    // Whether anything of the current row has been read, so a final newline ends the last row
+    // instead of starting an empty one.
+    let mut started = false;
+    let mut line = 1usize;
+    let mut quote_line = 0usize;
+    let mut chars = text.chars().peekable();
 
     while let Some(c) = chars.next() {
+        if quoted {
+            match c {
+                '"' if chars.peek() == Some(&'"') => {
+                    chars.next();
+                    field.push('"');
+                }
+                '"' => quoted = false,
+                other => {
+                    if other == '\n' {
+                        line += 1;
+                    }
+                    field.push(other);
+                }
+            }
+            continue;
+        }
         match c {
-            '"' if in_quotes && chars.peek() == Some(&'"') => {
-                // A doubled quote inside a quoted field is one literal quote.
-                chars.next();
-                field.push('"');
+            '"' if field.is_empty() => {
+                quoted = true;
+                quote_line = line;
+                started = true;
             }
-            '"' => {
-                in_quotes = !in_quotes;
+            ',' => {
+                row.push(std::mem::take(&mut field));
+                started = true;
             }
-            ',' if !in_quotes => {
-                fields.push(std::mem::take(&mut field));
+            '\r' | '\n' => {
+                if c == '\r' && chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                line += 1;
+                row.push(std::mem::take(&mut field));
+                rows.push(std::mem::take(&mut row));
+                started = false;
             }
-            _ => field.push(c),
+            other => {
+                field.push(other);
+                started = true;
+            }
         }
     }
-    fields.push(field);
-    fields
+    if quoted {
+        return Err(format!(
+            "the file ends inside a quoted cell that starts on line {quote_line} — a closing \" is missing"
+        ));
+    }
+    if started {
+        row.push(field);
+        rows.push(row);
+    }
+    Ok(rows)
 }
 
-/// Render rows as CSV text: the inverse of [`parse_csv`].
-///
-/// A field is quoted only when it contains a comma, a quote or a newline; quotes inside are
-/// doubled.
-pub fn to_csv(rows: &[Vec<String>]) -> String {
+/// Rows as CSV text: the inverse of [`parse`]. Lines end in `\r\n`, as RFC 4180 has them.
+pub fn write(rows: &[Vec<String>]) -> String {
     let mut out = String::new();
-    for (r, row) in rows.iter().enumerate() {
-        if r > 0 {
-            out.push('\n');
-        }
+    for row in rows {
         for (c, field) in row.iter().enumerate() {
             if c > 0 {
                 out.push(',');
             }
-            out.push_str(&quote_field(field));
+            if field.contains([',', '"', '\n', '\r']) {
+                out.push('"');
+                out.push_str(&field.replace('"', "\"\""));
+                out.push('"');
+            } else {
+                out.push_str(field);
+            }
         }
-    }
-    // A trailing newline, so `to_csv(parse_csv(x)) == x` for a file that ends in one.
-    if !rows.is_empty() {
-        out.push('\n');
+        out.push_str("\r\n");
     }
     out
-}
-
-fn quote_field(field: &str) -> String {
-    if field.contains(',') || field.contains('"') || field.contains('\n') {
-        let mut quoted = String::with_capacity(field.len() + 2);
-        quoted.push('"');
-        for ch in field.chars() {
-            if ch == '"' {
-                quoted.push('"');
-            }
-            quoted.push(ch);
-        }
-        quoted.push('"');
-        quoted
-    } else {
-        field.to_string()
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn rows(r: &[&[&str]]) -> Vec<Vec<String>> {
+        r.iter().map(|row| row.iter().map(|s| s.to_string()).collect()).collect()
+    }
+
     #[test]
-    fn round_trips_quoted_comma_doubled_quote_and_trailing_newline() {
-        let input = "a,\"b,c\",\"say \"\"hi\"\"\"\n1,2,3\n";
-        let parsed = parse_csv(input);
-        assert_eq!(
-            parsed,
-            vec![
-                vec!["a".to_string(), "b,c".to_string(), "say \"hi\"".to_string()],
-                vec!["1".to_string(), "2".to_string(), "3".to_string()],
-            ]
-        );
-        assert_eq!(to_csv(&parsed), input);
+    fn quoted_commas_quotes_and_line_breaks_survive_a_round_trip() {
+        let data = rows(&[
+            &["name", "note", "amount"],
+            &["Smith, Jo", "said \"hi\"", "3"],
+            &["multi", "line one\nline two", "4"],
+            &["cr", "old\rmac", "5"],
+            &["crlf", "a\r\nb", "6"],
+            &["", "", ""],
+        ]);
+        let text = write(&data);
+        assert_eq!(parse(&text).unwrap(), data);
+    }
+
+    #[test]
+    fn excel_byte_order_mark_and_line_endings_are_read() {
+        let text = "\u{feff}a,b\r\n1,2\r\n";
+        assert_eq!(parse(text).unwrap(), rows(&[&["a", "b"], &["1", "2"]]));
+        assert_eq!(parse("a,b\r1,2").unwrap(), rows(&[&["a", "b"], &["1", "2"]]));
+        assert_eq!(parse("a,b\n1,2").unwrap(), rows(&[&["a", "b"], &["1", "2"]]));
+    }
+
+    #[test]
+    fn a_blank_line_keeps_its_place() {
+        assert_eq!(parse("a\n\nb\n").unwrap(), rows(&[&["a"], &[""], &["b"]]));
+    }
+
+    #[test]
+    fn empty_text_is_no_rows_and_a_trailing_comma_is_an_empty_cell() {
+        assert!(parse("").unwrap().is_empty());
+        assert_eq!(parse("a,\n").unwrap(), rows(&[&["a", ""]]));
+    }
+
+    #[test]
+    fn an_unclosed_quote_says_where_it_began() {
+        let e = parse("a,b\n\"never\nclosed").unwrap_err();
+        assert!(e.contains("line 2"), "{e}");
     }
 }
