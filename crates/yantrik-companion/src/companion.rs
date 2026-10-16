@@ -2512,11 +2512,12 @@ impl CompanionService {
         // SecurityGuard: filter output for sensitive info leaks
         response_text = self.guard.check_response(&response_text, &self.db);
 
-        // Update conversation history
+        // Update conversation history. A failed turn's reply is about the failure, and can be
+        // the provider's own words: the model is shown a fixed line instead (`FAILED_TURN`).
         self.conversation_history
             .push(ChatMessage::user(user_text));
         self.conversation_history
-            .push(ChatMessage::assistant(&response_text));
+            .push(ChatMessage::assistant(history_reply(&response_text, &model_failure)));
 
         // Compress conversation history when it grows too long
         self.compress_history_if_needed();
@@ -3516,10 +3517,10 @@ impl CompanionService {
         // SecurityGuard: filter output for sensitive info leaks
         response_text = self.guard.check_response(&response_text, &self.db);
 
-        // Update conversation history
+        // Update conversation history (a failed turn as a fixed line, as in `handle_message`).
         self.conversation_history.push(ChatMessage::user(user_text));
         self.conversation_history
-            .push(ChatMessage::assistant(&response_text));
+            .push(ChatMessage::assistant(history_reply(&response_text, &model_failure)));
 
         // Compress conversation history when it grows too long
         self.compress_history_if_needed();
@@ -4169,6 +4170,19 @@ impl CompanionService {
             self.session_turn_count = 0;
         }
     }
+}
+
+/// What the conversation history holds for a turn the model failed, in place of what the person
+/// was told. That sentence can carry up to 200 characters an endpoint chose ("Claude refused the
+/// request: …"), and history is replayed to the model on every later turn as the companion's own
+/// words; after the person switches models, to a different provider. The person still reads the
+/// reason in the chat; the model never does (security review of #827, finding 2).
+pub const FAILED_TURN: &str = "(No answer: this turn failed before the model could reply.)";
+
+/// The assistant's side of a turn as the history keeps it: the reply, or [`FAILED_TURN`] when
+/// the model failed the turn.
+fn history_reply<'a>(response_text: &'a str, model_failure: &Option<String>) -> &'a str {
+    if model_failure.is_some() { FAILED_TURN } else { response_text }
 }
 
 /// What the person is told when a model call reached the model and still gave no answer: it
@@ -5724,6 +5738,10 @@ mod stream_error_tests {
             assert!(reply.message.starts_with(reason), "{}", reply.message);
             assert_eq!(reply.model_failure.as_deref(), Some(reason));
             assert!(!reply.offline_mode, "the model was reached: this is not the offline responder");
+            // The person reads the provider's words; the model's history never holds them.
+            let said = c.conversation_history.last().expect("the turn is in the history");
+            assert_eq!(said.content, FAILED_TURN, "streaming: {streaming}");
+            assert!(c.conversation_history.iter().all(|m| !m.content.contains("temperature")));
         }
     }
 
