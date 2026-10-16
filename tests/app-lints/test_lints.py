@@ -659,9 +659,9 @@ class RealRepo(unittest.TestCase):
     the last app here is fixed, the fixtures above are what is left to prove the lint still
     sees, and that is how it should end.
 
-    Spreadsheet and Music are shelved and they stay here. A shelved app is still linted -- that
+    Spreadsheet is shelved and stays here (Music came back, #728). A shelved app is still linted -- that
     is the whole point of keeping it a workspace member -- and while Network Manager is being
-    fixed they are the last real instances of the unset `in` property in the tree. Each lint must
+    fixed it holds the last real instances of the unset `in` property in the tree. Each lint must
     keep at least one entry that is not network-manager's, or the day Network Manager is finished
     is the day this test stops looking at anything.
     """
@@ -671,7 +671,6 @@ class RealRepo(unittest.TestCase):
     }
     MUST_FLAG_HANDLERS = {
         "spreadsheet": ["save_sheet", "load_sheet"],
-        "music-player": ["play_track_index"],
     }
 
     @classmethod

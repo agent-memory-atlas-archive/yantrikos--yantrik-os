@@ -8,7 +8,7 @@
 # What this file changes is where that debt is reported. A shelved app's findings are
 # printed under their own heading with the reason the app is on the shelf, they are
 # left out of the shipping totals, and they do not fail the run. Nobody is being asked
-# to fix them: the decision was that these two apps get built properly or stay off the
+# to fix them: the decision was that these apps get built properly or stay off the
 # shelf, and a lint failing every day about an app nobody is working on is a lint that
 # gets switched off.
 #
@@ -20,13 +20,6 @@
 # The shelf itself -- what the launcher refuses, and why -- is SHELVED in
 # crates/yantrik-ui/src/wire/dock.rs. design/shelved-2026-09-20.md is the account.
 # Un-shelving an app is deleting its entry here and there.
-
-[music-player]
-reason = """
-Nothing plays audio. There is no playback engine, no scanner and no library behind the \
-screen: double-clicking a song logs "(stub)", and only YANTRIK_MUSIC_DEMO=1 can put a \
-track on it. 2168 lines of Slint over 312 of Rust.\
-"""
 
 [spreadsheet]
 reason = """

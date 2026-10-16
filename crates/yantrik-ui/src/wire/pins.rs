@@ -235,7 +235,7 @@ mod tests {
         for pin in DEFAULT_PINS {
             assert!(super::super::dock::shelved(pin).is_none(), "default pin `{pin}` is shelved");
         }
-        for id in ["music", "spreadsheet", "ySheets"] {
+        for id in ["spreadsheet", "ySheets"] {
             assert!(!super::super::dock::is_launchable(id, &[]), "`{id}` would draw a START tile");
         }
     }

@@ -96,8 +96,9 @@ pub struct Shelved {
 /// The apps that are not shipped, and what each is waiting on.
 ///
 /// The rule this table enforces: an app with nothing under its screen is not shipped. Music and
-/// ySheets were both complete drawings over nothing — Music has no playback engine, no scanner
-/// and no library, so only `YANTRIK_MUSIC_DEMO=1` could ever put a song on screen; ySheets never
+/// ySheets were both complete drawings over nothing when this was written. Music came back in
+/// October 2026 (#728): it scans its folders, plays through its own mpv over the JSON IPC
+/// socket, and answers `yos act music …` with what mpv reported. ySheets never
 /// sets `cell-grid`, `row-count` or `col-count`, so its 50x26 grid has no cells and every guard
 /// in cell-click, cell-edit and the formula bar fails. The decision and its reasoning are in
 /// design/apps-plan-2026-09-20.md, Wave 3: build it or take it off the shelf. Shipping the
@@ -113,15 +114,6 @@ pub struct Shelved {
 /// ever deciding to. Un-shelving an app is deleting one entry here and putting its row back in
 /// ROUTES.
 const SHELVED: &[Shelved] = &[
-    Shelved {
-        ids: &["music", "music_player"],
-        name: "Music",
-        binary: "yantrik-music-player",
-        reason: "nothing plays audio yet — there is no playback engine, no scanner and no \
-                 library behind the screen",
-        returns_when: "mpv is driven over its JSON IPC socket, a folder scan fills a small \
-                       library store, and play/pause/next/queue and `open <file>` work",
-    },
     Shelved {
         ids: &["spreadsheet", "ysheets"],
         name: "ySheets",
@@ -609,7 +601,7 @@ pub fn is_launchable(app: &str, installed: &[DesktopEntry]) -> bool {
 /// did nothing when clicked.
 ///
 /// A shelved app is the third case, and the only one where the program on the disk works
-/// perfectly well: an installed machine keeps `/opt/yantrik/bin/yantrik-music-player` and its
+/// perfectly well: an installed machine keeps `/opt/yantrik/bin/yantrik-spreadsheet` and its
 /// .desktop entry from whatever release put them there, because the updater installs binaries
 /// over binaries and never removes one the new bundle does not carry. Matching the shelf by the
 /// program the Exec line runs is what keeps that stale pair out of the launcher.
@@ -2152,26 +2144,21 @@ mod tests {
             _ => panic!("a catalogue-only program must resolve to its .desktop entry"),
         }
         // And the shelf still comes first, whatever else is installed.
-        let shelved_by_name = stale_entry("music-player", "Music Player", "yantrik-music-player");
-        assert!(matches!(resolve("music", &[shelved_by_name]), Resolved::Shelved(_)));
+        let shelved_by_name = stale_entry("ysheets", "ySheets", "yantrik-spreadsheet");
+        assert!(matches!(resolve("spreadsheet", &[shelved_by_name]), Resolved::Shelved(_)));
         assert!(matches!(resolve("nothing-called-this", &[]), Resolved::Unknown));
     }
 
     /// Every spelling a caller could arrive with is refused, and refused for the same reason.
     ///
-    /// A shelf that only catches one spelling is not a shelf: `music-player` is what the binary
-    /// is called, `Music Player` is the window title, `music` is what the dock says, and an agent
-    /// reads whichever of those it saw last.
+    /// A shelf that only catches one spelling is not a shelf: `yantrik-spreadsheet` is what the
+    /// binary is called, `ySheets` is the window title, `spreadsheet` is what the dock says, and
+    /// an agent reads whichever of those it saw last.
     #[test]
     fn every_spelling_of_a_shelved_app_reaches_the_shelf() {
         for spelling in [
-            "music", "music_player", "music-player", "Music Player", "MUSIC",
-            "  music  ", "yantrik-music-player",
+            "spreadsheet", "Spreadsheet", "ySheets", "ysheets", "yantrik-spreadsheet", "  SPREADSHEET  ",
         ] {
-            let shelf = shelved(spelling).unwrap_or_else(|| panic!("`{spelling}` is not shelved"));
-            assert_eq!(shelf.binary, "yantrik-music-player", "{spelling}");
-        }
-        for spelling in ["spreadsheet", "Spreadsheet", "ySheets", "ysheets", "yantrik-spreadsheet"] {
             let shelf = shelved(spelling).unwrap_or_else(|| panic!("`{spelling}` is not shelved"));
             assert_eq!(shelf.binary, "yantrik-spreadsheet", "{spelling}");
         }
@@ -2184,11 +2171,8 @@ mod tests {
     /// still on the disk, and the updater removes neither.
     #[test]
     fn a_shelved_app_does_not_open_even_with_its_desktop_file_on_disk() {
-        let stale = [
-            stale_entry("yantrik-music-player", "Music", "/opt/yantrik/bin/yantrik-music-player"),
-            stale_entry("yantrik-spreadsheet", "ySheets", "/opt/yantrik/bin/yantrik-spreadsheet"),
-        ];
-        for name in ["music", "music-player", "Music", "spreadsheet", "ySheets"] {
+        let stale = [stale_entry("yantrik-spreadsheet", "ySheets", "/opt/yantrik/bin/yantrik-spreadsheet")];
+        for name in ["spreadsheet", "ySheets", "yantrik-spreadsheet"] {
             assert!(!is_launchable(name, &stale), "`{name}` must not open");
             assert!(
                 matches!(availability(name, &stale), Availability::Shelved(_)),
@@ -2204,9 +2188,6 @@ mod tests {
     /// basename will still be one the shelf recognises.
     #[test]
     fn the_catalogue_drops_a_shelved_desktop_entry() {
-        assert!(!entry_is_launchable(&stale_entry(
-            "yantrik-music-player", "Music", "/opt/yantrik/bin/yantrik-music-player"
-        )));
         assert!(!entry_is_launchable(&stale_entry(
             "yantrik-spreadsheet", "ySheets", "/opt/yantrik/bin/yantrik-spreadsheet"
         )));

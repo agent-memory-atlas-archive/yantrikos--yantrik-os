@@ -223,8 +223,14 @@ rc = ask("XDG_RUNTIME_DIR=/run/user/1000 timeout 900 /opt/yantrik/bin/release-ch
          timeout=960)
 check("release-check (tier ci) passes inside the booted image", "exit=0" in rc, rc)
 
-shelved = ask("ls /opt/yantrik/bin | grep -c -E 'music-player|spreadsheet'")
+shelved = ask("ls /opt/yantrik/bin | grep -c -E 'spreadsheet'")
 check("no shelved app was packaged", shelved.splitlines()[-1].strip() == "0", shelved)
+
+# Music came off the shelf (#728): it ships, and so does the mpv it plays through.
+music = ask("[ -x /opt/yantrik/bin/yantrik-music-player ] && echo app; command -v mpv >/dev/null && echo mpv; "
+            "grep -q '%f' /opt/yantrik/share/applications/yantrik-music-player.desktop && echo desktop; echo checked")
+check("Music is packaged with mpv and a .desktop that takes a file",
+      all(w in music for w in ("app", "mpv", "desktop", "checked")), music)
 
 essentials = ask("for b in yantrik-ui yantrik yos yantrik-update yantrik-session yantrik-notes "
                  "yantrik-email yantrik-calendar network-service email-service; do "

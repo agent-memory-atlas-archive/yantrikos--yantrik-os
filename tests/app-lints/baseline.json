@@ -39,45 +39,6 @@
         "proposal_applied"
       ]
     },
-    "music-player": {
-      "unset-property": [
-        "agent-context",
-        "agent-suggestions",
-        "agent-unavailable",
-        "ai-is-working",
-        "ai-response",
-        "is-scanning",
-        "proposal",
-        "proposal-working",
-        "scan-progress",
-        "scan-status"
-      ],
-      "dead-handler": [
-        "add_to_queue",
-        "ai_dismiss",
-        "ai_explain_pressed",
-        "browse_filter_changed",
-        "browse_item_selected",
-        "music_toggle_folder_watch",
-        "next_track",
-        "play_next",
-        "play_track_index",
-        "playlist_add_track",
-        "playlist_create",
-        "playlist_delete",
-        "playlist_remove_track",
-        "playlist_rename",
-        "prev_track",
-        "queue_clear",
-        "queue_move_down",
-        "queue_move_up",
-        "queue_play_index",
-        "queue_remove",
-        "scan_add_folder",
-        "scan_remove_folder",
-        "scan_rescan"
-      ]
-    },
     "spreadsheet": {
       "unset-property": [
         "active-comment",

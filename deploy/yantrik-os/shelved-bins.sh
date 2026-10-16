@@ -33,7 +33,7 @@ DOCK="$PROJECT_ROOT/crates/yantrik-ui/src/wire/dock.rs"
 }
 
 # Only the VALUES in the SHELVED table, never the struct's field declaration: `pub binary:`
-# is a type, `binary: "yantrik-music-player"` is a decision. The leading whitespace and the
+# is a type, `binary: "yantrik-spreadsheet"` is a decision. The leading whitespace and the
 # absence of `pub` is what tells them apart.
 BINS="$(sed -n 's/^[[:space:]]\+binary:[[:space:]]*"\([^"]\+\)".*/\1/p' "$DOCK")"
 
