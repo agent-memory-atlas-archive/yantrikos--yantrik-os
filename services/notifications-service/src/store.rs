@@ -220,6 +220,9 @@ pub struct Store {
     load_notice: Option<String>,
     /// Harness ids only one account may use ([`crate::notices::MIND_ID`]), read once at open.
     reserved: Mutex<std::collections::BTreeMap<String, u32>>,
+    /// Why nothing may be written: the sidecar is on the disk and could not be read, so a write
+    /// would replace it. `None` on every healthy start.
+    blocked: Option<String>,
 }
 
 /// Where the store lives. `$XDG_DATA_HOME`, then `~/.local/share`, then a temp directory so the
@@ -272,7 +275,24 @@ impl Store {
 
         let (mut state, mut load_notice) = (state, load_notice);
         let sidecar = sidecar_path(&path);
-        match std::fs::read_to_string(&sidecar) {
+        // Writes stop while the sidecar is on the disk but could not be read: the next write would
+        // replace it with an empty one, losing every notice record, the person's settings and the
+        // harness bindings (the security delta review of af69330 on #831). Nothing is answered
+        // `stored` meanwhile.
+        let mut blocked = None;
+        let mut say = |said: String| {
+            tracing::error!("{said}");
+            load_notice = Some(load_notice.take().map_or(said.clone(), |n| format!("{n}; {said}")));
+        };
+        // The sidecar's name before 2b38018 was `notices.json`; a store that ran that build reads
+        // it once, and writes the new name from then on.
+        let legacy = path.with_file_name("notices.json");
+        let read_from = if !sidecar.exists() && path.file_name().is_some_and(|n| n == "notifications.json") && legacy.exists() {
+            legacy
+        } else {
+            sidecar.clone()
+        };
+        match std::fs::read_to_string(&read_from) {
             Ok(text) => match serde_json::from_str::<Sidecar>(&text) {
                 Ok(read) => {
                     let orphans = state.join(read);
@@ -281,17 +301,27 @@ impl Store {
                 }
                 Err(e) => {
                     // Moved aside rather than overwritten by the next write: whatever it held is
-                    // still on the disk for a person to look at.
-                    let aside = sidecar.with_extension(format!("json.unreadable-{}", Utc::now().timestamp()));
-                    let _ = std::fs::rename(&sidecar, &aside);
-                    let said = format!("{} could not be parsed ({e}); it was moved to {}", sidecar.display(), aside.display());
-                    load_notice = Some(load_notice.map_or(said.clone(), |n| format!("{n}; {said}")));
+                    // still on the disk for a person to look at. If it cannot be moved, nothing
+                    // is written over it.
+                    let aside = read_from.with_extension(format!("json.unreadable-{}", Utc::now().timestamp()));
+                    match std::fs::rename(&read_from, &aside) {
+                        Ok(()) => say(format!("{} could not be parsed ({e}); it was moved to {}", read_from.display(), aside.display())),
+                        Err(moved) => {
+                            let said = format!(
+                                "{} could not be parsed ({e}) and could not be moved aside ({moved}); nothing is stored until it is moved",
+                                read_from.display()
+                            );
+                            blocked = Some(said.clone());
+                            say(said);
+                        }
+                    }
                 }
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => {
-                let said = format!("{} could not be read: {e}", sidecar.display());
-                load_notice = Some(load_notice.map_or(said.clone(), |n| format!("{n}; {said}")));
+                let said = format!("{} could not be read ({e}); nothing is stored until it can be", read_from.display());
+                blocked = Some(said.clone());
+                say(said);
             }
         }
 
@@ -307,6 +337,7 @@ impl Store {
             written: Mutex::new(0),
             load_notice,
             reserved: Mutex::new(reserved),
+            blocked,
         }
     }
 
@@ -683,6 +714,9 @@ impl Store {
     /// attempted, because nothing told a caller it had been kept. Writes are serialised, and a
     /// snapshot older than one already written is not written again: the newer one holds it.
     pub(crate) fn persist(&self, state: &OnDisk) -> Result<(), String> {
+        if let Some(why) = &self.blocked {
+            return Err(why.clone());
+        }
         let mut written = self.written.lock().unwrap_or_else(|e| e.into_inner());
         if state.generation != 0 && state.generation <= *written {
             return Ok(());

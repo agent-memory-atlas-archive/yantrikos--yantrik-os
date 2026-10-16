@@ -871,6 +871,46 @@ mod tests {
     }
 
     #[test]
+    fn a_sidecar_that_cannot_be_read_is_never_written_over() {
+        // The security delta review of af69330 on #831: an unreadable sidecar (a wrong owner
+        // after a restore, an I/O error) must not be replaced by an empty one on the next write.
+        // A directory in its place is unreadable as a file even to root, which the CI runner and
+        // this sandbox may be.
+        let (store, dir) = temp_store();
+        store.add_notice(post("mind", notice("rem-1", "reminder", "inbox")), &home());
+        drop(store);
+        let sidecar = crate::store::sidecar_path(&dir.join("notifications.json"));
+        let kept = std::fs::read(&sidecar).unwrap();
+        std::fs::remove_file(&sidecar).unwrap();
+        std::fs::create_dir(&sidecar).unwrap();
+        std::fs::write(sidecar.join("held"), &kept).unwrap();
+
+        let store = Store::open(dir.join("notifications.json"));
+        assert!(store.load_notice().is_some_and(|n| n.contains("nothing is stored")), "{:?}", store.load_notice());
+        let answer = store.add_notice(post("mind", notice("rem-2", "reminder", "inbox")), &home());
+        assert_eq!(answer["stored"], false, "nothing is acknowledged while it cannot be written: {answer}");
+        assert!(sidecar.is_dir() && std::fs::read(sidecar.join("held")).unwrap() == kept, "untouched");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_store_that_ran_with_the_first_sidecar_name_reads_it() {
+        let dir = std::env::temp_dir().join(format!("yantrik-notices-legacy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("notifications.json");
+        let store = Store::open(path.clone());
+        store.add_notice(post("mind", notice("rem-1", "reminder", "inbox")), &home());
+        store.set_initiative(|s| { s.quiet = true; Ok(()) }).unwrap();
+        drop(store);
+        std::fs::rename(crate::store::sidecar_path(&path), dir.join("notices.json")).unwrap();
+        let store = Store::open(path);
+        assert!(store.initiative().quiet);
+        assert!(store.list().iter().any(|n| n.notice.is_some()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn an_accounts_uid_is_read_from_the_password_file() {
         assert_eq!(account_uid("root"), Some(0));
         assert_eq!(account_uid("no-such-account-here"), None);
