@@ -1499,9 +1499,11 @@ OUTBOUND = {"web_type", "web_go"}
 # from its pixels (#257). Private the way os_screen is — everything on the display is in them.
 # A picture of a display holds even more than its text (design/capture-2026-10-15.md), so the two
 # screenshots taint exactly as the two reads do: the desktop's as read_screen, Mind View's as
-# read_mind_view.
+# read_mind_view. A saved screenshot or recording is the same picture, opened again: `open_capture`,
+# a mind's one way to one, taints as read_screen does (security review of #828, finding 1).
 SCREEN_READS = {("shell", "read_screen"), ("shell", "read_mind_view"),
-                ("shell", "screenshot_screen"), ("shell", "screenshot_mind_view")}
+                ("shell", "screenshot_screen"), ("shell", "screenshot_mind_view"),
+                ("shell", "open_capture")}
 
 _SAW_PRIVATE = []          # what tainted this conversation, in order, for the refusal message
 TAINT_OFF = os.environ.get("YOS_MCP_NO_TAINT") == "1"

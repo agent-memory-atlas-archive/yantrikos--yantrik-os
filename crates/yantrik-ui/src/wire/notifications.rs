@@ -1379,12 +1379,13 @@ mod tests {
     /// added here because its words are the desktop's.
     #[test]
     fn model_text_reaches_a_notification_only_through_post_companion() {
-        const DESKTOPS_OWN_WORDS: [(&str, &str); 18] = [
+        const DESKTOPS_OWN_WORDS: [(&str, &str); 19] = [
             // Capture: fixed sentences, a file name this desktop chose, the requester's mind name.
             ("capture/notice.rs", "screenshot_saved"),
             ("capture/notice.rs", "screenshot_copied"),
             ("capture/notice.rs", "screenshot_by_mind"),
             ("capture/notice.rs", "recording_by_mind"),
+            ("capture/notice.rs", "capture_opened_by_mind"), // "<mind> opened <capture>"
             ("capture/notice.rs", "screenshot_failed"),
             ("capture/notice.rs", "recording_failed"),
             ("capture/notice.rs", "recording_finished"),

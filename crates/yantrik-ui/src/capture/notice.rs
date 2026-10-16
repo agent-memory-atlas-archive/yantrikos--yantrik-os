@@ -69,6 +69,16 @@ pub fn screenshot_by_mind(mind: &str, path: &Path, desktop: bool) {
     notify::send(with_buttons(n, path));
 }
 
+/// A mind opened one of the person's saved screenshots or recordings (`open_capture`), which the
+/// person allowed on a card a moment ago. Told after the fact as a screenshot is, naming the mind
+/// and the file, so the person sees what their Allow let it look at.
+pub fn capture_opened_by_mind(mind: &str, path: &Path) {
+    let n = Notification::new("Yantrik", format!("{mind} opened {}", file_name(path)))
+        .body("One of your saved captures, opened in Mind View for the mind to look at.")
+        .urgency(Level::Normal);
+    notify::send(n);
+}
+
 /// A mind started recording Mind View. The red dot shows it too; this says whose it is.
 pub fn recording_by_mind(mind: &str) {
     notify::send(
