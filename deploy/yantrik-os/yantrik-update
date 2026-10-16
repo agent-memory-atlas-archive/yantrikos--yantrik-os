@@ -1724,11 +1724,14 @@ swap_memory() {
 
 # Whether a file this updater is about to install as root came from where only root can write:
 # root's, not writable by group or others, in a directory (and a share/ and prefix) the same.
+# ROOT_UID is root's uid, a variable only so the selftest, which CI runs as an ordinary user, can
+# name its own; assigned here unconditionally, so nothing from the environment sets it.
+ROOT_UID=0
 source_is_roots() {
   local f="$1" d
   d="$(dirname "$f")"
   for p in "$f" "$d" "$SHARE_DIR" "$PREFIX"; do
-    [ "$(stat -c %u "$p" 2>/dev/null)" = 0 ] || return 1
+    [ "$(stat -c %u "$p" 2>/dev/null)" = "$ROOT_UID" ] || return 1
   done
   [ -z "$(find "$f" "$d" "$SHARE_DIR" "$PREFIX" -maxdepth 0 ! -type l -perm /022 2>/dev/null)" ]
 }
@@ -5343,7 +5346,7 @@ c.sendall((json.dumps({"ok": True, "seeded": req["rules"]}) + "\n").encode())' "
     ( GRUB_DEFAULTS="$gd/default/grub" GRUB_CFG="$gd/boot/grub.cfg" UPDATES_DIR="$gd/updates" GR_MODE="$1"
       GRUB_EFI_DIR="$gd/efi" GRUB_SCRIPTS_DIR="$gd/grub.d" GRUB_THEME_SOURCE="$gd/theme-src" GRUB_THEME_DIR="$gd/boot/themes/yantrik"
       PREFIX="$gd" SHARE_DIR="$gd/share" ROOT_FILES="$gd/bin/yantrik-root-files.sha256" GRUB_THEME_BUNDLED="$gd/share/grub-theme"
-      GRUB_CURSOR_CONF="$gd/tmpfiles.d/yantrik-splash-cursor.conf"
+      GRUB_CURSOR_CONF="$gd/tmpfiles.d/yantrik-splash-cursor.conf" ROOT_UID="$(id -u)"
       cp() { [ -n "${GR_CP_FAIL:-}" ] && case "${3:-}" in "$GRUB_DEFAULTS".yantrik-*) true ;; *) false ;; esac \
                && { echo "cp: error writing: No space left on device" >&2; return 1; }; command cp "$@"; }
       grub_can_regenerate() { [ "$GR_MODE" != no-update-grub ]; }
@@ -5883,7 +5886,7 @@ c.sendall((json.dumps({"ok": True, "seeded": req["rules"]}) + "\n").encode())' "
     "1|yes|regenerate|terminal_output gfxterm|yes" \
     "$(find "$gd/default" -name 'grub.before-*' | wc -l)|$(cmp -s "$gd/hand" "$gd/default"/grub.before-* && echo yes || echo no)|$(cat "$gd/calls")|$(grep terminal_output "$gd/boot/grub.cfg")|$(grep -qF " $GRUB_DEFAULT_CONSOLE" "$gd/boot/grub.cfg" && echo yes || echo no)"
   is "541 as it was: ... the build's theme copied into /boot as it shipped, root's, and the cursor line" "same|0|yes" \
-    "$(diff -r "$gsh" "$gth" >/dev/null 2>&1 && echo same || echo differs)|$(find "$gth" ! -user 0 | wc -l)|$([ -f "$gcur" ] && echo yes || echo no)"
+    "$(diff -r "$gsh" "$gth" >/dev/null 2>&1 && echo same || echo differs)|$(find "$gth" ! -user "$(id -u)" | wc -l)|$([ -f "$gcur" ] && echo yes || echo no)"
   t "541 as it was: ... and it says all three: the terminal" "drawn on the screen alone" "$out"
   t "541 as it was: ... the theme" "the menu has the Yantrik theme" "$out"
   t "541 as it was: ... the console" "the splash's ground with no cursor" "$out"
@@ -5921,8 +5924,11 @@ c.sendall((json.dumps({"ok": True, "seeded": req["rules"]}) + "\n").encode())' "
   is "theme from the build: a share/ others could write: not copied" "0|no" "$(gb_try)"
   gb_make; rm -f "$gd/bin/yantrik-root-files.sha256"
   is "theme from the build: no root-files list: not copied" "0|no" "$(gb_try)"
-  gb_make; chown 1000 "$gsh/icon.png"
-  is "theme from the build: a file not root's: not copied" "0|no" "$(gb_try)"
+  # Only root can give a file away; as an ordinary user (CI) the case cannot be built.
+  if [ "$(id -u)" = 0 ]; then
+    gb_make; chown 1000 "$gsh/icon.png"
+    is "theme from the build: a file not root's: not copied" "0|no" "$(gb_try)"
+  fi
   # The image's theme stands in when the build's is refused, and one already in /boot that is the
   # image's (an install of 14 to 16 Oct) is used as it is, though the build's differs.
   gb_make; printf 'other\n' > "$gsh/icon.png"
