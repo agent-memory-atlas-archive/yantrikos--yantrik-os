@@ -133,10 +133,12 @@ pub fn grab(display: Display, region: Option<&str>, format: Format, pointer: boo
     run_bounded(grim(display, region, format, pointer, out.as_os_str())?, CAPTURE_LIMIT, "the capture (grim)").map(|_| ())
 }
 
-/// The same, the picture handed back in memory rather than written anywhere: for a look that
-/// keeps nothing (the screen watcher's).
-pub fn grab_bytes(display: Display, format: Format) -> Result<Vec<u8>, String> {
-    run_bounded(grim(display, None, format, false, std::ffi::OsStr::new("-"))?, CAPTURE_LIMIT, "the capture (grim)")
+/// The same, the picture handed back in memory (grim writes to its stdout) rather than written
+/// anywhere by grim: for a look that keeps nothing (the screen watcher's), and for a screenshot,
+/// which is written into a file the shell made itself (`names::create_fresh`) and never into a
+/// path grim would open and follow.
+pub fn grab_bytes(display: Display, region: Option<&str>, format: Format, pointer: bool) -> Result<Vec<u8>, String> {
+    run_bounded(grim(display, region, format, pointer, std::ffi::OsStr::new("-"))?, CAPTURE_LIMIT, "the capture (grim)")
 }
 
 fn grim(display: Display, region: Option<&str>, format: Format, pointer: bool, out: &std::ffi::OsStr) -> Result<Command, String> {

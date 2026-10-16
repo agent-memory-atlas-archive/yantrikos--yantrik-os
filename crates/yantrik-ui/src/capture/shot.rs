@@ -5,7 +5,13 @@
 //! frame after they are gone: a Wayland client cannot ask when its unmap reached the screen, so
 //! the wait is a number of frames, not a signal. The same wait follows `slurp`, whose selection
 //! overlay is a surface of its own.
+//!
+//! grim writes the picture to its stdout, and the shell writes it into a file it made itself,
+//! exclusively and 0600 in a 0700 folder (`names::create_fresh`): grim given a path opens it with
+//! O_TRUNC and follows a link planted at the predictable next name (security review of #828,
+//! finding 3). The clipboard gets the same bytes on wl-copy's stdin, with no file in between.
 
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -99,20 +105,15 @@ pub fn take(shot: Shot) -> Result<Taken, String> {
         return Err("the screen locked before the picture was taken, so none was".into());
     }
     let at = Local::now();
+    let png = grab::grab_bytes(shot.display, region.as_deref(), Format::Png, shot.pointer)?;
     match shot.keep {
-        Keep::Clipboard => {
-            let temp = private_temp()?;
-            let result = grab::grab(shot.display, region.as_deref(), Format::Png, shot.pointer, &temp.0)
-                .and_then(|()| copy_to_clipboard(&temp.0));
-            result.map(|()| Taken::Copied)
-        }
+        Keep::Clipboard => copy_to_clipboard(&png).map(|()| Taken::Copied),
         Keep::File | Keep::FileAndClipboard => {
-            let path = names::fresh_path(Kind::Screenshot, &names::home()?, &at)?;
-            grab::grab(shot.display, region.as_deref(), Format::Png, shot.pointer, &path)?;
+            let path = save(&png, &at)?;
             if shot.keep == Keep::FileAndClipboard {
                 // Saved is what matters; a clipboard that could not be reached is logged, and the
                 // notification still offers the file.
-                if let Err(e) = copy_to_clipboard(&path) {
+                if let Err(e) = copy_to_clipboard(&png) {
                     tracing::warn!(error = %e, "The screenshot was saved but not copied to the clipboard");
                 }
             }
@@ -122,48 +123,51 @@ pub fn take(shot: Shot) -> Result<Taken, String> {
     }
 }
 
-/// `wl-copy --type image/png < file`. wl-copy reads the whole file before it forks to serve the
-/// clipboard, so the file may go as soon as this returns.
-fn copy_to_clipboard(path: &std::path::Path) -> Result<(), String> {
-    let file = std::fs::File::open(path).map_err(|e| format!("could not read the picture: {e}"))?;
+/// Write the picture into a new screenshot file of the shell's own making, and answer its path.
+/// A write that fails takes the half-written file with it.
+pub(crate) fn save(png: &[u8], at: &chrono::DateTime<Local>) -> Result<PathBuf, String> {
+    let (path, mut file) = names::create_fresh(Kind::Screenshot, &names::home()?, at)?;
+    if let Err(e) = file.write_all(png).and_then(|()| file.sync_all()) {
+        let _ = std::fs::remove_file(&path);
+        return Err(format!("could not save the picture: {e}"));
+    }
+    Ok(path)
+}
+
+/// `wl-copy --type image/png`, the picture on its stdin. wl-copy reads all of it before it forks
+/// to serve the clipboard.
+fn copy_to_clipboard(png: &[u8]) -> Result<(), String> {
     let mut cmd = Command::new("wl-copy");
     cmd.args(["--type", "image/png"]).env_remove("WAYLAND_SOCKET");
-    let child = cmd
-        .stdin(Stdio::from(file))
+    let mut child = cmd
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("could not start wl-copy: {e}"))?;
+    let written = child.stdin.take().map(|mut stdin| stdin.write_all(png));
     let out = child.wait_with_output().map_err(|e| format!("wl-copy: {e}"))?;
+    if let Some(Err(e)) = written {
+        return Err(format!("could not hand the picture to wl-copy: {e}"));
+    }
     if !out.status.success() {
         return Err(format!("wl-copy failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
     }
     Ok(())
 }
 
-/// A picture on its way to the clipboard: in the session's runtime directory, only this account
-/// can read it, and it is removed however the copy ends.
-struct Temp(PathBuf);
-
-impl Drop for Temp {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+#[cfg(test)]
+mod tests {
+    /// Security review of #828, finding 3: grim given a path opens it with O_TRUNC and follows a
+    /// link planted at the predictable next name. A screenshot is grim's stdout, written into a
+    /// file the shell made exclusively, 0600 (names::create_fresh, whose own test holds that).
+    #[test]
+    fn grim_never_opens_a_screenshot_file_itself() {
+        let src = include_str!("shot.rs");
+        let src = src.split("#[cfg(test)]").next().unwrap();
+        assert!(!src.contains("grab::grab("), "grim is handed a path");
+        assert!(src.contains("grab::grab_bytes("));
+        assert!(src.contains("names::create_fresh(Kind::Screenshot"));
+        assert!(!src.contains("fresh_path"), "a name checked, then opened by someone else");
     }
-}
-
-fn private_temp() -> Result<Temp, String> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
-    let path = PathBuf::from(dir).join(format!(
-        "yantrik-clip-{}-{}.png",
-        std::process::id(),
-        Local::now().timestamp_nanos_opt().unwrap_or_default()
-    ));
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&path)
-        .map_err(|e| format!("could not make a place for the picture: {e}"))?;
-    Ok(Temp(path))
 }

@@ -156,6 +156,10 @@ pub fn command(unit: &str, wayland: &str, target: &Target, audio: Audio, enc: &E
         // wf-recorder's "finish the file and exit", for every stop systemd makes.
         "--property=KillSignal=SIGINT".into(),
         format!("--property=TimeoutStopSec={STOP_TIMEOUT_SECS}"),
+        // The video is the person's alone: wf-recorder makes the file itself, at the umask, and
+        // the default left it 0644 (security review of #828, finding 3). The folder is 0700 and
+        // the name fresh (names::fresh_path).
+        "--property=UMask=0077".into(),
         // The display to record. WAYLAND_SOCKET is not passed: the unit is started by the user
         // manager, which has the session's environment, not the shell's handed socket.
         format!("--setenv=WAYLAND_DISPLAY={wayland}"),
@@ -194,8 +198,7 @@ pub fn start(target: Target, audio: Audio, who: Who) -> Result<PathBuf, String> 
     }
     let wayland = target.display().wayland()?;
     let home = names::home()?;
-    let dir = Kind::Recording.dir(&home);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("could not make {}: {e}", dir.display()))?;
+    let dir = names::folder(Kind::Recording, &home)?;
     let free = disk::free_bytes(&dir);
     if !disk::room(free) {
         return Err(format!(
@@ -430,6 +433,8 @@ mod tests {
         assert_eq!(&argv[..4], ["systemd-run", "--user", "--unit=yantrik-capture-rec-7", "--collect"]);
         assert!(argv.contains(&"--property=KillSignal=SIGINT".to_string()), "{argv:?}");
         assert!(argv.contains(&"--setenv=WAYLAND_DISPLAY=wayland-0".to_string()));
+        // The file wf-recorder makes is the person's alone (security review of #828, finding 3).
+        assert!(argv[..argv.iter().position(|a| a == "--").unwrap()].contains(&"--property=UMask=0077".to_string()), "{argv:?}");
         let rec = argv.iter().position(|a| a == "wf-recorder").expect("runs wf-recorder");
         assert_eq!(argv[rec - 1], "--", "everything after -- is the recorder's");
         assert_eq!(argv.last().unwrap(), &path.to_string_lossy());

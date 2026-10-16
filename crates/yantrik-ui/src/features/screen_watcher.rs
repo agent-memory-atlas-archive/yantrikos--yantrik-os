@@ -99,7 +99,7 @@ fn quick_screen_check() -> Option<String> {
     // the capture yet (see below), so there is no reason for it to touch the disk at all. Through
     // the shared capture, so it has the same deadline as every other look at the screen.
     use crate::capture::grab::{self, Display, Format};
-    grab::grab_bytes(Display::Desktop, Format::Png).ok()?;
+    grab::grab_bytes(Display::Desktop, None, Format::Png, false).ok()?;
 
     // For now, just note that we captured — full vision analysis would
     // require the Ollama URL which isn't available in the feature context.
