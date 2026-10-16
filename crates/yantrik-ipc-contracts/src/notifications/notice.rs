@@ -621,7 +621,13 @@ pub fn url_host(url: &str) -> Option<String> {
 /// it resolves, is refused. That is where a home keeps what a card must never put on the screen
 /// a mind can read — `~/.ssh`, `~/.gnupg`, `~/.config/*/credentials`, the keyrings, browser
 /// profiles, and this desktop's own `~/.local/share/yantrik`.
+///
+/// And through the rule every agent read shares (`home_paths::may_read_file`, with its
+/// `PROTECTED` list), as the review asked: outside the protected places, and a file with one name,
+/// because a hard link `~/Documents/key.txt` to `~/.ssh/id_ed25519` has no hidden component and
+/// no link to follow, and is the key.
 pub fn file_under(reference: &str, home: &std::path::Path) -> Option<std::path::PathBuf> {
+    crate::home_paths::may_read_file(reference, home).ok()?;
     let home = std::fs::canonicalize(home).ok()?;
     let hidden = |p: &std::path::Path| p.components().any(|c| c.as_os_str().to_string_lossy().starts_with('.'));
     let written = std::path::Path::new(reference);
@@ -631,6 +637,9 @@ pub fn file_under(reference: &str, home: &std::path::Path) -> Option<std::path::
     let real = std::fs::canonicalize(reference).ok()?;
     let inside = real.strip_prefix(&home).ok()?;
     if inside.as_os_str().is_empty() || hidden(inside) {
+        return None;
+    }
+    if crate::home_paths::is_protected(&real) {
         return None;
     }
     std::fs::metadata(&real).ok()?.is_file().then_some(real)
@@ -915,6 +924,26 @@ mod tests {
         let day = QuietHours { start: 13, end: 14 };
         assert!(day.contains(13) && !day.contains(14));
         assert!(!QuietHours { start: 5, end: 5 }.contains(5), "an empty window is no window");
+    }
+
+    /// Security review of #831, finding 3, through the shared rule: a protected place and a second
+    /// name for a credential are refused, though neither has a hidden component.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_ref_goes_through_the_shared_protected_paths_rule() {
+        let root = std::env::temp_dir().join(format!("notice-protected-{}", std::process::id()));
+        let home = root.join("home");
+        std::fs::create_dir_all(home.join(".ssh")).unwrap();
+        std::fs::create_dir_all(home.join("Documents")).unwrap();
+        std::fs::write(home.join(".ssh/id_ed25519"), "key").unwrap();
+        std::fs::write(home.join("memory.db"), "x").unwrap();
+        std::fs::write(home.join("Documents/report.pdf"), "x").unwrap();
+        std::fs::hard_link(home.join(".ssh/id_ed25519"), home.join("Documents/key.txt")).unwrap();
+        let at = |rel: &str| home.join(rel).to_string_lossy().to_string();
+        assert!(file_under(&at("Documents/key.txt"), &home).is_none(), "a second name for a key");
+        assert!(file_under(&at("memory.db"), &home).is_none(), "on the PROTECTED list, not hidden");
+        assert!(file_under(&at("Documents/report.pdf"), &home).is_some());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

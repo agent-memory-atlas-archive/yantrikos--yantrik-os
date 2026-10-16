@@ -164,6 +164,11 @@ pub fn read_only_copy(path: &Path, into: &Path, name: &str) -> Result<PathBuf, S
     if !meta.is_file() {
         return Err("it is not a file".into());
     }
+    // Judged on the handle, as `home_paths::stat` judges a path: a second name is the same bytes
+    // as the other one, which may be a key, and no link says where.
+    if std::os::unix::fs::MetadataExt::nlink(&meta) > 1 {
+        return Err("it has another name elsewhere, which could be anything".into());
+    }
     let opened = std::fs::read_link(format!("/proc/self/fd/{}", std::os::fd::AsRawFd::as_raw_fd(&file)))
         .map_err(|e| format!("cannot tell what was opened: {e}"))?;
     if opened != path {
