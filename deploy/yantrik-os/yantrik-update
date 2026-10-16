@@ -5025,7 +5025,7 @@ c.sendall((json.dumps({"ok": True, "seeded": req["rules"]}) + "\n").encode())' "
     ( GRUB_DEFAULTS="$gd/default/grub" GRUB_CFG="$gd/boot/grub.cfg" UPDATES_DIR="$gd/updates" GR_MODE="$1"
       cp() { [ -n "${GR_CP_FAIL:-}" ] && case "${3:-}" in "$GRUB_DEFAULTS".yantrik-*) true ;; *) false ;; esac \
                && { echo "cp: error writing: No space left on device" >&2; return 1; }; command cp "$@"; }
-      grub_can_regenerate() { return 0; }
+      grub_can_regenerate() { [ "$GR_MODE" != no-update-grub ]; }
       grub_regenerate() {
         printf 'regenerate\n' >> "$gd/calls"
         case "$GR_MODE" in
@@ -5096,6 +5096,17 @@ c.sendall((json.dumps({"ok": True, "seeded": req["rules"]}) + "\n").encode())' "
   is "serial console: a put-back that fails leaves no temp file" "" "$(find "$gd/default" "$gd/boot" -name '*.yantrik-*')"
   t "serial console: ... says which file did not go back" "could not put $gd/default/grub back" "$out"
   is "serial console: ... and does not say both are as they were" "no" "$(printf '%s' "$out" | grep -q 'are as they were' && echo yes || echo no)"
+
+  # A machine with no update-grub, and one whose menu is not at $GRUB_CFG (#829 review, item 5):
+  # nothing is touched and it says why.
+  gr_old "$GRUB_CMDLINE_OLD"; cp -p "$gd/default/grub" "$gd/hand"; out="$(gr_run no-update-grub)"
+  is "serial console: no update-grub: nothing is touched" "yes||none" \
+    "$(cmp -s "$gd/hand" "$gd/default/grub" && echo yes || echo no)|$(cat "$gd/calls" 2>/dev/null)|$(ls "$gd/default"/grub.before-* 2>/dev/null || echo none)"
+  t "serial console: ... and it says why" "no update-grub on this machine" "$out"
+  gr_old "$GRUB_CMDLINE_OLD"; cp -p "$gd/default/grub" "$gd/hand"; rm -f "$gd/boot/grub.cfg"; out="$(gr_run ok)"
+  is "serial console: no grub.cfg: nothing is touched or made" "yes||none|no" \
+    "$(cmp -s "$gd/hand" "$gd/default/grub" && echo yes || echo no)|$(cat "$gd/calls" 2>/dev/null)|$(ls "$gd/default"/grub.before-* 2>/dev/null || echo none)|$([ -e "$gd/boot/grub.cfg" ] && echo yes || echo no)"
+  t "serial console: ... and it says why" "no $gd/boot/grub.cfg on this machine" "$out"
 
   # A run killed after $f was rewritten and before the menu was (#829 review, item 2): the next
   # one finishes the job instead of stopping at "already the new line".
