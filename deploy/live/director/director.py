@@ -84,6 +84,11 @@ FIX_FIRST = (
     "action, and check it again by running `{check}`. Then read the code and {notes} side by side, and "
     "untick any line whose code is not really there yet: a line is ticked only when it works. Then carry "
     "on with the first line that is not ticked.")
+NOTHING_CHANGED = (
+    "You said FINISHED on {name}, but nothing in the {folder} folder has changed since this round "
+    "started: no file was written. Reading files is not the step. Do the step now through the shell's "
+    "agent_run action, writing the code into the files, check the page by running `{check}`, tick the "
+    "line only when its code is really there, and only then say FINISHED on its own line.")
 POLISH = (
     "Please make {name} better by one step. It is in the {folder} folder inside the Projects folder in "
     "your home folder. Read IDEAS.md there through the shell's agent_run action. If it is missing, or "
@@ -291,6 +296,25 @@ def polish(b):
                 brief=POLISH, keep_going=POLISH_KEEP_GOING, max_turns=POLISH_TURNS, max_hours=POLISH_HOURS)
 
 
+def folder_print(m):
+    """What the mission's folder holds, by name, size and modification time: two prints differ
+    when anything in it was written. Hidden entries and the page check's own leavings are not
+    counted; a missing folder prints empty."""
+    root = os.path.join(PROJECTS, m["fields"]["folder"])
+    seen = []
+    for top, dirs, files in os.walk(root):
+        dirs[:] = sorted(x for x in dirs if not x.startswith("."))
+        for name in sorted(files):
+            if name.startswith("."):
+                continue
+            try:
+                st = os.stat(os.path.join(top, name))
+            except OSError:
+                continue
+            seen.append((os.path.relpath(os.path.join(top, name), root), st.st_size, st.st_mtime_ns))
+    return tuple(seen)
+
+
 def prompt(template, m, errors=""):
     return template.format(errors=errors, **m["fields"])
 
@@ -332,6 +356,10 @@ def run_mission(m):
             log(mission=m["id"], event="fresh chat refused", said=said)
     cards = 0
     previous = ""
+    # A FINISHED counts only over a folder that changed. On 561 the Mind read Beatgrid's files
+    # eight times, wrote nothing, and said FINISHED over a description of code it had not
+    # written; the page, untouched, checked clean (16 Oct 2026).
+    before = folder_print(m)
     for turn in range(1, m["max_turns"] + 1):
         if time.time() - started > m["max_hours"] * 3600:
             log(mission=m["id"], event="stopped", why="time limit", turns=turn - 1)
@@ -363,7 +391,10 @@ def run_mission(m):
         if cards >= 2:
             log(mission=m["id"], event="stopped", why="cards are waiting for a person", turns=turn)
             return
-        if said_finished(reply):
+        unchanged = said_finished(reply) and folder_print(m) == before
+        if unchanged:
+            log(mission=m["id"], event="finished refused", turn=turn, why="nothing in the folder changed")
+        elif said_finished(reply):
             if clean is False:
                 # The Mind's word against the page's: the page wins, and the mission goes on.
                 log(mission=m["id"], event="finished refused", turn=turn, why="the page throws")
@@ -380,7 +411,12 @@ def run_mission(m):
             return
         previous = reply
         time.sleep(BETWEEN_TURNS_SECS)
-        text = prompt(FIX_FIRST, m, errors) if clean is False else prompt(m["keep_going"], m)
+        if clean is False:
+            text = prompt(FIX_FIRST, m, errors)
+        elif unchanged:
+            text = prompt(NOTHING_CHANGED, m)
+        else:
+            text = prompt(m["keep_going"], m)
     log(mission=m["id"], event="stopped", why="turn limit")
 
 
