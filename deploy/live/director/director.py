@@ -27,6 +27,7 @@ Missions are in missions.json beside it. Progress goes to ~/director/log.jsonl, 
 Stdlib only; the image ships no Python packages for it.
 """
 import difflib
+import hashlib
 import json
 import os
 import re
@@ -86,7 +87,8 @@ FIX_FIRST = (
     "on with the first line that is not ticked.")
 NOTHING_CHANGED = (
     "You said FINISHED on {name}, but nothing in the {folder} folder has changed since this round "
-    "started: no file was written. Reading files is not the step. Do the step now through the shell's "
+    "started: none of its code changed (ticking a line or copying a file to a backup is not a "
+    "change). Reading files is not the step. Do the step now through the shell's "
     "agent_run action, writing the code into the files, check the page by running `{check}`, tick the "
     "line only when its code is really there, and only then say FINISHED on its own line.")
 POLISH = (
@@ -296,22 +298,34 @@ def polish(b):
                 brief=POLISH, keep_going=POLISH_KEEP_GOING, max_turns=POLISH_TURNS, max_hours=POLISH_HOURS)
 
 
+def is_code(name):
+    """Whether a file is part of what the page is made of, rather than notes or a backup."""
+    lower = name.lower()
+    if lower.endswith((".md", "~", ".orig", ".tmp", ".swp")) or ".bak" in lower:
+        return False
+    return True
+
+
 def folder_print(m):
-    """What the mission's folder holds, by name, size and modification time: two prints differ
-    when anything in it was written. Hidden entries and the page check's own leavings are not
-    counted; a missing folder prints empty."""
+    """What the mission's code holds, by name and content: two prints differ when a file the
+    page is made of was really changed. Notes (`.md`), backups (`.bak`, `~`) and hidden entries
+    are not counted: on 561 a Labyrinth round was taken as done when the Mind ticked IDEAS.md
+    and copied maze.js to maze.js.bak, while maze.js itself was byte for byte what it had been
+    (16 Oct 2026). Content, not modification time, so rewriting a file unchanged is not a
+    change either. A missing folder prints empty."""
     root = os.path.join(PROJECTS, m["fields"]["folder"])
     seen = []
     for top, dirs, files in os.walk(root):
         dirs[:] = sorted(x for x in dirs if not x.startswith("."))
         for name in sorted(files):
-            if name.startswith("."):
+            if name.startswith(".") or not is_code(name):
                 continue
             try:
-                st = os.stat(os.path.join(top, name))
+                with open(os.path.join(top, name), "rb") as f:
+                    digest = hashlib.sha256(f.read()).hexdigest()
             except OSError:
                 continue
-            seen.append((os.path.relpath(os.path.join(top, name), root), st.st_size, st.st_mtime_ns))
+            seen.append((os.path.relpath(os.path.join(top, name), root), digest))
     return tuple(seen)
 
 
