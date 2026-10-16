@@ -475,6 +475,13 @@ sudo grep -qx 'quiet_boot="1"' "$ROOTFS/etc/grub.d/10_linux" \
     || fail "10_linux has no quiet_boot switch — the installed boot menu would show GRUB's loading lines"
 ok "Installed boot menu's plain entry quiet"
 
+# ── The installed boot menu's terminal is its ground, not black ──
+# Between Enter and the kernel GRUB shows its terminal window, which gfxterm fills black unless
+# told otherwise: a black rectangle over the menu for about 3 s (#820, the OVMF film). update-grub
+# on the installed machine writes this after 00_header (grub-ground says how).
+sudo install -m 0755 "$SCRIPT_DIR/grub-ground" "$ROOTFS/etc/grub.d/06_yantrik_ground"
+ok "Installed boot menu's terminal in the ground"
+
 # ── The live system's shutdown says nothing about removing its medium ──
 # live-tools' system-shutdown hook ejected the disk the medium is on and waited for ENTER after
 # "Please remove the live-medium". On a Mac the installer is a partition of the internal disk
@@ -1567,7 +1574,13 @@ loadfont /boot/grub/themes/yantrik/dejavusans_16.pf2
 loadfont /boot/grub/themes/yantrik/dejavusans_20.pf2
 loadfont /boot/grub/themes/yantrik/dejavusans_bold_28.pf2
 loadfont unicode
-terminal_output gfxterm
+# The terminal window GRUB loads the kernel in, after Enter, in the menu's ground: gfxterm fills
+# it with black otherwise, a black rectangle over the menu for about 3 s (#820, the OVMF film).
+# Only once gfxterm is up: background_color needs a video mode. Installed machines: grub-ground.
+if terminal_output gfxterm; then
+    insmod gfxterm_background
+    background_color "#0e1018"
+fi
 set theme=/boot/grub/themes/yantrik/theme.txt
 export theme
 
