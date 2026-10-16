@@ -11,7 +11,7 @@
 //! So, for every OpenAI-compatible client in this crate (one module, never copies):
 //! - a 400 that names a sampling parameter as one the model will not take ([`refused_params`],
 //!   the one matcher, which the gateway calls too) is answered by sending the same request once
-//!   more without it, and the refusal is remembered per (address, model)
+//!   more without it, and once that is answered the refusal is remembered per (address, model)
 //!   for the life of the process, so later calls (and the key test, which shares the process)
 //!   leave it out from the start ([`send_dropping_refused`]);
 //! - on Anthropic's own endpoint a sampling value nobody chose (the [`GenerationConfig`] default)
@@ -161,10 +161,21 @@ fn key(base_url: &str, model: &str) -> (String, String) {
     (base_url.trim().trim_end_matches('/').to_ascii_lowercase(), model.to_string())
 }
 
+/// The most (address, model) pairs remembered. Entries only grow with the pairs the person
+/// configures or key-tests, so this is never reached in use; past it a new pair is still retried
+/// on each call, just not remembered.
+const MOST_REMEMBERED: usize = 64;
+
 /// Remember for this process that `model` at `base_url` will not take `parameter`.
 pub fn remember(base_url: &str, model: &str, parameter: &'static str) {
-    let mut all = refusals().lock().unwrap_or_else(|e| e.into_inner());
-    let known = all.entry(key(base_url, model)).or_default();
+    insert(&mut refusals().lock().unwrap_or_else(|e| e.into_inner()), key(base_url, model), parameter);
+}
+
+fn insert(all: &mut Refusals, key: (String, String), parameter: &'static str) {
+    if !all.contains_key(&key) && all.len() >= MOST_REMEMBERED {
+        return;
+    }
+    let known = all.entry(key).or_default();
     if !known.contains(&parameter) {
         known.push(parameter);
     }
@@ -195,8 +206,8 @@ pub fn prepare(base_url: &str, model: &str, config: &GenerationConfig, body: &mu
 }
 
 /// Send `body` with `post`, and when the provider refuses sampling parameters it names
-/// ([`refused_params`]), send it once more without them, remembering the refusal for every later
-/// call.
+/// ([`refused_params`]), send it once more without them; once that is answered, the refusal is
+/// remembered for every later call.
 ///
 /// `post` sends one request: `Ok(Ok(_))` is an answer, `Ok(Err((status, body)))` the provider's
 /// refusal as it said it, `Err` a failure on the way. Each parameter is dropped at most once, so
@@ -213,9 +224,18 @@ pub fn send_dropping_refused<T>(
             fields.remove(parameter);
         }
     }
+    // Remembered only once a request without them is answered: the error text can echo what a
+    // caller sent, and an endpoint can answer the matching 400 and then fail the retry, so a 400
+    // alone is not the provider's word (as in the gateway since 91f80cd).
+    let mut dropped: Vec<&'static str> = Vec::new();
     loop {
         let (status, text) = match post(&body)? {
-            Ok(answer) => return Ok(Ok(answer)),
+            Ok(answer) => {
+                for parameter in dropped {
+                    remember(base_url, model, parameter);
+                }
+                return Ok(Ok(answer));
+            }
             Err(refusal) => refusal,
         };
         let refused = if status == 400 { refused_params(text.as_bytes(), &body) } else { Vec::new() };
@@ -230,8 +250,8 @@ pub fn send_dropping_refused<T>(
         );
         if let Some(fields) = body.as_object_mut() {
             for parameter in refused {
-                remember(base_url, model, parameter);
                 fields.remove(parameter);
+                dropped.push(parameter);
             }
         }
     }
@@ -390,6 +410,39 @@ mod tests {
         assert_eq!(reply, Err((400, r#"{"error":{"message":"bad message"}}"#.to_string())));
         assert_eq!(calls, 1);
         assert!(remembered(base, "m").is_empty());
+    }
+
+    #[test]
+    fn a_refusal_is_remembered_only_once_the_retry_without_it_is_answered() {
+        let base = "https://refusal-test-5.example/v1";
+        let mut calls = 0;
+        let reply = send_dropping_refused(base, "m", &body(), |b| {
+            calls += 1;
+            Ok(if b.get("temperature").is_some() { Err((400, TEMPERATURE_DEPRECATED.to_string())) } else { Err::<(), _>((500, "down".to_string())) })
+        })
+        .unwrap();
+        assert_eq!(reply, Err((500, "down".to_string())));
+        assert_eq!(calls, 2, "the refusal, then one retry");
+        assert!(remembered(base, "m").is_empty(), "a retry that failed proves nothing");
+
+        let failed_on_the_way = send_dropping_refused(base, "m", &body(), |b| {
+            if b.get("temperature").is_some() { Ok(Err::<(), _>((400, TEMPERATURE_DEPRECATED.to_string()))) } else { anyhow::bail!("reset") }
+        });
+        assert!(failed_on_the_way.is_err());
+        assert!(remembered(base, "m").is_empty());
+    }
+
+    #[test]
+    fn past_the_cap_a_new_pair_is_not_remembered_and_a_known_one_still_is() {
+        let mut all = Refusals::new();
+        for i in 0..MOST_REMEMBERED {
+            insert(&mut all, key(&format!("https://cap-{i}.example/v1"), "m"), "temperature");
+        }
+        insert(&mut all, key("https://cap-over.example/v1", "m"), "temperature");
+        assert_eq!(all.len(), MOST_REMEMBERED);
+        assert!(!all.contains_key(&key("https://cap-over.example/v1", "m")));
+        insert(&mut all, key("https://cap-0.example/v1", "m"), "top_p");
+        assert_eq!(all[&key("https://cap-0.example/v1", "m")], vec!["temperature", "top_p"], "a pair already known keeps learning");
     }
 
     #[test]
