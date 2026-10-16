@@ -1918,12 +1918,45 @@ grub_cfg_by_device() {
   grep -qE '^[[:space:]]*linux[^[:space:]]*[[:space:]].*[[:space:]]root=/dev/(sd|nvme|vd|hd|mmcblk)' "$1" 2>/dev/null
 }
 
+# Does a grub.cfg still start the kernel with the old line's serial console?
+grub_cfg_has_old_serial() {
+  grep -qE '^[[:space:]]*linux[^[:space:]]*[[:space:]].*[[:space:]]console=ttyS0,115200' "$1" 2>/dev/null
+}
+
+# The .before- copy this code rewrote $1 from, if $1 is exactly that copy with the old line
+# swapped for the new: proof the new line is this code's doing, not someone's own edit.
+grub_defaults_rewritten_from() {
+  local c
+  for c in "$1".before-*; do
+    [ -f "$c" ] || continue
+    awk -v old="$GRUB_CMDLINE_OLD" -v new="$GRUB_CMDLINE_NEW" '$0 == old { print new; next } { print }' "$c" \
+      | cmp -s - "$1" && { printf '%s\n' "$c"; return 0; }
+  done
+  return 1
+}
+
 migrate_grub_cmdline() {
-  local f="$GRUB_DEFAULTS" cfg="$GRUB_CFG" lines note copy tmp cfg_copy out rc
+  local f="$GRUB_DEFAULTS" cfg="$GRUB_CFG" lines note copy tmp cfg_copy out rc resume="" kept
   [ -f "$f" ] || return 0
+  # A run killed part way leaves its temp files here; every name with this suffix is one this
+  # function made, and nothing else runs it at the same time (security review of 5f826b95,
+  # #829, item 2).
+  rm -f -- "$f".yantrik-?????? "$cfg".yantrik-??????
   lines="$(grep -E '^[[:space:]]*(export[[:space:]]+)?GRUB_CMDLINE_LINUX=' "$f")"
-  [ "$lines" = "$GRUB_CMDLINE_NEW" ] && return 0
-  if [ "$lines" != "$GRUB_CMDLINE_OLD" ]; then
+  kept="$f keeps console=ttyS0"
+  if [ "$lines" = "$GRUB_CMDLINE_NEW" ]; then
+    # Already the new line. Done, unless a run was stopped between rewriting $f and finishing
+    # the menu (killed, or its put-back failed): then grub.cfg still starts the kernel on
+    # ttyS0, and stopping here would leave the getty loop at every boot until some kernel
+    # update happened to regenerate it (#829 review, item 2). Resumed only when this code
+    # made the change (a .before- copy that $f is the rewrite of), and when nothing in $f or
+    # its grub.d asks for that console, so a menu that would carry it anyway is not
+    # regenerated at every update.
+    grub_cfg_has_old_serial "$cfg" || return 0
+    grep -qs -- 'console=ttyS0,115200' "$f" "$f".d/*.cfg && return 0
+    copy="$(grub_defaults_rewritten_from "$f")" || return 0
+    resume=1; kept="$cfg still starts the kernel with console=ttyS0"
+  elif [ "$lines" != "$GRUB_CMDLINE_OLD" ]; then
     # Said once per line, not at every update: it is not a fault, only worth knowing about.
     note="$UPDATES_DIR/grub-cmdline-left-alone"
     if [ "$(cat "$note" 2>/dev/null)" != "$lines" ]; then
@@ -1938,26 +1971,28 @@ migrate_grub_cmdline() {
     fi
     return 0
   fi
-  grub_can_regenerate || { warn "no update-grub on this machine; $f keeps console=ttyS0"; return 0; }
+  grub_can_regenerate || { warn "no update-grub on this machine; $kept"; return 0; }
   # A menu somewhere else (/boot not mounted, another loader) is not one this can put back.
-  [ -f "$cfg" ] || { warn "no $cfg on this machine; $f keeps console=ttyS0"; return 0; }
+  [ -f "$cfg" ] || { warn "no $cfg on this machine; $kept"; return 0; }
 
-  cfg_copy="$(mktemp "$cfg.yantrik-XXXXXX")" || { warn "could not write beside $cfg; $f keeps console=ttyS0"; return 0; }
-  cp -p "$cfg" "$cfg_copy" || { rm -f "$cfg_copy"; warn "could not copy $cfg aside; $f keeps console=ttyS0"; return 0; }
-  # One copy of the old file, however many runs it takes: a run whose regeneration failed put the
-  # file back as it was, and its copy still stands for it.
-  copy=""
-  for tmp in "$f".before-*; do
-    [ -f "$tmp" ] && cmp -s "$tmp" "$f" && copy="$tmp"
-  done
-  [ -n "$copy" ] || copy="$f.before-$(date -u +%Y%m%dT%H%M%SZ)"
-  [ -f "$copy" ] || cp -p "$f" "$copy" || { rm -f "$cfg_copy"; warn "could not copy $f aside; it keeps console=ttyS0"; return 0; }
-  tmp="$(mktemp "$f.yantrik-XXXXXX")" || { rm -f "$cfg_copy"; warn "could not write beside $f; it keeps console=ttyS0"; return 0; }
-  if ! awk -v old="$GRUB_CMDLINE_OLD" -v new="$GRUB_CMDLINE_NEW" '$0 == old { print new; next } { print }' "$f" > "$tmp" \
-     || ! chmod --reference="$f" "$tmp" || ! chown --reference="$f" "$tmp" || ! mv -f "$tmp" "$f"; then
-    rm -f "$tmp" "$cfg_copy"
-    warn "could not rewrite $f; it keeps console=ttyS0"
-    return 0
+  cfg_copy="$(mktemp "$cfg.yantrik-XXXXXX")" || { warn "could not write beside $cfg; $kept"; return 0; }
+  cp -p "$cfg" "$cfg_copy" || { rm -f "$cfg_copy"; warn "could not copy $cfg aside; $kept"; return 0; }
+  if [ -z "$resume" ]; then
+    # One copy of the old file, however many runs it takes: a run whose regeneration failed put the
+    # file back as it was, and its copy still stands for it.
+    copy=""
+    for tmp in "$f".before-*; do
+      [ -f "$tmp" ] && cmp -s "$tmp" "$f" && copy="$tmp"
+    done
+    [ -n "$copy" ] || copy="$f.before-$(date -u +%Y%m%dT%H%M%SZ)"
+    [ -f "$copy" ] || cp -p "$f" "$copy" || { rm -f "$cfg_copy"; warn "could not copy $f aside; it keeps console=ttyS0"; return 0; }
+    tmp="$(mktemp "$f.yantrik-XXXXXX")" || { rm -f "$cfg_copy"; warn "could not write beside $f; it keeps console=ttyS0"; return 0; }
+    if ! awk -v old="$GRUB_CMDLINE_OLD" -v new="$GRUB_CMDLINE_NEW" '$0 == old { print new; next } { print }' "$f" > "$tmp" \
+       || ! chmod --reference="$f" "$tmp" || ! chown --reference="$f" "$tmp" || ! mv -f "$tmp" "$f"; then
+      rm -f "$tmp" "$cfg_copy"
+      warn "could not rewrite $f; it keeps console=ttyS0"
+      return 0
+    fi
   fi
   out="$(grub_regenerate 2>&1)"; rc=$?
   if [ "$rc" = 0 ] && grub_cfg_by_device "$cfg" && ! grub_cfg_by_device "$cfg_copy"; then
@@ -5034,6 +5069,28 @@ c.sendall((json.dumps({"ok": True, "seeded": req["rules"]}) + "\n").encode())' "
   done
   gr_run fail >/dev/null
   is "serial console: a second failed run keeps the one copy" "1" "$(find "$gd/default" -name 'grub.before-*' | wc -l)"
+
+  # A run killed after $f was rewritten and before the menu was (#829 review, item 2): the next
+  # one finishes the job instead of stopping at "already the new line".
+  gr_killed() { # the state such a run leaves: $f rewritten, its copy kept, the old menu, temp files
+    gr_old "$GRUB_CMDLINE_OLD"; cp -p "$gd/default/grub" "$gd/default/grub.before-20261016T000000Z"
+    sed -i "s/^GRUB_CMDLINE_LINUX=.*/$(printf '%s' "$GRUB_CMDLINE_NEW" | sed 's/[&/]/\\&/g')/" "$gd/default/grub"
+    printf 'half\n' > "$gd/boot/grub.cfg.yantrik-AbC123"; printf 'half\n' > "$gd/default/grub.yantrik-dEf456"
+  }
+  gr_killed; out="$(gr_run ok)"
+  is "serial console: an interrupted run is finished by the next one" "regenerate|linux /vmlinuz root=UUID=1234 console=tty1" \
+    "$(cat "$gd/calls" 2>/dev/null)|$(cat "$gd/boot/grub.cfg")"
+  is "serial console: ... its temp files are cleared" "" "$(find "$gd/default" "$gd/boot" -name '*.yantrik-*')"
+  is "serial console: ... and a run after that does nothing" "" "$(rm -f "$gd/calls"; gr_run ok; cat "$gd/calls" 2>/dev/null)"
+  gr_killed; gcfg="$(cat "$gd/boot/grub.cfg")"; out="$(gr_run fail)"
+  is "serial console: an interrupted run whose finish fails puts back the old file and menu" "$GRUB_CMDLINE_OLD|$gcfg" \
+    "$(grep '^GRUB_CMDLINE_LINUX=' "$gd/default/grub")|$(cat "$gd/boot/grub.cfg")"
+  gr_killed; rm -f "$gd/default"/grub.before-*; out="$(gr_run ok)"
+  is "serial console: the new line with no copy of ours beside it is not regenerated" "" "$(cat "$gd/calls" 2>/dev/null)$out"
+  gr_killed; mkdir -p "$gd/default/grub.d"
+  printf 'GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT console=ttyS0,115200"\n' > "$gd/default/grub.d/serial.cfg"
+  out="$(gr_run ok)"; rm -rf "$gd/default/grub.d"
+  is "serial console: ... nor is a machine whose grub.d asks for that console itself" "" "$(cat "$gd/calls" 2>/dev/null)"
   is "serial console: the new line is the installer's" "yes" \
     "$(! [ -f "$here/../../crates/yantrik-ui/src/wire/installer.rs" ] \
        || grep -qF -- "$(printf '%s' "$GRUB_CMDLINE_NEW" | sed 's/"/\\"/g')" "$here/../../crates/yantrik-ui/src/wire/installer.rs" && echo yes || echo no)"
