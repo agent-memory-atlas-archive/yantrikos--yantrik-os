@@ -176,7 +176,7 @@ jobs:
             pkg-config libasound2-dev libudev-dev libssl-dev libspeechd-dev libwayland-dev \
             libxkbcommon-dev libfontconfig1-dev libfreetype6-dev libinput-dev libgbm-dev \
             libegl1-mesa-dev \
-            debootstrap xorriso squashfs-tools grub-pc-bin grub-efi-amd64-bin grub-common \
+            debootstrap xorriso squashfs-tools grub-pc-bin grub-efi-amd64-bin grub-common fonts-dejavu-core \
             mtools dosfstools zstd \
             qemu-system-x86 python3 python3-pip git
 
