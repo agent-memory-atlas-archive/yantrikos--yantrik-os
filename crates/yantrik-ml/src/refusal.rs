@@ -9,8 +9,9 @@
 //! was wrong.
 //!
 //! So, for every OpenAI-compatible client in this crate (one module, never copies):
-//! - a 400 that names a sampling parameter as one the model will not take is answered by sending
-//!   the same request once more without it, and the refusal is remembered per (address, model)
+//! - a 400 that names a sampling parameter as one the model will not take ([`refused_params`],
+//!   the one matcher, which the gateway calls too) is answered by sending the same request once
+//!   more without it, and the refusal is remembered per (address, model)
 //!   for the life of the process, so later calls (and the key test, which shares the process)
 //!   leave it out from the start ([`send_dropping_refused`]);
 //! - on Anthropic's own endpoint a sampling value nobody chose (the [`GenerationConfig`] default)
@@ -25,21 +26,20 @@ use std::sync::{Mutex, OnceLock};
 use crate::types::GenerationConfig;
 
 /// The request fields a model may refuse to be sent, and that a request can go without: each
-/// only tunes sampling, so leaving it out means the provider's default.
+/// only tunes sampling, so leaving it out means the provider's default. This is the one place that
+/// says what may be dropped, for the companion's clients and the gateway alike. `top_k` and the
+/// penalties are here too: the companion sends `frequency_penalty` on every turn by default
+/// (`repeat_penalty` 1.1), and OpenAI's reasoning models refuse the penalties outright, so a
+/// refusal of one would otherwise fail every turn on such a model.
 pub const SAMPLING_PARAMETERS: [&str; 5] = ["temperature", "top_p", "top_k", "frequency_penalty", "presence_penalty"];
 
-/// Words a provider uses when it will not take a parameter at all (as opposed to a value out of
-/// range, which is the caller's to fix and is not retried).
-const WILL_NOT_TAKE: [&str; 8] = [
-    "deprecated",
-    "not supported",
-    "unsupported",
-    "not allowed",
-    "not permitted",
-    "no longer supported",
-    "cannot both be specified",
-    "cannot be specified",
-];
+/// What a provider says when a model will not take a parameter at all. A range error
+/// ("temperature values above 1 are not allowed", "must be at most 1") or a conflict ("`temperature`
+/// and `top_p` cannot both be specified") is not one of these: the parameter is allowed, the value
+/// or the pair is wrong, and the caller is shown it rather than having the parameter dropped for
+/// good.
+const REFUSED: [&str; 7] =
+    ["is deprecated", "deprecated for this model", "not supported", "unsupported", "does not support", "unrecognized request argument", "unknown parameter"];
 
 /// Anthropic's API host: its OpenAI-compatible endpoint is `https://api.anthropic.com/v1`.
 const ANTHROPIC_HOST: &str = "api.anthropic.com";
@@ -103,31 +103,51 @@ pub fn provider_message(body: &str) -> Option<String> {
     (!line.is_empty()).then_some(line)
 }
 
-/// Whether `word` appears in `text` on its own: not inside a longer name (`top_p` is not in
-/// `top_probability`).
+/// Whether `text` holds `word` with no identifier character either side (`top_p` is not in
+/// `top_probability` or `top_p2`).
 fn names(text: &str, word: &str) -> bool {
-    let is_name_char = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
     text.match_indices(word).any(|(i, _)| {
         let before = text[..i].chars().next_back();
         let after = text[i + word.len()..].chars().next();
-        !before.is_some_and(is_name_char) && !after.is_some_and(is_name_char)
+        !before.is_some_and(ident) && !after.is_some_and(ident)
     })
 }
 
-/// The sampling parameter a refusal says the model will not take, when the request carried it.
+/// The [`SAMPLING_PARAMETERS`] a provider's message says the model will not take. A parameter
+/// counts only when it is named in the same sentence as the refusal: "`temperature` and `top_p`
+/// cannot both be specified. `top_p` is deprecated." names both, and refuses one.
+pub fn refused_in(message: &str) -> Vec<&'static str> {
+    let message = message.to_ascii_lowercase();
+    let mut found = Vec::new();
+    for sentence in message.split(['.', ';', '\n']) {
+        if !REFUSED.iter().any(|w| sentence.contains(w)) {
+            continue;
+        }
+        for p in SAMPLING_PARAMETERS {
+            if names(sentence, p) && !found.contains(&p) {
+                found.push(p);
+            }
+        }
+    }
+    found
+}
+
+/// The parameters a 400's body says the model will not take, of those `sent` carries. The one
+/// matcher: the companion's clients ([`send_dropping_refused`]) and the gateway both call it.
 ///
-/// Conservative on purpose: only a 400, only a parameter the request really sent, and only when
-/// the provider's message names it and says it is not taken at all. A 400 for anything else
-/// (a bad message, a value out of range) is the caller's and is not retried.
-pub fn refused_parameter(status: u16, body: &str, sent: &serde_json::Value) -> Option<&'static str> {
-    if status != 400 {
-        return None;
-    }
-    let message = provider_message(body)?.to_ascii_lowercase();
-    if !WILL_NOT_TAKE.iter().any(|w| message.contains(w)) {
-        return None;
-    }
-    SAMPLING_PARAMETERS.into_iter().find(|p| sent.get(*p).is_some() && names(&message, p))
+/// Conservative on purpose: only the provider's own message (`error.message`, a bare `error`, or a
+/// top-level `message`), only a parameter the request really sent, and only when the message says
+/// it is not taken at all ([`refused_in`]). Providers echo an unknown key's name in their 400, so
+/// when `sent` has another key holding the parameter's name (`"x temperature"`), the message may be
+/// that echo, and the parameter is not taken as refused. The caller checks the status is 400.
+pub fn refused_params(error_body: &[u8], sent: &serde_json::Value) -> Vec<&'static str> {
+    let Some(sent) = sent.as_object() else { return Vec::new() };
+    let Some(message) = raw_message(error_body) else { return Vec::new() };
+    refused_in(&message)
+        .into_iter()
+        .filter(|p| sent.contains_key(*p) && !sent.keys().any(|k| k != p && k.to_ascii_lowercase().contains(p)))
+        .collect()
 }
 
 type Refusals = HashMap<(String, String), Vec<&'static str>>;
@@ -174,8 +194,9 @@ pub fn prepare(base_url: &str, model: &str, config: &GenerationConfig, body: &mu
     }
 }
 
-/// Send `body` with `post`, and when the provider refuses a sampling parameter it names, send it
-/// once more without that parameter, remembering the refusal for every later call.
+/// Send `body` with `post`, and when the provider refuses sampling parameters it names
+/// ([`refused_params`]), send it once more without them, remembering the refusal for every later
+/// call.
 ///
 /// `post` sends one request: `Ok(Ok(_))` is an answer, `Ok(Err((status, body)))` the provider's
 /// refusal as it said it, `Err` a failure on the way. Each parameter is dropped at most once, so
@@ -197,18 +218,21 @@ pub fn send_dropping_refused<T>(
             Ok(answer) => return Ok(Ok(answer)),
             Err(refusal) => refusal,
         };
-        let Some(parameter) = refused_parameter(status, &text, &body) else {
+        let refused = if status == 400 { refused_params(text.as_bytes(), &body) } else { Vec::new() };
+        if refused.is_empty() {
             return Ok(Err((status, text)));
-        };
+        }
         tracing::warn!(
             host = %host_of(base_url),
             model,
-            parameter,
-            "the model refused a sampling parameter (400); asking once more without it, and not sending it again"
+            parameters = ?refused,
+            "the model refused sampling parameters (400); asking once more without them, and not sending them again"
         );
-        remember(base_url, model, parameter);
         if let Some(fields) = body.as_object_mut() {
-            fields.remove(parameter);
+            for parameter in refused {
+                remember(base_url, model, parameter);
+                fields.remove(parameter);
+            }
         }
     }
 }
@@ -268,22 +292,60 @@ mod tests {
 
     #[test]
     fn the_recorded_refusal_names_temperature() {
-        assert_eq!(refused_parameter(400, TEMPERATURE_DEPRECATED, &body()), Some("temperature"));
+        assert_eq!(refused_params(TEMPERATURE_DEPRECATED.as_bytes(), &body()), vec!["temperature"]);
         assert_eq!(provider_message(TEMPERATURE_DEPRECATED).as_deref(), Some("`temperature` is deprecated for this model."));
+    }
+
+    /// The security review's 16 inputs (PR #827), and what the one matcher answers for each. The
+    /// gateway runs the same table through `body::refused_params`, so the two callers cannot drift.
+    const TABLE: &str = include_str!("llm/testdata/refusal_table.json");
+
+    #[test]
+    fn the_one_matcher_answers_the_review_table() {
+        let table: Vec<(String, Vec<String>)> = serde_json::from_str(TABLE).unwrap();
+        assert_eq!(table.len(), 16);
+        let sent = serde_json::json!({"model": "m", "messages": [], "temperature": 0.7, "top_p": 0.9, "top_k": 40, "frequency_penalty": 0.1});
+        for (message, want) in table {
+            let body = serde_json::json!({"error": {"message": message}}).to_string();
+            assert_eq!(refused_params(body.as_bytes(), &sent), want, "{message}");
+        }
     }
 
     #[test]
     fn other_refusals_are_not_taken_for_a_parameter() {
         let sent = body();
-        // Not a 400; a 400 about something else; a value out of range; a parameter not sent.
-        assert_eq!(refused_parameter(422, TEMPERATURE_DEPRECATED, &sent), None);
-        assert_eq!(refused_parameter(400, r#"{"error":{"message":"messages: at least one message is required"}}"#, &sent), None);
-        assert_eq!(refused_parameter(400, r#"{"error":{"message":"temperature: must be between 0 and 1"}}"#, &sent), None);
-        assert_eq!(refused_parameter(400, r#"{"error":{"message":"`top_k` is not supported"}}"#, &sent), None);
-        assert_eq!(refused_parameter(400, "not json at all: temperature is deprecated", &sent), None);
-        assert_eq!(refused_parameter(400, r#"{"error":{"message":"top_probability is deprecated"}}"#, &sent), None);
+        let refused = |b: &str| refused_params(b.as_bytes(), &sent);
+        // A 400 about something else; a value out of range; a parameter not sent; not JSON; a
+        // longer name.
+        assert!(refused(r#"{"error":{"message":"messages: at least one message is required"}}"#).is_empty());
+        assert!(refused(r#"{"error":{"message":"temperature: must be between 0 and 1"}}"#).is_empty());
+        assert!(refused(r#"{"error":{"message":"`top_k` is not supported"}}"#).is_empty());
+        assert!(refused("not json at all: temperature is deprecated").is_empty());
+        assert!(refused(r#"{"error":{"message":"top_probability is deprecated"}}"#).is_empty());
         // The other one the same models refuse, once temperature is gone.
-        assert_eq!(refused_parameter(400, r#"{"error":{"message":"`top_p` is not supported for this model."}}"#, &sent), Some("top_p"));
+        assert_eq!(refused(r#"{"error":{"message":"`top_p` is not supported for this model."}}"#), vec!["top_p"]);
+    }
+
+    #[test]
+    fn a_refusal_that_may_echo_the_callers_own_key_drops_nothing() {
+        let echoed = |key: &str| serde_json::json!({"error": {"message": format!("Unrecognized request argument supplied: {key}")}}).to_string();
+        for key in ["x temperature", "x. temperature is not supported", "my_temperature"] {
+            let sent = serde_json::json!({"model": "x", "temperature": 0.7, key: 1});
+            assert!(refused_params(echoed(key).as_bytes(), &sent).is_empty(), "{key}");
+        }
+    }
+
+    #[test]
+    fn a_400_that_is_not_about_a_parameter_is_not_retried() {
+        let base = "https://refusal-test-4.example/v1";
+        let mut calls = 0;
+        let reply = send_dropping_refused(base, "m", &body(), |_| {
+            calls += 1;
+            Ok(Err::<(), _>((422, TEMPERATURE_DEPRECATED.to_string())))
+        })
+        .unwrap();
+        assert!(reply.is_err(), "only a 400 is read for a parameter");
+        assert_eq!(calls, 1);
     }
 
     #[test]
