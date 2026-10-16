@@ -413,9 +413,7 @@ mod tests {
         std::thread::spawn(move || {
             for (status, body) in replies {
                 let Ok((mut stream, _)) = listener.accept() else { return };
-                let mut buf = [0u8; 8192];
-                let n = stream.read(&mut buf).unwrap_or(0);
-                let _ = tx.send(String::from_utf8_lossy(&buf[..n]).to_string());
+                let _ = tx.send(read_request(&mut stream));
                 let reason = match status { 200 => "OK", 401 => "Unauthorized", 404 => "Not Found", _ => "Error" };
                 let reply = format!(
                     "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -425,6 +423,29 @@ mod tests {
             }
         });
         (base, rx)
+    }
+
+    /// One whole request: the head, then as many body bytes as its Content-Length says. ureq
+    /// writes the head and a JSON body separately, so one read can end before the body arrives.
+    fn read_request(stream: &mut std::net::TcpStream) -> String {
+        let mut got = Vec::new();
+        let mut buf = [0u8; 8192];
+        loop {
+            let text = String::from_utf8_lossy(&got).to_string();
+            if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                let length = head
+                    .lines()
+                    .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0)))
+                    .unwrap_or(0);
+                if body.len() >= length {
+                    return text;
+                }
+            }
+            match stream.read(&mut buf) {
+                Ok(0) | Err(_) => return String::from_utf8_lossy(&got).to_string(),
+                Ok(n) => got.extend_from_slice(&buf[..n]),
+            }
+        }
     }
 
     #[test]
