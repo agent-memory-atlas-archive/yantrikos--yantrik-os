@@ -209,10 +209,7 @@ impl NotificationsHandler {
             // feedback, evidence and button through it.
             SINCE => {
                 let revision = params["revision"].as_u64().unwrap_or(0);
-                let mut since = self.store.since(revision);
-                let desktop = is_desktop(peer);
-                since.changed = since.changed.into_iter().map(|n| store::seen_by(n, desktop)).collect();
-                Ok(serde_json::to_value(since).unwrap_or_default())
+                Ok(serde_json::to_value(self.store.since_for(revision, is_desktop(peer))).unwrap_or_default())
             }
 
             DISMISS => {
@@ -296,6 +293,14 @@ impl NotificationsHandler {
             }
 
             INITIATIVE => Ok(serde_json::to_value(self.store.initiative()).unwrap_or_default()),
+
+            NOTICE_UNBIND => {
+                self.desktop_only(method, peer)?;
+                let harness = required_str(&params, "harness")?;
+                let forgotten = self.store.unbind(&harness).map_err(bad_request)?;
+                tracing::info!(harness = %harness, forgotten, "the person forgot a harness id's binding");
+                Ok(serde_json::json!({ "forgotten": forgotten }))
+            }
 
             INITIATIVE_SET => {
                 self.desktop_only(method, peer)?;
@@ -398,6 +403,13 @@ fn describe_view(store: &store::Store, link: &freedesktop::Link) -> View {
     }
     if let Some(note) = archive::size_note(&store.archive_path()) {
         view = view.with("archive", note);
+    }
+    // Which account and program each harness id belongs to, so a person (or a mind helping them)
+    // can see why a harness is refused, and forget one in Settings.
+    let bindings: serde_json::Map<String, serde_json::Value> =
+        store.bindings().into_iter().map(|(id, b)| (id, b.line().into())).collect();
+    if !bindings.is_empty() {
+        view = view.with("harness_ids", serde_json::Value::Object(bindings));
     }
     view
 }
@@ -979,6 +991,7 @@ mod tests {
             (NOTICE_FEEDBACK, serde_json::json!({ "id": stored[0].id, "kind": "useful" })),
             (NOTICE_FEEDBACK_POLL, serde_json::json!({ "harness": "mind" })),
             (INITIATIVE_SET, serde_json::json!({ "quiet": true })),
+            (NOTICE_UNBIND, serde_json::json!({ "harness": "mind" })),
             (NOTICE_SHOWN, serde_json::json!({ "id": stored[0].id, "shown_as": "toast" })),
         ] {
             let err = h.dispatch(method, params, None).unwrap_err();
@@ -1009,6 +1022,11 @@ mod tests {
         assert!(!card.dismissed && !card.read, "{card:?}");
         let listed = h.dispatch(LIST, serde_json::json!({}), None).unwrap();
         assert!(listed[0]["notice"].get("evidence").is_none(), "{listed}");
+        // And the poll a mind's tool can call too (the security delta review on #831).
+        let since = h.dispatch(SINCE, serde_json::json!({ "revision": 0 }), None).unwrap();
+        let card = since["changed"].as_array().unwrap().iter().find(|n| n["id"] == id.as_str()).unwrap();
+        assert!(card["notice"].get("evidence").is_none(), "{since}");
+        assert!(since.get("harness_bindings").is_none(), "{since}");
     }
 
     /// Two doors the first round of fixes for #831's findings 1 and 7 left open: `since`, which

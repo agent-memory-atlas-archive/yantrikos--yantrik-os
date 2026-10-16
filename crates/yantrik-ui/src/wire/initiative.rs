@@ -9,11 +9,13 @@
 use std::cell::RefCell;
 
 use slint::{ComponentHandle, ModelRc, VecModel};
-use yantrik_ipc_contracts::notifications::notice::{Family, Initiative, QuietHours};
-use yantrik_ipc_contracts::notifications::INITIATIVE_SET;
+use std::collections::BTreeMap;
+
+use yantrik_ipc_contracts::notifications::notice::{Family, HarnessBinding, Initiative, QuietHours};
+use yantrik_ipc_contracts::notifications::{INITIATIVE_SET, NOTICE_UNBIND};
 use yantrik_ipc_transport::SyncRpcClient;
 
-use crate::{App, FamilyRowData, InitiativeState};
+use crate::{App, BindingRowData, FamilyRowData, InitiativeState};
 
 /// The quiet hours Settings cycles through, `None` first: off.
 pub const QUIET_HOURS: &[Option<QuietHours>] = &[
@@ -39,6 +41,12 @@ fn description(family: &Family) -> &'static str {
 thread_local! {
     /// What the screen last drew, so a second that changed nothing rebuilds nothing.
     static DRAWN: RefCell<Option<Initiative>> = const { RefCell::new(None) };
+    static DRAWN_BINDINGS: RefCell<Option<BTreeMap<String, HarnessBinding>>> = const { RefCell::new(None) };
+}
+
+/// The rows for the harness ids and what each belongs to.
+pub fn binding_rows(bindings: &BTreeMap<String, HarnessBinding>) -> Vec<BindingRowData> {
+    bindings.iter().map(|(id, b)| BindingRowData { id: id.as_str().into(), holder: b.line().into() }).collect()
 }
 
 /// The rows the screen draws for these settings.
@@ -79,11 +87,18 @@ pub fn wire(ui: &App) {
         let next = next_quiet_hours(crate::notice_desk::initiative().quiet_hours);
         change(&weak, serde_json::json!({ "quiet_hours": next }));
     });
+    let weak = ui.as_weak();
+    state.on_forget(move |id| forget(&weak, id.to_string()));
     refresh(ui);
 }
 
 /// Draw the settings as the store last said them.
 pub fn refresh(ui: &App) {
+    let bindings = crate::notice_desk::bindings();
+    if DRAWN_BINDINGS.with(|d| d.borrow().as_ref() != Some(&bindings)) {
+        ui.global::<InitiativeState>().set_bindings(ModelRc::new(VecModel::from(binding_rows(&bindings))));
+        DRAWN_BINDINGS.with(|d| *d.borrow_mut() = Some(bindings));
+    }
     let settings = crate::notice_desk::initiative();
     let unchanged = DRAWN.with(|d| d.borrow().as_ref() == Some(&settings));
     if unchanged {
@@ -94,6 +109,27 @@ pub fn refresh(ui: &App) {
     state.set_quiet_hours(quiet_hours_label(settings.quiet_hours).into());
     state.set_families(ModelRc::new(VecModel::from(rows(&settings))));
     DRAWN.with(|d| *d.borrow_mut() = Some(settings));
+}
+
+/// Forget who `id` belongs to, off the UI thread. The next notification poll draws the bindings
+/// as they now are.
+fn forget(weak: &slint::Weak<App>, id: String) {
+    let weak = weak.clone();
+    let _ = std::thread::Builder::new().name("yos-initiative".into()).spawn(move || {
+        let answer = yantrik_app_runtime::service::ensure("notifications").map_err(|e| e.to_string()).and_then(|_| {
+            SyncRpcClient::for_service("notifications")
+                .with_timeout(std::time::Duration::from_secs(3))
+                .call(NOTICE_UNBIND, serde_json::json!({ "harness": id }))
+                .map_err(|e| e.message)
+        });
+        let _ = weak.upgrade_in_event_loop(move |ui| {
+            let note = match answer {
+                Ok(_) => String::new(),
+                Err(why) => format!("Not forgotten: {why}"),
+            };
+            ui.global::<InitiativeState>().set_notice(note.into());
+        });
+    });
 }
 
 /// Ask the store for one change, off the UI thread, and draw what it answers.
@@ -140,6 +176,16 @@ mod tests {
             assert!(!row.description.is_empty(), "{}", row.family);
         }
         assert_eq!(rows.iter().find(|r| r.family == "discovery").unwrap().setting, "off");
+    }
+
+    #[test]
+    fn each_bound_harness_id_has_a_row_saying_who_holds_it() {
+        let mut bindings = BTreeMap::new();
+        bindings.insert("mind".to_string(), HarnessBinding { uid: Some(999), program: String::new() });
+        bindings.insert("hermes".to_string(), HarnessBinding { uid: Some(1000), program: "python3".into() });
+        let rows = binding_rows(&bindings);
+        let drawn: Vec<(String, String)> = rows.iter().map(|r| (r.id.to_string(), r.holder.to_string())).collect();
+        assert_eq!(drawn, [("hermes".into(), "account 1000 · python3".into()), ("mind".into(), "account 999".into())]);
     }
 
     #[test]

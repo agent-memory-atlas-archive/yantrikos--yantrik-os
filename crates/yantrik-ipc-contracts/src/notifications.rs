@@ -54,6 +54,10 @@ pub const NOTICE_FEEDBACK_POLL: &str = "notifications.notice_feedback_poll";
 pub const INITIATIVE: &str = "notifications.initiative";
 /// Change them. Params: `{ quiet? , family?, setting?, quiet_hours? }`. Desktop only.
 pub const INITIATIVE_SET: &str = "notifications.initiative_set";
+/// Forget which account and program a harness id belongs to, so the next notice under it binds
+/// it afresh. Params: `{ harness }`. Answers `{ forgotten: bool }`. Desktop only: the person
+/// presses Forget in Settings → Harnesses → Initiative.
+pub const NOTICE_UNBIND: &str = "notifications.notice_unbind";
 
 // ── Bounds ──────────────────────────────────────────────────────────────────────────────────
 
@@ -331,6 +335,10 @@ pub struct Since {
     /// service.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initiative: Option<notice::Initiative>,
+    /// Which account and program each harness id belongs to, by id. Only for the desktop, which
+    /// shows them in Settings so the person can forget one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_bindings: Option<std::collections::BTreeMap<String, notice::HarnessBinding>>,
 }
 
 #[cfg(test)]

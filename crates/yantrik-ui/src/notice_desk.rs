@@ -9,13 +9,13 @@
 //! Every method runs on the harness socket's thread, never the UI thread, and never with the
 //! host's lock held.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use yantrik_harness::notice::{NoticeDesk, NoticeSend};
-use yantrik_ipc_contracts::notifications::notice::{Initiative, NoticeHarness, NoticePost};
+use yantrik_ipc_contracts::notifications::notice::{HarnessBinding, Initiative, NoticeHarness, NoticePost};
 use yantrik_ipc_contracts::notifications::{Since, ADD, NOTICE_FEEDBACK_POLL};
 use yantrik_ipc_transport::SyncRpcClient;
 
@@ -34,6 +34,8 @@ const FEEDBACK_FRESH: Duration = Duration::from_secs(30);
 static INITIATIVE: Mutex<Option<Initiative>> = Mutex::new(None);
 /// The store's revision as that poll last saw it.
 static REVISION: AtomicU64 = AtomicU64::new(0);
+/// Which account and program each harness id belongs to, as that poll last read them.
+static BINDINGS: Mutex<Option<BTreeMap<String, HarnessBinding>>> = Mutex::new(None);
 
 /// Called by the shell's notification poll with every answer it gets: the settings a harness is
 /// told on its next poll, and whether anything in the store moved.
@@ -43,7 +45,17 @@ pub fn observe(since: &Since) {
             *held = Some(settings.clone());
         }
     }
+    if let Some(bindings) = &since.harness_bindings {
+        if let Ok(mut held) = BINDINGS.lock() {
+            *held = Some(bindings.clone());
+        }
+    }
     REVISION.store(since.revision, Ordering::Relaxed);
+}
+
+/// The harness bindings as last read, for the Settings screen.
+pub fn bindings() -> BTreeMap<String, HarnessBinding> {
+    BINDINGS.lock().ok().and_then(|b| b.clone()).unwrap_or_default()
 }
 
 /// The settings as last read, for the Settings screen.

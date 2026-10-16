@@ -12,8 +12,8 @@
 use chrono::{DateTime, Local, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use yantrik_ipc_contracts::notifications::notice::{
-    self, answer, ActionKind, Feedback, FeedbackKind, FamilySetting, Initiative, Notice, NoticeHarness,
-    NoticePost,
+    self, answer, ActionKind, Feedback, FeedbackKind, FamilySetting, HarnessBinding, Initiative, Notice,
+    NoticeHarness, NoticePost,
 };
 use yantrik_ipc_contracts::notifications::{Notification, Sender, Source, Urgency};
 
@@ -38,33 +38,56 @@ pub struct Queued {
 /// How long a harness over its 200 undismissed is told to wait: the person has to dismiss some.
 const UNDISMISSED_RETRY_SECS: u64 = 600;
 
-/// What a harness id belongs to.
-///
-/// A harness names its own id at attach, and nothing checks it then: an id is bound here, by the
-/// first notice stored under it, to the account the kernel named at attach and the program behind
-/// it. A notice or a feedback poll under that id from anything else is refused, so another process
-/// — while the Mind is detached, say — cannot attach as `mind`, read and acknowledge the Mind's
-/// feedback, supersede its cards or claim its next `notice_id` first.
-///
-/// `program` is empty when the shell could not see the executable, which is the case for a mind
-/// that runs under its own account (`yantrik-mind`); the id is then bound by the account alone,
-/// which is the boundary that matters there.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Binding {
-    pub uid: Option<u32>,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub program: String,
+/// The harness id this OS ships a mind under, and the account that mind runs as (#411). Nothing
+/// else may use that id, bound or not, so it cannot be taken before the Mind first posts.
+pub const MIND_ID: &str = "mind";
+pub const MIND_ACCOUNT: &str = "yantrik-mind";
+
+/// The uid of `account`, from `/etc/passwd`. `None` on a machine without it.
+pub fn account_uid(account: &str) -> Option<u32> {
+    let passwd = std::fs::read_to_string("/etc/passwd").ok()?;
+    passwd.lines().find_map(|line| {
+        let mut fields = line.split(':');
+        (fields.next()? == account).then_some(())?;
+        fields.nth(1)?.parse().ok()
+    })
 }
 
-impl Binding {
-    fn admits(&self, uid: Option<u32>, program: &str) -> bool {
-        self.uid == uid && (self.program.is_empty() || self.program == program)
+/// Bind every harness id a store written before bindings existed holds notices under, to the
+/// account and program of its newest one. Run when the store is opened, so the upgrade has no
+/// window in which an id with queued feedback is unbound (the security delta review on #831).
+pub(crate) fn bind_existing(state: &mut OnDisk) {
+    let bound: std::collections::BTreeSet<String> = state.bindings.keys().cloned().collect();
+    // Oldest first, so the newest record under an id is the one that stays.
+    for n in &state.notifications {
+        let Some(harness) = n.notice.as_ref().map(|x| &x.harness) else { continue };
+        if bound.contains(&harness.id) || (harness.uid.is_none() && harness.program.is_empty()) {
+            continue;
+        }
+        state.bindings.insert(harness.id.clone(), HarnessBinding { uid: harness.uid, program: harness.program.clone() });
     }
 }
 
-/// Whether `id` may be used by `uid` running `program`. Binds an unbound id when `bind` is set and
-/// there is something to bind it to.
-fn check_binding(state: &mut OnDisk, id: &str, uid: Option<u32>, program: &str, bind: bool) -> Result<(), String> {
+/// Whether `id` may be used by `uid` running `program`, as [`HarnessBinding`] says. Binds an
+/// unbound id when `bind` is set and there is something to bind it to. An id reserved for an
+/// account answers to that account only, whatever is bound.
+fn check_binding(
+    state: &mut OnDisk,
+    reserved: &std::collections::BTreeMap<String, u32>,
+    id: &str,
+    uid: Option<u32>,
+    program: &str,
+    bind: bool,
+) -> Result<(), String> {
+    if let Some(&account) = reserved.get(id) {
+        if uid != Some(account) {
+            return Err(format!("the harness id `{id}` is reserved for the account this OS runs it as; attach under an id of your own"));
+        }
+        if state.bindings.get(id).is_none_or(|b| b.uid != Some(account)) {
+            state.bindings.insert(id.to_string(), HarnessBinding { uid: Some(account), program: String::new() });
+        }
+        return Ok(());
+    }
     match state.bindings.get(id) {
         Some(bound) if bound.admits(uid, program) => Ok(()),
         Some(_) => Err(format!(
@@ -72,7 +95,7 @@ fn check_binding(state: &mut OnDisk, id: &str, uid: Option<u32>, program: &str, 
         )),
         None => {
             if bind && (uid.is_some() || !program.is_empty()) {
-                state.bindings.insert(id.to_string(), Binding { uid, program: program.to_string() });
+                state.bindings.insert(id.to_string(), HarnessBinding { uid, program: program.to_string() });
             }
             Ok(())
         }
@@ -172,7 +195,8 @@ impl Store {
 
         let mut state = self.lock();
         // Before anything is said about what this id already holds.
-        if let Err(why) = check_binding(&mut state, &harness.id, harness.uid, &harness.program, true) {
+        let reserved = self.reserved();
+        if let Err(why) = check_binding(&mut state, &reserved, &harness.id, harness.uid, &harness.program, true) {
             tracing::warn!(harness = %harness.id, uid = ?harness.uid, program = %harness.program, "a notice under a harness id bound to another program");
             return answer::refused(&why);
         }
@@ -396,8 +420,9 @@ impl Store {
     /// Only to the account and program the id is bound to ([`Binding`]): anything else is refused,
     /// and nothing it sends is taken as an acknowledgement.
     pub fn feedback_for(&self, harness: &str, uid: Option<u32>, program: &str, ack: Option<u64>) -> Result<Vec<Feedback>, String> {
+        let reserved = self.reserved();
         let mut state = self.lock();
-        check_binding(&mut state, harness, uid, program, false)?;
+        check_binding(&mut state, &reserved, harness, uid, program, false)?;
         let cursor = state.feedback_cursor.get(harness).copied().unwrap_or(0);
         if let Some(ack) = ack.filter(|a| *a > cursor) {
             state.feedback_cursor.insert(harness.to_string(), ack);
@@ -453,6 +478,25 @@ impl Store {
         let snapshot = snapshot(&mut state);
         drop(state);
         let _ = self.persist(&snapshot);
+    }
+
+    /// Forget what `harness` is bound to, so the next notice under it binds it afresh. The
+    /// person's way out when something took an id first. Answers whether there was a binding.
+    pub fn unbind(&self, harness: &str) -> Result<bool, String> {
+        let mut state = self.lock();
+        if state.bindings.remove(harness).is_none() {
+            return Ok(false);
+        }
+        state.revision += 1;
+        let snapshot = snapshot(&mut state);
+        drop(state);
+        self.persist(&snapshot)?;
+        Ok(true)
+    }
+
+    /// Every harness id and what it is bound to.
+    pub fn bindings(&self) -> std::collections::BTreeMap<String, HarnessBinding> {
+        self.lock().bindings.clone()
     }
 
     /// The person's initiative settings.
@@ -773,6 +817,68 @@ mod tests {
         drop(store);
         let store = Store::open(dir.join("notifications.json"));
         assert!(store.add_notice(post_as("mind", 1000, "python3", notice("rem-4", "reminder", "inbox")), &home())["refused"].is_string(), "the binding survives a restart");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_accounts_uid_is_read_from_the_password_file() {
+        assert_eq!(account_uid("root"), Some(0));
+        assert_eq!(account_uid("no-such-account-here"), None);
+    }
+
+    #[test]
+    fn since_for_anyone_but_the_desktop_is_redacted_as_list_is() {
+        let (store, dir) = temp_store();
+        let mut n = notice("d1", "discovery", "inbox");
+        n["evidence"] = json!(["SECRET-EVIDENCE"]);
+        n["action"] = json!({ "kind": "open_url", "ref": "https://example.com/" });
+        let id = store.add_notice(post("mind", n), &home())["id"].as_str().unwrap().to_string();
+        store.record_feedback(&id, FeedbackKind::Useful).unwrap();
+        let theirs = store.since_for(0, false);
+        let card = theirs.changed.iter().find_map(|n| n.notice.clone()).unwrap();
+        assert!(card.feedback.is_empty() && card.evidence.is_empty() && card.action.is_none(), "{card:?}");
+        assert!(theirs.harness_bindings.is_none(), "the bindings are the desktop's");
+        let desktop = store.since_for(0, true);
+        assert!(desktop.changed.iter().find_map(|n| n.notice.clone()).is_some_and(|c| !c.evidence.is_empty() && !c.feedback.is_empty()));
+        assert!(desktop.harness_bindings.unwrap().contains_key("mind"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_store_from_before_bindings_binds_its_ids_when_opened() {
+        let (store, dir) = temp_store();
+        let id = store.add_notice(post_as("mind", 999, "", notice("rem-1", "reminder", "inbox")), &home())["id"].as_str().unwrap().to_string();
+        store.record_feedback(&id, FeedbackKind::NotNow).unwrap();
+        // As a store written before this change: the records, the queued feedback, no bindings.
+        {
+            let mut state = store.lock();
+            state.bindings.clear();
+            let snapshot = snapshot(&mut state);
+            drop(state);
+            store.persist(&snapshot).unwrap();
+        }
+        drop(store);
+        let store = Store::open(dir.join("notifications.json"));
+        assert!(store.feedback_for("mind", Some(1000), "python3", Some(u64::MAX)).is_err(), "no upgrade window");
+        assert_eq!(store.feedback_for("mind", Some(999), "", None).unwrap().len(), 1, "unacknowledged");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_minds_id_cannot_be_squatted_and_any_other_can_be_forgotten() {
+        let (store, dir) = temp_store();
+        store.reserve("mind", 999);
+        // Something else gets there first: refused, and the Mind is not locked out.
+        assert!(store.add_notice(post_as("mind", 1000, "python3", notice("r1", "reminder", "inbox")), &home())["refused"].is_string());
+        assert_eq!(store.add_notice(post_as("mind", 999, "", notice("r1", "reminder", "inbox")), &home())["stored"], true);
+        // Another id taken first by the wrong program: the person forgets the binding, and the
+        // next notice under it binds it afresh.
+        store.add_notice(post_as("hermes", 1000, "python3", notice("h1", "machine", "inbox")), &home());
+        assert!(store.add_notice(post_as("hermes", 1000, "hermes", notice("h2", "machine", "inbox")), &home())["refused"].is_string());
+        assert_eq!(store.unbind("hermes"), Ok(true));
+        assert_eq!(store.add_notice(post_as("hermes", 1000, "hermes", notice("h2", "machine", "inbox")), &home())["stored"], true);
+        assert_eq!(store.bindings()["hermes"].program, "hermes");
+        assert_eq!(store.unbind("nobody"), Ok(false));
         let _ = std::fs::remove_dir_all(dir);
     }
 

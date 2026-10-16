@@ -459,7 +459,7 @@ calls `a11y.act`.
 | notes | `notes.set_pinned` | change | none | rewrites the note's pinned flag. No caller on the desktop |
 | notes | `notes.set_tags` | change | `tags` (app) — standard | rewrites the note's tags. No caller on the desktop |
 | notifications | `notifications.list` | read | — | the centre's contents. To any caller but the desktop, a mind's notice comes without its feedback, evidence or button |
-| notifications | `notifications.since` | read | — | what changed since a revision; the shell's notification wire polls it |
+| notifications | `notifications.since` | read | — | what changed since a revision; the shell's notification wire polls it. Redacted as `list` is for any caller but the desktop, and without the harness bindings |
 | notifications | `notifications.add` | change | `notify` (service surface) — standard | stores and shows one notification. Every app's notify goes through an app-runtime helper that calls this method |
 | notifications | `notifications.dismiss` | change | `dismiss` (service surface) — standard | takes one off the screen. A mind's notice is refused to any caller but the desktop |
 | notifications | `notifications.dismiss_all` | change | `dismiss_all` (service surface) — standard | takes them all off; from any caller but the desktop, minds' notices stay |
@@ -470,6 +470,7 @@ calls `a11y.act`.
 | notifications | `notifications.notice_feedback_poll` | change | none | one harness's pending feedback, advancing its durable cursor past what it acknowledged. Desktop only: the harness host asks on the harness's behalf, naming the account and program the harness id is bound to |
 | notifications | `notifications.initiative` | read | — | the person's initiative settings (design/initiative-inbox-2026-10-16.md) |
 | notifications | `notifications.initiative_set` | change | none | changes the initiative settings. Desktop only: Settings → Harnesses → Initiative is the authority |
+| notifications | `notifications.notice_unbind` | change | none | forgets which account and program a harness id belongs to, so the next notice under it binds it afresh. Desktop only: the person presses Forget in Settings → Harnesses → Initiative |
 | email | `email.accounts` | read | — | the configured accounts, secrets stripped |
 | email | `email.oauth_status` | read | — | where a sign-in stands |
 | email | `email.test_account` | read | — | dials the account's server to check the credentials; changes nothing |
