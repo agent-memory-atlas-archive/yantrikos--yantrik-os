@@ -44,6 +44,8 @@ def png(path, w, h, rgba):
                 + chunk(b"IDAT", zlib.compress(rows, 9)) + chunk(b"IEND", b""))
 png(sys.argv[1] + "/select_c.png", 8, 8, (0x22, 0x2C, 0x3D, 0xFF))
 png(sys.argv[1] + "/select_w.png", 2, 8, (0x8F, 0xB4, 0xE3, 0xFF))
+# The terminal window GRUB boots in, filled with the ground (#0e1018) rather than black.
+png(sys.argv[1] + "/terminal_box_c.png", 8, 8, (0x0E, 0x10, 0x18, 0xFF))
 PY
     for f in $FONTS; do
         ttf="$fonts/${f%%:*}"; size="${f##*:}"
@@ -84,10 +86,22 @@ PY
 if [ "${1:-}" = selftest ]; then
     T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
     stage "$T/theme" "${2:-/usr/share/fonts/truetype/dejavu}"
-    for f in theme.txt icon.png select_c.png dejavusans_16.pf2 dejavusans_20.pf2 dejavusans_bold_28.pf2; do
+    for f in theme.txt icon.png select_c.png terminal_box_c.png dejavusans_16.pf2 dejavusans_20.pf2 dejavusans_bold_28.pf2; do
         [ -s "$T/theme/$f" ] || { echo "FAIL the staged theme has $f"; exit 1; }
     done
     echo "ok   the theme stages with every font it names, each drawing every character it uses"
+    # The terminal GRUB boots in is the ground, not black (#820): theme.txt names the box, and its
+    # centre is the ground's colour.
+    grep -qx 'terminal-box: "terminal_box_\*.png"' "$T/theme/theme.txt" \
+        && python3 - "$T/theme/terminal_box_c.png" <<'PY' || { echo "FAIL the terminal GRUB boots in is the ground, not black"; exit 1; }
+import sys, zlib
+data = open(sys.argv[1], "rb").read()
+i = data.index(b"IDAT")
+n = int.from_bytes(data[i - 4:i], "big")
+raw = zlib.decompress(data[i + 4:i + 4 + n])
+sys.exit(0 if raw[1:5] == bytes((0x0E, 0x10, 0x18, 0xFF)) else 1)
+PY
+    echo "ok   the terminal GRUB boots in is the ground, not black"
     # A theme that names a font nobody made is refused, not drawn in GRUB's ASCII fallback.
     sed 's/DejaVu Sans Bold 28/DejaVu Sans Bold 99/' "$SRC/theme.txt" > "$T/theme/theme.txt"
     if check "$T/theme" 2>/dev/null; then echo "FAIL a font theme.txt names but nobody made is refused"; exit 1; fi

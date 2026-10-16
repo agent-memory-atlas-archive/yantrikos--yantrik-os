@@ -15,6 +15,11 @@ terminal-font: "DejaVu Sans Regular 16"
 message-font: "DejaVu Sans Regular 16"
 message-color: "#c0c8d6"
 message-bg-color: "#0e1018"
+# The terminal window: where GRUB writes "Booting ..." between Enter and the kernel, about 3 s while
+# it loads the kernel and initrd. With no box it was cleared to black, a black rectangle over the
+# menu (#820, the OVMF film). Its box is the ground, made by stage-grub-theme.sh, so those seconds
+# look like the menu's own screen with the menu gone.
+terminal-box: "terminal_box_*.png"
 
 # GRUB draws a picture at its own size (128 px), whatever width and height say.
 + image {
