@@ -30,6 +30,7 @@ use serde::{Deserialize, Serialize};
 use slint::{ComponentHandle, Model, Timer, TimerMode};
 
 use crate::agents::model::State;
+use crate::mind_panel_words as words;
 use crate::agents::{self, Store, Tab};
 use crate::{App, MindPanelAct, MindPanelAgent, MindPanelNow, MindPanelRecipe, MindPanelState};
 
@@ -370,7 +371,10 @@ pub struct Act {
 /// One row of Recent actions.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ActLine {
+    /// The plain sentence: "Ran a command" ([`words::act_sentence`]).
     pub what: String,
+    /// The raw id and outcome, for the row's tooltip: "terminal.run · ok".
+    pub detail: String,
     pub when: String,
     pub outcome: String,
 }
@@ -423,15 +427,17 @@ fn parse_audit_line(line: &str) -> Option<Act> {
     })
 }
 
-/// The rows: `app.action`, how long ago, and how it went.
+/// The rows: what was done in words, how long ago, and how it went. A failure more than a day old
+/// is left to the audit view ([`words::still_current`]).
 pub fn act_lines(acts: &[Act], now: u64, count: usize) -> Vec<ActLine> {
-    let mut sorted: Vec<&Act> = acts.iter().collect();
+    let mut sorted: Vec<&Act> = acts.iter().filter(|a| words::still_current(&a.outcome, a.unix, now)).collect();
     sorted.sort_by(|a, b| b.unix.cmp(&a.unix));
     sorted
         .into_iter()
         .take(count)
         .map(|a| ActLine {
-            what: format!("{}.{}", a.app, a.action),
+            what: words::act_sentence(&a.app, &a.action, &a.outcome),
+            detail: words::act_detail(&a.app, &a.action, &a.outcome),
             when: ago(now, a.unix),
             outcome: if a.outcome.trim().is_empty() { "not reported".into() } else { a.outcome.trim().to_string() },
         })
@@ -539,19 +545,10 @@ pub fn build(input: &Inputs) -> Panel {
         },
     };
 
-    let (memory, memory_known) = match input.memory_count {
-        Some(n) => (format!("YantrikDB · {} {}", thousands(n), if n == 1 { "memory" } else { "memories" }), true),
-        None => ("YantrikDB · count not known yet".to_string(), false),
-    };
+    let (memory, memory_known) = (words::memory_words(input.memory_count), input.memory_count.is_some());
     let minds = match &input.minds {
         None => "not known yet".to_string(),
-        Some(seen) => format!(
-            "{} {} · {} {} memory",
-            seen.count,
-            if seen.count == 1 { "mind" } else { "minds" },
-            seen.keep_memory,
-            if seen.keep_memory == 1 { "keeps" } else { "keep" },
-        ),
+        Some(seen) => words::minds_words(seen.count, seen.keep_memory),
     };
     let (services, services_trouble) = services_line(&input.services);
 
@@ -604,21 +601,6 @@ pub fn services_line(services: &[(String, String)]) -> (String, bool) {
     (parts.join(" · "), !failed.is_empty())
 }
 
-fn thousands(n: i64) -> String {
-    let digits = n.unsigned_abs().to_string();
-    let mut out = String::new();
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    if n < 0 {
-        format!("-{out}")
-    } else {
-        out
-    }
-}
 
 // ── describe shell, and set_mind_panel ─────────────────────────────
 
@@ -749,7 +731,9 @@ fn refresh(ui: &App) {
         memory_count: WORKER_UP.load(Ordering::Relaxed).then(|| ui.get_memory_count() as i64),
         working: agents::store().read(|s| working(s, now, AGENT_ROWS)),
         recipes: recipes(),
-        acts: act_lines(&recent_acts(ACT_ROWS), now, ACT_ROWS),
+        // Read past the rows shown: failures older than a day are dropped from what is read, and
+        // the panel should still fill its rows with what is current.
+        acts: act_lines(&recent_acts(AUDIT_SEED), now, ACT_ROWS),
         services,
     };
     publish(ui, &build(&input));
@@ -811,7 +795,12 @@ fn publish(ui: &App, panel: &Panel) {
     let acts: Vec<MindPanelAct> = panel
         .acts
         .iter()
-        .map(|a| MindPanelAct { what: a.what.as_str().into(), when: a.when.as_str().into(), outcome: a.outcome.as_str().into() })
+        .map(|a| MindPanelAct {
+            what: a.what.as_str().into(),
+            detail: a.detail.as_str().into(),
+            when: a.when.as_str().into(),
+            outcome: a.outcome.as_str().into(),
+        })
         .collect();
     if let Some(model) = crate::models::changed(g.get_acts(), acts) {
         g.set_acts(model);
@@ -912,21 +901,21 @@ mod tests {
         assert_eq!(panel.now.mind, "unknown");
         assert_eq!(panel.now.minds, "not known yet");
         assert!(!panel.now.memory_known);
-        assert_eq!(panel.now.memory, "YantrikDB · count not known yet", "not \"0 memories\"");
+        assert_eq!(panel.now.memory, "Not counted yet", "not \"0 memories\"");
         assert!(!panel.now.recipes_known, "no read from the companion yet: recipes are not known, not none");
         assert_eq!(panel.now.project, "", "no project detected is drawn as such by the panel, not invented");
 
         let known = build(&input());
-        assert_eq!(known.now.memory, "YantrikDB · 1,234 memories");
-        assert_eq!(known.now.minds, "3 minds · 2 keep memory");
+        assert_eq!(known.now.memory, "Remembers 1,234 things");
+        assert_eq!(known.now.minds, "3 can answer · 2 keep their own memory");
         assert!(known.now.recipes_known);
 
         let mut one = input();
         one.memory_count = Some(1);
         one.minds = Some(MindsSeen { answering: None, count: 1, keep_memory: 1 });
         let panel = build(&one);
-        assert_eq!(panel.now.memory, "YantrikDB · 1 memory");
-        assert_eq!(panel.now.minds, "1 mind · 1 keeps memory");
+        assert_eq!(panel.now.memory, "Remembers 1 thing");
+        assert_eq!(panel.now.minds, "1 can answer · 1 keeps its own memory");
         assert_eq!(panel.now.mind, "no mind");
         assert_eq!(panel.now.model, "nothing is answering");
 
@@ -1039,11 +1028,13 @@ mod tests {
         let now = 1_000_000;
         let lines = act_lines(
             &[
-                act(now - 7_300, "notes", "create", "ok"),
+                act(now - 7_300, "notes", "create_note", "ok"),
                 act(now - 240, "files", "move", "failed"),
                 act(now - 20, "calendar", "add_event", ""),
                 act(now - 200_000, "email", "send", "ok"),
                 act(now - 60, "files", "copy", "ok"),
+                // Eleven days old and failed: in the audit view, not on the panel.
+                act(now - 11 * 86_400, "terminal", "run", "failed"),
             ],
             now,
             ACT_ROWS,
@@ -1052,12 +1043,15 @@ mod tests {
         assert_eq!(
             rows,
             [
-                ("calendar.add_event", "just now", "not reported"),
-                ("files.copy", "1m ago", "ok"),
-                ("files.move", "4m ago", "failed"),
-                ("notes.create", "2h ago", "ok"),
+                ("Added an event to your calendar", "just now", "not reported"),
+                ("Copied in your files", "1m ago", "ok"),
+                ("Couldn\u{2019}t move in your files", "4m ago", "failed"),
+                ("Wrote a note", "2h ago", "ok"),
             ]
         );
+        assert_eq!(lines[2].detail, "files.move · failed", "the raw id stays, in the tooltip");
+        let old_failures = act_lines(&[act(now - 11 * 86_400, "terminal", "run", "failed")], now, ACT_ROWS);
+        assert!(old_failures.is_empty(), "a failure older than a day is aged out of the panel");
         assert_eq!(ago(now, now + 30), "just now", "a clock that disagrees is not a negative age");
         assert_eq!(ago(now, now - 200_000), "2d ago");
     }
