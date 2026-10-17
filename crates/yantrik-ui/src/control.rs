@@ -2297,7 +2297,7 @@ mod persons_fields_tests {
 
 #[cfg(test)]
 mod screen_table_tests {
-    use super::{SCREENS, SETTINGS_SECTIONS, check_launchable, screen_name};
+    use super::{SCREENS, SETTINGS_SECTIONS, check_launchable, screen_name, shelved_refusal};
     use std::path::Path;
 
     /// Elements that wrap a screen rather than being one.
