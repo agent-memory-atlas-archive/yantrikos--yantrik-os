@@ -7,7 +7,7 @@ use super::*;
 use slint::{ModelRc, VecModel};
 
 fn row(name: &str, state: &str, runs_on: &str, source: &str) -> RunsOnRow {
-    RunsOnRow { name: name.into(), state: state.into(), answering: state == "Answering", runs_on: runs_on.into(), source: source.into() }
+    RunsOnRow { name: name.into(), state: state.into(), answering: state == "Answering", runs_on: runs_on.into(), source: source.into(), details: format!("{name}: {runs_on}").into() }
 }
 
 pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -24,12 +24,12 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
         p
     };
     let before = draw();
-    let own = "its own settings \u{b7} as it reported";
+    let own = "Set in its own settings; this is what it says";
     ui.set_rows(ModelRc::new(VecModel::from(vec![
         row("Yantrik Mind", "Answering", "Ollama Cloud \u{b7} deepseek-v4.1-flash", own),
-        row("Yantrik Companion", "Built in", "Custom endpoint \u{b7} aig.mycluster.cyou \u{b7} qwen3.8:27b", "set in /opt/yantrik/config.yaml"),
+        row("Yantrik Companion", "Built in", "A service you set up \u{b7} qwen3.8:27b", "Set in this computer\u{2019}s setup file"),
         row("DeepSeek", "Attached", "Ollama Cloud \u{b7} deepseek-v4.1-flash", own),
-        row("Hermes Agent", "Attached", "provider not reported \u{b7} deepseek-v4.1-flash", own),
+        row("Hermes Agent", "Attached", "deepseek-v4.1-flash; it does not say from where", own),
         row("OpenClaw", "Attached", "Ollama Cloud \u{b7} kimi-k3", own),
         row("Pi", "Attached", "Ollama Cloud \u{b7} deepseek-v4.1-flash", own),
     ])));
@@ -84,7 +84,7 @@ pub fn run_providers(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<
         InUseRow {
             label: "Custom endpoint \u{b7} aig.mycluster.cyou".into(),
             used_by: "Used by Yantrik Companion".into(),
-            where_set: "set in /opt/yantrik/config.yaml \u{b7} used by the built-in companion".into(),
+            where_set: "set in this computer\u{2019}s setup file \u{b7} used by the built-in companion".into(),
             models: "qwen3.8:27b".into(),
             preset: "custom".into(),
             base_url: "https://aig.mycluster.cyou/v1".into(),
