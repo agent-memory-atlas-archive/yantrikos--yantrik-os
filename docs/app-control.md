@@ -327,7 +327,7 @@ content, and a content action a paired action takes back stays `standard` (`add_
 
 | calendar | `add_event`, `update_own_event`, `delete_own_event` | standard | content, paired: what `add_event` writes, `update_own_event` moves and `delete_own_event` takes back — the caller's own events, by the #201 record |
 | calendar | `update_event`, `delete_event` | sensitive | reach any stored event — the person's own, a Google-synced one, another caller's — so the person sees a card (#332); a delete has no trash, and its description says the event is not recoverable |
-| containers | `refresh`, `start`, `show_logs` | standard | reads, and starting what is stopped |
+| containers | `refresh`, `start`, `show_logs`, `show_tab` | standard | reads, and starting what is stopped; `show_tab` switches the window between containers, images and volumes, as `describe.tab` reports it |
 | containers | `stop`, `restart` | sensitive | interrupts what the container was serving |
 | containers | `remove` | dangerous | the writable layer goes with it |
 | documents | `find`, `show` | safe | reads |
@@ -336,7 +336,7 @@ content, and a content action a paired action takes back stays `standard` (`add_
 | download-manager | `cancel` | sensitive | ends a transfer in flight |
 | email | `open_message`, `select_folder`, `search`, `mark_read`, `flag`, `compose` | standard | reads and a draft; `send` is deliberately not published — mail that has gone cannot be taken back |
 | email | `begin_google_sign_in` | sensitive | puts a full-access consent screen in front of the person, unasked |
-| image-viewer | `open`, `show`, `next`, `previous`, `rotate`, `fit`, `toggle_info` | standard | showing pictures; `rotate` turns what is on screen, the file is unchanged |
+| image-viewer | `open`, `show`, `next`, `previous`, `rotate`, `flip`, `fit`, `toggle_info` | standard | showing pictures; `rotate` and `flip` turn and mirror what is on screen (the toolbar's own path), the file is unchanged and the next picture is shown as stored; `fit` is the fit button, back to the whole picture from a zoom |
 | network | `refresh`, `wifi_scan` | standard | reads that trigger a radio scan |
 | network | `wifi_connect`, `wifi_forget` | sensitive | changes what the machine joins; forgetting deletes a stored credential |
 | network | `wifi_disconnect`, `wifi_radio` | dangerous | on a machine reached over Wi-Fi, takes away the channel the undo would travel on |
