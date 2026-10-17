@@ -1474,6 +1474,13 @@ socket can make the shell read it again, and
 A lowering does not clear a standing rule — it is not the person's answer to take back — but in
 ask and plan it answers nothing, which is the same thing for as long as the mode stays down.
 
+**Whom it covers: every caller on the machine, not one mind.** A standing rule is not scoped to
+the Mind, a mission or an agent. Like a session rule, it answers for any caller the mode answers
+for — another agent, a harness, `yos act` — so on the live VM any of them runs `shell.agent_run`
+in auto with no card. The reach checks still come first (`control_approvals`, and the app
+runtime's `control.rs`), and so do the ceiling, the phone hold and a tainted session's ask; a
+standing rule only answers the question a session rule would have answered.
+
 **The person stays in charge.** A standing rule in force is listed in the mode menu beside the
 session rules ("shell.agent_run · this machine's administrator") with the same ✕. The ✕
 (`person_revoke_rule`, UI only) **suspends** it until the shell restarts; nothing re-arms it short

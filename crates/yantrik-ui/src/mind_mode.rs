@@ -76,7 +76,9 @@
 //! can write it ([`standing_rules_from`]), and nothing on the socket can add, re-arm or revoke
 //! one. A standing rule answers no more than a session rule does — never `dangerous`, never what
 //! cannot be undone — and only in auto or a bypass, so a person who lowers the mode gets the asks
-//! back. The person's ✕ suspends one until the shell restarts. See the 15 October 2026 entry in
+//! back. A standing rule covers every caller on the machine, not only one mind — any agent,
+//! harness or `yos act` caller the mode answers for — with the reach checks still made first.
+//! The person's ✕ suspends one until the shell restarts. See the 15 October 2026 entry in
 //! `design/mind-modes-2026-09-21.md`.
 
 use std::sync::{Mutex, OnceLock};
