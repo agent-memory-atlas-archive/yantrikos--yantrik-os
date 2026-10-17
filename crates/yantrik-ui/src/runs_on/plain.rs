@@ -78,14 +78,20 @@ impl RunsOn {
     }
 }
 
-fn plain_or_unsaid(r: &RunsOn, model: Option<&str>) -> String {
-    let provider = match &r.provider {
+/// A provider in words, never by its address: "Ollama Cloud", "A service you set up", "A model
+/// server on this computer". `None` when nothing said which.
+pub(super) fn provider_words(provider: &ProviderRef) -> Option<String> {
+    match provider {
         ProviderRef::Known(p) => Some(p.display_name.to_string()),
         ProviderRef::Custom(_) => Some("A service you set up".to_string()),
         ProviderRef::Local(host) if is_loopback(host) => Some("A model server on this computer".to_string()),
         ProviderRef::Local(_) => Some("A model server on your network".to_string()),
         ProviderRef::NotReported => None,
-    };
+    }
+}
+
+fn plain_or_unsaid(r: &RunsOn, model: Option<&str>) -> String {
+    let provider = provider_words(&r.provider);
     match (provider, model) {
         (Some(p), Some(m)) if m == PICKED => format!("{p}: the model you pick in the ask bar"),
         (Some(p), Some(m)) => format!("{p} \u{b7} {m}"),

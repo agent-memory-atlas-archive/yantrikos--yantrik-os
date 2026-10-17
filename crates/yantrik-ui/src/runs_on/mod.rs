@@ -431,12 +431,14 @@ fn one(m: &MindFact, companion: Option<&CompanionFact>) -> RunsOn {
 /// "Ollama Cloud runs 4 minds. 1 mind does not say what it runs on. No mind here runs on a
 /// signed-in account."
 pub fn summary(rows: &[RunsOn]) -> String {
+    // Counted by the provider's words, not its address: the map above names no host, and two
+    // services someone set up are said together, as what they are.
     let mut counts: Vec<(String, String, usize)> = Vec::new(); // key, label, minds
     for r in rows {
-        if let Some(k) = r.provider.key() {
+        if let Some(k) = plain::provider_words(&r.provider) {
             match counts.iter_mut().find(|(key, _, _)| *key == k) {
                 Some(c) => c.2 += 1,
-                None => counts.push((k, r.provider.label(), 1)),
+                None => counts.push((k.clone(), k, 1)),
             }
         }
     }

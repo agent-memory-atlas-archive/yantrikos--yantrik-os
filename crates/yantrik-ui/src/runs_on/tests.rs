@@ -43,7 +43,7 @@ fn vm_520_every_mind_says_what_it_runs_on_and_where_that_is_set() {
     assert_eq!(got, want);
     assert_eq!(
         summary(&rows),
-        "Ollama Cloud runs 4 minds. Custom endpoint \u{b7} aig.mycluster.cyou runs 1 mind. 1 mind does not say what it runs on. No mind here runs on a signed-in account."
+        "Ollama Cloud runs 4 minds. A service you set up runs 1 mind. 1 mind does not say what it runs on. No mind here runs on a signed-in account."
     );
     // The thing that started this: nothing here may name Claude, whose sign-in no mind uses.
     for r in &rows {
@@ -285,7 +285,7 @@ fn vm_541_a_mind_on_the_gateway_is_said_by_where_the_gateway_sends_it() {
     // The Minds row says it in words; the exact line is its Details.
     assert_eq!(crate::wire::runs_on_card::row_line(&rows, "hermes"), "Runs on A service you set up \u{b7} qwen3.5:27b");
     assert!(crate::wire::runs_on_card::row_details(&rows, "hermes").contains("Custom endpoint \u{b7} aig.example \u{b7} qwen3.5:27b \u{b7} set by this desktop"));
-    assert_eq!(summary(&rows), "Custom endpoint \u{b7} aig.example runs 1 mind. No mind here runs on a signed-in account.");
+    assert_eq!(summary(&rows), "A service you set up runs 1 mind. No mind here runs on a signed-in account.");
     assert!(in_use_not_saved(&rows, None, &[]).is_empty(), "the account is the person's own, already set up");
 }
 
