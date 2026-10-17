@@ -303,3 +303,30 @@ fn the_parser_keeps_the_limits_exactly() {
     assert_eq!(crate::csv::parse(&full).unwrap().len(), MAX_CELLS / 2);
     assert!(crate::csv::parse(&(full + "1\n")).unwrap_err().contains("more than the 500000 cells"));
 }
+
+// ── Open reads regular files only ───────────────────────────────────────
+
+/// Open `path` on a thread of its own, so a regression fails the test instead of hanging it.
+fn open_within_seconds(path: std::path::PathBuf) -> Result<crate::document::Opened, String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(crate::document::Document::new().open(&path));
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(5)).expect("open blocked or read without end")
+}
+
+#[test]
+fn a_fifo_a_device_and_a_link_to_a_device_are_refused_at_once() {
+    let dir = Scratch::new("special");
+    let fifo = dir.path("pipe.csv");
+    let c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    let zero = dir.path("zero.csv");
+    std::os::unix::fs::symlink("/dev/zero", &zero).unwrap();
+    for path in [fifo, zero, "/dev/zero".into()] {
+        let e = open_within_seconds(path.clone()).unwrap_err();
+        assert!(e.contains("not a regular file"), "{}: {e}", path.display());
+    }
+    let folder = open_within_seconds(dir.path("")).unwrap_err();
+    assert!(folder.contains("is a folder"), "{folder}");
+}

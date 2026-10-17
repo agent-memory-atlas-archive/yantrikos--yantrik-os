@@ -81,18 +81,7 @@ impl Document {
     /// Replace this document with the CSV at `path`. Nothing changes when it cannot be read.
     pub fn open(&mut self, path: &Path) -> Result<Opened, String> {
         let shown = path.display();
-        let meta = std::fs::metadata(path).map_err(|e| format!("{shown} could not be opened: {}", io_words(&e)))?;
-        if meta.is_dir() {
-            return Err(format!("{shown} is a folder, not a CSV file"));
-        }
-        if meta.len() > MAX_FILE_BYTES {
-            return Err(format!(
-                "{shown} is {} MB, more than the {} MB this sheet opens",
-                meta.len() / (1024 * 1024),
-                MAX_FILE_BYTES / (1024 * 1024)
-            ));
-        }
-        let bytes = std::fs::read(path).map_err(|e| format!("{shown} could not be read: {}", io_words(&e)))?;
+        let bytes = read_regular(path)?;
         let text = String::from_utf8(bytes)
             .map_err(|_| format!("{shown} is not UTF-8 text, so it is not a CSV file this sheet can read"))?;
         let rows = csv::parse(&text).map_err(|e| format!("{shown} could not be read as CSV: {e}"))?;
@@ -164,6 +153,49 @@ impl Document {
             replaced: existed,
         })
     }
+}
+
+/// The bytes of the regular file at `path`, at most [`MAX_FILE_BYTES`] of them.
+///
+/// Opened without blocking and checked on the open handle, so a FIFO, a device, or a link to
+/// one is refused before a byte is read: `fs::read` of a FIFO waited forever on the window's
+/// thread, and `/dev/zero` (length 0) passed the size check and read without end (security
+/// review of #727). The read itself stops one byte past the limit, for a file that grows.
+fn read_regular(path: &Path) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let shown = path.display();
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = options.open(path).map_err(|e| format!("{shown} could not be opened: {}", io_words(&e)))?;
+    let meta = file.metadata().map_err(|e| format!("{shown} could not be opened: {}", io_words(&e)))?;
+    if meta.is_dir() {
+        return Err(format!("{shown} is a folder, not a CSV file"));
+    }
+    if !meta.is_file() {
+        return Err(format!("{shown} is not a regular file (a device, a pipe or a socket), so it is not opened"));
+    }
+    let too_big = || {
+        format!(
+            "{shown} is more than the {} MB this sheet opens",
+            MAX_FILE_BYTES / (1024 * 1024)
+        )
+    };
+    if meta.len() > MAX_FILE_BYTES {
+        return Err(too_big());
+    }
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    file.take(MAX_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("{shown} could not be read: {}", io_words(&e)))?;
+    if bytes.len() as u64 > MAX_FILE_BYTES {
+        return Err(too_big());
+    }
+    Ok(bytes)
 }
 
 /// A file only this user can read, created fresh: never through a link left at the name.
