@@ -8,7 +8,7 @@
 use std::collections::VecDeque;
 
 use crate::address::Cell;
-use crate::formula::{self, eval::Eval, eval::Grid, Error, Kind, Value};
+use crate::formula::{self, budget::Budget, eval::Eval, eval::Grid, Error, Kind, Value};
 
 struct View<'a> {
     rows: usize,
@@ -86,6 +86,7 @@ pub fn recalc(rows: usize, cols: usize, raw: &[String]) -> Vec<Value> {
         }
     }
 
+    let budget = Budget::default();
     let mut ready: VecDeque<usize> = (0..formulas.len()).filter(|&k| waiting[k] == 0).collect();
     while let Some(k) = ready.pop_front() {
         let (i, compiled) = &formulas[k];
@@ -93,7 +94,14 @@ pub fn recalc(rows: usize, cols: usize, raw: &[String]) -> Vec<Value> {
             Err(e) => Value::Error(e.clone()),
             Ok(expr) => {
                 let view = View { rows, cols, values: &values };
-                Eval { grid: &view }.run(expr)
+                let v = Eval { grid: &view, budget: &budget }.run(expr);
+                match v {
+                    Value::Text(t) => match budget.text(t.len()) {
+                        Ok(()) => Value::Text(t),
+                        Err(e) => Value::Error(e),
+                    },
+                    v => v,
+                }
             }
         };
         values[*i] = v;

@@ -4,6 +4,7 @@
 //! dependency order (`sheet::recalc`) and hands this a [`Grid`] whose cells are already done, so
 //! a chain of ten thousand running totals costs no stack and a loop is found before anything runs.
 
+use super::budget::{self, Budget};
 use super::parser::{Expr, Op};
 use super::value::{parse_number, Error, Kind, Value};
 use crate::address::{Cell, Range};
@@ -23,6 +24,8 @@ pub struct Item {
 
 pub struct Eval<'a> {
     pub grid: &'a dyn Grid,
+    /// Shared by every formula of one recalculation.
+    pub budget: &'a Budget,
 }
 
 impl Eval<'_> {
@@ -56,6 +59,11 @@ impl Eval<'_> {
 
     /// A cell's value, with an error in it passed on and marked with where it started.
     pub fn cell(&self, cell: Cell) -> Result<Value, Error> {
+        self.budget.work(1)?;
+        self.read(cell)
+    }
+
+    fn read(&self, cell: Cell) -> Result<Value, Error> {
         match self.grid.value(cell) {
             Value::Error(e) => Err(passed_on(e, cell)),
             v => Ok(v),
@@ -80,10 +88,12 @@ impl Eval<'_> {
         if r.first.row >= self.grid.rows() || r.first.col >= self.grid.cols() {
             return Ok(out);
         }
+        // Paid for before anything is read, so a range too big to read allocates nothing.
+        self.budget.work((last_row + 1 - r.first.row) * (last_col + 1 - r.first.col))?;
         for row in r.first.row..=last_row {
             for col in r.first.col..=last_col {
                 let cell = Cell::new(row, col);
-                out.push(Item { value: self.cell(cell)?, from: Some(cell) });
+                out.push(Item { value: self.read(cell)?, from: Some(cell) });
             }
         }
         Ok(out)
@@ -130,7 +140,11 @@ impl Eval<'_> {
             Op::Mul => "multiplied",
             Op::Div => "divided",
             Op::Pow => "raised to a power",
-            Op::Concat => return Ok(Value::Text(self.text(a)? + &self.text(b)?)),
+            Op::Concat => {
+                let (x, y) = (self.text(a)?, self.text(b)?);
+                budget::fits(x.chars().count() + y.chars().count())?;
+                return Ok(Value::Text(x + &y));
+            }
             _ => return self.compare(op, a, b),
         };
         let x = self.number(a, verb)?;

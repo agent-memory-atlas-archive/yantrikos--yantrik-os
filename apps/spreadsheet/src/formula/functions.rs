@@ -6,6 +6,7 @@
 //! truths inside a range are skipped by the arithmetic functions, and the statistical ones —
 //! AVERAGE, MIN, MAX, COUNT — count only the cells that hold numbers.
 
+use super::budget;
 use super::criteria;
 use super::eval::{to_number, Eval, Item};
 use super::parser::Expr;
@@ -110,10 +111,13 @@ pub fn call(ev: &Eval, name: &str, args: &[Expr]) -> Result<Value, Error> {
             }
         }
         "CONCAT" | "CONCATENATE" => {
-            let mut out = String::new();
+            let (mut out, mut chars) = (String::new(), 0);
             for a in args {
                 for item in ev.items(a)? {
-                    out.push_str(&item.value.display());
+                    let piece = item.value.display();
+                    chars += piece.chars().count();
+                    budget::fits(chars)?;
+                    out.push_str(&piece);
                 }
             }
             Ok(Value::Text(out))
@@ -125,11 +129,14 @@ pub fn call(ev: &Eval, name: &str, args: &[Expr]) -> Result<Value, Error> {
         "UPPER" | "LOWER" | "TRIM" => {
             arity(name, args, 1, 1)?;
             let t = ev.text(&args[0])?;
-            Ok(Value::Text(match name {
+            let out = match name {
                 "UPPER" => t.to_uppercase(),
                 "LOWER" => t.to_lowercase(),
                 _ => t.split_whitespace().collect::<Vec<_>>().join(" "),
-            }))
+            };
+            // A few letters grow when their case changes ("ß" is "SS").
+            budget::fits(out.chars().count())?;
+            Ok(Value::Text(out))
         }
         "COUNTIF" => {
             arity(name, args, 2, 2)?;

@@ -2,6 +2,7 @@
 //!
 //! Text → [`lexer`] → [`parser`] → a tree that [`eval`] works out against a [`eval::Grid`].
 
+pub mod budget;
 pub mod criteria;
 pub mod eval;
 pub mod functions;
