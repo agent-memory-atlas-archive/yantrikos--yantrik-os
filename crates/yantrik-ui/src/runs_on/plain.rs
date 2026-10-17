@@ -1,11 +1,15 @@
 //! What runs on what, in plain words, with the exact facts kept for Details.
 //!
 //! `runs_on()` and `source()` are exact: "provider not reported · picked", "This network ·
-//! 127.0.0.1:7460", "set in /opt/yantrik/config.yaml". They stay what the harness rows' long line
-//! and the chat composer are built from. Settings → AI & Intelligence showed them as the map's
-//! first lines, and the sweep of 17 October (design/ui-sweep-2026-10-17.md, root cause 3) read
-//! them as what they are to a person: an address, a path and a code. The map now leads with
-//! these words, and puts the exact ones in its collapsed Details.
+//! 127.0.0.1:7460", "set in /opt/yantrik/config.yaml". Settings → AI & Intelligence and the Minds
+//! cards showed them as their first lines, and the sweep of 17 October
+//! (design/ui-sweep-2026-10-17.md, root cause 3) read them as what they are to a person: an
+//! address, a path and a code. Every face now leads with these words — the map, the Minds cards
+//! (`runs_on_card::row_line`) and the Minds quick panel (`plain_answering`, which names a custom
+//! service's host because it tells the person where their messages go) — and the exact lines
+//! live only in the collapsed Details (`details`), with the address shown without its sign-in
+//! details, query or fragment. The chat composer's line is `destination()`, in mod.rs; the mind
+//! picker (`picker::companion_runs_on`) still uses the exact `runs_on()`.
 
 use super::identity::{is_loopback, ProviderRef};
 use super::{Backend, RunsOn, SetIn, Via};
@@ -18,6 +22,17 @@ impl RunsOn {
     /// on this computer · qwen3.5:9b"; "It does not say what it runs on". A model's name is its
     /// name and stays; an address never leads.
     pub fn plain_runs_on(&self) -> String {
+        self.plain(false)
+    }
+
+    /// `plain_runs_on`, but a service someone set up is named by its host: "A service you set up
+    /// at aig.example · qwen3.5:27b". The Minds quick panel's line for the answering mind, which
+    /// tells the person where their messages go, so it says where.
+    pub fn plain_answering(&self) -> String {
+        self.plain(true)
+    }
+
+    fn plain(&self, name_host: bool) -> String {
         let model = self.model.as_deref().map(str::trim).filter(|m| !m.is_empty());
         let with = |what: &str| match model {
             Some(m) if m == PICKED => format!("{what}: the model you pick in the ask bar"),
@@ -35,10 +50,10 @@ impl RunsOn {
         match &self.via_gateway {
             Some(Via::NoPick) => return "No model picked yet".to_string(),
             Some(Via::Refused { .. }) => return "Nothing is sent: this desktop holds it back".to_string(),
-            Some(Via::Sends { lane: true }) => return format!("{}, on your private lane", plain_or_unsaid(self, model)),
+            Some(Via::Sends { lane: true }) => return format!("{}, on your private lane", plain_or_unsaid(self, model, name_host)),
             _ => {}
         }
-        plain_or_unsaid(self, model)
+        plain_or_unsaid(self, model, name_host)
     }
 
     /// Where it is set, as a sentence: "Set in its own settings; this is what it says".
@@ -62,8 +77,13 @@ impl RunsOn {
     pub fn details(&self) -> String {
         let mut lines = Vec::new();
         lines.push(format!("{}: {} \u{b7} {}", self.name, self.runs_on(), self.source()));
-        if !self.base_url.is_empty() {
-            lines.push(format!("Address: {}", self.base_url));
+        if !self.base_url.trim().is_empty() {
+            // Never the URL as configured: it can carry a key (`user:key@`, `?api-key=`), and
+            // these Details are drawn on screen and screenshotted (review of #844).
+            match yantrik_app_runtime::place::address_of(&self.base_url) {
+                shown if shown.is_empty() => lines.push("Address: not shown, as it may hold sign-in details".to_string()),
+                shown => lines.push(format!("Address: {shown}")),
+            }
         }
         if let Some(said) = &self.said {
             lines.push(format!("It said: {said}"));
@@ -90,8 +110,11 @@ pub(super) fn provider_words(provider: &ProviderRef) -> Option<String> {
     }
 }
 
-fn plain_or_unsaid(r: &RunsOn, model: Option<&str>) -> String {
-    let provider = provider_words(&r.provider);
+fn plain_or_unsaid(r: &RunsOn, model: Option<&str>, name_host: bool) -> String {
+    let provider = match &r.provider {
+        ProviderRef::Custom(host) if name_host => Some(format!("A service you set up at {host}")),
+        other => provider_words(other),
+    };
     match (provider, model) {
         (Some(p), Some(m)) if m == PICKED => format!("{p}: the model you pick in the ask bar"),
         (Some(p), Some(m)) => format!("{p} \u{b7} {m}"),
@@ -132,6 +155,24 @@ mod tests {
         assert_eq!(row.plain_source(), "Set in this computer\u{2019}s setup file");
         assert!(!row.plain_runs_on().contains("127.0.0.1") && !row.plain_source().contains("/opt/"));
         assert!(row.details().contains("Address: http://127.0.0.1:8341/v1") && row.details().contains("/opt/yantrik/config.yaml"));
+    }
+
+    /// The Details are drawn on screen (and screenshotted): a configured URL is shown without
+    /// the key it can carry in its sign-in details, query or fragment (review of #844).
+    #[test]
+    fn details_never_show_a_key_in_the_address() {
+        let companion = || MindFact { id: "companion".into(), name: "Yantrik Companion".into(), detail: None, answering: false, builtin: true, gateway: None };
+        let at = |url: &str| {
+            let c = CompanionFact { base_url: url.into(), model: "qwen3.5:27b".into(), source: "config.yaml".into(), ..CompanionFact::default() };
+            resolve(&[companion()], Some(&c))[0].details()
+        };
+        let details = at("https://user:pw@aig.example/v1?api-key=sk-secret#frag");
+        assert!(details.contains("Address: https://aig.example/v1"), "{details}");
+        for secret in ["pw@", "user:", "api-key", "sk-secret", "#frag", "frag"] {
+            assert!(!details.contains(secret), "Details show {secret}: {details}");
+        }
+        let odd = at("https://user:p/w@aig.example/v1");
+        assert!(odd.contains("Address: not shown") && !odd.contains("p/w"), "{odd}");
     }
 
     /// Settings names minds "Minds" (the vocabulary rule), and keeps addresses and paths off the

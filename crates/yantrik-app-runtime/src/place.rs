@@ -52,6 +52,27 @@ pub fn site_of(url: &str) -> String {
     host.strip_prefix("www.").unwrap_or(host).to_string()
 }
 
+/// A URL as it may be drawn on screen: its scheme, host and path, without the sign-in details,
+/// query or fragment that can carry a key: `https://user:key@aig.example/v1?api-key=k#x` →
+/// "https://aig.example/v1". A URL whose sign-in details cannot be told from its host and path (an
+/// `@` past the host: a key holding a `/`, `?` or `#`) gives an empty string rather than a guess
+/// that could show part of the key.
+pub fn address_of(url: &str) -> String {
+    let url = url.trim();
+    let (scheme, whole) = url.split_once("://").unwrap_or(("", url));
+    let rest = whole.split(['?', '#']).next().unwrap_or("");
+    let (authority, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+    let host = authority.rsplit('@').next().unwrap_or("");
+    if host.is_empty() || whole.matches('@').count() != authority.matches('@').count() {
+        return String::new();
+    }
+    if scheme.is_empty() {
+        format!("{host}{path}")
+    } else {
+        format!("{scheme}://{host}{path}")
+    }
+}
+
 /// The person's home directory, as `place_of` wants it.
 pub fn home() -> std::path::PathBuf {
     std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_else(|| std::path::PathBuf::from("/root"))
@@ -88,5 +109,23 @@ mod tests {
         assert_eq!(site_of("https://www.example.org/file.zip"), "example.org");
         assert_eq!(site_of("http://user:pw@10.0.0.2:8000/x"), "10.0.0.2:8000");
         assert_eq!(site_of("not a url"), "");
+    }
+
+    #[test]
+    fn an_address_is_drawn_without_its_sign_in_query_or_fragment() {
+        assert_eq!(address_of("https://user:pw@aig.example/v1?api-key=sk-123#frag"), "https://aig.example/v1");
+        assert_eq!(address_of("http://127.0.0.1:8341/v1"), "http://127.0.0.1:8341/v1");
+        assert_eq!(address_of("localhost:11434"), "localhost:11434");
+        assert_eq!(address_of("https://key@[::1]:4000"), "https://[::1]:4000");
+        // A key holding a character the split stops at is not guessed around: nothing is drawn.
+        for odd in ["https://user:p/w@aig.example/v1", "https://user:p?w@aig.example", "https://user:p#w@aig.example", "https://@/v1"] {
+            assert_eq!(address_of(odd), "", "{odd}");
+        }
+        for url in ["https://user:pw@aig.example/v1?api-key=sk-123#frag", "https://user:p/w@aig.example/v1"] {
+            let shown = address_of(url);
+            for secret in ["pw@", "user", "api-key", "sk-123", "frag", "p/w"] {
+                assert!(!shown.contains(secret), "{url} shows {secret}: {shown}");
+            }
+        }
     }
 }

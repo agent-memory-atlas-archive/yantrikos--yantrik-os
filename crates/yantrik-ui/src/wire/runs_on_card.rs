@@ -74,7 +74,7 @@ pub(crate) fn publish(ui: &App) {
     let answering = rows
         .iter()
         .find(|r| r.answering)
-        .map(|r| r.plain_runs_on())
+        .map(|r| r.plain_answering())
         .unwrap_or_default();
     ui.set_runs_on_summary(runs_on::summary(&rows).into());
     ui.set_runs_on_answering(answering.into());

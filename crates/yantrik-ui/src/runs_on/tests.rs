@@ -285,6 +285,8 @@ fn vm_541_a_mind_on_the_gateway_is_said_by_where_the_gateway_sends_it() {
     // The Minds row says it in words; the exact line is its Details.
     assert_eq!(crate::wire::runs_on_card::row_line(&rows, "hermes"), "Runs on A service you set up \u{b7} qwen3.5:27b");
     assert!(crate::wire::runs_on_card::row_details(&rows, "hermes").contains("Custom endpoint \u{b7} aig.example \u{b7} qwen3.5:27b \u{b7} set by this desktop"));
+    // The Minds quick panel's line says where the person's messages go: the host is named.
+    assert_eq!(r.plain_answering(), "A service you set up at aig.example \u{b7} qwen3.5:27b");
     assert_eq!(summary(&rows), "A service you set up runs 1 mind. No mind here runs on a signed-in account.");
     assert!(in_use_not_saved(&rows, None, &[]).is_empty(), "the account is the person's own, already set up");
 }
