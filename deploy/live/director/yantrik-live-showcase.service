@@ -1,0 +1,27 @@
+# The live instance's showcase (deploy/live/director/showcase-browser): the Director's window
+# beside Mind View, showing the game the Mind is building and, between missions, the finished
+# games in their demo mode. On VM 561 only. Installed by setup-director.sh. A service of its own,
+# long-running, so the Director's oneshot ends with its mission as before.
+[Unit]
+Description=Yantrik Live showcase (the Mind's games, beside Mind View)
+After=yantrik-mind.service
+
+[Service]
+User=yantrik
+Environment=XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0
+Environment=HOME=/home/yantrik
+ExecStart=/usr/bin/python3 /opt/yantrik-live/director/director.py showcase
+# The session restarting, or the window closed: open it again, unhurried.
+Restart=always
+RestartSec=15
+Nice=5
+MemoryMax=1G
+NoNewPrivileges=yes
+PrivateTmp=yes
+# No IP at all. The showcase shows code the Mind wrote; with this, no request it makes leaves the
+# machine or reaches a local service, whatever Chromium's own flags say. Unix sockets are not IP,
+# so the Wayland socket and `yos` are untouched.
+IPAddressDeny=any
+
+[Install]
+WantedBy=multi-user.target

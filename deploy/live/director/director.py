@@ -22,18 +22,33 @@ IDEAS.md of improvements, and once every build is finished the Director goes rou
 polish rounds, one improvement a round, the project polished longest ago first. After Starfall the
 live machine sat idle for two weeks with every mission finished (2 to 15 Oct 2026).
 
+It puts the work on screen. The Director owns a showcase window beside Mind View: a locked-down
+Chromium (showcase-browser, run by yantrik-live-showcase.service) that shows a frame page the
+Director writes, with a caption bar (the mission, the turn, the Mind's latest reply in one line)
+over the game being built, reloaded after every turn. Between missions the showcase service goes
+round the finished games in their self-playing demo mode. On 561 the stream showed only the Mind's
+terminal, half the screen was empty, and viewers never saw a game it built (17 Oct 2026). The
+showcase is the Director's, never the Mind's: the Mind's own browser still refuses file:// and
+new local addresses (check-page says why), and nothing here changes that.
+
+Builds and polish rounds are interleaved: each finished build is followed by POLISH_PER_BUILD
+polish rounds before the next build starts, so the finished games keep getting better while new
+ones are made, and the first idea every game gets in polish is its demo mode (DEMO_IDEA).
+
 Runs on the live instance (VM 561) as the desktop's account, from yantrik-live-director.service.
 Missions are in missions.json beside it. Progress goes to ~/director/log.jsonl, one line a turn.
 Stdlib only; the image ships no Python packages for it.
 """
 import difflib
 import hashlib
+import html
 import json
 import os
 import re
 import subprocess
 import sys
 import time
+import urllib.parse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 YOS = "/opt/yantrik/bin/yos"
@@ -42,6 +57,12 @@ LOG = os.path.join(STATE_DIR, "log.jsonl")
 DONE = os.path.join(STATE_DIR, "done.json")
 STARTED = os.path.join(STATE_DIR, "started.json")
 POLISHED = os.path.join(STATE_DIR, "polished.json")
+# How many polish rounds are still owed before the next build: set after every finished build.
+POLISH_DUE = os.path.join(STATE_DIR, "polish-due.json")
+# The mission run last, so a build picked up after others knows its conversation is gone.
+LAST = os.path.join(STATE_DIR, "last.json")
+# What the showcase is showing: a mission, or nothing (the showcase service cycles the games).
+SHOWING = os.path.join(STATE_DIR, "showing.json")
 CHECK_PAGE = os.path.join(HERE, "check-page")
 PROJECTS = os.path.expanduser("~/Projects")
 
@@ -54,6 +75,26 @@ FINISHED = "FINISHED"
 # A polish round is one improvement: shorter limits than a build.
 POLISH_TURNS = 10
 POLISH_HOURS = 1
+# Polish rounds after each finished build, before the next build begins.
+POLISH_PER_BUILD = 2
+
+# The showcase: the frame page the Director writes, and the window that shows it.
+SHOWCASE_DIR = "/opt/yantrik-live/showcase"
+SHOWCASE_TITLE = "Yantrik Live showcase"
+SHOWCASE_BROWSER = os.path.join(HERE, "showcase-browser")
+# Between missions, each finished game is shown this long in its demo mode.
+CYCLE_SECS = 75
+# A mission whose showing has not been refreshed in this long has died with the Director; the
+# showcase goes back to cycling the games rather than showing a stopped one for ever.
+SHOWING_STALE_SECS = TURN_LIMIT_SECS + 10 * 60
+CAPTION_CHARS = 120
+# A mission folder, as missions.json may name one: nothing that could climb out of ~/Projects.
+FOLDER = re.compile(r"[a-z0-9][a-z0-9-]{0,63}\Z")
+
+# The first improvement every game gets, ahead of its other ideas: something to watch on the
+# stream between missions, when nobody is playing it.
+DEMO_IDEA = ("a self-playing demo mode: when opened with ?demo=1 it plays itself (attract mode), "
+             "visibly, and keeps the score/state changing")
 
 # What every mission is told, filled from its fields in missions.json. One wording for all of them,
 # so a lesson learned on one build (agent_run, not the Terminal app; a tick only over a clean
@@ -71,14 +112,26 @@ BRIEF = (
     "when the code for it is really there and the check is clean: a tick is a promise to the people "
     "watching. People are watching the screen, so keep each step small and visible. When every step is "
     "ticked and the check is clean, write IDEAS.md in the folder: five improvements you would make next, "
-    "each an unticked checklist line. Then say FINISHED on its own line.")
+    "each an unticked checklist line, the first of them " + DEMO_IDEA + ". Then say FINISHED on its own line.")
 KEEP_GOING = (
     "Please keep going on {name}. Read PLAN.md in the {folder} folder through the shell's agent_run "
     "action. If the folder or the plan does not exist yet, make them first, as the brief said. Otherwise "
     "take the first step that is not ticked, do it, and check the page by running `{check}` through "
     "agent_run. Fix any error it prints, and tick the step off in PLAN.md only when its code is really "
     "there and the check is clean. If every step is ticked and the check is clean, write IDEAS.md if it "
-    "is not there yet (five improvements, each an unticked checklist line), then say FINISHED on its own line.")
+    "is not there yet (five improvements, each an unticked checklist line, the first of them " + DEMO_IDEA
+    + "), then say FINISHED on its own line.")
+# A build picked up after other missions ran in between: on a fresh conversation, which has not
+# seen the brief, so it says again what the build is. "Keep going" alone had the Mind build Orrery
+# from its name (15 Oct 2026).
+RESUME = (
+    "Please pick {name} up again where it was left: {what}, in the {folder} folder inside the Projects "
+    "folder in your home folder. {details} " + TERMINAL + " Read PLAN.md there, take the first step "
+    "that is not ticked, do it, and check the page by running `{check}` through agent_run. Fix any error "
+    "it prints, and tick the step off in PLAN.md only when its code is really there and the check is "
+    "clean. If every step is ticked and the check is clean, write IDEAS.md if it is not there yet (five "
+    "improvements, each an unticked checklist line, the first of them " + DEMO_IDEA + "), then say "
+    "FINISHED on its own line.")
 FIX_FIRST = (
     "Before anything else on {name}: the page throws an error when it loads. The Director just loaded it "
     "in a headless browser and it said:\n\n{errors}\n\nFix that first, through the shell's agent_run "
@@ -167,10 +220,20 @@ def mind_idle(state):
         and not last.get("streaming")
 
 
+def act(action, *args):
+    """One shell action, as `yos act shell` takes it. Best effort: (whether it went, what it said)."""
+    try:
+        done = subprocess.run([YOS, "act", "shell", action, *args], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as why:
+        return False, str(why)[:300]
+    return done.returncode == 0, (done.stdout + done.stderr).strip()[:300]
+
+
 def show_mind_view():
-    """Put Mind View in front, so the stream shows the Mind's work. A person can minimise it or
-    open something over it between turns; the person watching should not see an idle desktop
-    while the Mind builds. Best effort: Mind View may not exist yet before the Mind opens an app.
+    """Put Mind View in front, so the stream shows the Mind's work, with the showcase beside it.
+    A person can minimise it or open something over it between turns; the person watching should
+    not see an idle desktop while the Mind builds. Best effort: Mind View may not exist yet before
+    the Mind opens an app.
 
     Never while a card is waiting: the card is drawn in the shell's Mind panel, and Mind View
     maximised covers the whole shell. On 561 a waiting agent_run card sat behind it and the
@@ -178,8 +241,211 @@ def show_mind_view():
     state = shell_state()
     if state is not None and state.get("pending_approvals"):
         return
-    subprocess.run([YOS, "act", "shell", "focus_window", "title=Mind View"],
-                   capture_output=True, text=True, timeout=30)
+    act("focus_window", "title=Mind View")
+    place_windows(state)
+
+
+def snap_action(view):
+    """The shell's snap action, from what `describe shell` publishes: (its name, the argument that
+    names the window, the argument that says where, the values that one takes), or None when the
+    shell publishes none. Looked up rather than assumed, so a shell that renames it or has none
+    costs a log line, not a failed mission."""
+    for a in (view or {}).get("actions") or []:
+        name = a.get("name") or ""
+        if not re.search(r"snap(?!shot)", name.lower()):
+            continue
+        props = (a.get("parameters") or {}).get("properties") or {}
+        title = next((k for k in props if "title" in k or k == "window"), None)
+        where = next((k for k in props if k != title), None)
+        if title and where:
+            return name, title, where, [str(v) for v in (props[where] or {}).get("enum") or []]
+    return None
+
+
+def snap_args(snap, title, side):
+    """The `yos act shell` arguments that put the window called `title` on `side` (left or right)
+    half of the screen, or None when the snap action offers no such place."""
+    name, title_arg, where_arg, values = snap
+    if values:
+        value = next((v for v in values if side in v.lower() and "half" in v.lower()), None) \
+            or next((v for v in values if v.lower() == side), None)
+    else:
+        value = f"{side}-half"
+    return None if value is None else [name, f"{title_arg}={title}", f"{where_arg}={value}"]
+
+
+UNSNAPPED = []
+
+
+def place_windows(state=None, showcase_front=False):
+    """Mind View on the left half of the screen and the showcase on the right, then the showcase
+    focused, so focusing Mind View never leaves it covered. Returns whether the windows were
+    snapped. Without a snap action they stay where the compositor put them, overlapping: then the
+    showcase is brought in front only when `showcase_front` asks (between missions, when it is
+    the thing to watch), and during a mission Mind View stays in front."""
+    try:
+        out = subprocess.run([YOS, "describe", "shell", "--json"], capture_output=True, text=True, timeout=30).stdout
+        snap = snap_action(json.loads(out))
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        snap = None
+    snapped = False
+    if snap is None:
+        # Said once a run, not every turn.
+        if not UNSNAPPED:
+            UNSNAPPED.append(True)
+            log(event="windows not snapped", why="the shell publishes no snap action")
+    else:
+        for title, side in (("Mind View", "left"), (SHOWCASE_TITLE, "right")):
+            args = snap_args(snap, title, side)
+            snapped = bool(args) and act(*args)[0] and (snapped or side == "left")
+    if snapped or showcase_front:
+        act("focus_window", f"title={SHOWCASE_TITLE}")
+    fill_mind_view(state)
+    return snapped
+
+
+def fill_mind_view(state):
+    """Maximise the Mind's terminals inside Mind View. A terminal smaller than Mind View left the
+    picture an empty Mind View shows (config/labwc-mind/empty.png, "Apps your companion opens
+    appear here, so they stay out of your way.") showing round it, on stream. The picture is right
+    for a person's empty Mind View; on 561 the terminal should simply fill it. Mind View is a
+    nested labwc on its own display, which `describe shell` names; the Director is its account."""
+    display = ((state or {}).get("mind_view") or {}).get("display")
+    if not isinstance(display, str) or not re.fullmatch(r"wayland-[0-9]+", display):
+        return
+    try:
+        subprocess.run(["wlrctl", "toplevel", "maximize", "app_id:foot"], capture_output=True, timeout=10,
+                       env=dict(os.environ, WAYLAND_DISPLAY=display))
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def caption_summary(reply):
+    """The Mind's reply in one line for the caption: its first sentence, plain text, no longer
+    than CAPTION_CHARS. Code blocks, HTML, markdown and paths are taken out; what is left is
+    still only text, and the frame page escapes it again."""
+    text = html.unescape(re.sub(r"```.*?(```|\Z)", "\n", reply or "", flags=re.S))
+    text = re.sub(r"<[^>]*>?", " ", text)
+    lines = []
+    for line in text.splitlines():
+        line = re.sub(r"^\s*(#{1,6}|>|[-*+]|\d+[.)])\s+", "", line)
+        line = re.sub(r"^\s*\[[ xX]\]\s*", "", line)
+        if line.strip() and not said_finished(line):
+            lines.append(line.strip())
+    text = " ".join(lines)
+    text = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", text)
+    text = text.replace("`", " ")
+    # A path or an address is any word with a slash in it, whatever punctuation follows it.
+    text = re.sub(r"[^\s]*/[^\s]*?(?=[.,;:!?)\]]*(\s|$))", " ", text)
+    text = re.sub(r"\*+|~~|(?<!\w)_+|_+(?!\w)", "", text)
+    text = re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", text)
+    text = re.sub(r"\s+([.,;:!?])", r"\1", " ".join(text.split()))
+    text = re.sub(r"(\w)\s*:\s*([.!?])", r"\1\2", text)
+    first = re.match(r"(.+?[.!?])(\s|$)", text)
+    text = first.group(1) if first else text
+    if len(text) > CAPTION_CHARS:
+        text = text[: CAPTION_CHARS - 1].rsplit(" ", 1)[0].rstrip(" ,;:") + "…"
+    return text
+
+
+def game_page(folder):
+    """A mission's page, ~/Projects/<folder>/index.html, as a real path, or None. Nothing else is
+    ever put in the showcase: not a folder name that climbs out (`..`), not an index.html that is
+    a link to somewhere else, not a page that is not there."""
+    if not isinstance(folder, str) or not FOLDER.match(folder):
+        return None
+    want = os.path.join(os.path.realpath(PROJECTS), folder, "index.html")
+    page = os.path.join(PROJECTS, folder, "index.html")
+    if os.path.realpath(page) != want or os.path.islink(page) or not os.path.isfile(want):
+        return None
+    return want
+
+
+def game_url(folder, demo):
+    page = game_page(folder)
+    if page is None:
+        return None
+    return "file://" + urllib.parse.quote(page) + ("?demo=1" if demo else "")
+
+
+FRAME = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline' file:; frame-src file:">
+<title>@WINDOW@</title>
+<style>
+html, body { margin: 0; height: 100%; background: #0c0c14; color: #e8e8f0; font: 16px/1.35 sans-serif; overflow: hidden; }
+body { display: flex; flex-direction: column; }
+header { padding: 10px 16px 12px; background: #161624; border-bottom: 2px solid #6c5ce7; }
+header .top { display: flex; gap: 12px; align-items: baseline; white-space: nowrap; overflow: hidden; }
+header .live { background: #e5484d; color: #fff; font-weight: 700; font-size: 12px; padding: 1px 6px; border-radius: 3px; }
+header b { font-size: 19px; overflow: hidden; text-overflow: ellipsis; }
+header .turn { color: #a8a8c0; }
+header p { margin: 6px 0 0; color: #c8c8dc; min-height: 1.35em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+iframe { flex: 1; width: 100%; border: 0; background: #000; }
+.empty { flex: 1; display: flex; align-items: center; justify-content: center; color: #8888a0; font-size: 20px; padding: 24px; text-align: center; }
+</style></head>
+<body oncontextmenu="return false">
+<header><div class="top"><span class="live">LIVE</span><b>@TITLE@</b><span class="turn">@LINE@</span></div><p>@SUMMARY@</p></header>
+@GAME@
+<script>
+var shown = "@VERSION@";
+window.showcaseVersion = function (v) { if (v !== shown) location.reload(); };
+setInterval(function () {
+  var s = document.createElement("script");
+  s.src = "version.js?" + Date.now();
+  s.onload = s.onerror = function () { s.remove(); };
+  document.head.appendChild(s);
+}, 3000);
+</script>
+</body></html>
+"""
+
+
+def frame_page(title, line, summary, url, empty, version):
+    """The frame page's HTML. Every word in it that came from a mission or the Mind is escaped,
+    quotes too, so a reply with markup in it is shown as text and can never become markup."""
+    if url:
+        game = ('<iframe src="%s" sandbox="allow-scripts allow-same-origin" title="%s"></iframe>'
+                % (html.escape(url, quote=True), html.escape(title, quote=True)))
+    else:
+        game = '<div class="empty">%s</div>' % html.escape(empty, quote=True)
+    page = FRAME
+    # The version last: it is hex, and nothing filled in before it can be mistaken for its marker.
+    for mark, value in (("@WINDOW@", html.escape(SHOWCASE_TITLE)), ("@TITLE@", html.escape(title, quote=True)),
+                        ("@LINE@", html.escape(line, quote=True)), ("@SUMMARY@", html.escape(summary, quote=True))):
+        page = page.replace(mark, value, 1)
+    return page.replace("@GAME@", game, 1).replace("@VERSION@", version, 1)
+
+
+def write_atomically(path, text):
+    with open(path + ".new", "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(path + ".new", path)
+
+
+def write_frame(title, line, summary, folder, demo=True, empty="Nothing to show yet."):
+    """Rewrite the showcase's frame page for `folder`'s game, then its version, which the page
+    polls: a new version is the page reloading itself, game and all."""
+    url = game_url(folder, demo)
+    version = hashlib.sha256(f"{title}|{line}|{summary}|{url}|{time.time()}".encode()).hexdigest()[:16]
+    os.makedirs(SHOWCASE_DIR, exist_ok=True)
+    write_atomically(os.path.join(SHOWCASE_DIR, "frame.html"), frame_page(title, line, summary, url, empty, version))
+    write_atomically(os.path.join(SHOWCASE_DIR, "version.js"), 'showcaseVersion("%s");\n' % version)
+    return url
+
+
+def show_mission(m, turn=0, reply="", clean=None):
+    """Put the mission's game in the showcase, with the caption for this turn. Never stops a
+    mission: a showcase that cannot be written costs the stream, not the work."""
+    line = f"turn {turn}" if turn else "starting"
+    if clean is False:
+        line += " · the page throws an error, being fixed"
+    try:
+        write_frame(m["title"], line, caption_summary(reply), m["fields"]["folder"],
+                    empty=f"{m['fields']['name']} has no page yet: the Mind is starting on it.")
+        write_state(SHOWING, {"mission": m["id"], "at": time.time()})
+    except OSError as why:
+        log(mission=m["id"], event="showcase not written", why=str(why)[:200])
 
 
 def new_chat():
@@ -279,6 +545,8 @@ def finished_missions():
 
 def mark_finished(mission_id):
     write_state(DONE, finished_missions() | {mission_id})
+    # A finished build earns the finished games their polish rounds before the next build.
+    write_state(POLISH_DUE, POLISH_PER_BUILD)
 
 
 def build(spec):
@@ -334,25 +602,64 @@ def prompt(template, m, errors=""):
 
 
 def next_mission(builds):
-    """The first unfinished build; once all are finished, a polish round on the build polished
-    longest ago (never polished first, then in the missions' order)."""
+    """The first unfinished build, unless polish rounds are owed: after each finished build, the
+    next POLISH_PER_BUILD missions are polish rounds, so builds and polish take turns rather than
+    every build first and then polish only. Once all builds are finished, polish rounds only. A
+    polish round goes to the finished build polished longest ago (never polished first, then in
+    the missions' order)."""
     done = finished_missions()
     todo = [b for b in builds if b["id"] not in done]
-    if todo:
+    finished = [b for b in builds if b["id"] in done]
+    due = read_state(POLISH_DUE, 0)
+    if todo and (due <= 0 or not finished):
         return todo[0]
-    if not builds:
+    if not finished:
         return None
+    if todo:
+        write_state(POLISH_DUE, due - 1)
     # Each build's last polish round, by number: rounds are counted, not timed, so two rounds in
     # the same second still go round in turn.
     polished = read_state(POLISHED, {})
-    b = min(builds, key=lambda b: (polished.get(b["id"], 0), builds.index(b)))
+    b = min(finished, key=lambda b: (polished.get(b["id"], 0), builds.index(b)))
     polished[b["id"]] = max(polished.values(), default=0) + 1
     write_state(POLISHED, polished)
     return polish(b)
 
 
+def ensure_demo_idea(m):
+    """Put DEMO_IDEA at the head of the game's IDEAS.md, unticked, unless the file already has a
+    line about ?demo=1 (ticked or not), so the polish round takes it before the game's other
+    ideas. The Director's one write into a mission's folder, and only to its notes: a note is not
+    code, so it never counts as the Mind having changed anything (folder_print)."""
+    folder = m["fields"]["folder"]
+    if not FOLDER.match(folder) or not os.path.isdir(os.path.join(PROJECTS, folder)):
+        return False
+    path = os.path.join(PROJECTS, folder, "IDEAS.md")
+    if os.path.islink(path):
+        return False
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except FileNotFoundError:
+        lines = []
+    except (OSError, ValueError):
+        return False
+    if any("demo=1" in line for line in lines):
+        return False
+    at = next((i for i, line in enumerate(lines) if re.match(r"\s*[-*+]\s+\[[ xX]\]", line)), len(lines))
+    lines.insert(at, "- [ ] " + DEMO_IDEA[0].upper() + DEMO_IDEA[1:])
+    write_atomically(path, "\n".join(lines) + "\n")
+    return True
+
+
 def run_mission(m):
     started = time.time()
+    if m["id"].startswith("polish:"):
+        try:
+            if ensure_demo_idea(m):
+                log(mission=m["id"], event="demo idea added", to="IDEAS.md")
+        except OSError as why:
+            log(mission=m["id"], event="demo idea not added", why=str(why)[:200])
     # A build stopped part way (a card, a limit, the screen locked) is picked up where it is, not
     # started over: the brief would have the Mind write a fresh plan over its own ticks.
     begun = read_state(STARTED, set())
@@ -361,10 +668,15 @@ def run_mission(m):
     # Mind built Orrery from its name alone and said it had never seen the brief (15 Oct 2026).
     planned = os.path.exists(os.path.join(PROJECTS, m["fields"]["folder"], "PLAN.md"))
     resuming = m["id"] in begun and planned and not m["id"].startswith("polish:")
+    # Picked up after other missions ran: their conversation, not this one's, is on screen, so it
+    # starts afresh and is told again what the build is.
+    elsewhere = resuming and read_state(LAST, "") != m["id"]
     write_state(STARTED, begun | {m["id"]})
+    write_state(LAST, m["id"])
     log(mission=m["id"], event="resuming" if resuming else "starting", title=m["title"])
-    text = prompt(m["keep_going"] if resuming else m["brief"], m)
-    if not resuming:
+    text = prompt(RESUME if elsewhere else m["keep_going"] if resuming else m["brief"], m)
+    show_mission(m)
+    if not resuming or elsewhere:
         ok, said = new_chat()
         if not ok:
             log(mission=m["id"], event="fresh chat refused", said=said)
@@ -394,6 +706,8 @@ def run_mission(m):
         clean, errors = check_page(m)
         log(mission=m["id"], event="turn", turn=turn, outcome=why, reply=reply[:400],
             page={True: "loads clean", False: "throws", None: "not checked"}[clean], errors=errors or None)
+        # The game reloaded in the showcase after every turn, its page checked first.
+        show_mission(m, turn, reply, clean)
         if why != "answered":
             log(mission=m["id"], event="stopped", why=why, turns=turn)
             return
@@ -434,16 +748,81 @@ def run_mission(m):
     log(mission=m["id"], event="stopped", why="turn limit")
 
 
-def main():
+def cycle_step(builds, index):
+    """Show the next finished game in the showcase, in its demo mode, between missions. Returns
+    the index to show next time. Only finished builds with a page of their own are shown."""
+    done = finished_missions()
+    games = [b for b in builds if b["id"] in done and game_page(b["fields"]["folder"])]
+    if not games:
+        write_frame("Yantrik Live", "between missions", "The Mind's next mission starts soon.", None,
+                    empty="No game is finished yet: the Mind is building the first one.")
+        return 0
+    b = games[index % len(games)]
+    write_frame(b["title"], "between missions · demo", "Built earlier by the Mind; its next mission starts soon.",
+                b["fields"]["folder"])
+    return (index + 1) % len(games)
+
+
+def showcase_main(builds):
+    """yantrik-live-showcase.service: keep the showcase window open and, while no mission is
+    showing, go round the finished games one every CYCLE_SECS. A service of its own so that the
+    Director's oneshot ends with its mission and its timer goes on as before."""
+    browser, index, shown_at, place_at, was_live = None, 0, 0.0, 0.0, True
+    while True:
+        if browser is None or browser.poll() is not None:
+            if browser is not None:
+                log(event="showcase closed", code=browser.returncode)
+                time.sleep(10)
+            if not os.path.exists(os.path.join(SHOWCASE_DIR, "frame.html")):
+                index = cycle_step(builds, index)
+            browser = subprocess.Popen([SHOWCASE_BROWSER, os.path.join(SHOWCASE_DIR, "frame.html")])
+            place_at = time.time() + 10
+        showing = read_state(SHOWING, {})
+        live = bool(showing.get("mission")) and time.time() - float(showing.get("at") or 0) < SHOWING_STALE_SECS
+        if not live and was_live:
+            # A mission just ended: the games are the thing to watch now.
+            place_at = place_at or time.time()
+        if place_at and time.time() >= place_at:
+            state = shell_state()
+            # Never while a card is waiting: the shell holds window actions then, and the card
+            # must stay where the person can see it (show_mind_view).
+            if state is not None and not state.get("pending_approvals"):
+                place_windows(state, showcase_front=not live)
+                place_at = 0.0
+        if not live and (was_live or time.time() - shown_at >= CYCLE_SECS):
+            try:
+                index = cycle_step(builds, index)
+            except OSError as why:
+                log(event="showcase not written", why=str(why)[:200])
+            shown_at = time.time()
+        was_live = live
+        time.sleep(POLL_SECS)
+
+
+def load_builds():
     with open(os.path.join(HERE, "missions.json"), encoding="utf-8") as f:
-        builds = [build(spec) for spec in json.load(f)]
+        return [build(spec) for spec in json.load(f)]
+
+
+def main(argv=()):
+    builds = load_builds()
+    if list(argv[:1]) == ["showcase"]:
+        showcase_main(builds)
+        return 0
     m = next_mission(builds)
     if m is None:
         log(event="idle", why="there are no missions")
         return 0
-    run_mission(m)
+    try:
+        run_mission(m)
+    finally:
+        # The mission is over, finished or not: the showcase goes back to the finished games.
+        try:
+            write_state(SHOWING, {})
+        except OSError:
+            pass
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))

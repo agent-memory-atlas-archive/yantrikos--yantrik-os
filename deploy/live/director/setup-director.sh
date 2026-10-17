@@ -10,11 +10,12 @@ VM=${VM:-561}
 ENABLE=${ENABLE:-1}
 . ../guest.sh
 
-guest 'set -e; install -d -m 755 /opt/yantrik-live/director; install -d -o yantrik -g yantrik -m 700 /home/yantrik/director' < /dev/null
-for f in director.py missions.json check-page; do
-  guest "set -e; cat > /opt/yantrik-live/director/$f.new; chmod 644 /opt/yantrik-live/director/$f.new; [ $f = check-page ] && chmod 755 /opt/yantrik-live/director/$f.new; mv /opt/yantrik-live/director/$f.new /opt/yantrik-live/director/$f" < "$f"
+# The showcase's frame page is the Director's to rewrite, as the desktop's account.
+guest 'set -e; install -d -m 755 /opt/yantrik-live/director; install -d -o yantrik -g yantrik -m 700 /home/yantrik/director; install -d -o yantrik -g yantrik -m 755 /opt/yantrik-live/showcase' < /dev/null
+for f in director.py missions.json check-page showcase-browser; do
+  guest "set -e; cat > /opt/yantrik-live/director/$f.new; chmod 644 /opt/yantrik-live/director/$f.new; case $f in check-page|showcase-browser) chmod 755 /opt/yantrik-live/director/$f.new ;; esac; mv /opt/yantrik-live/director/$f.new /opt/yantrik-live/director/$f" < "$f"
 done
-for u in yantrik-live-director.service yantrik-live-director.timer; do
+for u in yantrik-live-director.service yantrik-live-director.timer yantrik-live-showcase.service; do
   guest "set -e; cat > /etc/systemd/system/$u; chmod 644 /etc/systemd/system/$u" < "$u"
 done
 guest 'set -e; python3 -c "import json; json.load(open(\"/opt/yantrik-live/director/missions.json\"))"; systemctl daemon-reload' < /dev/null
@@ -46,7 +47,9 @@ echo "the Mind bridge is sealed and the egress socket is root'"'"'s; restart yan
 fi
 if [ "$ENABLE" = 1 ]; then
   guest 'systemctl enable --now yantrik-live-director.timer >/dev/null 2>&1; systemctl is-active yantrik-live-director.timer' < /dev/null
+  # Restarted, not only started, so a re-run puts the new showcase code on screen.
+  guest 'systemctl enable yantrik-live-showcase.service >/dev/null 2>&1; systemctl restart yantrik-live-showcase.service; systemctl is-active yantrik-live-showcase.service' < /dev/null
 else
-  echo "timer left off (ENABLE=0)"
+  echo "timer and showcase left off (ENABLE=0)"
 fi
 echo "director installed on VM $VM; start a mission now with: systemctl start --no-block yantrik-live-director"
