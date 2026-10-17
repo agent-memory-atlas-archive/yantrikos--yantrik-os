@@ -332,6 +332,10 @@ pub fn socket_path() -> Result<PathBuf, StartError> {
     Ok(dir.join(format!("yantrik-music-mpv.{}.sock", std::process::id())))
 }
 
+/// ffmpeg opens nothing but local files, and only reads the containers Music's sound files come in.
+/// (`[...]` keeps the commas inside one value for mpv.)
+const LAVF_LOCAL_ONLY: &str = "--demuxer-lavf-o=protocol_whitelist=file,format_whitelist=[wav,mp3,flac,ogg,mov,aac]";
+
 /// mpv's command line, apart from the program.
 ///
 /// mpv decides what a file is from its contents, not its name, so a file called `x.mp3` that holds
@@ -342,6 +346,12 @@ pub fn socket_path() -> Result<PathBuf, StartError> {
 ///   EDL, ordered chapters). Such a file fails with "unrecognized file format".
 /// - `--load-unsafe-playlists=no`: playlists from untrusted places stay refused even if a demuxer
 ///   produces one anyway. (mpv's default, set so a config change cannot turn it on.)
+/// - `--demuxer-lavf-o=protocol_whitelist=file,...`: ffmpeg also picks formats by content, and
+///   some of them (SDP, RTSP, HLS, DASH, concat...) open sockets or URLs themselves: an `x.mp3`
+///   holding an SDP description would bind UDP ports on every interface and play what arrives.
+///   `protocol_whitelist=file` lets nothing ffmpeg opens on its own be anything but a local file,
+///   whatever the format; `format_whitelist` keeps ffmpeg to the containers of the sound files
+///   Music lists (wav, mp3, flac, ogg/opus, m4a), so any other format is refused outright.
 /// - `--ytdl=no`: no youtube-dl for anything that looks like a web page.
 /// - `--network-timeout=5`: if anything ever does reach the network, it gives up in seconds
 ///   instead of holding the player.
@@ -353,6 +363,7 @@ pub fn args(volume: f64, socket: &Path) -> Vec<String> {
         "--ytdl=no",
         "--access-references=no",
         "--load-unsafe-playlists=no",
+        LAVF_LOCAL_ONLY,
         "--network-timeout=5",
         "--no-video",
         "--audio-display=no",
@@ -666,7 +677,14 @@ mod tests {
     #[test]
     fn mpv_is_told_never_to_follow_what_a_file_points_at() {
         let args = args(150.0, Path::new("/run/user/1000/m.sock"));
-        for flag in ["--access-references=no", "--load-unsafe-playlists=no", "--ytdl=no", "--no-config", "--load-scripts=no"] {
+        for flag in [
+            "--access-references=no",
+            "--load-unsafe-playlists=no",
+            "--ytdl=no",
+            "--no-config",
+            "--load-scripts=no",
+            "--demuxer-lavf-o=protocol_whitelist=file,format_whitelist=[wav,mp3,flac,ogg,mov,aac]",
+        ] {
             assert!(args.iter().any(|a| a == flag), "{flag} missing from {args:?}");
         }
         assert!(args.iter().any(|a| a.starts_with("--network-timeout=")), "{args:?}");
@@ -749,6 +767,50 @@ mod tests {
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
             other => panic!("mpv contacted the address in the playlist: {other:?}"),
         }
+
+        engine.client.load(good.to_str().unwrap()).unwrap();
+        let want = good.to_str().unwrap().to_string();
+        let (played, o) =
+            engine.observed.wait_for(Duration::from_secs(5), |o| o.loads > 0 && o.path.as_deref() == Some(want.as_str()));
+        assert!(played, "a real sound file still plays: {o:?}");
+        drop(engine);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The security delta review's file: `sdp.mp3` is an SDP description, which ffmpeg would open
+    /// as a live RTP stream on UDP ports of every interface. A real mpv refuses it, binds neither
+    /// port, and a real sound file after it still plays.
+    #[test]
+    fn a_real_mpv_does_not_open_network_ports_for_an_sdp_file_named_like_a_sound_file() {
+        if Command::new("mpv").arg("--version").stdout(Stdio::null()).status().is_err() {
+            eprintln!("no mpv here; skipped");
+            return;
+        }
+        use std::net::UdpSocket;
+        let dir = scratch("sdp");
+        // An even port whose next one is free too: RTP takes the port, RTCP the one after it.
+        let port = (0..50)
+            .find_map(|_| {
+                let p = UdpSocket::bind("0.0.0.0:0").ok()?.local_addr().ok()?.port() & !1;
+                (p > 1024 && UdpSocket::bind(("0.0.0.0", p)).is_ok() && UdpSocket::bind(("0.0.0.0", p + 1)).is_ok())
+                    .then_some(p)
+            })
+            .expect("a free pair of UDP ports");
+        let sdp = dir.join("sdp.mp3");
+        std::fs::write(&sdp, format!("v=0\no=- 0 0 IN IP4 127.0.0.1\ns=x\nc=IN IP4 127.0.0.1\nt=0 0\nm=audio {port} RTP/AVP 0\n"))
+            .unwrap();
+        let good = dir.join("good.wav");
+        wav(&good);
+
+        let engine = Engine::start("mpv", dir.join("mpv.sock"), 0.0, |_| {}).expect("mpv starts");
+        engine.client.load(sdp.to_str().unwrap()).unwrap();
+        let (ended, o) = engine.observed.wait_for(Duration::from_secs(5), |o| o.errors > 0 || o.loads > 0);
+        // Checked while this mpv still runs: a socket it bound would still be held.
+        for p in [port, port + 1] {
+            assert!(UdpSocket::bind(("0.0.0.0", p)).is_ok(), "mpv bound UDP port {p} for sdp.mp3: {o:?}");
+        }
+        assert!(ended, "mpv refused sdp.mp3 instead of waiting on the network: {o:?}");
+        assert_eq!(o.loads, 0, "nothing played: {o:?}");
 
         engine.client.load(good.to_str().unwrap()).unwrap();
         let want = good.to_str().unwrap().to_string();
