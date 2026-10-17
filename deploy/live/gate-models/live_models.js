@@ -100,4 +100,38 @@ async function chat(r) {
     r.return(reply.status, reply.responseText);
 }
 
-export default { chat };
+// The local lane (AIG's Ollama-native /api/chat). The Mind always streams, and AIG's stream ends
+// with an empty message where the answer was a tool call (seen 17 Oct 2026: the same request
+// streamed came back empty, unstreamed it called os_describe), so every agent turn on this lane
+// chose no tool. The gate asks for the whole answer and hands it back as a one-line stream, which
+// the Mind's reader takes like any other: it reads tool calls from whichever line carries them.
+// Nothing else about the request changes; this route forwarded the body as sent before, too.
+async function local(r) {
+    let asked;
+    try {
+        asked = JSON.parse(r.requestText || '');
+    } catch (e) {
+        return refuse(r, 400, 'the request body is not JSON');
+    }
+    if (typeof asked !== 'object' || asked === null || Array.isArray(asked)) {
+        return refuse(r, 400, 'the request body is not a JSON object');
+    }
+    const streamed = asked.stream !== false; // Ollama streams unless told not to
+    asked.stream = false;
+
+    const reply = await r.subrequest('/_live_upstream/aig', { method: 'POST', body: JSON.stringify(asked) });
+    if (reply.status < 200 || reply.status > 299) {
+        return refuse(r, reply.status === 429 || reply.status >= 500 ? reply.status : 502,
+            'the local model answered ' + reply.status);
+    }
+    let answer;
+    try {
+        answer = JSON.parse(reply.responseText);
+    } catch (e) {
+        return refuse(r, 502, 'the local model did not answer with JSON');
+    }
+    r.headersOut['Content-Type'] = streamed ? 'application/x-ndjson' : 'application/json';
+    r.return(200, JSON.stringify(answer) + '\n');
+}
+
+export default { chat, local };
