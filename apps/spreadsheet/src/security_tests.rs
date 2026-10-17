@@ -351,3 +351,133 @@ fn a_new_csv_is_written_by_this_user_and_readable_by_others_less_the_umask() {
     act(&mut s, "save_over", json!({ "path": path })).unwrap();
     assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
 }
+
+// ── Memory: a nested SUMIF holds no copy of its range while the next one runs ──
+// The security delta review of #727 (5f3f849e..b2906136): SUMIF kept the range it tests while
+// working out its third argument, so 95 SUMIFs nested over one range of long texts held 95
+// copies of it: 1.5 GB from a 16 MB CSV, 6.3 GB from one agent `set_cell`.
+
+use std::alloc::{GlobalAlloc, Layout, System};
+
+/// Counts what this thread allocates, so a test can say how much memory one step took at most.
+struct Counting;
+
+thread_local! {
+    static LIVE: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
+    static PEAK: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
+}
+
+fn count(bytes: isize) {
+    let _ = LIVE.try_with(|live| {
+        live.set(live.get() + bytes);
+        let _ = PEAK.try_with(|peak| peak.set(peak.get().max(live.get())));
+    });
+}
+
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let p = System.alloc(layout);
+        if !p.is_null() {
+            count(layout.size() as isize);
+        }
+        p
+    }
+    unsafe fn dealloc(&self, p: *mut u8, layout: Layout) {
+        System.dealloc(p, layout);
+        count(-(layout.size() as isize));
+    }
+    unsafe fn realloc(&self, p: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+        let q = System.realloc(p, layout, size);
+        if !q.is_null() {
+            count(size as isize - layout.size() as isize);
+        }
+        q
+    }
+}
+
+#[global_allocator]
+static COUNTING: Counting = Counting;
+
+/// The most bytes `step` had allocated at once on this thread, beyond what was live before it.
+fn peak_of<T>(step: impl FnOnce() -> T) -> (T, usize) {
+    let start = LIVE.with(std::cell::Cell::get);
+    PEAK.with(|p| p.set(start));
+    let out = step();
+    (out, (PEAK.with(std::cell::Cell::get) - start).max(0) as usize)
+}
+
+/// The reviewer's formula: `SUMIF(<range>,"y",…)` nested 95 deep around a 1.
+fn nested_sumif(range: &str) -> String {
+    format!("={}1{}", format!("SUMIF({range},\"y\",").repeat(95), ")".repeat(95))
+}
+
+const MB: usize = 1024 * 1024;
+
+/// The CSV route: 480 rows of 32,768 × `x` and the nested formula, 15.7 MB, under the 16 MB cap.
+#[test]
+fn a_nested_sumif_in_a_csv_reads_its_range_once_at_a_time() {
+    let dir = Scratch::new("sumif-csv");
+    let path = dir.path("sumif.csv");
+    let mut text = format!("{}\n", "x".repeat(MAX_TEXT)).repeat(480);
+    text.push_str(&format!("\"{}\"\n", nested_sumif("A1:A480").replace('"', "\"\"")));
+    assert!(text.len() < crate::document::MAX_FILE_BYTES as usize, "{}", text.len());
+    std::fs::write(&path, &text).unwrap();
+    let file = text.len();
+    drop(text);
+
+    let mut s = Session::new();
+    let (opened, peak) = peak_of(|| act(&mut s, "open", json!({ "path": path })));
+    opened.unwrap();
+    assert_eq!(s.doc.sheet.value(Cell::new(480, 0)).display(), "0", "no text is \"y\", so nothing is summed");
+    // The file read, parsed and kept, and one copy of the range: a few times the file, not 95.
+    assert!(peak < 8 * file, "open took {} MB at once for a {} MB file", peak / MB, file / MB);
+}
+
+/// The agent route: 2,000 cells of 32,768 characters, then one `set_cell` of the nested formula.
+#[test]
+fn a_nested_sumif_from_an_agent_reads_its_range_once_at_a_time() {
+    let mut s = Session::new();
+    // The 2,000 cells go in at once: one `set_cell` each works the whole sheet out 2,000 times,
+    // which a debug build takes minutes over. The sheet they make is the same.
+    s.doc.sheet = Sheet::from_rows(&vec![vec!["x".repeat(MAX_TEXT)]; 2000]).unwrap();
+    let _agent = AgentTokenScope::enter(Some("tok-sheets-review".into()));
+    let data = 2000 * MAX_TEXT;
+    let formula = nested_sumif("A1:A2000");
+    let (got, peak) = peak_of(|| act(&mut s, "set_cell", json!({ "cell": "B1", "text": formula })));
+    assert_eq!(got.unwrap()["value"], json!(0.0));
+    // The recalculation's new values (one copy of every text) and one copy of the range: twice
+    // the text, where 95 copies at once was 6.3 GB.
+    assert!(peak < 3 * data, "set_cell took {} MB at once over {} MB of text", peak / MB, data / MB);
+}
+
+#[test]
+fn sumif_still_sums_with_any_mix_of_ranges_and_nested_formulas() {
+    let cells = [("A1", "1"), ("A2", "2"), ("A3", "3"), ("B1", "10"), ("B2", "20"), ("B3", "30")];
+    let mut s = Sheet::default();
+    for (at, text) in cells {
+        s.set(parse_cell(at).unwrap(), text).unwrap();
+    }
+    for (f, want) in [
+        ("=SUMIF(A1:A3,\">1\")", "5"),
+        ("=SUMIF(A1:A3,\">1\",B1:B3)", "50"),
+        ("=SUMIF(A1:A3,\">1\",SUMIF(A1:A3,\">0\"))", "0"),
+        ("=SUMIF(A1:A3,1,SUMIF(A1:A3,\">0\"))", "6"),
+        ("=SUMIF(SUMIF(A1:A3,\">0\"),6,B1)", "10"),
+        ("=SUMIF(A2,2,B2)", "20"),
+    ] {
+        s.set(parse_cell("D1").unwrap(), f).unwrap();
+        assert_eq!(s.value(parse_cell("D1").unwrap()).display(), want, "{f}");
+    }
+}
+
+/// Without a third argument SUMIF reads its first one once, not twice: twice was 2^95 work for
+/// 95 nested SUMIFs that read no cell, which the work budget never sees.
+#[test]
+fn a_nested_sumif_without_a_sum_range_works_its_argument_out_once() {
+    let mut s = Sheet::default();
+    let f = format!("={}1{}", "SUMIF(".repeat(95), ",\">0\")".repeat(95));
+    let t = std::time::Instant::now();
+    s.set(parse_cell("A1").unwrap(), &f).unwrap();
+    assert_eq!(s.value(parse_cell("A1").unwrap()).display(), "1");
+    assert!(t.elapsed().as_secs_f64() < 1.0, "{:?}", t.elapsed());
+}

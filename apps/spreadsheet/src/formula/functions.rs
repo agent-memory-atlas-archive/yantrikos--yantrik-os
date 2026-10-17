@@ -146,12 +146,24 @@ pub fn call(ev: &Eval, name: &str, args: &[Expr]) -> Result<Value, Error> {
         }
         "SUMIF" => {
             arity(name, args, 2, 3)?;
+            // Every formula nested in the call is worked out before a range is read, so no copy
+            // of a range is alive while another SUMIF inside this one runs: nested 95 deep over
+            // 2,000 long texts, that was 95 copies and 6 GB (security delta review of #727).
+            // Without a third argument the tested values are summed too, read once.
             let want = ev.value(&args[1])?;
-            let tested = ev.items(&args[0])?;
-            let summed = match args.get(2) {
-                Some(e) => ev.items(e)?,
-                None => ev.items(&args[0])?,
+            let is_range = |e: &Expr| matches!(e, Expr::Range(_) | Expr::Ref(_));
+            let (tested, summed) = match args.get(2) {
+                None => (ev.items(&args[0])?, None),
+                Some(e) if is_range(&args[0]) => {
+                    let summed = ev.items(e)?;
+                    (ev.items(&args[0])?, Some(summed))
+                }
+                Some(e) => {
+                    let tested = ev.items(&args[0])?;
+                    (tested, Some(ev.items(e)?))
+                }
             };
+            let summed = summed.as_ref().unwrap_or(&tested);
             let mut total = 0.0;
             for (t, s) in tested.iter().zip(summed.iter()) {
                 if criteria::matches(&t.value, &want) {
