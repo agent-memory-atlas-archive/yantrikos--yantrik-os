@@ -18,7 +18,13 @@ Each cloud route also answers `GET <base>/models` (`/ollama-cloud/v1/models`, `/
 generated from `live_models.js` by `node gen-models-list.js`; `setup-models.sh` runs `--check` first and
 refuses to install a list that differs. Change the allowlist, run the generator, commit both.
 
-The AIG route is `gate-setup.sh`'s. The three cloud routes are this directory's. On those:
+The AIG route is `gate-setup.sh`'s, except `/api/chat`, the local lane's chat call, which is this
+directory's: AIG's streamed answers drop tool calls, so `live.local` asks unstreamed and hands the
+answer back as one NDJSON line. It allows only the Mind's local model, caps `num_predict` at 8,192,
+holds at most 4 calls open, verifies AIG's certificate, and never passes AIG's error text back. AIG's
+other paths (`/api/generate`, `/v1/...`) are still `gate-setup.sh`'s, unverified; that is a follow-up.
+
+The three cloud routes are this directory's too. On those:
 - The request isn't forwarded as sent. `live_models.js` refuses a model that isn't on its list,
   caps `max_tokens` at 8,192, counts the day's requests, and sends the provider a new body built
   from known fields only.
