@@ -330,3 +330,24 @@ fn a_fifo_a_device_and_a_link_to_a_device_are_refused_at_once() {
     let folder = open_within_seconds(dir.path("")).unwrap_err();
     assert!(folder.contains("is a folder"), "{folder}");
 }
+
+// ── The mode a new file is given is the one its comment says ────────────
+
+#[test]
+fn a_new_csv_is_written_by_this_user_and_readable_by_others_less_the_umask() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = Scratch::new("mode");
+    let path = dir.path("new.csv");
+    let mut s = Session::new();
+    act(&mut s, "set_cell", json!({ "cell": "A1", "text": "1" })).unwrap();
+    act(&mut s, "save", json!({ "path": path })).unwrap();
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode & !0o644, 0, "never more than 0o644: {mode:o}");
+    assert_eq!(mode & 0o600, 0o600, "this user reads and writes it: {mode:o}");
+
+    // A replaced file keeps the mode it had.
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    act(&mut s, "set_cell", json!({ "cell": "A1", "text": "2" })).unwrap();
+    act(&mut s, "save_over", json!({ "path": path })).unwrap();
+    assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+}

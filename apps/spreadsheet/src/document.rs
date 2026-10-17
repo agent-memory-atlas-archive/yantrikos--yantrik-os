@@ -198,7 +198,9 @@ fn read_regular(path: &Path) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-/// A file only this user can read, created fresh: never through a link left at the name.
+/// A new file, created fresh: never through a link left at the name. It is made `0o644`, less
+/// the umask, the mode of any new document: this user writes it and others may read it. A
+/// file being replaced is given the old one's mode after this (`Document::save`).
 fn write_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     let mut options = std::fs::OpenOptions::new();

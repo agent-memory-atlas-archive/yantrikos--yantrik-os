@@ -4,8 +4,8 @@
 //!
 //! Three bounds: no text a formula makes is longer than a cell holds; all the text formulas make
 //! in one recalculation together stays under [`MAX_TEXT_BYTES`]; and the cells read, and the
-//! links between formulas (`sheet::recalc`), each stay under [`MAX_WORK`]. Past any of them the formula shows `#VALUE!`
-//! with a sentence, and nothing is allocated first.
+//! links between formulas (`sheet::recalc`), each stay under [`MAX_WORK`]. Past any of them the
+//! formula shows `#VALUE!` with a sentence, and nothing is allocated first.
 
 use std::cell::Cell;
 
