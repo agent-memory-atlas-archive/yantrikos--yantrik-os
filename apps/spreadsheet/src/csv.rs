@@ -10,10 +10,16 @@
 //! moved every row below it up by one, and with it every reference into them.
 
 use crate::formula::budget::MAX_TEXT;
+use crate::sheet::{MAX_CELLS, MAX_SHEET_COLS};
 
 /// Rows of fields, or a sentence saying where the file stops making sense. A field longer than
 /// the [`MAX_TEXT`] characters a cell holds is refused as it is read: a formula in it could
 /// otherwise be any length, and nest as deep as it likes.
+///
+/// The sheet's own limits are kept while reading, not after: a row of more than
+/// [`MAX_SHEET_COLS`] fields, or more than [`MAX_CELLS`] fields in all, stops the read there. A
+/// 16 MB file of newlines built 16 million rows, 2.1 GB, before the sheet refused it (security
+/// review of #727). Every row holds at least one field, so the rows are bounded too.
 pub fn parse(text: &str) -> Result<Vec<Vec<String>>, String> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut rows = Vec::new();
@@ -28,6 +34,19 @@ pub fn parse(text: &str) -> Result<Vec<Vec<String>>, String> {
     let mut chars = text.chars().peekable();
     // Characters in `field`, and the line it began on.
     let (mut field_chars, mut field_line) = (0usize, 1usize);
+    let mut fields = 0usize;
+    // Keep one more field, refusing the file if it is one too many.
+    let mut keep = |row: &mut Vec<String>, field: String, line: usize| -> Result<(), String> {
+        fields += 1;
+        if fields > MAX_CELLS {
+            return Err(format!("the file has more than the {MAX_CELLS} cells one sheet holds (line {line})"));
+        }
+        if row.len() >= MAX_SHEET_COLS {
+            return Err(format!("line {line} has more than the {MAX_SHEET_COLS} columns one sheet holds"));
+        }
+        row.push(field);
+        Ok(())
+    };
 
     while let Some(c) = chars.next() {
         if field_chars == 0 {
@@ -61,7 +80,7 @@ pub fn parse(text: &str) -> Result<Vec<Vec<String>>, String> {
                 started = true;
             }
             ',' => {
-                row.push(std::mem::take(&mut field));
+                keep(&mut row, std::mem::take(&mut field), line)?;
                 field_chars = 0;
                 started = true;
             }
@@ -69,8 +88,8 @@ pub fn parse(text: &str) -> Result<Vec<Vec<String>>, String> {
                 if c == '\r' && chars.peek() == Some(&'\n') {
                     chars.next();
                 }
+                keep(&mut row, std::mem::take(&mut field), line)?;
                 line += 1;
-                row.push(std::mem::take(&mut field));
                 rows.push(std::mem::take(&mut row));
                 field_chars = 0;
                 started = false;
@@ -91,7 +110,7 @@ pub fn parse(text: &str) -> Result<Vec<Vec<String>>, String> {
         ));
     }
     if started {
-        row.push(field);
+        keep(&mut row, field, line)?;
         rows.push(row);
     }
     Ok(rows)

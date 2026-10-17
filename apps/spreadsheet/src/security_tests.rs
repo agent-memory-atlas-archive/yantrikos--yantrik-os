@@ -272,3 +272,34 @@ fn ranges_that_overlap_without_end_are_held_to_the_budget() {
     let last = s.value(Cell::new(6_999, 0));
     assert!(last.error().unwrap().message.contains("cells to work out"), "{last:?}");
 }
+
+// ── Parsing stops at the sheet's limits ─────────────────────────────────
+
+/// The reviewer's two 16 MB files: newlines (16 M rows, 2.1 GB before), and commas (16 M empty
+/// fields, about 400 MB). Both now stop after at most one sheet's worth of fields.
+#[test]
+fn sixteen_megabytes_of_newlines_or_commas_stop_at_the_sheets_limits() {
+    let dir = Scratch::new("huge");
+    let size = crate::document::MAX_FILE_BYTES as usize;
+    for (name, byte, says) in [("lines.csv", b'\n', "500000 cells"), ("commas.csv", b',', "256 columns")] {
+        let path = dir.path(name);
+        std::fs::write(&path, vec![byte; size]).unwrap();
+        let mut s = Session::new();
+        let t = std::time::Instant::now();
+        let e = act(&mut s, "open", json!({ "path": path })).unwrap_err();
+        assert!(e.contains(says), "{name}: {e}");
+        assert!(t.elapsed().as_secs_f64() < 5.0, "{name}: {:?}", t.elapsed());
+    }
+}
+
+#[test]
+fn the_parser_keeps_the_limits_exactly() {
+    use crate::sheet::{MAX_CELLS, MAX_SHEET_COLS};
+    let wide = vec!["a"; MAX_SHEET_COLS].join(",");
+    assert_eq!(crate::csv::parse(&wide).unwrap()[0].len(), MAX_SHEET_COLS);
+    let e = crate::csv::parse(&format!("x\n{wide},b")).unwrap_err();
+    assert!(e.contains("line 2 has more than"), "{e}");
+    let full = "1,1\n".repeat(MAX_CELLS / 2);
+    assert_eq!(crate::csv::parse(&full).unwrap().len(), MAX_CELLS / 2);
+    assert!(crate::csv::parse(&(full + "1\n")).unwrap_err().contains("more than the 500000 cells"));
+}
