@@ -395,14 +395,21 @@ impl Engine {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        // SAFETY: getpid cannot fail and touches no memory.
+        let parent = unsafe { libc::getpid() };
         // SAFETY: only async-signal-safe calls between fork and exec.
         unsafe {
-            command.pre_exec(|| {
+            command.pre_exec(move || {
                 // The socket mpv creates is born 0600: no window in which another account could
                 // connect before the chmod below.
                 libc::umask(0o177);
                 // mpv exits with the app even when the app is killed and never drops the engine.
                 libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+                // The app may have died between the fork and the prctl, before there was anyone
+                // to signal us: then nobody would ever stop this mpv, so it does not start.
+                if libc::getppid() != parent {
+                    libc::_exit(1);
+                }
                 Ok(())
             });
         }
