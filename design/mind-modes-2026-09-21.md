@@ -1450,8 +1450,10 @@ read), owned by uid 0 and writable by neither group nor others. One check the br
 for: the directory it sits in is held to the same two (root's, not group- or other-writable),
 because a directory somebody else can write lets them rename their own root-owned-looking file
 into place and every check above is then made of the replacement. Fail any of these and the
-whole file is ignored, with a `tracing::warn` naming why. A malformed line is skipped with a
-warning and the rest stand — one typo must not stall the machine again. More than 32 rules
+whole file is ignored, with a `tracing::warn` naming why. A malformed line ignores the whole file
+too, and the warning names every bad line: a file that does not say exactly what its author meant
+is not believed in part (a root write cut off at the shell's start can turn a longer action name
+into a shorter valid one). More than 32 rules
 ignores the whole file: which 32 to keep would be an accident of order. The file is read once,
 when the shell's one `Modes` is built (`mind_mode::modes`, behind a `OnceLock`); nothing on the
 socket can make the shell read it again, and
@@ -1503,7 +1505,7 @@ that asks it.
 
 | where | what |
 |---|---|
-| `crates/yantrik-ui/src/mind_mode.rs` | the parser (comments, blanks, duplicates, bad lines skipped, 32 and no more); the loader refuses a symlink, a non-root owner, a group- or other-writable file, an other-writable directory, a directory or FIFO at the path, and too many rules (the owner is a test seam, so no test needs root); a standing rule runs `shell.agent_run` in auto and bypass without a card and is named as what answered; it does nothing in ask or plan, after a lowering, or after a bypass lapses to ask, and comes back on raising; it never answers `dangerous`, what cannot be undone, or past the ceiling; the ✕ suspends it through any mode change; the sentence names it; what `policy_json` publishes, the gate decides the same in every mode |
+| `crates/yantrik-ui/src/mind_mode.rs` | the parser (comments, blanks, duplicates, one bad line ignores the whole file, 32 and no more); the loader refuses a symlink, a non-root owner, a group- or other-writable file, an other-writable directory, a directory or FIFO at the path, and too many rules (the owner is a test seam, so no test needs root); a standing rule runs `shell.agent_run` in auto and bypass without a card and is named as what answered; it does nothing in ask or plan, after a lowering, or after a bypass lapses to ask, and comes back on raising; it never answers `dangerous`, what cannot be undone, or past the ceiling; the ✕ suspends it through any mode change; the sentence names it; what `policy_json` publishes, the gate decides the same in every mode |
 | `crates/yantrik-ui/src/control_approvals.rs` | no `control*.rs` names the loader, and inside `mind_mode.rs` it is called once, from `modes` |
 | `crates/yantrik-ipc-transport/src/gate.rs` | `standing_covers` in every mode, never `dangerous`, never unrecoverable, never past the ceiling or for a held call; `mode_from` reads `standing_rules` and keeps them through a lapse back to auto |
 | `sdk/python/tests/test_gate.py` | the same, in the Python gate |

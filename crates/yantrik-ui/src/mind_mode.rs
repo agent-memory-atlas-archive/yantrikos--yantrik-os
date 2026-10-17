@@ -429,14 +429,16 @@ fn standing_name_ok(name: &str) -> bool {
         && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'.' | b'-'))
 }
 
-/// The rules in the file's text, and a warning for every line that was skipped.
+/// The rules in the file's text.
 ///
 /// `<app> <action>`, optionally followed by `# comment`; blank lines and comment lines are
-/// nothing. A malformed line is skipped and the rest stand: one typo must not take the machine's
-/// whole policy away and stall it again. A duplicate is the same rule. More than
-/// [`STANDING_RULES_MAX`] rules is an `Err` — the whole file is ignored — for the reason that
-/// constant gives.
-pub fn parse_standing_rules(text: &str) -> Result<(Vec<Rule>, Vec<String>), String> {
+/// nothing. A duplicate is the same rule. A malformed line is an `Err` that names every bad line,
+/// and the whole file is ignored — it allows nothing. A file that does not say exactly what its
+/// author meant is not believed in part: a root write cut off at the shell's start can turn a
+/// longer action name into a shorter valid one, and the lines around a bad one may be no closer
+/// to what was meant. More than [`STANDING_RULES_MAX`] rules is an `Err` too, for the reason
+/// that constant gives.
+pub fn parse_standing_rules(text: &str) -> Result<Vec<Rule>, String> {
     let mut rules: Vec<Rule> = Vec::new();
     let mut skipped = Vec::new();
     for (index, raw) in text.lines().enumerate() {
@@ -467,7 +469,10 @@ pub fn parse_standing_rules(text: &str) -> Result<(Vec<Rule>, Vec<String>), Stri
             rules.len()
         ));
     }
-    Ok((rules, skipped))
+    if !skipped.is_empty() {
+        return Err(format!("{} line(s) are not a rule — {}", skipped.len(), skipped.join("; ")));
+    }
+    Ok(rules)
 }
 
 /// The standing rules at `path`, if the file there can be trusted, owned by `owner` — `0` on a
@@ -482,11 +487,13 @@ pub fn parse_standing_rules(text: &str) -> Result<(Vec<Rule>, Vec<String>), Stri
 ///   between the look and the read;
 /// * owned by `owner` and not writable by group or others — the file's owner is the only person
 ///   it speaks for, and a file anyone else can write speaks for them too;
+/// * every line a rule ([`parse_standing_rules`]) — one malformed line and the file allows
+///   nothing;
 /// * and the directory it sits in the same (not in the 15 October brief, added because it closes
 ///   the same door one level up: a directory somebody else can write lets them rename their own
 ///   file into place, and every check above would then be made of the wrong file's
 ///   replacement). `/etc/yantrik` is root's on every machine that has it.
-pub fn standing_rules_from(path: &std::path::Path, owner: u32) -> Result<(Vec<Rule>, Vec<String>), String> {
+pub fn standing_rules_from(path: &std::path::Path, owner: u32) -> Result<Vec<Rule>, String> {
     use std::io::Read;
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
@@ -496,7 +503,7 @@ pub fn standing_rules_from(path: &std::path::Path, owner: u32) -> Result<(Vec<Ru
         .open(path)
     {
         Ok(file) => file,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((Vec::new(), Vec::new())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         // ELOOP is what O_NOFOLLOW answers for a symlink in the last component.
         Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
             return Err("it is a symbolic link, and only a file root wrote in place is trusted".into())
@@ -548,10 +555,7 @@ fn load_standing_rules() -> Vec<Rule> {
     }
     let path = std::path::Path::new(STANDING_RULES_PATH);
     match standing_rules_from(path, 0) {
-        Ok((rules, skipped)) => {
-            for why in &skipped {
-                tracing::warn!(path = STANDING_RULES_PATH, "a standing rule was skipped — {why}");
-            }
+        Ok(rules) => {
             if !rules.is_empty() {
                 let names: Vec<String> = rules.iter().map(|r| format!("{}.{}", r.app, r.action)).collect();
                 tracing::warn!(
@@ -1838,32 +1842,39 @@ mod mind_mode_tests {
         path
     }
 
-    /// What the file may say: two names a line, comments and blanks ignored, a bad line skipped
-    /// and the rest standing, no more than 32 rules.
+    /// What the file may say: two names a line, comments and blanks ignored, no more than 32
+    /// rules — and one bad line makes the whole file allow nothing.
     #[test]
     fn mind_mode_standing_rules_parse_what_the_administrator_wrote() {
-        let (rules, skipped) = parse_standing_rules(
-            "# the live-stream VM\n\
-             \n\
-             shell agent_run   # the Director's builds\n\
-             shell agent_run\n\
-             files   move\n\
-             Shell agent_run\n\
-             shell\n\
-             shell agent_run extra\n\
-             shell agent;run\n",
-        )
-        .unwrap();
+        let good = "# the live-stream VM\n\
+                    \n\
+                    shell agent_run   # the Director's builds\n\
+                    shell agent_run\n\
+                    files   move\n";
         assert_eq!(
-            rules,
+            parse_standing_rules(good).unwrap(),
             vec![
                 Rule { app: "shell".into(), action: "agent_run".into() },
                 Rule { app: "files".into(), action: "move".into() },
             ],
             "a duplicate is one rule"
         );
-        assert_eq!(skipped.len(), 4, "every bad line is named: {skipped:?}");
-        assert!(skipped[0].starts_with("line 6:"), "{skipped:?}");
+
+        // A bad line in a good file: nothing stands, and every bad line is named.
+        let err = parse_standing_rules(&format!(
+            "{good}Shell agent_run\n\
+             shell\n\
+             shell agent_run extra\n\
+             shell agent;run\n"
+        ))
+        .unwrap_err();
+        assert!(err.starts_with("4 line(s)"), "{err}");
+        for line in ["line 6:", "line 7:", "line 8:", "line 9:"] {
+            assert!(err.contains(line), "{line} is named: {err}");
+        }
+        // One bad line is enough, wherever it sits.
+        assert!(parse_standing_rules("shell agent_run\nfiles\n").is_err());
+        assert!(parse_standing_rules("shell agent;run\nshell agent_run\n").is_err());
 
         assert!(standing_name_ok(&"a".repeat(64)) && !standing_name_ok(&"a".repeat(65)));
         assert!(!standing_name_ok("") && standing_name_ok("app-shell.v2_x"));
@@ -1872,19 +1883,19 @@ mod mind_mode_tests {
         let err = parse_standing_rules(&many).unwrap_err();
         assert!(err.contains("33 rules"), "{err}");
         let enough: String = (0..STANDING_RULES_MAX).map(|i| format!("app{i} act\n")).collect();
-        assert_eq!(parse_standing_rules(&enough).unwrap().0.len(), STANDING_RULES_MAX);
+        assert_eq!(parse_standing_rules(&enough).unwrap().len(), STANDING_RULES_MAX);
     }
 
     /// The file is trusted only as root's: a symlink, a file somebody else owns, a file or a
-    /// directory others can write, or too many rules, and the whole file is ignored.
+    /// directory others can write, too many rules or a bad line, and the whole file is ignored.
     #[test]
     fn mind_mode_standing_rules_trust_only_a_file_root_alone_can_write() {
         let (dir, uid) = rules_dir("trust", 0o755);
         // No file: no rules, and nothing to say.
-        assert_eq!(standing_rules_from(&dir.join("standing-rules.conf"), uid).unwrap().0, vec![]);
+        assert_eq!(standing_rules_from(&dir.join("standing-rules.conf"), uid).unwrap(), vec![]);
 
         let path = write_rules(&dir, "shell agent_run\n", 0o644);
-        assert_eq!(standing_rules_from(&path, uid).unwrap().0.len(), 1, "root's own file, as it should be");
+        assert_eq!(standing_rules_from(&path, uid).unwrap().len(), 1, "root's own file, as it should be");
         let err = standing_rules_from(&path, uid.wrapping_add(1)).unwrap_err();
         assert!(err.contains("owned by uid"), "a file somebody else owns speaks for them: {err}");
 
@@ -1919,10 +1930,10 @@ mod mind_mode_tests {
         write_rules(&dir, &many, 0o644);
         assert!(standing_rules_from(&path, uid).unwrap_err().contains("at most 32"));
 
-        // A bad line in a good file: skipped, the rest stand.
+        // A bad line in a good file: the whole file is ignored, and the warning names the line.
         write_rules(&dir, "shell agent_run\nNOT A RULE\n", 0o644);
-        let (rules, skipped) = standing_rules_from(&path, uid).unwrap();
-        assert_eq!((rules.len(), skipped.len()), (1, 1));
+        let err = standing_rules_from(&path, uid).unwrap_err();
+        assert!(err.contains("line 2:"), "{err}");
 
         // A directory others can write lets them rename their own file into place.
         let (open_dir, uid) = rules_dir("trust-open-dir", 0o777);
