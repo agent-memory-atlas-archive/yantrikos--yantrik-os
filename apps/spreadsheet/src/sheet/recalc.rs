@@ -85,9 +85,9 @@ pub fn recalc(rows: usize, cols: usize, raw: &[String]) -> Vec<Value> {
             .filter(|&d| d != usize::MAX)
             .collect();
         let found = ranges.iter().try_for_each(|r| {
-            for col in r.first.col..=r.last.col.min(cols.saturating_sub(1)) {
+            let last = r.last.col.min(cols.saturating_sub(1));
+            for column in by_col.get(r.first.col..=last).unwrap_or_default() {
                 links.work(1)?;
-                let column = &by_col[col];
                 let start = column.partition_point(|&(row, _)| row < r.first.row);
                 for &(row, d) in &column[start..] {
                     if row > r.last.row {
