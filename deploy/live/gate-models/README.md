@@ -24,7 +24,8 @@ directory's: AIG's streamed answers drop tool calls, so `live.local` asks unstre
 answer back as one NDJSON line. AIG also serves Pranab's own Mind from the same loaded model, and
 on Ollama any load-time option that differs reloads it, so the gate rebuilds the request from known
 fields only: the Mind's local model alone, sampling options only, `num_ctx` pinned at 32,768,
-`num_predict` capped at 8,192, and `keep_alive` set by the gate (-1, kept loaded). It holds at most 4
+`num_predict` capped at 8,192, and no `keep_alive`, so AIG's own default applies, as for Pranab's
+Mind, whose backend sends none either. It holds at most 4
 calls open, verifies AIG's certificate, and never passes AIG's error text back. AIG's
 other paths (`/api/generate`, `/v1/...`) are still `gate-setup.sh`'s, unverified; that is a follow-up.
 

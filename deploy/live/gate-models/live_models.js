@@ -30,7 +30,10 @@ const LOCAL_MODELS = ['qwen3.8:27b'];
 // load-time option that differs from the loaded runner's (num_ctx, num_gpu, main_gpu, num_batch,
 // num_thread, use_mmap, ...) reloads it, and every request's keep_alive resets when it unloads. So
 // the instance chooses none of them: the gate sends AIG a request built from these fields only,
-// with the context pinned to what the Mind sends and the model kept loaded (reviews of #850).
+// with the context pinned to what the Mind sends (reviews of #850). No keep_alive either: the
+// Mind's Ollama backend (yantrik-ml provider/generic_openai.rs, num_ctx 32,768) sends none, so
+// AIG's own default decides when the model unloads, as it does for Pranab's Mind. A -1 here
+// pinned the model in AIG's memory for good, crowding out the other models AIG serves.
 // No `format`: the Mind never sends one, and Ollama compiles a JSON schema into a grammar that
 // constrains every token, so a deep or wide one could stall or crash the shared server.
 const LOCAL_PASSED = ['messages', 'tools', 'think'];
@@ -41,7 +44,6 @@ const LOCAL_OPTIONS = ['temperature', 'top_p', 'top_k', 'min_p', 'repeat_penalty
 const LOCAL_MAX_STOPS = 8;
 const LOCAL_MAX_STOP_LENGTH = 64;
 const LOCAL_CONTEXT = 32768;
-const LOCAL_KEEP_ALIVE = -1;
 
 function refuse(r, status, text) {
     r.headersOut['Content-Type'] = 'text/plain; charset=utf-8';
@@ -162,7 +164,7 @@ async function local(r) {
         && stops.every((s) => typeof s === 'string' && s.length > 0 && s.length <= LOCAL_MAX_STOP_LENGTH)) {
         options.stop = stops;
     }
-    const sent = { model: asked.model, stream: false, keep_alive: LOCAL_KEEP_ALIVE, options: options };
+    const sent = { model: asked.model, stream: false, options: options };
     for (let i = 0; i < LOCAL_PASSED.length; i++) {
         const field = LOCAL_PASSED[i];
         if (Object.prototype.hasOwnProperty.call(asked, field)) sent[field] = asked[field];
