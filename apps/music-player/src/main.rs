@@ -134,8 +134,8 @@ struct Music {
     scanning: bool,
     /// A folder changed while a scan ran: scan again when it ends.
     rescan_after: bool,
-    /// Callers of `rescan` waiting for its result.
-    scan_waiters: Vec<mpsc::Sender<Value>>,
+    /// Callers of `rescan` waiting for its result, each with whether it is an agent's.
+    scan_waiters: Vec<(mpsc::Sender<Value>, bool)>,
 
     queue: Queue,
     engine: Option<Arc<mpv::Engine>>,
@@ -147,6 +147,8 @@ struct Music {
     muted: bool,
 
     status: String,
+    /// What an agent reads in place of `status` when it names folders the agent may not see.
+    agent_status: Option<String>,
     notice: String,
 }
 
@@ -190,6 +192,7 @@ impl Music {
             volume: saved.volume,
             muted: false,
             status: String::new(),
+            agent_status: None,
             notice: String::new(),
         }
     }
@@ -386,7 +389,11 @@ fn refuse(s: &State, message: impl Into<String>) -> String {
 }
 
 fn say(s: &State, status: impl Into<String>) {
-    s.borrow_mut().status = status.into();
+    {
+        let mut m = s.borrow_mut();
+        m.status = status.into();
+        m.agent_status = None;
+    }
     draw_status(s);
 }
 
@@ -515,6 +522,7 @@ fn load(s: &State, track: &Track) -> Result<Arc<mpv::Engine>, String> {
             m.notice.clear();
         }
         m.status = format!("Playing \u{201c}{}\u{201d}", track.title);
+        m.agent_status = None;
     }
     draw(s);
     Ok(e)
@@ -656,8 +664,9 @@ fn play_file(s: &State, path: &Path) -> Result<(Arc<mpv::Engine>, Track), String
 // ── The scan ─────────────────────────────────────────────────────────
 
 /// Scan every folder on a worker thread. The window stays live; the result comes back through
-/// `invoke_from_event_loop`. `waiter` gets the summary when it is done.
-fn start_scan(s: &State, waiter: Option<mpsc::Sender<Value>>) -> Result<(), String> {
+/// `invoke_from_event_loop`. `waiter` gets the summary when it is done, with the paths an agent
+/// may not read hidden if it is an agent's.
+fn start_scan(s: &State, waiter: Option<(mpsc::Sender<Value>, bool)>) -> Result<(), String> {
     let folders = {
         let mut m = s.borrow_mut();
         if let Some(w) = waiter {
@@ -673,6 +682,7 @@ fn start_scan(s: &State, waiter: Option<mpsc::Sender<Value>>) -> Result<(), Stri
         } else {
             format!("Scanning {}\u{2026}", library::count(m.folders.len(), "folder", "folders"))
         };
+        m.agent_status = None;
         m.folders.clone()
     };
     draw_lists(s);
@@ -691,7 +701,7 @@ fn start_scan(s: &State, waiter: Option<mpsc::Sender<Value>>) -> Result<(), Stri
 }
 
 fn finish_scan(s: &State, scanned: Vec<String>, found: library::Library) {
-    let (again, waiters, answer) = {
+    let (again, waiters, (person, agent)) = {
         let mut m = s.borrow_mut();
         m.scanning = false;
         // Counts belong to the folders that were scanned; a folder added meanwhile reads 0
@@ -701,25 +711,34 @@ fn finish_scan(s: &State, scanned: Vec<String>, found: library::Library) {
             .iter()
             .map(|f| scanned.iter().position(|g| g == f).map(|i| found.per_folder[i]).unwrap_or(0))
             .collect();
-        m.status = if scanned.is_empty() {
-            "No library folders. Add one under Folders.".to_string()
-        } else {
-            library::summary(&found, scanned.len())
+        let said = |agent: bool| {
+            if scanned.is_empty() {
+                "No library folders. Add one under Folders.".to_string()
+            } else {
+                library::summary(&found, scanned.len(), |f| shown_text(f, agent))
+            }
         };
-        let answer = json!({
-            "library_size": found.tracks.len(),
-            "folders": scanned.iter().zip(&found.per_folder).map(|(f, n)| json!({"path": f, "tracks": n})).collect::<Vec<_>>(),
-            "unreadable": found.unreadable.iter().map(|(f, why)| json!({"path": f, "why": why})).collect::<Vec<_>>(),
-            "summary": m.status,
-        });
+        m.status = said(false);
+        m.agent_status = Some(said(true)).filter(|a| *a != m.status);
+        let answer = |agent: bool| {
+            json!({
+                "library_size": found.tracks.len(),
+                "folders": scanned.iter().zip(&found.per_folder)
+                    .map(|(f, n)| json!({"path": shown_path(Some(f), agent), "tracks": n})).collect::<Vec<_>>(),
+                "unreadable": found.unreadable.iter()
+                    .map(|(f, why)| json!({"path": shown_path(Some(f), agent), "why": why})).collect::<Vec<_>>(),
+                "summary": said(agent),
+            })
+        };
+        let (person, agent) = (answer(false), answer(true));
         m.library = found.tracks;
         m.refilter();
         let again = std::mem::take(&mut m.rescan_after);
         let waiters = if again { Vec::new() } else { std::mem::take(&mut m.scan_waiters) };
-        (again, waiters, answer)
+        (again, waiters, (person, agent))
     };
-    for w in waiters {
-        let _ = w.send(answer.clone());
+    for (w, is_agent) in waiters {
+        let _ = w.send(if is_agent { agent.clone() } else { person.clone() });
     }
     draw(s);
     if again {
@@ -912,7 +931,8 @@ fn wire(app: &MusicPlayerApp, music: Music) -> State {
 // ── The control surface ──────────────────────────────────────────────
 
 /// What mpv reports now, asked fresh over the socket rather than read from the last event.
-fn report(e: &mpv::Engine) -> Value {
+/// `agent`: whether the caller is an agent, asked on the UI thread (see [`shown_path`]).
+fn report(e: &mpv::Engine, agent: bool) -> Value {
     let get = |p: &str| e.client.get(p).unwrap_or(Value::Null);
     let paused = get("pause").as_bool().unwrap_or(false);
     let idle = get("idle-active").as_bool().unwrap_or(true);
@@ -920,7 +940,7 @@ fn report(e: &mpv::Engine) -> Value {
     json!({
         "playing": !idle && !path.is_null() && !paused,
         "paused": paused,
-        "path": shown_path(path.as_str()),
+        "path": shown_path(path.as_str(), agent),
         "position": get("time-pos"),
         "duration": get("duration"),
         "volume": get("volume"),
@@ -931,12 +951,22 @@ fn report(e: &mpv::Engine) -> Value {
 
 /// A path as this caller may see it: an agent is not told about a file outside the person's
 /// home, or in its protected places (#443), even one the person is playing.
-fn shown_path(path: Option<&str>) -> Value {
+///
+/// `agent` is [`agent_is_calling`], asked by the handler on the UI thread. It cannot be asked
+/// here: an answer left to `answer_later` is built on the RPC thread, where neither the caller
+/// nor the agent token is in scope, so every caller would look like the person.
+fn shown_path(path: Option<&str>, agent: bool) -> Value {
     match path {
         None => Value::Null,
-        Some(p) if agent_is_calling()
-            && yantrik_ipc_contracts::home_paths::may_read_file(p, &home()).is_err() => json!("(hidden)"),
-        Some(p) => json!(p),
+        Some(p) => json!(shown_text(p, agent)),
+    }
+}
+
+fn shown_text(path: &str, agent: bool) -> String {
+    if agent && yantrik_ipc_contracts::home_paths::may_read_file(path, &home()).is_err() {
+        "(hidden)".to_string()
+    } else {
+        path.to_string()
     }
 }
 
@@ -950,11 +980,13 @@ fn answer_loaded(e: Arc<mpv::Engine>, track: Track, before: Mark) -> Result<Valu
         Some(old) if Arc::ptr_eq(old, &e) => (before.loads, before.errors),
         _ => (0, 0),
     };
+    // Asked here, on the UI thread: `work` may run where the caller is no longer known.
+    let agent = agent_is_calling();
     let work = move || {
         let loaded = |o: &mpv::Observed| o.loads > before.0 && o.path.as_deref() == Some(track.path.as_str());
         let (_, o) = e.observed.wait_for(LOAD_WAIT, |o| o.gone || o.errors > before.1 || loaded(o));
         if !o.gone && o.errors == before.1 && loaded(&o) {
-            let mut answer = report(&e);
+            let mut answer = report(&e, agent);
             answer["track"] = json!(track.title);
             return Ok(answer);
         }
@@ -963,8 +995,7 @@ fn answer_loaded(e: Arc<mpv::Engine>, track: Track, before: Mark) -> Result<Valu
             _ if o.gone => "the player (mpv) stopped".into(),
             // mpv loaded something, but not this file: say what it is playing instead.
             (_, Some(other)) if o.loads > before.0 => {
-                let shown = shown_path(Some(other.as_str()));
-                format!("mpv is playing {} instead", shown.as_str().unwrap_or("another file"))
+                format!("mpv is playing {} instead", shown_text(other, agent))
             }
             _ => "mpv did not report the file as loaded".into(),
         };
@@ -1024,7 +1055,7 @@ fn surface(s: &State) -> Vec<(Action, Handler)> {
                 (e, Some(t)) => answer_loaded(e, t, before),
                 (e, None) => {
                     let (ok, _) = e.observed.wait_for(Duration::from_secs(1), |o| !o.paused);
-                    let answer = report(&e);
+                    let answer = report(&e, agent_is_calling());
                     if !ok || answer["paused"] == true {
                         return Err(refuse(s, "mpv was asked to resume and still reports paused."));
                     }
@@ -1035,7 +1066,7 @@ fn surface(s: &State) -> Vec<(Action, Handler)> {
     );
     add(act("pause", "Pause what is playing. Answers with mpv's own report of pause and position."), |s, _| {
         let e = pause(s)?;
-        let answer = report(&e);
+        let answer = report(&e, agent_is_calling());
         if answer["paused"] != true {
             return Err(refuse(s, "mpv was asked to pause and does not report paused."));
         }
@@ -1059,7 +1090,7 @@ fn surface(s: &State) -> Vec<(Action, Handler)> {
             let before = mark(s);
             match previous(s)? {
                 (e, Some(t)) => answer_loaded(e, t, before),
-                (e, None) => Ok(report(&e)),
+                (e, None) => Ok(report(&e, agent_is_calling())),
             }
         },
     );
@@ -1076,7 +1107,7 @@ fn surface(s: &State) -> Vec<(Action, Handler)> {
                 return Err(refuse(s, format!("The track is {} long; {seconds} seconds is past its end.", library::clock(Some(d)))));
             }
             let e = seek_to(s, seconds)?;
-            Ok(report(&e))
+            Ok(report(&e, agent_is_calling()))
         },
     );
     add(
@@ -1088,7 +1119,7 @@ fn surface(s: &State) -> Vec<(Action, Handler)> {
                 return Err(refuse(s, format!("`percent` is from 0 to 100, not {p}.")));
             }
             match set_volume(s, p)? {
-                Some(e) => Ok(report(&e)),
+                Some(e) => Ok(report(&e, agent_is_calling())),
                 // Nothing to ask: the volume is kept and mpv starts with it.
                 None => Ok(json!({ "volume": p, "player": "not running; mpv starts at this volume", "reported_by": "music" })),
             }
@@ -1125,7 +1156,7 @@ fn surface(s: &State) -> Vec<(Action, Handler)> {
         .expected_seconds(30),
         |s, _| {
             let (tx, rx) = mpsc::channel();
-            start_scan(s, Some(tx))?;
+            start_scan(s, Some((tx, agent_is_calling())))?;
             // The scan's result reaches the window through the event loop, which this handler is
             // holding; the wait therefore happens after it returns.
             let work = move || {
@@ -1140,6 +1171,7 @@ fn surface(s: &State) -> Vec<(Action, Handler)> {
 
 /// The state a mind reads first.
 fn view(s: &State) -> View {
+    let agent = agent_is_calling();
     let m = s.borrow();
     let o = m.observed();
     let loaded = o.path.is_some() && !o.idle && !o.gone;
@@ -1164,7 +1196,7 @@ fn view(s: &State) -> View {
     }
     View::new(summary)
         .with("track", title)
-        .with("path", if loaded { shown_path(o.path.as_deref()) } else { Value::Null })
+        .with("path", if loaded { shown_path(o.path.as_deref(), agent) } else { Value::Null })
         .with("position", if loaded { json!(o.time_pos) } else { Value::Null })
         .with("duration", if loaded { json!(o.duration) } else { Value::Null })
         .with("playing", o.playing())
@@ -1179,7 +1211,7 @@ fn view(s: &State) -> View {
         }).collect::<Vec<_>>())
         .with("library_listed", m.shown.len() as i64)
         .with("folders", m.folders.iter().enumerate().map(|(i, f)| {
-            json!({"path": shown_path(Some(f)), "tracks": m.per_folder.get(i).copied().unwrap_or(0)})
+            json!({"path": shown_path(Some(f), agent), "tracks": m.per_folder.get(i).copied().unwrap_or(0)})
         }).collect::<Vec<_>>())
         .with("scanning", m.scanning)
         .with("player", m.player.word())
@@ -1187,7 +1219,7 @@ fn view(s: &State) -> View {
             Player::Unavailable(why) => Value::String(why.clone()),
             _ => Value::Null,
         })
-        .with("status", m.status.clone())
+        .with("status", m.agent_status.as_ref().filter(|_| agent).unwrap_or(&m.status).clone())
         .with("notice", m.notice.clone())
 }
 

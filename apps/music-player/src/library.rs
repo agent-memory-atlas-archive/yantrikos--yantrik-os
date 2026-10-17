@@ -120,15 +120,16 @@ pub fn count(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
-/// The sentence a finished scan leaves on the status line.
-pub fn summary(library: &Library, folders: usize) -> String {
+/// The sentence a finished scan leaves on the status line. `name` says how each folder that could
+/// not be read is named in it.
+pub fn summary(library: &Library, folders: usize, name: impl Fn(&str) -> String) -> String {
     let mut said = format!(
         "{} in {}",
         count(library.tracks.len(), "track", "tracks"),
         count(folders, "folder", "folders")
     );
     if !library.unreadable.is_empty() {
-        let names: Vec<&str> = library.unreadable.iter().map(|(f, _)| f.as_str()).collect();
+        let names: Vec<String> = library.unreadable.iter().map(|(f, _)| name(f)).collect();
         said.push_str(&format!(
             " — could not read {}: {}",
             if names.len() == 1 { "this folder" } else { "these folders" },
@@ -218,7 +219,7 @@ mod tests {
         assert_eq!(lib.tracks.len(), 4, "inner/x.ogg is in both folders and listed once");
         assert_eq!(lib.unreadable.len(), 1);
         assert_eq!(lib.unreadable[0].0, missing);
-        let said = summary(&lib, folders.len());
+        let said = summary(&lib, folders.len(), str::to_string);
         assert!(said.starts_with("4 tracks in 3 folders — could not read this folder: "), "{said}");
         std::fs::remove_dir_all(&root).ok();
     }
@@ -242,7 +243,7 @@ mod tests {
         assert_eq!(count(0, "track", "tracks"), "0 tracks");
         assert_eq!(count(2, "folder", "folders"), "2 folders");
         let one = Library { tracks: vec![track_from(Path::new("/m/a/b.mp3"))], per_folder: vec![1], unreadable: vec![] };
-        assert_eq!(summary(&one, 1), "1 track in 1 folder");
+        assert_eq!(summary(&one, 1, str::to_string), "1 track in 1 folder");
     }
 
     #[test]

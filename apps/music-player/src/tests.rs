@@ -61,7 +61,8 @@ fn pump(jobs: &Jobs, done: impl Fn() -> bool) -> bool {
 /// Speaks enough of mpv's JSON IPC for the app: observe, get/set, loadfile, seek, stop, quit.
 /// A file whose name holds `short` ends as soon as it starts; `broken` fails to open; `crash`
 /// takes the player down; `playlist` behaves like an mpv that follows a playlist: it reports a
-/// `redirect` and starts playing the URL inside.
+/// `redirect` and starts playing the URL inside; `elsewhere` loads another file than the one asked
+/// for, one outside the home.
 const FAKE_MPV: &str = r#"
 import json, os, socket, sys
 path = [a.split('=', 1)[1] for a in sys.argv if a.startswith('--input-ipc-server=')][0]
@@ -102,6 +103,9 @@ for line in f:
         if 'playlist' in p:
             after.append({'event': 'end-file', 'reason': 'redirect'})
             change('path', 'http://127.0.0.1:9/beacon.mp3'); change('idle-active', False)
+            after.append({'event': 'file-loaded'})
+        elif 'elsewhere' in p:
+            change('path', '/var/elsewhere/secret.mp3'); change('idle-active', False)
             after.append({'event': 'file-loaded'})
         elif 'broken' in p:
             change('path', None); change('idle-active', True)
@@ -191,6 +195,21 @@ fn the_window_plays_scans_and_answers_with_what_mpv_reported() {
         assert!(pump(&jobs, || worker.is_finished()), "`{name}` answered in time");
         worker.join().unwrap()
     };
+    // The same, for an agent: its token is in scope only while the handler runs on the UI
+    // thread, as in `ControlRpc::dispatch`, and not where the rest of the answer is built.
+    let agent_call = |name: &str, args: Value| -> Result<Value, String> {
+        let scope = yantrik_surface::LaterScope::enter();
+        let first = {
+            let _agent = yantrik_surface::AgentTokenScope::enter(Some("tok-test-agent".into()));
+            (acts[name].1)(&args)
+        };
+        let Some(later) = scope.take() else { return first };
+        drop(scope);
+        let worker = std::thread::spawn(later);
+        assert!(pump(&jobs, || worker.is_finished()), "`{name}` answered in time");
+        worker.join().unwrap()
+    };
+    let dir_text = dir.to_string_lossy().into_owned();
 
     // ── Every published action is graded and says what it does ──
     for name in ["play", "pause", "next", "previous", "seek", "set_volume", "play_file", "rescan"] {
@@ -328,6 +347,46 @@ fn the_window_plays_scans_and_answers_with_what_mpv_reported() {
     assert!(!app.get_is_playing());
     let good = call("play_file", json!({"path": dir.join("Music/Gamma/Gamma 009.mp3")})).unwrap();
     assert_eq!(good["track"], "Gamma 009", "{good}");
+
+    // ── An agent is never told a path it may not read, in any answer ──
+    // The library is under the temporary directory, outside the home: the person sees the
+    // paths, an agent does not, though its answer is finished off the UI thread.
+    let mine = call("play", json!({"index": 3})).unwrap();
+    assert!(mine["path"].as_str().is_some_and(|p| p.ends_with("Alpha 002.mp3")), "{mine}");
+    let theirs = agent_call("play", json!({"index": 3})).unwrap();
+    assert_eq!(theirs["track"], "Alpha 002", "{theirs}");
+    assert_eq!(theirs["path"], "(hidden)", "{theirs}");
+    assert!(!theirs.to_string().contains(&dir_text), "{theirs}");
+    for (name, args) in [("pause", json!({})), ("play", json!({})), ("seek", json!({"seconds": 1.0}))] {
+        let answer = agent_call(name, args).unwrap();
+        assert!(!answer.to_string().contains(&dir_text), "{name}: {answer}");
+    }
+    let scanned = agent_call("rescan", json!({})).unwrap();
+    assert_eq!(scanned["folders"][0]["path"], "(hidden)", "{scanned}");
+    assert!(!scanned.to_string().contains(&dir_text), "{scanned}");
+    assert!(pump(&jobs, || !s.borrow().scanning));
+    {
+        let _agent = yantrik_surface::AgentTokenScope::enter(Some("tok-test-agent".into()));
+        let d = view(&s).state;
+        assert!(!d.to_string().contains(&dir_text), "describe hides them too: {d}");
+    }
+    // mpv loading another file than the one asked for: the person hears which, an agent does not.
+    let elsewhere = dir.join("elsewhere.mp3");
+    std::fs::write(&elsewhere, b"").unwrap();
+    let err = call("play_file", json!({"path": elsewhere})).unwrap_err();
+    assert!(err.contains("mpv is playing /var/elsewhere/secret.mp3 instead"), "{err}");
+    // An agent may name only a file in the home, so this part needs one there.
+    let in_home = home().join(format!("yantrik-music-test-{}", std::process::id()));
+    if std::fs::create_dir_all(&in_home).is_ok() {
+        let asked = in_home.join("elsewhere.mp3");
+        std::fs::write(&asked, b"").unwrap();
+        let err = agent_call("play_file", json!({"path": asked})).unwrap_err();
+        let _ = std::fs::remove_dir_all(&in_home);
+        assert!(err.contains("mpv is playing (hidden) instead"), "{err}");
+        assert!(!err.contains("/var/elsewhere"), "{err}");
+    } else {
+        eprintln!("the home is not writable here; the agent's play_file case is skipped");
+    }
 
     // ── The player dies: said in plain words, and the next play starts it again ──
     let crash = dir.join("Music/crash.mp3");
