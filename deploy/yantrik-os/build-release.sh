@@ -72,7 +72,7 @@ fail() { printf '\033[31mFAIL: %s\033[0m\n' "$*" >&2; exit 1; }
 # did nothing. That is what a git worktree made on Windows looks like from WSL (its .git file
 # names a C:/ path this git cannot follow). Say so instead.
 if [ -z "${YANTRIK_VERSION:-}" ]; then
-  VERSION="$(git -C "$PROJECT_ROOT" describe --tags --always --dirty 2>&1)"     || fail "git cannot read $PROJECT_ROOT to name this build: $VERSION. A worktree made by another OS's git cannot be read here; clone it natively, or set YANTRIK_VERSION."
+  VERSION="$(git -C "$PROJECT_ROOT" describe --tags --match "v[0-9]*" --always --dirty 2>&1)"     || fail "git cannot read $PROJECT_ROOT to name this build: $VERSION. A worktree made by another OS's git cannot be read here; clone it natively, or set YANTRIK_VERSION."
 else
   VERSION="$YANTRIK_VERSION"
 fi
@@ -505,7 +505,7 @@ EOF
 # it did in the file rather than presenting a guess as a range.
 PREVIOUS="${YANTRIK_PREVIOUS:-}"
 if [ -z "$PREVIOUS" ]; then
-  PREVIOUS="$(git -C "$PROJECT_ROOT" describe --tags --abbrev=0 HEAD~1 2>/dev/null || true)"
+  PREVIOUS="$(git -C "$PROJECT_ROOT" describe --tags --match "v[0-9]*" --abbrev=0 HEAD~1 2>/dev/null || true)"
 fi
 if [ -n "$PREVIOUS" ] && git -C "$PROJECT_ROOT" rev-parse -q --verify "$PREVIOUS^{commit}" >/dev/null 2>&1; then
   CHANGE_RANGE="$PREVIOUS..HEAD"
