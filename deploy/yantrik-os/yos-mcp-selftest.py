@@ -2524,10 +2524,10 @@ with tempfile.TemporaryDirectory() as d:
           not read(state).get("requests")
           and [a["action"] for a in read(state).get("acted", [])] == ["agent_run"], read(state))
 
-    def tainted_command(name, mode, call, want, answer="granted", **desktop):
+    def tainted_command(name, mode, call, want, answer="granted", rules=RULED, **desktop):
         """A session that has described the weather, then one command; what the desktop saw."""
         module, state = case(tmp, "command-taint-%s-%s" % (name, mode), mode=mode, ceiling=None,
-                             machine_ceiling="dangerous", rules=RULED, answer=answer, **desktop)
+                             machine_ceiling="dangerous", rules=rules, answer=answer, **desktop)
         module.run_tool(module.BY_NAME["os_describe"], {"app": "shell"})
         told = call(module)
         s = read(state)
@@ -2562,6 +2562,24 @@ with tempfile.TemporaryDirectory() as d:
             check("allowed, it runs once, with the grant it was minted for (%s, %s)" % (name, mode),
                   [(a["app"], a["action"], a.get("grant")) for a in s.get("acted", [])
                    if a["action"] != "show_app"] == [want + ("appr-1",)], s.get("acted"))
+    # The unattended machine's own case: no session rule, only the administrator's STANDING rule
+    # for shell.agent_run (22d'). That is the path the live VM's Mind takes, and a standing rule
+    # answers no more than a session rule — a tainted session's command still asks.
+    standing = [{"app": "shell", "action": "agent_run", "suspended": False, "in_force": True}]
+    for mode in ("auto", "bypass"):
+        s, _ = tainted_command("run_command under a standing rule", mode,
+                               lambda m: m.call_tool(m.AGENT_BY_NAME["run_command"], {"command": CURL}),
+                               ("shell", "agent_run"), rules=[], standing=standing, token=TOKEN)
+        check("under only a standing rule, a tainted command is not audited as unasked (%s)" % mode,
+              not s.get("audited") and [(a["app"], a["action"], a.get("grant"))
+                                        for a in s.get("acted", []) if a["action"] != "show_app"]
+              == [("shell", "agent_run", "appr-1")], (s.get("audited"), s.get("acted")))
+    s, text = tainted_command("run_command under a standing rule, refused", "auto",
+                              lambda m: m.call_tool(m.AGENT_BY_NAME["run_command"], {"command": CURL}),
+                              ("shell", "agent_run"), answer="denied", rules=[], standing=standing,
+                              token=TOKEN)
+    check("and refused, it does not run on the standing rule instead",
+          not s.get("acted") and text.startswith("REFUSED"), (text[:160], s.get("acted")))
     s, text = tainted_command("run_command", "auto",
                               lambda m: m.call_tool(m.AGENT_BY_NAME["run_command"], {"command": CURL}),
                               ("shell", "agent_run"), answer="denied", token=TOKEN)
