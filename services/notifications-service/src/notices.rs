@@ -967,6 +967,31 @@ mod tests {
     }
 
     #[test]
+    fn the_first_sidecar_is_put_aside_even_after_a_crash_before_the_rename() {
+        // The security delta review of b244448 on #831: a start that wrote the new sidecar but
+        // stopped before putting the old one aside must not leave it to be read again.
+        let dir = std::env::temp_dir().join(format!("yantrik-notices-legacy-crash-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("notifications.json");
+        let store = Store::open(path.clone());
+        store.add_notice(post("mind", notice("rem-1", "reminder", "inbox")), &home());
+        store.set_initiative(|s| { s.quiet = true; Ok(()) }).unwrap();
+        drop(store);
+        // The disk after that crash: the new sidecar, and the old one still beside it.
+        std::fs::copy(crate::store::sidecar_path(&path), dir.join("notices.json")).unwrap();
+        let store = Store::open(path.clone());
+        store.set_initiative(|s| { s.quiet = false; Ok(()) }).unwrap();
+        drop(store);
+        assert!(!dir.join("notices.json").exists(), "the first write put it aside");
+        assert!(std::fs::read_dir(&dir).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().starts_with("notices.json.migrated-")));
+        std::fs::remove_file(crate::store::sidecar_path(&path)).unwrap();
+        let store = Store::open(path);
+        assert!(!store.initiative().quiet, "the old settings did not come back");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn an_accounts_uid_is_read_from_the_password_file() {
         assert_eq!(account_uid("root"), Some(0));
         assert_eq!(account_uid("no-such-account-here"), None);

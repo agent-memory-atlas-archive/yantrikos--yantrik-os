@@ -332,6 +332,16 @@ impl Store {
             }
         }
 
+        // The old file is put aside by the first write that keeps the new sidecar: after reading
+        // it here, or when a start before this one wrote the new sidecar and then stopped (or
+        // failed to rename) before putting it aside. The new sidecar supersedes it then, and it
+        // must not be read again if that one later goes missing (the security delta review of
+        // b244448 on #831). Only a regular file is moved this way, never a symlink.
+        let superseded = present
+            && path.file_name().is_some_and(|n| n == "notifications.json")
+            && std::fs::symlink_metadata(&legacy).is_ok_and(|m| m.file_type().is_file());
+        let put_aside = blocked.is_none() && ((migrating && legacy.is_file()) || superseded);
+
         let mut reserved = std::collections::BTreeMap::new();
         // Not in tests, whose stores post as `mind` from any uid, whatever machine runs them.
         let mind = if cfg!(test) { None } else { crate::notices::account_uid(crate::notices::MIND_ACCOUNT) };
@@ -344,7 +354,7 @@ impl Store {
             written: Mutex::new(0),
             load_notice,
             reserved: Mutex::new(reserved),
-            legacy: Mutex::new((migrating && blocked.is_none() && legacy.is_file()).then_some(legacy)),
+            legacy: Mutex::new(put_aside.then_some(legacy)),
             blocked,
         }
     }
