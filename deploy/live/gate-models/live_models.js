@@ -23,6 +23,9 @@ const RULES = {
 const PASSED = ['messages', 'temperature', 'top_p', 'stop', 'frequency_penalty', 'think',
     'reasoning_effort', 'tools', 'tool_choice'];
 const MAX_TOKENS = 8192;
+// The local lane's models (AIG, Ollama-native /api/chat): the one the live Mind is set to
+// (YM_LOCAL_OLLAMA_MODEL on 561).
+const LOCAL_MODELS = ['qwen3.8:27b'];
 
 function refuse(r, status, text) {
     r.headersOut['Content-Type'] = 'text/plain; charset=utf-8';
@@ -116,11 +119,23 @@ async function local(r) {
     if (typeof asked !== 'object' || asked === null || Array.isArray(asked)) {
         return refuse(r, 400, 'the request body is not a JSON object');
     }
+    if (!LOCAL_MODELS.includes(asked.model)) {
+        return refuse(r, 403, 'this gate serves ' + LOCAL_MODELS.join(', ') + ' on the local lane');
+    }
+    // Unstreamed, a long answer holds a gate connection until it is whole, so the answer's length is
+    // capped here as `chat` caps max_tokens (review of #846).
+    if (typeof asked.options !== 'object' || asked.options === null || Array.isArray(asked.options)) {
+        asked.options = {};
+    }
+    const wanted = Math.floor(Number(asked.options.num_predict));
+    asked.options.num_predict = wanted > 0 ? Math.min(wanted, MAX_TOKENS) : MAX_TOKENS;
     const streamed = asked.stream !== false; // Ollama streams unless told not to
     asked.stream = false;
 
     const reply = await r.subrequest('/_live_upstream/aig', { method: 'POST', body: JSON.stringify(asked) });
     if (reply.status < 200 || reply.status > 299) {
+        // AIG's words go to the gate's own error log, never to the instance.
+        r.error('local lane: AIG answered ' + reply.status + ': ' + String(reply.responseText || '').slice(0, 200));
         return refuse(r, reply.status === 429 || reply.status >= 500 ? reply.status : 502,
             'the local model answered ' + reply.status);
     }
