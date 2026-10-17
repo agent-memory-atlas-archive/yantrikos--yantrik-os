@@ -5,7 +5,7 @@
 //! a chain of ten thousand running totals costs no stack and a loop is found before anything runs.
 
 use super::budget::{self, Budget};
-use super::parser::{Expr, Op};
+use super::parser::{Expr, Op, MAX_DEPTH};
 use super::value::{parse_number, Error, Kind, Value};
 use crate::address::{Cell, Range};
 
@@ -26,9 +26,16 @@ pub struct Eval<'a> {
     pub grid: &'a dyn Grid,
     /// Shared by every formula of one recalculation.
     pub budget: &'a Budget,
+    /// How many `value` calls are open. The parser already refuses a tree deeper than
+    /// [`MAX_DEPTH`]; this holds the evaluator to it too, so no tree can reach the stack's end.
+    depth: std::cell::Cell<usize>,
 }
 
-impl Eval<'_> {
+impl<'a> Eval<'a> {
+    pub fn new(grid: &'a dyn Grid, budget: &'a Budget) -> Self {
+        Self { grid, budget, depth: std::cell::Cell::new(0) }
+    }
+
     pub fn run(&self, expr: &Expr) -> Value {
         match self.value(expr) {
             Ok(v) => v,
@@ -38,6 +45,17 @@ impl Eval<'_> {
 
     /// A single value. A range here is a mistake unless it is one cell.
     pub fn value(&self, expr: &Expr) -> Result<Value, Error> {
+        let depth = self.depth.get();
+        if depth >= MAX_DEPTH {
+            return Err(Error::new(Kind::Syntax, format!("the formula nests more than {MAX_DEPTH} levels deep")));
+        }
+        self.depth.set(depth + 1);
+        let out = self.value_of(expr);
+        self.depth.set(depth);
+        out
+    }
+
+    fn value_of(&self, expr: &Expr) -> Result<Value, Error> {
         Ok(match expr {
             Expr::Number(n) => Value::Number(*n),
             Expr::Text(s) => Value::Text(s.clone()),

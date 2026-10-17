@@ -9,7 +9,11 @@
 //! A blank line in the middle of a file is a row of one empty cell, not nothing: skipping it
 //! moved every row below it up by one, and with it every reference into them.
 
-/// Rows of fields, or a sentence saying where the file stops making sense.
+use crate::formula::budget::MAX_TEXT;
+
+/// Rows of fields, or a sentence saying where the file stops making sense. A field longer than
+/// the [`MAX_TEXT`] characters a cell holds is refused as it is read: a formula in it could
+/// otherwise be any length, and nest as deep as it likes.
 pub fn parse(text: &str) -> Result<Vec<Vec<String>>, String> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut rows = Vec::new();
@@ -22,13 +26,22 @@ pub fn parse(text: &str) -> Result<Vec<Vec<String>>, String> {
     let mut line = 1usize;
     let mut quote_line = 0usize;
     let mut chars = text.chars().peekable();
+    // Characters in `field`, and the line it began on.
+    let (mut field_chars, mut field_line) = (0usize, 1usize);
 
     while let Some(c) = chars.next() {
+        if field_chars == 0 {
+            field_line = line;
+        }
+        if field_chars > MAX_TEXT {
+            return Err(too_long(field_line));
+        }
         if quoted {
             match c {
                 '"' if chars.peek() == Some(&'"') => {
                     chars.next();
                     field.push('"');
+                    field_chars += 1;
                 }
                 '"' => quoted = false,
                 other => {
@@ -36,6 +49,7 @@ pub fn parse(text: &str) -> Result<Vec<Vec<String>>, String> {
                         line += 1;
                     }
                     field.push(other);
+                    field_chars += 1;
                 }
             }
             continue;
@@ -48,6 +62,7 @@ pub fn parse(text: &str) -> Result<Vec<Vec<String>>, String> {
             }
             ',' => {
                 row.push(std::mem::take(&mut field));
+                field_chars = 0;
                 started = true;
             }
             '\r' | '\n' => {
@@ -57,13 +72,18 @@ pub fn parse(text: &str) -> Result<Vec<Vec<String>>, String> {
                 line += 1;
                 row.push(std::mem::take(&mut field));
                 rows.push(std::mem::take(&mut row));
+                field_chars = 0;
                 started = false;
             }
             other => {
                 field.push(other);
+                field_chars += 1;
                 started = true;
             }
         }
+    }
+    if field_chars > MAX_TEXT {
+        return Err(too_long(field_line));
     }
     if quoted {
         return Err(format!(
@@ -75,6 +95,10 @@ pub fn parse(text: &str) -> Result<Vec<Vec<String>>, String> {
         rows.push(row);
     }
     Ok(rows)
+}
+
+fn too_long(line: usize) -> String {
+    format!("the cell starting on line {line} is longer than the {MAX_TEXT} characters one cell holds")
 }
 
 /// Rows as CSV text: the inverse of [`parse`]. Lines end in `\r\n`, as RFC 4180 has them.

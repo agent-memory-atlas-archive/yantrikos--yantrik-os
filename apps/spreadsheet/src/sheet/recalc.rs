@@ -94,7 +94,7 @@ pub fn recalc(rows: usize, cols: usize, raw: &[String]) -> Vec<Value> {
             Err(e) => Value::Error(e.clone()),
             Ok(expr) => {
                 let view = View { rows, cols, values: &values };
-                let v = Eval { grid: &view, budget: &budget }.run(expr);
+                let v = Eval::new(&view, &budget).run(expr);
                 match v {
                     Value::Text(t) => match budget.text(t.len()) {
                         Ok(()) => Value::Text(t),

@@ -140,3 +140,83 @@ fn a_formula_that_reads_too_many_cells_is_refused_before_it_reads_them() {
     let v = s.value(parse_cell("A18000").unwrap());
     assert!(v.error().unwrap().message.contains("cells to work out"), "{v:?}");
 }
+
+// ── Stack: nesting has a bound ──────────────────────────────────────────
+
+use crate::formula::parser::MAX_DEPTH;
+
+fn nested(depth: usize) -> String {
+    format!("={}1{}", "(".repeat(depth), ")".repeat(depth))
+}
+
+/// The reviewer's formula: 16,000 brackets, 32,002 characters, under the `set_cell` cap.
+#[test]
+fn sixteen_thousand_brackets_are_an_error_not_a_stack_overflow() {
+    let f = nested(16_000);
+    assert_eq!(f.len(), 32_002);
+    let mut s = Session::new();
+    let got = act(&mut s, "set_cell", json!({ "cell": "A1", "text": f })).unwrap();
+    assert_eq!(got["value"]["error"], "#ERROR!", "{got}");
+    assert!(got["problem"].as_str().unwrap().contains("nests more than 100 levels"), "{got}");
+}
+
+#[test]
+fn every_kind_of_deep_nesting_is_refused_and_shallow_nesting_still_works() {
+    let mut s = Sheet::default();
+    let at = parse_cell("B1").unwrap();
+    let deep = [
+        nested(MAX_DEPTH + 1),
+        format!("={}1", "-".repeat(16_000)),
+        format!("={}1", "+".repeat(16_000)),
+        format!("=1{}", "+1".repeat(16_000)),
+        format!("=1{}", "%".repeat(16_000)),
+        format!("={}1{}", "ABS(".repeat(5_000), ")".repeat(5_000)),
+        format!("={}1{}", "IF(TRUE,".repeat(3_000), ")".repeat(3_000)),
+    ];
+    for f in &deep {
+        s.set(at, f).unwrap();
+        let v = s.value(at);
+        assert!(v.error().is_some_and(|e| e.message.contains("levels deep")), "{}…: {v:?}", &f[..20]);
+    }
+    s.set(at, &nested(50)).unwrap();
+    assert_eq!(s.value(at).display(), "1");
+    s.set(at, &format!("=1{}", "+1".repeat(60))).unwrap();
+    assert_eq!(s.value(at).display(), "61");
+}
+
+#[test]
+fn a_csv_cell_longer_than_a_cell_holds_is_refused_with_its_line() {
+    let dir = Scratch::new("long-cell");
+    let path = dir.path("long.csv");
+    std::fs::write(&path, format!("ok\n\"{}\"\n", nested(20_000))).unwrap();
+    let mut s = Session::new();
+    let e = act(&mut s, "open", json!({ "path": path })).unwrap_err();
+    assert!(e.contains("line 2") && e.contains("32768 characters"), "{e}");
+    assert!(crate::csv::parse(&"a".repeat(MAX_TEXT)).is_ok(), "exactly a cell's worth is fine");
+}
+
+#[test]
+fn the_evaluator_refuses_a_tree_deeper_than_the_parser_allows() {
+    use crate::formula::budget::Budget;
+    use crate::formula::eval::{Eval, Grid};
+    use crate::formula::{Expr, Value};
+    struct Blank;
+    impl Grid for Blank {
+        fn value(&self, _: Cell) -> Value {
+            Value::Empty
+        }
+        fn rows(&self) -> usize {
+            1
+        }
+        fn cols(&self) -> usize {
+            1
+        }
+    }
+    let mut e = Expr::Number(1.0);
+    for _ in 0..MAX_DEPTH + 5 {
+        e = Expr::Neg(Box::new(e));
+    }
+    let budget = Budget::default();
+    let v = Eval::new(&Blank, &budget).run(&e);
+    assert!(v.error().is_some_and(|e| e.message.contains("levels deep")), "{v:?}");
+}

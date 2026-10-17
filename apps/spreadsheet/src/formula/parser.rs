@@ -34,12 +34,19 @@ pub enum Expr {
     Call(String, Vec<Expr>),
 }
 
+/// How deep a formula may nest: brackets, function calls, signs, and operators chained on one
+/// another. The parser, `references` and the evaluator all walk the tree by recursion, so a
+/// formula 16,000 brackets deep overflowed the window's stack and aborted it (security review of
+/// #727); past this it is refused as `#ERROR!` with a sentence instead. No hand-written formula
+/// comes near it.
+pub const MAX_DEPTH: usize = 100;
+
 pub fn parse(tokens: Vec<Token>) -> Result<Expr, Error> {
     if tokens.is_empty() {
         return Err(Error::new(Kind::Syntax, "the formula is empty after the ="));
     }
-    let mut p = Parser { tokens, pos: 0 };
-    let expr = p.comparison()?;
+    let mut p = Parser { tokens, pos: 0, nesting: 0 };
+    let (expr, _) = p.comparison()?;
     match p.peek() {
         None => Ok(expr),
         Some(Token::RParen) => Err(Error::new(Kind::Syntax, "there is a ) with no ( to close")),
@@ -50,9 +57,30 @@ pub fn parse(tokens: Vec<Token>) -> Result<Expr, Error> {
     }
 }
 
+/// A part of the tree, and how deep it goes.
+type Parsed = Result<(Expr, usize), Error>;
+
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    /// How many of the parser's own calls are open, for brackets and signs that add no node.
+    nesting: usize,
+}
+
+fn too_deep() -> Error {
+    Error::new(Kind::Syntax, format!("the formula nests more than {MAX_DEPTH} levels deep"))
+}
+
+/// One node over `children`, refused if it would be deeper than [`MAX_DEPTH`].
+fn node(expr: Expr, children: usize) -> Parsed {
+    if children >= MAX_DEPTH {
+        return Err(too_deep());
+    }
+    Ok((expr, children + 1))
+}
+
+fn binary(op: Op, (a, da): (Expr, usize), (b, db): (Expr, usize)) -> Parsed {
+    node(Expr::Binary(op, Box::new(a), Box::new(b)), da.max(db))
 }
 
 fn describe(t: &Token) -> String {
@@ -88,32 +116,45 @@ impl Parser {
         }
     }
 
-    fn comparison(&mut self) -> Result<Expr, Error> {
-        let mut left = self.concat()?;
-        loop {
-            let op = match self.peek() {
-                Some(Token::Eq) => Op::Eq,
-                Some(Token::Ne) => Op::Ne,
-                Some(Token::Lt) => Op::Lt,
-                Some(Token::Le) => Op::Le,
-                Some(Token::Gt) => Op::Gt,
-                Some(Token::Ge) => Op::Ge,
-                _ => return Ok(left),
-            };
-            self.pos += 1;
-            left = Expr::Binary(op, Box::new(left), Box::new(self.concat()?));
+    /// Run one recursive step, refusing it past [`MAX_DEPTH`] open calls.
+    fn nested(&mut self, step: impl FnOnce(&mut Self) -> Parsed) -> Parsed {
+        if self.nesting >= MAX_DEPTH {
+            return Err(too_deep());
         }
+        self.nesting += 1;
+        let out = step(self);
+        self.nesting -= 1;
+        out
     }
 
-    fn concat(&mut self) -> Result<Expr, Error> {
+    fn comparison(&mut self) -> Parsed {
+        self.nested(|p| {
+            let mut left = p.concat()?;
+            loop {
+                let op = match p.peek() {
+                    Some(Token::Eq) => Op::Eq,
+                    Some(Token::Ne) => Op::Ne,
+                    Some(Token::Lt) => Op::Lt,
+                    Some(Token::Le) => Op::Le,
+                    Some(Token::Gt) => Op::Gt,
+                    Some(Token::Ge) => Op::Ge,
+                    _ => return Ok(left),
+                };
+                p.pos += 1;
+                left = binary(op, left, p.concat()?)?;
+            }
+        })
+    }
+
+    fn concat(&mut self) -> Parsed {
         let mut left = self.additive()?;
         while self.eat(&Token::Amp) {
-            left = Expr::Binary(Op::Concat, Box::new(left), Box::new(self.additive()?));
+            left = binary(Op::Concat, left, self.additive()?)?;
         }
         Ok(left)
     }
 
-    fn additive(&mut self) -> Result<Expr, Error> {
+    fn additive(&mut self) -> Parsed {
         let mut left = self.term()?;
         loop {
             let op = match self.peek() {
@@ -122,11 +163,11 @@ impl Parser {
                 _ => return Ok(left),
             };
             self.pos += 1;
-            left = Expr::Binary(op, Box::new(left), Box::new(self.term()?));
+            left = binary(op, left, self.term()?)?;
         }
     }
 
-    fn term(&mut self) -> Result<Expr, Error> {
+    fn term(&mut self) -> Parsed {
         let mut left = self.power()?;
         loop {
             let op = match self.peek() {
@@ -135,37 +176,38 @@ impl Parser {
                 _ => return Ok(left),
             };
             self.pos += 1;
-            left = Expr::Binary(op, Box::new(left), Box::new(self.power()?));
+            left = binary(op, left, self.power()?)?;
         }
     }
 
-    fn power(&mut self) -> Result<Expr, Error> {
+    fn power(&mut self) -> Parsed {
         let mut left = self.unary()?;
         while self.eat(&Token::Caret) {
-            left = Expr::Binary(Op::Pow, Box::new(left), Box::new(self.unary()?));
+            left = binary(Op::Pow, left, self.unary()?)?;
         }
         Ok(left)
     }
 
-    fn unary(&mut self) -> Result<Expr, Error> {
+    fn unary(&mut self) -> Parsed {
         if self.eat(&Token::Minus) {
-            return Ok(Expr::Neg(Box::new(self.unary()?)));
+            let (e, d) = self.nested(Self::unary)?;
+            return node(Expr::Neg(Box::new(e)), d);
         }
         if self.eat(&Token::Plus) {
-            return self.unary();
+            return self.nested(Self::unary);
         }
         let mut e = self.primary()?;
         while self.eat(&Token::Percent) {
-            e = Expr::Percent(Box::new(e));
+            e = node(Expr::Percent(Box::new(e.0)), e.1)?;
         }
         Ok(e)
     }
 
-    fn primary(&mut self) -> Result<Expr, Error> {
+    fn primary(&mut self) -> Parsed {
         match self.bump() {
             None => Err(Error::new(Kind::Syntax, "the formula ends where a value was expected")),
-            Some(Token::Number(n)) => Ok(Expr::Number(n)),
-            Some(Token::Text(s)) => Ok(Expr::Text(s)),
+            Some(Token::Number(n)) => Ok((Expr::Number(n), 1)),
+            Some(Token::Text(s)) => Ok((Expr::Text(s), 1)),
             Some(Token::LParen) => {
                 let e = self.comparison()?;
                 if !self.eat(&Token::RParen) {
@@ -178,13 +220,15 @@ impl Parser {
         }
     }
 
-    fn word(&mut self, w: String) -> Result<Expr, Error> {
+    fn word(&mut self, w: String) -> Parsed {
         if self.eat(&Token::LParen) {
             let name = w.to_ascii_uppercase();
-            let mut args = Vec::new();
+            let (mut args, mut deepest) = (Vec::new(), 0);
             if !self.eat(&Token::RParen) {
                 loop {
-                    args.push(self.comparison()?);
+                    let (arg, d) = self.comparison()?;
+                    args.push(arg);
+                    deepest = deepest.max(d);
                     if self.eat(&Token::RParen) {
                         break;
                     }
@@ -196,11 +240,11 @@ impl Parser {
                     }
                 }
             }
-            return Ok(Expr::Call(name, args));
+            return node(Expr::Call(name, args), deepest);
         }
         match w.to_ascii_uppercase().as_str() {
-            "TRUE" => return Ok(Expr::Bool(true)),
-            "FALSE" => return Ok(Expr::Bool(false)),
+            "TRUE" => return Ok((Expr::Bool(true), 1)),
+            "FALSE" => return Ok((Expr::Bool(false), 1)),
             _ => {}
         }
         let Some(first) = address::parse_cell(&w) else {
@@ -216,9 +260,9 @@ impl Parser {
             let Some(last) = address::parse_cell(&end) else {
                 return Err(Error::new(Kind::Name, format!("`{end}` is not a cell, so {w}:{end} is not a range")));
             };
-            return Ok(Expr::Range(Range::new(first, last)));
+            return Ok((Expr::Range(Range::new(first, last)), 1));
         }
-        Ok(Expr::Ref(first))
+        Ok((Expr::Ref(first), 1))
     }
 }
 
