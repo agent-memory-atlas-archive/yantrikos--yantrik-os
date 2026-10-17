@@ -26,7 +26,16 @@ const MAX_TOKENS = 8192;
 // The local lane's models (AIG, Ollama-native /api/chat): the one the live Mind is set to
 // (YM_LOCAL_OLLAMA_MODEL on 561).
 const LOCAL_MODELS = ['qwen3.8:27b'];
-const LOCAL_MAX_CONTEXT = 32768;
+// AIG also serves Pranab's own Mind's private turns, from the same loaded model. On Ollama any
+// load-time option that differs from the loaded runner's (num_ctx, num_gpu, main_gpu, num_batch,
+// num_thread, use_mmap, ...) reloads it, and every request's keep_alive resets when it unloads. So
+// the instance chooses none of them: the gate sends AIG a request built from these fields only,
+// with the context pinned to what the Mind sends and the model kept loaded (reviews of #850).
+const LOCAL_PASSED = ['messages', 'tools', 'think', 'format'];
+const LOCAL_OPTIONS = ['temperature', 'top_p', 'top_k', 'min_p', 'repeat_penalty', 'repeat_last_n',
+    'presence_penalty', 'frequency_penalty', 'seed', 'stop'];
+const LOCAL_CONTEXT = 32768;
+const LOCAL_KEEP_ALIVE = -1;
 
 function refuse(r, status, text) {
     r.headersOut['Content-Type'] = 'text/plain; charset=utf-8';
@@ -109,7 +118,7 @@ async function chat(r) {
 // streamed came back empty, unstreamed it called os_describe), so every agent turn on this lane
 // chose no tool. The gate asks for the whole answer and hands it back as a one-line stream, which
 // the Mind's reader takes like any other: it reads tool calls from whichever line carries them.
-// Nothing else about the request changes; this route forwarded the body as sent before, too.
+// The request AIG gets is rebuilt from LOCAL_PASSED and LOCAL_OPTIONS, as `chat` rebuilds its own.
 async function local(r) {
     let asked;
     try {
@@ -123,23 +132,28 @@ async function local(r) {
     if (!LOCAL_MODELS.includes(asked.model)) {
         return refuse(r, 403, 'this gate serves ' + LOCAL_MODELS.join(', ') + ' on the local lane');
     }
+    const given = (typeof asked.options === 'object' && asked.options !== null && !Array.isArray(asked.options))
+        ? asked.options : {};
     // Unstreamed, a long answer holds a gate connection until it is whole, so the answer's length is
-    // capped here as `chat` caps max_tokens (review of #846).
-    if (typeof asked.options !== 'object' || asked.options === null || Array.isArray(asked.options)) {
-        asked.options = {};
+    // capped as `chat` caps max_tokens. A shorter answer only shortens the instance's own reply.
+    const wanted = Math.floor(Number(given.num_predict));
+    const options = {
+        num_predict: wanted > 0 ? Math.min(wanted, MAX_TOKENS) : MAX_TOKENS,
+        num_ctx: LOCAL_CONTEXT,
+    };
+    // An index loop: the njs engine on the gate does not take for...of.
+    for (let i = 0; i < LOCAL_OPTIONS.length; i++) {
+        const key = LOCAL_OPTIONS[i];
+        if (Object.prototype.hasOwnProperty.call(given, key)) options[key] = given[key];
     }
-    const wanted = Math.floor(Number(asked.options.num_predict));
-    asked.options.num_predict = wanted > 0 ? Math.min(wanted, MAX_TOKENS) : MAX_TOKENS;
-    // AIG also serves Pranab's own Mind's private turns, so the instance may not resize the model's
-    // context or decide when it is unloaded: a huge num_ctx reloads it and keep_alive 0 unloads it
-    // after every call, for everyone (delta review of #846). The Mind sends 32,768 itself.
-    const context = Math.floor(Number(asked.options.num_ctx));
-    asked.options.num_ctx = context > 0 ? Math.min(context, LOCAL_MAX_CONTEXT) : LOCAL_MAX_CONTEXT;
-    delete asked.keep_alive;
+    const sent = { model: asked.model, stream: false, keep_alive: LOCAL_KEEP_ALIVE, options: options };
+    for (let i = 0; i < LOCAL_PASSED.length; i++) {
+        const field = LOCAL_PASSED[i];
+        if (Object.prototype.hasOwnProperty.call(asked, field)) sent[field] = asked[field];
+    }
     const streamed = asked.stream !== false; // Ollama streams unless told not to
-    asked.stream = false;
 
-    const reply = await r.subrequest('/_live_upstream/aig', { method: 'POST', body: JSON.stringify(asked) });
+    const reply = await r.subrequest('/_live_upstream/aig', { method: 'POST', body: JSON.stringify(sent) });
     if (reply.status < 200 || reply.status > 299) {
         // AIG's words go to the gate's own error log, never to the instance.
         // Control characters become spaces, so AIG's text can't start a line of its own in the log.
