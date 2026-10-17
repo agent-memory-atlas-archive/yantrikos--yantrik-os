@@ -2105,7 +2105,9 @@ grub_theme_tree_ok() { # <tree> [hashed]
     return 1
   fi
   [ "${2:-0}" = 1 ] || return 0
-  for e in "$src"/* "$src"/.[!.]*; do
+  # Every name in it, a dot-dot one (..x) too: cp -a "$src/." below copies them all (security
+  # delta review of f27f9e04..1d35edbc, #835).
+  for e in "$src"/* "$src"/.[!.]* "$src"/..?*; do
     [ -e "$e" ] || [ -L "$e" ] || continue
     rel="grub-theme/${e##*/}"
     if ! [ -f "$e" ] || [ -L "$e" ] || ! root_file_ok "$rel" "$e"; then
@@ -5918,6 +5920,10 @@ c.sendall((json.dumps({"ok": True, "seeded": req["rules"]}) + "\n").encode())' "
   t "theme from the build: ... and said so" "lacks files this build ships" "$(cat "$gd/said")"
   gb_make; rm -f "$gsh/icon.png"; ln -s /etc/hostname "$gsh/icon.png"
   is "theme from the build: a link in it: not copied" "0|no" "$(gb_try)"
+  for gdot in .hidden ..hidden; do
+    gb_make; printf 'x\n' > "$gsh/$gdot"; chmod 0644 "$gsh/$gdot"
+    is "theme from the build: a file named $gdot the build does not list: not copied" "0|no" "$(gb_try)"
+  done
   gb_make; mkdir "$gsh/sub"
   is "theme from the build: a directory in it: not copied" "0|no" "$(gb_try)"
   gb_make; chmod g+w "$gd/share"
