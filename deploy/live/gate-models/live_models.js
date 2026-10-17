@@ -31,9 +31,15 @@ const LOCAL_MODELS = ['qwen3.8:27b'];
 // num_thread, use_mmap, ...) reloads it, and every request's keep_alive resets when it unloads. So
 // the instance chooses none of them: the gate sends AIG a request built from these fields only,
 // with the context pinned to what the Mind sends and the model kept loaded (reviews of #850).
-const LOCAL_PASSED = ['messages', 'tools', 'think', 'format'];
+// No `format`: the Mind never sends one, and Ollama compiles a JSON schema into a grammar that
+// constrains every token, so a deep or wide one could stall or crash the shared server.
+const LOCAL_PASSED = ['messages', 'tools', 'think'];
+// `stop` is not here: it is checked after the loop, because every stop string is matched against
+// each token for every caller sharing the runner.
 const LOCAL_OPTIONS = ['temperature', 'top_p', 'top_k', 'min_p', 'repeat_penalty', 'repeat_last_n',
-    'presence_penalty', 'frequency_penalty', 'seed', 'stop'];
+    'presence_penalty', 'frequency_penalty', 'seed'];
+const LOCAL_MAX_STOPS = 8;
+const LOCAL_MAX_STOP_LENGTH = 64;
 const LOCAL_CONTEXT = 32768;
 const LOCAL_KEEP_ALIVE = -1;
 
@@ -132,6 +138,10 @@ async function local(r) {
     if (!LOCAL_MODELS.includes(asked.model)) {
         return refuse(r, 403, 'this gate serves ' + LOCAL_MODELS.join(', ') + ' on the local lane');
     }
+    if (asked.tools !== undefined && (!Array.isArray(asked.tools)
+        || !asked.tools.every((t) => t && typeof t === 'object' && t.type === 'function'))) {
+        return refuse(r, 400, 'tools must be a list of functions');
+    }
     const given = (typeof asked.options === 'object' && asked.options !== null && !Array.isArray(asked.options))
         ? asked.options : {};
     // Unstreamed, a long answer holds a gate connection until it is whole, so the answer's length is
@@ -145,6 +155,12 @@ async function local(r) {
     for (let i = 0; i < LOCAL_OPTIONS.length; i++) {
         const key = LOCAL_OPTIONS[i];
         if (Object.prototype.hasOwnProperty.call(given, key)) options[key] = given[key];
+    }
+    // A few short stop strings, as the Mind sends, or none.
+    const stops = typeof given.stop === 'string' ? [given.stop] : given.stop;
+    if (Array.isArray(stops) && stops.length > 0 && stops.length <= LOCAL_MAX_STOPS
+        && stops.every((s) => typeof s === 'string' && s.length > 0 && s.length <= LOCAL_MAX_STOP_LENGTH)) {
+        options.stop = stops;
     }
     const sent = { model: asked.model, stream: false, keep_alive: LOCAL_KEEP_ALIVE, options: options };
     for (let i = 0; i < LOCAL_PASSED.length; i++) {
