@@ -618,7 +618,7 @@ component MindCard inherits Rectangle {
                 // not plainly ok is said as reported.
                 if act.outcome != "ok" && act.outcome != "failed" : Text {
                     text: act.outcome;
-                    color: act.outcome == "failed" ? Theme.color-danger : Theme.text-secondary;
+                    color: Theme.text-secondary;
                     font-size: Theme.fs-micro;
                     vertical-alignment: center;
                     max-width: 70px;
