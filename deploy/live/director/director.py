@@ -117,6 +117,9 @@ COPY_MAX_DEPTH = 6
 # Entries looked at, across the whole game, whether copied or not.
 COPY_MAX_ENTRIES = 4 * COPY_MAX_FILES
 REQUEST_MAX_BYTES = 16 << 10
+# The Director's own state files (done.json and the rest) are a few hundred bytes; read_state
+# reads no more than this of any of them.
+STATE_MAX_BYTES = 1 << 20
 # The fastest a running mission's game is copied again (a turn takes longer than this anyway).
 LIVE_COPY_SECS = 15
 # Copies kept: the one showing, and the one before, which a frame still loading may point at.
@@ -204,10 +207,25 @@ LOG_TO_FILE = [True]
 def log(**entry):
     entry["at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     if LOG_TO_FILE[0]:
-        os.makedirs(STATE_DIR, exist_ok=True)
-        with open(LOG, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        # The loops log their own failures through here, so a log file that cannot be written
+        # is said in the journal, never raised.
+        try:
+            os.makedirs(STATE_DIR, exist_ok=True)
+            with open(LOG, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except OSError as why:
+            entry["log_file"] = f"not written: {why}"[:200]
     print(json.dumps(entry, ensure_ascii=False), flush=True)
+
+
+def parse_json(raw):
+    """`raw`, bytes of UTF-8 or text, as JSON, or None when it is not JSON: bad UTF-8, bad
+    syntax, or nesting deep enough to raise RecursionError (16 KiB of "[" does, #840). Whatever
+    the text holds, it is no value rather than an exception; callers cap its size before this."""
+    try:
+        return json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+    except Exception:  # ValueError, UnicodeDecodeError, RecursionError, MemoryError: all mean "not JSON"
+        return None
 
 
 def shell_state():
@@ -219,10 +237,8 @@ def shell_state():
     start, end = out.find("\n{"), out.rfind("\n}")
     if start < 0 or end < 0:
         return None
-    try:
-        return json.loads(out[start + 1 : end + 2])
-    except json.JSONDecodeError:
-        return None
+    state = parse_json(out[start + 1 : end + 2])
+    return state if isinstance(state, dict) else None
 
 
 def last_reply(state):
@@ -245,7 +261,7 @@ def whole_text(turn):
                              capture_output=True, text=True, timeout=30).stdout
         start = out.find("\n{")
         whole, _ = json.JSONDecoder().raw_decode(out[start + 1:]) if start >= 0 else ({}, 0)
-    except (OSError, subprocess.TimeoutExpired, ValueError):
+    except (OSError, subprocess.TimeoutExpired, ValueError, RecursionError):
         return text
     return whole.get("text") or text if isinstance(whole, dict) else text
 
@@ -329,8 +345,9 @@ def place_windows(state=None, showcase_front=False):
     the thing to watch), and during a mission Mind View stays in front."""
     try:
         out = subprocess.run([YOS, "describe", "shell", "--json"], capture_output=True, text=True, timeout=30).stdout
-        snap = snap_action(json.loads(out))
-    except (OSError, subprocess.TimeoutExpired, ValueError):
+        view = parse_json(out)
+        snap = snap_action(view) if isinstance(view, dict) else None
+    except (OSError, subprocess.TimeoutExpired):
         snap = None
     snapped = False
     if snap is None:
@@ -702,10 +719,26 @@ def check_page(m):
 
 
 def read_state(path, empty):
+    """The state file at `path` as the type of `empty`, or `empty` when it is missing, not a plain
+    file, over STATE_MAX_BYTES, not JSON or not that type. The Mind's account can write ~/director,
+    so this reads hostile bytes too (SHOWING in windows_main): never past the cap, never blocking
+    on a FIFO, never raising."""
     try:
-        with open(path, encoding="utf-8") as f:
-            return type(empty)(json.load(f))
-    except (OSError, ValueError, TypeError):
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        return empty
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return empty
+        raw = os.read(fd, STATE_MAX_BYTES + 1)
+    except OSError:
+        return empty
+    finally:
+        os.close(fd)
+    value = parse_json(raw) if len(raw) <= STATE_MAX_BYTES else None
+    try:
+        return type(empty)(value) if value is not None else empty
+    except (ValueError, TypeError, OverflowError):
         return empty
 
 
@@ -966,10 +999,7 @@ def read_request(uid):
         return {}
     finally:
         os.close(fd)
-    try:
-        req = json.loads(raw.decode("utf-8")) if len(raw) <= REQUEST_MAX_BYTES else {}
-    except ValueError:
-        return {}
+    req = parse_json(raw) if len(raw) <= REQUEST_MAX_BYTES else None
     return req if isinstance(req, dict) else {}
 
 
@@ -1040,8 +1070,11 @@ def showcase_main(builds):
     uid = pwd.getpwnam(MIND_ACCOUNT).pw_uid
     index, shown_at, last = 0, 0.0, None
     while True:
-        live = live_request(builds, uid)
+        # Each step is on its own: a request that fails in a way not foreseen here, or a step that
+        # does, is logged and the next poll starts afresh. On #840 a RecursionError escaped this
+        # loop, and Restart=always only brought it back to the same file, the showcase frozen.
         try:
+            live = live_request(builds, uid)
             if live is not None:
                 m, line, summary, at = live
                 key = (m["id"], line, summary, at)
@@ -1056,6 +1089,8 @@ def showcase_main(builds):
                 shown_at, last = time.time(), None
         except OSError as why:
             log(event="showcase not written", why=str(why)[:200])
+        except Exception as why:  # noqa: BLE001 - one bad step never stops the showcase
+            log(event="showcase step failed", why=f"{type(why).__name__}: {why}"[:200])
         time.sleep(POLL_SECS)
 
 
@@ -1077,24 +1112,29 @@ def windows_main():
     showcase in front: the games are the thing to watch)."""
     placed_for, place_at, was_live = None, 0.0, True
     while True:
-        started = browser_started()
-        if started is not None and started != placed_for:
-            placed_for, place_at = started, time.time() + 10
-        showing = read_state(SHOWING, {})
+        # As in showcase_main: SHOWING is the Mind's file, and one bad read or step is logged,
+        # never the end of the loop.
         try:
-            live = bool(showing.get("mission")) and time.time() - float(showing.get("at") or 0) < SHOWING_STALE_SECS
-        except (TypeError, ValueError):
-            live = False
-        if not live and was_live:
-            place_at = place_at or time.time()
-        if place_at and time.time() >= place_at:
-            state = shell_state()
-            # Never while a card is waiting: the shell holds window actions then, and the card
-            # must stay where the person can see it (show_mind_view).
-            if state is not None and not state.get("pending_approvals"):
-                place_windows(state, showcase_front=not live)
-                place_at = 0.0
-        was_live = live
+            started = browser_started()
+            if started is not None and started != placed_for:
+                placed_for, place_at = started, time.time() + 10
+            showing = read_state(SHOWING, {})
+            try:
+                live = bool(showing.get("mission")) and time.time() - float(showing.get("at") or 0) < SHOWING_STALE_SECS
+            except (TypeError, ValueError):
+                live = False
+            if not live and was_live:
+                place_at = place_at or time.time()
+            if place_at and time.time() >= place_at:
+                state = shell_state()
+                # Never while a card is waiting: the shell holds window actions then, and the card
+                # must stay where the person can see it (show_mind_view).
+                if state is not None and not state.get("pending_approvals"):
+                    place_windows(state, showcase_front=not live)
+                    place_at = 0.0
+            was_live = live
+        except Exception as why:  # noqa: BLE001 - one bad step never stops the window loop
+            log(event="window step failed", why=f"{type(why).__name__}: {why}"[:200])
         time.sleep(POLL_SECS)
 
 

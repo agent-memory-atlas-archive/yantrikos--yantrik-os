@@ -11,6 +11,7 @@ import importlib.util
 import json
 import os
 import re
+import signal
 import sys
 import tempfile
 
@@ -486,6 +487,64 @@ check("a request for no mission, a stale one, an oversized one, one through a li
       forged == [] and turn_line == "starting" and oversize is None and linked is None and idle is None,
       repr((forged, turn_line, oversize, linked, idle)))
 
+# The request is the Mind's file: whatever it holds, the publisher reads it as no request and carries on.
+# 16 KiB of "[" fits under REQUEST_MAX_BYTES and is deep enough to raise RecursionError in json (#840).
+HOSTILE = {"16 KiB of [": b"[" * d.REQUEST_MAX_BYTES, "invalid UTF-8": b'{"mission": "\xff\xfe"}',
+           "a 10 MB body": b'{"mission": "' + b"x" * (10 << 20) + b'"}', "a non-object": b'"starfall"',
+           "a deeply nested object": b'{"a":' * 3000 + b"1" + b"}" * 3000}
+open(d.DIRECTOR_CGROUP, "w").write("4242\n")
+fell = {}
+for name, body in HOSTILE.items():
+    open(d.SHOWING, "wb").write(body)
+    try:
+        if d.live_request(builds, me) is not None:
+            fell[name] = "shown"
+    except Exception as why:
+        fell[name] = type(why).__name__
+check("a request of 16 KiB of [, invalid UTF-8, 10 MB, a non-object or deep nesting is no request, and raises nothing",
+      fell == {}, repr(fell))
+fell = {}
+for name, body in HOSTILE.items():
+    open(d.SHOWING, "wb").write(body)
+    try:
+        if d.read_state(d.SHOWING, {}) != {}:
+            fell[name] = "read"
+    except Exception as why:
+        fell[name] = type(why).__name__
+os.remove(d.SHOWING)
+os.mkfifo(d.SHOWING)
+
+
+def blocked(*_):
+    raise TimeoutError("blocked on the FIFO")
+
+
+signal.signal(signal.SIGALRM, blocked)
+signal.alarm(5)
+try:
+    if d.read_state(d.SHOWING, {}) != {}:
+        fell["a FIFO"] = "read"
+except Exception as why:
+    fell["a FIFO"] = type(why).__name__
+signal.alarm(0)
+os.remove(d.SHOWING)
+check("the window loop's read of the same file is empty for each of them, and for a FIFO, and raises or blocks on"
+      " nothing", fell == {}, repr(fell))
+real_run = d.subprocess.run
+fell = {}
+for name, body in HOSTILE.items():
+    d.subprocess.run = lambda argv, **k: Done("shell\n" + body.decode("utf-8", "replace").replace("[", "{", 1) + "\n}")
+    try:
+        d.shell_state()
+        d.whole_text({"text": "t", "clipped": True, "index": 1})
+        d.place_windows(None)
+    except Exception as why:
+        fell[name] = type(why).__name__
+d.subprocess.run = real_run
+check("the shell's describe output is parsed the same way, so no reply of the desktop's ends the Director's loops",
+      fell == {}, repr(fell))
+open(d.DIRECTOR_CGROUP, "w").write("")
+
 for s in specs[:3]:
     os.makedirs(os.path.join(d.PROJECTS, s["folder"]), exist_ok=True)
     open(os.path.join(d.PROJECTS, s["folder"], "index.html"), "w").write("x")
@@ -556,6 +615,56 @@ check("the publisher goes round the rotation until the Director runs a mission, 
       and frames[3].startswith("LIVE" + specs[2]["title"]) and len(mission_frames) == 4
       and "turn 1" in mission_frames[0] and "turn 1" in mission_frames[1] and "turn 2" in mission_frames[-1],
       repr([f[4:12] + "|" + f[-20:] for f in frames]))
+
+# One bad request, or any one failure in a step, never ends the publisher: on 0040a380 the 16 KiB of "["
+# escaped showcase_main, Restart=always brought it back to the same file, and the showcase froze.
+open(d.DIRECTOR_CGROUP, "w").write("4242\n")
+clock, ticks, frames, broke = [1000.0], [0], [], [1]
+d.time.time = lambda: clock[0]
+d.pwd.getpwnam = lambda name: type("pw", (), {"pw_uid": me})()
+real_frame = d.write_frame
+
+
+def breaking_frame(*a, **k):
+    if broke[0]:
+        broke[0] = 0
+        raise RuntimeError("one step failed")
+    return real_frame(*a, **k)
+
+
+def tick(_):
+    ticks[0] += 1
+    clock[0] += d.LIVE_COPY_SECS
+    body = list(HOSTILE.values())[ticks[0] - 1] if ticks[0] <= len(HOSTILE) else None
+    if body is not None:
+        open(d.SHOWING, "wb").write(body)
+    elif ticks[0] == len(HOSTILE) + 1:
+        d.write_state(d.SHOWING, {"mission": specs[1]["id"], "at": clock[0], "turn": 4})
+    else:
+        header = re.search(r"<header>(.*?)</header>", open(os.path.join(d.SHOWCASE_DIR, "frame.html")).read())
+        frames.append(html.unescape(re.sub(r"<[^>]+>", "", header.group(1))))
+    if ticks[0] == len(HOSTILE) + 4:
+        raise Stop
+
+
+d.write_frame, d.time.sleep = breaking_frame, tick
+real_log, logged = d.log, []
+d.log = lambda **entry: logged.append(entry)
+d.write_state(d.SHOWING, {"mission": specs[1]["id"], "at": clock[0], "turn": 3})
+ended = None
+try:
+    d.showcase_main(builds)
+except Stop:
+    pass
+except Exception as why:
+    ended = type(why).__name__
+d.time.sleep, d.time.time, d.pwd.getpwnam, d.write_frame = real_sleep, real_time, real_pw, real_frame
+d.log = real_log
+d.LOG_TO_FILE[0] = True
+check("the publisher outlives a failing step and every hostile request, logs the failure, and shows the next good"
+      " request", ended is None and bool(frames) and "turn 4" in frames[-1] and "one step failed" in repr(logged),
+      repr((ended, frames, ticks[0], logged)))
+open(d.DIRECTOR_CGROUP, "w").write("")
 
 # The window loop: placed when the browser starts, and with the showcase in front when a mission ends.
 placed, starts, ticks = [], ["a", "a", "a", "b", "b", "b", "b"], [0]
