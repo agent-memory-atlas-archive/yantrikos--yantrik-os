@@ -503,11 +503,14 @@ for name, body in HOSTILE.items():
         fell[name] = type(why).__name__
 check("a request of 16 KiB of [, invalid UTF-8, 10 MB, a non-object or deep nesting is no request, and raises nothing",
       fell == {}, repr(fell))
+# Python 3.12 and later parse the 16 KiB nested object (it is valid JSON, and read_state may return it);
+# 100,000 levels, under STATE_MAX_BYTES, raise RecursionError on every version.
 fell = {}
-for name, body in HOSTILE.items():
+for name, body in dict(HOSTILE, **{"a 100,000-deep object": b'{"a":' * 100000 + b"1" + b"}" * 100000}).items():
     open(d.SHOWING, "wb").write(body)
     try:
-        if d.read_state(d.SHOWING, {}) != {}:
+        got = d.read_state(d.SHOWING, {})
+        if got != {} and not (name == "a deeply nested object" and list(got) == ["a"]):
             fell[name] = "read"
     except Exception as why:
         fell[name] = type(why).__name__
