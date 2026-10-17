@@ -50,14 +50,14 @@ pub fn memory_words(count: Option<i64>) -> String {
     }
 }
 
-/// The minds row: "6 can answer · 4 keep their own memory". A harness's memory is its own unless
-/// it says otherwise (`MindsSeen::keep_memory`), so the words say "their own", not "share yours".
+/// The minds row: "6 can answer · 4 remember". One line in the panel's width. "Remember" is each
+/// mind's own memory (`MindsSeen::keep_memory`): a harness's memory is its own unless it says
+/// otherwise, and nothing here claims it shares yours.
 pub fn minds_words(count: usize, keep_memory: usize) -> String {
     let answer = if count == 1 { "1 can answer".to_string() } else { format!("{count} can answer") };
     let keep = match keep_memory {
-        0 => "none keeps its own memory".to_string(),
-        1 => "1 keeps its own memory".to_string(),
-        n => format!("{n} keep their own memory"),
+        0 => "none remember".to_string(),
+        n => format!("{n} remember"),
     };
     format!("{answer} \u{b7} {keep}")
 }
@@ -109,9 +109,9 @@ mod tests {
         assert_eq!(memory_words(Some(1_768)), "Remembers 1,768 things");
         assert_eq!(memory_words(Some(1)), "Remembers 1 thing");
         assert_eq!(memory_words(None), "Not counted yet", "never a zero that was not read");
-        assert_eq!(minds_words(6, 4), "6 can answer \u{b7} 4 keep their own memory");
-        assert_eq!(minds_words(1, 1), "1 can answer \u{b7} 1 keeps its own memory");
-        assert_eq!(minds_words(2, 0), "2 can answer \u{b7} none keeps its own memory");
+        assert_eq!(minds_words(6, 4), "6 can answer \u{b7} 4 remember");
+        assert_eq!(minds_words(1, 1), "1 can answer \u{b7} 1 remember");
+        assert_eq!(minds_words(2, 0), "2 can answer \u{b7} none remember");
         for said in [memory_words(Some(5)), minds_words(3, 2)] {
             assert!(!said.contains("YantrikDB") && !said.contains("minds"), "{said}");
         }

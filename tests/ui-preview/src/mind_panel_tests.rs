@@ -55,7 +55,7 @@ fn fill(ui: &App) {
         project: "".into(),
         memory: "Remembers 1,234 things".into(),
         memory_known: true,
-        minds: "3 can answer · 2 keep their own memory".into(),
+        minds: "3 can answer · 2 remember".into(),
         running: 2,
         needs_you: 1,
         more_agents: 0,
