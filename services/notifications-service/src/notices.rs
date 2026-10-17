@@ -428,6 +428,11 @@ impl Store {
     /// Only to the account and program the id is bound to ([`Binding`]): anything else is refused,
     /// and nothing it sends is taken as an acknowledgement.
     pub fn feedback_for(&self, harness: &str, uid: Option<u32>, program: &str, ack: Option<u64>) -> Result<Vec<Feedback>, String> {
+        // Before the binding check, which would bind a reserved id, and before a cursor moves:
+        // nothing about a poll can be kept while the store is blocked.
+        if let Some(why) = self.blocked() {
+            return Err(why.to_string());
+        }
         let reserved = self.reserved();
         let mut state = self.lock();
         check_binding(&mut state, &reserved, harness, uid, program, false)?;
@@ -922,6 +927,12 @@ mod tests {
         assert!(store.bindings().is_empty(), "no id was bound by a post that was not kept");
         assert!(store.unbind("mind").is_err() && store.set_initiative(|s| { s.quiet = true; Ok(()) }).is_err());
         assert!(!store.initiative().quiet);
+        // A poll neither binds a reserved id nor moves a cursor.
+        store.reserve("mind", 999);
+        assert!(store.feedback_for("mind", Some(999), "", Some(7)).is_err());
+        assert!(store.feedback_for("whoever", Some(4242), "evil", Some(99)).is_err());
+        assert!(store.bindings().is_empty());
+        assert!(store.lock().feedback_cursor.is_empty(), "no cursor moved");
         let _ = std::fs::remove_dir_all(dir);
     }
 
