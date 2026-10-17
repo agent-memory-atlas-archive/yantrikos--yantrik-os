@@ -361,6 +361,7 @@ if argv[:1] == ["describe"]:
                 "previous": "ask",
                 "bypass_expires_in_secs": None,
                 "session_rules": state.get("rules", []),
+                "standing_rules": state.get("standing", []),
             }
         if state.get("machine_ceiling"):
             body["tool_permission"] = state["machine_ceiling"]
@@ -1978,6 +1979,18 @@ with tempfile.TemporaryDirectory() as d:
           sorted(set(v.get("layer") for v in vectors)))
     check("and each of the six outcomes actually occurs somewhere in them",
           named == set(module.OUTCOMES), sorted(set(module.OUTCOMES) - named))
+    # The administrator's standing rules (15 October 2026) are an axis of their own, and they
+    # change answers: auto's open-ended sensitive command runs on one where it asked without.
+    standing = [v for v in vectors if v.get("standing_rules")]
+    check("the standing rules are in the vectors, in every mode",
+          set(v.get("mode") for v in standing) == set(module.MODES), len(standing))
+    flipped = [v.get("id") for v in standing if v.get("expect") == "run_logged"
+               and any(w.get("id") == v.get("id").replace("rule=standing", "rule=none")
+                       and w.get("expect") == "ask" for w in vectors)]
+    check("and they answer somewhere a card was asked for: %d cells" % len(flipped),
+          bool(flipped) and all("/plan/" not in i and "/ask/" not in i
+                                and "/dangerous/" not in i and "unrecoverable=true" not in i
+                                for i in flipped), flipped[:5])
 
     # The `unrecoverable` axis, and that it is a real axis rather than a field nobody varies.
     #
@@ -2009,7 +2022,7 @@ with tempfile.TemporaryDirectory() as d:
     auto_sensitive = [v for v in vectors
                       if v.get("layer") == "shell" and v.get("mode") == "auto"
                       and v.get("grade") == "sensitive" and v.get("ceiling") == "dangerous"
-                      and not v.get("rules")]
+                      and not v.get("rules") and not v.get("standing_rules")]
     by_undo = {bool(v.get("unrecoverable")): v.get("expect") for v in auto_sensitive
                if not v.get("open_ended")}
     check("auto runs a recoverable sensitive action and asks about one that cannot be undone",
@@ -2289,6 +2302,37 @@ with tempfile.TemporaryDirectory() as d:
           s.get("carried") and not any("--full" in c["argv"] for c in s["carried"]),
           [c["argv"] for c in s.get("carried", [])])
 
+    # 22d'. The unattended machine (15 October 2026): its administrator allows shell.agent_run
+    # in /etc/yantrik/standing-rules.conf, so in auto the first command after a restart runs
+    # with no card, and the record names the standing rule. In ask it asks as ever, and one the
+    # person suspended with its ✕ answers nothing.
+    allowed = {"app": "shell", "action": "agent_run", "suspended": False, "in_force": True}
+    module, state = case(tmp, "standing-auto", mode="auto", ceiling=None, token=TOKEN,
+                         answer="pending", standing=[allowed])
+    module.call_tool(module.AGENT_BY_NAME["run_command"], {"command": "make", "cwd": "/tmp"})
+    s = read(state)
+    audited = (s.get("audited") or [{}])[0]
+    check("with the administrator's standing rule, run_command runs in auto with no card",
+          not s.get("requests") and len(s.get("acted", [])) == 1, s)
+    check("and lands in the record as the standing rule",
+          (audited.get("app"), audited.get("action"), audited.get("mode"))
+          == ("shell", "agent_run", "standing_rule"), s.get("audited"))
+    for name, mode, rule in (("standing-ask", "ask", allowed),
+                             ("standing-suspended", "auto", dict(allowed, suspended=True))):
+        module, state = case(tmp, name, mode=mode, ceiling=None, token=TOKEN, answer="pending",
+                             standing=[rule])
+        module.call_tool(module.AGENT_BY_NAME["run_command"], {"command": "make", "cwd": "/tmp"})
+        s = read(state)
+        check("%s: the standing rule answers nothing, and a card is asked for" % name,
+              [r.get("action") for r in s.get("requests", [])] == ["agent_run"]
+              and not s.get("acted"), s)
+    check("a standing rule never answers a dangerous command, nor in plan",
+          module.decide("dangerous", "shell", "agent_run", False, "auto", [], "dangerous",
+                        runs_anything=True, standing=[("shell", "agent_run")]) == ("ask", None)
+          and module.decide("sensitive", "shell", "agent_run", False, "plan", [], "dangerous",
+                            runs_anything=True, standing=[("shell", "agent_run")])[0]
+          == "refuse_mode", None)
+
     # 22e. A command still running when its wait ran out says so, and how to follow it up.
     module, state = case(tmp, "token-running", mode="auto", ceiling=None, token=TOKEN,
                          agent_running=True)
@@ -2521,10 +2565,10 @@ with tempfile.TemporaryDirectory() as d:
           not read(state).get("requests")
           and [a["action"] for a in read(state).get("acted", [])] == ["agent_run"], read(state))
 
-    def tainted_command(name, mode, call, want, answer="granted", **desktop):
+    def tainted_command(name, mode, call, want, answer="granted", rules=RULED, **desktop):
         """A session that has described the weather, then one command; what the desktop saw."""
         module, state = case(tmp, "command-taint-%s-%s" % (name, mode), mode=mode, ceiling=None,
-                             machine_ceiling="dangerous", rules=RULED, answer=answer, **desktop)
+                             machine_ceiling="dangerous", rules=rules, answer=answer, **desktop)
         module.run_tool(module.BY_NAME["os_describe"], {"app": "shell"})
         told = call(module)
         s = read(state)
@@ -2559,6 +2603,24 @@ with tempfile.TemporaryDirectory() as d:
             check("allowed, it runs once, with the grant it was minted for (%s, %s)" % (name, mode),
                   [(a["app"], a["action"], a.get("grant")) for a in s.get("acted", [])
                    if a["action"] != "show_app"] == [want + ("appr-1",)], s.get("acted"))
+    # The unattended machine's own case: no session rule, only the administrator's STANDING rule
+    # for shell.agent_run (22d'). That is the path the live VM's Mind takes, and a standing rule
+    # answers no more than a session rule — a tainted session's command still asks.
+    standing = [{"app": "shell", "action": "agent_run", "suspended": False, "in_force": True}]
+    for mode in ("auto", "bypass"):
+        s, _ = tainted_command("run_command under a standing rule", mode,
+                               lambda m: m.call_tool(m.AGENT_BY_NAME["run_command"], {"command": CURL}),
+                               ("shell", "agent_run"), rules=[], standing=standing, token=TOKEN)
+        check("under only a standing rule, a tainted command is not audited as unasked (%s)" % mode,
+              not s.get("audited") and [(a["app"], a["action"], a.get("grant"))
+                                        for a in s.get("acted", []) if a["action"] != "show_app"]
+              == [("shell", "agent_run", "appr-1")], (s.get("audited"), s.get("acted")))
+    s, text = tainted_command("run_command under a standing rule, refused", "auto",
+                              lambda m: m.call_tool(m.AGENT_BY_NAME["run_command"], {"command": CURL}),
+                              ("shell", "agent_run"), answer="denied", rules=[], standing=standing,
+                              token=TOKEN)
+    check("and refused, it does not run on the standing rule instead",
+          not s.get("acted") and text.startswith("REFUSED"), (text[:160], s.get("acted")))
     s, text = tainted_command("run_command", "auto",
                               lambda m: m.call_tool(m.AGENT_BY_NAME["run_command"], {"command": CURL}),
                               ("shell", "agent_run"), answer="denied", token=TOKEN)

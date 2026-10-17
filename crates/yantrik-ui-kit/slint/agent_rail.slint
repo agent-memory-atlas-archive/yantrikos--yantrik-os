@@ -66,14 +66,18 @@ component SectionLabel inherits Text {
 
 component ContextRow inherits TouchArea {
     in property <AgentContextItem> item;
+    // Whether a click on the row does anything. Off, the row is a line of text: no pointer, no
+    // hover, no click — it does not dress up as a button nothing answers.
+    in property <bool> opens: false;
     height: 38px;
-    mouse-cursor: pointer;
+    enabled: root.opens;
+    mouse-cursor: root.opens ? pointer : default;
 
     Rectangle {
         width: 100%;
         height: 100%;
         border-radius: Theme.r-sm;
-        background: parent.has-hover ? Theme.hover-fill : transparent;
+        background: root.opens && parent.has-hover ? Theme.hover-fill : transparent;
 
         HorizontalLayout {
             padding-left: Theme.sp-2;
@@ -188,6 +192,12 @@ export component AgentRail inherits Rectangle {
     callback context-activated(string);
     callback suggestion-activated(string);
 
+    // Whether a context row opens something when clicked. Only an app whose Rust answers
+    // `context-activated` turns this on; everywhere else the rows are shown and not offered as
+    // buttons. Before this, every app's rows had a pointer and a hover and most of them went
+    // nowhere: a control that is drawn must work (design/apps-plan-2026-09-20.md, rule 7).
+    in property <bool> context-opens: false;
+
     // Nothing true to say, nothing drawn. See the header.
     property <bool> has-content:
         root.context-items.length > 0 || root.suggestions.length > 0 || root.unavailable != "";
@@ -239,6 +249,7 @@ export component AgentRail inherits Rectangle {
                     spacing: Theme.sp-2;
                     for c in root.context-items : ContextRow {
                         item: c;
+                        opens: root.context-opens;
                         clicked => { root.context-activated(c.id); }
                     }
                 }

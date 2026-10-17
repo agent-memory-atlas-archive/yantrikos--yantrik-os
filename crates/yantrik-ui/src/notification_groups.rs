@@ -267,6 +267,7 @@ mod tests {
             replaces_id: None,
             sender,
             image: None,
+            notice: None,
             revision: 1,
         }
     }

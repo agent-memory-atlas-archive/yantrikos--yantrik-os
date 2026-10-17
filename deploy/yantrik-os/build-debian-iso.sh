@@ -60,7 +60,7 @@ TARGET_DIR="${TARGET_DIR:-$( \
 # running `git describe` again for itself. Two describes a few minutes apart can differ — a tag
 # pushed between them is enough — and then the ISO's filename names one build while the BUILD
 # marker inside it names another.
-export YANTRIK_VERSION="${YANTRIK_VERSION:-$(git -C "$PROJECT_ROOT" describe --tags --always --dirty 2>/dev/null)}"
+export YANTRIK_VERSION="${YANTRIK_VERSION:-$(git -C "$PROJECT_ROOT" describe --tags --match "v[0-9]*" --always --dirty 2>/dev/null)}"
 [ -n "$YANTRIK_VERSION" ] || export YANTRIK_VERSION="0.0.0-unknown"
 DEBIAN_SUITE="trixie"
 DEBIAN_MIRROR="http://deb.debian.org/debian"

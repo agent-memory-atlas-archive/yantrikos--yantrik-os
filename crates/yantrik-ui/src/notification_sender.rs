@@ -250,6 +250,7 @@ mod tests {
                 desktop,
             }),
             image: None,
+            notice: None,
             revision: 1,
         }
     }

@@ -332,7 +332,7 @@ content, and a content action a paired action takes back stays `standard` (`add_
 
 | calendar | `add_event`, `update_own_event`, `delete_own_event` | standard | content, paired: what `add_event` writes, `update_own_event` moves and `delete_own_event` takes back — the caller's own events, by the #201 record |
 | calendar | `update_event`, `delete_event` | sensitive | reach any stored event — the person's own, a Google-synced one, another caller's — so the person sees a card (#332); a delete has no trash, and its description says the event is not recoverable |
-| containers | `refresh`, `start`, `show_logs` | standard | reads, and starting what is stopped |
+| containers | `refresh`, `start`, `show_logs`, `show_tab` | standard | reads, and starting what is stopped; `show_tab` switches the window between containers, images and volumes, as `describe.tab` reports it |
 | containers | `stop`, `restart` | sensitive | interrupts what the container was serving |
 | containers | `remove` | dangerous | the writable layer goes with it |
 | documents | `find`, `show` | safe | reads |
@@ -341,7 +341,7 @@ content, and a content action a paired action takes back stays `standard` (`add_
 | download-manager | `cancel` | sensitive | ends a transfer in flight |
 | email | `open_message`, `select_folder`, `search`, `mark_read`, `flag`, `compose` | standard | reads and a draft; `send` is deliberately not published — mail that has gone cannot be taken back |
 | email | `begin_google_sign_in` | sensitive | puts a full-access consent screen in front of the person, unasked |
-| image-viewer | `open`, `show`, `next`, `previous`, `rotate`, `fit`, `toggle_info` | standard | showing pictures; `rotate` turns what is on screen, the file is unchanged |
+| image-viewer | `open`, `show`, `next`, `previous`, `rotate`, `flip`, `fit`, `toggle_info` | standard | showing pictures; `rotate` and `flip` turn and mirror what is on screen (the toolbar's own path), the file is unchanged and the next picture is shown as stored; `fit` is the fit button, back to the whole picture from a zoom |
 | network | `refresh`, `wifi_scan` | standard | reads that trigger a radio scan |
 | network | `wifi_connect`, `wifi_forget` | sensitive | changes what the machine joins; forgetting deletes a stored credential |
 | network | `wifi_disconnect`, `wifi_radio` | dangerous | on a machine reached over Wi-Fi, takes away the channel the undo would travel on |
@@ -463,13 +463,19 @@ calls `a11y.act`.
 | notes | `notes.delete` | change | none | removes the note file outright — no trash; the app's `trash` (sensitive) is the recoverable one. No caller on the desktop |
 | notes | `notes.set_pinned` | change | none | rewrites the note's pinned flag. No caller on the desktop |
 | notes | `notes.set_tags` | change | `tags` (app) — standard | rewrites the note's tags. No caller on the desktop |
-| notifications | `notifications.list` | read | — | the centre's contents |
-| notifications | `notifications.since` | read | — | what changed since a revision; the shell's notification wire polls it |
+| notifications | `notifications.list` | read | — | the centre's contents. To any caller but the desktop, a mind's notice comes without its feedback, evidence or button |
+| notifications | `notifications.since` | read | — | what changed since a revision; the shell's notification wire polls it. Redacted as `list` is for any caller but the desktop, and without the harness bindings |
 | notifications | `notifications.add` | change | `notify` (service surface) — standard | stores and shows one notification. Every app's notify goes through an app-runtime helper that calls this method |
-| notifications | `notifications.dismiss` | change | `dismiss` (service surface) — standard | takes one off the screen |
-| notifications | `notifications.dismiss_all` | change | `dismiss_all` (service surface) — standard | takes them all off |
-| notifications | `notifications.mark_read` | change | `mark_read` (service surface) — standard | clears the unread badge |
+| notifications | `notifications.dismiss` | change | `dismiss` (service surface) — standard | takes one off the screen. A mind's notice is refused to any caller but the desktop |
+| notifications | `notifications.dismiss_all` | change | `dismiss_all` (service surface) — standard | takes them all off; from any caller but the desktop, minds' notices stay |
+| notifications | `notifications.mark_read` | change | `mark_read` (service surface) — standard | clears the unread badge; from any caller but the desktop, minds' notices stay unread |
 | notifications | `notifications.action` | change | none | invokes a notification's button and tells the sender. The shell calls it when the person clicks; the click is the authority, which is why there is no action |
+| notifications | `notifications.notice_feedback` | change | none | records the person's feedback on a mind's notice (and, for "Never this kind" / "Inbox only", their settings). Refused to any caller but the desktop: the press on the card is the authority |
+| notifications | `notifications.notice_shown` | change | none | records that the shell toasted a notice, showed it in For you, or opened its button. Desktop only |
+| notifications | `notifications.notice_feedback_poll` | change | none | one harness's pending feedback, advancing its durable cursor past what it acknowledged. Desktop only: the harness host asks on the harness's behalf, naming the account and program the harness id is bound to |
+| notifications | `notifications.initiative` | read | — | the person's initiative settings (design/initiative-inbox-2026-10-16.md) |
+| notifications | `notifications.initiative_set` | change | none | changes the initiative settings. Desktop only: Settings → Harnesses → Initiative is the authority |
+| notifications | `notifications.notice_unbind` | change | none | forgets which account and program a harness id belongs to, so the next notice under it binds it afresh. Desktop only: the person presses Forget in Settings → Harnesses → Initiative |
 | email | `email.accounts` | read | — | the configured accounts, secrets stripped |
 | email | `email.oauth_status` | read | — | where a sign-in stands |
 | email | `email.test_account` | read | — | dials the account's server to check the credentials; changes nothing |
