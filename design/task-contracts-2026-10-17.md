@@ -12,7 +12,7 @@ In one week the machine showed the same failure in five shapes, and every one of
 
 - A mind said FINISHED over code it had never written.
 - A mind claimed it needed approval while an approval rule was in force.
-- Three different models made the same unasked offers, which points at our own prompt. That is a hypothesis, being tested as E.PROMPT1 (yantrik-mind eb4dc86); this line is updated when the re-run lands.
+- Three different models made the same unasked offers. We tested whether our own prompt caused this (E.PROMPT1): removing the persona's mandates did not reduce the fault count (7 → 6 of 12), so the hypothesis is not supported. Offers persist across three models and two prompts.
 - Apps shipped with buttons that only logged.
 - The live stream showed exertion (grep) instead of consequences (the game).
 
