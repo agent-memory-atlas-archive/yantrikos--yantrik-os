@@ -3352,7 +3352,7 @@ export component App inherits Window {
                 root.navigate(35);
                 RecipesState.show(id);
             }
-            // Straight to Settings > Harnesses, as the status bar's mind chip does.
+            // Straight to Settings > Minds, as the status bar's mind chip does.
             open-mind => {
                 root.settings-category = 8;
                 root.current-screen = 7;
@@ -3391,7 +3391,7 @@ export component App inherits Window {
         // boolean and the desktop did not move. This is the panel that toggle was always meant to
         // open, and switching minds is the thing it should have been switching.
         //
-        // The fast path, deliberately: Settings > Harnesses is where you read about a mind, and
+        // The fast path, deliberately: Settings > Minds is where you read about a mind, and
         // this is where you change to one without leaving what you were doing.
         if root.ai-quick-switcher-open : Rectangle {
             width: 100%;

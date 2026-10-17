@@ -19,6 +19,7 @@
 //!   says so; when one does, the mind's row will name the account.
 
 pub mod identity;
+mod plain;
 
 #[cfg(test)]
 mod tests;
@@ -215,6 +216,8 @@ pub struct RunsOn {
     pub provider_kind: String,
     /// What the gateway does with its calls, for a mind on it (`SetIn::Gateway`).
     pub via_gateway: Option<Via>,
+    /// The mind's own line as it attached ("Hermes 0.21.5 · picked"), for Details only.
+    pub said: Option<String>,
 }
 
 /// What the gateway does with a mind's calls; the address and model are the row's own.
@@ -382,6 +385,7 @@ fn one(m: &MindFact, companion: Option<&CompanionFact>) -> RunsOn {
         base_url: String::new(),
         provider_kind: String::new(),
         via_gateway: None,
+        said: m.detail.clone().filter(|d| !d.trim().is_empty()),
     };
     // On the gateway, the gateway's answer is the fact, whatever the mind says (it says "picked").
     if let Some(g) = &m.gateway {
@@ -523,8 +527,8 @@ pub fn in_use_not_saved(rows: &[RunsOn], companion: Option<&CompanionFact>, save
             e.model = e.models.first().cloned().unwrap_or_default();
             let others = e.used_by.len() - usize::from(has_config);
             e.where_set = match (has_config, others) {
-                (true, 0) => "set in /opt/yantrik/config.yaml \u{b7} used by the built-in companion".to_string(),
-                (true, _) => "set in /opt/yantrik/config.yaml for the built-in companion; the other minds keep their own key in their own settings".to_string(),
+                (true, 0) => "set in this computer\u{2019}s setup file \u{b7} used by the built-in companion".to_string(),
+                (true, _) => "set in this computer\u{2019}s setup file for the built-in companion; the other minds keep their own key in their own settings".to_string(),
                 (false, 1) => "kept in that mind's own settings, with its own key".to_string(),
                 (false, _) => "each mind keeps its own key in its own settings".to_string(),
             };

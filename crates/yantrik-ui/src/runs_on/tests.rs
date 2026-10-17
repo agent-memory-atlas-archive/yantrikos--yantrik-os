@@ -125,7 +125,7 @@ fn vm_520_the_providers_in_use_are_listed_though_none_is_saved() {
     let aig = &in_use[1];
     assert_eq!(aig.label, "Custom endpoint \u{b7} aig.mycluster.cyou");
     assert_eq!(aig.used_by, ["Yantrik Companion"]);
-    assert_eq!(aig.where_set, "set in /opt/yantrik/config.yaml \u{b7} used by the built-in companion");
+    assert_eq!(aig.where_set, "set in this computer\u{2019}s setup file \u{b7} used by the built-in companion");
     assert_eq!(
         (aig.preset.as_str(), aig.base_url.as_str(), aig.model.as_str()),
         ("custom", "https://aig.mycluster.cyou/v1", "qwen3.8:27b")

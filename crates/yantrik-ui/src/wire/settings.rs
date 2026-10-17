@@ -897,7 +897,7 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         },
         SettingsCategoryItem {
             icon: "".into(),
-            label: "Harnesses".into(),
+            label: "Minds".into(),
             id: 8,
         },
     ];

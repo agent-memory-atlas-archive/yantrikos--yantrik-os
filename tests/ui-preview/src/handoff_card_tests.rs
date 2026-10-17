@@ -1,4 +1,4 @@
-//! The "give a harness a provider" card, on Settings → Harnesses where it is opened. It lived
+//! The "give a harness a provider" card, on Settings → Minds where it is opened. It lived
 //! inside the AI page's block, so on VM 520 pressing a provider on the Harnesses page drew
 //! nothing at all and the person had no way to Apply.
 
