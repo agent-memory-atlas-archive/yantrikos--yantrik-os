@@ -60,7 +60,7 @@ TARGET_DIR="${TARGET_DIR:-$( \
 # running `git describe` again for itself. Two describes a few minutes apart can differ — a tag
 # pushed between them is enough — and then the ISO's filename names one build while the BUILD
 # marker inside it names another.
-export YANTRIK_VERSION="${YANTRIK_VERSION:-$(git -C "$PROJECT_ROOT" describe --tags --always --dirty 2>/dev/null)}"
+export YANTRIK_VERSION="${YANTRIK_VERSION:-$(git -C "$PROJECT_ROOT" describe --tags --match "v[0-9]*" --always --dirty 2>/dev/null)}"
 [ -n "$YANTRIK_VERSION" ] || export YANTRIK_VERSION="0.0.0-unknown"
 DEBIAN_SUITE="trixie"
 DEBIAN_MIRROR="http://deb.debian.org/debian"
@@ -261,7 +261,9 @@ apt-get install -y -qq \
 # build, and the parity check after this step names anything user-data.yaml gains later.
 # mpv: Files opens sound and video in mpv's own window (#255); the image shipped no player.
 # flatpak: the Package Manager installs Flathub apps with it, per-user and without root (#399).
-apt-get install -y -qq     seatd     libcap2-bin     chromium     pipewire-pulse wireplumber pulseaudio-utils     python3-websocket     fontconfig     grim slurp     qemu-guest-agent     libnotify-bin     xdg-desktop-portal xdg-desktop-portal-wlr xdg-desktop-portal-gtk     lxpolkit     udisks2     brightnessctl     upower power-profiles-daemon     bluez alsa-utils     mpv     flatpak     nftables
+# wf-recorder: the capture bar's Record (design/capture-2026-10-15.md); its libav libraries are
+# already here for mpv. vainfo: whether the GPU encodes H.264, asked before a recording starts.
+apt-get install -y -qq     seatd     libcap2-bin     chromium     pipewire-pulse wireplumber pulseaudio-utils     python3-websocket     fontconfig     grim slurp wf-recorder vainfo     qemu-guest-agent     libnotify-bin     xdg-desktop-portal xdg-desktop-portal-wlr xdg-desktop-portal-gtk     lxpolkit     udisks2     brightnessctl     upower power-profiles-daemon     bluez alsa-utils     mpv     flatpak     nftables
 
 # Three programs the shell shells out to by name, and did not have.
 #   swaybg     — yantrik-companion-tools/src/wallpaper.rs: setting a wallpaper did nothing
@@ -1062,10 +1064,22 @@ sudo tee "$LABWC_DIR/rc.xml" > /dev/null <<'RCXML'
     <keybind key="W-t">
       <action name="Execute"><command>foot</command></action>
     </keybind>
+    <!-- Capture goes to the shell, as in config/labwc/rc.xml, which the session copies over this
+         file at login: no grim here, which would also photograph a locked screen. -->
     <keybind key="Print">
-      <action name="Execute">
-        <command>sh -c 'mkdir -p ~/Pictures/Screenshots &amp;&amp; grim ~/Pictures/Screenshots/$(date +%Y%m%d_%H%M%S).png'</command>
-      </action>
+      <action name="Execute"><command>/opt/yantrik/bin/yos act shell capture_open</command></action>
+    </keybind>
+    <keybind key="S-Print">
+      <action name="Execute"><command>/opt/yantrik/bin/yos act shell capture_region</command></action>
+    </keybind>
+    <keybind key="W-S-s">
+      <action name="Execute"><command>/opt/yantrik/bin/yos act shell capture_region</command></action>
+    </keybind>
+    <keybind key="C-Print">
+      <action name="Execute"><command>/opt/yantrik/bin/yos act shell capture_screen_to_clipboard</command></action>
+    </keybind>
+    <keybind key="W-S-r">
+      <action name="Execute"><command>/opt/yantrik/bin/yos act shell capture_record_toggle</command></action>
     </keybind>
   </keyboard>
   <windowRules>

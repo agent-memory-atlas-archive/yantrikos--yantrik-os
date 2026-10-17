@@ -5,33 +5,33 @@ Apps screen.
 
 Every app has AI integration — you can ask the companion to help with tasks directly inside each app, or use the dedicated AI panels built into the office apps.
 
-> **One app is shelved and is not in this build: ySheets.** It is described below, marked,
-> rather than quietly deleted, so that a page promising them cannot outlive the
-> decision. The account is [`design/shelved-2026-09-20.md`](../design/shelved-2026-09-20.md)
-> and the list the shell actually reads is `SHELVED` in
-> `crates/yantrik-ui/src/wire/dock.rs`.
+> **Nothing is shelved in this build.** Music and ySheets were shelved on 20 September 2026,
+> because neither had anything under its screen, and both came back in October 2026 — ySheets
+> in #727 and Music in #728. The account is
+> [`design/shelved-2026-09-20.md`](../design/shelved-2026-09-20.md), and the list the shell
+> actually reads is `SHELVED` in `crates/yantrik-ui/src/wire/dock.rs`, empty today.
 
 ## Productivity Apps
 
-### ySheets (Spreadsheet) — SHELVED, not in this build
+### ySheets (Spreadsheet)
 
-**Shelved on 20 September 2026.** Asking the shell to open it gets a refusal naming the
-reason, not an error; it is not in the launcher, not in the Lens, not offered to a mind, and
-not shipped in the release bundle or the ISO.
+A sheet of numbers and formulas, opened from and saved to CSV files. Shelved on 20 September
+2026 because there was no cell model behind the grid; back since October 2026 (#727).
 
-**Why:** there is no cell model behind the grid, so nothing can be typed into it, by mouse or
-by mind. The screen drew a perfect 50×26 grid over 1249 lines of Slint and 156 lines of Rust
-in which `cell-grid` was never written, `row-count` and `col-count` were always 0, and every
-handler that touches a cell took an early return. There is no formula engine — `is_formula`
-tested whether text *starts with* `=`, and nothing evaluated one. Save and Load were log
-lines.
+**Features:**
+- A cell model that is always `rows × cols`; type into a cell or the formula bar.
+- Formulas with references and dependency-ordered recalculation, loop detection, and
+  `SUM`/`AVERAGE`/`MIN`/`MAX`/`COUNT` among the functions.
+- CSV open and save through the desktop's file picker, or a file passed to it (`%f`).
+- Undo and redo.
+- A control surface, `spreadsheet` (aliases `ysheets`, `sheets`), so a mind can read and edit a
+  sheet with `yos act spreadsheet …`; see [`app-control.md`](app-control.md).
 
-**What brings it back:** a cell model, CSV load and save, and arithmetic with references plus
-`SUM`/`AVG`/`MIN`/`MAX`/`COUNT`.
+ySheets saves what was typed, formulas included, so a cell of an opened CSV that starts with `=`
+is saved back unchanged — and Excel or LibreOffice will read it as a formula.
 
-The crate stays in the tree and stays a workspace member, so it keeps compiling. What changed
-is that a person cannot reach it and a mind is not told it exists. Nothing in the desktop
-routes `.csv`, `.xlsx` or `.ods` at it — `.csv` opens in the text editor.
+Everything else the old screen drew without backing (charts, comments, formatting, the AI panel)
+was removed rather than kept as a drawing.
 
 ### yPresent (Presentations)
 

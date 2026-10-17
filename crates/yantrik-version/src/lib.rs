@@ -33,7 +33,7 @@
 //!    `yantrik-update` on every apply and rollback. It is also the field `yantrik-update`
 //!    compares to decide whether an update exists, so agreeing with it is the point.
 //! 3. `YANTRIK_BUILD_VERSION`, baked by this crate's `build.rs` from the same
-//!    `git describe --tags --always --dirty` the release scripts run. This is the answer during
+//!    `git describe --tags --match "v[0-9]*" --always --dirty` the release scripts run. This is the answer during
 //!    development, where there is no installed tree to read.
 //! 4. This crate's own package version, as a last resort.
 //!

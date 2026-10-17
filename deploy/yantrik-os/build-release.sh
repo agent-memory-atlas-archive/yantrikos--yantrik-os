@@ -72,7 +72,7 @@ fail() { printf '\033[31mFAIL: %s\033[0m\n' "$*" >&2; exit 1; }
 # did nothing. That is what a git worktree made on Windows looks like from WSL (its .git file
 # names a C:/ path this git cannot follow). Say so instead.
 if [ -z "${YANTRIK_VERSION:-}" ]; then
-  VERSION="$(git -C "$PROJECT_ROOT" describe --tags --always --dirty 2>&1)"     || fail "git cannot read $PROJECT_ROOT to name this build: $VERSION. A worktree made by another OS's git cannot be read here; clone it natively, or set YANTRIK_VERSION."
+  VERSION="$(git -C "$PROJECT_ROOT" describe --tags --match "v[0-9]*" --always --dirty 2>&1)"     || fail "git cannot read $PROJECT_ROOT to name this build: $VERSION. A worktree made by another OS's git cannot be read here; clone it natively, or set YANTRIK_VERSION."
 else
   VERSION="$YANTRIK_VERSION"
 fi
@@ -302,11 +302,19 @@ install -m 0755 "$SCRIPT_DIR/yantrik-mind-log" "$ROOT/share/root-helpers/yantrik
 # into /etc/systemd/system by `yantrik-update`; enabled by `yantrik-update migrate-minds`.
 mkdir -p "$ROOT/share/systemd"
 cp "$PROJECT_ROOT/config/systemd/"*.service "$ROOT/share/systemd/"
+# The boot menu's theme, with its fonts, made by the same script as the image's
+# /usr/share/yantrik/grub-theme (#835). A machine installed from an image older than that (VM 541,
+# 12 Oct) has no theme anywhere; `yantrik-update` copies this one into /boot/grub/themes/yantrik
+# as root when it moves an old installer's menu to gfxterm on UEFI, so it is hash-listed below.
+sh "$SCRIPT_DIR/stage-grub-theme.sh" "$ROOT/share/grub-theme" >/dev/null \
+  || fail "the boot menu's theme did not stage (stage-grub-theme.sh needs grub-mkfont and fonts-dejavu-core) — an update would leave an old machine's menu unthemed"
+echo "   + share/grub-theme (the boot menu's theme and fonts)"
 # What the updater installs as root, by content: every file under share/ it copies into /usr/lib,
-# /etc/polkit-1, /etc/sysctl.d, /etc/containers or /etc/systemd/system, with its sha256. It rides in bin/, which the
+# /etc/polkit-1, /etc/sysctl.d, /etc/containers, /etc/systemd/system or /boot/grub/themes, with
+# its sha256. It rides in bin/, which the
 # updater installs with plain cp as root, so it is root's on the machine whoever could write
 # share/; the updater installs nothing as root whose hash is not in it (#419).
-(cd "$ROOT/share" && sha256sum root-helpers/* polkit/* sysctl/* containers/* systemd/*) > "$ROOT/bin/yantrik-root-files.sha256"
+(cd "$ROOT/share" && sha256sum root-helpers/* polkit/* sysctl/* containers/* systemd/* grub-theme/*) > "$ROOT/bin/yantrik-root-files.sha256"
 [ "$(wc -l < "$ROOT/bin/yantrik-root-files.sha256")" -ge 4 ] || fail "the root-files list is short: $(cat "$ROOT/bin/yantrik-root-files.sha256")"
 mkdir -p "$ROOT/share/labwc-mind"
 cp "$PROJECT_ROOT/config/labwc-mind/rc.xml" "$ROOT/share/labwc-mind/rc.xml"
@@ -505,7 +513,7 @@ EOF
 # it did in the file rather than presenting a guess as a range.
 PREVIOUS="${YANTRIK_PREVIOUS:-}"
 if [ -z "$PREVIOUS" ]; then
-  PREVIOUS="$(git -C "$PROJECT_ROOT" describe --tags --abbrev=0 HEAD~1 2>/dev/null || true)"
+  PREVIOUS="$(git -C "$PROJECT_ROOT" describe --tags --match "v[0-9]*" --abbrev=0 HEAD~1 2>/dev/null || true)"
 fi
 if [ -n "$PREVIOUS" ] && git -C "$PROJECT_ROOT" rev-parse -q --verify "$PREVIOUS^{commit}" >/dev/null 2>&1; then
   CHANGE_RANGE="$PREVIOUS..HEAD"
