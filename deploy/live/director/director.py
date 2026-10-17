@@ -22,11 +22,13 @@ IDEAS.md of improvements, and once every build is finished the Director goes rou
 polish rounds, one improvement a round, the project polished longest ago first. After Starfall the
 live machine sat idle for two weeks with every mission finished (2 to 15 Oct 2026).
 
-It puts the work on screen. The Director owns a showcase window beside Mind View: a locked-down
-Chromium (showcase-browser, run by yantrik-live-showcase.service) that shows a frame page the
-Director writes, with a caption bar (the mission, the turn, the Mind's latest reply in one line)
-over the game being built, reloaded after every turn. Between missions the showcase service goes
-round the finished games in their self-playing demo mode. On 561 the stream showed only the Mind's
+It puts the work on screen. Beside Mind View is a showcase window: a locked-down Chromium
+(showcase-browser) showing a frame page with a caption bar (the mission, the turn, the Mind's
+latest reply in one line) over the game being built, reloaded after every turn. Between missions
+it goes round the finished games a person let into the rotation, in their self-playing demo mode.
+The Director only asks (showing.json); a root service copies the game out of ~/Projects and writes
+the frame where the Mind's account cannot, and the browser runs as an account of its own that can
+see nothing on disk but those copies (showcase_main says why it is three services). On 561 the stream showed only the Mind's
 terminal, half the screen was empty, and viewers never saw a game it built (17 Oct 2026). The
 showcase is the Director's, never the Mind's: the Mind's own browser still refuses file:// and
 new local addresses (check-page says why), and nothing here changes that.
@@ -35,7 +37,9 @@ Builds and polish rounds are interleaved: each finished build is followed by POL
 polish rounds before the next build starts, so the finished games keep getting better while new
 ones are made, and the first idea every game gets in polish is its demo mode (DEMO_IDEA).
 
-Runs on the live instance (VM 561) as the desktop's account, from yantrik-live-director.service.
+Runs on the live instance (VM 561) as the desktop's account, from yantrik-live-director.service;
+`director.py showcase` is the root publisher, `windows` the window loop, `wayland-grant` the
+browser's start step.
 Missions are in missions.json beside it. Progress goes to ~/director/log.jsonl, one line a turn.
 Stdlib only; the image ships no Python packages for it.
 """
@@ -44,7 +48,11 @@ import hashlib
 import html
 import json
 import os
+import pwd
 import re
+import shutil
+import stat
+import struct
 import subprocess
 import sys
 import time
@@ -61,7 +69,8 @@ POLISHED = os.path.join(STATE_DIR, "polished.json")
 POLISH_DUE = os.path.join(STATE_DIR, "polish-due.json")
 # The mission run last, so a build picked up after others knows its conversation is gone.
 LAST = os.path.join(STATE_DIR, "last.json")
-# What the showcase is showing: a mission, or nothing (the showcase service cycles the games).
+# What the Director asks the showcase to show: a mission and its caption, or nothing (the games go
+# round). A request, not the frame: the publisher checks it and builds the frame itself.
 SHOWING = os.path.join(STATE_DIR, "showing.json")
 CHECK_PAGE = os.path.join(HERE, "check-page")
 PROJECTS = os.path.expanduser("~/Projects")
@@ -78,10 +87,40 @@ POLISH_HOURS = 1
 # Polish rounds after each finished build, before the next build begins.
 POLISH_PER_BUILD = 2
 
-# The showcase: the frame page the Director writes, and the window that shows it.
+# The showcase. Three services (showcase_main says why): the publisher, as root, copies a game
+# out of ~/Projects into SHOWCASE_DIR and writes the frame page there; the browser, as
+# SHOWCASE_ACCOUNT, shows it and can see nothing else on disk; the window loop, as the desktop's
+# account, puts the window beside Mind View. Neither the Mind's account nor the browser's can
+# write SHOWCASE_DIR (root's, 755).
 SHOWCASE_DIR = "/opt/yantrik-live/showcase"
+GAMES_DIR = os.path.join(SHOWCASE_DIR, "games")
 SHOWCASE_TITLE = "Yantrik Live showcase"
 SHOWCASE_BROWSER = os.path.join(HERE, "showcase-browser")
+SHOWCASE_ACCOUNT = "yantrik-showcase"
+BROWSER_UNIT = "yantrik-live-showcase-browser.service"
+# The account the Mind's commands run as (agent_run), which owns ~/Projects and ~/director.
+MIND_ACCOUNT = "yantrik"
+# The finished games a person has let into the rotation, one mission id a line; root's file, so
+# the Mind cannot add a game to it or keep one in it. No file, no rotation.
+ROTATION = "/etc/yantrik-live/showcase-rotation"
+ROTATION_OWNER = 0
+# A mission is shown only while the Director's own service is running: the Mind can write
+# showing.json, but not start a unit or make its cgroup.
+DIRECTOR_CGROUP = "/sys/fs/cgroup/system.slice/yantrik-live-director.service/cgroup.procs"
+# Where the browser's ExecStartPre records which socket it was given (wayland_grant).
+WAYLAND_RUN = "/run/yantrik-live-showcase"
+WAYLAND_SOCKET = "wayland-0"
+# A game copied into the showcase is at most this big; a bigger one is not shown at all.
+COPY_MAX_FILES = 400
+COPY_MAX_BYTES = 48 << 20
+COPY_MAX_DEPTH = 6
+# Entries looked at, across the whole game, whether copied or not.
+COPY_MAX_ENTRIES = 4 * COPY_MAX_FILES
+REQUEST_MAX_BYTES = 16 << 10
+# The fastest a running mission's game is copied again (a turn takes longer than this anyway).
+LIVE_COPY_SECS = 15
+# Copies kept: the one showing, and the one before, which a frame still loading may point at.
+GAMES_KEPT = 2
 # Between missions, each finished game is shown this long in its demo mode.
 CYCLE_SECS = 75
 # A mission whose showing has not been refreshed in this long has died with the Director; the
@@ -158,11 +197,16 @@ POLISH_KEEP_GOING = (
     "only when its code is really there and the check is clean, then say FINISHED on its own line.")
 
 
+# The publisher sees ~/director read-only and logs to its journal only.
+LOG_TO_FILE = [True]
+
+
 def log(**entry):
     entry["at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    os.makedirs(STATE_DIR, exist_ok=True)
-    with open(LOG, "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    if LOG_TO_FILE[0]:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with open(LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     print(json.dumps(entry, ensure_ascii=False), flush=True)
 
 
@@ -348,24 +392,145 @@ def caption_summary(reply):
     return text
 
 
-def game_page(folder):
-    """A mission's page, ~/Projects/<folder>/index.html, as a real path, or None. Nothing else is
-    ever put in the showcase: not a folder name that climbs out (`..`), not an index.html that is
-    a link to somewhere else, not a page that is not there."""
+class Refused(Exception):
+    """A game, or a request, the showcase will not show."""
+
+
+def open_owned(path, uid, directory=False):
+    """`path` opened without following a link anywhere along it, as a file descriptor, only when
+    what it names is a directory (or a regular file with one name) owned by `uid`. The publisher
+    reads ~/Projects and ~/director as root: a link there, or a hard link to a file the Mind does
+    not own, is refused rather than followed, so it reads nothing the Mind could not already."""
+    parts = [p for p in path.split("/") if p]
+    if not path.startswith("/") or ".." in parts:
+        raise Refused("not a plain absolute path")
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for i, part in enumerate(parts):
+            last = i == len(parts) - 1
+            flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+            flags |= os.O_DIRECTORY if (directory or not last) else os.O_NONBLOCK
+            nxt = os.open(part, flags, dir_fd=fd)
+            os.close(fd)
+            fd = nxt
+        st = os.fstat(fd)
+        if st.st_uid != uid:
+            raise Refused("not the Mind's account's")
+        if not directory and (not stat.S_ISREG(st.st_mode) or st.st_nlink != 1):
+            raise Refused("not a plain file")
+        return fd
+    except OSError as why:
+        os.close(fd)
+        raise Refused(str(why)) from why
+    except Refused:
+        os.close(fd)
+        raise
+
+
+def copy_game(folder, uid, version):
+    """Copy ~/Projects/<folder> into GAMES_DIR/<folder>-<version>, the only copy of a game the
+    browser can see, and return its index.html. Only what a page is made of comes over: regular
+    files with one name and directories, owned by the Mind's account, no hidden entries. Links,
+    hard links, sockets, pipes and devices are left behind, never followed or opened. A game over
+    COPY_MAX_FILES, COPY_MAX_BYTES or COPY_MAX_DEPTH, or with no index.html, is not shown."""
     if not isinstance(folder, str) or not FOLDER.match(folder):
-        return None
-    want = os.path.join(os.path.realpath(PROJECTS), folder, "index.html")
-    page = os.path.join(PROJECTS, folder, "index.html")
-    if os.path.realpath(page) != want or os.path.islink(page) or not os.path.isfile(want):
-        return None
-    return want
+        raise Refused("not a mission folder")
+    src = open_owned(os.path.join(PROJECTS, folder), uid, directory=True)
+    os.makedirs(GAMES_DIR, mode=0o755, exist_ok=True)
+    name = f"{folder}-{version}"
+    work = os.path.join(GAMES_DIR, "." + name)
+    shutil.rmtree(work, ignore_errors=True)
+    os.mkdir(work, 0o755)
+    budget = {"files": COPY_MAX_FILES, "seen": COPY_MAX_ENTRIES, "bytes": COPY_MAX_BYTES, "left behind": 0}
+    try:
+        dst = os.open(work, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            copy_tree(src, dst, uid, 0, budget)
+            st = os.stat("index.html", dir_fd=dst, follow_symlinks=False)
+            if not stat.S_ISREG(st.st_mode):
+                raise Refused("no index.html")
+        finally:
+            os.close(dst)
+        os.rename(work, os.path.join(GAMES_DIR, name))
+    except (OSError, Refused) as why:
+        shutil.rmtree(work, ignore_errors=True)
+        raise Refused(str(why)) from why
+    finally:
+        os.close(src)
+    if budget["left behind"]:
+        log(event="showcase copy", folder=folder, left_behind=budget["left behind"])
+    return os.path.join(GAMES_DIR, name, "index.html")
 
 
-def game_url(folder, demo):
-    page = game_page(folder)
-    if page is None:
-        return None
-    return "file://" + urllib.parse.quote(page) + ("?demo=1" if demo else "")
+def copy_tree(src, dst, uid, depth, budget):
+    """One directory of copy_game, by descriptor: every name is looked up in `src` itself, so
+    nothing the Mind renames meanwhile can turn the walk outside the game."""
+    with os.scandir(src) as entries:
+        names = []
+        # Read lazily and counted, hidden and left-behind entries too: a folder of a million
+        # names is refused before it fills the publisher's memory.
+        for entry in entries:
+            budget["seen"] -= 1
+            if budget["seen"] < 0:
+                raise Refused("more than %d entries" % COPY_MAX_ENTRIES)
+            if not entry.name.startswith("."):
+                names.append(entry.name)
+    for name in sorted(names):
+        st = os.stat(name, dir_fd=src, follow_symlinks=False)
+        if st.st_uid != uid or not (stat.S_ISDIR(st.st_mode) or (stat.S_ISREG(st.st_mode) and st.st_nlink == 1)):
+            budget["left behind"] += 1
+            continue
+        budget["files"] -= 1
+        if budget["files"] < 0:
+            raise Refused("more than %d files" % COPY_MAX_FILES)
+        if stat.S_ISDIR(st.st_mode):
+            if depth + 1 >= COPY_MAX_DEPTH:
+                raise Refused("deeper than %d folders" % COPY_MAX_DEPTH)
+            sub = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=src)
+            try:
+                if (os.fstat(sub).st_dev, os.fstat(sub).st_ino) != (st.st_dev, st.st_ino):
+                    raise Refused("changed while copied")
+                os.mkdir(name, 0o755, dir_fd=dst)
+                out = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dst)
+                try:
+                    copy_tree(sub, out, uid, depth + 1, budget)
+                finally:
+                    os.close(out)
+            finally:
+                os.close(sub)
+            continue
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=src)
+        try:
+            now = os.fstat(fd)
+            if (now.st_dev, now.st_ino) != (st.st_dev, st.st_ino) or not stat.S_ISREG(now.st_mode) \
+                    or now.st_nlink != 1 or now.st_uid != uid:
+                raise Refused("changed while copied")
+            out = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=dst)
+            try:
+                while True:
+                    chunk = os.read(fd, 1 << 16)
+                    if not chunk:
+                        break
+                    budget["bytes"] -= len(chunk)
+                    if budget["bytes"] < 0:
+                        raise Refused("more than %d bytes" % COPY_MAX_BYTES)
+                    os.write(out, chunk)
+            finally:
+                os.close(out)
+        finally:
+            os.close(fd)
+
+
+def prune_games(keep):
+    """Remove every copy in GAMES_DIR but the ones named in `keep`. Root's directory, written by
+    nothing but copy_game, so nothing in it is a link."""
+    try:
+        names = os.listdir(GAMES_DIR)
+    except OSError:
+        return
+    for name in names:
+        if name not in keep:
+            shutil.rmtree(os.path.join(GAMES_DIR, name), ignore_errors=True)
 
 
 FRAME = """<!doctype html>
@@ -405,6 +570,12 @@ def frame_page(title, line, summary, url, empty, version):
     """The frame page's HTML. Every word in it that came from a mission or the Mind is escaped,
     quotes too, so a reply with markup in it is shown as text and can never become markup."""
     if url:
+        # allow-same-origin is kept so a game's high scores (localStorage) work: without it the
+        # first storage call throws and the game stops on stream. It is safe only while the game
+        # and this frame are different origins, which every file:// page is in Chromium, each an
+        # opaque origin of its own. Never add --allow-file-access-from-files to showcase-browser,
+        # and never serve the frame and the game from one http origin: with scripts and the same
+        # origin together, the game could reach parent.document and lift its own sandbox.
         game = ('<iframe src="%s" sandbox="allow-scripts allow-same-origin" title="%s"></iframe>'
                 % (html.escape(url, quote=True), html.escape(title, quote=True)))
     else:
@@ -423,29 +594,35 @@ def write_atomically(path, text):
     os.replace(path + ".new", path)
 
 
-def write_frame(title, line, summary, folder, demo=True, empty="Nothing to show yet."):
-    """Rewrite the showcase's frame page for `folder`'s game, then its version, which the page
-    polls: a new version is the page reloading itself, game and all."""
-    url = game_url(folder, demo)
-    version = hashlib.sha256(f"{title}|{line}|{summary}|{url}|{time.time()}".encode()).hexdigest()[:16]
-    os.makedirs(SHOWCASE_DIR, exist_ok=True)
+def write_frame(title, line, summary, folder, uid, demo=True, empty="Nothing to show yet."):
+    """Copy `folder`'s game into the showcase and rewrite the frame page for it, then its version,
+    which the page polls: a new version is the page reloading itself, game and all. The publisher
+    only. Returns the game's URL, or None when it was not shown (and `empty` was)."""
+    version = hashlib.sha256(f"{title}|{line}|{summary}|{folder}|{time.time()}".encode()).hexdigest()[:16]
+    url = None
+    if folder is not None:
+        try:
+            url = "file://" + urllib.parse.quote(copy_game(folder, uid, version)) + ("?demo=1" if demo else "")
+        except Refused as why:
+            log(event="game not shown", folder=folder if isinstance(folder, str) else None, why=str(why)[:200])
     write_atomically(os.path.join(SHOWCASE_DIR, "frame.html"), frame_page(title, line, summary, url, empty, version))
     write_atomically(os.path.join(SHOWCASE_DIR, "version.js"), 'showcaseVersion("%s");\n' % version)
+    kept = sorted((n for n in os.listdir(GAMES_DIR) if not n.startswith(".")),
+                  key=lambda n: os.stat(os.path.join(GAMES_DIR, n)).st_mtime)[-GAMES_KEPT:] \
+        if os.path.isdir(GAMES_DIR) else []
+    prune_games(set(kept))
     return url
 
 
 def show_mission(m, turn=0, reply="", clean=None):
-    """Put the mission's game in the showcase, with the caption for this turn. Never stops a
-    mission: a showcase that cannot be written costs the stream, not the work."""
-    line = f"turn {turn}" if turn else "starting"
-    if clean is False:
-        line += " · the page throws an error, being fixed"
+    """Ask the showcase for the mission's game, with the caption for this turn: the Director's
+    side, as the desktop's account. Only a request; the publisher checks it and builds the frame.
+    Never stops a mission: a showcase that cannot be asked costs the stream, not the work."""
     try:
-        write_frame(m["title"], line, caption_summary(reply), m["fields"]["folder"],
-                    empty=f"{m['fields']['name']} has no page yet: the Mind is starting on it.")
-        write_state(SHOWING, {"mission": m["id"], "at": time.time()})
+        write_state(SHOWING, {"mission": m["id"], "at": time.time(), "turn": turn, "clean": clean,
+                              "summary": caption_summary(reply)})
     except OSError as why:
-        log(mission=m["id"], event="showcase not written", why=str(why)[:200])
+        log(mission=m["id"], event="showcase not asked", why=str(why)[:200])
 
 
 def new_chat():
@@ -748,39 +925,167 @@ def run_mission(m):
     log(mission=m["id"], event="stopped", why="turn limit")
 
 
-def cycle_step(builds, index):
-    """Show the next finished game in the showcase, in its demo mode, between missions. Returns
-    the index to show next time. Only finished builds with a page of their own are shown."""
-    done = finished_missions()
-    games = [b for b in builds if b["id"] in done and game_page(b["fields"]["folder"])]
-    if not games:
-        write_frame("Yantrik Live", "between missions", "The Mind's next mission starts soon.", None,
-                    empty="No game is finished yet: the Mind is building the first one.")
-        return 0
-    b = games[index % len(games)]
-    write_frame(b["title"], "between missions · demo", "Built earlier by the Mind; its next mission starts soon.",
-                b["fields"]["folder"])
-    return (index + 1) % len(games)
+def rotation():
+    """The mission ids a person has let into the rotation (ROTATION), in the file's order. Read
+    only when root owns the file and nobody else may write it; otherwise none."""
+    try:
+        with open(ROTATION, encoding="utf-8") as f:
+            st = os.fstat(f.fileno())
+            if st.st_uid != ROTATION_OWNER or st.st_mode & 0o022:
+                return []
+            text = f.read(REQUEST_MAX_BYTES)
+    except (OSError, ValueError):
+        return []
+    ids = []
+    for line in text.splitlines():
+        line = line.split("#", 1)[0].strip()
+        if line and line not in ids:
+            ids.append(line)
+    return ids
+
+
+def director_running():
+    """Whether yantrik-live-director.service has a process: only systemd makes that cgroup."""
+    try:
+        with open(DIRECTOR_CGROUP, encoding="ascii") as f:
+            return bool(f.read(64).strip())
+    except (OSError, ValueError):
+        return False
+
+
+def read_request(uid):
+    """The Director's request (show_mission), checked: a mission of missions.json, its turn and
+    page state, and the one line of caption. Anything else in the file is ignored."""
+    try:
+        fd = open_owned(SHOWING, uid)
+    except Refused:
+        return {}
+    try:
+        raw = os.read(fd, REQUEST_MAX_BYTES + 1)
+    except OSError:
+        return {}
+    finally:
+        os.close(fd)
+    try:
+        req = json.loads(raw.decode("utf-8")) if len(raw) <= REQUEST_MAX_BYTES else {}
+    except ValueError:
+        return {}
+    return req if isinstance(req, dict) else {}
+
+
+def mission_for(builds, mission_id):
+    """The mission `mission_id` names, a build or a polish round of one, or None."""
+    if not isinstance(mission_id, str):
+        return None
+    for b in builds:
+        if mission_id == b["id"]:
+            return b
+        if mission_id == "polish:" + b["id"]:
+            return polish(b)
+    return None
+
+
+def live_request(builds, uid):
+    """(the mission to show, its turn line, its caption, its time) while the Director runs one, or
+    None. Everything shown comes from missions.json or is made here, but the caption, which is
+    the Mind's reply in one line, as the stream already shows it, made plain again and escaped."""
+    if not director_running():
+        return None
+    req = read_request(uid)
+    m = mission_for(builds, req.get("mission"))
+    try:
+        fresh = time.time() - float(req.get("at") or 0) < SHOWING_STALE_SECS
+    except (TypeError, ValueError):
+        fresh = False
+    if m is None or not fresh:
+        return None
+    turn = req.get("turn")
+    turn = turn if isinstance(turn, int) and not isinstance(turn, bool) and 0 <= turn <= 10 ** 4 else 0
+    line = f"turn {turn}" if turn else "starting"
+    if req.get("clean") is False:
+        line += " · the page throws an error, being fixed"
+    summary = req.get("summary")
+    summary = caption_summary(summary[:4000]) if isinstance(summary, str) else ""
+    return m, line, summary, req.get("at")
+
+
+def cycle_step(builds, index, uid):
+    """Show the next game of the rotation in the showcase, in its demo mode, between missions.
+    Returns the index to show next time. Only builds a person put in ROTATION are shown, in
+    missions.json's order, and one that cannot be copied is passed over."""
+    allowed = set(rotation())
+    games = [b for b in builds if b["id"] in allowed]
+    for step in range(len(games)):
+        b = games[(index + step) % len(games)]
+        if write_frame(b["title"], "between missions · demo", "Built earlier by the Mind; its next mission starts soon.",
+                       b["fields"]["folder"], uid):
+            return (index + step + 1) % len(games)
+    write_frame("Yantrik Live", "between missions", "The Mind's next mission starts soon.", None, uid,
+                empty="No game is in the rotation yet: the Mind is building the next one.")
+    return 0
 
 
 def showcase_main(builds):
-    """yantrik-live-showcase.service: keep the showcase window open and, while no mission is
-    showing, go round the finished games one every CYCLE_SECS. A service of its own so that the
-    Director's oneshot ends with its mission and its timer goes on as before."""
-    browser, index, shown_at, place_at, was_live = None, 0, 0.0, 0.0, True
+    """yantrik-live-showcase.service, as root: what the showcase shows. While the Director runs
+    a mission, that mission's game as it is now, re-copied every turn; otherwise the rotation,
+    one game every CYCLE_SECS.
+
+    Split in three because no one account may do it all. The game is the Mind's code, so the
+    browser that runs it (yantrik-live-showcase-browser.service) is an account of its own that
+    sees only SHOWCASE_DIR, and cannot write that. The Mind's account cannot write it either, so
+    the copy and the frame are root's, here, in a unit that can read ~/Projects and ~/director and
+    write SHOWCASE_DIR, nothing else. Placing the window takes `yos` as the desktop's account,
+    which is windows_main."""
+    LOG_TO_FILE[0] = False
+    uid = pwd.getpwnam(MIND_ACCOUNT).pw_uid
+    index, shown_at, last = 0, 0.0, None
     while True:
-        if browser is None or browser.poll() is not None:
-            if browser is not None:
-                log(event="showcase closed", code=browser.returncode)
-                time.sleep(10)
-            if not os.path.exists(os.path.join(SHOWCASE_DIR, "frame.html")):
-                index = cycle_step(builds, index)
-            browser = subprocess.Popen([SHOWCASE_BROWSER, os.path.join(SHOWCASE_DIR, "frame.html")])
-            place_at = time.time() + 10
+        live = live_request(builds, uid)
+        try:
+            if live is not None:
+                m, line, summary, at = live
+                key = (m["id"], line, summary, at)
+                # A new turn is a new copy, but not more often than LIVE_COPY_SECS: the Mind can
+                # rewrite the request as often as it likes, and each copy is up to COPY_MAX_BYTES.
+                if key != last and time.time() - shown_at >= LIVE_COPY_SECS:
+                    write_frame(m["title"], line, summary, m["fields"]["folder"], uid,
+                                empty=f"{m['fields']['name']} has no page yet: the Mind is starting on it.")
+                    shown_at, last = time.time(), key
+            elif last is not None or time.time() - shown_at >= CYCLE_SECS:
+                index = cycle_step(builds, index, uid)
+                shown_at, last = time.time(), None
+        except OSError as why:
+            log(event="showcase not written", why=str(why)[:200])
+        time.sleep(POLL_SECS)
+
+
+def browser_started():
+    """The showcase browser's current start (its unit's invocation id), or None when it is not
+    running. The window loop places the window again each time this changes."""
+    try:
+        done = subprocess.run(["systemctl", "show", "-p", "ActiveState,InvocationID", "--value", BROWSER_UNIT],
+                              capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    lines = done.stdout.split()
+    return lines[1] if len(lines) == 2 and lines[0] == "active" else None
+
+
+def windows_main():
+    """yantrik-live-windows.service, as the desktop's account: Mind View on the left, the
+    showcase on the right, again whenever the browser starts and when a mission ends (then the
+    showcase in front: the games are the thing to watch)."""
+    placed_for, place_at, was_live = None, 0.0, True
+    while True:
+        started = browser_started()
+        if started is not None and started != placed_for:
+            placed_for, place_at = started, time.time() + 10
         showing = read_state(SHOWING, {})
-        live = bool(showing.get("mission")) and time.time() - float(showing.get("at") or 0) < SHOWING_STALE_SECS
+        try:
+            live = bool(showing.get("mission")) and time.time() - float(showing.get("at") or 0) < SHOWING_STALE_SECS
+        except (TypeError, ValueError):
+            live = False
         if not live and was_live:
-            # A mission just ended: the games are the thing to watch now.
             place_at = place_at or time.time()
         if place_at and time.time() >= place_at:
             state = shell_state()
@@ -789,14 +1094,38 @@ def showcase_main(builds):
             if state is not None and not state.get("pending_approvals"):
                 place_windows(state, showcase_front=not live)
                 place_at = 0.0
-        if not live and (was_live or time.time() - shown_at >= CYCLE_SECS):
-            try:
-                index = cycle_step(builds, index)
-            except OSError as why:
-                log(event="showcase not written", why=str(why)[:200])
-            shown_at = time.time()
         was_live = live
         time.sleep(POLL_SECS)
+
+
+def wayland_grant():
+    """The browser unit's ExecStartPre, as root: let SHOWCASE_ACCOUNT connect to the desktop's
+    Wayland socket, and only that socket. The socket is the desktop account's, 0755, so another
+    account cannot connect; one ACL entry (rw for SHOWCASE_ACCOUNT) is added, set through the
+    descriptor of what was opened, never a link. Its device and inode go to WAYLAND_RUN, root's,
+    where showcase-browser checks that the socket bound into its unit is this one."""
+    mind, show = pwd.getpwnam(MIND_ACCOUNT), pwd.getpwnam(SHOWCASE_ACCOUNT)
+    path = f"/run/user/{mind.pw_uid}/{WAYLAND_SOCKET}"
+    fd = os.open(path, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISSOCK(st.st_mode) or st.st_uid != mind.pw_uid:
+            raise SystemExit(f"{path} is not the desktop's Wayland socket")
+        undefined = 0xFFFFFFFF
+        mode = st.st_mode
+        # The ACL xattr: version 2, then (tag, perm, id) entries in tag order. USER_OBJ, the one
+        # named user, GROUP_OBJ, the MASK (wide enough for that user, the group unchanged), OTHER.
+        entries = [(0x01, (mode >> 6) & 7, undefined), (0x02, 6, show.pw_uid), (0x04, (mode >> 3) & 7, undefined),
+                   (0x10, ((mode >> 3) & 7) | 6, undefined), (0x20, mode & 7, undefined)]
+        acl = struct.pack("<I", 2) + b"".join(struct.pack("<HHI", *e) for e in entries)
+        os.setxattr(f"/proc/self/fd/{fd}", "system.posix_acl_access", acl)
+        os.makedirs(WAYLAND_RUN, mode=0o755, exist_ok=True)
+        run = os.lstat(WAYLAND_RUN)
+        if not stat.S_ISDIR(run.st_mode) or run.st_uid != 0:
+            raise SystemExit(f"{WAYLAND_RUN} is not root's")
+        write_atomically(os.path.join(WAYLAND_RUN, "wayland.id"), f"{st.st_dev}:{st.st_ino}\n")
+    finally:
+        os.close(fd)
 
 
 def load_builds():
@@ -805,8 +1134,15 @@ def load_builds():
 
 
 def main(argv=()):
+    command = list(argv[:1])
+    if command == ["wayland-grant"]:
+        wayland_grant()
+        return 0
+    if command == ["windows"]:
+        windows_main()
+        return 0
     builds = load_builds()
-    if list(argv[:1]) == ["showcase"]:
+    if command == ["showcase"]:
         showcase_main(builds)
         return 0
     m = next_mission(builds)

@@ -247,12 +247,26 @@ def frame():
     return page
 
 
+def copied(url):
+    """The copy a frame's game URL points at, as a directory, or None when it is not in GAMES_DIR."""
+    prefix = "file://" + d.GAMES_DIR + "/"
+    if not url.startswith(prefix) or not url.endswith("/index.html?demo=1"):
+        return None
+    return os.path.dirname(url[len("file://"):].split("?")[0])
+
+
+me = os.getuid()
+d.GAMES_DIR = os.path.join(d.SHOWCASE_DIR, "games")
+os.makedirs(d.SHOWCASE_DIR, exist_ok=True)
+d.ROTATION = os.path.join(tmp, "showcase-rotation")
+d.ROTATION_OWNER = me
+d.DIRECTOR_CGROUP = os.path.join(tmp, "cgroup.procs")
 TEMPLATE_TAGS = {"html", "head", "meta", "title", "style", "body", "header", "div", "span", "b", "p", "script",
                  "iframe"}
 os.makedirs(os.path.join(d.PROJECTS, specs[0]["folder"]), exist_ok=True)
 open(os.path.join(d.PROJECTS, specs[0]["folder"], "index.html"), "w").write("<!doctype html><title>game</title>")
 hostile = 'Done: <img src=x onerror="alert(1)"> it\'s "quoted" & <script>alert(2)</script></header><b>'
-d.write_frame('Star"fall <i>x</i>', "turn 3 <b>", hostile, specs[0]["folder"])
+d.write_frame('Star"fall <i>x</i>', "turn 3 <b>", hostile, specs[0]["folder"], me)
 page = frame()
 text = "".join(page.text)
 check("the frame page shows a reply with HTML and quotes as text, never as markup",
@@ -260,18 +274,23 @@ check("the frame page shows a reply with HTML and quotes as text, never as marku
       and page.tags.count("script") == 1 and page.handlers == [("body", "oncontextmenu", "return false")]
       and '<img src=x onerror="alert(1)">' in text and 'Star"fall <i>x</i>' in text and "turn 3 <b>" in text,
       repr((page.tags, page.handlers)))
-page_url = "file://" + os.path.join(os.path.realpath(d.PROJECTS), specs[0]["folder"], "index.html")
-check("the frame page loads the game's own index.html, in its demo mode, and its version file, nothing else",
-      sorted(page.loads) == [("iframe", page_url + "?demo=1")], repr(page.loads))
+shown_copy = copied(page.loads[0][1]) if page.loads else None
+check("the frame page loads a root-held copy of the game's index.html, in its demo mode, nothing else",
+      len(page.loads) == 1 and page.loads[0][0] == "iframe" and shown_copy is not None
+      and os.path.basename(shown_copy).startswith(specs[0]["folder"] + "-")
+      and open(os.path.join(shown_copy, "index.html")).read() == "<!doctype html><title>game</title>", repr(page.loads))
 with open(os.path.join(d.SHOWCASE_DIR, "frame.html"), encoding="utf-8") as f:
     raw = f.read()
 version = open(os.path.join(d.SHOWCASE_DIR, "version.js"), encoding="utf-8").read()
-check("the frame page reloads itself when the Director writes a new version",
+check("the frame page reloads itself when the publisher writes a new version",
       re.fullmatch(r'showcaseVersion\("[0-9a-f]{16}"\);\n', version) is not None
       and version.split('"')[1] in raw and '"version.js?"' in raw, version)
-check("the game runs sandboxed: scripts and its own storage, no downloads, pop-ups, dialogs or navigating away",
-      'sandbox="allow-scripts allow-same-origin"' in raw and "Content-Security-Policy" in raw)
-d.write_frame("Missing", "turn 1", "", "no-such-game")
+director_src = open(os.path.join(HERE, "director.py"), encoding="utf-8").read()
+check("the game runs sandboxed: scripts and its own storage, no downloads, pop-ups, dialogs or navigating away;"
+      " why allow-same-origin is safe is written beside it",
+      'sandbox="allow-scripts allow-same-origin"' in raw and "Content-Security-Policy" in raw
+      and "Never add --allow-file-access-from-files" in director_src)
+d.write_frame("Missing", "turn 1", "", "no-such-game", me)
 check("a game with no page yet shows a line instead of a frame", "iframe" not in frame().tags)
 
 check("the caption is the reply's first sentence, plain text, with markup and paths taken out",
@@ -285,7 +304,7 @@ check("the caption is the reply's first sentence, plain text, with markup and pa
 long = d.caption_summary("word " * 80 + ".")
 check("the caption is never longer than 120 characters", len(long) <= 120 and long.endswith("…"), repr(long))
 
-# Nothing outside ~/Projects/<mission folder>/index.html is ever put in the showcase.
+# Nothing but a copy of ~/Projects/<mission folder> is ever put in the showcase.
 outside = os.path.join(tmp, "private.html")
 open(outside, "w").write("secret")
 os.makedirs(os.path.join(d.PROJECTS, "linked"), exist_ok=True)
@@ -293,15 +312,68 @@ os.symlink(outside, os.path.join(d.PROJECTS, "linked", "index.html"))
 os.symlink(tmp, os.path.join(d.PROJECTS, "via-link"))
 os.makedirs(os.path.join(tmp, "escaped"), exist_ok=True)
 open(os.path.join(tmp, "escaped", "index.html"), "w").write("x")
-refused = [f for f in ("../escaped", "..", "/etc", "linked", "via-link", "Starfall", "a/b", "", None, "x" * 80)
-           if d.game_page(f) is not None]
-check("the showcase opens nothing outside ~/Projects/<mission folder>/index.html: no climbing out, no links",
-      refused == [] and d.game_page(specs[0]["folder"]) == page_url[len("file://"):], repr(refused))
-for bad in ("../escaped", "linked"):
-    d.write_frame("x", "y", "z", bad)
+refused = []
+for f in ("../escaped", "..", "/etc", "linked", "via-link", "Starfall", "a/b", "", None, "x" * 80):
+    try:
+        d.copy_game(f, me, "0")
+        refused.append(f)
+    except d.Refused:
+        pass
+check("the showcase copies nothing outside ~/Projects/<mission folder>: no climbing out, no links, no index.html"
+      " that is one", refused == [], repr(refused))
+for bad in ("../escaped", "linked", "via-link"):
+    d.write_frame("x", "y", "z", bad, me)
     check(f"a frame for the folder {bad!r} loads nothing", frame().loads == [], repr(frame().loads))
-check("every mission's folder is one the showcase can open",
+try:
+    d.copy_game(specs[0]["folder"], me + 1, "0")
+    check("a folder the Mind's account does not own is not copied", False)
+except d.Refused:
+    check("a folder the Mind's account does not own is not copied", True)
+check("every mission's folder is one the showcase can copy",
       all(d.FOLDER.match(s["folder"]) for s in specs), repr([s["folder"] for s in specs]))
+
+# Inside a game: regular files and folders come over; links, hard links, pipes and hidden entries do not.
+g = os.path.join(d.PROJECTS, "hostile")
+os.makedirs(os.path.join(g, "assets", "deep"), exist_ok=True)
+open(os.path.join(g, "index.html"), "w").write("<iframe src='file:///etc/passwd'></iframe>")
+open(os.path.join(g, "assets", "deep", "a.png"), "w").write("png")
+os.symlink(outside, os.path.join(g, "credits.html"))
+os.symlink("/etc", os.path.join(g, "etc"))
+os.link(outside, os.path.join(g, "hard.html"))
+os.mkfifo(os.path.join(g, "pipe"))
+os.makedirs(os.path.join(g, ".git"), exist_ok=True)
+open(os.path.join(g, ".git", "config"), "w").write("x")
+if me == 0:
+    open(os.path.join(g, "theirs.js"), "w").write("not the Mind's")
+    os.chown(os.path.join(g, "theirs.js"), 12345, 12345)
+copy = os.path.dirname(d.copy_game("hostile", me, "abc"))
+got = sorted(os.path.relpath(os.path.join(r, n), copy) for r, ds, fs in os.walk(copy) for n in ds + fs)
+links = [p for p in got if os.path.islink(os.path.join(copy, p))]
+check("a copied game holds only its own plain files and folders: no link, hard link, pipe, hidden or"
+      " foreign file comes over", got == ["assets", "assets/deep", "assets/deep/a.png", "index.html"] and links == []
+      and all(os.stat(os.path.join(copy, p)).st_uid == me for p in got), repr(got))
+os.remove(os.path.join(g, "hard.html"))
+real_limits = d.COPY_MAX_FILES, d.COPY_MAX_BYTES, d.COPY_MAX_DEPTH
+over = []
+real_entries = d.COPY_MAX_ENTRIES
+for limits in ((2, 1 << 20, 6, 100), (100, 10, 6, 100), (100, 1 << 20, 2, 100), (100, 1 << 20, 6, 5)):
+    d.COPY_MAX_FILES, d.COPY_MAX_BYTES, d.COPY_MAX_DEPTH, d.COPY_MAX_ENTRIES = limits
+    try:
+        d.copy_game("hostile", me, "big")
+        over.append(limits)
+    except d.Refused:
+        pass
+d.COPY_MAX_FILES, d.COPY_MAX_BYTES, d.COPY_MAX_DEPTH = real_limits
+d.COPY_MAX_ENTRIES = real_entries
+check("a game over the file, entry, byte or depth limit is not copied at all, and leaves no half copy behind",
+      over == [] and not any("big" in n for n in os.listdir(d.GAMES_DIR)), repr((over, os.listdir(d.GAMES_DIR))))
+for _ in range(4):
+    d.write_frame("x", "y", "z", specs[0]["folder"], me)
+check("only the copies a frame may still show are kept",
+      len([n for n in os.listdir(d.GAMES_DIR)]) == d.GAMES_KEPT
+      and copied(frame().loads[0][1]) in [os.path.join(d.GAMES_DIR, n) for n in os.listdir(d.GAMES_DIR)],
+      repr(os.listdir(d.GAMES_DIR)))
+
 with open(os.path.join(HERE, "showcase-browser"), encoding="utf-8") as f:
     browser = f.read()
 # What it runs, its comments left out.
@@ -310,18 +382,58 @@ flags = re.findall(r"--[a-z-]+", browser)
 check("the showcase browser opens only the frame page it is given",
       browser.count("--app=") == 1 and '--app="file://$frame"' in browser and "http" not in
       browser.replace('--proxy-server="http://127.0.0.1:9"', "") and d.SHOWCASE_BROWSER.endswith("showcase-browser"))
-check("the showcase browser has no network, a throwaway profile, no extensions and no debugging port",
+check("the showcase browser has no network, a throwaway profile (its HOME too), no extensions, no debugging"
+      " port, and no file access between files",
       {"--proxy-server", "--host-resolver-rules", "--proxy-bypass-list", "--user-data-dir", "--disable-extensions",
        "--disable-component-extensions-with-background-pages", "--disable-background-networking"} <= set(flags)
       and '"MAP * ~NOTFOUND"' in browser and "mktemp -d" in browser and 'rm -rf "$profile"' in browser
-      and "remote-debugging" not in browser and "load-extension" not in browser)
-with open(os.path.join(HERE, "yantrik-live-showcase.service"), encoding="utf-8") as f:
-    showcase_unit = [line.strip() for line in f]
-check("the showcase's service has no IP either",
-      "IPAddressDeny=any" in showcase_unit and not any(x.startswith("IPAddressAllow") for x in showcase_unit)
-      and "User=yantrik" in showcase_unit)
+      and 'export HOME="$profile"' in browser and "remote-debugging" not in browser
+      and "load-extension" not in browser and "allow-file-access" not in browser)
+check("the showcase browser starts only on the Wayland socket wayland-grant checked",
+      'stat -c %d:%i "$sock"' in browser and "wayland.id" in browser)
+publisher_unit = unit_lines("yantrik-live-showcase.service")
+browser_unit = unit_lines("yantrik-live-showcase-browser.service")
+windows_unit = unit_lines("yantrik-live-windows.service")
 
-# While a mission runs the showcase shows its game; between missions it goes round the finished ones.
+
+def setting(unit, key):
+    return " ".join(line.split("=", 1)[1] for line in unit if line.startswith(key + "="))
+
+
+check("the publisher is root with one capability, reading the Mind's files: it can write the showcase and nothing"
+      " else, sees no other home, and has no network",
+      not any(line.startswith("User=") for line in publisher_unit)
+      and setting(publisher_unit, "CapabilityBoundingSet") == "CAP_DAC_READ_SEARCH"
+      and setting(publisher_unit, "ReadWritePaths") == "/opt/yantrik-live/showcase" and "ProtectSystem=strict" in publisher_unit
+      and "ProtectHome=tmpfs" in publisher_unit
+      and setting(publisher_unit, "BindReadOnlyPaths") == "-/home/yantrik/Projects -/home/yantrik/director"
+      and {"NoNewPrivileges=yes", "PrivateNetwork=yes", "IPAddressDeny=any"} <= set(publisher_unit)
+      and "ExecStart=/usr/bin/python3 -I /opt/yantrik-live/director/director.py showcase" in publisher_unit)
+hidden = setting(browser_unit, "TemporaryFileSystem").split() + setting(browser_unit, "InaccessiblePaths").split()
+check("the browser is its own account, with no capability, and can name nothing on disk but the published games",
+      "User=yantrik-showcase" in browser_unit and "ProtectHome=yes" in browser_unit
+      and {"/var", "/opt", "-/etc/yantrik", "-/etc/yantrik-live"} <= set(hidden)
+      and setting(browser_unit, "BindReadOnlyPaths").split() == [
+          "/opt/yantrik-live/showcase", "/opt/yantrik-live/director/showcase-browser",
+          "/run/user/1000/wayland-0:/run/yantrik-live-showcase/wayland-0"]
+      and not any(line.startswith(("BindPaths", "ReadWritePaths")) for line in browser_unit)
+      and {"ProtectSystem=strict", "ProtectProc=invisible", "NoNewPrivileges=yes", "CapabilityBoundingSet=",
+           "PrivateTmp=yes", "IPAddressDeny=any"} <= set(browser_unit)
+      and not any(x.startswith("IPAddressAllow") for x in browser_unit + publisher_unit + windows_unit)
+      and setting(browser_unit, "ExecStartPre") == "+/usr/bin/python3 -I /opt/yantrik-live/director/director.py wayland-grant")
+check("the window loop is the desktop's account and runs no browser",
+      "User=yantrik" in windows_unit and "IPAddressDeny=any" in windows_unit
+      and setting(windows_unit, "ExecStart") == "/usr/bin/python3 /opt/yantrik-live/director/director.py windows"
+      and "showcase-browser" not in setting(windows_unit, "ExecStart"))
+setup = open(os.path.join(HERE, "setup-director.sh"), encoding="utf-8").read()
+check("setup makes the showcase root's, the browser's account, and the root-only rotation, and installs all three"
+      " units", "install -d -o root -g root -m 755 /opt/yantrik-live/showcase" in setup
+      and "-o yantrik -g yantrik -m 755 /opt/yantrik-live/showcase" not in setup
+      and "useradd --system" in setup and "yantrik-showcase" in setup and "/etc/yantrik-live/showcase-rotation" in setup
+      and all(u in setup for u in ("yantrik-live-showcase.service", "yantrik-live-showcase-browser.service",
+                                   "yantrik-live-windows.service")))
+
+# While a mission runs, the Director asks for its game; between missions the publisher goes round the rotation.
 d.write_state(d.DONE, set())
 d.write_state(d.STARTED, set())
 seen = []
@@ -330,82 +442,146 @@ real_show = d.show_mission
 
 def watching_show(m, turn=0, reply="", clean=None):
     real_show(m, turn, reply, clean)
-    with open(os.path.join(d.SHOWCASE_DIR, "version.js"), encoding="utf-8") as f:
-        seen.append((m["id"], turn, frame().loads, "".join(frame().text), f.read()))
+    seen.append(d.read_state(d.SHOWING, {}))
 
 
 d.show_mission = watching_show
 replies[:] = [("Step one is in. More to come.", "answered"), ("FINISHED", "answered")]
 d.main()
 d.show_mission = real_show
-game = [("iframe", page_url + "?demo=1")]
-check("the showcase shows the running mission's game, with a new version after every turn",
-      [x[:3] for x in seen] == [(specs[0]["id"], t, game) for t in (0, 1, 2)]
-      and "Step one is in." in seen[1][3] and "turn 1" in seen[1][3] and specs[0]["title"] in seen[1][3]
-      and len({x[4] for x in seen}) == 3, repr([x[:3] for x in seen]))
-check("once the mission ends the showcase is handed back to the cycle", d.read_state(d.SHOWING, {}) == {})
+check("the Director asks for the running mission's game after every turn, with its caption, and writes no frame",
+      [(x["mission"], x["turn"]) for x in seen] == [(specs[0]["id"], t) for t in (0, 1, 2)]
+      and seen[1]["summary"] == "Step one is in." and "showcase not" not in open(d.LOG).read(),
+      repr(seen))
+check("once the mission ends the showcase is handed back to the rotation", d.read_state(d.SHOWING, {}) == {})
+
+builds = d.load_builds()
+open(d.DIRECTOR_CGROUP, "w").write("4242\n")
+d.write_state(d.SHOWING, {"mission": "polish:" + specs[0]["id"], "at": d.time.time(), "turn": 3, "clean": False,
+                          "summary": "Added <b>sound</b>. More."})
+live = d.live_request(builds, me)
+check("the publisher shows the Director's mission, with a turn line it makes and the caption made plain again",
+      live is not None and live[0]["id"] == "polish:" + specs[0]["id"]
+      and live[1] == "turn 3 · the page throws an error, being fixed" and live[2] == "Added sound.", repr(live))
+forged = []
+for req in ({"mission": "../etc", "at": d.time.time()}, {"mission": specs[0]["id"], "at": 0},
+            {"mission": specs[0]["id"], "at": "soon"}, ["not", "a", "dict"]):
+    open(d.SHOWING, "w").write(json.dumps(req))
+    if d.live_request(builds, me) is not None:
+        forged.append(req)
+d.write_state(d.SHOWING, {"mission": specs[0]["id"], "at": d.time.time(), "turn": "<b>9</b>"})
+turn_line = d.live_request(builds, me)[1]
+open(d.SHOWING, "w").write(json.dumps({"mission": specs[0]["id"], "at": d.time.time(), "summary": "x" * 20000}))
+oversize = d.live_request(builds, me)
+os.remove(d.SHOWING)
+os.symlink(os.path.join(tmp, "elsewhere.json"), d.SHOWING)
+open(os.path.join(tmp, "elsewhere.json"), "w").write(json.dumps({"mission": specs[0]["id"], "at": d.time.time()}))
+linked = d.live_request(builds, me)
+os.remove(d.SHOWING)
+d.write_state(d.SHOWING, {"mission": specs[0]["id"], "at": d.time.time()})
+open(d.DIRECTOR_CGROUP, "w").write("")
+idle = d.live_request(builds, me)
+check("a request for no mission, a stale one, an oversized one, one through a link, or one while the Director"
+      " is not running shows nothing; a forged turn is no turn",
+      forged == [] and turn_line == "starting" and oversize is None and linked is None and idle is None,
+      repr((forged, turn_line, oversize, linked, idle)))
+
 for s in specs[:3]:
     os.makedirs(os.path.join(d.PROJECTS, s["folder"]), exist_ok=True)
     open(os.path.join(d.PROJECTS, s["folder"], "index.html"), "w").write("x")
-d.write_state(d.DONE, {specs[0]["id"], specs[2]["id"], specs[3]["id"]})  # specs[3] has no page
-builds = d.load_builds()
+# The Mind can write done.json; only the rotation counts. specs[3] has no page.
+d.write_state(d.DONE, {s["id"] for s in specs})
+open(d.ROTATION, "w").write(f"# games\n{specs[2]['id']}\n{specs[0]['id']}  # Starfall\n{specs[3]['id']}\nnot-a-mission\n")
+os.chmod(d.ROTATION, 0o644)
 shown, index = [], 0
 for _ in range(3):
-    index = d.cycle_step(builds, index)
-    shown.append(frame().loads[0][1])
-want = ["file://" + os.path.join(os.path.realpath(d.PROJECTS), specs[i]["folder"], "index.html") + "?demo=1"
-        for i in (0, 2, 0)]
-check("between missions the showcase goes round the finished games with a page, in their demo mode",
-      shown == want, repr(shown))
-d.write_state(d.DONE, set())
-d.cycle_step(builds, 0)
-check("with no game finished the showcase says so rather than showing nothing", frame().loads == [])
-check("the cycle is a service of its own, so the Director's oneshot still ends with its mission",
-      "Restart=always" in showcase_unit and "ExecStart=/usr/bin/python3 /opt/yantrik-live/director/director.py showcase"
-      in showcase_unit and "Type=oneshot" in unit_lines("yantrik-live-director.service"))
+    index = d.cycle_step(builds, index, me)
+    shown.append(os.path.basename(copied(frame().loads[0][1])).rsplit("-", 1)[0])
+check("between missions the showcase goes round the games a person put in the rotation, with a page, in their"
+      " demo mode", shown == [specs[0]["folder"], specs[2]["folder"], specs[0]["folder"]], repr(shown))
+os.chmod(d.ROTATION, 0o666)
+d.cycle_step(builds, 0, me)
+writable = frame().loads
+os.remove(d.ROTATION)
+d.cycle_step(builds, 0, me)
+check("a rotation anyone else could write counts as none, and with no rotation the showcase says so",
+      writable == [] and frame().loads == [] and "No game is in the rotation yet" in "".join(frame().text))
+check("the publisher, the browser and the window loop are services of their own, so the Director's oneshot"
+      " still ends with its mission",
+      all("Restart=always" in u for u in (publisher_unit, browser_unit, windows_unit))
+      and "Type=oneshot" in unit_lines("yantrik-live-director.service"))
 
-# The showcase service: opens the window once, goes round the games, hands the screen to a mission.
+# The publisher's loop: the rotation until the Director runs a mission, then the mission, copied each turn at most.
 class Stop(Exception):
     pass
 
 
-class Browser:
-    def poll(self):
-        return None
-
-
-launched, placed, ticks = [], [], [0]
-d.write_state(d.DONE, {specs[0]["id"], specs[2]["id"]})
+open(d.ROTATION, "w").write(f"{specs[0]['id']}\n{specs[2]['id']}\n")
+os.chmod(d.ROTATION, 0o644)
 d.write_state(d.SHOWING, {})
-real_popen, real_place, real_sleep = d.subprocess.Popen, d.place_windows, d.time.sleep
-d.subprocess.Popen = lambda argv: (launched.append(argv), Browser())[1]
-d.place_windows = lambda state, showcase_front=False: placed.append(showcase_front)
-clock = [1000.0]
+open(d.DIRECTOR_CGROUP, "w").write("")
+clock, ticks, frames = [1000.0], [0], []
 real_time, d.time.time = d.time.time, lambda: clock[0]
+real_sleep = d.time.sleep
+real_pw = d.pwd.getpwnam
+d.pwd.getpwnam = lambda name: type("pw", (), {"pw_uid": me})()
 
 
 def tick(_):
     ticks[0] += 1
+    header = re.search(r"<header>(.*?)</header>", open(os.path.join(d.SHOWCASE_DIR, "frame.html")).read()).group(1)
+    frames.append(html.unescape(re.sub(r"<[^>]+>", "", header)))
     clock[0] += d.POLL_SECS if ticks[0] != 3 else d.CYCLE_SECS
     if ticks[0] == 5:
-        d.write_state(d.SHOWING, {"mission": "polish:x", "at": clock[0]})
-    if ticks[0] == 8:
+        open(d.DIRECTOR_CGROUP, "w").write("4242\n")
+        d.write_state(d.SHOWING, {"mission": specs[1]["id"], "at": clock[0], "turn": 1})
+    if ticks[0] == 7:
+        # The Mind rewriting the request every poll: copied again only after LIVE_COPY_SECS.
+        d.write_state(d.SHOWING, {"mission": specs[1]["id"], "at": clock[0], "turn": 2})
+    if ticks[0] == 10:
         raise Stop
 
 
 d.time.sleep = tick
-shown = []
-real_cycle = d.cycle_step
-d.cycle_step = lambda b, i: (shown.append(i), real_cycle(b, i))[1]
 try:
     d.main(["showcase"])
 except Stop:
     pass
-d.subprocess.Popen, d.place_windows, d.time.sleep, d.time.time, d.cycle_step = \
-    real_popen, real_place, real_sleep, real_time, real_cycle
-check("the showcase service opens one window on the frame page and goes round the games until a mission shows",
-      launched == [[d.SHOWCASE_BROWSER, os.path.join(d.SHOWCASE_DIR, "frame.html")]] and shown == [0, 1]
-      and placed == [True], repr((launched, shown, placed)))
+d.time.sleep, d.time.time, d.pwd.getpwnam = real_sleep, real_time, real_pw
+d.LOG_TO_FILE[0] = True
+mission_frames = [f for f in frames if f.startswith("LIVE" + specs[1]["title"])]
+check("the publisher goes round the rotation until the Director runs a mission, then shows that mission,"
+      " copied again no faster than LIVE_COPY_SECS",
+      [f.startswith("LIVE" + specs[0]["title"]) for f in frames[:3]] == [True, True, True]
+      and frames[3].startswith("LIVE" + specs[2]["title"]) and len(mission_frames) == 4
+      and "turn 1" in mission_frames[0] and "turn 1" in mission_frames[1] and "turn 2" in mission_frames[-1],
+      repr([f[4:12] + "|" + f[-20:] for f in frames]))
+
+# The window loop: placed when the browser starts, and with the showcase in front when a mission ends.
+placed, starts, ticks = [], ["a", "a", "a", "b", "b", "b", "b"], [0]
+real_place, real_started = d.place_windows, d.browser_started
+d.place_windows = lambda state, showcase_front=False: placed.append((ticks[0], showcase_front))
+d.browser_started = lambda: starts[min(ticks[0], len(starts) - 1)]
+d.write_state(d.SHOWING, {})
+clock = [1000.0]
+d.time.time = lambda: clock[0]
+
+
+def tick(_):
+    ticks[0] += 1
+    clock[0] += 6
+    if ticks[0] == 7:
+        raise Stop
+
+
+d.time.sleep = tick
+try:
+    d.main(["windows"])
+except Stop:
+    pass
+d.time.sleep, d.time.time, d.place_windows, d.browser_started = real_sleep, real_time, real_place, real_started
+check("the window loop places the windows once the browser starts and again when it restarts, never twice for one"
+      " start", placed == [(2, True), (5, True)], repr(placed))
 
 # Builds and polish rounds take turns.
 d.POLISH_PER_BUILD = 2
