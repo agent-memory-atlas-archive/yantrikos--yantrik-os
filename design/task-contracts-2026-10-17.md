@@ -12,7 +12,7 @@ In one week the machine showed the same failure in five shapes, and every one of
 
 - A mind said FINISHED over code it had never written.
 - A mind claimed it needed approval while an approval rule was in force.
-- Three different models made the same unasked offers because our own prompt told them to.
+- Three different models made the same unasked offers, which points at our own prompt. That is a hypothesis, being tested as E.PROMPT1 (yantrik-mind eb4dc86); this line is updated when the re-run lands.
 - Apps shipped with buttons that only logged.
 - The live stream showed exertion (grep) instead of consequences (the game).
 
@@ -86,11 +86,26 @@ Rollout, our amendment: declare effects first on the actions that live missions 
 - Capturing everything forever.
 - Wrapping every notice or click in a contract.
 
+## The Mind's side (from yantrik-mind-3e, who owns the Mind)
+
+1. **The turn carries the contract.** A Mind working under a contract gets a small `contract` block in its turn context:
+   - the id and revision, and the intent;
+   - the grant as it stands now, plus any pending grant requests;
+   - the acceptance criteria;
+   - the state.
+
+   It reads its authority from that present tense, not from the transcript. Stale approvals read from history (E.GROUND1) and a fired reminder still shown as pending (A3b) both came from the missing present tense.
+2. **The Mind reports; it never judges.** A Mind's FINISHED becomes `delivered` with artifact references, and its own report is labelled as its own. A harness method or event submits artifacts and evidence references, separate from the prose. Tool receipts count as evidence. Nothing a Mind writes can reach `decision`.
+3. **One ledger.** Work the person delegates through the Mind (research and code jobs) is a delegated outcome, so it is a contract. The Mind's `delegations` ledger and its stalled-work candidates (E.INIT1) become clients or views of it, never a second source of truth.
+4. **Declared effects replace the Mind's heuristics.** E.CLAIM2's read-only and changed-something lists are an asserted effect classification. Once describe exposes declared effects, with verified or asserted, the Mind consumes those. Until then, E.CLAIM2 stays the turn-level backstop for small in-turn actions, which don't get contracts.
+5. **Memory reuses what exists.** Mind beliefs already carry `provenance` and a confidence. User assertion, direct observation and agent inference map onto those, keeping one memory. Promotion into shared belief becomes explicit in the consolidation loop, which today promotes implicitly. That is a real gap.
+6. **The federation, a starting position.** One voice speaks to the person. Other minds' work reaches the person as artifacts and evidence on a contract card, never as a second conversational voice. A disagreement surfaces only when a contract's acceptance depends on it.
+
 ## How we would know this is wrong
 
 Run Pranab's next 20 ordinary, bounded missions, half through contracts and half through the old mission interface. Use the same executor, tools and safety boundaries, and plant some harmless false completions, scope changes and stale evidence. Measure:
 - steering time;
-- mistaken completions;
+- mistaken completions, labelled with the fixed held-out vocabulary (`false_claim`, `silent_action`, `stale_claim`), with the Jev screen limited to the rules that passed held-out (`offer`, `contradicts_facts`);
 - permission-boundary errors;
 - whether Pranab can explain what happened.
 
@@ -98,7 +113,7 @@ Run Pranab's next 20 ordinary, bounded missions, half through contracts and half
 
 ## Open, not settled by this document
 
-- **One assistant over a federation of minds.** Memory keeps disagreements and stays quiet, raising them only when a decision depends on them. What the person sees of that is not designed yet.
+- **One assistant over a federation of minds.** Memory keeps disagreements and stays quiet, raising them only when a decision depends on them. The Mind section above gives a starting position; the full design is still to be drafted (yantrik-mind-3e offered).
 - **Where the contracts module lives** once it outgrows the live machine. An OS-owned service like notifications is the likely answer: a mind must not be able to write its own acceptance.
 
 ## An ordinary Tuesday
