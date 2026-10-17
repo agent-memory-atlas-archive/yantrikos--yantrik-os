@@ -60,7 +60,8 @@ fn pump(jobs: &Jobs, done: impl Fn() -> bool) -> bool {
 
 /// Speaks enough of mpv's JSON IPC for the app: observe, get/set, loadfile, seek, stop, quit.
 /// A file whose name holds `short` ends as soon as it starts; `broken` fails to open; `crash`
-/// takes the player down.
+/// takes the player down; `playlist` behaves like an mpv that follows a playlist: it reports a
+/// `redirect` and starts playing the URL inside.
 const FAKE_MPV: &str = r#"
 import json, os, socket, sys
 path = [a.split('=', 1)[1] for a in sys.argv if a.startswith('--input-ipc-server=')][0]
@@ -98,7 +99,11 @@ for line in f:
             os._exit(3)
         if props['path']:
             send({'event': 'end-file', 'reason': 'stop'})
-        if 'broken' in p:
+        if 'playlist' in p:
+            after.append({'event': 'end-file', 'reason': 'redirect'})
+            change('path', 'http://127.0.0.1:9/beacon.mp3'); change('idle-active', False)
+            after.append({'event': 'file-loaded'})
+        elif 'broken' in p:
             change('path', None); change('idle-active', True)
             after.append({'event': 'end-file', 'reason': 'error', 'file_error': 'unrecognized file format'})
         else:
@@ -309,6 +314,21 @@ fn the_window_plays_scans_and_answers_with_what_mpv_reported() {
     let good = call("play_file", json!({"path": dir.join("Music/Gamma/Gamma 008.mp3")})).unwrap();
     assert_eq!(good["track"], "Gamma 008", "{good}");
 
+    // ── A ".mp3" that is a playlist: refused, stopped, and never reported as playing ──
+    let playlist = dir.join("Music/playlist.mp3");
+    std::fs::write(&playlist, b"#EXTM3U\nhttp://127.0.0.1:9/beacon.mp3\n").unwrap();
+    let err = call("play_file", json!({"path": playlist})).unwrap_err();
+    assert!(err.contains("playlist"), "the answer says what mpv did: {err}");
+    assert!(
+        pump(&jobs, || s.borrow().observed().path.is_none()),
+        "what the playlist pointed at was stopped: {:?}",
+        s.borrow().observed()
+    );
+    assert!(app.get_notice().to_string().contains("playlist"), "{}", app.get_notice());
+    assert!(!app.get_is_playing());
+    let good = call("play_file", json!({"path": dir.join("Music/Gamma/Gamma 009.mp3")})).unwrap();
+    assert_eq!(good["track"], "Gamma 009", "{good}");
+
     // ── The player dies: said in plain words, and the next play starts it again ──
     let crash = dir.join("Music/crash.mp3");
     std::fs::write(&crash, b"").unwrap();
@@ -331,8 +351,9 @@ fn the_window_plays_scans_and_answers_with_what_mpv_reported() {
     std::fs::write(solo.join("only.flac"), b"").unwrap();
     add_folder(&s, solo.to_str().unwrap()).unwrap();
     assert!(pump(&jobs, || !s.borrow().scanning));
-    // 300, the four files the player tests added under Music, and Solo/only.flac.
-    assert_eq!(app.get_status_text(), "305 tracks in 2 folders");
+    // 300, the five files the player tests added under Music, and Solo/only.flac. The scan goes by
+    // name, so playlist.mp3 is listed; it is mpv that refuses it.
+    assert_eq!(app.get_status_text(), "306 tracks in 2 folders");
     let kept: Value = serde_json::from_slice(&std::fs::read(&store).unwrap()).unwrap();
     assert_eq!(kept["folders"].as_array().map(Vec::len), Some(2), "the folder list is kept");
     remove_folder(&s, 0).unwrap();

@@ -225,12 +225,19 @@ impl Observed {
                 self.loads += 1;
                 self.last_error = None;
             }
-            Event::EndFile { reason, error } => {
-                if reason == "error" {
+            Event::EndFile { reason, error } => match reason.as_str() {
+                "error" => {
                     self.errors += 1;
                     self.last_error = Some(error.clone().unwrap_or_else(|| "it could not be played".into()));
                 }
-            }
+                // The file turned out to be a playlist and mpv went on to what it lists. That is
+                // a refusal: what was asked for did not play.
+                "redirect" => {
+                    self.errors += 1;
+                    self.last_error = Some(REDIRECTED.into());
+                }
+                _ => {}
+            },
             Event::Gone => self.gone = true,
         }
     }
@@ -324,6 +331,10 @@ pub fn socket_path() -> Result<PathBuf, StartError> {
     }
     Ok(dir.join(format!("yantrik-music-mpv.{}.sock", std::process::id())))
 }
+
+/// What the caller hears when mpv found a playlist where a sound file should be.
+pub const REDIRECTED: &str =
+    "it holds a playlist that points at other files or addresses, not sound, and Music does not follow those";
 
 impl Engine {
     /// Start mpv with its socket at `socket` and observe [`OBSERVED`]. `forward` gets every
@@ -609,6 +620,14 @@ mod tests {
         assert_eq!(o.last_error, None);
         o.apply(&Event::Gone);
         assert!(!o.playing());
+    }
+
+    #[test]
+    fn a_playlist_where_a_sound_file_should_be_counts_as_a_failure() {
+        let mut o = Observed::default();
+        o.apply(&Event::EndFile { reason: "redirect".into(), error: None });
+        assert_eq!(o.errors, 1);
+        assert_eq!(o.last_error.as_deref(), Some(REDIRECTED));
     }
 
     /// The real thing, where the machine has it: the socket is 0600, a file plays, and mpv is gone

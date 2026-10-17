@@ -479,6 +479,17 @@ fn on_event(s: &State, generation: u64, event: mpv::Event) {
                 refuse(s, format!("Could not play \u{201c}{title}\u{201d}: {why}."));
                 draw_transport(s);
             }
+            // The "sound file" was a playlist and mpv is moving on to what it lists. mpv is told
+            // not to (`--access-references=no`); if it does anyway, it is stopped here and the
+            // file is refused rather than followed.
+            "redirect" => {
+                if let Some(e) = s.borrow().live_engine() {
+                    let _ = e.client.command(&[json!("stop")]);
+                }
+                let title = s.borrow().queue.current().map(|t| t.title.clone()).unwrap_or_default();
+                refuse(s, format!("Could not play \u{201c}{title}\u{201d}: {}.", mpv::REDIRECTED));
+                draw_transport(s);
+            }
             _ => draw_transport(s),
         },
         mpv::Event::Gone => {
@@ -940,18 +951,24 @@ fn answer_loaded(e: Arc<mpv::Engine>, track: Track, before: Mark) -> Result<Valu
         _ => (0, 0),
     };
     let work = move || {
-        let (ok, o) = e.observed.wait_for(LOAD_WAIT, |o| {
-            o.gone || o.errors > before.1 || (o.loads > before.0 && o.path.as_deref() == Some(track.path.as_str()))
-        });
-        if !ok || o.path.as_deref() != Some(track.path.as_str()) {
-            let why = o.last_error.clone().unwrap_or_else(|| {
-                if o.gone { "the player (mpv) stopped".into() } else { "mpv did not report the file as loaded".into() }
-            });
-            return Err(format!("mpv did not play \u{201c}{}\u{201d}: {why}.", track.title));
+        let loaded = |o: &mpv::Observed| o.loads > before.0 && o.path.as_deref() == Some(track.path.as_str());
+        let (_, o) = e.observed.wait_for(LOAD_WAIT, |o| o.gone || o.errors > before.1 || loaded(o));
+        if !o.gone && o.errors == before.1 && loaded(&o) {
+            let mut answer = report(&e);
+            answer["track"] = json!(track.title);
+            return Ok(answer);
         }
-        let mut answer = report(&e);
-        answer["track"] = json!(track.title);
-        Ok(answer)
+        let why = match (&o.last_error, &o.path) {
+            (Some(error), _) if o.errors > before.1 => error.clone(),
+            _ if o.gone => "the player (mpv) stopped".into(),
+            // mpv loaded something, but not this file: say what it is playing instead.
+            (_, Some(other)) if o.loads > before.0 => {
+                let shown = shown_path(Some(other.as_str()));
+                format!("mpv is playing {} instead", shown.as_str().unwrap_or("another file"))
+            }
+            _ => "mpv did not report the file as loaded".into(),
+        };
+        Err(format!("mpv did not play \u{201c}{}\u{201d}: {why}.", track.title))
     };
     answer_later(work).map(|()| Value::Null).or_else(|work| work())
 }
