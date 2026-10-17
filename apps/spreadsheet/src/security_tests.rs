@@ -69,6 +69,28 @@ fn a_hidden_sheet_quoted_by_the_status_line_is_not_read_out() {
     assert!(!text.contains("topsecret"), "{text}");
 }
 
+/// The security delta review's INFO: `describe` still gave a hidden sheet's path, used range,
+/// counts, first error and selected cell. Now it gives its name and nothing of its shape.
+#[test]
+fn describe_gives_an_agent_a_hidden_sheets_name_and_nothing_of_its_shape() {
+    let dir = Scratch::new("hidden-describe");
+    let mut s = person_opens_a_secret(&dir);
+    act(&mut s, "set_cell", json!({ "cell": "D3", "text": "=1/0" })).unwrap();
+    act(&mut s, "select", json!({ "cell": "C2" })).unwrap();
+    let _agent = AgentTokenScope::enter(Some("tok-sheets-review".into()));
+    let state = yantrik_app_runtime::control::describe_json("spreadsheet", &surface::describe(&s), &[]);
+    let st = &state["state"];
+    assert_eq!(st["sheet"], "secret.csv");
+    for key in ["path", "rows", "cols", "used", "selection", "can_undo", "can_redo", "filled_cells", "error_cells", "first_error"] {
+        assert!(st[key].is_null(), "{key}: {}", st[key]);
+    }
+    assert!(st["hidden"].is_string(), "the agent is told why");
+    let text = state.to_string();
+    for shape in ["A1:D3", "D3", "C2", "topsecret"] {
+        assert!(!text.contains(shape), "{shape} in {text}");
+    }
+}
+
 // ── Memory: text and work have bounds ───────────────────────────────────
 
 use crate::address::{parse_cell, Cell};

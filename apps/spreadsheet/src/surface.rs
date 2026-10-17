@@ -84,15 +84,13 @@ pub fn actions() -> Vec<(Action, Handler)> {
 pub fn describe(s: &Session) -> View {
     let doc = &s.doc;
     let sheet = &doc.sheet;
+    let hidden = agent_rule::hidden_from_caller(doc.path.as_deref());
+    if let Some(why) = hidden {
+        return hidden_view(s, why);
+    }
     let (used_rows, used_cols) = sheet.used();
     let (filled, errors) = sheet.counts();
-    let hidden = agent_rule::hidden_from_caller(doc.path.as_deref());
-    // The status line and the notice can quote a cell ("B1 holds text (\"…\")"), so a hidden
-    // sheet's are not read out either.
-    let (status, notice) = match hidden {
-        Some(_) => (String::new(), String::new()),
-        None => (s.status().0, s.notice.clone()),
-    };
+    let notice = s.notice.clone();
     let mut summary = format!(
         "ySheets — {} · {} rows × {} columns · {} selected · {}",
         doc.title(),
@@ -104,14 +102,6 @@ pub fn describe(s: &Session) -> View {
     if !notice.is_empty() {
         summary.push_str(&format!(" · {notice}"));
     }
-    let selection = match &hidden {
-        Some(_) => json!(null),
-        None => json!({
-            "cell": s.active.name(),
-            "typed": sheet.raw(s.active),
-            "value": sheet.value(s.active).to_json(),
-        }),
-    };
     View::new(summary)
         .with("sheet", doc.title())
         .with("path", doc.path.as_ref().map(|p| p.display().to_string()))
@@ -120,16 +110,51 @@ pub fn describe(s: &Session) -> View {
         .with("used", if used_rows == 0 { "".to_string() } else {
             address::Range::new(Cell::new(0, 0), Cell::new(used_rows - 1, used_cols - 1)).name()
         })
-        .with("selection", selection)
+        .with("selection", json!({
+            "cell": s.active.name(),
+            "typed": sheet.raw(s.active),
+            "value": sheet.value(s.active).to_json(),
+        }))
         .with("dirty", doc.dirty())
         .with("can_undo", doc.history.can_undo())
         .with("can_redo", doc.history.can_redo())
         .with("filled_cells", filled as i64)
         .with("error_cells", errors as i64)
         .with("first_error", sheet.first_error().map(Cell::name))
-        .with("status", status)
+        .with("status", s.status().0)
         .with("notice", notice)
-        .with("hidden", hidden)
+        .with("hidden", None::<String>)
+        .with("functions", NAMES.to_vec())
+}
+
+/// What an agent sees of a sheet it may not read: its name, whether it has unsaved changes (an
+/// agent's `open` is refused until it is saved), and the sentence every refused action gives.
+/// Nothing of its shape — size, used range, counts, the first error, the selected cell, its
+/// history — and not the status line or the notice, which can quote a cell (security reviews of
+/// #727). The path is left out too; the sentence names the file's place as every refusal does.
+fn hidden_view(s: &Session, why: String) -> View {
+    let doc = &s.doc;
+    let summary = format!(
+        "ySheets — {} · not read for an agent · {}",
+        doc.title(),
+        if doc.dirty() { "unsaved changes" } else { "saved" }
+    );
+    View::new(summary)
+        .with("sheet", doc.title())
+        .with("path", None::<String>)
+        .with("rows", json!(null))
+        .with("cols", json!(null))
+        .with("used", json!(null))
+        .with("selection", json!(null))
+        .with("dirty", doc.dirty())
+        .with("can_undo", json!(null))
+        .with("can_redo", json!(null))
+        .with("filled_cells", json!(null))
+        .with("error_cells", json!(null))
+        .with("first_error", None::<String>)
+        .with("status", "")
+        .with("notice", "")
+        .with("hidden", Some(why))
         .with("functions", NAMES.to_vec())
 }
 
