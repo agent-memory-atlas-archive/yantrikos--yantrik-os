@@ -6,7 +6,8 @@ into showing anything it has. So it holds no provider key. Its only way to a mod
 
 | Route on the gate (`10.99.0.1:8443`)      | Goes to                      | Rate          | Requests a day | Model allowed                    |
 |-------------------------------------------|------------------------------|---------------|----------------|----------------------------------|
-| `/api/chat`, `/v1/chat/completions`, …    | AIG (`aig.mycluster.cyou`)   | 2 a second    | no cap         | whatever AIG serves              |
+| `/api/chat` (the local lane)              | AIG (`aig.mycluster.cyou`)   | 2 a second, at most 4 open | no cap | `qwen3.8:27b`              |
+| `/v1/chat/completions`, `/api/generate`, … | AIG (`aig.mycluster.cyou`)  | 2 a second    | no cap         | whatever AIG serves              |
 | `/ollama-cloud/v1/chat/completions`       | `ollama.com`                 | 30 a minute   | 1,500          | `kimi-k3`, `deepseek-v4.1-flash` |
 | `/nanogpt/api/v1/chat/completions`        | `nano-gpt.com`               | 10 a minute   | 100            | `deepseek/deepseek-v4-pro-cheaper` |
 | `/nim/v1/chat/completions`                | `integrate.api.nvidia.com`   | 10 a minute   | 100            | `nvidia/nemotron-3-super-120b-a12b` |
@@ -20,7 +21,8 @@ refuses to install a list that differs. Change the allowlist, run the generator,
 
 The AIG route is `gate-setup.sh`'s, except `/api/chat`, the local lane's chat call, which is this
 directory's: AIG's streamed answers drop tool calls, so `live.local` asks unstreamed and hands the
-answer back as one NDJSON line. It allows only the Mind's local model, caps `num_predict` at 8,192,
+answer back as one NDJSON line. It allows only the Mind's local model, caps `num_predict` at 8,192 and `num_ctx` at 32,768, drops
+`keep_alive` (AIG also serves Pranab's own Mind),
 holds at most 4 calls open, verifies AIG's certificate, and never passes AIG's error text back. AIG's
 other paths (`/api/generate`, `/v1/...`) are still `gate-setup.sh`'s, unverified; that is a follow-up.
 

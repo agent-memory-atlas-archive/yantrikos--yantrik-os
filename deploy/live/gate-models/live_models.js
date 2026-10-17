@@ -26,6 +26,7 @@ const MAX_TOKENS = 8192;
 // The local lane's models (AIG, Ollama-native /api/chat): the one the live Mind is set to
 // (YM_LOCAL_OLLAMA_MODEL on 561).
 const LOCAL_MODELS = ['qwen3.8:27b'];
+const LOCAL_MAX_CONTEXT = 32768;
 
 function refuse(r, status, text) {
     r.headersOut['Content-Type'] = 'text/plain; charset=utf-8';
@@ -129,13 +130,21 @@ async function local(r) {
     }
     const wanted = Math.floor(Number(asked.options.num_predict));
     asked.options.num_predict = wanted > 0 ? Math.min(wanted, MAX_TOKENS) : MAX_TOKENS;
+    // AIG also serves Pranab's own Mind's private turns, so the instance may not resize the model's
+    // context or decide when it is unloaded: a huge num_ctx reloads it and keep_alive 0 unloads it
+    // after every call, for everyone (delta review of #846). The Mind sends 32,768 itself.
+    const context = Math.floor(Number(asked.options.num_ctx));
+    asked.options.num_ctx = context > 0 ? Math.min(context, LOCAL_MAX_CONTEXT) : LOCAL_MAX_CONTEXT;
+    delete asked.keep_alive;
     const streamed = asked.stream !== false; // Ollama streams unless told not to
     asked.stream = false;
 
     const reply = await r.subrequest('/_live_upstream/aig', { method: 'POST', body: JSON.stringify(asked) });
     if (reply.status < 200 || reply.status > 299) {
         // AIG's words go to the gate's own error log, never to the instance.
-        r.error('local lane: AIG answered ' + reply.status + ': ' + String(reply.responseText || '').slice(0, 200));
+        // Control characters become spaces, so AIG's text can't start a line of its own in the log.
+        r.error('local lane: AIG answered ' + reply.status + ': '
+            + String(reply.responseText || '').slice(0, 200).replace(/[\x00-\x1f\x7f]/g, ' '));
         return refuse(r, reply.status === 429 || reply.status >= 500 ? reply.status : 502,
             'the local model answered ' + reply.status);
     }
