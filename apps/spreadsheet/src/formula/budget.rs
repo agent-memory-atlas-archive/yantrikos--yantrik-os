@@ -3,8 +3,8 @@
 //! review of #727).
 //!
 //! Three bounds: no text a formula makes is longer than a cell holds; all the text formulas make
-//! in one recalculation together stays under [`MAX_TEXT_BYTES`]; and the cells read plus the
-//! references followed stay under [`MAX_WORK`]. Past any of them the formula shows `#VALUE!`
+//! in one recalculation together stays under [`MAX_TEXT_BYTES`]; and the cells read, and the
+//! links between formulas (`sheet::recalc`), each stay under [`MAX_WORK`]. Past any of them the formula shows `#VALUE!`
 //! with a sentence, and nothing is allocated first.
 
 use std::cell::Cell;
@@ -15,7 +15,7 @@ use super::value::{Error, Kind};
 pub const MAX_TEXT: usize = 32_768;
 /// The most bytes of text the formulas of one sheet make, together.
 pub const MAX_TEXT_BYTES: usize = 64 * 1024 * 1024;
-/// The most cell reads and dependency links one recalculation follows.
+/// The most cell reads one recalculation makes, and the most links between formulas it follows.
 pub const MAX_WORK: usize = 20_000_000;
 
 #[derive(Debug)]

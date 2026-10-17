@@ -58,7 +58,20 @@ pub fn recalc(rows: usize, cols: usize, raw: &[String]) -> Vec<Value> {
         slot[*i] = k;
     }
 
-    // Edges: a formula another formula reads must be worked out first.
+    // The formulas of each column, by row, so a range visits only the formulas inside it. The
+    // first version scanned every formula for every range, O(formulas² × ranges): a 9 MB file of
+    // `=SUM(An:An)` did not open in five minutes (security review of #727).
+    let mut by_col: Vec<Vec<(usize, usize)>> = vec![Vec::new(); cols];
+    for (k, (i, _)) in formulas.iter().enumerate() {
+        let c = at(*i, cols);
+        by_col[c.col].push((c.row, k));
+    }
+
+    // Edges: a formula another formula reads must be worked out first. Every link costs a unit
+    // of a budget of its own, so a sheet whose ranges overlap without end is bounded too: a
+    // formula past it is not worked out, and says why.
+    let links = Budget::default();
+    let mut refused: Vec<Option<Error>> = vec![None; formulas.len()];
     let mut readers: Vec<Vec<usize>> = vec![Vec::new(); formulas.len()];
     let mut waiting = vec![0usize; formulas.len()];
     for (k, (_, compiled)) in formulas.iter().enumerate() {
@@ -71,12 +84,24 @@ pub fn recalc(rows: usize, cols: usize, raw: &[String]) -> Vec<Value> {
             .map(|c| slot[c.row * cols + c.col])
             .filter(|&d| d != usize::MAX)
             .collect();
-        for r in &ranges {
-            deps.extend(formulas.iter().enumerate().filter_map(|(d, (i, _))| {
-                let c = at(*i, cols);
-                (c.row >= r.first.row && c.row <= r.last.row && c.col >= r.first.col && c.col <= r.last.col)
-                    .then_some(d)
-            }));
+        let found = ranges.iter().try_for_each(|r| {
+            for col in r.first.col..=r.last.col.min(cols.saturating_sub(1)) {
+                links.work(1)?;
+                let column = &by_col[col];
+                let start = column.partition_point(|&(row, _)| row < r.first.row);
+                for &(row, d) in &column[start..] {
+                    if row > r.last.row {
+                        break;
+                    }
+                    links.work(1)?;
+                    deps.push(d);
+                }
+            }
+            Ok(())
+        });
+        if let Err(e) = found {
+            refused[k] = Some(e);
+            continue;
         }
         deps.sort_unstable();
         deps.dedup();
@@ -90,9 +115,9 @@ pub fn recalc(rows: usize, cols: usize, raw: &[String]) -> Vec<Value> {
     let mut ready: VecDeque<usize> = (0..formulas.len()).filter(|&k| waiting[k] == 0).collect();
     while let Some(k) = ready.pop_front() {
         let (i, compiled) = &formulas[k];
-        let v = match compiled {
-            Err(e) => Value::Error(e.clone()),
-            Ok(expr) => {
+        let v = match (compiled, &refused[k]) {
+            (_, Some(e)) | (Err(e), _) => Value::Error(e.clone()),
+            (Ok(expr), None) => {
                 let view = View { rows, cols, values: &values };
                 let v = Eval::new(&view, &budget).run(expr);
                 match v {

@@ -220,3 +220,55 @@ fn the_evaluator_refuses_a_tree_deeper_than_the_parser_allows() {
     let v = Eval::new(&Blank, &budget).run(&e);
     assert!(v.error().is_some_and(|e| e.message.contains("levels deep")), "{v:?}");
 }
+
+// ── Time: recalculation is not quadratic ────────────────────────────────
+
+/// `rows` rows of 26 `=SUM(An:An)` cells, as the reviewer's file had them.
+fn sums(rows: usize) -> String {
+    (1..=rows).map(|r| vec![format!("=SUM(A{r}:A{r})"); 26].join(",") + "\n").collect()
+}
+
+fn open_time(rows: usize) -> (Session, std::time::Duration) {
+    let dir = Scratch::new(&format!("sums-{rows}"));
+    let path = dir.path("sums.csv");
+    std::fs::write(&path, sums(rows)).unwrap();
+    let mut s = Session::new();
+    let t = std::time::Instant::now();
+    act(&mut s, "open", json!({ "path": path })).unwrap();
+    let took = t.elapsed();
+    assert_eq!(s.doc.sheet.value(Cell::new(rows - 1, 1)).error().map(|e| e.code()), Some("#CYCLE!"));
+    (s, took)
+}
+
+/// 40,000 formula cells took 6 s in a release build before; a debug build now opens them in
+/// well under that, and each edit after it costs the same, not more.
+#[test]
+fn forty_thousand_range_formulas_open_and_edit_in_linear_time() {
+    let (mut s, took) = open_time(40_000 / 26);
+    assert!(took.as_secs_f64() < 5.0, "{took:?}");
+    let t = std::time::Instant::now();
+    act(&mut s, "set_cell", json!({ "cell": "A1", "text": "5" })).unwrap();
+    assert!(t.elapsed().as_secs_f64() < 5.0, "{:?}", t.elapsed());
+    assert_eq!(s.doc.sheet.value(Cell::new(0, 1)).display(), "5");
+}
+
+/// The reviewer's 494,000 cells, about 9 MB: over 300 s before. Run with
+/// `cargo test --release -- --ignored`, which prints the time.
+#[test]
+#[ignore]
+fn the_reviewers_nine_megabyte_sheet_opens() {
+    let (_, took) = open_time(19_000);
+    eprintln!("494,000 formulas opened in {took:?}");
+    assert!(took.as_secs_f64() < 10.0, "{took:?}");
+}
+
+#[test]
+fn ranges_that_overlap_without_end_are_held_to_the_budget() {
+    // Running totals over everything above: 7,000 formulas link to 24.5 million others.
+    let mut rows = vec![vec!["1".to_string()]];
+    rows.extend((2..=7_000).map(|r| vec![format!("=SUM(A1:A{})", r - 1)]));
+    let s = Sheet::from_rows(&rows).unwrap();
+    assert_eq!(s.value(Cell::new(2, 0)).display(), "2", "the first totals are worked out");
+    let last = s.value(Cell::new(6_999, 0));
+    assert!(last.error().unwrap().message.contains("cells to work out"), "{last:?}");
+}
