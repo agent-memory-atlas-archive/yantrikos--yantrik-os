@@ -332,6 +332,43 @@ pub fn socket_path() -> Result<PathBuf, StartError> {
     Ok(dir.join(format!("yantrik-music-mpv.{}.sock", std::process::id())))
 }
 
+/// mpv's command line, apart from the program.
+///
+/// mpv decides what a file is from its contents, not its name, so a file called `x.mp3` that holds
+/// an m3u playlist would otherwise be opened as one, and mpv would then fetch every URL and open
+/// every file listed in it: past `play_file`'s rule, and onto the network. So:
+///
+/// - `--access-references=no`: a file never opens other files or addresses it names (playlists,
+///   EDL, ordered chapters). Such a file fails with "unrecognized file format".
+/// - `--load-unsafe-playlists=no`: playlists from untrusted places stay refused even if a demuxer
+///   produces one anyway. (mpv's default, set so a config change cannot turn it on.)
+/// - `--ytdl=no`: no youtube-dl for anything that looks like a web page.
+/// - `--network-timeout=5`: if anything ever does reach the network, it gives up in seconds
+///   instead of holding the player.
+pub fn args(volume: f64, socket: &Path) -> Vec<String> {
+    let mut args: Vec<String> = [
+        "--idle=yes",
+        "--no-config",
+        "--load-scripts=no",
+        "--ytdl=no",
+        "--access-references=no",
+        "--load-unsafe-playlists=no",
+        "--network-timeout=5",
+        "--no-video",
+        "--audio-display=no",
+        "--force-window=no",
+        "--no-terminal",
+        "--input-default-bindings=no",
+        "--keep-open=no",
+    ]
+    .iter()
+    .map(|a| a.to_string())
+    .collect();
+    args.push(format!("--volume={}", volume.clamp(0.0, 100.0).round()));
+    args.push(format!("--input-ipc-server={}", socket.display()));
+    args
+}
+
 /// What the caller hears when mpv found a playlist where a sound file should be.
 pub const REDIRECTED: &str =
     "it holds a playlist that points at other files or addresses, not sound, and Music does not follow those";
@@ -354,18 +391,7 @@ impl Engine {
         let _ = std::fs::remove_file(&socket);
         let mut command = Command::new(program);
         command
-            .arg("--idle=yes")
-            .arg("--no-config")
-            .arg("--load-scripts=no")
-            .arg("--ytdl=no")
-            .arg("--no-video")
-            .arg("--audio-display=no")
-            .arg("--force-window=no")
-            .arg("--no-terminal")
-            .arg("--input-default-bindings=no")
-            .arg("--keep-open=no")
-            .arg(format!("--volume={}", volume.clamp(0.0, 100.0).round()))
-            .arg(format!("--input-ipc-server={}", socket.display()))
+            .args(args(volume, &socket))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -630,6 +656,17 @@ mod tests {
         assert_eq!(o.last_error.as_deref(), Some(REDIRECTED));
     }
 
+    #[test]
+    fn mpv_is_told_never_to_follow_what_a_file_points_at() {
+        let args = args(150.0, Path::new("/run/user/1000/m.sock"));
+        for flag in ["--access-references=no", "--load-unsafe-playlists=no", "--ytdl=no", "--no-config", "--load-scripts=no"] {
+            assert!(args.iter().any(|a| a == flag), "{flag} missing from {args:?}");
+        }
+        assert!(args.iter().any(|a| a.starts_with("--network-timeout=")), "{args:?}");
+        assert!(args.contains(&"--volume=100".to_string()), "{args:?}");
+        assert_eq!(args.last().unwrap(), "--input-ipc-server=/run/user/1000/m.sock");
+    }
+
     /// The real thing, where the machine has it: the socket is 0600, a file plays, and mpv is gone
     /// once the engine is dropped.
     #[test]
@@ -650,6 +687,68 @@ mod tests {
         assert!(!socket.exists(), "the socket goes with the engine");
         let state = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
         assert!(state.is_empty() || state.contains(") Z"), "mpv is gone: {state}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A short, silent WAV that mpv plays.
+    fn wav(path: &Path) {
+        let (rate, samples) = (8000u32, 4000u32);
+        let mut b = Vec::new();
+        b.extend_from_slice(b"RIFF");
+        b.extend_from_slice(&(36 + samples * 2).to_le_bytes());
+        b.extend_from_slice(b"WAVEfmt ");
+        b.extend_from_slice(&16u32.to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes());
+        b.extend_from_slice(&rate.to_le_bytes());
+        b.extend_from_slice(&(rate * 2).to_le_bytes());
+        b.extend_from_slice(&2u16.to_le_bytes());
+        b.extend_from_slice(&16u16.to_le_bytes());
+        b.extend_from_slice(b"data");
+        b.extend_from_slice(&(samples * 2).to_le_bytes());
+        b.resize(b.len() + samples as usize * 2, 0);
+        std::fs::write(path, b).unwrap();
+    }
+
+    /// The security review's file: `evil.mp3` is an m3u playlist naming a URL and a file. A real
+    /// mpv refuses it without contacting the listener or opening the file, and a real sound file
+    /// after it still plays.
+    #[test]
+    fn a_real_mpv_does_not_follow_a_playlist_named_like_a_sound_file() {
+        if Command::new("mpv").arg("--version").stdout(Stdio::null()).status().is_err() {
+            eprintln!("no mpv here; skipped");
+            return;
+        }
+        let dir = scratch("evil");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let outside = dir.join("outside.wav");
+        wav(&outside);
+        let evil = dir.join("evil.mp3");
+        std::fs::write(&evil, format!("#EXTM3U\nhttp://127.0.0.1:{port}/beacon.mp3\n{}\n", outside.display())).unwrap();
+        let good = dir.join("good.wav");
+        wav(&good);
+
+        let engine = Engine::start("mpv", dir.join("mpv.sock"), 0.0, |_| {}).expect("mpv starts");
+        engine.client.load(evil.to_str().unwrap()).unwrap();
+        let (ended, o) = engine.observed.wait_for(Duration::from_secs(5), |o| o.errors > 0 || o.loads > 0);
+        assert!(ended, "mpv said something about evil.mp3: {o:?}");
+        assert_eq!(o.loads, 0, "nothing played, neither the URL nor outside.wav: {o:?}");
+        assert_ne!(o.last_error.as_deref(), Some(REDIRECTED), "mpv did not even open it as a playlist");
+        // Give a fetch that slipped through time to arrive.
+        std::thread::sleep(Duration::from_millis(500));
+        match listener.accept() {
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            other => panic!("mpv contacted the address in the playlist: {other:?}"),
+        }
+
+        engine.client.load(good.to_str().unwrap()).unwrap();
+        let want = good.to_str().unwrap().to_string();
+        let (played, o) =
+            engine.observed.wait_for(Duration::from_secs(5), |o| o.loads > 0 && o.path.as_deref() == Some(want.as_str()));
+        assert!(played, "a real sound file still plays: {o:?}");
+        drop(engine);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
