@@ -8,16 +8,16 @@ use crate::session::Session;
 use crate::surface;
 
 /// A directory of this test's own, removed when it is dropped.
-struct Scratch(PathBuf);
+pub(crate) struct Scratch(PathBuf);
 
 impl Scratch {
-    fn new(name: &str) -> Self {
+    pub(crate) fn new(name: &str) -> Self {
         let dir = std::env::temp_dir().join(format!("ysheets-test-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         Self(dir)
     }
-    fn path(&self, name: &str) -> PathBuf {
+    pub(crate) fn path(&self, name: &str) -> PathBuf {
         self.0.join(name)
     }
 }
@@ -28,12 +28,12 @@ impl Drop for Scratch {
     }
 }
 
-fn act(s: &mut Session, name: &str, args: Json) -> Result<Json, String> {
+pub(crate) fn act(s: &mut Session, name: &str, args: Json) -> Result<Json, String> {
     let (_, handler) = surface::actions()
         .into_iter()
         .find(|(spec, _)| spec.schema()["name"] == name)
         .unwrap_or_else(|| panic!("no action {name}"));
-    handler(s, &args)
+    surface::run(s, name, handler, &args)
 }
 
 // ── CSV files ───────────────────────────────────────────────────────────

@@ -31,7 +31,8 @@ pub fn may_write(path: &Path) -> Result<(), String> {
 }
 
 /// Why the open file's cells are kept from this caller, if they are: a file the person opened
-/// from a place no agent may read is not read back to one through `get_range` or `describe`.
+/// from a place no agent may read is not read back or saved for one (`surface::run`), and
+/// `describe` leaves its cells, status line and notice out.
 pub fn hidden_from_caller(path: Option<&Path>) -> Option<String> {
     if !agent_is_calling() {
         return None;

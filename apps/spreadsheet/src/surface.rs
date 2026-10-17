@@ -27,6 +27,20 @@ pub const MAX_RANGE_CELLS: usize = 2_000;
 
 pub type Handler = fn(&mut Session, &Json) -> Result<Json, String>;
 
+/// Run one action for whoever is calling. The rule that a sheet opened from a place an agent
+/// may not read is not read back to one is kept here, once, for every action: `select`,
+/// `set_cell` (`=A1&B1`), `undo` and `redo` all answer with cell values, and `save` would put
+/// the cells in a file the agent can read (security review of #727). Only `open` goes through,
+/// because it replaces the sheet and is refused while there are unsaved changes.
+pub fn run(s: &mut Session, name: &str, handler: Handler, args: &Json) -> Result<Json, String> {
+    if name != "open" {
+        if let Some(why) = agent_rule::hidden_from_caller(s.doc.path.as_deref()) {
+            return Err(s.failed(format!("This sheet is not read or saved for an agent: {why}")));
+        }
+    }
+    handler(s, args)
+}
+
 pub fn actions() -> Vec<(Action, Handler)> {
     vec![
         (
@@ -73,7 +87,12 @@ pub fn describe(s: &Session) -> View {
     let (used_rows, used_cols) = sheet.used();
     let (filled, errors) = sheet.counts();
     let hidden = agent_rule::hidden_from_caller(doc.path.as_deref());
-    let (status, _) = s.status();
+    // The status line and the notice can quote a cell ("B1 holds text (\"…\")"), so a hidden
+    // sheet's are not read out either.
+    let (status, notice) = match hidden {
+        Some(_) => (String::new(), String::new()),
+        None => (s.status().0, s.notice.clone()),
+    };
     let mut summary = format!(
         "ySheets — {} · {} rows × {} columns · {} selected · {}",
         doc.title(),
@@ -82,8 +101,8 @@ pub fn describe(s: &Session) -> View {
         s.active.name(),
         if doc.dirty() { "unsaved changes" } else { "saved" }
     );
-    if !s.notice.is_empty() {
-        summary.push_str(&format!(" · {}", s.notice));
+    if !notice.is_empty() {
+        summary.push_str(&format!(" · {notice}"));
     }
     let selection = match &hidden {
         Some(_) => json!(null),
@@ -109,7 +128,7 @@ pub fn describe(s: &Session) -> View {
         .with("error_cells", errors as i64)
         .with("first_error", sheet.first_error().map(Cell::name))
         .with("status", status)
-        .with("notice", s.notice.clone())
+        .with("notice", notice)
         .with("hidden", hidden)
         .with("functions", NAMES.to_vec())
 }
@@ -174,9 +193,6 @@ fn set_cell(s: &mut Session, args: &Json) -> Result<Json, String> {
 }
 
 fn get_range(s: &mut Session, args: &Json) -> Result<Json, String> {
-    if let Some(why) = agent_rule::hidden_from_caller(s.doc.path.as_deref()) {
-        return Err(s.failed(format!("This sheet's cells are not read to an agent: {why}")));
-    }
     let raw = text(args, "range").unwrap_or_default();
     let range = address::parse_range(raw)
         .ok_or_else(|| s.failed(format!("`{raw}` is not a range; name one like A1:C10")))?;

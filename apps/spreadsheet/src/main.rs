@@ -28,6 +28,8 @@ mod surface;
 mod wire;
 
 #[cfg(test)]
+mod security_tests;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod window_tests;
@@ -85,11 +87,12 @@ fn serve(ui: &SpreadsheetApp, shared: &session::Shared) {
         _ => View::new("ySheets — the window is closed or busy"),
     });
     for (spec, handler) in surface::actions() {
+        let name = spec.schema()["name"].as_str().unwrap_or_default().to_string();
         let (weak, s) = (ui.as_weak(), shared.clone());
         app = app.action(spec, move |args| {
             let ui = weak.upgrade().ok_or("the ySheets window is closed")?;
             let mut s = s.try_borrow_mut().map_err(|_| "the window is busy with another request; try again")?;
-            let answer = handler(&mut s, args);
+            let answer = surface::run(&mut s, &name, handler, args);
             files::redraw(&ui, &s);
             answer
         });
