@@ -282,7 +282,9 @@ fn vm_541_a_mind_on_the_gateway_is_said_by_where_the_gateway_sends_it() {
     assert_eq!(r.runs_on(), "Custom endpoint \u{b7} aig.example \u{b7} qwen3.5:27b");
     assert_eq!(r.source(), "set by this desktop");
     assert!(!r.reported, "the answering line says \"set by this desktop\"");
-    assert_eq!(crate::wire::runs_on_card::row_line(&rows, "hermes"), "Runs on Custom endpoint \u{b7} aig.example \u{b7} qwen3.5:27b \u{b7} set by this desktop");
+    // The Minds row says it in words; the exact line is its Details.
+    assert_eq!(crate::wire::runs_on_card::row_line(&rows, "hermes"), "Runs on A service you set up \u{b7} qwen3.5:27b");
+    assert!(crate::wire::runs_on_card::row_details(&rows, "hermes").contains("Custom endpoint \u{b7} aig.example \u{b7} qwen3.5:27b \u{b7} set by this desktop"));
     assert_eq!(summary(&rows), "Custom endpoint \u{b7} aig.example runs 1 mind. No mind here runs on a signed-in account.");
     assert!(in_use_not_saved(&rows, None, &[]).is_empty(), "the account is the person's own, already set up");
 }
