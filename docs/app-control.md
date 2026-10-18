@@ -299,6 +299,11 @@ content, and a content action a paired action takes back stays `standard` (`add_
 | shell | `install_harness`, `start_harness` | sensitive | fetches software onto the machine; decides what it runs on every login |
 | shell | `set_mind_panel` | safe | showing: how much of one panel is drawn, remembered in the panel's own file; nothing sent, run or granted |
 | shell | `lock` | safe | only takes access away — Super+L must lock, not ask about locking (#215) |
+| shell | `capture_open`, `capture_region`, `capture_screen_to_clipboard`, `capture_record_toggle` | safe | the person's capture keys (Print, Shift+Print, Super+Shift+S, Ctrl+Print, Super+Shift+R): a key must not raise a card, so each refuses any caller the shell takes for a mind instead (design/capture-2026-10-15.md) |
+| shell | `screenshot_mind_view` | safe | a mind photographing its own display; saved to ~/Pictures/Screenshots and the person told which mind took it; one every 2 s from minds, and none with under 1 GB free |
+| shell | `screenshot_screen` | sensitive | a picture of the person's desktop; its purpose says it cannot be undone, word for word as `read_screen`'s, so it asks every time and no session rule covers it; the person is told which mind took it |
+| shell | `open_capture` | sensitive | opens a saved screenshot or recording in Mind View's viewer or player; each is a picture of the person's desktop, so its purpose says it cannot be undone, word for word as `read_screen`'s, it asks every time and taints as a screen read. `~/Pictures/Screenshots` and `~/Videos/Recordings` are protected places (`home_paths::PROTECTED`): Files, the apps' `open` and the file tools refuse them to every agent, and this is a mind's one way to one |
+| shell | `record_start`, `record_stop` | sensitive | recording Mind View only (`target` offers `mind_view` and nothing else): the person's desktop is never recorded for a mind. The red dot shows for every recording; locking stops it. A mind's ends after 30 minutes (`RuntimeMaxSec`) at a fifth of the default CPU weight, and the person starting their own stops it |
 | shell | `files_go`, `files_enter`, `files_open`, `files_up`, `files_new_folder`, `files_new_file`, `files_select`, `files_view`, `files_rename`, `files_copy`, `files_cut`, `files_paste`, `files_trash_selected`, `files_undo_trash`, `files_toggle_trash`, `files_refresh`, `files_cancel`, `files_terminal` | standard | driving the Files screen; what they change is content, taken back by the paired verb or recovered from Trash; `files_new_folder` and `files_new_file` answer the disk's own fact, **settled**, from the create call itself (`EEXIST`), not a stat beside it: `{"created": "<absolute path>", "kind": "directory"\; `files_go` answers, **settled**, what the folder holds (`{"path", "exists": true, "entries", "first": [up to 12 names, folders end in `/`], "more"}`), and a missing folder is refused with the `files_new_folder` call that makes it; `files_new_folder` takes a nested path (`a/b`, `~/a/b`), makes the missing parents (each level judged as a single make is, `..` refused) and lists them in `made_parents` |
 | shell | `files_delete` | dangerous | destroys without a trash |
 | shell | `check_update` | safe | reads |
@@ -637,11 +642,13 @@ publishes right now is `yos describe <name>`; whether it keeps the protocol, `yo
 | `editor` | `app-editor.sock` | `text-editor` | write a new text or code file (new with its text, then save_as a path), or open and edit one by path |
 | `email` | `app-email.sock` | — | read and send mail |
 | `image-viewer` | `app-image-viewer.sock` | `images`, `image` | view pictures |
+| `music` | `app-music.sock` | `music-player` | play the music in your library folders, or one sound file, through mpv |
 | `network` | `app-network.sock` | `network-manager` | this machine's connections, Wi-Fi and firewall state |
 | `notes` | `app-notes.sock` | — | quick markdown notes kept in the notes library, not files you name |
 | `presentation` | `app-presentation.sock` | `slides` | slide decks |
 | `shell` | `app-shell.sock` | — | the desktop itself: screens, windows, files, opening apps, approvals |
 | `snippets` | `app-snippets.sock` | `snippet-manager` | reusable pieces of code and text |
+| `spreadsheet` | `app-spreadsheet.sock` | `ysheets`, `sheets` | a sheet of numbers and formulas, opened from and saved to CSV files |
 | `studio` | `app-studio.sock` | — | make pictures from a sentence, on your own GPU or a hosted service; they land as files |
 | `system-monitor` | `app-system-monitor.sock` | `sysmonitor` | CPU, memory, disk and processes |
 | `terminal` | `app-terminal.sock` | — | a shell: run commands |
@@ -658,6 +665,10 @@ them, so describe never waits on the network for them. For somewhere else, `act 
 with the place, then describe (the act's own answer already carries the new place's state).
 Blender's surface is served by a Python addon inside Blender (`apps/blender/addon`), a port of the
 runtime's dispatch.
+
+ySheets saves what was typed, formulas included, so a cell of an opened CSV that starts with
+`=` (`=HYPERLINK(...)`, `=cmd|...`) is saved back unchanged, and Excel or LibreOffice reads it
+as a formula when the file is opened there later.
 
 Windows from other applications are not in this list unless their `.desktop` file declares a
 surface (above) — an adapter is how one gets there. The rest publish through AT-SPI, and

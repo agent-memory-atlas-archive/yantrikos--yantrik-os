@@ -1535,8 +1535,13 @@ impl Host {
         pid: Option<u32>,
         uid: Option<u32>,
     ) -> Result<serde_json::Value, String> {
-        let announced: Attach = serde_json::from_value(params.clone())
+        let mut announced: Attach = serde_json::from_value(params.clone())
             .map_err(|e| format!("`attach` needs at least an `id` and a `name`: {e}"))?;
+        // A mind's own line often names where it runs ("qwen3.5 · https://user:key@aig/v1"), and
+        // every face draws it: the Minds rows and Details, the status rail, `describe shell`, the
+        // runs-on card. It is kept only as it may be drawn, here, so none of them can show the
+        // sign-in details of an address in it (review of #856, finding 3).
+        announced.detail = announced.detail.as_deref().map(yantrik_shown_address::without_sign_in);
         if announced.id.trim().is_empty() {
             return Err("`id` is what a person types to select this harness; it cannot be empty".into());
         }
@@ -1695,6 +1700,14 @@ impl Host {
         if self.builtin(&announced.id).is_some() {
             return Err(format!(
                 "`{}` is a built-in harness; attach under a different id",
+                announced.id
+            ));
+        }
+        // The OS's own notices (the calendar's) are filed under this id. A harness under it, even
+        // a shared one, would post as the calendar and be served its feedback.
+        if announced.id == crate::notice::OS_HARNESS {
+            return Err(format!(
+                "`{}` is the id the desktop files its own notices under; attach under a different id",
                 announced.id
             ));
         }
@@ -2835,6 +2848,30 @@ mod tests {
         assert_eq!(row.pid, None, "`handle` brings no peer for the kernel to name");
     }
 
+    /// Review of #856, finding 3: a mind's own line is drawn on every face that lists minds, so
+    /// an address in it is kept without its sign-in details, query or fragment from the attach on.
+    #[test]
+    fn a_minds_own_line_is_kept_without_the_sign_in_of_any_address_in_it() {
+        let host = host();
+        let said = [
+            ("qwen3.5 \u{b7} https://user:pw@aig.example/v1?api-key=x#f", "qwen3.5 \u{b7} https://aig.example/v1"),
+            ("qwen3.5 \u{b7} https://user:p/w@aig.example/v1", "qwen3.5 \u{b7} (address not shown)"),
+            ("on http://u@127.0.0.1:11434", "on http://127.0.0.1:11434"),
+            ("on http://u:p@[::1]:4000", "on http://[::1]:4000"),
+            ("m \u{b7} user:pw@aig.example", "m \u{b7} aig.example"),
+            ("m \u{b7} user%40x:pw@aig.example", "m \u{b7} aig.example"),
+            ("m \u{b7} aig.example/v1?api-key=x", "m \u{b7} aig.example/v1"),
+            ("m \u{b7} https://aig.example/a@b", "m \u{b7} (address not shown)"),
+            ("Hermes 0.21.5 \u{b7} picked", "Hermes 0.21.5 \u{b7} picked"),
+        ];
+        for (i, (detail, kept)) in said.iter().enumerate() {
+            let id = format!("m{i}");
+            host.handle(protocol::ATTACH, &serde_json::json!({ "id": id, "name": "M", "detail": detail })).unwrap();
+            let row = host.list().into_iter().find(|e| e.id == id).unwrap();
+            assert_eq!(row.detail.as_deref(), Some(*kept), "{detail}");
+        }
+    }
+
     // ── Order: first in, first out, one at a time per conversation ─────
     //
     // These three are written against the API that existed before agents, so they can be run
@@ -3733,6 +3770,10 @@ mod tests {
         let (session, agent, turn_id, _answer) = turn_in_flight(&host);
         assert!(host.stop_agent(&agent));
         tracing::subscriber::with_default(DropLog(lines.clone()), || {
+            // Another test thread can register this log line's callsite while no subscriber is
+            // listening, and tracing caches that interest; asked again now, it counts this one
+            // (failed once in CI on #861, never locally).
+            tracing::callsite::rebuild_interest_cache();
             for text in ["secret one", "secret two"] {
                 let r = host
                     .handle(protocol::CHUNK, &json!({ "session": session, "turn_id": turn_id, "delta": text }))

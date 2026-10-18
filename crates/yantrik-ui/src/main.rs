@@ -79,6 +79,10 @@ mod wifi_reconnect;
 mod control_update;
 mod control_files;
 mod control_screen;
+/// Screenshots and screen recording (design/capture-2026-10-15.md); `control_capture` is its
+/// surface, `wire::capture_bar` its bar.
+mod capture;
+mod control_capture;
 /// The decision model, asked by the person's own surfaces (the browser's commitment check).
 mod control_decide;
 /// Private mode: the Mind off and nothing recorded, until the person turns it off.
@@ -138,6 +142,8 @@ mod mind_mode;
 mod never_ask;
 /// The right edge of every screen: the answering mind, what is at work, what it did.
 mod mind_panel;
+mod mind_panel_room;
+mod mind_panel_words;
 /// A desktop of the mind's own, inside one window: where the apps a mind opens are drawn (#239).
 mod mind_view;
 /// Whether the window a launch promised appeared, and where: `open_app`'s answer reads it back.

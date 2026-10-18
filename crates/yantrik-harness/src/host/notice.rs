@@ -257,6 +257,33 @@ mod tests {
     }
 
     #[test]
+    fn no_mind_can_attach_as_the_desktop_and_so_none_can_post_or_poll_as_the_calendar() {
+        // The OS files its calendar heads-ups under `desktop` (design/calendar-heads-up). A mind
+        // that attached under it would post as the calendar and be served its feedback.
+        let desk = Arc::new(Desk::default());
+        let host = host_with(&desk);
+        for attach in [
+            json!({ "id": "desktop", "name": "Calendar" }),
+            json!({ "id": "desktop", "name": "Calendar", "shared": true }),
+            json!({ "id": "desktop", "name": "Calendar", "shared": true, "takes_turns": false }),
+        ] {
+            for peer in [(None, None), (Some(4242), Some(1000))] {
+                let err = host.handle_from(protocol::ATTACH, &attach, peer.0, peer.1).unwrap_err();
+                assert!(err.contains("its own notices"), "{attach}: {err}");
+            }
+        }
+        assert!(host.list().iter().all(|h| h.id != "desktop"), "nothing is listed under it");
+        // A harness attached under its own id still cannot name the desktop: the host names the
+        // sender, never the request.
+        let (session, _) = attach(&host, "pi");
+        let mut forged = reminder("cal-reminder:e1:20261016T1500");
+        forged["harness"] = json!({ "id": "desktop" });
+        send(&host, &session, forged);
+        let posted = desk.posted.lock().unwrap();
+        assert_eq!(posted.iter().map(|p| p.harness.as_str()).collect::<Vec<_>>(), ["pi"]);
+    }
+
+    #[test]
     fn a_text_notice_with_no_turn_in_flight_is_stored_and_with_one_is_still_a_status_line() {
         let desk = Arc::new(Desk::default());
         let host = host_with(&desk);
