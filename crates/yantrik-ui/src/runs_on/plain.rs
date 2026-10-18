@@ -86,7 +86,8 @@ impl RunsOn {
             }
         }
         if let Some(said) = &self.said {
-            lines.push(format!("It said: {said}"));
+            // A mind's own words can hold an address with its key; it is drawn as Address is.
+            lines.push(format!("It said: {}", yantrik_app_runtime::place::without_sign_in(said)));
         }
         if let Some(fb) = &self.fallback {
             lines.push(format!("Falls back to: {fb}"));
@@ -112,7 +113,9 @@ pub(super) fn provider_words(provider: &ProviderRef) -> Option<String> {
 
 fn plain_or_unsaid(r: &RunsOn, model: Option<&str>, name_host: bool) -> String {
     let provider = match &r.provider {
-        ProviderRef::Custom(host) if name_host => Some(format!("A service you set up at {host}")),
+        // The host is the drawable one (`identity::shown_host`); when that cannot be told, the
+        // service is not named by any part of its address.
+        ProviderRef::Custom(host) if name_host && !host.is_empty() => Some(format!("A service you set up at {host}")),
         other => provider_words(other),
     };
     match (provider, model) {

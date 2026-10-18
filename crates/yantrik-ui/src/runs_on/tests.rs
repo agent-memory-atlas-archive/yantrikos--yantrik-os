@@ -359,3 +359,84 @@ fn a_mind_with_its_own_provider_is_said_as_before() {
     let silent = resolve(&[mind("hermes", "Hermes Agent", Some("Hermes 0.21.5 \u{b7} picked"), true)], None);
     assert_eq!(silent[0].destination(), "");
 }
+
+/// Addresses whose sign-in details, query or fragment must never be drawn, in any face: the
+/// review of #844 (finding 2) saw `https://user:p/w@aig.example/v1` drawn as "Custom endpoint ·
+/// user:p" and "A service you set up at user:p", because a `/` in the key ends the authority early.
+pub(crate) const HOSTILE_URLS: &[&str] = &[
+    "https://user:p/w@aig.example/v1",
+    "https://user:pw@aig.example/v1?api-key=x#f",
+    "http://u@127.0.0.1:11434",
+    "https://user:pw@[fd00::1]:8443/v1",
+    "https://user:p/w@[::1]:4000/v1",
+    "https://user:pw@api.openai.com/v1?api-key=x",
+    // The review of #856's further inputs.
+    "http://u:p@[::1]:11434",
+    "user:pw@aig.example",
+    "user%40x:pw@aig.example",
+    "https://user:p%2Fw@aig.example/v1",
+    "https://aig.example/a@b",
+    "aig.example/v1?api-key=x",
+];
+
+/// What may not appear in anything drawn from those addresses.
+pub(crate) const SECRETS: &[&str] = &["user", "pw", "p/w", "p%2F", "api-key", "u@", "u:p", "%40", "#f", "?"];
+
+pub(crate) fn assert_clean(url: &str, shown: &str) {
+    for secret in SECRETS {
+        assert!(!shown.contains(secret), "{url} draws {secret:?}: {shown:?}");
+    }
+}
+
+#[test]
+fn no_face_draws_any_part_of_an_address_sign_in_query_or_fragment() {
+    for url in HOSTILE_URLS {
+        // The companion set in config.yaml, its fallback, a mind on the gateway, and a mind's own
+        // line naming the address.
+        let companion = CompanionFact { base_url: url.to_string(), model: "qwen3.5:27b".into(), source: "config.yaml".into(), ..CompanionFact::default() };
+        let builtin = MindFact { id: "companion".into(), name: "Yantrik Companion".into(), detail: None, answering: true, builtin: true, gateway: None };
+        let minds = [
+            builtin,
+            on_gateway("hermes", "Hermes Agent", "Hermes 0.21.5 \u{b7} picked", sends(url, "custom", "qwen3.5:27b")),
+            mind("pi", "Pi", Some(&format!("qwen3.5:27b \u{b7} {url}")), false),
+        ];
+        let rows = resolve(&minds, Some(&companion));
+        assert_eq!(rows.len(), 3);
+        for r in &rows {
+            for shown in [r.runs_on(), r.source(), r.destination(), r.plain_runs_on(), r.plain_answering(), r.plain_source(), r.details(), r.provider.label()] {
+                assert_clean(url, &shown);
+            }
+            assert_clean(url, &crate::wire::runs_on_card::row_line(&rows, &r.id));
+            assert_clean(url, &crate::wire::runs_on_card::row_details(&rows, &r.id));
+        }
+        assert_clean(url, &summary(&rows));
+        for u in in_use_not_saved(&rows, Some(&companion), &[]) {
+            assert_clean(url, &u.label);
+        }
+        assert_clean(url, &seen_at(url));
+        assert_clean(url, &fallback_label("openai", Some(url)));
+        assert_clean(url, &from_url(url).label());
+    }
+}
+
+#[test]
+fn an_address_whose_host_cannot_be_told_is_a_service_you_set_up() {
+    let at = |url: &str| {
+        let c = CompanionFact { base_url: url.into(), model: "qwen3.5:27b".into(), source: "config.yaml".into(), ..CompanionFact::default() };
+        let builtin = MindFact { id: "companion".into(), name: "Yantrik Companion".into(), detail: None, answering: true, builtin: true, gateway: None };
+        resolve(&[builtin], Some(&c)).remove(0)
+    };
+    let odd = at("https://user:p/w@aig.example/v1");
+    assert_eq!(odd.runs_on(), "Custom endpoint \u{b7} qwen3.5:27b");
+    assert_eq!(odd.plain_answering(), "A service you set up \u{b7} qwen3.5:27b");
+    assert!(odd.details().contains("Address: not shown"), "{}", odd.details());
+    // A clean address is still named by its host, and a local one is still local.
+    let clean = at("https://user:pw@aig.example/v1?api-key=x#f");
+    assert_eq!(clean.runs_on(), "Custom endpoint \u{b7} aig.example \u{b7} qwen3.5:27b");
+    assert_eq!(clean.plain_answering(), "A service you set up at aig.example \u{b7} qwen3.5:27b");
+    assert_eq!(at("http://u@127.0.0.1:11434").plain_runs_on(), "A model server on this computer \u{b7} qwen3.5:27b");
+    assert_eq!(at("https://user:pw@[fd00::1]:8443/v1").plain_runs_on(), "A model server on your network \u{b7} qwen3.5:27b");
+    // is_local reads the URL as it always did.
+    assert!(identity::is_local("http://u@127.0.0.1:11434") && identity::is_local("https://user:pw@[fd00::1]:8443/v1"));
+    assert!(!identity::is_local("https://user:pw@aig.example/v1"));
+}

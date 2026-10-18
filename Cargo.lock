@@ -11109,6 +11109,7 @@ dependencies = [
  "tracing-subscriber",
  "yantrik-ipc-contracts",
  "yantrik-ipc-transport",
+ "yantrik-shown-address",
  "yantrik-surface",
  "yantrik-version",
 ]
@@ -11188,6 +11189,7 @@ dependencies = [
  "tungstenite",
  "ureq 2.12.1",
  "yantrik-ml",
+ "yantrik-shown-address",
 ]
 
 [[package]]
@@ -11222,6 +11224,7 @@ dependencies = [
  "yantrik-ipc-transport",
  "yantrik-ml",
  "yantrik-os",
+ "yantrik-shown-address",
  "yantrikdb",
 ]
 
@@ -11282,6 +11285,7 @@ dependencies = [
  "yantrik-ipc-contracts",
  "yantrik-ipc-transport",
  "yantrik-ml",
+ "yantrik-shown-address",
  "yantrikdb",
 ]
 
@@ -11445,6 +11449,7 @@ dependencies = [
  "tracing",
  "ureq 2.12.1",
  "yantrik-ml",
+ "yantrik-shown-address",
 ]
 
 [[package]]
@@ -11461,6 +11466,7 @@ dependencies = [
  "unicode-normalization",
  "yantrik-ipc-contracts",
  "yantrik-ipc-transport",
+ "yantrik-shown-address",
 ]
 
 [[package]]
@@ -11580,6 +11586,7 @@ dependencies = [
  "tracing",
  "tts",
  "ureq 3.2.0",
+ "yantrik-shown-address",
 ]
 
 [[package]]
@@ -11736,6 +11743,10 @@ dependencies = [
  "libc",
  "tracing",
 ]
+
+[[package]]
+name = "yantrik-shown-address"
+version = "0.1.0"
 
 [[package]]
 name = "yantrik-snippet-manager"

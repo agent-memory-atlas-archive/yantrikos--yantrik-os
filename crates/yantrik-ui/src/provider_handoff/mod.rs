@@ -178,11 +178,18 @@ impl Plan {
         )
     }
 
-    /// The address, and when it is not the provider's own, whose it is not.
+    /// The address, and when it is not the provider's own, whose it is not. The host is the
+    /// drawable one (`shown_host`, the one rule): for `https://user:p/w@aig.example/v1` the raw
+    /// `host` is "user:p", part of the key (review of #856, finding 1). Whether the key may cross
+    /// plain http is still decided on the address as it is (`card`).
     fn where_to(&self) -> String {
+        let at = match crate::runs_on::identity::shown_host(&self.destination) {
+            h if h.is_empty() => "an address not shown, as it may hold sign-in details".to_string(),
+            h => h,
+        };
         match &self.own_address {
-            Some(own) => format!("{} (not {}'s own address, {own})", host(&self.destination), self.provider_name),
-            None => host(&self.destination),
+            Some(own) => format!("{at} (not {}'s own address, {own})", self.provider_name),
+            None => at,
         }
     }
 }
