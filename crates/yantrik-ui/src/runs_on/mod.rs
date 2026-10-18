@@ -22,7 +22,7 @@ pub mod identity;
 mod plain;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use identity::ProviderRef;
 
@@ -116,7 +116,7 @@ impl Backend {
 /// runtime by its default port on this machine), "Ollama Cloud", "10.0.0.2:8000, on this
 /// network". The words a destination or a fallback is named in.
 pub fn seen_at(base_url: &str) -> String {
-    let host = identity::host(base_url);
+    let host = identity::shown_host(base_url);
     match identity::from_url(base_url) {
         ProviderRef::Known(p) if p.kind == yantrik_ml::ProviderKind::Local => format!("{} at {host}", p.display_name),
         ProviderRef::Known(p) => p.display_name.to_string(),
@@ -125,6 +125,7 @@ pub fn seen_at(base_url: &str) -> String {
             None => h,
         },
         ProviderRef::Local(h) => format!("{h}, on this network"),
+        ProviderRef::Custom(h) if h.is_empty() => "a service you set up".to_string(),
         ProviderRef::Custom(h) => h,
         ProviderRef::NotReported => "an address not known".to_string(),
     }

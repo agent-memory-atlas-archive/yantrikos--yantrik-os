@@ -3310,7 +3310,7 @@ fn build_companion(config: CompanionConfig) -> Result<CompanionService, String> 
                 let url = fb_config.api_base_url.as_deref()
                     .ok_or_else(|| "api_base_url required for API fallback".to_string())?;
                 let model = fb_config.api_model.as_deref().unwrap_or("default");
-                tracing::info!(url, model, "Fallback: API");
+                tracing::info!(url = %yantrik_app_runtime::place::address_of(url), model, "Fallback: API");
                 FallbackConfig::Api {
                     base_url: url.to_string(),
                     model: model.to_string(),

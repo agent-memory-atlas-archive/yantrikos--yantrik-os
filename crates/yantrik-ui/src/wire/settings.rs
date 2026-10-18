@@ -1259,7 +1259,7 @@ pub(crate) fn push_providers_to_ui(ui: &App, store: &ProviderStore) {
             id: e.id.clone().into(),
             name: e.name.clone().into(),
             provider_type: e.provider_type.clone().into(),
-            base_url: e.base_url.clone().into(),
+            base_url: shown_address(&e.base_url).into(),
             status: "connected".into(), // default — will be updated by test
             is_primary: e.is_primary,
             is_fallback: e.is_fallback,
@@ -1268,6 +1268,15 @@ pub(crate) fn push_providers_to_ui(ui: &App, store: &ProviderStore) {
         })
         .collect();
     ui.set_settings_ai_providers(ModelRc::new(VecModel::from(items)));
+}
+
+/// A saved provider's address as its row draws it: without the sign-in details, query or
+/// fragment that can carry a key (`place::address_of`). The form keeps the address as saved.
+fn shown_address(base_url: &str) -> String {
+    match yantrik_app_runtime::place::address_of(base_url) {
+        shown if shown.is_empty() && !base_url.trim().is_empty() => "Address not shown, as it may hold sign-in details".to_string(),
+        shown => shown,
+    }
 }
 
 /// Push provider list with test result applied.
@@ -1279,7 +1288,7 @@ fn push_providers_to_ui_with_test(ui: &App, store: &ProviderStore, result: &Test
             id: e.id.clone().into(),
             name: e.name.clone().into(),
             provider_type: e.provider_type.clone().into(),
-            base_url: e.base_url.clone().into(),
+            base_url: shown_address(&e.base_url).into(),
             status: if result.success {
                 "connected".into()
             } else {
@@ -1442,6 +1451,21 @@ fn format_param_count(size_bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A saved provider's row draws its address without the sign-in details, query or fragment
+    /// (review of #844): `push_providers_to_ui` and `push_providers_to_ui_with_test` both use this.
+    #[test]
+    fn a_saved_provider_row_never_draws_its_key() {
+        for url in crate::runs_on::tests::HOSTILE_URLS {
+            crate::runs_on::tests::assert_clean(url, &shown_address(url));
+        }
+        assert_eq!(shown_address("https://user:pw@aig.example/v1?api-key=x#f"), "https://aig.example/v1");
+        assert_eq!(shown_address("https://user:p/w@aig.example/v1"), "Address not shown, as it may hold sign-in details");
+        assert_eq!(shown_address("http://127.0.0.1:11434"), "http://127.0.0.1:11434");
+        assert_eq!(shown_address(""), "");
+        let code = include_str!("settings.rs");
+        assert_eq!(code.matches("base_url: e.base_url.clone().into()").count(), 1, "only this line, in this test, names it");
+    }
 
     #[test]
     fn a_person_who_never_chose_a_mind_prefers_hermes() {

@@ -44,11 +44,15 @@ pub fn place_of(dir: &Path, home: &Path) -> String {
 }
 
 /// The site a URL is from, without the scheme, the path or a `www.`: "hn.algolia.com". Empty for
-/// something that is not a URL.
+/// something that is not a URL, and for one `address_of` would not draw: the site is read from
+/// the drawable address, so no part of its sign-in details is ever the site.
 pub fn site_of(url: &str) -> String {
-    let Some((_, rest)) = url.trim().split_once("://") else { return String::new() };
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    let host = authority.rsplit('@').next().unwrap_or("");
+    if !url.contains("://") {
+        return String::new();
+    }
+    let shown = address_of(url);
+    let rest = shown.split_once("://").map_or(shown.as_str(), |(_, r)| r);
+    let host = rest.split('/').next().unwrap_or("");
     host.strip_prefix("www.").unwrap_or(host).to_string()
 }
 
@@ -56,12 +60,13 @@ pub fn site_of(url: &str) -> String {
 /// query or fragment that can carry a key: `https://user:key@aig.example/v1?api-key=k#x` →
 /// "https://aig.example/v1". A URL whose sign-in details cannot be told from its host and path (an
 /// `@` past the host: a key holding a `/`, `?` or `#`) gives an empty string rather than a guess
-/// that could show part of the key.
+/// that could show part of the key. A `\` ends the host as `/` does, as a browser and the `url`
+/// crate read it, so `https://evil.example\@api.x.ai` is never drawn as api.x.ai.
 pub fn address_of(url: &str) -> String {
     let url = url.trim();
     let (scheme, whole) = url.split_once("://").unwrap_or(("", url));
     let rest = whole.split(['?', '#']).next().unwrap_or("");
-    let (authority, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+    let (authority, path) = rest.split_at(rest.find(['/', '\\']).unwrap_or(rest.len()));
     let host = authority.rsplit('@').next().unwrap_or("");
     if host.is_empty() || whole.matches('@').count() != authority.matches('@').count() {
         return String::new();
@@ -71,6 +76,35 @@ pub fn address_of(url: &str) -> String {
     } else {
         format!("{scheme}://{host}{path}")
     }
+}
+
+/// Someone else's line (a mind's own words) with every address in it drawn as `address_of`
+/// draws it: a word holding `://` or `@` becomes its address, or "(address not shown)" when its
+/// sign-in details cannot be told from its host. Everything else, spacing included, is kept.
+pub fn without_sign_in(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut word = String::new();
+    let flush = |word: &mut String, out: &mut String| {
+        if word.contains("://") || word.contains('@') {
+            match address_of(word) {
+                shown if shown.is_empty() => out.push_str("(address not shown)"),
+                shown => out.push_str(&shown),
+            }
+        } else {
+            out.push_str(word);
+        }
+        word.clear();
+    };
+    for c in text.chars() {
+        if c.is_whitespace() {
+            flush(&mut word, &mut out);
+            out.push(c);
+        } else {
+            word.push(c);
+        }
+    }
+    flush(&mut word, &mut out);
+    out
 }
 
 /// The person's home directory, as `place_of` wants it.
@@ -109,6 +143,28 @@ mod tests {
         assert_eq!(site_of("https://www.example.org/file.zip"), "example.org");
         assert_eq!(site_of("http://user:pw@10.0.0.2:8000/x"), "10.0.0.2:8000");
         assert_eq!(site_of("not a url"), "");
+        // The site is read from the drawable address: no part of the sign-in details is a site.
+        assert_eq!(site_of("https://user:pw@dl.example/f.zip?api-key=x#f"), "dl.example");
+        for odd in ["https://user:p/w@dl.example/f.zip", "https://user:p?w@dl.example", "https://evil.example\\@dl.example/f"] {
+            assert_eq!(site_of(odd), "", "{odd}");
+        }
+    }
+
+    #[test]
+    fn a_line_someone_else_wrote_is_drawn_without_the_sign_in_of_any_address_in_it() {
+        assert_eq!(without_sign_in("Hermes 0.21.5 \u{b7} picked"), "Hermes 0.21.5 \u{b7} picked");
+        assert_eq!(
+            without_sign_in("qwen3.5:27b \u{b7} https://user:pw@aig.example/v1?api-key=x#f"),
+            "qwen3.5:27b \u{b7} https://aig.example/v1"
+        );
+        assert_eq!(without_sign_in("x \u{b7} https://user:p/w@aig.example/v1"), "x \u{b7} (address not shown)");
+        assert_eq!(without_sign_in("on u@127.0.0.1:11434"), "on 127.0.0.1:11434");
+        for line in ["https://user:p/w@[::1]:4000/v1 now", "user:p/w@aig.example", "a\tuser:pw@[fd00::1]:8443"] {
+            let shown = without_sign_in(line);
+            for secret in ["user", "pw", "p/w", "api-key"] {
+                assert!(!shown.contains(secret), "{line} shows {secret}: {shown}");
+            }
+        }
     }
 
     #[test]
@@ -118,7 +174,7 @@ mod tests {
         assert_eq!(address_of("localhost:11434"), "localhost:11434");
         assert_eq!(address_of("https://key@[::1]:4000"), "https://[::1]:4000");
         // A key holding a character the split stops at is not guessed around: nothing is drawn.
-        for odd in ["https://user:p/w@aig.example/v1", "https://user:p?w@aig.example", "https://user:p#w@aig.example", "https://@/v1"] {
+        for odd in ["https://user:p/w@aig.example/v1", "https://user:p?w@aig.example", "https://user:p#w@aig.example", "https://@/v1", "https://evil.example\\@api.x.ai/v1"] {
             assert_eq!(address_of(odd), "", "{odd}");
         }
         for url in ["https://user:pw@aig.example/v1?api-key=sk-123#frag", "https://user:p/w@aig.example/v1"] {
