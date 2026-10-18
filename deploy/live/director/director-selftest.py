@@ -392,9 +392,12 @@ check("the showcase browser has no network, a throwaway profile (its HOME too), 
       and "load-extension" not in browser and "allow-file-access" not in browser)
 check("the showcase browser starts only on the Wayland socket wayland-grant checked",
       'stat -c %d:%i "$sock"' in browser and "wayland.id" in browser)
+check("the showcase browser puts no infobar or first-run prompt on the public stream",
+      {"--test-type", "--no-first-run", "--no-default-browser-check", "--deny-permission-prompts"} <= set(flags))
 publisher_unit = unit_lines("yantrik-live-showcase.service")
 browser_unit = unit_lines("yantrik-live-showcase-browser.service")
 windows_unit = unit_lines("yantrik-live-windows.service")
+grant_unit = unit_lines("yantrik-live-showcase-grant.service")
 
 
 def setting(unit, key):
@@ -421,18 +424,29 @@ check("the browser is its own account, with no capability, and can name nothing 
       and {"ProtectSystem=strict", "ProtectProc=invisible", "NoNewPrivileges=yes", "CapabilityBoundingSet=",
            "PrivateTmp=yes", "IPAddressDeny=any"} <= set(browser_unit)
       and not any(x.startswith("IPAddressAllow") for x in browser_unit + publisher_unit + windows_unit)
-      and setting(browser_unit, "ExecStartPre") == "+/usr/bin/python3 -I /opt/yantrik-live/director/director.py wayland-grant")
+      and not any(line.startswith("ExecStartPre") for line in browser_unit))
+# A "+" ExecStartPre runs inside the browser's namespace, where director.py and /run/user are hidden
+# (live test on 561), so the grant is a root oneshot of its own. Not RemainAfterExit, so each start
+# of the browser, every Restart=always one included, runs it again; Wants=, so a failed grant does
+# not leave the browser waiting on its dependency for good (both seen on systemd 255).
+check("the Wayland grant is a root oneshot outside the browser's namespace, run again before every browser start",
+      "Type=oneshot" in grant_unit and not any(line.startswith(("User=", "RemainAfterExit", "ProtectHome",
+                                                                "TemporaryFileSystem", "PrivateTmp")) for line in grant_unit)
+      and setting(grant_unit, "ExecStart") == "/usr/bin/python3 -I /opt/yantrik-live/director/director.py wayland-grant"
+      and setting(browser_unit, "Wants") == "yantrik-live-showcase-grant.service"
+      and "yantrik-live-showcase-grant.service" in setting(browser_unit, "After").split()
+      and not any(line.startswith(("Requires", "BindsTo")) for line in browser_unit))
 check("the window loop is the desktop's account and runs no browser",
       "User=yantrik" in windows_unit and "IPAddressDeny=any" in windows_unit
       and setting(windows_unit, "ExecStart") == "/usr/bin/python3 /opt/yantrik-live/director/director.py windows"
       and "showcase-browser" not in setting(windows_unit, "ExecStart"))
 setup = open(os.path.join(HERE, "setup-director.sh"), encoding="utf-8").read()
-check("setup makes the showcase root's, the browser's account, and the root-only rotation, and installs all three"
+check("setup makes the showcase root's, the browser's account, and the root-only rotation, and installs all four"
       " units", "install -d -o root -g root -m 755 /opt/yantrik-live/showcase" in setup
       and "-o yantrik -g yantrik -m 755 /opt/yantrik-live/showcase" not in setup
       and "useradd --system" in setup and "yantrik-showcase" in setup and "/etc/yantrik-live/showcase-rotation" in setup
       and all(u in setup for u in ("yantrik-live-showcase.service", "yantrik-live-showcase-browser.service",
-                                   "yantrik-live-windows.service")))
+                                   "yantrik-live-showcase-grant.service", "yantrik-live-windows.service")))
 
 # While a mission runs, the Director asks for its game; between missions the publisher goes round the rotation.
 d.write_state(d.DONE, set())

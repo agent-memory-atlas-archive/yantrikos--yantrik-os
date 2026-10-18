@@ -39,7 +39,7 @@ ones are made, and the first idea every game gets in polish is its demo mode (DE
 
 Runs on the live instance (VM 561) as the desktop's account, from yantrik-live-director.service;
 `director.py showcase` is the root publisher, `windows` the window loop, `wayland-grant` the
-browser's start step.
+root step before each browser start (yantrik-live-showcase-grant.service).
 Missions are in missions.json beside it. Progress goes to ~/director/log.jsonl, one line a turn.
 Stdlib only; the image ships no Python packages for it.
 """
@@ -107,7 +107,8 @@ ROTATION_OWNER = 0
 # A mission is shown only while the Director's own service is running: the Mind can write
 # showing.json, but not start a unit or make its cgroup.
 DIRECTOR_CGROUP = "/sys/fs/cgroup/system.slice/yantrik-live-director.service/cgroup.procs"
-# Where the browser's ExecStartPre records which socket it was given (wayland_grant).
+# Where the grant before the browser (yantrik-live-showcase-grant.service) records which socket it
+# was given (wayland_grant).
 WAYLAND_RUN = "/run/yantrik-live-showcase"
 WAYLAND_SOCKET = "wayland-0"
 # A game copied into the showcase is at most this big; a bigger one is not shown at all.
@@ -1139,10 +1140,10 @@ def windows_main():
 
 
 def wayland_grant():
-    """The browser unit's ExecStartPre, as root: let SHOWCASE_ACCOUNT connect to the desktop's
-    Wayland socket, and only that socket. The socket is the desktop account's, 0755, so another
-    account cannot connect; one ACL entry (rw for SHOWCASE_ACCOUNT) is added, set through the
-    descriptor of what was opened, never a link. Its device and inode go to WAYLAND_RUN, root's,
+    """yantrik-live-showcase-grant.service, as root, before each start of the browser: let
+    SHOWCASE_ACCOUNT connect to the desktop's Wayland socket, and only that socket. The socket is
+    the desktop account's, 0755, so another account cannot connect; one ACL entry (rw for
+    SHOWCASE_ACCOUNT) is added, set through the descriptor of what was opened, never a link. Its device and inode go to WAYLAND_RUN, root's,
     where showcase-browser checks that the socket bound into its unit is this one."""
     mind, show = pwd.getpwnam(MIND_ACCOUNT), pwd.getpwnam(SHOWCASE_ACCOUNT)
     path = f"/run/user/{mind.pw_uid}/{WAYLAND_SOCKET}"

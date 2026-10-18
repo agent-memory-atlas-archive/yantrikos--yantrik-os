@@ -43,8 +43,12 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 143' TERM INT HUP
 
-# Not exec: this script must outlive Chromium to remove its profile.
-chromium --ozone-platform=wayland --user-data-dir="$profile" \
+# Not exec: this script must outlive Chromium to remove its profile. On the public stream, so no
+# bar or prompt may cover the game: --test-type stops the "unsupported command-line flag" infobar
+# that --host-resolver-rules raises (and the missing-API-keys one), and turns off no confinement;
+# the profile is new each time, so there is no restore-session bubble; first-run, default-browser
+# and permission prompts are off below. (--disable-infobars has done nothing since Chromium 65.)
+chromium --test-type --ozone-platform=wayland --user-data-dir="$profile" \
     --app="file://$frame" --window-size=960,1080 \
     --proxy-server="http://127.0.0.1:9" --proxy-bypass-list="<-loopback>" \
     --host-resolver-rules="MAP * ~NOTFOUND" \
