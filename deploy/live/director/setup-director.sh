@@ -18,6 +18,10 @@ guest 'set -e; install -d -m 755 /opt/yantrik-live/director; install -d -o yantr
 if [ "$(stat -c %U /opt/yantrik-live/showcase 2>/dev/null)" != root ]; then rm -rf /opt/yantrik-live/showcase; fi
 install -d -o root -g root -m 755 /opt/yantrik-live/showcase
 id -u yantrik-showcase >/dev/null 2>&1 || useradd --system --user-group --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin yantrik-showcase
+# The task contracts store has an account of its own too: the Director and the Mind both run as
+# yantrik, and neither may write the store or a decision in it (contracts.py). systemd makes its
+# /var/lib/yantrik-contracts, 0700; a re-run keeps every contract in it.
+id -u yantrik-contracts >/dev/null 2>&1 || useradd --system --user-group --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin yantrik-contracts
 # The rotation: the finished games a person lets on air between missions, one mission id a line.
 # Root writes it, and a re-run leaves it as it is. To pull a game, delete its line; it is gone
 # from the rotation at its next turn.
@@ -26,10 +30,12 @@ install -d -o root -g root -m 755 /etc/yantrik-live
 # All of this only holds while the Mind cannot become root: an old image gave yantrik sudo
 # without a password, which the installers remove (#397).
 if runuser -u yantrik -- sudo -n true 2>/dev/null; then echo "WARNING: yantrik has passwordless sudo here; the showcase is not confined from the Mind until that rule is gone"; fi' < /dev/null
-for f in director.py missions.json check-page showcase-browser; do
+for f in director.py contracts.py missions.json check-page showcase-browser; do
   guest "set -e; cat > /opt/yantrik-live/director/$f.new; chmod 644 /opt/yantrik-live/director/$f.new; case $f in check-page|showcase-browser) chmod 755 /opt/yantrik-live/director/$f.new ;; esac; mv /opt/yantrik-live/director/$f.new /opt/yantrik-live/director/$f" < "$f"
 done
-for u in yantrik-live-director.service yantrik-live-director.timer yantrik-live-showcase.service \
+# The person's command, root's alone: accepting a contract is a person's decision.
+guest 'set -e; cat > /usr/local/sbin/director-contracts.new; chown root:root /usr/local/sbin/director-contracts.new; chmod 700 /usr/local/sbin/director-contracts.new; mv /usr/local/sbin/director-contracts.new /usr/local/sbin/director-contracts' < director-contracts
+for u in yantrik-live-director.service yantrik-live-director.timer yantrik-live-contracts.service yantrik-live-showcase.service \
          yantrik-live-showcase-browser.service yantrik-live-showcase-grant.service yantrik-live-windows.service; do
   guest "set -e; cat > /etc/systemd/system/$u; chmod 644 /etc/systemd/system/$u" < "$u"
 done
@@ -61,12 +67,24 @@ systemctl is-active yantrik-egress
 echo "the Mind bridge is sealed and the egress socket is root'"'"'s; restart yantrik-mind for the bridge to take effect"' < /dev/null
 fi
 if [ "$ENABLE" = 1 ]; then
+  # The contracts service first: the Director starts no mission without a contract.
+  guest 'systemctl enable yantrik-live-contracts.service >/dev/null 2>&1; systemctl restart yantrik-live-contracts.service; systemctl is-active yantrik-live-contracts.service' < /dev/null
+  # The threat the store's account is for, tried on the machine itself: the Mind's account must not
+  # be able to accept a contract, write the store, or run the person's command. Setup fails if it can.
+  guest 'set -e; sleep 1
+runuser -u yantrik -- /usr/bin/python3 -I /opt/yantrik-live/director/contracts.py probe || { echo "FAIL: the Mind'"'"'s account can reach the contracts store"; exit 1; }
+if runuser -u yantrik -- /usr/local/sbin/director-contracts list >/dev/null 2>&1; then echo "FAIL: the Mind'"'"'s account can run director-contracts"; exit 1; fi
+echo "as yantrik: director-contracts refused"
+case "$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null)" in 1|2|3) ;; *) echo "WARNING: ptrace_scope is not 1 or more: the Mind'"'"'s account could reach into the Director and report in its name (never accept)" ;; esac' < /dev/null
   guest 'systemctl enable --now yantrik-live-director.timer >/dev/null 2>&1; systemctl is-active yantrik-live-director.timer' < /dev/null
   # Restarted, not only started, so a re-run puts the new showcase code on screen.
   guest 'for u in yantrik-live-showcase yantrik-live-showcase-browser yantrik-live-windows; do systemctl enable $u.service >/dev/null 2>&1; systemctl restart $u.service; systemctl is-active $u.service; done' < /dev/null
 else
+  # Not started here, but a running one gets the new code (the Director's unit wants it anyway).
+  guest 'systemctl try-restart yantrik-live-contracts.service' < /dev/null
   echo "timer and showcase left off (ENABLE=0)"
 fi
 echo "games in the showcase's rotation (root's /etc/yantrik-live/showcase-rotation; none until a person adds one):"
 guest 'grep -v "^#" /etc/yantrik-live/showcase-rotation || true' < /dev/null
 echo "director installed on VM $VM; start a mission now with: systemctl start --no-block yantrik-live-director"
+echo "follow and decide its contracts, as root on the VM: director-contracts list | show <id> | accept <id> [note] | reject <id> <reason>"

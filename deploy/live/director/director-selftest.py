@@ -44,6 +44,13 @@ prints, scripted = [0], []
 d.folder_print = lambda m: scripted.pop(0) if scripted else (prints.__setitem__(0, prints[0] + 1), prints[0])[1]
 chats = []
 d.new_chat = lambda: (chats.append(len(sent)), (True, ""))[1]
+# The contracts service, in process: the real store (contracts.py) on a scratch file, called as
+# the kernel would name the Director.
+cspec = importlib.util.spec_from_file_location("contracts", os.path.join(HERE, "contracts.py"))
+c = importlib.util.module_from_spec(cspec)
+cspec.loader.exec_module(c)
+store = c.connect(os.path.join(tmp, "contracts.db"))
+d.contract_call = lambda req: c.handle(store, "director", json.dumps(req).encode())
 
 failed = 0
 
@@ -478,6 +485,12 @@ live = d.live_request(builds, me)
 check("the publisher shows the Director's mission, with a turn line it makes and the caption made plain again",
       live is not None and live[0]["id"] == "polish:" + specs[0]["id"]
       and live[1] == "turn 3 · the page throws an error, being fixed" and live[2] == "Added sound.", repr(live))
+check("the commands of the turn just ended are read from what the shell showed, after the Director's message",
+      d.turn_calls({"conversation": [{"role": "assistant", "calls": [{"name": "old", "summary": "ls"}]},
+                                     {"role": "user", "text": "keep going"},
+                                     {"role": "assistant", "calls": [{"name": "shell.agent_run", "summary": "mkdir -p\n x"},
+                                                                     "not a call"]}]})
+      == ["shell.agent_run: mkdir -p x"])
 forged = []
 for req in ({"mission": "../etc", "at": d.time.time()}, {"mission": specs[0]["id"], "at": 0},
             {"mission": specs[0]["id"], "at": "soon"}, ["not", "a", "dict"]):
@@ -803,5 +816,131 @@ with open(os.path.join(HERE, "yantrik-live-director.service"), encoding="utf-8")
     unit = [line.strip() for line in f]
 check("the Director's service has no IP, so a page the Mind wrote reaches no network when checked",
       "IPAddressDeny=any" in unit and not any(line.startswith("IPAddressAllow") for line in unit))
+
+# Task contracts (contracts.py): every mission is one, and the Director's FINISHED is delivered,
+# never accepted.
+
+
+def contract_for(mission):
+    row = store.execute("SELECT id FROM contracts WHERE mission=? ORDER BY rowid DESC LIMIT 1", (mission,)).fetchone()
+    return c.contract_view(store, row[0]) if row else None
+
+
+def as_person(req):
+    return c.handle(store, "person", json.dumps(req).encode())
+
+
+first = specs[0]
+d.write_state(d.DONE, set())
+d.write_state(d.STARTED, set())
+# A deliberately false FINISHED: the Mind touches one file (a meaningless edit) and says it built
+# everything; the page loads clean. The Director's heuristic passes it, so it is delivered, and
+# that is as far as it goes.
+scripted[:] = [-10, -11]
+replies[:] = [("All eight steps are in and working.\n\nFINISHED", "answered")]
+d.main()
+k = contract_for(first["id"])
+check("a mission is a contract whose intent is its brief, with the standing rule recorded as legacy",
+      k is not None and k["revisions"][0]["intent"]["brief"].startswith("Please build")
+      and k["revisions"][0]["grant"]["status"] == "legacy, not contract-enforced", repr(k and k["revisions"][0]))
+check("a false FINISHED over a folder that changed, with a clean page, stays delivered, not accepted",
+      k["state"] == "delivered" and k["decision"] is None
+      and [e["kind"] for e in k["events"]][-3:] == ["file_changed", "page_check", "finished_said"], repr(k["events"][-3:]))
+forged = [c.handle(store, "director", json.dumps(r).encode()) for r in (
+    {"op": "decide", "contract": k["id"], "verdict": "accepted", "note": "looks done"},
+    {"op": "event", "contract": k["id"], "revision": 1, "kind": "accepted"},
+    {"op": "event", "contract": k["id"], "revision": 1, "kind": "turn_started", "turn": 2, "prompt": "x"})]
+check("nothing the Director can send accepts a contract or moves a delivered one on",
+      not any(r["ok"] for r in forged) and contract_for(first["id"])["state"] == "delivered", repr(forged))
+rejected = as_person({"op": "decide", "contract": k["id"], "verdict": "rejected", "note": "the levels are not there"})
+k = contract_for(first["id"])
+check("a person's rejection ends it, with the reason and the revision it applied to",
+      rejected["ok"] and k["state"] == "failed" and k["decision"]["verdict"] == "rejected"
+      and k["decision"]["revision"] == 1 and "levels" in k["reason"], repr((rejected, k["decision"])))
+
+# A FINISHED over nothing written is refused and the contract runs on; the true one after it is
+# delivered, and accepted only when a person says so.
+second = specs[1]
+d.write_state(d.DONE, {first["id"]})
+d.write_state(d.STARTED, set())
+scripted[:] = [-20, -20, -21]
+replies[:] = [("FINISHED", "answered"), ("Wrote the code, the check is clean.\n\nFINISHED", "answered")]
+d.main()
+k = contract_for(second["id"])
+kinds = [e["kind"] for e in k["events"]]
+check("a FINISHED over nothing changed is refused on the contract, and it keeps running",
+      "finished_refused" in kinds and kinds.index("finished_refused") < kinds.index("turn_started", kinds.index("finished_refused")),
+      repr(kinds))
+check("a true FINISHED is delivered, not accepted, until a person decides",
+      k["state"] == "delivered" and k["decision"] is None and second["id"] in d.finished_missions(), repr(k["state"]))
+accepted = as_person({"op": "decide", "contract": k["id"], "verdict": "accepted", "note": ""})
+k = contract_for(second["id"])
+check("a person's accept makes it accepted, over the events of the revision it applied to",
+      accepted["ok"] and k["state"] == "accepted" and k["decision"]["evidence"] == [e["seq"] for e in k["events"][:-1]],
+      repr(k["decision"]))
+check("a decided contract is never decided again",
+      not as_person({"op": "decide", "contract": k["id"], "verdict": "rejected", "note": "changed my mind"})["ok"])
+show = c.show_text(k)
+with open(os.path.join(tmp, "sample-show.txt"), "w", encoding="utf-8") as f:
+    f.write(show)
+check("director-contracts show says what was asked, what was done, the evidence and the state, in words",
+      all(w in show for w in ("What was asked", "Please build", "What was done", "the Mind said FINISHED; the Director "
+                              "refused it", "Evidence", "Last page check: loads clean", "accepted by a person",
+                              "legacy, not contract-enforced")), show)
+
+# Stopped mid-mission: by systemctl stop (SIGTERM, a SystemExit through the turn), and by a kill
+# that leaves no word at all. Both pick up the same contract, with its events, on the next start.
+third = specs[2]
+d.write_state(d.DONE, {first["id"], second["id"]})
+d.write_state(d.STARTED, set())
+os.makedirs(os.path.join(d.PROJECTS, third["folder"]), exist_ok=True)
+open(os.path.join(d.PROJECTS, third["folder"], "PLAN.md"), "w").write("- [ ] step 1\n")
+real_send = d.send
+
+
+def sigterm(text):
+    raise SystemExit(143)
+
+
+d.send = sigterm
+try:
+    d.main()
+except SystemExit:
+    pass
+d.send = real_send
+k = contract_for(third["id"])
+check("a Director stopped mid-turn leaves its contract blocked with the reason, not running",
+      k["state"] == "blocked" and "stopped before the mission ended" in k["reason"], repr((k["state"], k["reason"])))
+# Killed outright: the contract is left running, as a SIGKILL would leave it.
+c.handle(store, "director", json.dumps({"op": "event", "contract": k["id"], "revision": k["revision"],
+                                        "kind": "turn_started", "turn": 1, "prompt": "keep going"}).encode())
+held = len(contract_for(third["id"])["events"])
+# The service restarts too: a fresh connection to the same file.
+store.close()
+store = c.connect(os.path.join(tmp, "contracts.db"))
+replies[:] = [("working", "card unanswered")]
+d.main()
+k = contract_for(third["id"])
+kinds = [e["kind"] for e in k["events"]]
+check("after a restart the same contract continues, its earlier events intact, the cut-off turn said",
+      len(k["events"]) > held and kinds[held:held + 3] == ["interrupted", "resumed", "turn_started"]
+      and k["state"] == "blocked" and sent[-1].startswith("Please keep going"), repr(kinds))
+
+# A changed brief is a new revision, and the decision of the old one does not carry.
+specs_changed = [dict(s) for s in specs]
+specs_changed[2]["details"] = specs_changed[2]["details"] + " Add a second level."
+real_load = d.load_builds
+d.load_builds = lambda: [d.build(s) for s in specs_changed]
+replies[:] = [("working", "card unanswered")]
+d.main()
+d.load_builds = real_load
+k = contract_for(third["id"])
+check("a changed brief makes a new revision, chained to the one before",
+      [(r["revision"], r["parent_revision"]) for r in k["revisions"]] == [(1, None), (2, 1)]
+      and "second level" in k["revisions"][1]["intent"]["brief"] and "second level" not in k["revisions"][0]["intent"]["brief"]
+      and "revised" in [e["kind"] for e in k["events"]], repr(k["revisions"]))
+stale = c.handle(store, "director", json.dumps({"op": "event", "contract": k["id"], "revision": 1, "kind": "stopped",
+                                                "turn": 1, "why": "x"}).encode())
+check("a report against the old revision is refused", not stale["ok"] and "revision 2" in stale["error"], repr(stale))
 
 sys.exit(1 if failed else 0)

@@ -33,6 +33,13 @@ terminal, half the screen was empty, and viewers never saw a game it built (17 O
 showcase is the Director's, never the Mind's: the Mind's own browser still refuses file:// and
 new local addresses (check-page says why), and nothing here changes that.
 
+Every mission is a task contract (contracts.py, design/task-contracts-2026-10-17.md): the
+Director opens one before the first turn and reports each turn to it, with its evidence: the turn
+started, the commands the shell showed, the code that changed (folder hashes), the page check,
+a FINISHED taken or refused. A FINISHED it takes makes the contract `delivered`, never
+`accepted`: only a person accepts, with director-contracts, as root. The store and the
+person's command are out of this account's reach, since the Mind's commands run as it too.
+
 Builds and polish rounds are interleaved: each finished build is followed by POLISH_PER_BUILD
 polish rounds before the next build starts, so the finished games keep getting better while new
 ones are made, and the first idea every game gets in polish is its demo mode (DEMO_IDEA).
@@ -51,6 +58,8 @@ import os
 import pwd
 import re
 import shutil
+import signal
+import socket
 import stat
 import struct
 import subprocess
@@ -131,6 +140,14 @@ CYCLE_SECS = 75
 # showcase goes back to cycling the games rather than showing a stopped one for ever.
 SHOWING_STALE_SECS = TURN_LIMIT_SECS + 10 * 60
 CAPTION_CHARS = 120
+# The contracts service (contracts.py serve, yantrik-live-contracts.service). It knows the Director
+# by the kernel's account of the caller (this account, in this unit's cgroup), not by anything sent.
+CONTRACTS_SOCKET = "/run/yantrik-contracts/contracts.sock"
+# What one event carries at most (contracts.py TEXT_MAX, NAME_MAX), and the commands of one turn
+# reported (a turn with more says how many were left out).
+CONTRACT_TEXT = 4000
+CONTRACT_NAME = 200
+CALLS_PER_TURN = 30
 # A mission folder, as missions.json may name one: nothing that could climb out of ~/Projects.
 FOLDER = re.compile(r"[a-z0-9][a-z0-9-]{0,63}\Z")
 
@@ -645,6 +662,91 @@ def show_mission(m, turn=0, reply="", clean=None):
         log(mission=m["id"], event="showcase not asked", why=str(why)[:200])
 
 
+def contract_call(request):
+    """One request to the contracts service, its reply as a dict, or None when it did not answer.
+    Tried twice: the service restarts in a second."""
+    for attempt in range(2):
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                s.settimeout(10)
+                s.connect(CONTRACTS_SOCKET)
+                s.sendall(json.dumps(request).encode())
+                s.shutdown(socket.SHUT_WR)
+                raw = b""
+                while len(raw) <= REQUEST_MAX_BYTES:
+                    chunk = s.recv(1 << 16)
+                    if not chunk:
+                        break
+                    raw += chunk
+            reply = parse_json(raw)
+            return reply if isinstance(reply, dict) else None
+        except OSError:
+            if attempt == 0:
+                time.sleep(1)
+    return None
+
+
+class Contract:
+    """A mission's contract as the Director holds it: its id and revision, and what it reports.
+    The Director only reports; nothing it can send accepts a contract (contracts.py EVENTS)."""
+
+    def __init__(self, cid, revision):
+        self.id, self.revision, self.ended = cid, revision, False
+
+    def event(self, kind, **fields):
+        reply = contract_call({"op": "event", "contract": self.id, "revision": self.revision, "kind": kind, **fields})
+        if not (reply or {}).get("ok"):
+            # A lost event costs the record, not the mission: said in the log, and the next goes on.
+            log(contract=self.id, event="contract event not recorded", kind=kind,
+                why=str((reply or {}).get("error") or "the contracts service did not answer")[:200])
+        # Ended only once the service has it: otherwise run_mission's finally says the mission
+        # stopped, so the contract is never left running behind a Director that has gone.
+        if kind in ("finished_said", "stopped", "failed") and (reply or {}).get("ok"):
+            self.ended = True
+        return reply
+
+
+def open_contract(m, resuming):
+    """The mission's contract, opened or picked up again: the brief, whole, is its intent. None
+    when the service did not take it; then the mission does not start (no contract, no mission)."""
+    reply = contract_call({"op": "open", "mission": m["id"], "title": m["title"], "brief": prompt(m["brief"], m),
+                           "folder": m["fields"]["folder"], "page": m.get("check_page") or "", "resume": resuming})
+    if not (reply or {}).get("ok"):
+        log(mission=m["id"], event="not started", why="no contract: " + str((reply or {}).get("error")
+                                                                             or "the contracts service did not answer")[:200])
+        return None
+    return Contract(reply["contract"], reply["revision"])
+
+
+def print_hash(p):
+    """A folder_print as one sha256: the evidence the contract keeps of what the code was."""
+    return hashlib.sha256(json.dumps(p, default=str).encode()).hexdigest()
+
+
+def changed_files(a, b):
+    """The names whose content differs between two folder prints."""
+    try:
+        return sorted({name for name, _ in set(a) ^ set(b)})[:50]
+    except (TypeError, ValueError):
+        return []
+
+
+def turn_calls(state):
+    """The Mind's tool calls in the turn just ended, as the shell read them (`calls` in describe:
+    what the person's panel shows), one line each: what was asked to run, not that it ran well."""
+    turns = (state or {}).get("conversation") or []
+    turns = [t for t in turns if isinstance(t, dict)]
+    since = max((i for i, t in enumerate(turns) if t.get("role") == "user"), default=-1)
+    lines = []
+    for t in turns[since + 1:]:
+        for c in t.get("calls") or []:
+            if not isinstance(c, dict):
+                continue
+            what = c.get("summary") if isinstance(c.get("summary"), str) else json.dumps(c.get("arguments"))[:300]
+            lines.append(f"{str(c.get('name'))[:60]}: {' '.join(str(what).split())}"[:CONTRACT_NAME * 2])
+    return lines
+
+
 def new_chat():
     """Start the Mind on a fresh conversation, so a mission begins from its brief and not from
     the day's history. On 561 the Mind answered nine "keep going" turns in a second each with
@@ -884,9 +986,28 @@ def run_mission(m):
     # Picked up after other missions ran: their conversation, not this one's, is on screen, so it
     # starts afresh and is told again what the build is.
     elsewhere = resuming and read_state(LAST, "") != m["id"]
+    contract = open_contract(m, resuming)
+    if contract is None:
+        return
+    try:
+        run_turns(m, contract, started, resuming, elsewhere, begun)
+    finally:
+        # However the turns ended without saying so (an error, the service stopped: SIGTERM is
+        # SystemExit, main), the contract says the mission stopped and is not left running.
+        if not contract.ended:
+            contract.event("stopped", turn=0, why="the Director stopped before the mission ended")
+
+
+def stop(m, contract, why, turns):
+    log(mission=m["id"], event="stopped", why=why, turns=turns, contract=contract.id)
+    contract.event("stopped", turn=turns, why=why)
+
+
+def run_turns(m, contract, started, resuming, elsewhere, begun):
     write_state(STARTED, begun | {m["id"]})
     write_state(LAST, m["id"])
-    log(mission=m["id"], event="resuming" if resuming else "starting", title=m["title"])
+    log(mission=m["id"], event="resuming" if resuming else "starting", title=m["title"], contract=contract.id,
+        revision=contract.revision)
     text = prompt(RESUME if elsewhere else m["keep_going"] if resuming else m["brief"], m)
     show_mission(m)
     if not resuming or elsewhere:
@@ -899,10 +1020,10 @@ def run_mission(m):
     # eight times, wrote nothing, and said FINISHED over a description of code it had not
     # written; the page, untouched, checked clean (16 Oct 2026).
     before = folder_print(m)
+    last_print = before
     for turn in range(1, m["max_turns"] + 1):
         if time.time() - started > m["max_hours"] * 3600:
-            log(mission=m["id"], event="stopped", why="time limit", turns=turn - 1)
-            return
+            return stop(m, contract, "time limit", turn - 1)
         # Someone (or the Mind on its own) may be mid-turn: let it finish before typing over it.
         for _ in range(TURN_LIMIT_SECS // POLL_SECS):
             state = shell_state()
@@ -910,46 +1031,63 @@ def run_mission(m):
                 break
             time.sleep(POLL_SECS)
         show_mind_view()
+        contract.event("turn_started", turn=turn, prompt=text[:CONTRACT_TEXT])
         ok, said = send(text)
         if not ok:
             log(mission=m["id"], event="send failed", turn=turn, said=said)
-            return
+            return stop(m, contract, "the message could not be sent", turn)
         state, why, card = wait_for_turn(time.time())
         reply = whole_text(last_reply(state)) if state else ""
         clean, errors = check_page(m)
-        log(mission=m["id"], event="turn", turn=turn, outcome=why, reply=reply[:400],
-            page={True: "loads clean", False: "throws", None: "not checked"}[clean], errors=errors or None)
+        page = {True: "loads clean", False: "throws", None: "not checked"}[clean]
+        log(mission=m["id"], event="turn", turn=turn, outcome=why, reply=reply[:400], page=page, errors=errors or None)
+        # The turn's record on the contract: what the Mind ran, what changed, what the page did.
+        calls = turn_calls(state)
+        for line in calls[:CALLS_PER_TURN]:
+            contract.event("command_run", turn=turn, command=line)
+        if len(calls) > CALLS_PER_TURN:
+            contract.event("command_run", turn=turn, command=f"and {len(calls) - CALLS_PER_TURN} more")
+        now = folder_print(m)
+        if now != last_print:
+            contract.event("file_changed", turn=turn, before=print_hash(last_print), after=print_hash(now),
+                           files=changed_files(last_print, now))
+            last_print = now
+        contract.event("page_check", turn=turn, result=page, output=errors[:CONTRACT_TEXT])
         # The game reloaded in the showcase after every turn, its page checked first.
         show_mission(m, turn, reply, clean)
         if why != "answered":
-            log(mission=m["id"], event="stopped", why=why, turns=turn)
-            return
+            return stop(m, contract, why, turn)
         # A card the Mind gave up waiting on ends its turn as if answered, and "keep going" only
         # raises the next one. Two turns running with a card is a person needed: stop, and the
         # timer tries again after its rest. On 561 the first agent_run of a new Mind session asks,
         # and each card lapsed in 110 s while the Director kept typing (15 Oct 2026).
         cards = cards + 1 if card else 0
         if cards >= 2:
-            log(mission=m["id"], event="stopped", why="cards are waiting for a person", turns=turn)
-            return
-        unchanged = said_finished(reply) and folder_print(m) == before
+            return stop(m, contract, "cards are waiting for a person", turn)
+        unchanged = said_finished(reply) and now == before
         if unchanged:
             log(mission=m["id"], event="finished refused", turn=turn, why="nothing in the folder changed")
+            contract.event("finished_refused", turn=turn, why="nothing in the folder changed",
+                           mind_said=reply[-CONTRACT_TEXT:])
         elif said_finished(reply):
             if clean is False:
                 # The Mind's word against the page's: the page wins, and the mission goes on.
                 log(mission=m["id"], event="finished refused", turn=turn, why="the page throws")
+                contract.event("finished_refused", turn=turn, why="the page throws", mind_said=reply[-CONTRACT_TEXT:])
             else:
                 if not m["id"].startswith("polish:"):
                     mark_finished(m["id"])
+                # Delivered, not accepted: the checks are the Director's heuristic, and only a
+                # person's decision (director-contracts accept) accepts the work.
+                contract.event("finished_said", turn=turn, mind_said=reply[-CONTRACT_TEXT:], folder=print_hash(now),
+                               page=page)
                 log(mission=m["id"], event="finished", turns=turn, page_checked=clean is True,
-                    minutes=round((time.time() - started) / 60))
+                    minutes=round((time.time() - started) / 60), contract=contract.id, state="delivered")
                 return
         # The same answer twice is a Mind that is not working the mission, whatever the reason;
         # typing "keep going" at it again only fills the stream with the same words.
         if same_answer(reply, previous):
-            log(mission=m["id"], event="stopped", why="the same answer twice", turns=turn)
-            return
+            return stop(m, contract, "the same answer twice", turn)
         previous = reply
         time.sleep(BETWEEN_TURNS_SECS)
         if clean is False:
@@ -958,7 +1096,7 @@ def run_mission(m):
             text = prompt(NOTHING_CHANGED, m)
         else:
             text = prompt(m["keep_going"], m)
-    log(mission=m["id"], event="stopped", why="turn limit")
+    stop(m, contract, "turn limit", m["max_turns"])
 
 
 def rotation():
@@ -1188,6 +1326,8 @@ def main(argv=()):
     if command == ["showcase"]:
         showcase_main(builds)
         return 0
+    # systemctl stop mid-mission: SystemExit, so run_mission's finally tells the contract.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     m = next_mission(builds)
     if m is None:
         log(event="idle", why="there are no missions")
