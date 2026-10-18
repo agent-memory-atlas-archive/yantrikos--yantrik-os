@@ -341,10 +341,11 @@ impl Due {
             }
             Kind::Early => {
                 let place = notice::plain(self.place.as_deref().unwrap_or_default(), 0);
+                let when_where = format!(" at {}, {}", self.start.format("%H:%M"), place.trim());
                 serde_json::json!({
                     "notice_id": notice_id(Kind::Early, &self.id, &self.start),
                     "family": "calendar",
-                    "title": format!("{} at {}, {}", self.title.trim(), self.start.format("%H:%M"), place.trim()),
+                    "title": format!("{}{when_where}", shortened(self.title.trim(), when_where.chars().count())),
                     "body": format!("{}. It has a place, so you may need to leave early.", capitalised(&minutes_phrase(minutes))),
                     "why": "This event has a place, so it may need travel.",
                     "attention": "interrupt",
@@ -355,6 +356,19 @@ impl Due {
             }
         }
     }
+}
+
+/// The event's title cut so that `room` more characters still fit a notice title: the time and
+/// the place are the early card's reason to exist, so they are what survives a long title. A
+/// title keeps at least `MIN_TITLE` characters; past that, `notice::check` cuts the place.
+fn shortened(title: &str, room: usize) -> String {
+    const MIN_TITLE: usize = 24;
+    let keep = notice::MAX_TITLE.saturating_sub(room).max(MIN_TITLE);
+    if title.chars().count() <= keep {
+        return title.to_string();
+    }
+    let cut: String = title.chars().take(keep.saturating_sub(1)).collect();
+    format!("{}…", cut.trim_end())
 }
 
 fn capitalised(s: &str) -> String {
@@ -737,6 +751,11 @@ mod tests {
         assert!(!n.title.chars().any(|c| c.is_control() || ('\u{202a}'..='\u{202e}').contains(&c)), "{:?}", n.title);
         // Line breaks become spaces; the words stay the person's own, in their order.
         assert!(n.title.ends_with("Elm St 12  Fake line · verified"), "{:?}", n.title);
+        // A long title gives way to the time and the place (the review of #861).
+        let wordy = placed("wordy", &"Quarterly planning review with the whole team ".repeat(2), "2099-03-18T10:00:00", "Elm St");
+        let n = notice::check(&due(&[wordy], now)[0].notice(&now)).unwrap();
+        assert!(n.title.ends_with("… at 10:00, Elm St"), "{:?}", n.title);
+        assert!(n.title.chars().count() <= notice::MAX_TITLE && n.clamped.is_empty(), "{:?} {:?}", n.title, n.clamped);
         // Long places are cut by the title's bound, and named.
         let long = placed("far", "Far", "2099-03-18T10:00:00", &"Road ".repeat(40));
         let n = notice::check(&due(&[long], now)[0].notice(&now)).unwrap();

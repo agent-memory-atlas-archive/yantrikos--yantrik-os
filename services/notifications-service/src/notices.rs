@@ -260,8 +260,9 @@ impl Store {
         // `x1` … `xN` N allowances.
         //
         // The OS's own notices are outside all three, both ways: a busy calendar must not crowd
-        // out minds, and a flooding mind must not hold back a reminder the person set. They still
-        // count toward the obligations' hourly interrupts, below.
+        // out minds, and a flooding mind must not hold back a reminder the person set. Below, the
+        // OS's reminders meet the hourly obligation limit on their own count only, while every
+        // harness's count includes them.
         let notices: Vec<&Notification> = state.notifications.iter().filter(|n| n.notice.is_some()).collect();
         let theirs: Vec<&Notification> =
             notices.iter().copied().filter(|n| n.notice.as_ref().is_some_and(|x| x.harness.id == harness.id)).collect();
@@ -312,10 +313,10 @@ impl Store {
         // An obligation skips the day's budget because the person asked for it; but which family a
         // card is in is the mind's own claim. Past an hour's allowance, it waits in the inbox.
         let would_interrupt = decision.granted == notice::Attention::Interrupt || decision.held_until.is_some();
-        if checked.family.is_obligation()
-            && would_interrupt
-            && (obligations_here >= notice::OBLIGATION_INTERRUPTS_PER_HOUR || obligations_all >= notice::OBLIGATION_INTERRUPTS_PER_HOUR_ALL)
-        {
+        // The shared count is the minds' allowance: the OS's own reminders are judged on theirs
+        // alone, or two minds sending four reminders each would silence the person's dentist.
+        let over_all = !os && obligations_all >= notice::OBLIGATION_INTERRUPTS_PER_HOUR_ALL;
+        if checked.family.is_obligation() && would_interrupt && (obligations_here >= notice::OBLIGATION_INTERRUPTS_PER_HOUR || over_all) {
             decision = grant::Decision { granted: notice::Attention::Inbox, reason: notice::GrantReason::Rate, held_until: None, spends: false };
         }
         if decision.spends {
@@ -1308,6 +1309,21 @@ mod tests {
             store.add_os_notice("Calendar", os_card(&format!("cal-early:e{i}:20990318T1000"), "calendar"));
         }
         assert_eq!(store.add_notice(post_as("m1", 1001, "", notice("after", "machine", "inbox")), &home())["stored"], true);
+
+        // Minds' reminders, up to the every-harness obligation limit, do not hold the desktop's
+        // reminder back (the review of #861)…
+        let (store3, dir3) = temp_store();
+        for i in 0..notice::OBLIGATION_INTERRUPTS_PER_HOUR_ALL {
+            let from = format!("m{}", i % 2);
+            let answer = store3.add_notice(post_as(&from, 1000 + (i % 2) as u32, "", notice(&format!("r{i}"), "reminder", "interrupt")), &home());
+            assert_eq!(answer["stored"], true, "{answer}");
+        }
+        let id = store3.add_os_notice("Calendar", os_card("cal-reminder:dentist:20990318T1000", "reminder"))["id"].as_str().unwrap().to_string();
+        assert_eq!(store3.get(&id).unwrap().notice.unwrap().grant_reason, GrantReason::Granted, "a mind's flood must not silence the person's own reminder");
+        // …while a mind's next one still meets the shared limit, which counts the desktop's too.
+        let more = store3.add_notice(post_as("m2", 1002, "", notice("r-more", "reminder", "interrupt")), &home())["id"].as_str().unwrap().to_string();
+        assert_eq!(store3.get(&more).unwrap().notice.unwrap().grant_reason, GrantReason::Rate);
+        let _ = std::fs::remove_dir_all(dir3);
 
         // The obligation limit still holds the desktop's reminders: past it, they wait in the inbox.
         let (store, dir2) = temp_store();
