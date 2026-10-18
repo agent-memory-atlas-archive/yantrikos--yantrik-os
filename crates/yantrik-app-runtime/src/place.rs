@@ -45,67 +45,19 @@ pub fn place_of(dir: &Path, home: &Path) -> String {
 
 /// The site a URL is from, without the scheme, the path or a `www.`: "hn.algolia.com". Empty for
 /// something that is not a URL, and for one `address_of` would not draw: the site is read from
-/// the drawable address, so no part of its sign-in details is ever the site.
+/// the drawable host, so no part of its sign-in details is ever the site.
 pub fn site_of(url: &str) -> String {
     if !url.contains("://") {
         return String::new();
     }
-    let shown = address_of(url);
-    let rest = shown.split_once("://").map_or(shown.as_str(), |(_, r)| r);
-    let host = rest.split('/').next().unwrap_or("");
-    host.strip_prefix("www.").unwrap_or(host).to_string()
+    let host = shown_host(url);
+    host.strip_prefix("www.").map(str::to_string).unwrap_or(host)
 }
 
-/// A URL as it may be drawn on screen: its scheme, host and path, without the sign-in details,
-/// query or fragment that can carry a key: `https://user:key@aig.example/v1?api-key=k#x` →
-/// "https://aig.example/v1". A URL whose sign-in details cannot be told from its host and path (an
-/// `@` past the host: a key holding a `/`, `?` or `#`) gives an empty string rather than a guess
-/// that could show part of the key. A `\` ends the host as `/` does, as a browser and the `url`
-/// crate read it, so `https://evil.example\@api.x.ai` is never drawn as api.x.ai.
-pub fn address_of(url: &str) -> String {
-    let url = url.trim();
-    let (scheme, whole) = url.split_once("://").unwrap_or(("", url));
-    let rest = whole.split(['?', '#']).next().unwrap_or("");
-    let (authority, path) = rest.split_at(rest.find(['/', '\\']).unwrap_or(rest.len()));
-    let host = authority.rsplit('@').next().unwrap_or("");
-    if host.is_empty() || whole.matches('@').count() != authority.matches('@').count() {
-        return String::new();
-    }
-    if scheme.is_empty() {
-        format!("{host}{path}")
-    } else {
-        format!("{scheme}://{host}{path}")
-    }
-}
-
-/// Someone else's line (a mind's own words) with every address in it drawn as `address_of`
-/// draws it: a word holding `://` or `@` becomes its address, or "(address not shown)" when its
-/// sign-in details cannot be told from its host. Everything else, spacing included, is kept.
-pub fn without_sign_in(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut word = String::new();
-    let flush = |word: &mut String, out: &mut String| {
-        if word.contains("://") || word.contains('@') {
-            match address_of(word) {
-                shown if shown.is_empty() => out.push_str("(address not shown)"),
-                shown => out.push_str(&shown),
-            }
-        } else {
-            out.push_str(word);
-        }
-        word.clear();
-    };
-    for c in text.chars() {
-        if c.is_whitespace() {
-            flush(&mut word, &mut out);
-            out.push(c);
-        } else {
-            word.push(c);
-        }
-    }
-    flush(&mut word, &mut out);
-    out
-}
+// A URL as it may be drawn, and someone else's line with every address in it drawn that way: the
+// one rule for the whole workspace, in a crate of its own so the harness host, yantrik-ml and the
+// gateway use it too (review of #856).
+pub use yantrik_shown_address::{address_of, shown_host, without_sign_in, NOT_SHOWN};
 
 /// The person's home directory, as `place_of` wants it.
 pub fn home() -> std::path::PathBuf {

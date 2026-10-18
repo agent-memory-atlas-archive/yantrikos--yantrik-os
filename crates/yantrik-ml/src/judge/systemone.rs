@@ -182,7 +182,7 @@ impl Judge for SystemOneJudge {
             }
             let mut reply = request
                 .send_json(&body)
-                .with_context(|| format!("judge {} at {}", self.model, self.endpoint))?;
+                .with_context(|| format!("judge {} at {}", self.model, yantrik_shown_address::address_of(&self.endpoint)))?;
             let status = reply.status().as_u16();
             if matches!(status, 429 | 503 | 529) && attempt < BUSY_RETRIES {
                 attempt += 1;

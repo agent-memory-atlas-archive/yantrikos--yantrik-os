@@ -370,10 +370,17 @@ pub(crate) const HOSTILE_URLS: &[&str] = &[
     "https://user:pw@[fd00::1]:8443/v1",
     "https://user:p/w@[::1]:4000/v1",
     "https://user:pw@api.openai.com/v1?api-key=x",
+    // The review of #856's further inputs.
+    "http://u:p@[::1]:11434",
+    "user:pw@aig.example",
+    "user%40x:pw@aig.example",
+    "https://user:p%2Fw@aig.example/v1",
+    "https://aig.example/a@b",
+    "aig.example/v1?api-key=x",
 ];
 
 /// What may not appear in anything drawn from those addresses.
-pub(crate) const SECRETS: &[&str] = &["user", "pw", "p/w", "api-key", "u@", "#f", "?"];
+pub(crate) const SECRETS: &[&str] = &["user", "pw", "p/w", "p%2F", "api-key", "u@", "u:p", "%40", "#f", "?"];
 
 pub(crate) fn assert_clean(url: &str, shown: &str) {
     for secret in SECRETS {

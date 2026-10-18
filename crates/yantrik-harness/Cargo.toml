@@ -19,6 +19,8 @@ rusqlite = { workspace = true }
 # needle.
 sha2 = { workspace = true }
 unicode-normalization = "0.1"
+# A mind's own line is kept as it may be drawn: no address in it keeps its sign-in details.
+yantrik-shown-address = { workspace = true }
 
 [dev-dependencies]
 # Only the examples need a socket; the host itself is deliberately transport-free so it can be

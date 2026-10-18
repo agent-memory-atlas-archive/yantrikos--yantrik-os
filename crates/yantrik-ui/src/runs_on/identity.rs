@@ -72,7 +72,7 @@ pub fn host(url: &str) -> String {
 /// be told from its host (`https://user:p/w@aig.example/v1`, a key holding a `/`), where `host`
 /// would give "user:p" (review of #844, finding 2).
 pub fn shown_host(url: &str) -> String {
-    host(&yantrik_app_runtime::place::address_of(url))
+    yantrik_app_runtime::place::shown_host(url)
 }
 
 /// The host without its port: "[::1]:11434" → "::1", "10.0.0.2:8000" → "10.0.0.2".
@@ -111,6 +111,9 @@ pub fn is_loopback(url_or_host: &str) -> bool {
 /// The provider a URL (or a bare host) points at. The host it keeps is the drawable one
 /// (`shown_host`), and for a URL whose host cannot be told apart from its sign-in details it is
 /// an unnamed custom endpoint: every face then says "A service you set up", never a guess.
+/// That includes an `@` only in the path or query (`http://127.0.0.1:11434/v1?x=a@b`): it reads
+/// the same as a key holding a `/` or `?`, so such an address is an unnamed custom endpoint, not
+/// Local or a catalogue provider (review of #856, finding 4; rare, and nothing is shown).
 pub fn from_url(url: &str) -> ProviderRef {
     if host(url).is_empty() {
         return ProviderRef::NotReported;
@@ -147,7 +150,9 @@ pub fn from_reported(text: &str) -> (ProviderRef, Option<String>) {
             }
             if let Some((p, right)) = provider_prefix(word) {
                 provider = p;
-                model = Some(right.to_string());
+                // `aig.example/v1?api-key=x` is an address, not `host/model`: what follows a `?`,
+                // `#` or `@` is never a model name (review of #856).
+                model = (!right.contains(['?', '#', '@'])).then(|| right.to_string());
                 break 'found;
             }
             if is_host(word) {
