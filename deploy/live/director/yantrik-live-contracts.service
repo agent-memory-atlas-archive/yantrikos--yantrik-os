@@ -6,8 +6,9 @@
 # account either could use would let the Mind write its own acceptance, which the design forbids
 # (design/task-contracts-2026-10-17.md). The store is in /var/lib/yantrik-contracts, 0700. The
 # socket in /run/yantrik-contracts is open to every account; contracts.py names each caller from
-# the kernel's peer credentials: root (a person) may decide, the Director's unit may report, and
-# nothing anyone can send makes a contract accepted but a person's decision.
+# the kernel's peer credentials: root outside the yantrik-live-* units (a person) may decide; the
+# Director may report, from its unit and with the key that run of its unit was given once, while
+# it was alone there; and nothing anyone can send makes a contract accepted but a person's decision.
 [Unit]
 Description=Yantrik Live task contracts (the missions' contracts and their events)
 Before=yantrik-live-director.service

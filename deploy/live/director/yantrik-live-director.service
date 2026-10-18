@@ -14,8 +14,12 @@ User=yantrik
 Environment=XDG_RUNTIME_DIR=/run/user/1000
 Environment=HOME=/home/yantrik
 # -I: no user site-packages and no PYTHON* variables. HOME is the Mind's account's, and a .pth
-# the Mind wrote under ~/.local would otherwise run inside this unit, which the contracts service
-# takes for the Director.
+# the Mind wrote under ~/.local would otherwise run inside this unit. -I is not passed on to a
+# child interpreter, so the Director runs yos with -I too, and PYTHONNOUSERSITE covers any other
+# Python started here. Neither is what keeps the Mind from reporting as the Director: what this
+# unit starts reads the Mind's files, so the contracts service takes for the Director only the
+# process holding this run's key (contracts.py register), not whatever runs in this unit.
+Environment=PYTHONNOUSERSITE=1
 ExecStart=/usr/bin/python3 -I /opt/yantrik-live/director/director.py
 NoNewPrivileges=yes
 PrivateTmp=yes

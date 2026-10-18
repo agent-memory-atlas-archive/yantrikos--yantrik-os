@@ -75,7 +75,10 @@ if [ "$ENABLE" = 1 ]; then
 runuser -u yantrik -- /usr/bin/python3 -I /opt/yantrik-live/director/contracts.py probe || { echo "FAIL: the Mind'"'"'s account can reach the contracts store"; exit 1; }
 if runuser -u yantrik -- /usr/local/sbin/director-contracts list >/dev/null 2>&1; then echo "FAIL: the Mind'"'"'s account can run director-contracts"; exit 1; fi
 echo "as yantrik: director-contracts refused"
-case "$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null)" in 1|2|3) ;; *) echo "WARNING: ptrace_scope is not 1 or more: the Mind'"'"'s account could reach into the Director and report in its name (never accept)" ;; esac' < /dev/null
+# With ptrace_scope 0 the Mind'"'"'s account may attach to any of its processes; the Director makes
+# itself non-dumpable, which holds without Yama, but the images set 1 and a VM built by hand is
+# held to the same. ALLOW_PTRACE_SCOPE_0=1 installs anyway, on purpose.
+case "$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null)" in 1|2|3) ;; *) if [ "'"${ALLOW_PTRACE_SCOPE_0:-0}"'" = 1 ]; then echo "WARNING: ptrace_scope is not 1 or more (ALLOW_PTRACE_SCOPE_0=1)"; else echo "FAIL: kernel.yama.ptrace_scope is not 1 or more: set it (config/sysctl/60-yantrik-ptrace.conf), or ALLOW_PTRACE_SCOPE_0=1"; exit 1; fi ;; esac' < /dev/null
   guest 'systemctl enable --now yantrik-live-director.timer >/dev/null 2>&1; systemctl is-active yantrik-live-director.timer' < /dev/null
   # Restarted, not only started, so a re-run puts the new showcase code on screen.
   guest 'for u in yantrik-live-showcase yantrik-live-showcase-browser yantrik-live-windows; do systemctl enable $u.service >/dev/null 2>&1; systemctl restart $u.service; systemctl is-active $u.service; done' < /dev/null

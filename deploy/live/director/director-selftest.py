@@ -31,6 +31,7 @@ d.POLISH_PER_BUILD = 0
 d.BETWEEN_TURNS_SECS = 0
 d.time.sleep = lambda s: None
 d.show_mind_view = lambda: None
+real_shell_state = d.shell_state
 d.shell_state = lambda: {"thinking": False}
 d.print = lambda *a, **k: None
 sent, replies, pages = [], [], []
@@ -50,7 +51,10 @@ cspec = importlib.util.spec_from_file_location("contracts", os.path.join(HERE, "
 c = importlib.util.module_from_spec(cspec)
 cspec.loader.exec_module(c)
 store = c.connect(os.path.join(tmp, "contracts.db"))
+real_contract_call = d.contract_call
 d.contract_call = lambda req: c.handle(store, "director", json.dumps(req).encode())
+# Registering for this run's key is checked on its own, near the end.
+real_become_director, d.become_director = d.become_director, lambda: None
 
 failed = 0
 
@@ -225,6 +229,22 @@ open(os.path.join(root, "a.js"), "w").write("12")
 check("the folder print changes when code is written, not for notes, backups, rewrites or hidden entries",
       same and notes_only and real_folder_print(m) != first
       and real_folder_print({"fields": {"folder": "missing"}}) == ())
+# The folder is the Mind's: a FIFO, a link to /dev/zero and a dangling link named like code are
+# skipped, not opened (a FIFO would block the Director, /dev/zero would read without end).
+before_hostile = real_folder_print(m)
+os.mkfifo(os.path.join(root, "pipe.js"))
+os.symlink("/dev/zero", os.path.join(root, "zero.js"))
+os.symlink("/nonexistent", os.path.join(root, "gone.js"))
+os.mkfifo(os.path.join(root, "IDEAS-fifo"))
+signal.alarm(20)
+hostile_print = real_folder_print(m)
+ideas_fifo = os.path.join(d.PROJECTS, "fifoideas")
+os.makedirs(ideas_fifo)
+os.mkfifo(os.path.join(ideas_fifo, "IDEAS.md"))
+fifo_demo = d.ensure_demo_idea({"fields": {"folder": "fifoideas"}})
+signal.alarm(0)
+check("the folder print skips FIFOs and links, and IDEAS.md as a FIFO is left alone, without blocking",
+      hostile_print == before_hostile and fifo_demo is False, repr(hostile_print))
 
 # ── The showcase ──────────────────────────────────────────────────────────────────────────────
 
@@ -942,5 +962,96 @@ check("a changed brief makes a new revision, chained to the one before",
 stale = c.handle(store, "director", json.dumps({"op": "event", "contract": k["id"], "revision": 1, "kind": "stopped",
                                                 "turn": 1, "why": "x"}).encode())
 check("a report against the old revision is refused", not stale["ok"] and "revision 2" in stale["error"], repr(stale))
+
+# The Director is the process holding this run's key (contracts.py register), because what its
+# unit runs reads the Mind's files (security review of #857). It registers before it starts
+# anything, sends the key with every report, and nobody else of its account can read it.
+order = []
+real_become, real_next, real_run_mission = d.become_director, d.next_mission, d.run_mission
+d.become_director = lambda: (order.append("register"), "refused: this run of the Director's unit has its key already")[1]
+d.next_mission = lambda b: (order.append("next"), None)[1]
+d.run_mission = lambda m: order.append("mission")
+d.main()
+d.become_director = lambda: (order.append("register"), None)[1]
+d.main()
+d.become_director, d.next_mission, d.run_mission = real_become, real_next, real_run_mission
+check("the Director registers before it picks or starts a mission, and starts none when it is refused",
+      order == ["register", "register", "next"], repr(order))
+
+import socket
+import threading
+heard = []
+srv_path = os.path.join(tmp, "contracts-fake.sock")
+srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+srv.bind(srv_path)
+srv.listen(4)
+
+
+def fake_service():
+    while True:
+        conn, _ = srv.accept()
+        with conn:
+            raw = b""
+            while True:
+                chunk = conn.recv(65536)
+                if not chunk:
+                    break
+                raw += chunk
+            req = json.loads(raw)
+            heard.append(req)
+            conn.sendall(json.dumps({"ok": True, "key": "ab" * 32} if req["op"] == "register" else {"ok": True}).encode())
+
+
+threading.Thread(target=fake_service, daemon=True).start()
+real_call = d.contract_call
+d.contract_call = real_contract_call
+d.CONTRACTS_SOCKET = srv_path
+import ctypes
+libc = ctypes.CDLL(None)
+was_dumpable = libc.prctl(3, 0, 0, 0, 0)
+why = real_become_director()
+dumpable = libc.prctl(3, 0, 0, 0, 0)
+libc.prctl(d.PR_SET_DUMPABLE, was_dumpable, 0, 0, 0)
+d.contract_call({"op": "event", "contract": "c-1"})
+d.contract_call = real_call
+check("become_director makes the Director non-dumpable, then asks for the key with nothing else",
+      why is None and dumpable == 0 and heard[:1] == [{"op": "register"}], repr((why, dumpable, heard)))
+check("every report after it carries the key, which is in no file, argument or environment",
+      heard[1:] == [{"op": "event", "contract": "c-1", "key": "ab" * 32}]
+      and "ab" * 32 not in json.dumps(dict(os.environ)), repr(heard))
+d.DIRECTOR_KEY[:] = []
+
+# yos as the Director runs it does not read the Mind's user site: a .pth planted under HOME.
+import subprocess
+mindhome = os.path.join(tmp, "mindhome")
+py = d.YOS_RUN[0] if os.path.exists(d.YOS_RUN[0]) else sys.executable
+site_dir = subprocess.run([py, "-c", "import site; print(site.getusersitepackages())"], env={"HOME": mindhome},
+                          capture_output=True, text=True).stdout.strip()
+os.makedirs(site_dir)
+marker = os.path.join(mindhome, "pth-ran")
+with open(os.path.join(site_dir, "mind.pth"), "w") as f:
+    f.write(f"import os; open({marker!r}, 'w').close()\n")
+fake_yos = os.path.join(tmp, "yos")
+with open(fake_yos, "w") as f:
+    f.write("print('shell')\nprint('{')\nprint('\"thinking\": false')\nprint('}')\n")
+real_yos_run, real_home = d.YOS_RUN, os.environ.get("HOME")
+os.environ["HOME"] = mindhome
+os.environ.pop("PYTHONNOUSERSITE", None)
+d.YOS_RUN = (py, *real_yos_run[1:-1], fake_yos)
+seen = real_shell_state()
+ran_isolated = os.path.exists(marker)
+subprocess.run([py, fake_yos], capture_output=True)
+ran_plain = os.path.exists(marker)
+d.YOS_RUN = real_yos_run
+os.environ["HOME"] = real_home or "/"
+check("yos runs with -I, so a .pth the Mind left under its HOME does not run in the Director's unit "
+      "(it does in a plain python3)",
+      real_yos_run[:2] == ("/usr/bin/python3", "-I") and seen == {"thinking": False} and not ran_isolated and ran_plain,
+      repr((real_yos_run, seen, ran_isolated, ran_plain)))
+with open(os.path.join(HERE, "check-page"), encoding="utf-8") as f:
+    page_script = f.read()
+check("check-page runs chromium with HOME its throwaway profile, never the Mind's (nssdb, fontconfig)",
+      'export HOME="$profile"' in page_script
+      and page_script.index('export HOME="$profile"') < page_script.index("chromium --headless"))
 
 sys.exit(1 if failed else 0)

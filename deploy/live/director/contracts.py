@@ -18,24 +18,37 @@ Who may write what is the point, so it is held by accounts, not by code paths:
   - `contracts.py serve` (yantrik-live-contracts.service, as yantrik-contracts) is the only
     writer. It listens on a socket and names each caller from the kernel's peer credentials,
     never from anything the caller says:
-      * root (outside the live services' own units) is a person: list, show, accept, reject;
-      * the yantrik account inside the Director's unit is the Director: open a contract, report
-        an event from EVENTS. No event a Director may send moves a contract to `accepted`;
+      * a person is uid 0 whose cgroup lies outside every /system.slice/yantrik-live-*.service
+        unit (the showcase publisher runs as root in one), wherever else it is: a login session,
+        `qm guest exec` through the guest agent, or another root daemon. Persons may list, show,
+        accept and reject. Root can rewrite the store anyway, so a narrower test would not stop
+        root; it only keeps the live services' own root code from deciding;
+      * the Director is the process holding the key the service gave this run of the Director's
+        unit (`register`), sent with every report, from the yantrik account inside that unit. The
+        unit alone is not enough: the Director runs `yos`, check-page and chromium there, which
+        read the Mind's files, so code the Mind wrote can run in the unit as yantrik (review of
+        #857). The key is given once a run, only while the caller is the one process in the unit
+        (before it has started anything), and lives only in the memory of a Director that has
+        made itself non-dumpable: no other process of the account can read it (DIRECTOR_RUNS);
       * anyone else, the Mind's commands included, is refused before a byte is read.
   - `director-contracts` is the person's command (root's, 0700), a client of that socket.
 
 Stdlib only, like the Director. `contracts.py serve` runs the service, `contracts.py cli ...` is
 what director-contracts runs.
 """
+import hashlib
+import hmac
 import json
 import os
 import pwd
 import re
+import secrets
 import socket
 import sqlite3
 import struct
 import sys
 import textwrap
+import threading
 import time
 
 STORE_DIR = "/var/lib/yantrik-contracts"
@@ -43,14 +56,25 @@ DB = os.path.join(STORE_DIR, "contracts.db")
 SOCKET = "/run/yantrik-contracts/contracts.sock"
 # The account the Director and the Mind's commands both run as (director.py MIND_ACCOUNT).
 MIND_ACCOUNT = "yantrik"
-# A process in this cgroup is the Director: only systemd puts one there, and the Mind's commands
-# run in the desktop's session, not in it.
+# The Director's unit. Only systemd starts a process there, but being in it does not make one the
+# Director: what the Director starts there reads the Mind's files (`register` says what does).
 DIRECTOR_CGROUP = "/system.slice/yantrik-live-director.service"
+# The same unit in the cgroup filesystem: its directory's inode number is the cgroup's id, which
+# the kernel never hands out twice (64-bit kernfs ids), so it names one run of the unit, and
+# cgroup.procs lists who is in it.
+DIRECTOR_UNIT_DIR = "/sys/fs/cgroup" + DIRECTOR_CGROUP
 # Root in one of the live services' own units (the showcase publisher runs as root) is not a
 # person deciding.
-LIVE_UNITS = re.compile(r"/system\.slice/yantrik-live-[^/]*\.service(/|$)")
+LIVE_UNITS = re.compile(r"/system\.slice/yantrik-live-[^/]*\.service(/|\Z)")
 REQUEST_MAX_BYTES = 64 << 10
 REPLY_MAX_BYTES = 4 << 20
+# One request, from the first byte to the last of the reply. Per recv a slow writer could hold a
+# worker for days (review of #857); this is the whole request's deadline.
+REQUEST_SECS = 5
+# Requests answered at once, by who asks. One slow caller holds one worker for at most
+# REQUEST_SECS; past this many, a caller is told the service is busy rather than queued. Persons
+# have workers of their own, so nothing in the Director's unit can keep a person from deciding.
+WORKERS = {"person": 2, "director unit": 3}
 # The longest text field an event carries (a prompt, the Mind's reply, check output).
 TEXT_MAX = 4000
 NAME_MAX = 200
@@ -61,7 +85,11 @@ FILES_MAX = 50
 # Events one contract keeps; a mission is at most 40 turns, and the Director sends at most
 # director.CALLS_PER_TURN commands a turn.
 EVENTS_MAX = 5000
-CONNECT_SECS = 5
+# A `show` sends the current revision's terms and the last SHOW_EVENTS events whole (with the
+# evidence summary worked out over all of them), so its reply fits REPLY_MAX_BYTES at any
+# EVENTS_MAX (checked below).
+SHOW_EVENTS = 60
+KEY = re.compile(r"[0-9a-f]{64}\Z")
 
 STATES = ("proposed", "ready", "running", "blocked", "delivered", "accepted", "failed", "cancelled")
 OPEN = ("proposed", "ready", "running", "blocked")
@@ -74,6 +102,27 @@ CONTRACT_ID = re.compile(r"c-[0-9]{1,9}\Z")
 # Controls (but newline and tab), bidi overrides and isolates, zero-width characters and lone
 # surrogates: what an outside party could use to fake a line or hide text on root's terminal.
 UNSAFE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ud800-\udfff]")
+# Credentials in what is stored: a command the Mind ran can carry a key (`curl -H "Authorization:
+# Bearer ..."`, `https://user:pw@host/?api-key=...`), and the store keeps it until a person
+# deletes it and prints it on root's terminal. Each is replaced by [redacted] before it is kept.
+CREDENTIALS = (
+    (re.compile(r"(?i)\b([a-z][a-z0-9+.-]{0,31}://)[^/\s:@]*:[^/\s@]*@"), r"\1[redacted]@"),
+    (re.compile(r"(?i)\b(authorization|proxy-authorization)(\s*[:=]\s*)(?:(?:bearer|basic|token|digest)\s+)?"
+                r"[^\s\"',;]+"), r"\1\2[redacted]"),
+    (re.compile(r"(?i)\b(bearer)\s+[A-Za-z0-9._~+/=-]{8,}"), r"\1 [redacted]"),
+    (re.compile(r"(?i)(?<![a-z0-9])((?:x-)?api[-_]?key|access[-_]?token|auth[-_]?token|token|secret|password|passwd)([\"']?\s*[=:]\s*[\"']?)"
+                r"(?!\[redacted\])[^\s&\"',;]+"), r"\1\2[redacted]"),
+    (re.compile(r"(?i)(--(?:api[-_]?key|token|secret|password|passwd))(\s+|=)(?!\[redacted\])[^\s\"',;]+"), r"\1\2[redacted]"),
+    (re.compile(r"\b(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16})\b"),
+     "[redacted]"),
+)
+
+
+def redact(value):
+    """`value` with the credentials CREDENTIALS knows replaced by [redacted]."""
+    for pattern, put in CREDENTIALS:
+        value = pattern.sub(put, value)
+    return value
 
 
 class Refused(Exception):
@@ -84,7 +133,8 @@ def text(limit):
     def check(value):
         if not isinstance(value, str) or len(value) > limit:
             raise Refused(f"not text of at most {limit} characters")
-        return UNSAFE.sub(" ", value)
+        return redact(UNSAFE.sub(" ", value))
+    check.chars = limit
     return check
 
 
@@ -112,6 +162,11 @@ def files(value):
     return [text(NAME_MAX)(v) for v in value]
 
 
+# The most characters each checked field can hold, quotes and commas included, for the bound on
+# a reply's size below.
+turn.chars, digest.chars, page_result.chars, files.chars = 6, 64, 20, FILES_MAX * (NAME_MAX + 4)
+
+
 # What the Director may report, each with the states it may come from, the state it leaves the
 # contract in (None: unchanged), and its fields, all required, nothing else taken. A positive
 # list: an unknown kind or field is refused, and no kind here leaves a contract `accepted`.
@@ -128,6 +183,13 @@ EVENTS = {
     "failed": (OPEN, "failed", {"why": text(NAME_MAX)}),
 }
 assert not any(to in ("accepted", "delivered") and kind != "finished_said" for kind, (_, to, _f) in EVENTS.items())
+# A `show` reply at its largest: SHOW_EVENTS events and three more in the evidence summary, each
+# as big as an event can be (4 bytes a character, the most UTF-8 or a JSON escape of a kept
+# character takes), one revision's terms, and a decision naming every event. It must fit what the
+# person's command reads (review of #857: 5,000 events of 4,000 characters did not).
+EVENT_BYTES_MAX = 4 * max(sum(f.chars + 8 for f in fields.values()) for _a, _t, fields in EVENTS.values()) + 512
+TERMS_BYTES_MAX = 4 * (BRIEF_MAX + 80 * 2 + NAME_MAX * 2 + 4000) + 4096
+assert (SHOW_EVENTS + 3) * EVENT_BYTES_MAX + TERMS_BYTES_MAX + 12 * EVENTS_MAX + 4 * TEXT_MAX + 4096 < REPLY_MAX_BYTES
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS contracts (
@@ -153,14 +215,18 @@ CREATE TRIGGER IF NOT EXISTS contracts_not_deleted BEFORE DELETE ON contracts
 CREATE TRIGGER IF NOT EXISTS decided_stays BEFORE UPDATE ON contracts
     WHEN OLD.state IN ('accepted', 'failed', 'cancelled')
     BEGIN SELECT RAISE(ABORT, 'a decided or ended contract stays as it is'); END;
+CREATE TABLE IF NOT EXISTS director_runs (
+    run INTEGER PRIMARY KEY, key_hash TEXT NOT NULL, pid INTEGER NOT NULL, at REAL NOT NULL);
+CREATE TRIGGER IF NOT EXISTS director_runs_kept BEFORE UPDATE ON director_runs
+    BEGIN SELECT RAISE(ABORT, 'a run keeps the key it was given'); END;
 CREATE TRIGGER IF NOT EXISTS accepted_needs_decision BEFORE UPDATE ON contracts
     WHEN NEW.state = 'accepted' AND (NEW.decision IS NULL OR OLD.state != 'delivered')
     BEGIN SELECT RAISE(ABORT, 'only a decision on a delivered contract accepts it'); END;
 """
 
 
-def connect(path=None):
-    db = sqlite3.connect(path or DB, isolation_level=None)
+def connect(path=None, threads=False):
+    db = sqlite3.connect(path or DB, isolation_level=None, check_same_thread=not threads)
     db.execute("PRAGMA synchronous=FULL")
     db.executescript(SCHEMA)
     return db
@@ -180,7 +246,8 @@ def terms(page):
                   "decision": "a person, with director-contracts accept or reject, as root on this machine",
                   "note": "the checks let a FINISHED become delivered; only the decision accepts it"}
     retention = {"scope": f"the Director's turn records: prompts, the commands the shell showed, page-check output, "
-                          f"folder hashes, at most {TEXT_MAX} characters a field",
+                          f"folder hashes, at most {TEXT_MAX} characters a field, with credentials in them replaced "
+                          f"by [redacted]",
                  "deletion": "kept until a person deletes the store; nothing else is captured"}
     return owner, grant, acceptance, retention
 
@@ -245,9 +312,13 @@ def open_contract(db, req, now):
                 db.execute("INSERT INTO revisions VALUES (?,?,?,?,?,?,?,?,?)",
                            (c["id"], rev, c["revision"], *material, now))
                 db.execute("UPDATE contracts SET revision=? WHERE id=?", (rev, c["id"]))
-                record(db, c["id"], "director", "revised", "ready",
+                # Proposed again and activated again, each by whoever does it, like revision 1:
+                # nothing approved for the old terms carries over, and the log says so.
+                record(db, c["id"], "director", "revised", "proposed",
                        f"revision {rev}: the terms changed; nothing from revision {c['revision']} carries over",
                        {"parent_revision": c["revision"]}, now)
+                record(db, c["id"], "standing policy", "activated", "ready",
+                       f"revision {rev} activated by the standing policy: missions.json is a person's list", {}, now)
             else:
                 record(db, c["id"], "director", "resumed", c["state"], "picked up again where it stopped", {}, now)
             cid = c["id"]
@@ -344,9 +415,91 @@ def contract_view(db, cid):
     return c
 
 
-def handle(db, actor, raw, now=None):
-    """One request from `actor` (who the kernel says sent it: "director" or "person"), as the
-    reply to send back. A malformed request is refused whole, never half taken."""
+def evidence_of(events, revision):
+    """What `show` sums up for the person over one revision's events, from an iterable of them,
+    so the service can work it out over every event without holding them all."""
+    out = {"last_check": None, "changes": 0, "last_change": None, "commands": 0, "last_said": None}
+    for e in events:
+        if e["revision"] != revision:
+            continue
+        if e["kind"] == "page_check":
+            out["last_check"] = e
+        elif e["kind"] == "file_changed":
+            out["changes"] += 1
+            out["last_change"] = e
+        elif e["kind"] == "command_run":
+            out["commands"] += 1
+        elif e["kind"] in ("finished_said", "finished_refused"):
+            out["last_said"] = e
+    return out
+
+
+EVENT_COLUMNS = ("seq", "revision", "at", "actor", "kind", "state", "detail")
+
+
+def event_rows(db, sql, args):
+    for r in db.execute(f"SELECT {', '.join(EVENT_COLUMNS)} FROM events WHERE {sql}", args):
+        yield dict(zip(EVENT_COLUMNS, (*r[:6], json.loads(r[6]))))
+
+
+def show_view(db, cid):
+    """A contract as `show` sends it: its current terms, the last SHOW_EVENTS events, and the
+    evidence summed over all of the current revision's, small enough for any contract to be read
+    (EVENT_BYTES_MAX)."""
+    c = contract_row(db, cid)
+    c["decision"] = json.loads(c["decision"]) if c["decision"] else None
+    r = db.execute("SELECT revision, parent_revision, intent, owner, grant_terms, acceptance, retention, created "
+                   "FROM revisions WHERE contract=? AND revision=?", (cid, c["revision"])).fetchone()
+    c["revisions"] = [dict(zip(("revision", "parent_revision", "intent", "owner", "grant", "acceptance", "retention",
+                                "created"), (r[0], r[1], *map(json.loads, r[2:7]), r[7])))]
+    c["events_total"] = db.execute("SELECT COUNT(*) FROM events WHERE contract=?", (cid,)).fetchone()[0]
+    c["events"] = list(event_rows(db, "contract=? ORDER BY seq DESC LIMIT ?", (cid, SHOW_EVENTS)))[::-1]
+    c["evidence"] = evidence_of(event_rows(db, "contract=? AND revision=? ORDER BY seq", (cid, c["revision"])),
+                                c["revision"])
+    return c
+
+
+def register(db, peer_pid, now):
+    """The Director, at the start of a run of its unit, asking for that run's key. Given once a
+    run, and only while the caller is the one process in the unit: the Director registers before
+    it starts anything, so nothing it started (`yos`, check-page, whatever the Mind put in their
+    way) is there yet to ask first, and anything left from an earlier run (systemd kills the unit's
+    processes when a run ends) would make the unit not the caller's alone. The key is kept hashed."""
+    try:
+        run = os.stat(DIRECTOR_UNIT_DIR).st_ino
+        with open(os.path.join(DIRECTOR_UNIT_DIR, "cgroup.procs"), encoding="ascii") as f:
+            procs = f.read(4096).split()
+    except (OSError, ValueError):
+        raise Refused("the Director's unit cannot be read") from None
+    if procs != [str(peer_pid)]:
+        raise Refused("the Director registers only as the one process in its unit, before it starts anything")
+    key = secrets.token_hex(32)
+    try:
+        db.execute("INSERT INTO director_runs VALUES (?,?,?,?)",
+                   (run, hashlib.sha256(key.encode()).hexdigest(), peer_pid, now))
+    except sqlite3.IntegrityError:
+        raise Refused("this run of the Director's unit has its key already") from None
+    return {"key": key}
+
+
+def director_key(db, req):
+    """Whether `req` carries the key of the current run of the Director's unit; takes it out."""
+    key = req.pop("key", None)
+    try:
+        run = os.stat(DIRECTOR_UNIT_DIR).st_ino
+    except OSError:
+        run = None
+    row = db.execute("SELECT key_hash FROM director_runs WHERE run=?", (run,)).fetchone() if run else None
+    if not (isinstance(key, str) and KEY.match(key) and row
+            and hmac.compare_digest(hashlib.sha256(key.encode()).hexdigest(), row[0])):
+        raise Refused("not the Director: no key from this run of its unit")
+
+
+def handle(db, actor, raw, now=None, peer_pid=None):
+    """One request from `actor` (who the kernel says sent it: "person", "director unit" for the
+    Mind's account in the Director's unit, which still has to show the run's key, or "director"
+    once it has), as the reply to send back. A malformed request is refused whole, never half
+    taken."""
     now = time.time() if now is None else now
     try:
         if len(raw) > REQUEST_MAX_BYTES:
@@ -358,6 +511,11 @@ def handle(db, actor, raw, now=None):
         if not isinstance(req, dict):
             raise Refused("not a JSON object")
         op = req.get("op")
+        if actor == "director unit":
+            if op == "register" and set(req) == {"op"}:
+                return {"ok": True, **register(db, peer_pid, now)}
+            director_key(db, req)
+            actor = "director"
         allowed = {"director": ("open", "event"), "person": ("list", "show", "decide")}.get(actor, ())
         if op not in allowed:
             raise Refused(f"{str(op)[:20]!r} is not something the {actor or 'caller'} may ask")
@@ -375,7 +533,7 @@ def handle(db, actor, raw, now=None):
         cid = req.get("contract")
         if not isinstance(cid, str) or not CONTRACT_ID.match(cid):
             raise Refused("not a contract id")
-        return {"ok": True, "contract": contract_view(db, cid)}
+        return {"ok": True, "contract": show_view(db, cid)}
     except Refused as why:
         return {"ok": False, "error": str(why)}
     except (sqlite3.Error, TypeError, KeyError) as why:
@@ -392,26 +550,34 @@ def cgroup_of(pid):
 
 
 def peer_actor(conn, mind_uid):
-    """Who is on the other end, from SO_PEERCRED, which the kernel fills at connect: "person"
-    for root outside the live units, "director" for the Mind's account inside the Director's
-    unit, None for anyone else."""
+    """Who is on the other end, from SO_PEERCRED, which the kernel fills at connect, and its pid:
+    "person" for root outside the live units, "director unit" for the Mind's account inside the
+    Director's unit (which must still show the run's key), None for anyone else."""
     pid, uid, _gid = struct.unpack("3i", conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))
-    return actor_for(uid, cgroup_of(pid), mind_uid)
+    return actor_for(uid, cgroup_of(pid), mind_uid), pid
 
 
 def actor_for(uid, where, mind_uid):
+    """A person is uid 0 in any cgroup but a yantrik-live-* service's (the module docstring says
+    why no narrower); the Mind's account in exactly the Director's unit may try its key."""
     if where is None:
         return None
     if uid == 0 and not LIVE_UNITS.search(where):
         return "person"
     if uid == mind_uid and where == DIRECTOR_CGROUP:
-        return "director"
+        return "director unit"
     return None
 
 
-def read_all(conn, limit):
+def read_all(conn, limit, deadline):
+    """What the other end sends until it shuts its side, up to just past `limit`, by `deadline`
+    (time.monotonic()) or TimeoutError: the whole read, not each recv."""
     chunks, size = [], 0
     while size <= limit:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise TimeoutError("the request was not sent in time")
+        conn.settimeout(left)
         chunk = conn.recv(1 << 16)
         if not chunk:
             break
@@ -420,12 +586,32 @@ def read_all(conn, limit):
     return b"".join(chunks)
 
 
+def answer(conn, actor, pid, db, lock, slots):
+    """One request, read, handled and answered by its deadline, on a worker of its own."""
+    try:
+        with conn:
+            deadline = time.monotonic() + REQUEST_SECS
+            raw = read_all(conn, REQUEST_MAX_BYTES, deadline)
+            with lock:
+                reply = handle(db, actor, raw, peer_pid=pid)
+            # A send's timeout is its whole duration (Python 3.5 and later).
+            conn.settimeout(max(0.5, deadline - time.monotonic()))
+            conn.sendall(json.dumps(reply, ensure_ascii=False).encode() + b"\n")
+    except (OSError, ValueError) as why:
+        print(f"request dropped: {why}"[:200], flush=True)
+    finally:
+        slots.release()
+
+
 def serve():
     """yantrik-live-contracts.service, as yantrik-contracts: the store's only writer. One request
-    a connection, one connection at a time; a caller that is neither a person nor the Director is
-    closed before anything is read from it, so it cannot hold the service up."""
+    a connection, up to WORKERS at once, each by its deadline, one write at a time. A caller that
+    is neither a person nor the Director's unit is closed before anything is read from it, and a
+    slow one holds only its own worker, for REQUEST_SECS at most."""
     os.umask(0o077)
-    db = connect()
+    db = connect(threads=True)
+    lock = threading.Lock()
+    pools = {actor: threading.BoundedSemaphore(n) for actor, n in WORKERS.items()}
     mind_uid = pwd.getpwnam(MIND_ACCOUNT).pw_uid
     try:
         os.unlink(SOCKET)
@@ -438,17 +624,25 @@ def serve():
     srv.listen(16)
     while True:
         conn, _ = srv.accept()
-        with conn:
-            try:
-                actor = peer_actor(conn, mind_uid)
-                conn.settimeout(CONNECT_SECS)
-                if actor is None:
-                    reply = {"ok": False, "error": "refused: neither a person (root) nor the Director"}
-                else:
-                    reply = handle(db, actor, read_all(conn, REQUEST_MAX_BYTES))
-                conn.sendall(json.dumps(reply, ensure_ascii=False).encode() + b"\n")
-            except (OSError, ValueError) as why:
-                print(f"request dropped: {why}"[:200], flush=True)
+        try:
+            actor, pid = peer_actor(conn, mind_uid)
+            refusal = None if actor else "refused: neither a person (root) nor the Director"
+            slots = pools.get(actor)
+            if not refusal and not slots.acquire(blocking=False):
+                refusal = "busy: try again in a few seconds"
+            if refusal is None:
+                try:
+                    threading.Thread(target=answer, args=(conn, actor, pid, db, lock, slots), daemon=True).start()
+                    continue
+                except RuntimeError:
+                    slots.release()
+                    refusal = "busy: try again in a few seconds"
+            with conn:
+                conn.settimeout(1)
+                conn.sendall(json.dumps({"ok": False, "error": refusal}).encode() + b"\n")
+        except (OSError, ValueError) as why:
+            conn.close()
+            print(f"request dropped: {why}"[:200], flush=True)
 
 
 # The person's command: director-contracts.
@@ -459,7 +653,7 @@ def call(request, path=None):
         s.connect(path or SOCKET)
         s.sendall(json.dumps(request).encode())
         s.shutdown(socket.SHUT_WR)
-        raw = read_all(s, REPLY_MAX_BYTES)
+        raw = read_all(s, REPLY_MAX_BYTES, time.monotonic() + 30)
     return json.loads(raw.decode("utf-8"))
 
 
@@ -531,23 +725,23 @@ def show_text(c):
             "", "What it may do", f"  {grant['rule']}: {grant['status']}.", wrap(grant["why"]),
             "", "How it is accepted"] + [f"  - {line(x)}" for x in acc["checks"]] + \
           [f"  - then the decision of {acc['decision']}", ""]
-    out.append(f"What was done ({len(c['events'])} events)")
+    total = c.get("events_total", len(c["events"]))
+    out.append(f"What was done ({total} events" + (f"; the last {len(c['events'])} are shown" if total > len(c["events"]) else "")
+               + ")")
     for e in c["events"]:
         who = {"director": "", "person": "[person] ", "contracts": "[store] ", "standing policy": "[policy] "}.get(e["actor"], "")
         out.append(f"  {when(e['at'])}  {who}{event_words(e)}")
-    current = [e for e in c["events"] if e["revision"] == c["revision"]]
-    checks = [e for e in current if e["kind"] == "page_check"]
-    changes = [e for e in current if e["kind"] == "file_changed"]
-    said = [e for e in current if e["kind"] in ("finished_said", "finished_refused")]
+    ev = c.get("evidence") or evidence_of(c["events"], c["revision"])
+    check, change, n = ev["last_check"], ev["last_change"], ev["changes"]
     out += ["", "Evidence (revision %d)" % c["revision"],
-            "  Last page check: " + (f"{checks[-1]['detail']['result']} (turn {checks[-1]['detail']['turn']})"
-                                     if checks else "none recorded"),
-            "  Code changed: " + (f"in {len(changes)} turn{'s' * (len(changes) != 1)}, folder now {changes[-1]['detail']['after'][:16]}… "
-                                  "(sha256 of the code files, by name and content)" if changes else "never"),
-            "  Commands the shell showed: %d" % sum(e["kind"] == "command_run" for e in current)]
-    if said:
+            "  Last page check: " + (f"{check['detail']['result']} (turn {check['detail']['turn']})"
+                                     if check else "none recorded"),
+            "  Code changed: " + (f"in {n} turn{'s' * (n != 1)}, folder now {change['detail']['after'][:16]}… "
+                                  "(sha256 of the code files, by name and content)" if change else "never"),
+            "  Commands the shell showed: %d" % ev["commands"]]
+    if ev["last_said"]:
         out.append("  The Mind's own report (its words, not evidence):")
-        out.append(wrap('"' + said[-1]["detail"]["mind_said"][:600] + '"'))
+        out.append(wrap('"' + ev["last_said"]["detail"]["mind_said"][:600] + '"'))
     out += ["", "Decision"]
     dec = c["decision"]
     out.append(f"  {dec['verdict']} by {dec['by']} on {when(dec['at'])}, for revision {dec['revision']}, over "
@@ -591,6 +785,11 @@ def cli(argv, path=None):
                "note": " ".join(rest[1:])}
     try:
         reply = call(req, path)
+    except ConnectionResetError:
+        # The service answers a caller past its workers with "busy" and closes without reading the
+        # request, which the kernel turns into a reset here.
+        print("the contracts service is busy (or restarting): try again in a few seconds", file=sys.stderr)
+        return 1
     except (OSError, ValueError) as why:
         print(f"the contracts service did not answer ({why}); see systemctl status yantrik-live-contracts",
               file=sys.stderr)
@@ -603,8 +802,13 @@ def cli(argv, path=None):
     elif op == "show":
         print(show_text(reply["contract"]))
     else:
+        # The decision is recorded: whatever goes wrong showing it again, the person is told so.
         print(f"{reply['contract']} is now {reply['state']}.")
-        print(show_text(call({"op": "show", "contract": reply["contract"]}, path)["contract"]))
+        try:
+            print(show_text(call({"op": "show", "contract": reply["contract"]}, path)["contract"]))
+        except Exception as why:  # OSError, ValueError, KeyError, TypeError: the record stands
+            print(f"(the decision is recorded; showing the contract again failed: {line(why, 120)}; "
+                  f"see director-contracts show {reply['contract']})", file=sys.stderr)
     return 0
 
 
