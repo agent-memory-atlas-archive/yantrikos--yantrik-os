@@ -16,7 +16,7 @@
 //! `attach` and every `poll` answer carry, and the person's feedback on this harness's cards,
 //! which its `poll` carries as `notice_feedback` until a later poll says `feedback_ack`.
 
-pub use yantrik_ipc_contracts::notifications::notice::{answer, check, FEATURE, RETRY_UNAVAILABLE_SECS};
+pub use yantrik_ipc_contracts::notifications::notice::{answer, check, FEATURE, OS_HARNESS, RETRY_UNAVAILABLE_SECS};
 
 /// The method a harness calls to hand the OS a notice.
 pub const NOTICE: &str = "harness.notice";

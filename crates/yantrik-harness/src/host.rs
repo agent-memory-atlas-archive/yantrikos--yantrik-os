@@ -1703,6 +1703,14 @@ impl Host {
                 announced.id
             ));
         }
+        // The OS's own notices (the calendar's) are filed under this id. A harness under it, even
+        // a shared one, would post as the calendar and be served its feedback.
+        if announced.id == crate::notice::OS_HARNESS {
+            return Err(format!(
+                "`{}` is the id the desktop files its own notices under; attach under a different id",
+                announced.id
+            ));
+        }
         if !announced.shared {
             return Ok(announced.id.clone());
         }
@@ -3762,6 +3770,10 @@ mod tests {
         let (session, agent, turn_id, _answer) = turn_in_flight(&host);
         assert!(host.stop_agent(&agent));
         tracing::subscriber::with_default(DropLog(lines.clone()), || {
+            // Another test thread can register this log line's callsite while no subscriber is
+            // listening, and tracing caches that interest; asked again now, it counts this one
+            // (failed once in CI on #861, never locally).
+            tracing::callsite::rebuild_interest_cache();
             for text in ["secret one", "secret two"] {
                 let r = host
                     .handle(protocol::CHUNK, &json!({ "session": session, "turn_id": turn_id, "delta": text }))

@@ -218,7 +218,9 @@ pub struct Store {
     /// than only logged: a store that silently began empty is exactly the failure this service
     /// was rewritten to stop hiding.
     load_notice: Option<String>,
-    /// Harness ids only one account may use ([`crate::notices::MIND_ID`]), read once at open.
+    /// Harness ids only one account may use ([`crate::notices::MIND_ID`] and the OS's own
+    /// [`notice::OS_HARNESS`](yantrik_ipc_contracts::notifications::notice::OS_HARNESS)), read
+    /// once at open.
     reserved: Mutex<std::collections::BTreeMap<String, u32>>,
     /// Why nothing may be written: the sidecar is on the disk and could not be read, so a write
     /// would replace it. `None` on every healthy start.
@@ -348,6 +350,12 @@ impl Store {
         if let Some(uid) = mind {
             reserved.insert(crate::notices::MIND_ID.to_string(), uid);
         }
+        // The OS's own notices are filed under this id, for this service's own account, in every
+        // build: no harness binds it, whichever account it posts from.
+        reserved.insert(
+            yantrik_ipc_contracts::notifications::notice::OS_HARNESS.to_string(),
+            yantrik_ipc_transport::owner::own_euid(),
+        );
         Self {
             path,
             state: Mutex::new(state),
