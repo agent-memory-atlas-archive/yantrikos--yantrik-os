@@ -28,7 +28,7 @@ pub const QUIET_HOURS: &[Option<QuietHours>] = &[
 /// What each row says about its family, in the person's words.
 fn description(family: &Family) -> &'static str {
     match family {
-        Family::Reminder => "Reminders you asked a mind for. Never off: you asked for them.",
+        Family::Reminder => "Your calendar events' own reminders, and reminders you asked a mind for. Never off: you asked for them.",
         Family::Delegated => "The results of jobs you handed to a mind. Never off: you asked for them.",
         Family::Machine => "Something about this machine a mind thinks you should know.",
         Family::Calendar => "Your events, before they start.",

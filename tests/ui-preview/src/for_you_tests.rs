@@ -44,7 +44,14 @@ fn save(pixels: &slint::SharedPixelBuffer<slint::Rgb8Pixel>, path: &str, width: 
 pub fn run(w: &MinimalSoftwareWindow, output: &str, width: u32, height: u32) -> Result<(), Box<dyn std::error::Error>> {
     let ui = ForYouProbe::new()?;
     let inbox = ui.global::<InboxState>();
+    // The calendar's early heads-up, as the notifications service files it
+    // (design/calendar-heads-up-2026-10-16.md): the desktop's own card, in the words the
+    // timer writes and the sender line the shell prints for a process this machine verified.
+    let mut heads_up = card("44", "Dentist at 15:00, Elm St", "In 60 minutes. It has a place, so you may need to leave early.", "Calendar", "Open event", true);
+    heads_up.why = "This event has a place, so it may need travel.".into();
+    heads_up.sender = "verified by this machine: notifications-service (pid 412)".into();
     inbox.set_cards(ModelRc::new(VecModel::from(vec![
+        heads_up,
         card("41", "Stretch", "You asked me at 14:02 to remind you to stretch.", "Reminders", "Open note", true),
         // A mind's words are drawn as they are: markup in them is text, not formatting.
         card("42", "Backup finished", "42 files, 1.2 GB, no errors. <b>Nothing</b> was **skipped**.", "Jobs you handed over", "", false),
@@ -53,7 +60,7 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str, width: u32, height: u32) -> 
     inbox.set_more(2);
     let state = ui.global::<InitiativeState>();
     state.set_families(ModelRc::new(VecModel::from(vec![
-        family("reminder", "Reminders", "Reminders you asked a mind for. Never off: you asked for them.", "on", false),
+        family("reminder", "Reminders", "Your calendar events' own reminders, and reminders you asked a mind for. Never off: you asked for them.", "on", false),
         family("delegated", "Jobs you handed over", "The results of jobs you handed to a mind. Never off: you asked for them.", "on", false),
         family("machine", "This machine", "Something about this machine a mind thinks you should know.", "inbox_only", true),
         family("calendar", "Calendar", "Your events, before they start.", "on", true),
@@ -106,7 +113,7 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str, width: u32, height: u32) -> 
         render(w, width, height);
     }
     let seen = pressed.borrow().clone();
-    let mut want = vec!["open:41", "feedback:41:useful", "feedback:41:not_useful", "feedback:41:not_now", "feedback:41:never_family", "feedback:41:inbox_only", "feedback:41:wrong", "open:43", "centre"];
+    let mut want = vec!["open:44", "feedback:44:never_family", "open:41", "feedback:41:useful", "feedback:41:not_useful", "feedback:41:not_now", "feedback:41:never_family", "feedback:41:inbox_only", "feedback:41:wrong", "open:43", "centre"];
     if !narrow {
         want.extend(["quiet-hours", "family:discovery:off", "family:machine:inbox_only"]);
         assert!(seen.iter().any(|s| s.starts_with("quiet:")), "the quiet initiative switch is not reachable: {seen:?}");

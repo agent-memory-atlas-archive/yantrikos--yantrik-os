@@ -1698,6 +1698,14 @@ impl Host {
                 announced.id
             ));
         }
+        // The OS's own notices (the calendar's) are filed under this id. A harness under it, even
+        // a shared one, would post as the calendar and be served its feedback.
+        if announced.id == crate::notice::OS_HARNESS {
+            return Err(format!(
+                "`{}` is the id the desktop files its own notices under; attach under a different id",
+                announced.id
+            ));
+        }
         if !announced.shared {
             return Ok(announced.id.clone());
         }

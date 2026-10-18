@@ -29,6 +29,12 @@ use super::clamp;
 /// when it sees this; an older desktop sends no `features` at all, and that means no.
 pub const FEATURE: &str = "notice_inbox_v1";
 
+/// The harness id the OS's own notices are filed under: the calendar's heads-ups and reminders,
+/// sent by the notifications service in its own process (design/calendar-heads-up-2026-10-16.md).
+/// No harness may attach under it and no socket caller may post or poll as it, so nothing can post
+/// as the calendar or read what the person answered it.
+pub const OS_HARNESS: &str = "desktop";
+
 /// The longest `notice_id`, which is also the shortest useful bound on a key a mind invents.
 pub const MAX_NOTICE_ID: usize = 96;
 /// A notice's title: one line.

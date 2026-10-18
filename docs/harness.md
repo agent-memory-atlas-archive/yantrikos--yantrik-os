@@ -652,6 +652,10 @@ titled with its first line, and answered `{"kept": true, "stored": true, "notice
 - **`id` is what a person types to select you**, so it cannot be empty or contain spaces.
 - **You cannot attach over a built-in.** The companion is compiled into the shell; a client
   taking its id could leave a machine with no working mind and no way to say so.
+- **`desktop` is not an id you can take.** The OS files its own notices (the calendar's
+  reminders and heads-ups) under it; a harness attached as `desktop`, shared or not, would post
+  as the calendar. The attach is refused, and the notification store refuses any post or
+  feedback poll under it from the socket too.
 - **Re-attaching under the same id replaces the old you.** That is what a harness that crashed
   and came back should get, and any turn the old one owed is failed rather than left hanging.
 - **Stop polling and you are dropped** after 90 seconds, with anything you owed failed so nobody
