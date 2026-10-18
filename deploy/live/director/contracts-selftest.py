@@ -98,10 +98,10 @@ check("and the store is exactly as it was", counts(db) == before, repr((before, 
 check("a refusal says why in words", all(isinstance(r.get("error"), str) and r["error"] for r in took.values()),
       repr(took))
 
-hostile = ask(db, "director", dict(good, output="\x1b[2J‮gnp.exe​\nfake line"))
+hostile = ask(db, "director", dict(good, output="\x1b[2J\u202egnp.exe\u200b\nfake line"))
 shown = c.event_words(c.contract_view(db, cid)["events"][-1])
 check("terminal escapes, bidi and zero-width characters are taken out before they are stored or shown",
-      hostile["ok"] and "\x1b" not in shown and "‮" not in shown and "​" not in shown and "\n" not in shown,
+      hostile["ok"] and "\x1b" not in shown and "\u202e" not in shown and "\u200b" not in shown and "\n" not in shown,
       repr(shown))
 
 # Who may ask what: the kernel's answer, never the caller's.

@@ -73,7 +73,7 @@ CONTRACT_ID = re.compile(r"c-[0-9]{1,9}\Z")
 
 # Controls (but newline and tab), bidi overrides and isolates, zero-width characters and lone
 # surrogates: what an outside party could use to fake a line or hide text on root's terminal.
-UNSAFE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f​-‏‪-‮⁦-⁩\ud800-\udfff]")
+UNSAFE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ud800-\udfff]")
 
 
 class Refused(Exception):
