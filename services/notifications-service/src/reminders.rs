@@ -73,6 +73,9 @@ const EARLY_LEAD: ChronoDuration = ChronoDuration::minutes(60);
 /// late), and the own lead from which an event's reminder is already early enough.
 const EARLY_MIN_LEFT: ChronoDuration = ChronoDuration::minutes(30);
 
+/// The least of a long title an early card keeps, however long its place.
+const EARLY_TITLE_KEPT: usize = 24;
+
 /// What the cards are filed as.
 const NAME: &str = "Calendar";
 
@@ -132,6 +135,17 @@ fn tick<Tz: TimeZone>(store: &Store, dir: &Path, sent: &mut Sent, now: DateTime<
             continue;
         }
         sent.record(due.kind, &due.id, &due.start);
+    }
+    // An event edited in place keeps its start, so its early card keeps its id: the card takes
+    // the new words rather than a second card being posted. A dismissed card is left alone.
+    for e in read.events.iter().filter(|e| issued_id(&e.id)) {
+        let (Some(start), Some(place)) = (parse_stamp(&e.start), place_of(e)) else { continue };
+        if !sent.has(Kind::Early, &e.id, &start) {
+            continue;
+        }
+        if let Err(why) = store.revise_os_title(&notice_id(Kind::Early, &e.id, &start), &early_title(&e.title, &start, place)) {
+            tracing::warn!(id = %e.id, %why, "could not put an edited event's words on its early card; trying again next tick");
+        }
     }
     // Only from a complete reading: an event that could not be read this tick has not gone.
     if read.complete {
@@ -285,13 +299,18 @@ fn due<Tz: TimeZone>(events: &[CalendarEvent], now: DateTime<Tz>) -> Vec<Due> {
 }
 
 /// Every notice id the events as they stand now would be announced under, at any time. A card
-/// whose id is not among them is for an event that was deleted or moved.
+/// whose id is not among them is for an event that was deleted or moved, or an early card for an
+/// event whose place was taken off.
 fn live_ids(events: &[CalendarEvent]) -> BTreeSet<String> {
     events
         .iter()
         .filter(|e| issued_id(&e.id))
         .filter_map(|e| parse_stamp(&e.start).map(|start| (e, start)))
-        .flat_map(|(e, start)| [notice_id(Kind::Reminder, &e.id, &start), notice_id(Kind::Early, &e.id, &start)])
+        .flat_map(|(e, start)| {
+            // An early card says the event has a place; once it has none, the card is taken back.
+            let early = place_of(e).map(|_| notice_id(Kind::Early, &e.id, &start));
+            std::iter::once(notice_id(Kind::Reminder, &e.id, &start)).chain(early)
+        })
         .collect()
 }
 
@@ -340,11 +359,10 @@ impl Due {
                 })
             }
             Kind::Early => {
-                let place = notice::plain(self.place.as_deref().unwrap_or_default(), 0);
                 serde_json::json!({
                     "notice_id": notice_id(Kind::Early, &self.id, &self.start),
                     "family": "calendar",
-                    "title": format!("{} at {}, {}", self.title.trim(), self.start.format("%H:%M"), place.trim()),
+                    "title": early_title(&self.title, &self.start, self.place.as_deref().unwrap_or_default()),
                     "body": format!("{}. It has a place, so you may need to leave early.", capitalised(&minutes_phrase(minutes))),
                     "why": "This event has a place, so it may need travel.",
                     "attention": "interrupt",
@@ -355,6 +373,24 @@ impl Due {
             }
         }
     }
+}
+
+/// "Dentist at 15:00, Elm St". The time and the place are the card's reason to exist, so a long
+/// title is cut to make room for them, down to `EARLY_TITLE_KEPT` characters and marked with an
+/// ellipsis; only a place too long for what is left is cut, by the title's own bound. The title's
+/// first line only, as any title, but before the place is added, so a line break in the title does
+/// not take the place with it.
+fn early_title(title: &str, start: &NaiveDateTime, place: &str) -> String {
+    let tail = format!(" at {}, {}", start.format("%H:%M"), notice::plain(place, 0).trim());
+    let (title, _) = notice::one_line(title, usize::MAX);
+    let room = notice::MAX_TITLE.saturating_sub(tail.chars().count()).max(EARLY_TITLE_KEPT);
+    let title = if title.chars().count() > room {
+        let kept: String = title.chars().take(room - 1).collect();
+        format!("{}…", kept.trim_end())
+    } else {
+        title
+    };
+    format!("{title}{tail}")
 }
 
 fn capitalised(s: &str) -> String {
@@ -743,6 +779,22 @@ mod tests {
         assert!(n.title.chars().count() <= notice::MAX_TITLE && n.clamped.contains(&"title".to_string()));
     }
 
+    #[test]
+    fn a_long_title_is_cut_so_the_card_keeps_its_time_and_place() {
+        let now = nine_am();
+        let long = "Quarterly planning review with the regional facilities and procurement teams";
+        let n = notice::check(&due(&[placed("q", long, "2099-03-18T10:00:00", "Elm St")], now)[0].notice(&now)).unwrap();
+        assert!(n.title.ends_with("… at 10:00, Elm St") && n.title.starts_with("Quarterly planning review"), "{:?}", n.title);
+        assert!(n.title.chars().count() <= notice::MAX_TITLE && n.clamped.is_empty(), "{:?} {:?}", n.title, n.clamped);
+        // A line break in the title no longer takes the place with it.
+        let n = notice::check(&due(&[placed("q", "Dentist\nbring the form", "2099-03-18T10:00:00", "Elm St")], now)[0].notice(&now)).unwrap();
+        assert_eq!(n.title, "Dentist at 10:00, Elm St");
+        // A short title is untouched, and however long the place, the title keeps its start.
+        assert_eq!(early_title("Dentist", &parse_stamp("2099-03-18T10:00:00").unwrap(), "Elm St"), "Dentist at 10:00, Elm St");
+        let t = early_title(long, &parse_stamp("2099-03-18T10:00:00").unwrap(), &"Road ".repeat(40));
+        assert!(t.starts_with("Quarterly planning revi…"), "{t:?}");
+    }
+
     // ── Recurring events ─────────────────────────────────────────────────────────────────
 
     #[test]
@@ -957,6 +1009,40 @@ mod tests {
     }
 
     #[test]
+    fn minds_flooding_reminders_and_spending_the_budget_first_never_stop_the_persons_reminder_interrupting() {
+        let (store, dir, cal) = calendar();
+        let now = nine_am();
+        // Two minds on two accounts, each within every cap of its own, fill the minds' shared
+        // hourly limit for reminder interrupts and spend the day's budget.
+        let send = |from: &str, uid: u32, id: &str, family: &str| {
+            let post = notice::NoticePost {
+                notice: serde_json::json!({ "notice_id": id, "family": family, "title": "Stretch", "why": "You asked.", "attention": "interrupt" }),
+                harness: notice::NoticeHarness { id: from.into(), uid: Some(uid), name: from.into(), ..Default::default() },
+                os_id: false,
+            };
+            store.add_notice(post, &dir)
+        };
+        for (from, uid) in [("m0", 1000), ("m1", 1001)] {
+            for i in 0..notice::OBLIGATION_INTERRUPTS_PER_HOUR {
+                assert_eq!(send(from, uid, &format!("r{i}"), "reminder")["stored"], true);
+            }
+        }
+        send("m0", 1000, "d0", "discovery");
+        send("m1", 1001, "d1", "discovery");
+        let theirs = send("m1", 1001, "r-late", "reminder");
+        let late = store.get(theirs["id"].as_str().unwrap()).unwrap().notice.unwrap();
+        assert_eq!(late.grant_reason, GrantReason::Rate, "the flood is real: a mind's next reminder waits");
+
+        // Then the person's own event comes due.
+        write(&cal, &event("dentist", "Dentist", &at(now, 10), DEFAULT_REMINDER_MINUTES));
+        let mut sent = Sent::load(&cal);
+        tick(&store, &cal, &mut sent, now);
+        let (_, own) = card(&store, "cal-reminder:dentist:20990318T0910").unwrap();
+        assert_eq!((own.granted, own.grant_reason, own.held_until), (Attention::Interrupt, GrantReason::Granted, None));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn a_dismissed_early_card_is_left_alone() {
         let (store, dir, cal) = calendar();
         let now = nine_am();
@@ -967,9 +1053,13 @@ mod tests {
         store.record_feedback(&early.id, notice::FeedbackKind::NotNow).unwrap();
         let before = card(&store, "cal-early:dentist:20990318T1000").unwrap();
         assert!(before.0.dismissed);
+        // Edited after it was dismissed: not brought back, and its words are not touched.
+        write(&cal, &placed("dentist", "Dentist", &at(now, 60), "Oak St"));
+        tick(&store, &cal, &mut sent, now + ChronoDuration::minutes(1));
         tick(&store, &cal, &mut sent, now + ChronoDuration::minutes(50));
         let after = card(&store, "cal-early:dentist:20990318T1000").unwrap();
-        assert_eq!(after.0.revision, before.0.revision, "not touched by the supersede");
+        assert_eq!(after.0.revision, before.0.revision, "not touched by the supersede or the edit");
+        assert_eq!(after.0.title, "Dentist at 10:00, Elm St");
         assert_eq!(after.1.feedback, before.1.feedback);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1110,10 +1200,22 @@ mod tests {
         tick(&store, &cal, &mut sent, now + ChronoDuration::minutes(60));
         assert_eq!(store.showing().iter().filter_map(|n| n.notice.as_ref().map(|x| x.notice_id.clone())).collect::<Vec<_>>(), ["cal-early:dentist:20990318T1100"]);
 
-        // Edited in place (same start, new title): the card stays as it is.
-        write(&cal, &placed("dentist", "Dentist (Dr Rao)", &at(now, 120), "Elm St"));
+        // Edited in place (same start, new title and place): the same card, with the new words.
+        let (before, _) = card(&store, "cal-early:dentist:20990318T1100").unwrap();
+        write(&cal, &placed("dentist", "Dentist (Dr Rao)", &at(now, 120), "Oak St"));
         tick(&store, &cal, &mut sent, now + ChronoDuration::minutes(61));
         assert_eq!(store.showing().len(), 1);
+        let (after, x) = card(&store, "cal-early:dentist:20990318T1100").unwrap();
+        assert_eq!((after.id.as_str(), after.title.as_str()), (before.id.as_str(), "Dentist (Dr Rao) at 11:00, Oak St"));
+        assert_eq!((x.grant_reason, x.feedback.len()), (before.notice.unwrap().grant_reason, 0), "not granted or counted again");
+        // Unchanged on the next tick: nothing written.
+        tick(&store, &cal, &mut sent, now + ChronoDuration::minutes(62));
+        assert_eq!(card(&store, "cal-early:dentist:20990318T1100").unwrap().0.revision, after.revision);
+        // The place taken off: the early card, which says it has one, is taken back.
+        write(&cal, &event("dentist", "Dentist (Dr Rao)", &at(now, 120), DEFAULT_REMINDER_MINUTES));
+        tick(&store, &cal, &mut sent, now + ChronoDuration::minutes(63));
+        assert!(store.showing().is_empty());
+        write(&cal, &placed("dentist", "Dentist (Dr Rao)", &at(now, 120), "Oak St"));
 
         // A mind's card is never the timer's to take back.
         let mut theirs = serde_json::json!({ "notice_id": "cal-early:x", "family": "calendar", "title": "t", "why": "w" });
@@ -1124,7 +1226,7 @@ mod tests {
             os_id: false,
         };
         assert_eq!(store.add_notice(post, &dir)["stored"], true);
-        tick(&store, &cal, &mut sent, now + ChronoDuration::minutes(62));
+        tick(&store, &cal, &mut sent, now + ChronoDuration::minutes(64));
         assert!(store.showing().iter().any(|n| n.notice.as_ref().is_some_and(|x| x.harness.id == "pi")));
         let _ = std::fs::remove_dir_all(dir);
     }

@@ -261,7 +261,8 @@ impl Store {
         //
         // The OS's own notices are outside all three, both ways: a busy calendar must not crowd
         // out minds, and a flooding mind must not hold back a reminder the person set. They still
-        // count toward the obligations' hourly interrupts, below.
+        // count toward the obligations' hourly interrupts, below: the desktop's own toward its own
+        // limit, and toward the minds' shared one.
         let notices: Vec<&Notification> = state.notifications.iter().filter(|n| n.notice.is_some()).collect();
         let theirs: Vec<&Notification> =
             notices.iter().copied().filter(|n| n.notice.as_ref().is_some_and(|x| x.harness.id == harness.id)).collect();
@@ -278,7 +279,12 @@ impl Store {
         }
         let hour_ago = now - chrono::Duration::hours(1);
         let obligations_here = theirs.iter().filter(|n| interrupting_obligation(n, hour_ago)).count();
-        let obligations_all = notices.iter().filter(|n| interrupting_obligation(n, hour_ago)).count();
+        // The shared limit exists because a mind's family is its own claim; the desktop's
+        // reminder is the person's own event, so only the desktop's own count can hold it back.
+        // Counting the minds' here would let two accounts at four reminders each turn the
+        // person's dentist reminder into an inbox card.
+        let over_obligations = obligations_here >= notice::OBLIGATION_INTERRUPTS_PER_HOUR
+            || (!os && notices.iter().filter(|n| interrupting_obligation(n, hour_ago)).count() >= notice::OBLIGATION_INTERRUPTS_PER_HOUR_ALL);
 
         state.revision += 1;
         let revision = state.revision;
@@ -312,10 +318,7 @@ impl Store {
         // An obligation skips the day's budget because the person asked for it; but which family a
         // card is in is the mind's own claim. Past an hour's allowance, it waits in the inbox.
         let would_interrupt = decision.granted == notice::Attention::Interrupt || decision.held_until.is_some();
-        if checked.family.is_obligation()
-            && would_interrupt
-            && (obligations_here >= notice::OBLIGATION_INTERRUPTS_PER_HOUR || obligations_all >= notice::OBLIGATION_INTERRUPTS_PER_HOUR_ALL)
-        {
+        if checked.family.is_obligation() && would_interrupt && over_obligations {
             decision = grant::Decision { granted: notice::Attention::Inbox, reason: notice::GrantReason::Rate, held_until: None, spends: false };
         }
         if decision.spends {
@@ -605,6 +608,48 @@ impl Store {
             return Err(format!("the store could not be written: {e}"));
         }
         Ok(gone.len())
+    }
+
+    /// Put new words on the title of one of the OS's own undismissed cards: the calendar's early
+    /// heads-up, for an event the person edited in place (same start, so the same id). Cleaned and
+    /// cut as any title. Only the title changes: the card is not re-granted, re-toasted or
+    /// re-counted, and a card the person dismissed is left alone. Answers whether it changed;
+    /// nothing changes when the store cannot be written.
+    pub fn revise_os_title(&self, notice_id: &str, title: &str) -> Result<bool, String> {
+        if let Some(why) = self.blocked() {
+            return Err(why.to_string());
+        }
+        let (title, _) = notice::one_line(title, notice::MAX_TITLE);
+        if title.is_empty() {
+            return Ok(false);
+        }
+        let mut state = self.lock();
+        let Some(index) = state
+            .notifications
+            .iter()
+            .position(|n| !n.dismissed && is_os(n) && n.notice.as_ref().is_some_and(|x| x.notice_id == notice_id))
+        else {
+            return Ok(false);
+        };
+        if state.notifications[index].title == title {
+            return Ok(false);
+        }
+        state.revision += 1;
+        let revision = state.revision;
+        let n = &mut state.notifications[index];
+        let id = n.id.clone();
+        let before = (std::mem::replace(&mut n.title, title), n.revision);
+        n.revision = revision;
+        let snapshot = snapshot(&mut state);
+        drop(state);
+        if let Err(e) = self.persist(&snapshot) {
+            let mut state = self.lock();
+            if let Some(n) = state.notifications.iter_mut().find(|n| n.id == id) {
+                (n.title, n.revision) = before;
+            }
+            return Err(format!("the store could not be written: {e}"));
+        }
+        Ok(true)
     }
 
     /// Forget what `harness` is bound to, so the next notice under it binds it afresh. The
@@ -1318,6 +1363,55 @@ mod tests {
         }
         assert_eq!(reasons.last(), Some(&GrantReason::Rate), "{reasons:?}");
         assert!(reasons[..notice::OBLIGATION_INTERRUPTS_PER_HOUR].iter().all(|r| *r == GrantReason::Granted), "{reasons:?}");
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(dir2);
+    }
+
+    #[test]
+    fn a_flood_of_the_minds_reminders_and_a_spent_budget_never_hold_back_the_persons_own_reminder() {
+        let (store, dir) = temp_store();
+        // Two minds on two accounts, each inside every cap of its own: four reminder-family
+        // interrupts each fill the minds' shared hourly limit, and two discovery interrupts spend
+        // the day's budget.
+        for (from, uid) in [("m0", 1000), ("m1", 1001)] {
+            for i in 0..notice::OBLIGATION_INTERRUPTS_PER_HOUR {
+                let answer = store.add_notice(post_as(from, uid, "", notice(&format!("r{i}"), "reminder", "interrupt")), &home());
+                assert_eq!(answer["stored"], true, "{from} {i}: {answer}");
+            }
+        }
+        for i in 0..2 {
+            store.add_notice(post_as("m0", 1000, "", notice(&format!("d{i}"), "discovery", "interrupt")), &home());
+        }
+        let reason = |store: &Store, id: &serde_json::Value| store.get(id.as_str().unwrap()).unwrap().notice.unwrap();
+        let next = store.add_notice(post_as("m1", 1001, "", notice("one-more", "reminder", "interrupt")), &home());
+        assert_eq!(reason(&store, &next["id"]).grant_reason, GrantReason::Rate, "the minds are at their shared limit");
+        assert_eq!(store.lock().budget.used, notice::DAILY_INTERRUPTS, "and the day's budget is spent");
+
+        // The person's own reminder interrupts all the same: not demoted, not held, not refused.
+        let answer = store.add_os_notice("Calendar", os_card("cal-reminder:dentist:20990318T1000", "reminder"));
+        assert_eq!(answer["stored"], true, "{answer}");
+        let card = reason(&store, &answer["id"]);
+        assert_eq!((card.granted, card.grant_reason, card.held_until), (Attention::Interrupt, GrantReason::Granted, None));
+
+        // Up to the desktop's own hourly limit, and only its own count holds it there.
+        for i in 1..notice::OBLIGATION_INTERRUPTS_PER_HOUR {
+            let answer = store.add_os_notice("Calendar", os_card(&format!("cal-reminder:e{i}:20990318T1000"), "reminder"));
+            assert_eq!(reason(&store, &answer["id"]).grant_reason, GrantReason::Granted, "{i}");
+        }
+        let answer = store.add_os_notice("Calendar", os_card("cal-reminder:fifth:20990318T1000", "reminder"));
+        assert_eq!(reason(&store, &answer["id"]).grant_reason, GrantReason::Rate, "a calendar of 10:00 meetings still waits past its own four");
+
+        // The desktop's reminders still count toward the minds' shared limit, as the design says:
+        // a mind on a fresh account, alone in its own count, waits in the inbox.
+        let (store, dir2) = temp_store();
+        for i in 0..notice::OBLIGATION_INTERRUPTS_PER_HOUR {
+            store.add_os_notice("Calendar", os_card(&format!("cal-reminder:a{i}:20990318T1000"), "reminder"));
+        }
+        for i in 0..notice::OBLIGATION_INTERRUPTS_PER_HOUR {
+            store.add_notice(post_as("m0", 1000, "", notice(&format!("r{i}"), "reminder", "interrupt")), &home());
+        }
+        let late = store.add_notice(post_as("m1", 1001, "", notice("r", "reminder", "interrupt")), &home());
+        assert_eq!(reason(&store, &late["id"]).grant_reason, GrantReason::Rate);
         let _ = std::fs::remove_dir_all(dir);
         let _ = std::fs::remove_dir_all(dir2);
     }
