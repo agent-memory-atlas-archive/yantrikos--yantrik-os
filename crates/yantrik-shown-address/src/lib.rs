@@ -60,9 +60,16 @@ pub const NOT_SHOWN: &str = "(address not shown)";
 ///
 /// A word is an address when it holds `://` or `@`, or a query or fragment that looks like one
 /// (`aig.example/v1?api-key=x`, `?token=x`): what follows a `?` or `#` after a `.`, `/` or `:`,
-/// or that holds `=` or `&`. "Ready?" and "issue #12" are words. A URL word whose next word
-/// carries the `@` (`https://user:p w@host`, sign-in details with a space in them) is not shown
-/// either, since its end is part of those details.
+/// or that holds `=` or `&`. "Ready?" and "issue #12" are words.
+///
+/// Sign-in details with spaces in them (`https://user:a b c@host`) are cut into several words, so
+/// a URL word that ends before its path, with no `@` of its own, starts a run that reaches the
+/// next word whose authority holds an `@`: the whole run is one [`NOT_SHOWN`], and that word is
+/// drawn as `address_of` draws it. That holds when the cut-off word looks whole
+/// (`https://user:1234`, a numeric password read as a port), and it hides an ordinary
+/// `http://localhost:8080` that is followed by someone's address on the same line: the two cannot
+/// be told apart by reading, and hiding is the side that never shows a key. A URL word that
+/// already has a path starts a run only when the very next word holds the `@`.
 pub fn without_sign_in(text: &str) -> String {
     // Each word with the run of whitespace that follows it.
     let mut pieces: Vec<(&str, &str)> = Vec::new();
@@ -76,21 +83,46 @@ pub fn without_sign_in(text: &str) -> String {
         rest = next;
     }
     let mut out = String::with_capacity(text.len());
-    for (i, (word, space)) in pieces.iter().enumerate() {
+    let mut i = 0;
+    while i < pieces.len() {
+        if let Some(at) = cut_off_run(&pieces, i) {
+            out.push_str(NOT_SHOWN);
+            out.push_str(pieces[at - 1].1);
+            i = at;
+            continue;
+        }
+        let (word, space) = pieces[i];
         if is_address(word) {
-            let cut_off = word.contains("://")
-                && !authority_of(word).contains('@')
-                && pieces.get(i + 1).is_some_and(|(next, _)| !next.contains("://") && authority_of(next).contains('@'));
             match address_of(word) {
-                shown if shown.is_empty() || cut_off => out.push_str(NOT_SHOWN),
+                shown if shown.is_empty() => out.push_str(NOT_SHOWN),
                 shown => out.push_str(&shown),
             }
         } else {
             out.push_str(word);
         }
         out.push_str(space);
+        i += 1;
     }
     out
+}
+
+/// When the word at `i` is a URL cut off inside its sign-in details (`without_sign_in`), the
+/// index of the word that holds their `@`. Every word before it, from `i`, is part of them.
+fn cut_off_run(pieces: &[(&str, &str)], i: usize) -> Option<usize> {
+    let (_, rest) = pieces[i].0.split_once("://")?;
+    if rest.contains('@') {
+        return None;
+    }
+    let reach = if rest.contains(['/', '\\', '?', '#']) { 1 } else { pieces.len() };
+    for (j, (next, _)) in pieces.iter().enumerate().skip(i + 1).take(reach) {
+        if next.contains("://") {
+            return None;
+        }
+        if authority_of(next).contains('@') {
+            return Some(j);
+        }
+    }
+    None
 }
 
 /// Whether a word of someone else's line is, or holds, an address (`without_sign_in`).
@@ -196,6 +228,13 @@ mod tests {
         assert_eq!(without_sign_in("a  https://user:pw@h/v1?api-key=x#f\tb"), "a  https://h/v1\tb");
         assert_eq!(without_sign_in("on https://user:p w@host/v1"), format!("on {NOT_SHOWN} host/v1"));
         assert_eq!(without_sign_in("on https://us er:pw@host/v1"), format!("on {NOT_SHOWN} host/v1"));
+        // Review of #856, delta finding B: sign-in details split by two or more spaces.
+        assert_eq!(without_sign_in("m \u{b7} https://user:a b c@host/v1 \u{b7} up"), format!("m \u{b7} {NOT_SHOWN} host/v1 \u{b7} up"));
+        assert_eq!(without_sign_in("on https://user:1234 a b@host"), format!("on {NOT_SHOWN} host"));
+        assert_eq!(without_sign_in("on https://us e r:pw@host/v1"), format!("on {NOT_SHOWN} host/v1"));
+        // A URL word with a path is whole unless the very next word holds the `@`.
+        assert_eq!(without_sign_in("see https://h/v1 and ask bob@x.org"), "see https://h/v1 and ask x.org");
+        assert_eq!(without_sign_in("see https://h/v1 ask"), "see https://h/v1 ask");
         for (input, _) in HOSTILE {
             let line = format!("qwen3.5:27b \u{b7} {input} \u{b7} up");
             let shown = without_sign_in(&line);

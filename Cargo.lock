@@ -11189,6 +11189,7 @@ dependencies = [
  "tungstenite",
  "ureq 2.12.1",
  "yantrik-ml",
+ "yantrik-shown-address",
 ]
 
 [[package]]
@@ -11284,6 +11285,7 @@ dependencies = [
  "yantrik-ipc-contracts",
  "yantrik-ipc-transport",
  "yantrik-ml",
+ "yantrik-shown-address",
  "yantrikdb",
 ]
 

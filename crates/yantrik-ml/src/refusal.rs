@@ -54,6 +54,14 @@ pub fn host_of(url: &str) -> String {
     if host.is_empty() { "the provider".to_string() } else { host }
 }
 
+/// A request that never got an answer, as it may be said or logged: ureq's own text with every
+/// address in it drawn by `yantrik_shown_address`. Its "bad uri" and "configured for https only"
+/// errors carry the whole address, sign-in details and `?key=` included.
+#[cfg(feature = "api-llm")]
+pub fn unanswered(e: ureq::Error) -> anyhow::Error {
+    anyhow::anyhow!(yantrik_shown_address::without_sign_in(&e.to_string()))
+}
+
 /// Whether `base_url` is Anthropic's own API: a decision, so it reads the address as it is.
 pub fn is_anthropic(base_url: &str) -> bool {
     let authority = base_url.split("://").nth(1).and_then(|r| r.split(['/', '?', '#']).next()).unwrap_or("");
@@ -543,5 +551,14 @@ mod tests {
         // Deciding is not drawing: Anthropic is still told by the address as it is.
         assert!(is_anthropic("https://key@api.anthropic.com/v1"));
         assert!(!is_anthropic("https://api.anthropic.com@evil.example/v1"));
+    }
+
+    #[cfg(feature = "api-llm")]
+    #[test]
+    fn a_request_that_never_got_an_answer_says_no_sign_in_or_key() {
+        let https_only = unanswered(ureq::Error::RequireHttpsOnly("http://user:pw@aig.example/v1/models?key=k".into()));
+        assert_eq!(https_only.to_string(), "configured for https only: http://aig.example/v1/models");
+        let bad = unanswered(ureq::Error::BadUri("user:pw@aig.example/v1 is missing scheme".into()));
+        assert_eq!(bad.to_string(), "bad uri: aig.example/v1 is missing scheme");
     }
 }

@@ -428,10 +428,6 @@ impl Config {
     }
 }
 
-/// Whether a base URL reaches a machine on a network the person owns: loopback, RFC 1918, or
-/// link-local. The question the grade turns on, so it is answered by parsing the URL rather than
-/// by looking for substrings like "localhost" in it — `http://evil.example/?x=localhost` would
-/// pass that test and must not pass this one.
 /// The backend's address as Studio says it, in a sentence, a `describe` field or an error: its
 /// scheme, host and path, never sign-in details, a query or a fragment
 /// (`yantrik_app_runtime::place::address_of`, the one rule; review of #856). The saved file keeps
@@ -443,6 +439,10 @@ pub fn shown_address(base_url: &str) -> String {
     }
 }
 
+/// Whether a base URL reaches a machine on a network the person owns: loopback, RFC 1918, or
+/// link-local. The question the grade turns on, so it is answered by parsing the URL rather than
+/// by looking for substrings like "localhost" in it — `http://evil.example/?x=localhost` would
+/// pass that test and must not pass this one.
 pub fn stays_on_a_network_you_own(base_url: &str) -> bool {
     let Ok(parsed) = url::Url::parse(base_url) else {
         // Not a URL this can read. Treated as away, because guessing "local" from something
