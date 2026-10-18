@@ -30,7 +30,7 @@ for f in director.py missions.json check-page showcase-browser; do
   guest "set -e; cat > /opt/yantrik-live/director/$f.new; chmod 644 /opt/yantrik-live/director/$f.new; case $f in check-page|showcase-browser) chmod 755 /opt/yantrik-live/director/$f.new ;; esac; mv /opt/yantrik-live/director/$f.new /opt/yantrik-live/director/$f" < "$f"
 done
 for u in yantrik-live-director.service yantrik-live-director.timer yantrik-live-showcase.service \
-         yantrik-live-showcase-browser.service yantrik-live-windows.service; do
+         yantrik-live-showcase-browser.service yantrik-live-showcase-grant.service yantrik-live-windows.service; do
   guest "set -e; cat > /etc/systemd/system/$u; chmod 644 /etc/systemd/system/$u" < "$u"
 done
 guest 'set -e; python3 -c "import json; json.load(open(\"/opt/yantrik-live/director/missions.json\"))"; systemctl daemon-reload' < /dev/null

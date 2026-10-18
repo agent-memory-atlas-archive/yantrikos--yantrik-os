@@ -11,6 +11,7 @@ import importlib.util
 import json
 import os
 import re
+import signal
 import sys
 import tempfile
 
@@ -391,9 +392,12 @@ check("the showcase browser has no network, a throwaway profile (its HOME too), 
       and "load-extension" not in browser and "allow-file-access" not in browser)
 check("the showcase browser starts only on the Wayland socket wayland-grant checked",
       'stat -c %d:%i "$sock"' in browser and "wayland.id" in browser)
+check("the showcase browser puts no infobar or first-run prompt on the public stream",
+      {"--test-type", "--no-first-run", "--no-default-browser-check", "--deny-permission-prompts"} <= set(flags))
 publisher_unit = unit_lines("yantrik-live-showcase.service")
 browser_unit = unit_lines("yantrik-live-showcase-browser.service")
 windows_unit = unit_lines("yantrik-live-windows.service")
+grant_unit = unit_lines("yantrik-live-showcase-grant.service")
 
 
 def setting(unit, key):
@@ -420,18 +424,29 @@ check("the browser is its own account, with no capability, and can name nothing 
       and {"ProtectSystem=strict", "ProtectProc=invisible", "NoNewPrivileges=yes", "CapabilityBoundingSet=",
            "PrivateTmp=yes", "IPAddressDeny=any"} <= set(browser_unit)
       and not any(x.startswith("IPAddressAllow") for x in browser_unit + publisher_unit + windows_unit)
-      and setting(browser_unit, "ExecStartPre") == "+/usr/bin/python3 -I /opt/yantrik-live/director/director.py wayland-grant")
+      and not any(line.startswith("ExecStartPre") for line in browser_unit))
+# A "+" ExecStartPre runs inside the browser's namespace, where director.py and /run/user are hidden
+# (live test on 561), so the grant is a root oneshot of its own. Not RemainAfterExit, so each start
+# of the browser, every Restart=always one included, runs it again; Wants=, so a failed grant does
+# not leave the browser waiting on its dependency for good (both seen on systemd 255).
+check("the Wayland grant is a root oneshot outside the browser's namespace, run again before every browser start",
+      "Type=oneshot" in grant_unit and not any(line.startswith(("User=", "RemainAfterExit", "ProtectHome",
+                                                                "TemporaryFileSystem", "PrivateTmp")) for line in grant_unit)
+      and setting(grant_unit, "ExecStart") == "/usr/bin/python3 -I /opt/yantrik-live/director/director.py wayland-grant"
+      and setting(browser_unit, "Wants") == "yantrik-live-showcase-grant.service"
+      and "yantrik-live-showcase-grant.service" in setting(browser_unit, "After").split()
+      and not any(line.startswith(("Requires", "BindsTo")) for line in browser_unit))
 check("the window loop is the desktop's account and runs no browser",
       "User=yantrik" in windows_unit and "IPAddressDeny=any" in windows_unit
       and setting(windows_unit, "ExecStart") == "/usr/bin/python3 /opt/yantrik-live/director/director.py windows"
       and "showcase-browser" not in setting(windows_unit, "ExecStart"))
 setup = open(os.path.join(HERE, "setup-director.sh"), encoding="utf-8").read()
-check("setup makes the showcase root's, the browser's account, and the root-only rotation, and installs all three"
+check("setup makes the showcase root's, the browser's account, and the root-only rotation, and installs all four"
       " units", "install -d -o root -g root -m 755 /opt/yantrik-live/showcase" in setup
       and "-o yantrik -g yantrik -m 755 /opt/yantrik-live/showcase" not in setup
       and "useradd --system" in setup and "yantrik-showcase" in setup and "/etc/yantrik-live/showcase-rotation" in setup
       and all(u in setup for u in ("yantrik-live-showcase.service", "yantrik-live-showcase-browser.service",
-                                   "yantrik-live-windows.service")))
+                                   "yantrik-live-showcase-grant.service", "yantrik-live-windows.service")))
 
 # While a mission runs, the Director asks for its game; between missions the publisher goes round the rotation.
 d.write_state(d.DONE, set())
@@ -485,6 +500,78 @@ check("a request for no mission, a stale one, an oversized one, one through a li
       " is not running shows nothing; a forged turn is no turn",
       forged == [] and turn_line == "starting" and oversize is None and linked is None and idle is None,
       repr((forged, turn_line, oversize, linked, idle)))
+
+# The request is the Mind's file: whatever it holds, the publisher reads it as no request and carries on.
+# 16 KiB of "[" fits under REQUEST_MAX_BYTES and is deep enough to raise RecursionError in json (#840).
+HOSTILE = {"16 KiB of [": b"[" * d.REQUEST_MAX_BYTES, "invalid UTF-8": b'{"mission": "\xff\xfe"}',
+           "a 10 MB body": b'{"mission": "' + b"x" * (10 << 20) + b'"}', "a non-object": b'"starfall"',
+           "a deeply nested object": b'{"a":' * 3000 + b"1" + b"}" * 3000}
+open(d.DIRECTOR_CGROUP, "w").write("4242\n")
+fell = {}
+for name, body in HOSTILE.items():
+    open(d.SHOWING, "wb").write(body)
+    try:
+        if d.live_request(builds, me) is not None:
+            fell[name] = "shown"
+    except Exception as why:
+        fell[name] = type(why).__name__
+check("a request of 16 KiB of [, invalid UTF-8, 10 MB, a non-object or deep nesting is no request, and raises nothing",
+      fell == {}, repr(fell))
+# A lone surrogate is valid JSON that no encoder takes: the caption drops it, so the frame can be written.
+open(d.SHOWING, "w").write('{"mission": "%s", "at": %f, "turn": 2, "summary": "Turn done \\ud800 ok."}'
+                           % (specs[0]["id"], d.time.time()))
+surrogate = d.live_request(builds, me)
+try:
+    surrogate[2].encode("utf-8")
+    encodes = True
+except (TypeError, UnicodeEncodeError):
+    encodes = False
+check("a caption with a lone surrogate is shown without it, so writing the frame cannot fail on it",
+      surrogate is not None and encodes and surrogate[2] == "Turn done ok.", repr(surrogate))
+# Python 3.12 and later parse the 16 KiB nested object (it is valid JSON, and read_state may return it);
+# 100,000 levels, under STATE_MAX_BYTES, raise RecursionError on every version.
+fell = {}
+for name, body in dict(HOSTILE, **{"a 100,000-deep object": b'{"a":' * 100000 + b"1" + b"}" * 100000}).items():
+    open(d.SHOWING, "wb").write(body)
+    try:
+        got = d.read_state(d.SHOWING, {})
+        if got != {} and not (name == "a deeply nested object" and list(got) == ["a"]):
+            fell[name] = "read"
+    except Exception as why:
+        fell[name] = type(why).__name__
+os.remove(d.SHOWING)
+os.mkfifo(d.SHOWING)
+
+
+def blocked(*_):
+    raise TimeoutError("blocked on the FIFO")
+
+
+signal.signal(signal.SIGALRM, blocked)
+signal.alarm(5)
+try:
+    if d.read_state(d.SHOWING, {}) != {}:
+        fell["a FIFO"] = "read"
+except Exception as why:
+    fell["a FIFO"] = type(why).__name__
+signal.alarm(0)
+os.remove(d.SHOWING)
+check("the window loop's read of the same file is empty for each of them, and for a FIFO, and raises or blocks on"
+      " nothing", fell == {}, repr(fell))
+real_run = d.subprocess.run
+fell = {}
+for name, body in HOSTILE.items():
+    d.subprocess.run = lambda argv, **k: Done("shell\n" + body.decode("utf-8", "replace").replace("[", "{", 1) + "\n}")
+    try:
+        d.shell_state()
+        d.whole_text({"text": "t", "clipped": True, "index": 1})
+        d.place_windows(None)
+    except Exception as why:
+        fell[name] = type(why).__name__
+d.subprocess.run = real_run
+check("the shell's describe output is parsed the same way, so no reply of the desktop's ends the Director's loops",
+      fell == {}, repr(fell))
+open(d.DIRECTOR_CGROUP, "w").write("")
 
 for s in specs[:3]:
     os.makedirs(os.path.join(d.PROJECTS, s["folder"]), exist_ok=True)
@@ -556,6 +643,56 @@ check("the publisher goes round the rotation until the Director runs a mission, 
       and frames[3].startswith("LIVE" + specs[2]["title"]) and len(mission_frames) == 4
       and "turn 1" in mission_frames[0] and "turn 1" in mission_frames[1] and "turn 2" in mission_frames[-1],
       repr([f[4:12] + "|" + f[-20:] for f in frames]))
+
+# One bad request, or any one failure in a step, never ends the publisher: on 0040a380 the 16 KiB of "["
+# escaped showcase_main, Restart=always brought it back to the same file, and the showcase froze.
+open(d.DIRECTOR_CGROUP, "w").write("4242\n")
+clock, ticks, frames, broke = [1000.0], [0], [], [1]
+d.time.time = lambda: clock[0]
+d.pwd.getpwnam = lambda name: type("pw", (), {"pw_uid": me})()
+real_frame = d.write_frame
+
+
+def breaking_frame(*a, **k):
+    if broke[0]:
+        broke[0] = 0
+        raise RuntimeError("one step failed")
+    return real_frame(*a, **k)
+
+
+def tick(_):
+    ticks[0] += 1
+    clock[0] += d.LIVE_COPY_SECS
+    body = list(HOSTILE.values())[ticks[0] - 1] if ticks[0] <= len(HOSTILE) else None
+    if body is not None:
+        open(d.SHOWING, "wb").write(body)
+    elif ticks[0] == len(HOSTILE) + 1:
+        d.write_state(d.SHOWING, {"mission": specs[1]["id"], "at": clock[0], "turn": 4})
+    else:
+        header = re.search(r"<header>(.*?)</header>", open(os.path.join(d.SHOWCASE_DIR, "frame.html")).read())
+        frames.append(html.unescape(re.sub(r"<[^>]+>", "", header.group(1))))
+    if ticks[0] == len(HOSTILE) + 4:
+        raise Stop
+
+
+d.write_frame, d.time.sleep = breaking_frame, tick
+real_log, logged = d.log, []
+d.log = lambda **entry: logged.append(entry)
+d.write_state(d.SHOWING, {"mission": specs[1]["id"], "at": clock[0], "turn": 3})
+ended = None
+try:
+    d.showcase_main(builds)
+except Stop:
+    pass
+except Exception as why:
+    ended = type(why).__name__
+d.time.sleep, d.time.time, d.pwd.getpwnam, d.write_frame = real_sleep, real_time, real_pw, real_frame
+d.log = real_log
+d.LOG_TO_FILE[0] = True
+check("the publisher outlives a failing step and every hostile request, logs the failure, and shows the next good"
+      " request", ended is None and bool(frames) and "turn 4" in frames[-1] and "one step failed" in repr(logged),
+      repr((ended, frames, ticks[0], logged)))
+open(d.DIRECTOR_CGROUP, "w").write("")
 
 # The window loop: placed when the browser starts, and with the showcase in front when a mission ends.
 placed, starts, ticks = [], ["a", "a", "a", "b", "b", "b", "b"], [0]
