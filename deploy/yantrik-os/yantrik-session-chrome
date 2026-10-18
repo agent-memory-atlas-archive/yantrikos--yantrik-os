@@ -3,7 +3,9 @@
 # yantrik-session-chrome — put the desktop's own chrome into the person's home
 # ═══════════════════════════════════════════════════════════════════════════════════════
 #
-#   yantrik-session-chrome [SHARE]      SHARE defaults to /opt/yantrik/share
+#   yantrik-session-chrome [SHARE]          put it in place; SHARE defaults to /opt/yantrik/share
+#   yantrik-session-chrome --check [SHARE]  change nothing; exit 0 when every file in the home
+#                                           already is SHARE's, 1 when any differs or is missing
 #
 # The compositor config (share/labwc/rc.xml: every key the desktop binds), the window menu, the
 # window theme and its titlebar buttons, the session autostart, and the house typeface. labwc
@@ -11,10 +13,11 @@
 #
 # Two callers, one copy logic (#854):
 #   yantrik-session   at every login, before labwc starts
-#   yantrik-update    after an apply that changed share/labwc/, as the session's owner (runuser),
-#                     followed by a SIGHUP to that session's labwc so new keys work at once. Before
-#                     this, only a login copied rc.xml: after #828 Print kept running plain `grim`
-#                     on an updated machine until the person logged out and in again.
+#   yantrik-update    in `reconcile` and after an apply or rollback, as the session's owner
+#                     (runuser): --check first, and only when the home differs, the copy and a
+#                     SIGHUP to that session's labwc so new keys work at once. Before this, only a
+#                     login copied rc.xml: after #828 Print kept running plain `grim` on an updated
+#                     machine until the person logged out and in again.
 #
 # Never through a link (pre-review checklist item 4). Each file is written to a fresh mktemp name
 # in its own directory and renamed over the target with `mv -fT`, which replaces a link, FIFO or
@@ -27,13 +30,21 @@
 # past one failure so the rest of the chrome still lands.
 set -u
 
+CHECK=0
+if [ "${1:-}" = --check ]; then CHECK=1; shift; fi
 CHROME="${1:-/opt/yantrik/share}"
 status=0
 
 say() { printf 'yantrik-session-chrome: %s\n' "$*" >&2; }
 
-# A directory under $HOME this account owns and that is not a link, made if missing.
+# A directory under $HOME this account owns and that is not a link, made if missing (not when
+# checking: then a missing one is a difference).
 dir_ok() {
+  if [ "$CHECK" = 1 ]; then
+    [ -d "$1" ] && [ ! -L "$1" ] && [ -O "$1" ] && return 0
+    status=1
+    return 1
+  fi
   mkdir -p -- "$1" 2>/dev/null
   if [ -L "$1" ] || [ ! -d "$1" ] || [ ! -O "$1" ]; then
     say "refusing $1: it is a link, not a directory, or not this account's"
@@ -46,6 +57,14 @@ dir_ok() {
 put() {
   src="$1" dst="$2" mode="${3:-0644}"
   [ -f "$src" ] || return 0
+  if [ "$CHECK" = 1 ]; then
+    # The same bytes, in a plain file, executable where it must be.
+    if [ -L "$dst" ] || [ ! -f "$dst" ] || ! cmp -s -- "$src" "$dst" \
+       || { [ "$mode" = 0755 ] && [ ! -x "$dst" ]; }; then
+      status=1
+    fi
+    return 0
+  fi
   tmp="$(mktemp "$(dirname -- "$dst")/.$(basename -- "$dst").XXXXXX" 2>/dev/null)" || {
     say "could not write beside $dst"
     status=1
@@ -87,7 +106,7 @@ if [ -d "$CHROME/fonts" ]; then
     for ttf in "$CHROME/fonts/"*.ttf; do
       [ -f "$ttf" ] && put "$ttf" "$fonts/$(basename -- "$ttf")"
     done
-    fc-cache -f "$fonts" >/dev/null 2>&1 || true
+    [ "$CHECK" = 1 ] || fc-cache -f "$fonts" >/dev/null 2>&1 || true
   fi
 fi
 exit "$status"

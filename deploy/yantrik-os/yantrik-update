@@ -791,6 +791,8 @@ from it. Change it with: yantrik-update set-channel nightly" ;;
     reconcile_hermes_launcher || true
     reconcile_harness_plugins || true
     reconcile_mind_egress || true
+    # Keys an earlier update left behind (#854); the running shell is this build.
+    refresh_session_chrome || true
     return 0
   fi
 
@@ -1009,7 +1011,8 @@ EOF
   # build's by now, whatever path this process was started from, so it reconciles, as a process
   # of its own, and this one stands in only when that file cannot run.
   if [ -x "$BIN_DIR/yantrik-update" ]; then
-    YANTRIK_PREFIX="$PREFIX" "$BIN_DIR/yantrik-update" reconcile || true
+    # This apply refreshes the keys itself, after the new build answered (refresh_session_chrome).
+    YANTRIK_PREFIX="$PREFIX" YANTRIK_APPLY_REFRESHES_KEYS=1 "$BIN_DIR/yantrik-update" reconcile || true
   else
     reconcile_packages || true
   fi
@@ -1022,7 +1025,7 @@ EOF
     restart_and_verify "$backup"
     # Only after the new build answered: restart_and_verify does not return from a rollback. Not
     # with --no-restart either, where new keys could name actions the running shell does not have.
-    refresh_session_chrome "$backup/share" || true
+    refresh_session_chrome || true
   else
     info "not restarting (--no-restart); the new build, and any new keys, take effect on next session start"
   fi
@@ -1250,7 +1253,7 @@ restart_and_verify() {
     runtime="$(session_runtime_dir)"
     info "restarting $SESSION_UNIT"
     if sudo -n systemctl restart "$SESSION_UNIT" 2>/dev/null; then
-      wait_for_shell "$runtime" && { SESSION_RESTARTED=1; return 0; }
+      wait_for_shell "$runtime" && return 0
       warn "the session restarted but the shell did not answer"
       restore_backup "$backup"
       sudo -n systemctl restart "$SESSION_UNIT" 2>/dev/null
@@ -1381,30 +1384,32 @@ restore_backup() {
 #
 # labwc reads its keys from the person's ~/.config/labwc/rc.xml, which yantrik-session copies
 # from share/labwc only at login. So after #828 an updated machine's Print still ran plain `grim`
-# until the person logged out and in. When the session unit was restarted, its new
-# yantrik-session already copied them; otherwise this runs the same copy, yantrik-session-chrome,
-# as the session's owner (never as root, and it writes nothing through a link), then sends that
-# owner's labwc SIGHUP, which is what `labwc --reconfigure` sends: it re-reads rc.xml in place,
-# with every window left open.
-SESSION_RESTARTED=0
-
-# Did share/labwc change between OLD and NEW (each a share/ directory)? Any file added, removed
-# or different counts: rc.xml holds the keys, and the theme and menu beside it are copied with it.
-labwc_chrome_changed() { # <old share> <new share>
-  local old="$1/labwc" new="$2/labwc" f
-  [ -d "$new" ] || return 1
-  [ -d "$old" ] || return 0
-  for f in "$new"/* "$old"/*; do
-    [ -e "$f" ] || continue
-    cmp -s -- "$new/${f##*/}" "$old/${f##*/}" || return 0
-  done
-  return 1
-}
+# until the person logged out and in. This asks the session's own copy, yantrik-session-chrome,
+# run as the session's owner (never as root, and it writes nothing through a link), whether the
+# home already has this build's files (--check). Only when it does not does it copy them, then
+# send that owner's labwc SIGHUP, which is what `labwc --reconfigure` sends: it re-reads rc.xml in
+# place, with every window left open.
+#
+# It compares the home with share/, not one build's share/ with the last, so it is the same answer
+# wherever it runs and running it twice changes nothing. That matters because of where it runs:
+#   reconcile   the hook every updater calls on the NEW build after installing it, including
+#               updaters from before #854, whose own apply has no step for the keys. Without this
+#               the first update of every machine already in the field brought the keys one update
+#               late (VM 520, 18 Oct). Run there, it happens before the shell is restarted; an old
+#               updater that then rolls back leaves the new keys with the old shell until the next
+#               login, which copies the old ones back.
+#   apply       this build's own apply does it after restart_and_verify returned (the new build
+#               answered; it never returns from a rollback) and tells its reconcile to leave it
+#               (YANTRIK_APPLY_REFRESHES_KEYS=1). Not with --no-restart: new keys could name actions
+#               the running shell does not have.
+#   rollback    after the restored build answered, the same way.
 
 # The labwc processes of the account with uid $1. A mind's own labwc runs as its own account
-# (#411), so this never reaches it. $2 is the process name, for the selftest's stand-in.
-session_labwc_pids() { # <uid> [name]
-  pgrep -u "$1" -x "${2:-labwc}" 2>/dev/null || true
+# (#411), so this never reaches it. The selftest names a stand-in.
+session_labwc_pids() { # <uid>
+  local name=labwc
+  selftest_standins && [ -n "${YANTRIK_LABWC_NAME:-}" ] && name="$YANTRIK_LABWC_NAME"
+  pgrep -u "$1" -x "$name" 2>/dev/null || true
 }
 
 # Ask each labwc in $2.. (pids of the account named $1) to re-read its config. As that account
@@ -1424,37 +1429,39 @@ reload_labwc() { # <owner> <pid>...
   return "$ok"
 }
 
-refresh_session_chrome() { # <share/ as it was before>
-  labwc_chrome_changed "$1" "$SHARE_DIR" || return 0
-  say "The compositor's keys and theme changed"
-  if [ "$SESSION_RESTARTED" = 1 ]; then
-    info "the session was restarted, and it put them in place as it started"
-    return 0
-  fi
+refresh_session_chrome() {
+  [ -d "$SHARE_DIR/labwc" ] || return 0
   local owner uid home pids
   owner="$(desktop_owner)"
   case "$owner" in ''|root|[!a-z_]*|*[!a-z0-9_-]*)
-    warn "cannot tell whose desktop this is; the new keys work after the next login"; return 1 ;;
+    info "compositor keys: cannot tell whose desktop this is; the session puts them in place at the next login"; return 0 ;;
   esac
-  uid="$(id -u "$owner" 2>/dev/null)" || { warn "no account $owner; the new keys work after the next login"; return 1; }
+  uid="$(id -u "$owner" 2>/dev/null)" || { warn "compositor keys: no account $owner"; return 1; }
   pids="$(session_labwc_pids "$uid")"
   if [ -z "$pids" ]; then
-    info "no desktop is running for $owner; the session puts them in place at the next login"
+    info "compositor keys: no desktop is running for $owner; the session puts them in place at the next login"
     return 0
   fi
   home="$(getent passwd "$owner" | cut -d: -f6)"
-  [ -n "$home" ] && [ -d "$home" ] || { warn "$owner has no home directory; the new keys work after the next login"; return 1; }
+  selftest_standins && [ -n "${YANTRIK_CHROME_HOME:-}" ] && home="$YANTRIK_CHROME_HOME"
+  [ -n "$home" ] && [ -d "$home" ] || { warn "compositor keys: $owner has no home directory"; return 1; }
   local as=()
   if [ "$(id -u)" = 0 ]; then
     as=(runuser -u "$owner" --)
   elif [ "$(id -u)" != "$uid" ]; then
-    warn "the desktop is $owner's and this runs as $(id -un); the new keys work after the next login"
+    warn "compositor keys: the desktop is $owner's and this runs as $(id -un); they apply at the next login"
     return 1
   fi
-  local out rc=0
   # A time limit like every other process this runs: the copy is a few files and an fc-cache.
-  out="$("${as[@]}" env -i HOME="$home" PATH=/usr/bin:/bin LANG=C.UTF-8 \
-          timeout --kill-after=10 120 "$BIN_DIR/yantrik-session-chrome" "$SHARE_DIR" 2>&1)" || rc=$?
+  local chrome=("${as[@]}" env -i HOME="$home" PATH=/usr/bin:/bin LANG=C.UTF-8
+                timeout --kill-after=10 120 "$BIN_DIR/yantrik-session-chrome")
+  if "${chrome[@]}" --check "$SHARE_DIR" >/dev/null 2>&1; then
+    info "compositor keys: $owner's are already this build's"
+    return 0
+  fi
+  say "The compositor's keys and theme in $home are not this build's"
+  local out rc=0
+  out="$("${chrome[@]}" "$SHARE_DIR" 2>&1)" || rc=$?
   [ -z "$out" ] || printf '%s\n' "$out" | LC_ALL=C tr -cd '\012\040-\176' | while IFS= read -r line; do info "$line"; done
   if [ "$rc" = 0 ]; then
     info "copied into $home/.config/labwc as $owner"
@@ -1478,14 +1485,11 @@ cmd_rollback() {
   }
   [ -n "$backup" ] && [ -d "$backup" ] || fail "no backup to roll back to"
   say "Rolling back to $backup"
-  # The keys as they are now, so the ones the rollback brings back can be put in the person's
-  # home too: the same gap as an update, the other way round (#854).
-  local before; before="$(mktemp -d)"
-  [ -d "$SHARE_DIR/labwc" ] && cp -a "$SHARE_DIR/labwc" "$before/labwc"
   restore_backup "$backup"
   restart_and_verify "$backup"
-  refresh_session_chrome "$before" || true
-  rm -rf "$before"
+  # The restored build's keys into the person's home: the same gap as an update, the other way
+  # round (#854).
+  refresh_session_chrome || true
 }
 
 # ── status ──────────────────────────────────────────────────────────────────────────────
@@ -1731,14 +1735,14 @@ APT_LOCKS="/var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/loc
 # install without a Debian machine. Honoured only in selftest mode (YANTRIK_SELFTEST=1) and never
 # for root, like install-mind's: a root run with any of these in its environment uses the real
 # apt and the real limits.
-apt_standins() { [ "${YANTRIK_SELFTEST:-}" = 1 ] && [ "$(id -u)" != 0 ]; }
+selftest_standins() { [ "${YANTRIK_SELFTEST:-}" = 1 ] && [ "$(id -u)" != 0 ]; }
 pkg_status_cmd() {
-  if apt_standins && [ -n "${YANTRIK_DPKG_STATUS:-}" ]; then printf '%s' "$YANTRIK_DPKG_STATUS"
+  if selftest_standins && [ -n "${YANTRIK_DPKG_STATUS:-}" ]; then printf '%s' "$YANTRIK_DPKG_STATUS"
   else printf 'pkg_installed'; fi
 }
 apt_setting() { # <name> <default>
   local v=""
-  apt_standins && v="$(printenv "YANTRIK_$1" 2>/dev/null)"
+  selftest_standins && v="$(printenv "YANTRIK_$1" 2>/dev/null)"
   printf '%s' "${v:-$2}"
 }
 
@@ -1782,7 +1786,7 @@ apt_wait_for_lock() {
 apt_run() {
   local secs="$1" log="$2"; shift 2
   local apt=(apt-get)
-  if apt_standins && [ -n "${YANTRIK_APT:-}" ]; then apt=("$YANTRIK_APT")
+  if selftest_standins && [ -n "${YANTRIK_APT:-}" ]; then apt=("$YANTRIK_APT")
   elif [ "$(id -u)" != 0 ]; then apt=(sudo -n apt-get); fi
   # sudo -n before env, when it is needed at all, so the environment reaches apt.
   if [ "${apt[0]}" = sudo ]; then
@@ -1871,7 +1875,7 @@ reconcile_packages() {
   [ "${#miss[@]}" -gt 0 ] || return 0
   info "missing: ${miss[*]}"
 
-  if [ "$(id -u)" != 0 ] && ! apt_standins && ! sudo -n true 2>/dev/null; then
+  if [ "$(id -u)" != 0 ] && ! selftest_standins && ! sudo -n true 2>/dev/null; then
     warn "failed: ${miss[*]} — apt needs root, and this account cannot sudo without a password. Finish with: sudo yantrik-update reconcile"
     return 1
   fi
@@ -4335,6 +4339,11 @@ cmd_reconcile() {
   # launcher still pointing into /tmp (#712) would stop dead.
   reconcile_hermes_launcher
   reconcile_harness_plugins
+  # The keys (#854), here because this is what every updater runs on the new build, an old one's
+  # apply included. This build's own apply says it does them itself, after the restart.
+  if [ "${YANTRIK_APPLY_REFRESHES_KEYS:-}" != 1 ]; then
+    refresh_session_chrome || true
+  fi
   audit_unowned /etc/polkit-1/rules.d '*.rules' polkit
   audit_unowned /etc/sysctl.d '*.conf' sysctl
   audit_unowned /etc/containers/registries.conf.d '*.conf' containers
@@ -4985,17 +4994,22 @@ fd = os.open(sys.argv[1], os.O_RDWR); fcntl.lockf(fd, fcntl.LOCK_EX); open(sys.a
     is "and keeps no copy of its own" "" "$(grep -n 'cp -f "\$CHROME' "$here/yantrik-session" || true)"
   fi
 
-  # Which applies count as a change to the keys.
-  local lo="$root/lold" ln="$root/lnew"
-  mkdir -p "$lo/labwc" "$ln/labwc"
-  printf 'a\n' > "$lo/labwc/rc.xml"; printf 'a\n' > "$ln/labwc/rc.xml"
-  printf 't\n' > "$lo/labwc/themerc"; printf 't\n' > "$ln/labwc/themerc"
-  is "the same labwc files: no change" "same" "$(labwc_chrome_changed "$lo" "$ln" && echo changed || echo same)"
-  printf 'b\n' > "$ln/labwc/rc.xml"
-  is "a new key in rc.xml: changed" "changed" "$(labwc_chrome_changed "$lo" "$ln" && echo changed || echo same)"
-  printf 'a\n' > "$ln/labwc/rc.xml"; rm "$ln/labwc/themerc"
-  is "a file dropped: changed" "changed" "$(labwc_chrome_changed "$lo" "$ln" && echo changed || echo same)"
-  is "a build before share/labwc existed: changed" "changed" "$(labwc_chrome_changed "$root/nolabwc" "$ln" && echo changed || echo same)"
+  # The check the refresh asks first: the home already has this build's files, or not.
+  if [ -n "$chrome_helper" ]; then
+    local kh="$root/khome"
+    HOME="$kh" sh "$chrome_helper" "$cs" >/dev/null 2>&1
+    is "--check: a home with this build's files" "0" "$(HOME="$kh" sh "$chrome_helper" --check "$cs" >/dev/null 2>&1; echo $?)"
+    printf '<keys old/>\n' > "$kh/.config/labwc/rc.xml"
+    is "--check: an older rc.xml differs" "1" "$(HOME="$kh" sh "$chrome_helper" --check "$cs" >/dev/null 2>&1; echo $?)"
+    is "--check changes nothing" "<keys old/>" "$(cat "$kh/.config/labwc/rc.xml")"
+    rm "$kh/.config/labwc/rc.xml"; ln -s "$cs/labwc/rc.xml" "$kh/.config/labwc/rc.xml"
+    is "--check: a link to the right bytes still differs" "1" "$(HOME="$kh" sh "$chrome_helper" --check "$cs" >/dev/null 2>&1; echo $?)"
+    rm "$kh/.config/labwc/rc.xml"; cp "$cs/labwc/rc.xml" "$kh/.config/labwc/rc.xml"; chmod -x "$kh/.config/labwc/autostart"
+    is "--check: an autostart that cannot run differs" "1" "$(HOME="$kh" sh "$chrome_helper" --check "$cs" >/dev/null 2>&1; echo $?)"
+    rm -rf "$kh"
+    is "--check: a home without them differs, and is not made" "1 absent" \
+      "$(HOME="$kh" sh "$chrome_helper" --check "$cs" >/dev/null 2>&1; echo "$? $([ -e "$kh/.config" ] && echo present || echo absent)")"
+  fi
 
   # labwc is sent SIGHUP (what `labwc --reconfigure` sends), found by its owner's uid and name. A
   # renamed `sleep` stands in for it: SIGHUP ends it with status 129.
@@ -5003,20 +5017,69 @@ fd = os.open(sys.argv[1], os.O_RDWR); fcntl.lockf(fd, fcntl.LOCK_EX); open(sys.a
   cp "$(command -v sleep)" "$fake"
   "$fake" 30 & fpid=$!
   sleep 0.3
-  t "the stand-in labwc is found by its owner's uid" "$fpid" "$(session_labwc_pids "$(id -u)" ylabwc-selftest)"
+  if [ "$(id -u)" = 0 ]; then
+    is "as root the stand-in's name is refused, so only a real labwc is ever signalled" "" \
+      "$(YANTRIK_SELFTEST=1 YANTRIK_LABWC_NAME=ylabwc-selftest session_labwc_pids "$(id -u)")"
+  else
+    t "the stand-in labwc is found by its owner's uid" "$fpid" \
+      "$(YANTRIK_SELFTEST=1 YANTRIK_LABWC_NAME=ylabwc-selftest session_labwc_pids "$(id -u)")"
+  fi
   out="$(reload_labwc "$(id -un)" "$fpid" 2>&1)"
   wait "$fpid" 2>/dev/null; local hup=$?
   is "and is sent SIGHUP" "129" "$hup"
   t "which the output says" "re-read its config" "$out"
   is "a uid with no labwc has none" "" "$(session_labwc_pids 2147483646)"
 
-  # Where apply and rollback do it: after the new build answered, never with --no-restart.
+  # The first update of a machine already in the field (VM 520, 18 Oct): its OLD updater runs the
+  # apply, and the only code of this build it runs is `reconcile`. So `reconcile` itself must bring
+  # the keys. Driven here as that old updater does, the real `reconcile` in a process of its own,
+  # against a scratch prefix and a scratch home. Never as root: the stand-ins are refused to root,
+  # and as root this would reach the real home and the real labwc.
+  if [ "$(id -u)" = 0 ]; then
+    printf '  skip reconcile key checks: they run as an ordinary account, never as root\n'
+  elif [ -n "$chrome_helper" ]; then
+    local op="$root/oldupd" oh="$root/ohome"
+    mkdir -p "$op/bin" "$op/share" "$op/logs" "$oh/.config/labwc"
+    cp "$chrome_helper" "$op/bin/yantrik-session-chrome"; chmod 0755 "$op/bin/yantrik-session-chrome"
+    cp -a "$cs/labwc" "$op/share/labwc"
+    printf '<keys from 16 Oct/>\n' > "$oh/.config/labwc/rc.xml"
+    as_old_updater() { # what an updater from before #854 runs after installing this build
+      env YANTRIK_SELFTEST=1 YANTRIK_PREFIX="$op" YANTRIK_LABWC_NAME=ylabwc-selftest \
+          YANTRIK_CHROME_HOME="$oh" "$@" "$0" reconcile 2>&1
+    }
+    "$fake" 30 & fpid=$!
+    sleep 0.3
+    out="$(as_old_updater)"
+    wait "$fpid" 2>/dev/null; hup=$?
+    t "reconcile alone finds the person's keys are not this build's" "are not this build's" "$out"
+    is "and puts this build's in place" "<keys new/>" "$(cat "$oh/.config/labwc/rc.xml")"
+    is "and labwc is sent SIGHUP" "129" "$hup"
+    t "and the output says the keys work now" "the new keys work now, with no new login" "$out"
+    "$fake" 30 & fpid=$!
+    sleep 0.3
+    out="$(as_old_updater)"
+    t "a second reconcile finds them already in place" "are already this build's" "$out"
+    is "and does not signal labwc again" "running" "$(kill -0 "$fpid" 2>/dev/null && echo running || echo gone)"
+    printf '<keys from 16 Oct/>\n' > "$oh/.config/labwc/rc.xml"
+    out="$(as_old_updater YANTRIK_APPLY_REFRESHES_KEYS=1)"
+    is "this build's own apply tells reconcile to leave the keys to it" "<keys from 16 Oct/>" "$(cat "$oh/.config/labwc/rc.xml")"
+    is "and labwc is left alone" "running" "$(kill -0 "$fpid" 2>/dev/null && echo running || echo gone)"
+    kill "$fpid" 2>/dev/null; wait "$fpid" 2>/dev/null
+    out="$(as_old_updater)"
+    t "with no desktop running, reconcile says the login will do it" "no desktop is running for" "$out"
+    is "and changes nothing" "<keys from 16 Oct/>" "$(cat "$oh/.config/labwc/rc.xml")"
+  fi
+
+  # Where this build's own apply and rollback do it: after the build answered, never with
+  # --no-restart, and its reconcile told to leave them.
   local applyfn; applyfn="$(sed -n '/^cmd_apply()/,/^}/p' "$SELF_PATH")"
-  is "apply refreshes the keys right after the restart it verified" 'refresh_session_chrome "$backup/share" || true' \
+  is "apply refreshes the keys right after the restart it verified" 'refresh_session_chrome || true' \
     "$(printf '%s\n' "$applyfn" | grep -A3 -F 'restart_and_verify "$backup"' | grep -F 'refresh_session_chrome' | sed 's/^ *//')"
-  is "and only there" "1" "$(printf '%s\n' "$applyfn" | grep -c 'refresh_session_chrome')"
-  t "rollback puts the older keys back the same way" 'refresh_session_chrome "$before"' \
-    "$(sed -n '/^cmd_rollback()/,/^}/p' "$SELF_PATH")"
+  is "an up-to-date apply checks them too" "2" "$(printf '%s\n' "$applyfn" | grep -c 'refresh_session_chrome || true')"
+  t "apply's reconcile is told the keys are apply's" 'YANTRIK_APPLY_REFRESHES_KEYS=1 "$BIN_DIR/yantrik-update" reconcile' \
+    "$(printf '%s\n' "$applyfn" | grep -F 'YANTRIK_APPLY_REFRESHES_KEYS=1')"
+  t "rollback puts the older keys back after the restart" 'refresh_session_chrome || true' \
+    "$(sed -n '/^cmd_rollback()/,/^}/p' "$SELF_PATH" | grep -A3 -F 'restart_and_verify "$backup"' | grep -F refresh_session_chrome)"
 
   # 9. Subordinate ids for rootless podman (#401). Where a new range starts, and whether an
   #    account already has one, decide whether two accounts end up sharing ids; both are pure
