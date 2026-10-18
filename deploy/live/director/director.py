@@ -400,7 +400,9 @@ def caption_summary(reply):
     # A path or an address is any word with a slash in it, whatever punctuation follows it.
     text = re.sub(r"[^\s]*/[^\s]*?(?=[.,;:!?)\]]*(\s|$))", " ", text)
     text = re.sub(r"\*+|~~|(?<!\w)_+|_+(?!\w)", "", text)
-    text = re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", text)
+    # Controls, and lone surrogates: valid JSON (\ud800) that no encoder takes, so a caption with
+    # one failed write_frame on every poll (#853 review).
+    text = re.sub(r"[\x00-\x1f\x7f-\x9f\ud800-\udfff]", " ", text)
     text = re.sub(r"\s+([.,;:!?])", r"\1", " ".join(text.split()))
     text = re.sub(r"(\w)\s*:\s*([.!?])", r"\1\2", text)
     first = re.match(r"(.+?[.!?])(\s|$)", text)

@@ -517,6 +517,17 @@ for name, body in HOSTILE.items():
         fell[name] = type(why).__name__
 check("a request of 16 KiB of [, invalid UTF-8, 10 MB, a non-object or deep nesting is no request, and raises nothing",
       fell == {}, repr(fell))
+# A lone surrogate is valid JSON that no encoder takes: the caption drops it, so the frame can be written.
+open(d.SHOWING, "w").write('{"mission": "%s", "at": %f, "turn": 2, "summary": "Turn done \\ud800 ok."}'
+                           % (specs[0]["id"], d.time.time()))
+surrogate = d.live_request(builds, me)
+try:
+    surrogate[2].encode("utf-8")
+    encodes = True
+except (TypeError, UnicodeEncodeError):
+    encodes = False
+check("a caption with a lone surrogate is shown without it, so writing the frame cannot fail on it",
+      surrogate is not None and encodes and surrogate[2] == "Turn done ok.", repr(surrogate))
 # Python 3.12 and later parse the 16 KiB nested object (it is valid JSON, and read_state may return it);
 # 100,000 levels, under STATE_MAX_BYTES, raise RecursionError on every version.
 fell = {}
