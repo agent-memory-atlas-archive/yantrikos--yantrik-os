@@ -1648,6 +1648,11 @@ PACKAGE_LIST_MAX_NAMES=512
 # one Debian package name refuses the whole file (exit 1, the line named on stderr), because a
 # list that is partly applied is a machine nobody can predict. Names go to apt as separate
 # arguments, so with this check nothing in the file can become an option, a path or a command.
+# Two things apt-get makes of a name that this syntax alone allows are closed elsewhere: a name
+# with `.` or `+` and no package of exactly that name is read as a regex (`zst.` selected zutty
+# and a dozen others on apt 2.8), so only names apt knows exactly are installed
+# (apt_known_names); a trailing `-` means "remove", so it is refused here (security review of
+# #858). A trailing `+` only means "install", and real names end in it (g++).
 read_package_list() { # <file>
   local f="$1" n=0 count=0 line size out=""
   if [ -L "$f" ] || [ ! -f "$f" ]; then
@@ -1664,7 +1669,8 @@ read_package_list() { # <file>
     line="${line#"${line%%[![:space:]]*}"}"
     line="${line%"${line##*[![:space:]]}"}"
     [ -n "$line" ] || continue
-    if ! [[ "$line" =~ ^[a-z0-9][a-z0-9+.-]+$ ]]; then
+    # Debian's name syntax, minus a trailing `-`: apt-get reads `name-` as "remove name".
+    if ! [[ "$line" =~ ^[a-z0-9][a-z0-9+.-]*[a-z0-9+]$ ]]; then
       printf '%s line %s is not one Debian package name: %s\n' "$f" "$n" \
         "$(printf '%s' "$line" | LC_ALL=C tr -cd '\040-\176' | cut -c1-80)" >&2
       return 1
@@ -1744,6 +1750,14 @@ apt_setting() { # <name> <default>
   local v=""
   selftest_standins && v="$(printenv "YANTRIK_$1" 2>/dev/null)"
   printf '%s' "${v:-$2}"
+}
+
+# Every package name apt knows, one per line: `apt-cache pkgnames` prints names as they are,
+# never matched as a pattern. One call (about a second and a half), then exact lookups in it.
+apt_known_names() { # <seconds>
+  local cache=(apt-cache)
+  if selftest_standins && [ -n "${YANTRIK_APT_CACHE:-}" ]; then cache=("$YANTRIK_APT_CACHE"); fi
+  timeout --kill-after=10 "$1" "${cache[@]}" pkgnames 2>/dev/null
 }
 
 # The first apt or dpkg lock someone holds, or nothing. fcntl locks, as apt takes them; opened
@@ -1904,11 +1918,30 @@ reconcile_packages() {
   fi
   rm -f "$log"
 
+  # Only names apt knows exactly: any other name with a `.` or `+` in it apt-get would read as a
+  # regex and install whatever matched.
+  local known pkg exact=() failed=()
+  known="$(mktemp)"
+  if ! apt_known_names "$(apt_setting APT_UPDATE_SECS "$APT_UPDATE_SECS")" > "$known"; then
+    rm -f "$known"
+    warn "failed: ${miss[*]} — apt-cache could not list the packages apt knows; nothing was installed"
+    return 1
+  fi
+  for pkg in "${miss[@]}"; do
+    if grep -qxF -- "$pkg" "$known"; then exact+=("$pkg")
+    else failed+=("$pkg — no package of exactly that name in this machine's apt sources"); fi
+  done
+  rm -f "$known"
+  local present=$(( ${#want[@]} - ${#miss[@]} - skipped ))
+  miss=("${exact[@]}")
+
   # All at once, the usual case. If that fails for a reason that is not the whole machine's (the
   # mirror, the lock, the time limit), one at a time, so one package that cannot be installed
   # does not keep the rest away.
-  local pkg done_ok=() failed=()
-  if apt_install "${miss[@]}"; then
+  local done_ok=()
+  if [ "${#miss[@]}" = 0 ]; then
+    :
+  elif apt_install "${miss[@]}"; then
     done_ok=("${miss[@]}")
   else
     case "$APT_WHY" in
@@ -1930,7 +1963,7 @@ reconcile_packages() {
     fi
   done
   for pkg in "${failed[@]}"; do warn "failed: $pkg"; done
-  info "packages: $ok installed, $(( ${#want[@]} - ${#miss[@]} - skipped )) already present, ${#failed[@]} failed"
+  info "packages: $ok installed, $present already present, ${#failed[@]} failed"
   [ "${#failed[@]}" = 0 ]
 }
 
@@ -4742,6 +4775,8 @@ cmd_selftest() {
   if [ -f "$here/build-debian-iso.sh" ]; then
     t "the ISO reads its packages through this parser" 'yantrik-update" package-list "$SCRIPT_DIR/packages.list"' \
       "$(grep -F -- 'yantrik-update" package-list "$SCRIPT_DIR/packages.list"' "$here/build-debian-iso.sh")"
+    t "and installs only names the mirror has exactly" 'grep -qxF -- "$pkg" /tmp/yantrik-known-packages' \
+      "$(grep -F -- 'grep -qxF -- "$pkg" /tmp/yantrik-known-packages' "$here/build-debian-iso.sh")"
     t "and installs every name, as separate arguments, with no || true" 'apt-get install -y -qq "${YANTRIK_PACKAGES[@]}"' \
       "$(grep -x 'apt-get install -y -qq "${YANTRIK_PACKAGES\[@\]}"' "$here/build-debian-iso.sh")"
     # A second list grows back the way the first one did: a package named on an ISO apt line.
@@ -4761,11 +4796,14 @@ cmd_selftest() {
   printf '# comment\n\nmpv   \n  nano # the editor\r\ncurl\n' > "$plt/good"
   is "comments, blank lines, spaces and CRLF are allowed" "mpv nano curl" \
     "$(read_package_list "$plt/good" | tr '\n' ' ' | sed 's/ $//')"
-  for bad in 'mpv; touch PWNED' '-oAPT::Get::Assume-Yes=1' 'mpv nano' '../../evil' 'Mpv' '$(touch PWNED)' 'mpv`touch PWNED`' 'https://x.example/a.deb' 'a'; do
+  for bad in 'coreutils-' 'mpv; touch PWNED' '-oAPT::Get::Assume-Yes=1' 'mpv nano' '../../evil' 'Mpv' '$(touch PWNED)' 'mpv`touch PWNED`' 'https://x.example/a.deb' 'a'; do
     printf 'mpv\n%s\nnano\n' "${bad//PWNED/$plt/pwned}" > "$plt/bad"
     out="$(read_package_list "$plt/bad" 2>/dev/null; printf '[exit %s]' "$?")"
     is "a list with the line '$bad' is refused whole" "[exit 1]" "$out"
   done
+  printf 'g++\nlibstdc++6\npython3.12\n' > "$plt/plus"
+  is "names with + and . are names (g++ ends in +)" "g++ libstdc++6 python3.12" \
+    "$(read_package_list "$plt/plus" | tr '\n' ' ' | sed 's/ $//')"
   is "and nothing in a refused line ran" "absent" "$([ -e "$plt/pwned" ] && echo present || echo absent)"
   printf '# nothing\n\n' > "$plt/empty"
   is "a list naming no packages is refused" "1" "$(read_package_list "$plt/empty" >/dev/null 2>&1; echo $?)"
@@ -4850,7 +4888,7 @@ esac
 [ "\$1" = update ] && exit 0
 for a in "\$@"; do
   case "\$a" in
-    nosuchpkg) printf 'E: Unable to locate package nosuchpkg\n'; exit 100 ;;
+    brokenpkg) printf 'E: Unable to correct problems, you have held broken packages.\n'; exit 100 ;;
   esac
 done
 case " \$* " in *" --download-only "*) exit 0 ;; esac
@@ -4859,7 +4897,10 @@ for a in "\$@"; do
 done
 exit 0
 STUB
-    chmod +x "$aptd/dpkg" "$aptd/apt-get"
+    # apt-cache: the names the "mirror" has, exactly.
+    printf 'mpv\nnano\ncurl\nbrokenpkg\nlibzstd1\nzstd\n' > "$st/known"
+    printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s/apt-cache-calls"\ncat "%s/known"\n' "$st" "$st" > "$aptd/apt-cache"
+    chmod +x "$aptd/dpkg" "$aptd/apt-get" "$aptd/apt-cache"
     chmod 0755 "$aptd" "$aptd/bin" "$aptd/share"
     aplist() { # the names given become the trusted, shipped list
       printf '%s\n' "$@" > "$aptd/share/packages.list"; chmod 0644 "$aptd/share/packages.list"
@@ -4868,6 +4909,7 @@ STUB
     reconcile_with() { # reconcile_with <STUB_MODE> [VAR=value...]
       rm -f "$st/apt-calls"
       ( export YANTRIK_SELFTEST=1 YANTRIK_APT="$aptd/apt-get" YANTRIK_DPKG_STATUS="$aptd/dpkg" \
+               YANTRIK_APT_CACHE="$aptd/apt-cache" \
                YANTRIK_APT_LOCKS="$st/lock" YANTRIK_APT_LOCK_WAIT=2 STUB_MODE="$1"
         shift
         # shellcheck disable=SC2163  # VAR=value pairs, exported as given
@@ -4919,13 +4961,29 @@ fd = os.open(sys.argv[1], os.O_RDWR); fcntl.lockf(fd, fcntl.LOCK_EX); open(sys.a
     out="$(reconcile_with ok)"
     t "once the lock is free, the same run installs" "installed: mpv" "$out"
 
-    # One package apt cannot find does not keep the others away.
-    aplist mpv nosuchpkg nano
+    # One package apt cannot install does not keep the others away.
+    aplist mpv brokenpkg nano
     rm -f "$st/mpv"
     out="$(reconcile_with ok)"
     t "one bad package: the others are still installed" "installed: mpv" "$out"
-    t "and the bad one is named with apt's reason" "failed: nosuchpkg — Unable to locate package nosuchpkg" "$out"
+    t "and the bad one is named with apt's reason" "failed: brokenpkg — Unable to correct problems, you have held broken packages." "$out"
     t "and counted" "packages: 1 installed, 1 already present, 1 failed" "$out"
+
+    # A name apt would read as a regex (on apt 2.8 `zst.` selected zutty and libzstd1; `zs.d`
+    # matches zstd): only names the mirror has exactly reach apt-get (security review of #858).
+    aplist mpv zs.d nano
+    rm -f "$st/mpv" "$st/apt-cache-calls"
+    out="$(reconcile_with ok)"
+    t "a name the mirror has no exact package for is not installed" \
+      "failed: zs.d — no package of exactly that name in this machine's apt sources" "$out"
+    is "and never reaches apt-get, so nothing it matches is installed" "" "$(grep -F 'zs.d' "$st/apt-calls" || true)"
+    is "nor anything a regex would have picked" "absent absent" \
+      "$([ -e "$st/zstd" ] && echo present || echo absent) $([ -e "$st/libzstd1" ] && echo present || echo absent)"
+    t "the exact ones still are" "installed: mpv" "$out"
+    t "and the summary counts both" "packages: 1 installed, 1 already present, 1 failed" "$out"
+    is "apt-cache is asked once, for every name" "1 pkgnames" \
+      "$(wc -l < "$st/apt-cache-calls" | tr -d ' ') $(head -1 "$st/apt-cache-calls")"
+    rm -f "$st/apt-cache-calls"
 
     # A download that does not finish is stopped, and said.
     aplist mpv

@@ -269,6 +269,14 @@ apt-get install -y -qq \
 # step names anything user-data.yaml gains later.
 mapfile -t YANTRIK_PACKAGES < /tmp/yantrik-packages
 [ "${#YANTRIK_PACKAGES[@]}" -gt 0 ] || { echo "the package list reached the chroot empty"; exit 1; }
+# Exact names only: apt-get reads a name with `.` or `+` that no package has exactly as a regex,
+# and would install whatever matched. yantrik-update makes the same check (apt_known_names).
+apt-cache pkgnames > /tmp/yantrik-known-packages
+for pkg in "${YANTRIK_PACKAGES[@]}"; do
+    grep -qxF -- "$pkg" /tmp/yantrik-known-packages \
+        || { echo "packages.list names $pkg, and the mirror has no package of exactly that name"; exit 1; }
+done
+rm -f /tmp/yantrik-known-packages
 apt-get install -y -qq "${YANTRIK_PACKAGES[@]}"
 rm -f /tmp/yantrik-packages
 

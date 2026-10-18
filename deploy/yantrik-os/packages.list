@@ -12,8 +12,10 @@
 # play (#854).
 #
 # Format: one Debian package name per line; `#` starts a comment. A line that is not exactly one
-# name ([a-z0-9][a-z0-9+.-]+) makes the whole list refused, by the image build and the updater
-# alike. Both pass the names to apt as separate arguments, never through a shell.
+# name ([a-z0-9][a-z0-9+.-]+, not ending in `-`, which apt-get reads as "remove") makes the whole
+# list refused, by the image build and the updater alike. Both pass the names to apt as separate
+# arguments, never through a shell, and only names the mirror has exactly: apt-get would read
+# any other name with `.` or `+` in it as a regex.
 #
 # What is NOT here: the kernel, the boot loader, live-boot, firmware, mbpfan, guest tools and the
 # installer's own tools. The image installs those in its own steps, some only where they fit the
