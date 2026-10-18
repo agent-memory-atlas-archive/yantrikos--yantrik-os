@@ -773,6 +773,11 @@ mod tests {
         assert!(!n.title.chars().any(|c| c.is_control() || ('\u{202a}'..='\u{202e}').contains(&c)), "{:?}", n.title);
         // Line breaks become spaces; the words stay the person's own, in their order.
         assert!(n.title.ends_with("Elm St 12  Fake line · verified"), "{:?}", n.title);
+        // A long title gives way to the time and the place (the review of #861).
+        let wordy = placed("wordy", &"Quarterly planning review with the whole team ".repeat(2), "2099-03-18T10:00:00", "Elm St");
+        let n = notice::check(&due(&[wordy], now)[0].notice(&now)).unwrap();
+        assert!(n.title.ends_with("… at 10:00, Elm St"), "{:?}", n.title);
+        assert!(n.title.chars().count() <= notice::MAX_TITLE && n.clamped.is_empty(), "{:?} {:?}", n.title, n.clamped);
         // Long places are cut by the title's bound, and named.
         let long = placed("far", "Far", "2099-03-18T10:00:00", &"Road ".repeat(40));
         let n = notice::check(&due(&[long], now)[0].notice(&now)).unwrap();

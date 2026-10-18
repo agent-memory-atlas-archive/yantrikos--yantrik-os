@@ -1354,6 +1354,21 @@ mod tests {
         }
         assert_eq!(store.add_notice(post_as("m1", 1001, "", notice("after", "machine", "inbox")), &home())["stored"], true);
 
+        // Minds' reminders, up to the every-harness obligation limit, do not hold the desktop's
+        // reminder back (the review of #861)…
+        let (store3, dir3) = temp_store();
+        for i in 0..notice::OBLIGATION_INTERRUPTS_PER_HOUR_ALL {
+            let from = format!("m{}", i % 2);
+            let answer = store3.add_notice(post_as(&from, 1000 + (i % 2) as u32, "", notice(&format!("r{i}"), "reminder", "interrupt")), &home());
+            assert_eq!(answer["stored"], true, "{answer}");
+        }
+        let id = store3.add_os_notice("Calendar", os_card("cal-reminder:dentist:20990318T1000", "reminder"))["id"].as_str().unwrap().to_string();
+        assert_eq!(store3.get(&id).unwrap().notice.unwrap().grant_reason, GrantReason::Granted, "a mind's flood must not silence the person's own reminder");
+        // …while a mind's next one still meets the shared limit, which counts the desktop's too.
+        let more = store3.add_notice(post_as("m2", 1002, "", notice("r-more", "reminder", "interrupt")), &home())["id"].as_str().unwrap().to_string();
+        assert_eq!(store3.get(&more).unwrap().notice.unwrap().grant_reason, GrantReason::Rate);
+        let _ = std::fs::remove_dir_all(dir3);
+
         // The obligation limit still holds the desktop's reminders: past it, they wait in the inbox.
         let (store, dir2) = temp_store();
         let mut reasons = Vec::new();
