@@ -320,7 +320,7 @@ echo "   + share/grub-theme (the boot menu's theme and fonts)"
 install -m 0644 "$SCRIPT_DIR/packages.list" "$ROOT/share/packages.list"
 # The packages this OS patches (#872): labwc with the window switcher renderer, built from the
 # reviewed patch by packaging/labwc/build-deb.sh (CI runs it in debian:trixie before this). Root
-# installs them with dpkg (`yantrik-update` reconcile, and the image build), so they are
+# installs them (apt in `yantrik-update` reconcile, dpkg in the image build), so they are
 # hash-listed below. Without one, Alt+Tab is labwc's own OSD; YANTRIK_REQUIRE_DEBS=1 (CI) makes
 # that a failure, so a published build never quietly ships without it.
 debs_found=0
