@@ -6,10 +6,11 @@
 //! This only draws the session and, for a typed letter, asks labwc to move the selection.
 //! It never takes the keyboard or the pointer, and it can neither focus nor raise a window.
 //!
-//! A session goes: `session_start`, the windows, `windows_done` (this acks at once, so labwc
-//! does not fall back to its own OSD), then `selected` as Tab moves, then `ended`. The stack is
-//! drawn only if the session is still open `SHOW_AFTER` later: a quick Alt+Tab switches back
-//! with nothing drawn at all. If this program dies or hangs, labwc draws its own OSD.
+//! A session goes: `session_start`, the windows, `windows_done`, then `selected` as Tab moves,
+//! then `ended`. The stack is drawn only if the session is still open `SHOW_AFTER` later, so a
+//! quick Alt+Tab switches back with nothing drawn at all; the session is acked once its first
+//! frame is on the screen. If that does not happen in labwc's time (it fails to draw, hangs or
+//! dies), labwc draws its own OSD for the session.
 
 use std::rc::Rc;
 use std::time::Duration;
@@ -97,6 +98,7 @@ struct Session {
     collecting: bool,
     selected: Option<u32>,
     acked: bool,
+    scheduled: bool,
     shown: bool,
     typed: String,
     started: std::time::Instant,
@@ -104,7 +106,7 @@ struct Session {
 
 impl Session {
     fn new(id: u32) -> Session {
-        Session { id, windows: Vec::new(), incoming: Vec::new(), collecting: false, selected: None, acked: false, shown: false, typed: String::new(), started: std::time::Instant::now() }
+        Session { id, windows: Vec::new(), incoming: Vec::new(), collecting: false, selected: None, acked: false, scheduled: false, shown: false, typed: String::new(), started: std::time::Instant::now() }
     }
 
     fn selected_index(&self) -> usize {
@@ -239,9 +241,8 @@ impl App {
                 s.windows = std::mem::take(&mut s.incoming);
                 s.collecting = false;
                 debug(format_args!("session {session}: {} windows", s.windows.len()));
-                if !s.acked {
-                    s.acked = true;
-                    self.renderer.ack(session);
+                if !s.scheduled {
+                    s.scheduled = true;
                     let _ = self.loop_handle.insert_source(Timer::from_duration(SHOW_AFTER), move |_, _, app| {
                         if app.session.as_ref().is_some_and(|s| s.id == session && !s.shown) {
                             app.show();
@@ -349,7 +350,7 @@ impl App {
                 })
             })
             .collect();
-        cards.sort_by(|a, b| b.0.cmp(&a.0));
+        cards.sort_by_key(|c| std::cmp::Reverse(c.0));
         let cards: Vec<Card> = cards.into_iter().map(|(_, c)| c).collect();
 
         let (line_top, line_height) = (120.0 * sy, 480.0 * sy);
@@ -397,6 +398,13 @@ impl App {
         surface.commit();
         buffer.destroy();
         debug(format_args!("drew {w}x{h}, {n} windows, selected {sel}, {} ms into the session", s.started.elapsed().as_millis()));
+        // The session is labwc's to draw until this frame is on the screen: only now is it acked.
+        if let Some(s) = self.session.as_mut() {
+            if !s.acked {
+                s.acked = true;
+                self.renderer.ack(s.id);
+            }
+        }
     }
 }
 

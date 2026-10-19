@@ -10,6 +10,7 @@ Description: Let an external client draw the window switcher session
 Author: Yantrik OS <dev@yantrikos.com>
 Forwarded: not-yet
 Last-Update: 2026-10-19
+Reviewed-by: security review of yantrikos/yantrik-os#872 (findings 1-5 addressed)
 ---
 --- labwc-0.8.3.orig/include/config/rcxml.h
 +++ labwc-0.8.3/include/config/rcxml.h
@@ -275,16 +276,20 @@ Last-Update: 2026-10-19
  	osd_finish(server);
  	/* Note that server->osd_state.cycle_view is cleared at this point */
  	desktop_focus_view(cycle_view, /*raise*/ true);
-@@ -489,6 +491,12 @@ handle_cycle_view_key(struct server *ser
- 			return true;
- 		}
+@@ -560,6 +562,16 @@ handle_compositor_keybindings(struct key
+ 		return true;
  	}
-+	/* A text key (filter, Space, `) goes to the renderer, if one draws */
-+	for (int i = 0; i < keyinfo->translated.nr_syms; i++) {
-+		if (switcher_renderer_key(server, keyinfo->translated.syms[i])) {
-+			return true;
+ 
++	/* A text key no binding took (filter, Space, `) goes to the renderer, if one draws */
++	if (!locked && server->input_mode == LAB_INPUT_STATE_WINDOW_SWITCHER) {
++		for (int i = 0; i < keyinfo.translated.nr_syms; i++) {
++			if (switcher_renderer_key(server, keyinfo.translated.syms[i])) {
++				key_state_store_pressed_key_as_bound(event->keycode);
++				return true;
++			}
 +		}
 +	}
++
  	return false;
  }
  
@@ -393,7 +398,7 @@ Last-Update: 2026-10-19
  		view->impl->set_activated(view, activated);
 --- /dev/null
 +++ labwc-0.8.3/src/window-switcher-renderer.c
-@@ -0,0 +1,443 @@
+@@ -0,0 +1,528 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * An external client that draws the window switcher session.
@@ -403,11 +408,14 @@ Last-Update: 2026-10-19
 + * is told the session and may only ask to move the selection. labwc launches
 + * the renderer itself on a pre-connected socket (WAYLAND_SOCKET) and offers
 + * the global to that wl_client only, so no other client can bind it, whatever
-+ * its pid or name. If the renderer has not acknowledged a session within
-+ * ACK_TIMEOUT_MS, or is gone, labwc draws its own OSD for that session.
++ * its pid or name. The renderer acks a session once it has drawn it; if it has
++ * not within ACK_TIMEOUT_MS, or is gone, labwc draws its own OSD for that
++ * session. A session over before the renderer draws (a quick Alt+Tab) shows
++ * nothing at all.
 + */
-+#define _POSIX_C_SOURCE 200809L
++#define _GNU_SOURCE
 +#include <assert.h>
++#include <fcntl.h>
 +#include <glib.h>
 +#include <signal.h>
 +#include <stdio.h>
@@ -419,6 +427,7 @@ Last-Update: 2026-10-19
 +#include <wayland-server-core.h>
 +#include <wlr/util/log.h>
 +#include "common/array.h"
++#include "common/fd-util.h"
 +#include "common/mem.h"
 +#include "config/rcxml.h"
 +#include "labwc.h"
@@ -429,7 +438,7 @@ Last-Update: 2026-10-19
 +#include "labwc-window-switcher-renderer-unstable-v1-protocol.h"
 +
 +#define RENDERER_VERSION 1
-+#define ACK_TIMEOUT_MS 200
++#define ACK_TIMEOUT_MS 300
 +#define RESPAWN_MIN_MS 5000
 +#define TEXT_MAX 512
 +
@@ -444,6 +453,7 @@ Last-Update: 2026-10-19
 +	uint32_t session;
 +	uint32_t next_view_id;
 +	struct view *focused_at_start;
++	struct wl_array sent; /* struct view *: the list as last sent this session */
 +	bool active;
 +	bool acked;
 +	bool fallback;
@@ -495,6 +505,54 @@ Last-Update: 2026-10-19
 +	fall_back(r);
 +}
 +
++extern char **environ;
++
++/*
++ * The environment for the renderer: labwc's own plus WAYLAND_SOCKET, built before fork so the
++ * child only closes, resets and execs (no allocation between fork and exec: another thread may
++ * hold the malloc lock at fork time).
++ */
++static char **
++renderer_env(int fd)
++{
++	size_t n = 0;
++	while (environ[n]) {
++		n++;
++	}
++	char **envp = calloc(n + 2, sizeof(char *));
++	if (!envp) {
++		return NULL;
++	}
++	size_t j = 0;
++	for (size_t i = 0; i < n; i++) {
++		if (strncmp(environ[i], "WAYLAND_SOCKET=", 15)) {
++			envp[j++] = environ[i];
++		}
++	}
++	char *ours = NULL;
++	if (asprintf(&ours, "WAYLAND_SOCKET=%d", fd) < 0) {
++		free(envp);
++		return NULL;
++	}
++	envp[j++] = ours;
++	envp[j] = NULL;
++	return envp;
++}
++
++static void
++free_renderer_env(char **envp)
++{
++	if (!envp) {
++		return;
++	}
++	for (size_t i = 0; envp[i]; i++) {
++		if (!strncmp(envp[i], "WAYLAND_SOCKET=", 15)) {
++			free(envp[i]);
++		}
++	}
++	free(envp);
++}
++
 +static void
 +spawn(struct switcher_renderer *r)
 +{
@@ -521,31 +579,41 @@ Last-Update: 2026-10-19
 +		g_strfreev(argv);
 +		return;
 +	}
++	/*
++	 * The renderer's end crosses exec: it is the only fd made inheritable here. labwc
++	 * spawns from the event loop, one at a time, and closes it right after fork.
++	 */
++	char **envp = renderer_env(sv[1]);
++	if (!envp || fcntl(sv[1], F_SETFD, 0) < 0) {
++		wlr_log(WLR_ERROR, "window switcher renderer: could not prepare its environment");
++		free_renderer_env(envp);
++		close(sv[0]);
++		close(sv[1]);
++		g_strfreev(argv);
++		return;
++	}
 +	pid_t pid = fork();
 +	if (pid < 0) {
 +		wlr_log_errno(WLR_ERROR, "window switcher renderer: fork");
++		free_renderer_env(envp);
 +		close(sv[0]);
 +		close(sv[1]);
 +		g_strfreev(argv);
 +		return;
 +	}
 +	if (pid == 0) {
++		/* As labwc's own spawn helpers: limits, signals, its own session */
++		restore_nofile_limit();
 +		sigset_t set;
 +		sigemptyset(&set);
 +		sigprocmask(SIG_SETMASK, &set, NULL);
 +		signal(SIGPIPE, SIG_DFL);
-+		/* dup() clears FD_CLOEXEC on the copy the renderer inherits */
-+		int fd = dup(sv[1]);
-+		if (fd < 0) {
-+			_exit(127);
-+		}
-+		char buf[16];
-+		snprintf(buf, sizeof(buf), "%d", fd);
-+		setenv("WAYLAND_SOCKET", buf, 1);
-+		execvp(argv[0], argv);
++		setsid();
++		execvpe(argv[0], argv, envp);
 +		_exit(127);
 +	}
 +	close(sv[1]);
++	free_renderer_env(envp);
 +	g_strfreev(argv);
 +
 +	r->client = wl_client_create(r->server->wl_display, sv[0]);
@@ -588,7 +656,7 @@ Last-Update: 2026-10-19
 +		uint32_t session, uint32_t id)
 +{
 +	struct switcher_renderer *r = wl_resource_get_user_data(resource);
-+	if (!r || !r->active || session != r->session) {
++	if (!r || !r->active || session != r->session || id == 0) {
 +		return;
 +	}
 +	struct server *server = r->server;
@@ -666,6 +734,7 @@ Last-Update: 2026-10-19
 +	}
 +	struct switcher_renderer *r = znew(*r);
 +	r->server = server;
++	wl_array_init(&r->sent);
 +	r->global = wl_global_create(server->wl_display,
 +		&zlabwc_window_switcher_renderer_v1_interface, RENDERER_VERSION, r, handle_bind);
 +	r->ack_timer = wl_event_loop_add_timer(server->wl_event_loop, handle_ack_timeout, r);
@@ -680,10 +749,17 @@ Last-Update: 2026-10-19
 +	if (!r) {
 +		return;
 +	}
++	/* On the way out nothing is drawn: no fallback to an OSD whose config is gone */
++	r->active = false;
++	if (r->resource) {
++		wl_resource_set_user_data(r->resource, NULL);
++		r->resource = NULL;
++	}
 +	if (r->client) {
 +		wl_list_remove(&r->client_destroy.link);
 +		wl_client_destroy(r->client);
 +	}
++	wl_array_release(&r->sent);
 +	wl_event_source_remove(r->ack_timer);
 +	wl_global_destroy(r->global);
 +	server->switcher_renderer = NULL;
@@ -722,6 +798,8 @@ Last-Update: 2026-10-19
 +	r->fallback = false;
 +	r->committing = false;
 +	r->focused_at_start = server->active_view;
++	wl_array_release(&r->sent);
++	wl_array_init(&r->sent);
 +	zlabwc_window_switcher_renderer_v1_send_session_start(r->resource, r->session);
 +	wl_event_source_timer_update(r->ack_timer, ACK_TIMEOUT_MS);
 +}
@@ -738,6 +816,17 @@ Last-Update: 2026-10-19
 +	struct switcher_renderer *r = server->switcher_renderer;
 +	if (!r || !r->active || !r->resource) {
 +		return;
++	}
++	/* The list again only when it changed; a Tab is just `selected` */
++	bool same = r->sent.size == views->size
++		&& !memcmp(r->sent.data, views->data, views->size);
++	if (same) {
++		goto selected;
++	}
++	wl_array_release(&r->sent);
++	wl_array_init(&r->sent);
++	if (views->size && wl_array_add(&r->sent, views->size)) {
++		memcpy(r->sent.data, views->data, views->size);
 +	}
 +	uint64_t t = now_ms();
 +	struct view **v;
@@ -773,6 +862,7 @@ Last-Update: 2026-10-19
 +			flags, (uint32_t)idle);
 +	}
 +	zlabwc_window_switcher_renderer_v1_send_windows_done(r->resource, r->session);
++selected:;
 +	struct view *cycle_view = server->osd_state.cycle_view;
 +	if (cycle_view && cycle_view->switcher_id) {
 +		zlabwc_window_switcher_renderer_v1_send_selected(r->resource,

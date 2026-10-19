@@ -11,9 +11,9 @@ Debian's labwc 0.8.3-1 with one patch, so Alt+Tab can be drawn by `yantrik-switc
 
 ## What the patch does
 
-- `<windowSwitcher renderer="command">`: labwc launches that command itself, on a socket it created (`WAYLAND_SOCKET`), and offers `zlabwc_window_switcher_renderer_v1` to that one `wl_client` only (the global filter in `server.c`). No other client can bind it, whatever its pid or name.
-- labwc keeps the session: the chord, the order (`get_next_cycle_view`), the selection and the commit when Alt comes up (`end_cycling`). The renderer is told `session_start`, the windows, `windows_done`, `selected`, `key` (text keys labwc does not use during a session) and `ended`. It may `ack` a session and ask to `select` a window in it. It can never commit, focus or raise.
-- If the renderer has not acked a session within 200 ms, or is gone, labwc draws its own OSD for that session, exactly as stock labwc does. A dead renderer is launched again on the next session, at most once every 5 s.
+- `<windowSwitcher renderer="command">` (read when labwc starts; adding or removing it takes a labwc restart): labwc launches that command itself, on a socket it created (`WAYLAND_SOCKET`), and offers `zlabwc_window_switcher_renderer_v1` to that one `wl_client` only (the global filter in `server.c`). No other client can bind it, whatever its pid or name.
+- labwc keeps the session: the chord, the order (`get_next_cycle_view`), the selection and the commit when Alt comes up (`end_cycling`). The renderer is told `session_start`, the windows and `windows_done` (again only when the list changes), `selected`, `key` (text keys no keybind took: every binding still runs during a session) and `ended`. It may `ack` a session and ask to `select` a window in it. It can never commit, focus or raise.
+- The renderer acks a session once it has drawn it. If it has not within 300 ms (it failed to draw, hung or died), labwc draws its own OSD for that session, exactly as stock labwc does. A session over before the renderer draws (a quick Alt+Tab) shows nothing. A dead renderer is launched again on the next session, at most once every 5 s.
 - A stock labwc ignores the `renderer` attribute, so `config/labwc/rc.xml` is the same for both.
 
 ## Tested (19 Oct 2026, VM 520, labwc 0.8.3)

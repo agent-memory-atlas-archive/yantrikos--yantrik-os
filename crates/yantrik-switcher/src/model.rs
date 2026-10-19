@@ -57,14 +57,26 @@ pub fn depth(index: usize, selected: usize, n: usize) -> usize {
     (index + n - selected % n) % n
 }
 
-/// A title or app id fit to draw: control and bidirectional-override characters dropped,
+/// Unicode's format characters (general category Cf): bidi overrides and isolates, zero-width
+/// spaces and joiners, the soft hyphen, word joiners, the BOM, interlinear annotation marks and
+/// tag characters. None draws anything a person can see, and each can make one title look like
+/// another or turn text around, so a title loses them all.
+pub fn is_format(c: char) -> bool {
+    matches!(c,
+        '\u{00ad}' | '\u{0600}'..='\u{0605}' | '\u{061c}' | '\u{06dd}' | '\u{070f}' | '\u{0890}'..='\u{0891}'
+        | '\u{08e2}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}'
+        | '\u{2066}'..='\u{206f}' | '\u{feff}' | '\u{fff9}'..='\u{fffb}' | '\u{110bd}' | '\u{110cd}'
+        | '\u{13430}'..='\u{1343f}' | '\u{1bca0}'..='\u{1bca3}' | '\u{1d173}'..='\u{1d17a}' | '\u{e0001}'
+        | '\u{e0020}'..='\u{e007f}')
+}
+
+/// A title or app id fit to draw: control and format characters (bidi, zero-width) dropped,
 /// whitespace runs made one space, and at most `max` characters, ending in "…" when cut.
 pub fn clean(s: &str, max: usize) -> String {
     let mut out = String::new();
     let mut space = false;
     for c in s.chars() {
-        let bidi = matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}' | '\u{061c}');
-        if c.is_control() || bidi {
+        if c.is_control() || is_format(c) {
             if c.is_whitespace() || c == '\n' || c == '\t' {
                 space = !out.is_empty();
             }
@@ -132,7 +144,7 @@ pub fn ago(idle_ms: u32) -> Option<String> {
     Some(match min {
         0 => "now".into(),
         1..=59 => format!("{min} min ago"),
-        _ if min % 60 == 0 => format!("{} h ago", min / 60),
+        _ if min.is_multiple_of(60) => format!("{} h ago", min / 60),
         _ => format!("{} h {} min ago", min / 60, min % 60),
     })
 }
@@ -236,6 +248,8 @@ mod tests {
     fn a_title_cannot_draw_controls_or_turn_text_around() {
         assert_eq!(clean("Bank\u{202e}moc.live\u{1b}[2J\n  x", 80), "Bankmoc.live[2J x");
         assert_eq!(clean("  spaced \t out  ", 80), "spaced out");
+        // Look-alikes: zero-width space, joiner, word joiner, soft hyphen, BOM, a tag character.
+        assert_eq!(clean("Pay\u{200b}Pal\u{200d}\u{2060}\u{00ad}\u{feff}\u{e0041}", 80), "PayPal");
         assert_eq!(clean(&"a".repeat(200), 10).chars().count(), 10);
         assert!(clean(&"a".repeat(200), 10).ends_with('…'));
     }
