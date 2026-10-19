@@ -664,6 +664,22 @@ sudo install -d -m 0755 -o root -g root "$ROOTFS/etc/containers/registries.conf.
 for conf in "$UNPACK/share/containers/"*.conf; do
     sudo install -m 0644 -o root -g root "$conf" "$ROOTFS/etc/containers/registries.conf.d/$(basename "$conf")"
 done
+# The packages this OS patches (#872), from the payload's share/debs: each checked against the
+# payload's own root-files list, as the updater checks it, then installed into the image and held
+# so the image's apt never puts Debian's build back. A payload without one keeps labwc's own.
+for deb in "$UNPACK/share/debs/"*.deb; do
+    [ -f "$deb" ] || continue
+    rel="debs/$(basename "$deb")"
+    want="$(awk -v p="$rel" '$2 == p || $2 == "*" p { print $1; exit }' "$UNPACK/bin/yantrik-root-files.sha256")"
+    [ -n "$want" ] && [ "$(sha256sum "$deb" | cut -d' ' -f1)" = "$want" ]         || fail "$rel is not what the payload's root-files list says it shipped — not installing it into the image"
+    pkg="$(dpkg-deb -f "$deb" Package)"
+    case "$pkg" in [a-z0-9]*) ;; *) fail "$rel names no plain package ($pkg)" ;; esac
+    sudo install -m 0644 "$deb" "$ROOTFS/tmp/$(basename "$deb")"
+    sudo chroot "$ROOTFS" env DEBIAN_FRONTEND=noninteractive dpkg --force-confold -i "/tmp/$(basename "$deb")" >/dev/null         || fail "dpkg could not install $rel into the image"
+    sudo chroot "$ROOTFS" apt-mark hold "$pkg" >/dev/null || fail "could not hold $pkg in the image"
+    sudo rm -f "$ROOTFS/tmp/$(basename "$deb")"
+    echo "   + $(basename "$deb"), held"
+done
 [ -r "$UNPACK/share/shell/bashrc" ] || fail "release tarball carries no share/shell/bashrc — every new account's ~/.bashrc sources it"
 for required in share/labwc/rc.xml share/labwc/menu.xml share/labwc/autostart bin/yantrik-session bin/yantrik-session-chrome bin/yantrik-shell \
                 share/packages.list \

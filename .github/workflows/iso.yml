@@ -193,9 +193,28 @@ jobs:
       - name: Build the workspace (release)
         run: cargo build --release --workspace --locked
 
+      # labwc with the window switcher renderer (#872), built from the reviewed patch in the
+      # Debian release the image is built on. build-deb.sh fixes the changelog date, so the same
+      # patch gives the same bytes; the bundle's root-files list carries the hash the updater checks.
+      - name: Build Yantrik's labwc (packaging/labwc)
+        run: |
+          docker run --rm -v "$PWD:/w" -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" debian:trixie bash -c '
+            set -euo pipefail
+            sed -i "s/^Types: deb$/Types: deb deb-src/" /etc/apt/sources.list.d/debian.sources
+            apt-get update -qq
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends build-essential devscripts dpkg-dev fakeroot patch >/dev/null
+            out="$(bash /w/packaging/labwc/build-deb.sh /tmp/labwc | tail -1)"
+            mkdir -p /w/packaging/labwc/dist
+            cp "$out" /w/packaging/labwc/dist/
+            chown -R "$HOST_UID:$HOST_GID" /w/packaging/labwc/dist'
+          ls -la packaging/labwc/dist
+          sha256sum packaging/labwc/dist/*.deb
+
       - name: Package the release bundle
         id: bundle
         env:
+          # A published build always carries Yantrik's labwc (#872).
+          YANTRIK_REQUIRE_DEBS: "1"
           # The build that was published before this one, so the bundle's CHANGELOG.md is
           # "what changed since the last image" rather than a guess.
           YANTRIK_PREVIOUS: ${{ needs.decide.outputs.previous }}

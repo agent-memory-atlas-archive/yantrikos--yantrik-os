@@ -774,6 +774,7 @@ from it. Change it with: yantrik-update set-channel nightly" ;;
     # so a run that found no new build is exactly the moment to look (#210).
     seal_share || true
     reconcile_packages || true
+    reconcile_pinned_debs || true
     reconcile_subids || true
     reconcile_polkit || true
     reconcile_helpers || true
@@ -1015,6 +1016,7 @@ EOF
     YANTRIK_PREFIX="$PREFIX" YANTRIK_APPLY_REFRESHES_KEYS=1 "$BIN_DIR/yantrik-update" reconcile || true
   else
     reconcile_packages || true
+    reconcile_pinned_debs || true
   fi
 
   if [ "$reboot" = 1 ]; then
@@ -1965,6 +1967,103 @@ reconcile_packages() {
   for pkg in "${failed[@]}"; do warn "failed: $pkg"; done
   info "packages: $ok installed, $present already present, ${#failed[@]} failed"
   [ "${#failed[@]}" = 0 ]
+}
+
+# ── Packages this OS patches (share/debs/, #872) ──
+#
+# A package Yantrik changes cannot come from the Debian mirror: labwc with the window switcher
+# renderer (packaging/labwc) is built from the reviewed patch by the release build and shipped as
+# share/debs/<file>.deb, hash-listed in bin/yantrik-root-files.sha256 like everything else root
+# acts on from share/ (#419). It is installed when this machine has another version of that
+# package, then held, so an apt upgrade does not put Debian's build back over it. Nothing else in
+# share/debs is acted on: only a regular file, root's alone, with the content this build shipped.
+DEBS_REL="debs"
+DEBS_MOST=8
+
+# Stand-ins, honoured only in selftest mode and never for root (selftest_standins).
+debs_tool() { # <name>: the command to run for dpkg-deb, dpkg-query, dpkg or apt-mark
+  local var
+  var="YANTRIK_$(printf '%s' "$1" | tr 'a-z-' 'A-Z_')"
+  if selftest_standins && [ -n "$(printenv "$var" 2>/dev/null)" ]; then printenv "$var"
+  else printf '%s' "$1"; fi
+}
+
+# The installed version of a package, or nothing; and whether it is held.
+deb_installed_version() { "$(debs_tool dpkg-query)" -W -f='${Version}' "$1" 2>/dev/null || true; }
+deb_is_held() { [ "$("$(debs_tool dpkg-query)" -W -f='${db:Status-Want}' "$1" 2>/dev/null)" = hold ]; }
+
+# deb_root_run <seconds> <log> <tool> <args...>: dpkg or apt-mark as root, with a time limit.
+deb_root_run() {
+  local secs="$1" log="$2" tool; tool="$(debs_tool "$3")"; shift 3
+  if [ "$(id -u)" = 0 ] || selftest_standins; then
+    env DEBIAN_FRONTEND=noninteractive timeout --kill-after=30 "$secs" "$tool" "$@" > "$log" 2>&1
+  else
+    # shellcheck disable=SC2024  # the log is this process's own temporary file
+    sudo -n env DEBIAN_FRONTEND=noninteractive timeout --kill-after=30 "$secs" "$tool" "$@" > "$log" 2>&1
+  fi
+}
+
+reconcile_pinned_debs() {
+  local dir="$SHARE_DIR/$DEBS_REL"
+  [ -d "$dir" ] || return 0
+  if ! selftest_standins && ! command -v dpkg-deb >/dev/null 2>&1; then
+    info "no dpkg-deb here — share/$DEBS_REL is for Debian machines"
+    return 0
+  fi
+  say "Packages this OS patches (share/$DEBS_REL)"
+  local f rel pkg ver have log held n=0 rc=0
+  for f in "$dir"/*.deb; do
+    [ -e "$f" ] || [ -L "$f" ] || continue
+    n=$((n + 1))
+    if [ "$n" -gt "$DEBS_MOST" ]; then
+      warn "more than $DEBS_MOST packages in share/$DEBS_REL; the rest were left alone"
+      rc=1; break
+    fi
+    rel="$DEBS_REL/$(basename "$f")"
+    if [ -L "$f" ] || [ ! -f "$f" ] || ! root_file_ok "$rel" "$f"; then
+      warn "$f is not root's alone to write, or is not what this build shipped ($ROOT_FILES); not installed"
+      rc=1; continue
+    fi
+    pkg="$("$(debs_tool dpkg-deb)" -f "$f" Package 2>/dev/null || true)"
+    ver="$("$(debs_tool dpkg-deb)" -f "$f" Version 2>/dev/null || true)"
+    # A plain Debian name and version, or nothing is done: both are passed to dpkg-query and
+    # apt-mark, and a name starting with `-` would be an option.
+    if ! [[ "$pkg" =~ ^[a-z0-9][a-z0-9+.-]{0,99}$ ]] || ! [[ "$ver" =~ ^[0-9][A-Za-z0-9.+~:-]{0,99}$ ]]; then
+      warn "$f does not name a plain package and version; not installed"
+      rc=1; continue
+    fi
+    have="$(deb_installed_version "$pkg")"
+    if [ "$have" = "$ver" ]; then
+      info "$pkg $ver is installed"
+      deb_is_held "$pkg" && continue
+    else
+      if [ "$(id -u)" != 0 ] && ! selftest_standins && ! sudo -n true 2>/dev/null; then
+        warn "failed: $pkg $ver — dpkg needs root, and this account cannot sudo without a password. Finish with: sudo yantrik-update reconcile"
+        rc=1; continue
+      fi
+      if ! held="$(apt_wait_for_lock)"; then
+        warn "failed: $pkg $ver — another apt or dpkg still holds the package database ($held); nothing was installed"
+        rc=1; continue
+      fi
+      log="$(mktemp)"
+      if deb_root_run "$(apt_setting APT_INSTALL_SECS "$APT_INSTALL_SECS")" "$log" dpkg --force-confold -i "$f"; then
+        info "installed $pkg $ver (was ${have:-not installed}); it takes effect at the next sign-in"
+      else
+        warn "failed: $pkg $ver — dpkg said: $(grep -v '^[[:space:]]*$' "$log" | tail -1 | tr -d '\000-\037\177' | cut -c1-200)"
+        rm -f "$log"; rc=1; continue
+      fi
+      rm -f "$log"
+    fi
+    log="$(mktemp)"
+    if deb_root_run 60 "$log" apt-mark hold "$pkg"; then
+      info "$pkg is held, so an apt upgrade keeps this build's"
+    else
+      warn "could not hold $pkg: an apt upgrade may put Debian's build back"
+      rc=1
+    fi
+    rm -f "$log"
+  done
+  return "$rc"
 }
 
 # Subordinate ids for rootless podman (#401). podman maps a container's users onto ids the
@@ -4352,6 +4451,7 @@ cmd_reconcile() {
   seal_share
   say "Reconciling the base system against what the image ships"
   reconcile_packages
+  reconcile_pinned_debs
   reconcile_subids
   reconcile_polkit
   reconcile_helpers
@@ -5002,6 +5102,82 @@ fd = os.open(sys.argv[1], os.O_RDWR); fcntl.lockf(fd, fcntl.LOCK_EX); open(sys.a
   # Three: an up-to-date apply, the new build's reconcile after an install, and its stand-in.
   is "apply runs the package reconcile as something that cannot fail it" "3" \
     "$(sed -n '/^cmd_apply()/,/^}/p' "$SELF_PATH" | grep -cE '(yantrik-update" reconcile|reconcile_packages) \|\| true$')"
+
+  # 8a. Packages this OS patches (share/debs/, #872): only the file this build shipped, installed
+  #     when the machine has another version, then held; a second run does nothing.
+  local dd; dd="$(mktemp -d)"
+  mkdir -p "$dd/share/debs" "$dd/bin" "$dd/st"
+  local deb="$dd/share/debs/labwc_0.8.3-1yantrik1_amd64.deb"
+  printf 'a deb' > "$deb"
+  (cd "$dd/share" && sha256sum debs/labwc_0.8.3-1yantrik1_amd64.deb) > "$dd/bin/yantrik-root-files.sha256"
+  chmod 0755 "$dd" "$dd/bin" "$dd/share" "$dd/share/debs"; chmod 0644 "$deb"
+  cat > "$dd/dpkg-deb" <<STUB
+#!/bin/sh
+case "\$3" in Package) printf '%s' "\${DEB_PKG:-labwc}" ;; Version) printf '%s' "\${DEB_VER:-0.8.3-1yantrik1}" ;; esac
+STUB
+  cat > "$dd/dpkg-query" <<STUB
+#!/bin/sh
+case "\$2" in *Status-Want*) cat "$dd/st/want" 2>/dev/null ;; *) cat "$dd/st/version" 2>/dev/null ;; esac
+STUB
+  cat > "$dd/dpkg" <<STUB
+#!/bin/sh
+printf 'dpkg %s\n' "\$*" >> "$dd/st/calls"
+[ -z "\${DPKG_FAIL:-}" ] || { echo "dpkg: error processing archive"; exit 1; }
+printf '%s' "\${DEB_VER:-0.8.3-1yantrik1}" > "$dd/st/version"
+STUB
+  cat > "$dd/apt-mark" <<STUB
+#!/bin/sh
+printf 'apt-mark %s\n' "\$*" >> "$dd/st/calls"; printf hold > "$dd/st/want"
+STUB
+  chmod +x "$dd/dpkg-deb" "$dd/dpkg-query" "$dd/dpkg" "$dd/apt-mark"
+  debs_with() { # debs_with [VAR=value...]
+    ( export YANTRIK_SELFTEST=1 YANTRIK_DPKG_DEB="$dd/dpkg-deb" YANTRIK_DPKG_QUERY="$dd/dpkg-query" \
+             YANTRIK_DPKG="$dd/dpkg" YANTRIK_APT_MARK="$dd/apt-mark" \
+             YANTRIK_APT_LOCKS="$dd/st/lock" YANTRIK_APT_LOCK_WAIT=2
+      # shellcheck disable=SC2163  # VAR=value pairs, exported as given
+      [ "$#" = 0 ] || export "$@"
+      PREFIX="$dd" SHARE_DIR="$dd/share" BIN_DIR="$dd/bin" ROOT_FILES="$dd/bin/yantrik-root-files.sha256" \
+        ROOT_UID="$(id -u)"
+      reconcile_pinned_debs; printf '[exit %s]' "$?" ) 2>&1
+  }
+  out="$(debs_with)"
+  t "a patched package the machine lacks is installed (#872)" "installed labwc 0.8.3-1yantrik1 (was not installed)" "$out"
+  t "by dpkg, from the shipped file" "dpkg --force-confold -i $deb" "$(cat "$dd/st/calls")"
+  t "then held, so an apt upgrade keeps it" "apt-mark hold labwc" "$(cat "$dd/st/calls")"
+  t "and the run succeeds" "[exit 0]" "$out"
+  rm -f "$dd/st/calls"
+  out="$(debs_with)"
+  t "a second run finds it installed" "labwc 0.8.3-1yantrik1 is installed" "$out"
+  is "and runs neither dpkg nor apt-mark" "absent" "$([ -e "$dd/st/calls" ] && echo present || echo absent)"
+  printf '0.8.3-1' > "$dd/st/version"; : > "$dd/st/want"
+  out="$(debs_with)"
+  t "Debian's build back (an upgrade past a lost hold): this build's again" "installed labwc 0.8.3-1yantrik1 (was 0.8.3-1)" "$out"
+  rm -f "$dd/st/calls"; printf '0.8.3-1' > "$dd/st/version"
+  out="$(debs_with DPKG_FAIL=1)"
+  t "dpkg failing is said, and the run fails for the caller to ignore" "failed: labwc 0.8.3-1yantrik1 — dpkg said: dpkg: error processing archive" "$out"
+  t "with a failure exit" "[exit 1]" "$out"
+  is "and nothing is held after a failed install" "" "$(grep apt-mark "$dd/st/calls" || true)"
+  rm -f "$dd/st/calls"
+  printf ' tampered' >> "$deb"
+  out="$(debs_with)"
+  t "a file that is not what the build shipped is not installed" "is not what this build shipped" "$out"
+  is "and dpkg is never run" "absent" "$([ -e "$dd/st/calls" ] && echo present || echo absent)"
+  printf 'a deb' > "$deb"
+  out="$(debs_with DEB_PKG=--force-all)"
+  t "a package name that would be an option is refused" "does not name a plain package and version" "$out"
+  out="$(debs_with 'DEB_VER=1.0;reboot')"
+  t "and so is a version that is not one" "does not name a plain package and version" "$out"
+  is "neither reached dpkg" "absent" "$([ -e "$dd/st/calls" ] && echo present || echo absent)"
+  mv "$deb" "$dd/real.deb"; ln -s "$dd/real.deb" "$deb"
+  out="$(debs_with)"
+  t "a link in share/debs is not followed" "is not root's alone to write, or is not what this build shipped" "$out"
+  is "and nothing ran" "absent" "$([ -e "$dd/st/calls" ] && echo present || echo absent)"
+  rm -rf "$dd"
+  # Every reconcile runs it, after the packages it may depend on.
+  is "the reconcile command installs the patched packages after the package list" "reconcile_packages reconcile_pinned_debs" \
+    "$(sed -n '/^cmd_reconcile()/,/^}/p' "$SELF_PATH" | grep -oE '^\s+reconcile_(packages|pinned_debs)\b' | tr -d ' ' | paste -sd' ' -)"
+  is "and so does an up-to-date apply" "1" \
+    "$(sed -n '/^cmd_apply()/,/^}/p' "$SELF_PATH" | grep -cE '^\s+reconcile_pinned_debs \|\| true$' | head -1 | awk '{print ($1>=1)?1:0}')"
 
   # 8b. The compositor's keys after an update (#854): the session's own copy, run as the person,
   #     never through a link, and labwc asked to re-read them.

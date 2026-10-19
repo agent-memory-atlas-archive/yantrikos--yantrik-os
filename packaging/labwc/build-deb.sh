@@ -22,8 +22,19 @@ done
 while read -r p; do
   case "$p" in yantrik-*) patch -p1 --forward --quiet < "debian/patches/$p" ;; esac
 done < debian/patches/series
-DEBEMAIL=dev@yantrikos.com DEBFULLNAME="Yantrik OS" dch -v "$OURS" -D trixie \
-  "Add an external window switcher renderer (zlabwc_window_switcher_renderer_v1) for Yantrik OS Alt+Tab."
+# The entry is written with a fixed date, not dch's "now": dpkg takes SOURCE_DATE_EPOCH from the
+# changelog, so two builds of the same patch are the same bytes and the .deb can be pinned by hash
+# (labwc.pin), which is how a build checks it shipped the package that was reviewed.
+STAMP="Mon, 19 Oct 2026 12:00:00 +0000"
+{
+  printf 'labwc (%s) trixie; urgency=medium\n\n' "$OURS"
+  printf '  * Add an external window switcher renderer (zlabwc_window_switcher_renderer_v1)\n'
+  printf '    for Yantrik OS Alt+Tab (yantrikos/yantrik-os#872).\n\n'
+  printf ' -- Yantrik OS <dev@yantrikos.com>  %s\n\n' "$STAMP"
+  cat debian/changelog
+} > debian/changelog.new
+mv debian/changelog.new debian/changelog
+export SOURCE_DATE_EPOCH="$(date -d "$STAMP" +%s)"
 DEB_BUILD_OPTIONS="nocheck parallel=$(nproc)" dpkg-buildpackage -us -uc -b >"$WORK/build.log" 2>&1 \
   || { tail -30 "$WORK/build.log"; exit 1; }
 ls "$WORK/labwc_${OURS}_amd64.deb"
