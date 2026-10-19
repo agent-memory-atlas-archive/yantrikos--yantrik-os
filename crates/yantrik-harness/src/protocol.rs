@@ -1,6 +1,6 @@
 //! The wire between a harness and this OS.
 //!
-//! Seven methods, spoken by the harness to the `harness` socket. That is the whole interface, and
+//! Eight methods, spoken by the harness to the `harness` socket. That is the whole interface, and
 //! its smallness is the point: a harness already knows how to be itself — `yantrik-mind` has its
 //! own models and config, hermes-agent has its own — and none of that is the OS's business. The
 //! OS offers somewhere to attach and a way to be handed turns.
@@ -31,7 +31,22 @@
 //!   chunk {session, turn_id, delta}     → {}          … as many as you like
 //!   event {session, turn_id, event}     → {}          … optional: what the agent is doing
 //!   complete {session, turn_id}         → {}
+//!
+//! outside any turn, when attach answered features: ["notice_inbox_v1"]:
+//!   notice {session, notice}            → {stored, notice_id, duplicate?, clamped?}
+//!                                         | {stored: false, retry_after_secs, why}
+//!                                         | {stored: false, refused}
 //! ```
+//!
+//! # Notices and the person's initiative settings
+//!
+//! When this desktop takes notices, the `attach` reply carries `features: ["notice_inbox_v1"]`
+//! and `initiative: {quiet, off, inbox_only}`, the person's settings. Every `poll` answer carries
+//! `initiative` too, so a change reaches a mind within one poll, and, when the person has
+//! responded to one of THIS harness's cards, `notice_feedback: [{seq, notice_id, kind, seen_at,
+//! opened_at, at}]`. Feedback comes again on every poll until one says `feedback_ack: <seq>`, and
+//! across restarts. No harness sees another's. See [`crate::notice`] and
+//! design/initiative-inbox-2026-10-16.md.
 //!
 //! The session is opaque (`s<n>-<random>` today; parse nothing out of it) and answers only whoever
 //! attached it: over a socket where the kernel names the caller, every call on it must come from
@@ -85,9 +100,11 @@ pub const DETACH: &str = "harness.detach";
 /// What the agent is doing, beside the text: a tool call opening, its output, its end. See
 /// [`crate::event`].
 pub use crate::event::EVENT;
+/// A card for the person, outside any turn. See [`crate::notice`].
+pub use crate::notice::NOTICE;
 
 /// Every method this service answers, for the error when something else is called.
-pub const METHODS: &[&str] = &[ATTACH, POLL, CHUNK, EVENT, COMPLETE, FAIL, DETACH];
+pub const METHODS: &[&str] = &[ATTACH, POLL, CHUNK, EVENT, NOTICE, COMPLETE, FAIL, DETACH];
 
 /// The most one [`EVENT`] may weigh, as JSON. A command's output travels as many small
 /// `tool_output` events, not one large one; an event past this is refused and counted, and the
@@ -178,6 +195,12 @@ pub struct Attach {
     /// to its own question and filed it in their profile (yantrik-mind F28, 2026-09-27).
     #[serde(default)]
     pub handover_context: bool,
+    /// Booted with no model to think with (yantrik-mind E.SOCK2b: the placeholder that says "not
+    /// set up yet — say hello"). The first run may then give it the person's pick through the
+    /// gateway with no question. False, the default, is what an older mind reads as: it has a
+    /// provider of its own and is asked first.
+    #[serde(default)]
+    pub needs_model: bool,
     /// What this harness was doing for a desktop it lost (#246): each conversation it still
     /// holds, with the agent token the desktop gave it, and the turn it is still answering in
     /// it, if any. A shell that restarted mid-answer used to fail every one of them, so the
@@ -247,6 +270,58 @@ impl Origin {
     }
 }
 
+/// What the person chose for this turn in the picker (#673): the model, how hard it should think,
+/// and the files they handed over. Credential-free, like everything else here: a model is named,
+/// never reached — `<account>/<model>` at the local model gateway, which a harness was pointed at
+/// once ("Use Yantrik models") and which holds the keys. Every field is optional, and a harness
+/// that does not know `options` ignores it and answers as it always did.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnOptions {
+    /// `<account>/<model>`, as the gateway's `/v1/models` lists it. Empty: the harness's own choice.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
+    /// `easy`, `medium`, `high` or `xhigh`; sent only for a model that thinks. The gateway turns it
+    /// into the provider's own knob when it is sent as the request's `effort`; a harness with its
+    /// own models maps it to whatever it has (a step budget), or ignores it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub effort: String,
+    /// Files the person handed over with this message.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<Attachment>,
+}
+
+impl TurnOptions {
+    pub fn is_empty(&self) -> bool {
+        self.model.is_empty() && self.effort.is_empty() && self.attachments.is_empty()
+    }
+}
+
+/// A file the person handed over to the mind, with the provenance the mind's egress planner reads
+/// it by: the person gave it, here, now. A handed-over file is a valid source for what a mind may
+/// look up or send on the person's behalf, as their own words are.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Attachment {
+    /// The file's name, as shown on the chip.
+    pub name: String,
+    /// Where it is, absolute. A harness running as the person reads it there; one running as an
+    /// account of its own (the Mind) may not be able to, and reads `content_b64`.
+    pub path: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub mime: String,
+    pub size: u64,
+    /// SHA-256 of the content as hex, so a mind can tell it read the file that was handed over.
+    pub sha256: String,
+    /// Always `"person"`: who handed it over. With `via` and `at`, the provenance.
+    pub handed_over_by: String,
+    /// Where: `lens` (the ask bar), `mind-panel`.
+    pub via: String,
+    /// When, RFC 3339.
+    pub at: String,
+    /// The whole file as base64, for a file up to 1 MiB (and 4 MiB a turn); empty above that.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub content_b64: String,
+}
+
 /// One turn handed to a harness.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Assignment {
@@ -290,6 +365,10 @@ pub struct Assignment {
     /// is unchanged for a turn that does not say.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<Origin>,
+    /// What the person chose for this turn ([`TurnOptions`]): model, effort, handed-over files.
+    /// Absent when they chose nothing, so the wire is unchanged for a harness that never sees one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<TurnOptions>,
 }
 
 /// What stands in for a secret when a struct holding one is printed: whether there is one, never
@@ -324,6 +403,7 @@ impl std::fmt::Debug for Assignment {
             .field("memory_credential", &redacted(&self.memory_credential))
             .field("memory_url", &self.memory_url)
             .field("origin", &self.origin)
+            .field("options", &self.options)
             .finish()
     }
 }
@@ -355,6 +435,7 @@ mod tests {
             memory: true,
             conversations: true,
             handover_context: true,
+            needs_model: false,
             resume: Vec::new(),
             shared: false,
             takes_turns: true,
@@ -387,6 +468,7 @@ mod tests {
             memory_credential: String::new(),
             memory_url: String::new(),
             origin: None,
+            options: None,
         };
         let wire = serde_json::to_value(&turn).unwrap();
         assert!(wire.get("origin").is_none(), "{wire}");
@@ -420,6 +502,7 @@ mod tests {
             memory_credential: credential.clone(),
             memory_url: "unix:/run/yantrik-mind/1000/memory.sock".into(),
             origin: None,
+            options: None,
         };
         let resume = Resume { conversation: "main".into(), agent_token: token.into(), turn_id: Some(7), prompt: "hi".into() };
         for printed in [format!("{turn:?}"), format!("{resume:?}"), format!("{:#?}", Attach {
@@ -430,6 +513,7 @@ mod tests {
             memory: false,
             conversations: true,
             handover_context: false,
+            needs_model: false,
             resume: vec![resume.clone()],
             shared: false,
             takes_turns: true,
@@ -441,12 +525,57 @@ mod tests {
     }
 
     #[test]
+    fn turn_options_travel_when_chosen_and_carry_nothing_that_reaches_a_model() {
+        let mut turn: Assignment = serde_json::from_str(r#"{"turn_id":3,"text":"look at this"}"#).unwrap();
+        assert!(turn.options.is_none(), "a turn from an older desktop chose nothing");
+        assert!(serde_json::to_value(&turn).unwrap().get("options").is_none(), "and says nothing");
+        turn.options = Some(TurnOptions {
+            model: "ollama-cloud/deepseek-v4.1-flash".into(),
+            effort: "high".into(),
+            attachments: vec![Attachment {
+                name: "plan.md".into(),
+                path: "/home/p/plan.md".into(),
+                mime: "text/markdown".into(),
+                size: 5,
+                sha256: "ab".repeat(32),
+                handed_over_by: "person".into(),
+                via: "lens".into(),
+                at: "2026-10-06T10:00:00Z".into(),
+                content_b64: "aGVsbG8=".into(),
+            }],
+        });
+        let wire = serde_json::to_value(&turn).unwrap();
+        assert_eq!(wire["options"]["model"], "ollama-cloud/deepseek-v4.1-flash");
+        assert_eq!(wire["options"]["effort"], "high");
+        assert_eq!(wire["options"]["attachments"][0]["handed_over_by"], "person");
+        let back: Assignment = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(back.options, turn.options);
+        // Credential-free: a model is named, never reached, and nothing in the options is a way in.
+        let opts = wire["options"].as_object().unwrap();
+        let mut keys: Vec<&str> = opts.keys().map(|k| k.as_str()).collect();
+        keys.extend(wire["options"]["attachments"][0].as_object().unwrap().keys().map(|k| k.as_str()));
+        for forbidden in ["endpoint", "base_url", "url", "api_key", "key", "token", "password", "secret"] {
+            assert!(!keys.contains(&forbidden), "`{forbidden}` has no business in turn options");
+        }
+        // Only what was chosen is sent.
+        let only_effort = TurnOptions { effort: "easy".into(), ..TurnOptions::default() };
+        assert_eq!(serde_json::to_value(&only_effort).unwrap(), serde_json::json!({"effort": "easy"}));
+        assert!(TurnOptions::default().is_empty());
+    }
+
+    #[test]
     fn a_harness_that_says_nothing_about_conversations_holds_one() {
         let attach: Attach = serde_json::from_str(r#"{"id":"hermes","name":"Hermes"}"#).unwrap();
         assert!(!attach.conversations);
         let attach: Attach =
             serde_json::from_str(r#"{"id":"pi","name":"Pi","conversations":true}"#).unwrap();
         assert!(attach.conversations);
+    }
+
+    #[test]
+    fn the_notice_method_is_one_of_the_methods() {
+        assert!(METHODS.contains(&NOTICE));
+        assert_eq!(NOTICE, "harness.notice");
     }
 
     #[test]

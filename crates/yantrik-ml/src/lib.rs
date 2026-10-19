@@ -16,6 +16,14 @@ pub mod types;
 pub mod traits;
 pub mod capability;
 
+// A Qwen3's thinking switch on a self-run server, and the all-thinking-no-answer failure
+pub mod thinking;
+// An error a server sends inside a streamed reply, after its 200
+pub mod stream_error;
+
+// A provider that answered and refused the request, and the parameters a model will not take.
+pub mod refusal;
+
 // Chat template formatting (always compiled — used by candle + llamacpp backends)
 mod chat_template;
 pub mod chat_templates;
@@ -33,6 +41,12 @@ mod token_stream;
 
 // LLM backend modules
 mod llm;
+
+// The companion's model when none is chosen: its chat says how to choose one.
+pub mod not_set_up;
+
+// What each model can do and how hard it can be asked to think (the AI accounts catalogue).
+pub mod model_caps;
 
 // Provider registry (multi-provider management, key validation)
 #[cfg(feature = "api-llm")]
@@ -64,6 +78,9 @@ pub use model_loader::{GGUFFiles, ModelFiles};
 pub use types::{ApiToolCall, ApiToolCallFunction, ChatMessage, GenerationConfig, LLMResponse, ToolCall, TranscribeResult, VoiceParams, ProviderConfigEntry};
 pub use traits::{LLMBackend, STTBackend, Embedder};
 pub use capability::{ModelCapabilityProfile, ModelFamily, ModelTier, ToolCallMode, SlotMode, ToolFamily};
+pub use thinking::{ThoughtWithoutAnswer, THOUGHT_WITHOUT_ANSWER};
+pub use stream_error::StreamError;
+pub use refusal::ProviderRefused;
 
 // ── Chat template exports ────────────────────────────────────────────
 
