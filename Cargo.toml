@@ -43,6 +43,8 @@ members = [
     "crates/yantrik-shown-address",
     # The lock screen as a Wayland session lock (#313).
     "crates/yantrik-lock",
+    # Alt+Tab drawn as a stack in time; labwc owns the session (#867, packaging/labwc).
+    "crates/yantrik-switcher",
     "crates/yantrik-mind-view-title",
     # The one way out for the mind account: a CONNECT proxy by the person's policy.
     "crates/yantrik-egress",
