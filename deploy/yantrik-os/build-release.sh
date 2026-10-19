@@ -340,7 +340,10 @@ fi
 # package list it runs apt from, with its sha256. It rides in bin/, which the
 # updater installs with plain cp as root, so it is root's on the machine whoever could write
 # share/; the updater installs nothing as root whose hash is not in it (#419).
-(cd "$ROOT/share" && shopt -s nullglob && sha256sum packages.list root-helpers/* polkit/* sysctl/* containers/* systemd/* grub-theme/* debs/*.deb) > "$ROOT/bin/yantrik-root-files.sha256"
+# An empty directory among these leaves its glob as it is, and sha256sum fails the build; only
+# debs/ may be empty (a build without the patched labwc), so it is listed on its own.
+(cd "$ROOT/share" && sha256sum packages.list root-helpers/* polkit/* sysctl/* containers/* systemd/* grub-theme/* \
+   && { ! compgen -G 'debs/*.deb' >/dev/null || sha256sum debs/*.deb; }) > "$ROOT/bin/yantrik-root-files.sha256"
 [ "$(wc -l < "$ROOT/bin/yantrik-root-files.sha256")" -ge 4 ] || fail "the root-files list is short: $(cat "$ROOT/bin/yantrik-root-files.sha256")"
 mkdir -p "$ROOT/share/labwc-mind"
 cp "$PROJECT_ROOT/config/labwc-mind/rc.xml" "$ROOT/share/labwc-mind/rc.xml"
