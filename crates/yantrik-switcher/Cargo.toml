@@ -12,6 +12,7 @@ path = "src/main.rs"
 slint = { workspace = true }
 smithay-client-toolkit = { version = "0.20", default-features = false, features = ["calloop"] }
 wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client"] }
 # Bindings for labwc's renderer protocol, generated from packaging/labwc's XML (one copy).
 wayland-scanner = "0.31"
 wayland-backend = "0.3"

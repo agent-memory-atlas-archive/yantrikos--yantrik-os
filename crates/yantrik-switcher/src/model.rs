@@ -37,6 +37,8 @@ pub struct Place {
 }
 
 /// The card at depth `d`: each step back is 15.5% smaller, up and to the right, and fainter.
+/// (Drawing uses `place_at`, which matches this at whole depths; the tests hold it to that.)
+#[cfg(test)]
 pub fn place(d: usize) -> Place {
     let k = 0.845f32.powi(d as i32);
     Place {
@@ -46,6 +48,123 @@ pub fn place(d: usize) -> Place {
         h: 400.0 * k,
         alpha: [1.0, 0.8, 0.6, 0.42, 0.28][d.min(4)],
         depth: d,
+    }
+}
+
+/// A card on its way between places: `d` may be fractional (mid-glide), below 0 (the card that
+/// was in front, moving past the viewer and fading) or past the last drawn depth (fading out at
+/// the back). Whole depths give exactly `place`.
+pub fn place_at(d: f32) -> Place {
+    let k = 0.845f32.powf(d);
+    let alpha = if d < 0.0 {
+        (1.0 + d).clamp(0.0, 1.0)
+    } else if d >= 4.0 {
+        (0.28 * (1.0 - (d - 4.0))).clamp(0.0, 0.28)
+    } else {
+        let table = [1.0, 0.8, 0.6, 0.42, 0.28];
+        let i = d.floor() as usize;
+        let f = d - i as f32;
+        table[i] + (table[(i + 1).min(4)] - table[i]) * f
+    };
+    Place {
+        x: 150.0 + 96.0 * d,
+        y: 214.0 - 37.0 * d,
+        w: 640.0 * k,
+        h: 400.0 * k,
+        alpha,
+        depth: d.max(0.0).round() as usize,
+    }
+}
+
+/// How much darker a card at depth `d` is drawn: the place's fade turned into a veil, so the
+/// stack stays solid (a translucent card would show the ones behind through its picture).
+pub fn dim(d: f32) -> f32 {
+    (1.0 - place_at(d.clamp(0.0, 4.0)).alpha) * 0.85
+}
+
+/// A card's opacity: 1 in the stack; going from 1 to 0 as it leaves past the front (0 to -1)
+/// or past the last drawn depth (4 to 5).
+pub fn fade(d: f32) -> f32 {
+    if d < 0.0 {
+        (1.0 + d).clamp(0.0, 1.0)
+    } else if d > 4.0 {
+        (1.0 - (d - 4.0)).clamp(0.0, 1.0)
+    } else {
+        1.0
+    }
+}
+
+/// A card in motion: a critically damped spring from where it is drawn (`pos`) to where it
+/// belongs (`target`), both depths in the stack.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Spring {
+    pub pos: f32,
+    pub vel: f32,
+    pub target: f32,
+    /// 0..=1: how far a card that re-entered at the back has faded in.
+    pub appear: f32,
+    /// Leaving past the front; when it is out of sight it re-enters at the back, at `back_to`.
+    pub leaving: Option<f32>,
+}
+
+impl Spring {
+    pub fn at(d: f32) -> Spring {
+        Spring { pos: d, vel: 0.0, target: d, appear: 1.0, leaving: None }
+    }
+
+    /// A new place. A card sent from the front to the back of an `n`-window list goes forward
+    /// out of sight first (toward -1) rather than back through the whole stack; one brought from
+    /// the back to the front starts just in front (-1) and comes in.
+    pub fn retarget(&mut self, target: f32, n: usize) {
+        let half = n as f32 / 2.0;
+        if target - self.pos > half {
+            self.target = (self.pos.floor() - 1.0).min(-1.0);
+            self.leaving = Some(target);
+        } else if self.pos - target > half {
+            self.pos -= n as f32;
+            self.target = target;
+            self.leaving = None;
+        } else {
+            self.target = target;
+            self.leaving = None;
+        }
+    }
+
+    /// Advance by `dt` seconds (semi-implicit Euler in small steps, which is stable for this
+    /// stiffness at any frame rate).
+    pub fn step(&mut self, dt: f32, stiffness: f32, appear: f32, n: usize) {
+        let mut left = dt;
+        while left > 0.0 {
+            let h = left.min(0.004);
+            let a = -2.0 * stiffness * self.vel - stiffness * stiffness * (self.pos - self.target);
+            self.vel += a * h;
+            self.pos += self.vel * h;
+            left -= h;
+        }
+        if self.appear < 1.0 {
+            self.appear = (self.appear + dt / appear).min(1.0);
+        }
+        if let Some(back) = self.leaving {
+            if self.pos <= -0.95 {
+                // Out of sight in front: in again at the back, fading in, from just behind its place.
+                self.pos = back + 0.6;
+                self.vel = 0.0;
+                self.target = back;
+                self.appear = 0.0;
+                self.leaving = None;
+            }
+        }
+        let _ = n;
+    }
+
+    pub fn settled(&self) -> bool {
+        self.leaving.is_none() && (self.pos - self.target).abs() < 0.002 && self.vel.abs() < 0.01 && self.appear >= 1.0
+    }
+
+    pub fn snap(&mut self) {
+        self.pos = self.target;
+        self.vel = 0.0;
+        self.appear = 1.0;
     }
 }
 
@@ -315,5 +434,85 @@ mod tests {
         let b = win(2, "Weather · Paris", 1);
         assert_eq!(tile_slot(&a), tile_slot(&b), "same app, same colour");
         assert!(tile_slot(&a) < 8);
+    }
+
+    #[test]
+    fn a_glide_passes_through_the_places_and_ends_on_them() {
+        for d in 0..VISIBLE {
+            let (a, b) = (place(d), place_at(d as f32));
+            assert!((a.x - b.x).abs() < 1e-3 && (a.w - b.w).abs() < 1e-3 && (a.alpha - b.alpha).abs() < 1e-3);
+        }
+        let mid = place_at(0.5);
+        assert!(mid.w < place(0).w && mid.w > place(1).w);
+        assert!((mid.alpha - 0.9).abs() < 1e-3);
+        // Leaving past the front: bigger and gone at -1; fading out past the back.
+        assert!(place_at(-1.0).alpha == 0.0 && place_at(-1.0).w > place(0).w);
+        assert!(place_at(5.0).alpha == 0.0);
+    }
+
+    fn run(sp: &mut Spring, seconds: f32) {
+        let mut t = 0.0;
+        while t < seconds {
+            sp.step(0.016, 22.0, 0.16, 4);
+            t += 0.016;
+        }
+    }
+
+    #[test]
+    fn a_card_springs_to_its_place_without_overshoot() {
+        let mut sp = Spring::at(1.0);
+        sp.retarget(0.0, 4);
+        let mut lowest = f32::MAX;
+        for _ in 0..40 {
+            sp.step(0.016, 22.0, 0.16, 4);
+            lowest = lowest.min(sp.pos);
+        }
+        assert!(lowest > -0.01, "overshot to {lowest}");
+        assert!((sp.pos - 0.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn tab_sends_the_front_card_out_forward_and_back_in_at_the_back() {
+        // 4 windows, Tab: the front card (0) now belongs at 3. It leaves toward -1 first.
+        let mut sp = Spring::at(0.0);
+        sp.retarget(3.0, 4);
+        assert!(sp.target < 0.0 && sp.leaving == Some(3.0));
+        run(&mut sp, 1.0);
+        assert!(sp.leaving.is_none() && (sp.pos - 3.0).abs() < 0.01 && sp.appear == 1.0);
+    }
+
+    #[test]
+    fn shift_tab_brings_the_back_card_in_from_the_front() {
+        let mut sp = Spring::at(3.0);
+        sp.retarget(0.0, 4);
+        assert_eq!(sp.pos, -1.0);
+        run(&mut sp, 1.0);
+        assert!((sp.pos - 0.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn held_tab_keeps_cards_moving_without_stopping() {
+        // A new target every 40 ms (key repeat): the card never stops between them.
+        let mut sp = Spring::at(4.0);
+        let mut slowest = f32::MAX;
+        for k in 1..=4 {
+            sp.retarget(4.0 - k as f32, 8);
+            for _ in 0..3 {
+                sp.step(0.0134, 22.0, 0.16, 8);
+                slowest = slowest.min(sp.vel.abs());
+            }
+        }
+        assert!(slowest > 1.0, "the card nearly stopped: {slowest}");
+    }
+
+    #[test]
+    fn the_stack_is_solid_and_only_the_ends_fade() {
+        assert_eq!(fade(0.0), 1.0);
+        assert_eq!(fade(3.5), 1.0);
+        assert_eq!(fade(-0.5), 0.5);
+        assert_eq!(fade(4.5), 0.5);
+        assert_eq!(dim(0.0), 0.0);
+        assert!(dim(1.0) > 0.0 && dim(3.0) > dim(1.0));
+        assert_eq!(dim(-0.5), 0.0);
     }
 }

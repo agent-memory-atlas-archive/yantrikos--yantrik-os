@@ -12,7 +12,10 @@ export struct Card {
     y: length,
     w: length,
     h: length,
-    alpha: float,
+    // How much darker than the front card it is drawn, for its depth (0 = not at all).
+    dim: float,
+    // Its opacity: 1 except for a card fading in or out at either end of the stack.
+    fade: float,
     front: bool,
     name: string,
     letter: string,
@@ -20,6 +23,8 @@ export struct Card {
     ago: string,
     other-desktop: bool,
     minimized: bool,
+    picture: image,
+    has-picture: bool,
 }
 
 export struct Dot {
@@ -84,14 +89,18 @@ export component SwitcherView inherits Window {
         width: card.w;
         height: card.h;
         border-radius: 14px * root.scale * card.w / (640px * root.scale);
-        background: Theme.bg-card.with-alpha(card.alpha);
+        background: Theme.bg-card;
         clip: true;
+        // Stack cards are solid and darker with depth (the veil below); only a card fading in or
+        // out at either end is see-through. The software renderer draws `opacity` through an extra
+        // layer, so it is 1 for every card but that one.
+        opacity: card.fade;
 
         // The card's head: tile, name, how long ago.
         Rectangle {
             y: 0;
             height: 44px * root.scale * card.w / (640px * root.scale);
-            background: Theme.bg-elevated.with-alpha(card.alpha);
+            background: Theme.bg-elevated;
             HorizontalLayout {
                 padding-left: parent.height * 0.32;
                 padding-right: parent.height * 0.32;
@@ -103,12 +112,11 @@ export component SwitcherView inherits Window {
                         size: 44px * root.scale * card.w / (640px * root.scale) * 0.56;
                         letter: card.letter;
                         tint: card.tile;
-                        alpha: card.alpha;
                     }
                 }
                 Text {
                     text: card.name;
-                    color: Theme.text-primary.with-alpha(card.alpha);
+                    color: Theme.text-primary;
                     font-size: parent.height * 0.36;
                     font-weight: 600;
                     vertical-alignment: center;
@@ -117,21 +125,28 @@ export component SwitcherView inherits Window {
                 }
                 Text {
                     text: card.ago;
-                    color: Theme.text-secondary.with-alpha(card.alpha);
+                    color: Theme.text-secondary;
                     font-size: parent.height * 0.30;
                     vertical-alignment: center;
                 }
             }
         }
 
-        // The body: the app's tile, large. Pictures of windows come later (design, "Pictures").
-        Tile {
+        // The body: the window as labwc last drew it, or, until that arrives, the app's tile.
+        if card.has-picture: Image {
+            x: parent.width * 0.03;
+            y: 44px * card.w / 640px + parent.height * 0.03;
+            width: parent.width * 0.94;
+            height: parent.height - self.y - parent.height * 0.04;
+            source: card.picture;
+            image-fit: contain;
+        }
+        if !card.has-picture: Tile {
             x: (parent.width - self.width) / 2;
             y: parent.height * 0.5 - self.height * 0.35;
             size: min(parent.width, parent.height) * 0.26;
             letter: card.letter;
             tint: card.tile;
-            alpha: card.alpha;
         }
         if card.other-desktop || card.minimized: Text {
             x: 0;
@@ -140,15 +155,20 @@ export component SwitcherView inherits Window {
             horizontal-alignment: center;
             text: card.other-desktop && card.minimized ? "on another desktop · minimized"
                 : card.other-desktop ? "on another desktop" : "minimized";
-            color: Theme.text-dim.with-alpha(card.alpha);
+            color: Theme.text-dim;
             font-size: 13px * root.scale;
+        }
+
+        // Deeper cards, darker: one veil over everything on the card.
+        if card.dim > 0.01: Rectangle {
+            background: #000000.with-alpha(card.dim);
         }
 
         // The edge last, so the head does not cover it.
         Rectangle {
             border-radius: parent.border-radius;
             border-width: card.front ? 2px : 1px;
-            border-color: card.front ? Theme.accent : Theme.border-card.with-alpha(card.alpha * 0.9);
+            border-color: card.front ? Theme.accent : Theme.border-card;
         }
     }
 
