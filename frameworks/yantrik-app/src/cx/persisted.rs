@@ -65,7 +65,7 @@ impl<A: App> Core<A> {
     /// Hands the lane whatever the store owes the disk: a save, a migration's rewrite, a
     /// conflict's resolution. Nothing when it is settled or in recovery.
     pub fn flush_settings(&self) {
-        let owed = self.settings.borrow().bytes_to_write();
+        let owed = self.settings.borrow_mut().bytes_to_write();
         let Some((revision, bytes)) = owed else {
             return;
         };

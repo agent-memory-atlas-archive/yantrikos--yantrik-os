@@ -34,13 +34,44 @@ pub struct Paths {
 impl Paths {
     /// The paths for `id` under the session's profile and base directories.
     pub fn for_app(id: &str) -> Paths {
-        let profile = std::env::var("YANTRIK_PROFILE")
-            .ok()
-            .map(|p| p.trim().to_string())
-            .filter(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
-            .unwrap_or_else(|| DEFAULT_PROFILE.into());
-        match std::env::var_os("YANTRIK_HOME").filter(|v| !v.is_empty()) {
-            Some(root) => Paths::under(&PathBuf::from(root), id, &profile),
+        let home = std::env::var_os("YANTRIK_HOME")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from);
+        let profile = std::env::var("YANTRIK_PROFILE").ok();
+        Paths::resolve(id, home.as_deref(), profile.as_deref())
+    }
+
+    /// [`Paths::for_app`] from the two variables, so the rule has a test: a profile other than
+    /// the default lives only under `$YANTRIK_HOME` (the design's "roots all four for a second
+    /// profile"). Named without a home, it would be a second instance on the same files, so it
+    /// is refused with a warning and the default profile runs. A relative home is refused too.
+    pub fn resolve(id: &str, home: Option<&Path>, profile: Option<&str>) -> Paths {
+        let home = match home {
+            Some(h) if h.is_absolute() => Some(h),
+            Some(h) => {
+                tracing::warn!(app = id, home = %h.display(), "$YANTRIK_HOME is not an absolute path; ignored");
+                None
+            }
+            None => None,
+        };
+        let asked = profile
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(str::to_string);
+        let profile = match (asked, home) {
+            (None, _) => DEFAULT_PROFILE.to_string(),
+            (Some(p), None) => {
+                tracing::warn!(app = id, profile = %p, "$YANTRIK_PROFILE without $YANTRIK_HOME would share the default profile's files; running the default profile");
+                DEFAULT_PROFILE.to_string()
+            }
+            (Some(p), Some(_)) if p.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') && p.len() <= 64 => p,
+            (Some(p), Some(_)) => {
+                tracing::warn!(app = id, profile = %p, "$YANTRIK_PROFILE is not a name (letters, digits, - and _, up to 64); running the default profile");
+                DEFAULT_PROFILE.to_string()
+            }
+        };
+        match home {
+            Some(root) => Paths::under(root, id, &profile),
             None => Paths::from_bases(
                 &xdg::config_home(),
                 &xdg::data_home(),
@@ -141,6 +172,20 @@ mod tests {
         assert_eq!(p.instance_name(), "weather");
         let q = Paths::under(Path::new("/r"), "weather", "work");
         assert_eq!(q.instance_name(), "weather-work");
+    }
+
+    #[test]
+    fn a_profile_lives_only_under_a_home_of_its_own() {
+        let p = Paths::resolve("notes", Some(Path::new("/h")), Some("work"));
+        assert_eq!(p.profile(), "work");
+        assert_eq!(p.config_file(), Path::new("/h/config/yantrik/notes.json"));
+        // Without a home, a profile would be a second instance on the default's files: refused.
+        let p = Paths::resolve("notes", None, Some("work"));
+        assert_eq!(p.profile(), DEFAULT_PROFILE);
+        assert_eq!(p.instance_name(), "notes");
+        // A name that is not one, or a home that is relative, is refused too.
+        assert_eq!(Paths::resolve("notes", Some(Path::new("/h")), Some("../x")).profile(), DEFAULT_PROFILE);
+        assert_eq!(Paths::resolve("notes", Some(Path::new("rel")), None).config_file(), Paths::resolve("notes", None, None).config_file());
     }
 
     #[test]

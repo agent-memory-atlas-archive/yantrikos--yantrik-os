@@ -57,6 +57,22 @@ enum Command {
     SettleNo,
     Lock,
     Tick,
+    /// A keyed job that is not started while one of its kind runs; `Busy` is applied instead.
+    Guarded(i32),
+    Busy,
+    /// Arms a one-shot timer that fires `Chain` again: a timer's command arming a timer.
+    Chain,
+    /// Asks for itself again: a `then` cycle.
+    Ping,
+    /// A chain: `Chain3` queues `Step2`, which queues `Step3`, which starts the fetch. An
+    /// explicit invocation of it is owed its answer until that fetch lands.
+    Chain3,
+    Step2,
+    Step3,
+    /// A job whose result command is one `update` refuses.
+    BadResult,
+    /// Changes the model without saying which part: every part is redrawn.
+    Quiet,
 }
 
 struct Counter;
@@ -116,6 +132,35 @@ impl App for Counter {
             Command::SettleNo => fx.settle(Err(Refused::new("no", "Settled: no."))),
             Command::Lock => m.locked = true,
             Command::Tick => m.log.push("tick".into()),
+            Command::Guarded(tag) => {
+                fx.spawn_keyed_or(
+                    JobKey {
+                        feature: "guard",
+                        scope: Scope::App,
+                    },
+                    Concurrency::RejectIfRunning,
+                    Command::Busy,
+                    move |_| Command::Fetched(tag),
+                );
+            }
+            Command::Busy => m.log.push("busy".into()),
+            Command::Chain => {
+                m.log.push("chain".into());
+                fx.after(TimerId("chain"), Duration::from_secs(1), Command::Chain);
+            }
+            Command::Ping => {
+                m.log.push("ping".into());
+                fx.then(Command::Ping);
+            }
+            Command::Chain3 => fx.then(Command::Step2),
+            Command::Step2 => fx.then(Command::Step3),
+            Command::Step3 => {
+                fx.spawn(|_| Command::Fetched(5));
+            }
+            Command::BadResult => {
+                fx.spawn(|_| Command::Refuse);
+            }
+            Command::Quiet => m.n += 10,
         }
         Ok(())
     }
@@ -195,7 +240,80 @@ impl App for Counter {
         table.add(Intent::new(Action::new("lock", "Lock the counter"), |_| {
             Ok(Command::Lock)
         }));
+        let explicit = Settle::Explicit {
+            within: Duration::from_millis(300),
+        };
+        table.add(
+            Intent::new(Action::new("chain", "A fetch three steps down"), |_| {
+                Ok(Command::Chain3)
+            })
+            .settles(explicit)
+            .reply(|m: &Model| json!({ "count": m.n })),
+        );
+        table.add(
+            Intent::new(
+                Action::new("guarded", "One at a time").arg(Param::integer("tag")),
+                |a| Ok(Command::Guarded(a.integer("tag")? as i32)),
+            )
+            .settles(explicit)
+            .reply(|m: &Model| json!({ "count": m.n })),
+        );
+        table.add(
+            Intent::new(Action::new("bad", "A result the app refuses"), |_| {
+                Ok(Command::BadResult)
+            })
+            .settles(explicit),
+        );
     }
+}
+
+/// §3.1: the reply describes that invocation's committed result. A job started three `then`s
+/// down is still that invocation's work; it is not answered until the job lands.
+#[test]
+fn an_invocation_is_not_settled_while_its_chain_is_still_queued() {
+    let app = TestApp::<Counter>::start();
+    let pending = app.act("chain", json!({})).unwrap();
+    assert_eq!(app.settlements_open(), 1, "owed until the fetch lands");
+    assert_eq!(app.jobs_waiting(), 1);
+    app.run_jobs();
+    assert_eq!(pending.settle().unwrap()["count"], json!(5));
+    assert_eq!(app.settlements_open(), 0);
+}
+
+/// A job refused because one of its kind runs is a refusal to the invocation that asked, not
+/// "done" from a model the job never touched; the first invocation is answered when it lands.
+#[test]
+fn a_rejected_job_refuses_its_invocation() {
+    let app = TestApp::<Counter>::start();
+    let first = app.act("guarded", json!({"tag": 9})).unwrap();
+    let second = app.act("guarded", json!({"tag": 10})).unwrap();
+    let e = second.settle().unwrap_err();
+    assert!(e.contains("already running"), "{e}");
+    assert_eq!(app.model(|m| m.log.clone()), vec!["busy"], "the app heard of it too");
+    app.run_jobs();
+    assert_eq!(first.settle().unwrap()["count"], json!(9));
+}
+
+/// A result command the app refuses is the invocation's terminal outcome: the refusal.
+#[test]
+fn a_refused_result_refuses_its_invocation() {
+    let app = TestApp::<Counter>::start();
+    let pending = app.act("bad", json!({})).unwrap();
+    app.run_jobs();
+    assert_eq!(pending.settle().unwrap_err(), "Not now.");
+    assert_eq!(app.settlements_open(), 0);
+}
+
+/// An intent an agent may never raise is refused before the dispatch decides: in a mode that
+/// asks about a dangerous call, no approval is asked for a call that cannot run.
+#[test]
+fn an_agents_forbidden_intent_is_refused_before_any_approval_is_asked() {
+    let app = TestApp::<Counter>::start();
+    let e = app
+        .act_as(Call::new("reset", json!({})).as_agent("agent-token").in_mode("ask"))
+        .unwrap_err();
+    assert_eq!(e, "An agent does not reset the count.");
+    assert_eq!(app.model(|m| m.n), 0);
 }
 
 #[test]
@@ -273,6 +391,76 @@ fn a_close_request_with_no_handler_ends_the_process() {
     );
     app.tick();
     assert_eq!(app.exit_reason(), Some(ExitReason::LastWindowClosed));
+}
+
+/// §4: saturation cannot lose a job's outcome. The inbox is filled to its capacity with commands,
+/// then the job lands: its result still arrives, and its key is free again.
+#[test]
+fn a_full_inbox_does_not_lose_a_jobs_result() {
+    let app = TestApp::<Counter>::start();
+    app.run(Command::Fetch(7));
+    let post = app.post();
+    for _ in 0..yantrik_app::queue::CAPACITY {
+        post.post(Inbound::Command(Command::Add(0))).unwrap();
+    }
+    assert_eq!(
+        post.post(Inbound::Command(Command::Add(0))),
+        Err(Dropped::Full),
+        "commands are refused at the bound"
+    );
+    app.run_jobs();
+    assert!(app.model(|m| m.log.contains(&"fetched 7".to_string())));
+    assert_eq!(app.jobs_waiting(), 0, "the key is free again");
+    app.run(Command::Fetch(8));
+    app.run_jobs();
+    assert!(app.model(|m| m.log.contains(&"fetched 8".to_string())));
+}
+
+/// A timer's command that arms a timer: the clock is released before the command runs.
+#[test]
+fn a_timers_command_may_arm_a_timer() {
+    let app = TestApp::<Counter>::start();
+    app.run(Command::Chain);
+    app.advance(Duration::from_millis(3500));
+    assert_eq!(
+        app.model(|m| m.log.iter().filter(|l| *l == "chain").count()),
+        4,
+        "the first, then one a second"
+    );
+}
+
+/// A keyed job refused because one of its kind runs tells the app so, through its `failed`
+/// command, as a panicked or refused job would.
+#[test]
+fn a_rejected_job_runs_its_failed_command() {
+    let app = TestApp::<Counter>::start();
+    app.run(Command::Guarded(1));
+    app.run(Command::Guarded(2));
+    assert_eq!(app.model(|m| m.log.clone()), vec!["busy"]);
+    app.run_jobs();
+    assert_eq!(app.model(|m| m.log.clone()), vec!["busy", "fetched 1"]);
+}
+
+/// A `then` cycle cannot freeze the UI thread: one drain applies a bounded number and the rest
+/// wait for the next wake.
+#[test]
+fn a_then_cycle_yields_to_the_event_loop() {
+    let app = TestApp::<Counter>::start();
+    app.run(Command::Ping);
+    let pings = app.model(|m| m.log.iter().filter(|l| *l == "ping").count());
+    assert_eq!(pings, yantrik_app::cx::PENDING_PER_DRAIN + 1);
+    assert_eq!(app.pending_commands(), 1, "the rest waits");
+    app.tick();
+    let pings = app.model(|m| m.log.iter().filter(|l| *l == "ping").count());
+    assert_eq!(pings, 2 * yantrik_app::cx::PENDING_PER_DRAIN + 1);
+}
+
+/// An `update` that changes the model and does not say which part redraws every part.
+#[test]
+fn a_command_that_names_no_part_redraws_everything() {
+    let app = TestApp::<Counter>::start();
+    app.run(Command::Quiet);
+    assert_eq!(app.ui(|ui| (ui.get_count(), ui.get_renders())), (10, 2));
 }
 
 #[test]

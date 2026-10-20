@@ -59,10 +59,13 @@ pub mod headless {
             &self,
             event: Box<dyn FnOnce() + Send>,
         ) -> Result<(), slint::EventLoopError> {
-            // There is no loop to hand it to: a test's posts are drained by `TestApp::tick`.
-            // What Slint itself posts (nothing, in a headless test) runs at once.
-            event();
-            Ok(())
+            // Onto the one UI thread, as a step of its own, whichever thread asked: a closure
+            // that upgrades a `slint::Weak` must run where the component was made.
+            super::ui_thread()
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .send(event)
+                .map_err(|_| slint::EventLoopError::EventLoopTerminated)
         }
     }
 
@@ -438,10 +441,19 @@ impl<A: App> TestApp<A> {
         })
     }
 
-    /// Moves the virtual clock, firing every timer that comes due.
+    /// Moves the virtual clock, firing every timer that comes due. Each timer's command runs
+    /// with the clock released, so a command that arms or stops a timer is fine.
     pub fn advance(&self, by: Duration) {
         self.with(move |u| {
-            u.clock.borrow_mut().advance(by);
+            let until = u.clock.borrow().now() + by;
+            loop {
+                let fired = u.clock.borrow_mut().fire_next(until);
+                match fired {
+                    Some(command) => u.core.run(command),
+                    None => break,
+                }
+            }
+            u.clock.borrow_mut().settle(until);
             u.core.drain();
         });
     }
@@ -481,6 +493,11 @@ impl<A: App> TestApp<A> {
 
     pub fn settings_pending(&self) -> bool {
         self.with(|u| u.core.settings_pending())
+    }
+
+    /// Commands queued behind the one being applied (`then`), not yet applied.
+    pub fn pending_commands(&self) -> usize {
+        self.with(|u| u.core.pending_commands())
     }
 
     pub fn model<R: Send + 'static>(&self, f: impl FnOnce(&A::Model) -> R + Send + 'static) -> R {

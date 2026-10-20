@@ -60,6 +60,39 @@ pub fn write_text_atomically(path: &Path, text: &str) -> io::Result<()> {
     write_atomically(path, text.as_bytes())
 }
 
+/// Removes the temporaries a killed process left beside `path` (`.<name>.<pid>-<n>.tmp`), once
+/// they are older than `older_than`: young enough to be another process mid-write, they stay.
+/// Nothing else ever sweeps them. Failures are nothing; this is housekeeping.
+pub fn sweep_stale_temps(path: &Path, older_than: std::time::Duration) {
+    let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) else {
+        return;
+    };
+    let Some(name) = path.file_name().map(|n| n.to_string_lossy().to_string()) else {
+        return;
+    };
+    let prefix = format!(".{name}.");
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let file = entry.file_name();
+        let file = file.to_string_lossy();
+        if !(file.starts_with(&prefix) && file.ends_with(".tmp")) {
+            continue;
+        }
+        let old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|m| now.duration_since(m).ok())
+            .is_some_and(|age| age >= older_than);
+        if old {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -84,6 +117,27 @@ mod tests {
             use std::os::unix::fs::PermissionsExt as _;
             assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
         }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_stale_temporary_is_swept_and_a_fresh_one_is_left() {
+        let dir = temp_dir("sweep");
+        let path = dir.join("settings.json");
+        write_atomically(&path, b"{}").unwrap();
+        let stale = dir.join(".settings.json.1-1.tmp");
+        let fresh = dir.join(".settings.json.2-1.tmp");
+        let other = dir.join(".other.json.1-1.tmp");
+        for p in [&stale, &fresh, &other] {
+            fs::write(p, b"half").unwrap();
+        }
+        // Zero age sweeps everything of this file's; a day's age sweeps nothing.
+        sweep_stale_temps(&path, std::time::Duration::from_secs(86_400));
+        assert!(stale.exists() && fresh.exists());
+        sweep_stale_temps(&path, std::time::Duration::ZERO);
+        assert!(!stale.exists() && !fresh.exists());
+        assert!(other.exists(), "another file's temporary is not this file's business");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{}");
         let _ = fs::remove_dir_all(&dir);
     }
 
