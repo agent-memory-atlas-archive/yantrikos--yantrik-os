@@ -106,6 +106,10 @@ members = [
     "frameworks/yantrik-app-build",
     # YantrikApp: what every app's process is made of (design/app-framework-2026-10-21.md).
     "frameworks/yantrik-app",
+    # How an app is tested without a display (dev-only).
+    "frameworks/yantrik-testing",
+    # The toy app on the framework: the runner, a model, commands, a job and a timer.
+    "examples/hello-app",
     # YantrikFoundation: the rules every app, service and the shell share (docs/architecture.md, L0).
     "frameworks/yantrik-foundation",
     # The workspace's own checks: `cargo run -q -p xtask -- check-architecture` (docs/architecture.md).
@@ -199,6 +203,7 @@ yantrik-app-runtime = { path = "crates/yantrik-app-runtime" }
 yantrik-shown-address = { path = "crates/yantrik-shown-address" }
 yantrik-app-build = { path = "frameworks/yantrik-app-build" }
 yantrik-app = { path = "frameworks/yantrik-app" }
+yantrik-testing = { path = "frameworks/yantrik-testing" }
 yantrik-foundation = { path = "frameworks/yantrik-foundation" }
 yantrik-file-follow = { path = "crates/yantrik-file-follow" }
 yantrik-install-target = { path = "crates/yantrik-install-target" }

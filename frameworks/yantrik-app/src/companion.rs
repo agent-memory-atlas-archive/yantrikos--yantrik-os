@@ -97,7 +97,10 @@ pub struct Recalled {
 /// Search the companion's memory.
 pub fn recall(query: &str, limit: usize) -> Result<Vec<Recalled>, String> {
     let response = client()
-        .call("companion.recall", serde_json::json!({ "query": query, "limit": limit }))
+        .call(
+            "companion.recall",
+            serde_json::json!({ "query": query, "limit": limit }),
+        )
         .map_err(|e| format!("[{}] {}", e.code, e.message))?;
     let rows = response
         .get("results")
@@ -106,8 +109,16 @@ pub fn recall(query: &str, limit: usize) -> Result<Vec<Recalled>, String> {
     Ok(rows
         .iter()
         .map(|r| Recalled {
-            rid: r.get("rid").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-            text: r.get("text").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+            rid: r
+                .get("rid")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            text: r
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
             score: r.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0),
         })
         .collect())
@@ -233,7 +244,12 @@ pub fn reach() -> Reach {
     static WATCH: OnceLock<Arc<ReachWatch>> = OnceLock::new();
     WATCH
         .get_or_init(|| {
-            ReachWatch::new(Box::new(probe_reach), REACH_EVERY, REACH_FIRST_WAIT, REACH_IDLE)
+            ReachWatch::new(
+                Box::new(probe_reach),
+                REACH_EVERY,
+                REACH_FIRST_WAIT,
+                REACH_IDLE,
+            )
         })
         .get()
 }
@@ -365,7 +381,11 @@ mod tests {
     use super::*;
 
     fn rpc_error(code: i32) -> yantrik_ipc_transport::RpcError {
-        yantrik_ipc_transport::RpcError { code, message: "no".into(), data: None }
+        yantrik_ipc_transport::RpcError {
+            code,
+            message: "no".into(),
+            data: None,
+        }
     }
 
     /// The core of the defect: a no-model refusal used to arrive as an ordinary string, and
@@ -374,14 +394,20 @@ mod tests {
     fn the_no_model_code_maps_to_the_one_sentence() {
         let e = ask_error(yantrik_ipc_contracts::ERR_NO_MODEL, "no AI model is set up");
         assert!(matches!(e, AskError::NoModel));
-        assert_eq!(e.to_string(), "No AI model answered. Check Settings \u{2192} AI.");
+        assert_eq!(
+            e.to_string(),
+            "No AI model answered. Check Settings \u{2192} AI."
+        );
         assert_eq!(e.hint(), NO_MODEL_HINT);
     }
 
     #[test]
     fn any_other_failure_keeps_its_reason_and_the_old_hint() {
         let e = ask_error(-32000, "companion timed out");
-        assert_eq!(e.to_string(), "The companion did not answer: [-32000] companion timed out");
+        assert_eq!(
+            e.to_string(),
+            "The companion did not answer: [-32000] companion timed out"
+        );
         assert_eq!(e.hint(), OFFLINE_HINT);
     }
 
@@ -390,8 +416,14 @@ mod tests {
     /// reply flipped the flag.
     #[test]
     fn reach_tells_a_missing_shell_apart_from_a_shell_with_no_model() {
-        assert_eq!(reach_of(Ok(serde_json::json!({ "online": true }))), Reach::Ready);
-        assert_eq!(reach_of(Ok(serde_json::json!({ "online": false }))), Reach::NoModel);
+        assert_eq!(
+            reach_of(Ok(serde_json::json!({ "online": true }))),
+            Reach::Ready
+        );
+        assert_eq!(
+            reach_of(Ok(serde_json::json!({ "online": false }))),
+            Reach::NoModel
+        );
         assert_eq!(reach_of(Err(rpc_error(-1))), Reach::NoShell);
 
         assert_eq!(Reach::Ready.hint(), None);
@@ -427,15 +459,27 @@ mod tests {
 
         let first = Instant::now();
         assert_eq!(watch.get(), Reach::NoShell, "nothing heard yet");
-        assert!(first.elapsed() < Duration::from_millis(600), "the first ask waited {:?}", first.elapsed());
+        assert!(
+            first.elapsed() < Duration::from_millis(600),
+            "the first ask waited {:?}",
+            first.elapsed()
+        );
 
         // While the probe is still out, every ask is a read.
         for _ in 0..20 {
             let t = Instant::now();
             assert_eq!(watch.get(), Reach::NoShell);
-            assert!(t.elapsed() < Duration::from_millis(50), "an ask waited {:?}", t.elapsed());
+            assert!(
+                t.elapsed() < Duration::from_millis(50),
+                "an ask waited {:?}",
+                t.elapsed()
+            );
         }
-        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1, "one probe, not one per ask");
+        assert_eq!(
+            asked.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "one probe, not one per ask"
+        );
 
         // And once the shell answers, the answer is what the next ask reads.
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -478,9 +522,16 @@ mod tests {
         }
         let idle_at = asked.load(std::sync::atomic::Ordering::SeqCst);
         std::thread::sleep(Duration::from_millis(100));
-        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), idle_at, "an idle watcher asked the shell");
+        assert_eq!(
+            asked.load(std::sync::atomic::Ordering::SeqCst),
+            idle_at,
+            "an idle watcher asked the shell"
+        );
 
         assert_eq!(watch.get(), Reach::Ready);
-        assert!(watch.state.lock().unwrap().running, "an ask wakes the watcher");
+        assert!(
+            watch.state.lock().unwrap().running,
+            "an ask wakes the watcher"
+        );
     }
 }

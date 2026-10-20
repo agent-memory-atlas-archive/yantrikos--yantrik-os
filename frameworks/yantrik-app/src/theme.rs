@@ -19,7 +19,10 @@ pub struct ThemeSettings {
 
 impl Default for ThemeSettings {
     fn default() -> Self {
-        Self { dark: true, accent_index: 0 }
+        Self {
+            dark: true,
+            accent_index: 0,
+        }
     }
 }
 
@@ -49,7 +52,10 @@ pub fn offered_accent(name: &str) -> &'static str {
 
 pub fn accent_name_to_index(name: &str) -> i32 {
     let name = offered_accent(name);
-    ACCENTS.iter().find(|(n, _)| *n == name).map_or(0, |(_, i)| *i)
+    ACCENTS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map_or(0, |(_, i)| *i)
 }
 
 /// Path of the shell's settings file — the one the machine's ceiling is read from, so the theme
@@ -73,7 +79,9 @@ fn parse(text: &str) -> ThemeSettings {
     let mut t = ThemeSettings::default();
     for line in text.lines() {
         let line = line.trim();
-        let Some((key, value)) = line.split_once(':') else { continue };
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
         let value = value.trim().trim_matches('"').trim_matches('\'');
         match key.trim() {
             "dark_mode" => t.dark = value != "false",
@@ -90,8 +98,15 @@ mod tests {
 
     #[test]
     fn parses_the_two_keys_and_ignores_the_rest() {
-        let t = parse("user_name: Pranab\ndark_mode: false\naccent_color: purple\nwallpaper: aurora\n");
-        assert_eq!(t, ThemeSettings { dark: false, accent_index: 2 });
+        let t =
+            parse("user_name: Pranab\ndark_mode: false\naccent_color: purple\nwallpaper: aurora\n");
+        assert_eq!(
+            t,
+            ThemeSettings {
+                dark: false,
+                accent_index: 2
+            }
+        );
     }
 
     #[test]

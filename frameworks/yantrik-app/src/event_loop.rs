@@ -68,7 +68,8 @@ pub fn run_until_closed<C: slint::ComponentHandle + 'static>(ui: &C, program: &s
     let weak = ui.as_weak();
     crate::present::install(move || {
         let ui = weak.upgrade().ok_or("the window is closing")?;
-        ui.show().map_err(|e| format!("the window could not be shown: {e}"))?;
+        ui.show()
+            .map_err(|e| format!("the window could not be shown: {e}"))?;
         crate::chrome::bring_back(ui.window());
         Ok(())
     });
@@ -76,7 +77,13 @@ pub fn run_until_closed<C: slint::ComponentHandle + 'static>(ui: &C, program: &s
         Ok(()) => true,
         Err(error) => {
             let socket = wayland_socket();
-            ended_in_error(program, &error.to_string(), socket.as_deref(), GRACE, &problems::dir());
+            ended_in_error(
+                program,
+                &error.to_string(),
+                socket.as_deref(),
+                GRACE,
+                &problems::dir(),
+            );
             false
         }
     }
@@ -119,7 +126,10 @@ fn ended_in_error(
                  writing a problem record"
             );
             let message = format!("the event loop ended with an error: {error}");
-            problems::write_to(records, &problems::problem("failure", program, &message, None, None));
+            problems::write_to(
+                records,
+                &problems::problem("failure", program, &message, None, None),
+            );
         }
     }
     ending
@@ -225,7 +235,10 @@ mod tests {
     #[test]
     fn the_code_is_read_out_of_winits_exit_failure() {
         assert_eq!(exit_failure(LOGOUT), Some(1));
-        assert_eq!(exit_failure("Error running winit event loop: Exit Failure: 71"), Some(71));
+        assert_eq!(
+            exit_failure("Error running winit event loop: Exit Failure: 71"),
+            Some(71)
+        );
         assert_eq!(exit_failure("Nested event loops are not supported"), None);
         assert_eq!(exit_failure("Exit Failure: soon"), None);
     }
@@ -234,15 +247,27 @@ mod tests {
     fn the_display_answers_before_the_error_is_read() {
         // Asked and gone: an ending, whatever the error says.
         assert_eq!(classify(LOGOUT, Some(false)), Ending::DisplayGone);
-        assert_eq!(classify("rendering failed", Some(false)), Ending::DisplayGone);
+        assert_eq!(
+            classify("rendering failed", Some(false)),
+            Ending::DisplayGone
+        );
         // Asked and still there: the same `Exit Failure: 1` is a failure, because a compositor
         // that is still running closed our connection, and that is a bug in us.
         assert_eq!(classify(LOGOUT, Some(true)), Ending::Failure);
         // Not asked: only a lost connection that was not a protocol error counts as an ending.
         assert_eq!(classify(LOGOUT, None), Ending::DisplayGone);
-        assert_eq!(classify("Error running winit event loop: Exit Failure: 32", None), Ending::DisplayGone);
-        assert_eq!(classify("Error running winit event loop: Exit Failure: 71", None), Ending::Failure);
-        assert_eq!(classify("Nested event loops are not supported", None), Ending::Failure);
+        assert_eq!(
+            classify("Error running winit event loop: Exit Failure: 32", None),
+            Ending::DisplayGone
+        );
+        assert_eq!(
+            classify("Error running winit event loop: Exit Failure: 71", None),
+            Ending::Failure
+        );
+        assert_eq!(
+            classify("Nested event loops are not supported", None),
+            Ending::Failure
+        );
     }
 
     #[cfg(unix)]
@@ -251,14 +276,23 @@ mod tests {
         let d = tmp("gone");
         let records = d.join("problems");
         // Never there at all: the runtime directory a logout removed.
-        let ending = ended_in_error("yantrik-test", LOGOUT, Some(&d.join("wayland-0")), GRACE, &records);
+        let ending = ended_in_error(
+            "yantrik-test",
+            LOGOUT,
+            Some(&d.join("wayland-0")),
+            GRACE,
+            &records,
+        );
         assert_eq!(ending, Ending::DisplayGone);
         // There once, listener closed: the socket file a compositor left behind.
         let socket = d.join("wayland-1");
         drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
         let ending = ended_in_error("yantrik-test", LOGOUT, Some(&socket), GRACE, &records);
         assert_eq!(ending, Ending::DisplayGone);
-        assert!(problems::list_in(&records).is_empty(), "a logout was written down as a problem");
+        assert!(
+            problems::list_in(&records).is_empty(),
+            "a logout was written down as a problem"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -269,14 +303,23 @@ mod tests {
         let records = d.join("problems");
         let socket = d.join("wayland-0");
         let _compositor = std::os::unix::net::UnixListener::bind(&socket).unwrap();
-        let ending =
-            ended_in_error("yantrik-test", LOGOUT, Some(&socket), Duration::from_millis(300), &records);
+        let ending = ended_in_error(
+            "yantrik-test",
+            LOGOUT,
+            Some(&socket),
+            Duration::from_millis(300),
+            &records,
+        );
         assert_eq!(ending, Ending::Failure);
         let written = problems::list_in(&records);
         assert_eq!(written.len(), 1, "a real failure left no record");
         assert_eq!(written[0].1.kind, "failure");
         assert_eq!(written[0].1.program, "yantrik-test");
-        assert!(written[0].1.message.contains("Exit Failure: 1"), "{}", written[0].1.message);
+        assert!(
+            written[0].1.message.contains("Exit Failure: 1"),
+            "{}",
+            written[0].1.message
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -297,7 +340,10 @@ mod tests {
         let ending = ended_in_error("yantrik-test", LOGOUT, Some(&socket), GRACE, &records);
         closes.join().unwrap();
         assert_eq!(ending, Ending::DisplayGone);
-        assert!(started.elapsed() < GRACE, "waited out the grace for a compositor that had gone");
+        assert!(
+            started.elapsed() < GRACE,
+            "waited out the grace for a compositor that had gone"
+        );
         assert!(problems::list_in(&records).is_empty());
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -315,7 +361,10 @@ mod tests {
             eprintln!("skipped: packaged source without the apps tree");
             return;
         };
-        let mut mains: Vec<PathBuf> = apps.flatten().map(|e| e.path().join("src/main.rs")).collect();
+        let mut mains: Vec<PathBuf> = apps
+            .flatten()
+            .map(|e| e.path().join("src/main.rs"))
+            .collect();
         mains.push(root.join("crates/yantrik-ui/src/main.rs"));
         let read: Vec<(String, String)> = mains
             .iter()
@@ -337,9 +386,13 @@ mod tests {
             // Without whitespace, so a formatter that breaks the chain across lines cannot hide it.
             let flat: String = source.chars().filter(|c| !c.is_whitespace()).collect();
             if flat.contains(".run().unwrap()") || flat.contains(".run().expect(") {
-                wrong.push(format!("{name} unwraps its event loop; use run_until_closed"));
+                wrong.push(format!(
+                    "{name} unwraps its event loop; use run_until_closed"
+                ));
             } else if !flat.contains("run_until_closed(") {
-                wrong.push(format!("{name} does not run its window through run_until_closed"));
+                wrong.push(format!(
+                    "{name} does not run its window through run_until_closed"
+                ));
             }
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));

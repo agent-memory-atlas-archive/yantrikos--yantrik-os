@@ -54,20 +54,31 @@ pub(crate) fn install(presenter: impl Fn() -> Result<(), String> + 'static) {
 
 /// The action as every surface publishes it.
 pub(crate) fn action() -> Action {
-    Action::new(ACTION, "Show this app's window and bring it forward; for the desktop's own launches")
-        .risk("safe")
-        .arg(Param::text("display").optional())
+    Action::new(
+        ACTION,
+        "Show this app's window and bring it forward; for the desktop's own launches",
+    )
+    .risk("safe")
+    .arg(Param::text("display").optional())
 }
 
 /// The handler [`crate::control::App::serve`] registers. Runs on the UI thread.
 pub(crate) fn handle(args: &serde_json::Value) -> Result<serde_json::Value, String> {
     if control::agent_is_calling() {
-        return Err("present is the desktop's own handover between two launches of an app; an agent \
+        return Err(
+            "present is the desktop's own handover between two launches of an app; an agent \
                     drives the app through its other actions and does not bring its window forward"
-            .into());
+                .into(),
+        );
     }
     let here = std::env::var("WAYLAND_DISPLAY").ok();
-    WINDOW.with(|cell| answer(cell.borrow().as_deref(), here.as_deref(), args["display"].as_str()))
+    WINDOW.with(|cell| {
+        answer(
+            cell.borrow().as_deref(),
+            here.as_deref(),
+            args["display"].as_str(),
+        )
+    })
 }
 
 /// What the first copy answers, given how it shows its window (if it has one), the display it
@@ -84,7 +95,9 @@ fn answer(
     // Said, not decided here: this process cannot move its window to another display, and the
     // launch that asked is the one that knows which display the person is looking at.
     let elsewhere = matches!((here, asked_from), (Some(h), Some(a)) if h != a);
-    Ok(serde_json::json!({ "window": true, "presented": true, "display": here, "elsewhere": elsewhere }))
+    Ok(
+        serde_json::json!({ "window": true, "presented": true, "display": here, "elsewhere": elsewhere }),
+    )
 }
 
 /// What the running copy made of the request, as the second launch reads it.
@@ -166,7 +179,11 @@ pub(crate) fn ask_at(address: &str) -> Presented {
     }
     let here = std::env::var("WAYLAND_DISPLAY").ok();
     let request = serde_json::json!({ "action": ACTION, "args": { "display": here } });
-    read(yantrik_ipc_transport::SyncRpcClient::new(address).with_timeout(ANSWER_WAIT).call("app.act", request))
+    read(
+        yantrik_ipc_transport::SyncRpcClient::new(address)
+            .with_timeout(ANSWER_WAIT)
+            .call("app.act", request),
+    )
 }
 
 #[cfg(unix)]
@@ -192,7 +209,9 @@ mod tests {
         assert_eq!(reply["window"], false);
         let read = read(Ok(serde_json::json!({ "accepted": true, "result": reply })));
         assert_eq!(read, Presented::NoWindow);
-        let said = read.sentence("Calendar").expect("a windowless copy is not passed over in silence");
+        let said = read
+            .sentence("Calendar")
+            .expect("a windowless copy is not passed over in silence");
         assert!(said.contains("without a window"), "{said}");
     }
 
@@ -200,7 +219,10 @@ mod tests {
     /// installed, so it answers that it has none rather than claiming a window it does not have.
     #[test]
     fn the_action_in_a_process_that_never_ran_a_window_says_it_has_none() {
-        let answered = std::thread::spawn(|| handle(&serde_json::json!({}))).join().unwrap().unwrap();
+        let answered = std::thread::spawn(|| handle(&serde_json::json!({})))
+            .join()
+            .unwrap()
+            .unwrap();
         assert_eq!(answered, serde_json::json!({ "window": false }));
         assert_eq!(action().permission, "safe");
     }
@@ -233,7 +255,10 @@ mod tests {
     #[test]
     fn a_window_that_cannot_be_shown_is_a_refusal_with_its_reason() {
         let show = || Err("the window is closing".to_string());
-        assert_eq!(answer(Some(&show), None, None).unwrap_err(), "the window is closing");
+        assert_eq!(
+            answer(Some(&show), None, None).unwrap_err(),
+            "the window is closing"
+        );
         let refused = read(Err(yantrik_ipc_transport::RpcError {
             code: yantrik_surface::REFUSED,
             message: "the window is closing".into(),
@@ -248,6 +273,9 @@ mod tests {
         let started = Instant::now();
         let read = ask_at(&dir.join("app-nobody.sock").display().to_string());
         assert!(matches!(read, Presented::Unanswered(_)), "{read:?}");
-        assert!(started.elapsed() < BIND_WAIT + Duration::from_secs(1), "waited past the bind budget");
+        assert!(
+            started.elapsed() < BIND_WAIT + Duration::from_secs(1),
+            "waited past the bind budget"
+        );
     }
 }

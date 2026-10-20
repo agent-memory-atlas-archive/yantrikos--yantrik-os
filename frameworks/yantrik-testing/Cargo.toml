@@ -1,0 +1,12 @@
+[package]
+name = "yantrik-testing"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "GPL-3.0-only"
+description = "How a Yantrik app is tested without a display: a headless Slint platform, and TestApp, which runs an App's commands, jobs and timers when the test says so"
+
+# A dev-dependency of apps and of yantrik-app itself. Never in a shipped binary.
+[dependencies]
+slint = { workspace = true }
+yantrik-app = { workspace = true }
