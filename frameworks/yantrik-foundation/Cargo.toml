@@ -1,0 +1,10 @@
+[package]
+name = "yantrik-foundation"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "GPL-3.0-only"
+description = "YantrikFoundation: the rules every Yantrik app, service and the shell share, with no UI and no service behind them"
+
+# No dependencies, so anything on the platform can use it, down to the smallest service.
+[dependencies]

@@ -104,6 +104,8 @@ members = [
     "tests/windows-core",
     # How an app's UI is compiled: the style, YantrikUI's tokens and kit as libraries (step 2).
     "frameworks/yantrik-app-build",
+    # YantrikFoundation: the rules every app, service and the shell share (docs/architecture.md, L0).
+    "frameworks/yantrik-foundation",
     # The workspace's own checks: `cargo run -q -p xtask -- check-architecture` (docs/architecture.md).
     "tools/xtask",
 ]
