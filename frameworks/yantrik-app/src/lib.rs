@@ -14,8 +14,10 @@ pub mod event_loop;
 pub mod instance;
 pub mod present;
 pub mod theme;
+pub mod window;
 
 pub use event_loop::run_until_closed;
+pub use window::Window;
 // Moved to Foundation (L0): the one rule for an address, and the problem records every process
 // writes. Named here so the modules above keep their `crate::problems` paths.
 pub use yantrik_foundation::{place, problems};
