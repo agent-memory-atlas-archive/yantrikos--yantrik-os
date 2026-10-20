@@ -79,8 +79,9 @@ impl<C: Send + 'static> Post<C> {
 
     /// Posts on the reserved lane: never refused as full, only as closed. For what is bounded
     /// elsewhere and must not be lost to a flood of commands: a job's outcome (bounded by the
-    /// pool), the core's own continuation of a drain. Not for anything a caller can repeat.
-    pub fn post_control(&self, command: C) -> Result<(), Dropped> {
+    /// pool), the core's own continuation of a drain. Crate-private, so nothing a caller can
+    /// repeat reaches it.
+    pub(crate) fn post_control(&self, command: C) -> Result<(), Dropped> {
         if self.0.closed.load(Ordering::Acquire) {
             return Err(Dropped::Closed);
         }
