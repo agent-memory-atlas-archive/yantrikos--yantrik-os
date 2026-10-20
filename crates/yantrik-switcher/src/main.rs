@@ -105,6 +105,8 @@ const LIVE_EVERY: Duration = Duration::from_millis(500);
 /// design size. After that it is the front slot in output pixels. labwc keeps the window's aspect
 /// ratio inside it, and the front card is drawn at the size it sends, so it is drawn 1:1.
 const PICTURE: (u32, u32) = (640, 400);
+/// The largest overlay drawn, each side (8K): a bigger configure is taken as the design size.
+const OUTPUT_MOST: u32 = 7680;
 /// The largest picture labwc sends (its THUMB_MAX), so a bad size is refused before it is read.
 const PICTURE_MOST: u32 = 1024;
 
@@ -482,7 +484,10 @@ impl App {
             }
             zr::Event::Thumbnail { session, id, fd, width, height, stride } => {
                 let Some(s) = self.session.as_mut().filter(|s| s.id == session) else { return };
-                match picture(fd, width, height, stride) {
+                // Only a window of this session's list (labwc sends no other, but it is not taken on
+                // trust). The fd is closed either way: `picture` owns it.
+                let listed = s.windows.iter().any(|w| w.id == id);
+                match picture(fd, width, height, stride).filter(|_| listed) {
                     Some(image) => {
                         s.pictures.insert(id, (image, (width, height)));
                         self.draw();
@@ -742,10 +747,15 @@ impl App {
         slint::platform::update_timers_and_animations();
         let surface = layer.wl_surface().clone();
         let set_frames = &mut self.frames[set];
+        // The buffer's size in bytes, in usize and checked: a configure is the compositor's word, and
+        // `pixels` below is a slice of exactly this memory.
+        let Some(len) = (w as usize).checked_mul(h as usize).and_then(|n| n.checked_mul(4)) else { return };
         if set_frames.size != (w, h) {
-            set_frames.frames.clear();
+            for f in set_frames.frames.drain(..) {
+                f.buffer.destroy();
+            }
             for i in 0..2 {
-                let Ok(mut pool) = RawPool::new((w * h * 4) as usize, &self.shm) else { return };
+                let Ok(mut pool) = RawPool::new(len, &self.shm) else { return };
                 let buffer = pool.create_buffer(0, w as i32, h as i32, (w * 4) as i32, wl_shm::Format::Argb8888, set * 2 + i, &self.qh);
                 set_frames.frames.push(Frame { pool, buffer, busy: false });
             }
@@ -766,8 +776,12 @@ impl App {
         self.whole_frames = self.whole_frames.saturating_sub(1);
         let frame = &mut self.frames[set].frames[i];
         let bytes = frame.pool.mmap();
-        // Safety: Bgra is four u8s with alignment 1, and the pool holds exactly w * h of them.
-        let pixels: &mut [Bgra] = unsafe { std::slice::from_raw_parts_mut(bytes.as_mut_ptr().cast::<Bgra>(), (w * h) as usize) };
+        if bytes.len() < len {
+            return;
+        }
+        // Safety: Bgra is four u8s with alignment 1, and the mapping holds at least `len` bytes, which
+        // is w * h of them (checked above, in usize).
+        let pixels: &mut [Bgra] = unsafe { std::slice::from_raw_parts_mut(bytes.as_mut_ptr().cast::<Bgra>(), len / 4) };
         self.window.request_redraw();
         let mut dirty = None;
         self.window.draw_if_needed(|renderer| {
@@ -867,7 +881,8 @@ impl LayerShellHandler for App {
             return;
         }
         let (w, h) = configure.new_size;
-        *size = if w == 0 || h == 0 { (DESIGN.0 as u32, DESIGN.1 as u32) } else { (w, h) };
+        // No real output is larger; a configure past it is refused rather than allocated.
+        *size = if w == 0 || h == 0 || w > OUTPUT_MOST || h > OUTPUT_MOST { (DESIGN.0 as u32, DESIGN.1 as u32) } else { (w, h) };
         debug(format_args!("overlay configured {w}x{h}"));
         self.draw();
     }

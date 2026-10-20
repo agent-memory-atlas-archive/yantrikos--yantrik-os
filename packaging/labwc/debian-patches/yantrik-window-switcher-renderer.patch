@@ -10,14 +10,15 @@ Description: Let an external client draw the window switcher session
  renders offscreen from the window's own scene subtree (as upstream labwc's
  thumbnail switcher, src/cycle/osd-thumbnail.c, does; at twice the size and
  averaged down 2x2 when it shrinks by 2 or more) and hands over in a sealed
- memory file, at most 40 a second. While the renderer draws the session, a
+ memory file, at most 15 a second. A screen lock ends the session, and no
+ window is captured or selected behind one. While the renderer draws the session, a
  held Tab steps every 0.7 s (each window stays in front that long)
  instead of at the keyboard's repeat rate.
  Built for Yantrik OS's Alt+Tab (yantrikos/yantrik-os#867, #849).
 Author: Yantrik OS <dev@yantrikos.com>
 Forwarded: not-yet
 Last-Update: 2026-10-20
-Reviewed-by: security review of yantrikos/yantrik-os#872 (findings 1-5 addressed); version 2 pending review
+Reviewed-by: security reviews of yantrikos/yantrik-os#872 (findings 1-5 addressed) and #876 (lock finding fixed)
 ---
 --- labwc-0.8.3.orig/include/config/rcxml.h
 +++ labwc-0.8.3/include/config/rcxml.h
@@ -441,6 +442,31 @@ Reviewed-by: security review of yantrikos/yantrik-os#872 (findings 1-5 addressed
  #if HAVE_XWAYLAND
  	xwayland_server_finish(server);
  #endif
+--- labwc-0.8.3.orig/src/session-lock.c
++++ labwc-0.8.3/src/session-lock.c
+@@ -3,6 +3,7 @@
+ #include <assert.h>
+ #include "common/mem.h"
+ #include "labwc.h"
++#include "osd.h"
+ #include "node.h"
+ 
+ struct session_lock_output {
+@@ -330,6 +331,14 @@
+ 	}
+ 	assert(wl_list_empty(&manager->lock_outputs));
+ 
++	/*
++	 * A lock ends a window switcher session, cancelled: nothing is captured or selected
++	 * behind the lock, and Alt's release behind it focuses nothing.
++	 */
++	if (manager->server->input_mode == LAB_INPUT_STATE_WINDOW_SWITCHER) {
++		osd_finish(manager->server);
++	}
++
+ 	/* Remember the focused view to restore it on unlock */
+ 	manager->last_active_view = manager->server->active_view;
+ 	seat_focus_surface(&manager->server->seat, NULL);
 --- labwc-0.8.3.orig/src/view.c
 +++ labwc-0.8.3/src/view.c
 @@ -23,6 +23,7 @@
@@ -463,7 +489,7 @@ Reviewed-by: security review of yantrikos/yantrik-os#872 (findings 1-5 addressed
  		view->impl->set_activated(view, activated);
 --- labwc-0.8.3.orig/src/window-switcher-renderer.c
 +++ labwc-0.8.3/src/window-switcher-renderer.c
-@@ -0,0 +1,773 @@
+@@ -0,0 +1,776 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * An external client that draws the window switcher session.
@@ -513,6 +539,7 @@ Reviewed-by: security review of yantrikos/yantrik-os#872 (findings 1-5 addressed
 +#include "common/mem.h"
 +#include "config/rcxml.h"
 +#include "labwc.h"
++#include "session-lock.h"
 +#include "osd.h"
 +#include "view.h"
 +#include "workspaces.h"
@@ -525,7 +552,7 @@ Reviewed-by: security review of yantrikos/yantrik-os#872 (findings 1-5 addressed
 +#define TEXT_MAX 512
 +#define THUMB_MIN 16
 +#define THUMB_MAX 1024
-+#define CAPTURES_PER_SECOND 40
++#define CAPTURES_PER_SECOND 15
 +#define SWITCHER_REPEAT_MS 700
 +
 +struct switcher_renderer {
@@ -743,8 +770,10 @@ Reviewed-by: security review of yantrikos/yantrik-os#872 (findings 1-5 addressed
 +static struct view *
 +listed_view(struct switcher_renderer *r, uint32_t session, uint32_t id)
 +{
++	/* Never a window behind a lock (a lock also ends the session: session-lock.c) */
 +	if (!r->active || session != r->session || id == 0
-+			|| r->server->input_mode != LAB_INPUT_STATE_WINDOW_SWITCHER) {
++			|| r->server->input_mode != LAB_INPUT_STATE_WINDOW_SWITCHER
++			|| r->server->session_lock_manager->locked) {
 +		return NULL;
 +	}
 +	struct view *target = find_view(r, id);
