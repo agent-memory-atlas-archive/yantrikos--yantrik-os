@@ -133,7 +133,9 @@ impl Spring {
     pub fn retarget(&mut self, target: f32, n: usize) {
         let half = n as f32 / 2.0;
         if target - self.pos > half {
-            self.target = (self.pos.floor() - 1.0).min(-1.0);
+            // Aimed past -1, so it is out of sight (-0.95) in about half the time a spring would
+            // take to creep up to -1 itself.
+            self.target = (self.pos.floor() - 1.6).min(-1.6);
             self.leaving = Some(target);
         } else if self.pos - target > half {
             self.pos -= n as f32;
@@ -177,8 +179,16 @@ impl Spring {
         let _ = n;
     }
 
+    /// Close enough to stop: within about a pixel of its place (a depth is ~100 px) and all
+    /// but still. The spring's tail would take another 0.3 s for that last pixel.
     pub fn settled(&self) -> bool {
-        self.leaving.is_none() && (self.pos - self.target).abs() < 0.002 && self.vel.abs() < 0.01 && self.appear >= 1.0
+        self.leaving.is_none() && (self.pos - self.target).abs() < 0.01 && self.vel.abs() < 0.1 && self.appear >= 1.0
+    }
+
+    /// Moving fast enough that frames may be drawn at reduced size without it showing: still
+    /// far from its place, quick, or leaving past the front.
+    pub fn fast(&self) -> bool {
+        self.leaving.is_some() || self.vel.abs() > 2.0 || (self.pos - self.target).abs() > 0.25
     }
 
     pub fn snap(&mut self) {
@@ -557,5 +567,25 @@ mod tests {
             let b = body(cw, ch);
             assert!(b.0.fract() == 0.0 && b.1.fract() == 0.0 && b.2.fract() == 0.0 && b.3.fract() == 0.0);
         }
+    }
+
+    #[test]
+    fn a_step_is_sharp_by_a_fifth_of_a_second_and_done_by_half() {
+        let mut sp = Spring::at(1.0);
+        sp.retarget(0.0, 6);
+        let (mut sharp_at, mut done_at, mut t) = (None, None, 0.0f32);
+        while t < 1.0 {
+            sp.step(0.016, 15.0, 0.24, 6);
+            t += 0.016;
+            if sharp_at.is_none() && !sp.fast() {
+                sharp_at = Some(t);
+            }
+            if done_at.is_none() && sp.settled() {
+                done_at = Some(t);
+            }
+        }
+        let (sharp, done) = (sharp_at.unwrap(), done_at.unwrap());
+        assert!(sharp < 0.25, "full size only from {sharp} s");
+        assert!(done < 0.5, "settled only at {done} s");
     }
 }

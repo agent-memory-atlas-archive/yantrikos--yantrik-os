@@ -14,7 +14,7 @@
 //!
 //! Pictures (protocol version 2): each card shows its window as labwc last drew it. They are
 //! asked for when the list arrives, and the front card's again every `LIVE_EVERY` while the
-//! stack is up, so it is a live picture; the others every `LIVE_EVERY * BACK_EVERY`. A card
+//! stack is up and still, so it is a live picture. A card
 //! with no picture yet (labwc too old, nothing drawn, or still on its way) shows the app's tile.
 
 use std::collections::HashMap;
@@ -91,10 +91,9 @@ const FRAME: Duration = Duration::from_millis(16);
 /// scales them up (wp_viewporter): motion hides the softness, and a quarter of the pixels is
 /// what lets the software renderer keep FRAME. The frame they land on is drawn at full size.
 const GLIDE_SCALE: u32 = 2;
-/// How often the front card's picture is asked for again while the stack is up.
-const LIVE_EVERY: Duration = Duration::from_millis(250);
-/// The cards behind it, every this many of those.
-const BACK_EVERY: u32 = 4;
+/// How often the front card's picture is asked for again while the stack is up and still
+/// (never while cards move: the compositor's time goes to the motion then).
+const LIVE_EVERY: Duration = Duration::from_millis(500);
 /// The picture size asked for until the overlay's size is known: the front card's body at the
 /// design size. After that it is the front card's body in output pixels, so the front card is
 /// drawn 1:1 (labwc keeps the window's aspect ratio inside it).
@@ -531,8 +530,8 @@ impl App {
         }
     }
 
-    /// While the stack is up: the front card's picture again every LIVE_EVERY, the ones behind
-    /// it every BACK_EVERY of those. Stops by itself when the session ends.
+    /// While the stack is up: the front card's picture again every LIVE_EVERY, unless cards are
+    /// moving. Stops by itself when the session ends.
     fn start_live(&mut self) {
         let Some(s) = self.session.as_mut() else { return };
         if s.live || self.renderer.version() < 2 {
@@ -540,12 +539,12 @@ impl App {
         }
         s.live = true;
         let session = s.id;
-        let mut tick = 0u32;
         let _ = self.loop_handle.insert_source(Timer::from_duration(LIVE_EVERY), move |_, _, app| {
             let Some(s) = app.session.as_ref().filter(|s| s.id == session) else { return TimeoutAction::Drop };
-            tick += 1;
-            let ids = if tick % BACK_EVERY == 0 { visible_ids(s) } else { s.selected.into_iter().collect() };
-            app.capture(session, &ids);
+            if !s.animating {
+                let ids: Vec<u32> = s.selected.into_iter().collect();
+                app.capture(session, &ids);
+            }
             TimeoutAction::ToDuration(LIVE_EVERY)
         });
     }
@@ -565,7 +564,10 @@ impl App {
         let (out_w, out_h) = (*w, *h);
         // Gliding: a smaller frame, scaled up by the compositor. Everything below is laid out
         // from (w, h), so it is the same picture at a lower resolution.
-        let gliding = s.animating && self.viewport.is_some();
+        // Half size only while cards move fast, where the eye cannot follow detail anyway; as
+        // they slow toward their places the frames are full size, so a picture is sharp while
+        // it is still settling, not after.
+        let gliding = s.animating && self.viewport.is_some() && s.springs.values().any(|sp| sp.target < 1.5 && sp.fast());
         let set = gliding as usize;
         let (w, h) = if gliding { (out_w / GLIDE_SCALE, out_h / GLIDE_SCALE) } else { (out_w, out_h) };
         if w == 0 || h == 0 || s.windows.is_empty() {
