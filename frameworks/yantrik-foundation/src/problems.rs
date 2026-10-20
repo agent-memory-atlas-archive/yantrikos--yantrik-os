@@ -394,7 +394,13 @@ mod tests {
     fn a_home_path_and_a_username_do_not_survive_scrubbing() {
         // Whatever the machine's real values are, the scrubber must remove them.
         let home_dir = home().to_string_lossy().to_string();
-        let user = std::env::var("USER").unwrap_or_else(|_| "somebody".into());
+        // The same fallback `scrub` uses, or a bare container (no USER, HOME=/root) sees the
+        // scrubber remove `root` while the test looks for `somebody`.
+        let user = std::env::var("USER")
+            .ok()
+            .filter(|u| !u.is_empty())
+            .or_else(|| home().file_name().map(|n| n.to_string_lossy().to_string()))
+            .unwrap_or_default();
         let text = format!("failed to open {home_dir}/Pictures/x.png as {user} in /home/{user}/y");
         let out = scrub(&text);
         if home_dir.len() > 1 {
