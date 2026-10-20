@@ -94,6 +94,18 @@ pub fn fade(d: f32) -> f32 {
     }
 }
 
+/// Where a card of `w` x `h` (output pixels) shows its window: (x, y, width, height), in whole
+/// pixels so a picture asked at exactly this size is drawn 1:1, not resampled. Under the card's
+/// head (44 at 640 wide), 3% in from the sides and top, 4% up from the bottom.
+pub fn body(w: f32, h: f32) -> (f32, f32, f32, f32) {
+    let head = 44.0 * w / 640.0;
+    let x = (w * 0.03).round();
+    let y = (head + h * 0.03).round();
+    let bw = (w - 2.0 * x).round();
+    let bh = (h - y - (h * 0.04).round()).round();
+    (x, y, bw.max(0.0), bh.max(0.0))
+}
+
 /// How far a card may trail its place, in depths.
 pub const LAG_MOST: f32 = 1.0;
 
@@ -534,6 +546,16 @@ mod tests {
                 sp.step(0.0134, 12.0, 0.24, 64);
                 assert!((sp.pos - sp.target).abs() <= LAG_MOST + 1e-4);
             }
+        }
+    }
+
+    #[test]
+    fn the_front_picture_area_is_whole_pixels() {
+        let (x, y, w, h) = body(640.0, 400.0);
+        assert_eq!((x, y, w, h), (19.0, 56.0, 602.0, 328.0));
+        for (cw, ch) in [(533.3, 333.3), (1280.0, 800.0), (100.0, 62.5)] {
+            let b = body(cw, ch);
+            assert!(b.0.fract() == 0.0 && b.1.fract() == 0.0 && b.2.fract() == 0.0 && b.3.fract() == 0.0);
         }
     }
 }

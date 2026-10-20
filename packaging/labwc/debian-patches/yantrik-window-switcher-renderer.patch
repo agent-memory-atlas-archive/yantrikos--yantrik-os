@@ -8,9 +8,10 @@ Description: Let an external client draw the window switcher session
  Text keys labwc does not use during a session are handed to the renderer.
  Version 2 adds pictures: the renderer may ask for a listed window, which labwc
  renders offscreen from the window's own scene subtree (as upstream labwc's
- thumbnail switcher, src/cycle/osd-thumbnail.c, does) and hands over in a
- sealed memory file, at most 40 a second. While the renderer draws the
- session, a held Tab steps once a second (each window stays in front that long)
+ thumbnail switcher, src/cycle/osd-thumbnail.c, does; at twice the size and
+ averaged down 2x2 when it shrinks by 2 or more) and hands over in a sealed
+ memory file, at most 40 a second. While the renderer draws the session, a
+ held Tab steps every 0.7 s (each window stays in front that long)
  instead of at the keyboard's repeat rate.
  Built for Yantrik OS's Alt+Tab (yantrikos/yantrik-os#867, #849).
 Author: Yantrik OS <dev@yantrikos.com>
@@ -462,7 +463,7 @@ Reviewed-by: security review of yantrikos/yantrik-os#872 (findings 1-5 addressed
  		view->impl->set_activated(view, activated);
 --- labwc-0.8.3.orig/src/window-switcher-renderer.c
 +++ labwc-0.8.3/src/window-switcher-renderer.c
-@@ -0,0 +1,742 @@
+@@ -0,0 +1,773 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * An external client that draws the window switcher session.
@@ -525,7 +526,7 @@ Reviewed-by: security review of yantrikos/yantrik-os#872 (findings 1-5 addressed
 +#define THUMB_MIN 16
 +#define THUMB_MAX 1024
 +#define CAPTURES_PER_SECOND 40
-+#define SWITCHER_REPEAT_MS 1000
++#define SWITCHER_REPEAT_MS 700
 +
 +struct switcher_renderer {
 +	struct server *server;
@@ -839,9 +840,34 @@ Reviewed-by: security review of yantrikos/yantrik-os#872 (findings 1-5 addressed
 + * A picture of the view, w x h, in a new sealed memory file; -1 on any failure. Rendered
 + * offscreen from the view's content tree (as upstream's render_thumb) and read back.
 + */
++/*
++ * Shrink a premultiplied ARGB8888 picture by 2 in each direction, each output pixel the mean of
++ * its 2x2 block: an area filter, so a window drawn at a third of its size stays crisp instead of
++ * the one-pass bilinear smear.
++ */
++static void
++halve(const uint8_t *src, uint32_t src_stride, uint8_t *dst, uint32_t dst_stride, int w, int h)
++{
++	for (int y = 0; y < h; y++) {
++		const uint8_t *a = src + (size_t)(2 * y) * src_stride;
++		const uint8_t *b = a + src_stride;
++		uint8_t *o = dst + (size_t)y * dst_stride;
++		for (int x = 0; x < w; x++) {
++			for (int c = 0; c < 4; c++) {
++				unsigned sum = a[8 * x + c] + a[8 * x + 4 + c] + b[8 * x + c] + b[8 * x + 4 + c];
++				o[4 * x + c] = (uint8_t)((sum + 2) / 4);
++			}
++		}
++	}
++}
++
 +static int
 +render_thumbnail(struct server *server, struct view *view, int w, int h, double scale)
 +{
++	/* Twice the size and halved when the window shrinks by 2 or more; at once otherwise */
++	int ss = scale * 2.0 <= 1.0 ? 2 : 1;
++	int rw = w * ss, rh = h * ss;
++	scale *= ss;
 +	struct wlr_drm_format fallback = {
 +		.format = DRM_FORMAT_ARGB8888,
 +		.len = 1,
@@ -852,7 +878,7 @@ Reviewed-by: security review of yantrikos/yantrik-os#872 (findings 1-5 addressed
 +	if (view->output && view->output->wlr_output && view->output->wlr_output->swapchain) {
 +		format = &view->output->wlr_output->swapchain->format;
 +	}
-+	struct wlr_buffer *buffer = wlr_allocator_create_buffer(server->allocator, w, h, format);
++	struct wlr_buffer *buffer = wlr_allocator_create_buffer(server->allocator, rw, rh, format);
 +	if (!buffer) {
 +		wlr_log(WLR_ERROR, "window switcher thumbnail: no buffer");
 +		return -1;
@@ -863,7 +889,7 @@ Reviewed-by: security review of yantrikos/yantrik-os#872 (findings 1-5 addressed
 +		return -1;
 +	}
 +	wlr_render_pass_add_rect(pass, &(struct wlr_render_rect_options){
-+		.box = { .width = w, .height = h },
++		.box = { .width = rw, .height = rh },
 +		.color = { 0, 0, 0, 0 },
 +		.blend_mode = WLR_RENDER_BLEND_MODE_NONE,
 +	});
@@ -881,18 +907,24 @@ Reviewed-by: security review of yantrikos/yantrik-os#872 (findings 1-5 addressed
 +	}
 +	uint32_t stride = (uint32_t)w * 4;
 +	size_t size = (size_t)stride * (size_t)h;
++	uint32_t rstride = (uint32_t)rw * 4;
++	uint8_t *rendered = ss > 1 ? malloc((size_t)rstride * (size_t)rh) : NULL;
 +	int fd = memfd_create("labwc-switcher-thumbnail", MFD_CLOEXEC | MFD_ALLOW_SEALING);
 +	void *map = MAP_FAILED;
-+	bool ok = fd >= 0 && ftruncate(fd, (off_t)size) == 0
++	bool ok = (ss == 1 || rendered) && fd >= 0 && ftruncate(fd, (off_t)size) == 0
 +		&& (map = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0)) != MAP_FAILED;
 +	if (ok) {
 +		ok = wlr_texture_read_pixels(texture, &(struct wlr_texture_read_pixels_options){
-+			.data = map,
++			.data = ss > 1 ? (void *)rendered : map,
 +			.format = DRM_FORMAT_ARGB8888,
-+			.stride = stride,
++			.stride = ss > 1 ? rstride : stride,
 +		});
++		if (ok && ss > 1) {
++			halve(rendered, rstride, map, stride, w, h);
++		}
 +		munmap(map, size);
 +	}
++	free(rendered);
 +	wlr_texture_destroy(texture);
 +	wlr_buffer_drop(buffer);
 +	/* Sealed: the size and the bytes stay as sent */

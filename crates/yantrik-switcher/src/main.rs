@@ -82,7 +82,7 @@ const TILES: [u32; 8] = [0x5b9be8, 0x2bb5a6, 0x4bbf6b, 0xe0a94a, 0xe5626a, 0x7cc
 /// How quickly a card follows its place (the spring's natural frequency, radians a second).
 /// Critically damped: it arrives without overshoot in about 4 / STIFFNESS seconds, and a new
 /// target mid-way only bends its path, so held Tab streams the cards one after another.
-const STIFFNESS: f32 = 12.0;
+const STIFFNESS: f32 = 15.0;
 /// How long a card that re-enters at the back of the stack takes to fade in.
 const APPEAR: f32 = 0.24;
 /// A frame while cards glide (about 60 a second).
@@ -95,9 +95,10 @@ const GLIDE_SCALE: u32 = 2;
 const LIVE_EVERY: Duration = Duration::from_millis(250);
 /// The cards behind it, every this many of those.
 const BACK_EVERY: u32 = 4;
-/// The picture size asked for: the front card's body at the design size; labwc keeps the
-/// window's aspect ratio inside it.
-const PICTURE: (u32, u32) = (640, 360);
+/// The picture size asked for until the overlay's size is known: the front card's body at the
+/// design size. After that it is the front card's body in output pixels, so the front card is
+/// drawn 1:1 (labwc keeps the window's aspect ratio inside it).
+const PICTURE: (u32, u32) = (602, 328);
 /// The largest picture labwc sends (its THUMB_MAX), so a bad size is refused before it is read.
 const PICTURE_MOST: u32 = 1024;
 
@@ -270,6 +271,8 @@ struct App {
     pending: bool,
     viewporter: Option<WpViewporter>,
     viewport: Option<WpViewport>,
+    /// The front card's picture area at full size, in output pixels: what pictures are asked at.
+    picture_size: (u32, u32),
 }
 
 fn main() {
@@ -313,6 +316,7 @@ fn main() {
         pending: false,
         viewporter: globals.bind::<WpViewporter, _, _>(&qh, 1..=1, ()).ok(),
         viewport: None,
+        picture_size: PICTURE,
     };
     WaylandSource::new(conn, queue).insert(event_loop.handle()).expect("the Wayland source");
     loop {
@@ -342,6 +346,10 @@ fn warm_up(window: &Rc<MinimalSoftwareWindow>, view: &SwitcherView) {
         ago: "4 min ago".into(),
         other_desktop: true,
         minimized: true,
+        body_x: 19.0,
+        body_y: 56.0,
+        body_w: 602.0,
+        body_h: 328.0,
         picture: Image::default(),
         has_picture: false,
     };
@@ -519,7 +527,7 @@ impl App {
             return;
         }
         for &id in ids {
-            self.renderer.capture(session, id, PICTURE.0, PICTURE.1);
+            self.renderer.capture(session, id, self.picture_size.0, self.picture_size.1);
         }
     }
 
@@ -581,6 +589,7 @@ impl App {
                 let (d, appear) = drawn[i];
                 (d > -1.0 && d < model::VISIBLE as f32).then(|| {
                     let p = model::place_at(d);
+                    let body = model::body(p.w * scale, p.h * scale);
                     let rgb = TILES[model::tile_slot(win)];
                     (
                         d,
@@ -598,6 +607,10 @@ impl App {
                             ago: model::ago(win.idle_ms).unwrap_or_default().into(),
                             other_desktop: !win.current_workspace,
                             minimized: win.minimized,
+                            body_x: body.0,
+                            body_y: body.1,
+                            body_w: body.2,
+                            body_h: body.3,
                             picture: s.pictures.get(&win.id).cloned().unwrap_or_default(),
                             has_picture: s.pictures.contains_key(&win.id),
                         },
@@ -620,6 +633,11 @@ impl App {
             model::ticks().into_iter().map(|(label, pos)| Tick { y: px(line_top + pos * line_height), label: label.into() }).collect();
 
         let front = &s.windows[sel];
+        // Pictures are asked at the front card's picture area, at full size.
+        if !gliding {
+            let full = model::body(model::place_at(0.0).w * scale, model::place_at(0.0).h * scale);
+            self.picture_size = (full.2.max(16.0) as u32, full.3.max(16.0) as u32);
+        }
         self.view.set_cards(ModelRc::new(VecModel::from(cards)));
         self.view.set_dots(ModelRc::new(VecModel::from(dots)));
         self.view.set_ticks(ModelRc::new(VecModel::from(ticks)));

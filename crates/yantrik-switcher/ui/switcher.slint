@@ -23,6 +23,11 @@ export struct Card {
     ago: string,
     other-desktop: bool,
     minimized: bool,
+    // Where the window's picture sits on the card, in whole pixels (model.rs `body`).
+    body-x: length,
+    body-y: length,
+    body-w: length,
+    body-h: length,
     picture: image,
     has-picture: bool,
 }
@@ -133,11 +138,12 @@ export component SwitcherView inherits Window {
         }
 
         // The body: the window as labwc last drew it, or, until that arrives, the app's tile.
+        // The front card's picture is asked at exactly this size, so it is drawn 1:1.
         if card.has-picture: Image {
-            x: parent.width * 0.03;
-            y: 44px * card.w / 640px + parent.height * 0.03;
-            width: parent.width * 0.94;
-            height: parent.height - self.y - parent.height * 0.04;
+            x: card.body-x;
+            y: card.body-y;
+            width: card.body-w;
+            height: card.body-h;
             source: card.picture;
             image-fit: contain;
         }
