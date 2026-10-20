@@ -526,6 +526,6 @@ mod tests {
         assert_eq!(store::date(0), "1970-01-01");
         assert_eq!(store::relative(0, 1_789_862_400), "");
         assert_eq!(store::relative(1_789_862_400, 1_789_862_410), "just now");
-        assert_eq!(store::relative(1_789_862_400, 1_789_866_000), "1 hours ago");
+        assert_eq!(store::relative(1_789_862_400, 1_789_866_000), "1 hour ago");
     }
 }

@@ -3092,7 +3092,7 @@ fn push_urges(companion: &CompanionService, ui_weak: &slint::Weak<App>) {
             reason: u.reason.clone().into(),
             urgency: u.urgency as f32,
             suggested_message: u.suggested_message.clone().into(),
-            time_ago: format_time_ago(now - u.created_at).into(),
+            time_ago: yantrik_foundation::time::ago_secs(now - u.created_at).into(),
             border_color: instinct_color(&u.instinct_name),
         })
         .collect();
@@ -3140,19 +3140,6 @@ pub fn instinct_color(name: &str) -> slint::Color {
         "self_awareness" => slint::Color::from_rgb_u8(0x6B, 0xE8, 0xC4),       // teal
         "humor" => slint::Color::from_rgb_u8(0xE8, 0x6B, 0xC4),                // pink
         _ => slint::Color::from_rgb_u8(0xD4, 0xA0, 0x3C),                      // default amber
-    }
-}
-
-/// Format seconds-ago into a human-readable string.
-pub fn format_time_ago(seconds: f64) -> String {
-    if seconds < 60.0 {
-        "just now".to_string()
-    } else if seconds < 3600.0 {
-        format!("{}m ago", (seconds / 60.0) as i64)
-    } else if seconds < 86400.0 {
-        format!("{}h ago", (seconds / 3600.0) as i64)
-    } else {
-        format!("{}d ago", (seconds / 86400.0) as i64)
     }
 }
 

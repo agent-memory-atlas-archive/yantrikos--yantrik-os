@@ -248,9 +248,9 @@ impl Places {
                 let stale = age > recent::STALE_AFTER;
                 // How old this is, and, when it is old, why it was not replaced.
                 let freshness = match (&last_error, stale) {
-                    (Some(e), _) => format!("fetched {}; the last refresh failed: {e}", recent::ago(age)),
-                    (None, true) => format!("fetched {}, stale; a refresh is under way", recent::ago(age)),
-                    (None, false) => format!("fetched {}", recent::ago(age)),
+                    (Some(e), _) => format!("fetched {}; the last refresh failed: {e}", yantrik_foundation::time::ago(age)),
+                    (None, true) => format!("fetched {}, stale; a refresh is under way", yantrik_foundation::time::ago(age)),
+                    (None, false) => format!("fetched {}", yantrik_foundation::time::ago(age)),
                 };
                 // The days go in the state; the summary only says they are there.
                 let ahead = if days.is_empty() { String::new() } else { format!("; {}-day forecast in state", days.len()) };

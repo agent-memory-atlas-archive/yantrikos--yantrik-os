@@ -833,7 +833,7 @@ fn publish_workroom(g: &AgentsState, all: &workroom::Workroom, mind: Option<&str
         mind: d.mind.as_str().into(),
         task: d.task.as_str().into(),
         text: d.text.as_str().into(),
-        age: workroom::ago(d.age_secs).into(),
+        age: yantrik_foundation::time::ago(std::time::Duration::from_secs(d.age_secs)).into(),
         action: d.action.as_str().into(),
     };
     // The Needs you page lists the whole desktop's; the shelf is the narrowed mind's, three of them.

@@ -371,18 +371,11 @@ pub fn icon_id(w: &Window) -> String {
     }
 }
 
-/// How long ago, said plainly: "now", "4 min ago", "1 h ago", "2 h 15 min ago". `None` when
-/// labwc never saw the window focused.
+/// How long ago, to the minute (yantrik_foundation::time::ago_precise): "just now", "4 min ago",
+/// "2 h 15 min ago". `None` when labwc never saw the window focused.
 pub fn ago(idle_ms: u32) -> Option<String> {
-    if idle_ms == 0 {
-        return None;
-    }
-    let min = idle_ms / 60_000;
-    Some(match min {
-        0 => "now".into(),
-        1..=59 => format!("{min} min ago"),
-        _ if min.is_multiple_of(60) => format!("{} h ago", min / 60),
-        _ => format!("{} h {} min ago", min / 60, min % 60),
+    (idle_ms != 0).then(|| {
+        yantrik_foundation::time::ago_precise(std::time::Duration::from_millis(u64::from(idle_ms)))
     })
 }
 
@@ -469,8 +462,9 @@ pub fn whereabouts(w: &Window) -> String {
     if w.minimized {
         parts.push("minimized".into());
     }
+    // Focused within the last minute is "in use", read off the time and not the words for it.
     if let Some(a) = ago(w.idle_ms) {
-        parts.push(if a == "now" { "in use".into() } else { format!("used {a}") });
+        parts.push(if w.idle_ms < 60_000 { "in use".into() } else { format!("used {a}") });
     }
     parts.join(" · ")
 }
@@ -524,7 +518,7 @@ mod tests {
     #[test]
     fn age_is_said_plainly_and_unknown_is_not_made_up() {
         assert_eq!(ago(0), None);
-        assert_eq!(ago(5_000).as_deref(), Some("now"));
+        assert_eq!(ago(5_000).as_deref(), Some("just now"));
         assert_eq!(ago(4 * 60_000).as_deref(), Some("4 min ago"));
         assert_eq!(ago(60 * 60_000).as_deref(), Some("1 h ago"));
         assert_eq!(ago(135 * 60_000).as_deref(), Some("2 h 15 min ago"));

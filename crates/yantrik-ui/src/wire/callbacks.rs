@@ -469,7 +469,7 @@ fn wire_memory_search(ui: &App, ctx: &AppContext) {
 
                     // Statements, not database rows (wire/memory_rows.rs): every row recalled, a
                     // duplicate folded into one, where each came from in words.
-                    let items: Vec<MemoryItem> = super::memory_rows::rows(&results, now, bridge::format_time_ago)
+                    let items: Vec<MemoryItem> = super::memory_rows::rows(&results, now, yantrik_foundation::time::ago_secs)
                         .into_iter()
                         .map(|row| MemoryItem {
                             rid: row.rid.into(),

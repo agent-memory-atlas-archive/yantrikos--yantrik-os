@@ -235,18 +235,17 @@ pub fn language_for(path: &Path) -> &'static str {
     }
 }
 
-/// "just now", "12 minutes ago", "3 days ago", and a plain date once that stops being useful.
+/// "just now", "12 minutes ago", "3 days ago" (yantrik_foundation::time), and a plain date once
+/// that stops being useful, after a week.
 pub fn relative(then: u64, now_secs: u64) -> String {
     if then == 0 {
         return String::new();
     }
     let delta = now_secs.saturating_sub(then);
-    match delta {
-        0..=59 => "just now".to_string(),
-        60..=3599 => format!("{} minutes ago", delta / 60),
-        3600..=86399 => format!("{} hours ago", delta / 3600),
-        86400..=604_799 => format!("{} days ago", delta / 86400),
-        _ => date(then),
+    if delta < 7 * 86_400 {
+        yantrik_foundation::time::ago_long(std::time::Duration::from_secs(delta))
+    } else {
+        date(then)
     }
 }
 

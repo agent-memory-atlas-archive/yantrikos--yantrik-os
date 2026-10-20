@@ -5,6 +5,7 @@
 # layer   path (a member's folder; `dir/*` places every member under dir)
 #
 # L0 Foundation: types and rules with no UI and no service behind them.
+L0  frameworks/yantrik-foundation
 L0  crates/yantrik-ipc-contracts
 L0  crates/yantrik-ipc-transport
 L0  crates/yantrik-version

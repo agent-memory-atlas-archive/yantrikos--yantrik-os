@@ -10087,6 +10087,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "ureq 2.12.1",
+ "yantrik-foundation",
  "yantrik-ipc-contracts",
  "yantrik-service-sdk",
 ]
@@ -11234,6 +11235,7 @@ dependencies = [
  "yantrik-companion-instincts",
  "yantrik-companion-tools",
  "yantrik-email-text",
+ "yantrik-foundation",
  "yantrik-ipc-contracts",
  "yantrik-ipc-transport",
  "yantrik-ml",
@@ -11450,7 +11452,12 @@ dependencies = [
  "libc",
  "serde_json",
  "tracing",
+ "yantrik-foundation",
 ]
+
+[[package]]
+name = "yantrik-foundation"
+version = "0.1.0"
 
 [[package]]
 name = "yantrik-gateway"
@@ -11773,6 +11780,7 @@ dependencies = [
  "yantrik-app-build",
  "yantrik-app-runtime",
  "yantrik-design-tokens",
+ "yantrik-foundation",
  "yantrik-ipc-contracts",
  "yantrik-ipc-transport",
  "yantrik-ui-kit",
@@ -11784,6 +11792,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "yantrik-foundation",
 ]
 
 [[package]]
@@ -11854,6 +11863,7 @@ dependencies = [
  "wayland-scanner",
  "yantrik-app-build",
  "yantrik-design-tokens",
+ "yantrik-foundation",
  "yantrik-ui-kit",
 ]
 
@@ -11972,6 +11982,7 @@ dependencies = [
  "yantrik-app-runtime",
  "yantrik-chat",
  "yantrik-companion",
+ "yantrik-foundation",
  "yantrik-gateway",
  "yantrik-harness",
  "yantrik-install-target",

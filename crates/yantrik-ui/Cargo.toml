@@ -13,6 +13,7 @@ name = "test-brain"
 path = "src/bin/test_brain.rs"
 
 [dependencies]
+yantrik-foundation = { workspace = true }
 # The lock screen's helpers shared with yantrik-lock (yantrik_ui_kit::lock_shared).
 yantrik-ui-kit = { workspace = true }
 yantrik-harness = { workspace = true }
