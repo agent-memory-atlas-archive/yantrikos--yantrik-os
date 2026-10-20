@@ -2,7 +2,8 @@ Description: Let an external client draw the window switcher session
  labwc keeps the window switcher session (chord, order, selection, commit on
  modifier release). This adds zlabwc_window_switcher_renderer_v1, a private
  protocol offered only to the one client labwc launches itself on a
- pre-connected socket (<windowSwitcher renderer="command">). The renderer is told
+ pre-connected socket (<windowSwitcher renderer="command">), and again as soon as
+ it exits (at most every 5 s). The renderer is told
  the session and may only ask to move the selection. If it has not acknowledged
  a session within 300 ms, or is gone, labwc draws its own OSD as before.
  Text keys labwc does not use during a session are handed to the renderer.
@@ -489,7 +490,7 @@ Reviewed-by: security reviews of yantrikos/yantrik-os#872 (findings 1-5 addresse
  		view->impl->set_activated(view, activated);
 --- labwc-0.8.3.orig/src/window-switcher-renderer.c
 +++ labwc-0.8.3/src/window-switcher-renderer.c
-@@ -0,0 +1,776 @@
+@@ -0,0 +1,798 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * An external client that draws the window switcher session.
@@ -562,6 +563,7 @@ Reviewed-by: security reviews of yantrikos/yantrik-os#872 (findings 1-5 addresse
 +	struct wl_listener client_destroy;
 +	struct wl_resource *resource;
 +	struct wl_event_source *ack_timer;
++	struct wl_event_source *respawn_timer;
 +	uint64_t last_spawn_ms;
 +	uint32_t session;
 +	uint32_t next_view_id;
@@ -610,6 +612,15 @@ Reviewed-by: security reviews of yantrikos/yantrik-os#872 (findings 1-5 addresse
 +	return 0;
 +}
 +
++static void spawn(struct switcher_renderer *r);
++
++static int
++handle_respawn(void *data)
++{
++	spawn(data);
++	return 0;
++}
++
 +static void
 +handle_client_destroy(struct wl_listener *listener, void *data)
 +{
@@ -618,6 +629,16 @@ Reviewed-by: security reviews of yantrikos/yantrik-os#872 (findings 1-5 addresse
 +	r->client = NULL;
 +	r->resource = NULL;
 +	fall_back(r);
++	/*
++	 * Launched again now, not at the next session: a session that finds no renderer is
++	 * drawn as labwc's OSD, so waiting for one made the first Alt+Tab after a crash (or an
++	 * update) the old list. At most once per RESPAWN_MIN_MS, so one that keeps dying
++	 * cannot keep labwc forking.
++	 */
++	uint64_t t = now_ms();
++	uint64_t since = r->last_spawn_ms ? t - r->last_spawn_ms : RESPAWN_MIN_MS;
++	int wait = since >= RESPAWN_MIN_MS ? 1 : (int)(RESPAWN_MIN_MS - since) + 10;
++	wl_event_source_timer_update(r->respawn_timer, wait);
 +}
 +
 +extern char **environ;
@@ -1067,6 +1088,7 @@ Reviewed-by: security reviews of yantrikos/yantrik-os#872 (findings 1-5 addresse
 +	r->global = wl_global_create(server->wl_display,
 +		&zlabwc_window_switcher_renderer_v1_interface, RENDERER_VERSION, r, handle_bind);
 +	r->ack_timer = wl_event_loop_add_timer(server->wl_event_loop, handle_ack_timeout, r);
++	r->respawn_timer = wl_event_loop_add_timer(server->wl_event_loop, handle_respawn, r);
 +	server->switcher_renderer = r;
 +	spawn(r);
 +}
@@ -1090,6 +1112,7 @@ Reviewed-by: security reviews of yantrikos/yantrik-os#872 (findings 1-5 addresse
 +	}
 +	wl_array_release(&r->sent);
 +	wl_event_source_remove(r->ack_timer);
++	wl_event_source_remove(r->respawn_timer);
 +	wl_global_destroy(r->global);
 +	server->switcher_renderer = NULL;
 +	free(r);
