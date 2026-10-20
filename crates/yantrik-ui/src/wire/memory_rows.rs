@@ -23,7 +23,7 @@ use crate::bridge::MemoryResult;
 pub struct Row {
     pub rid: String,
     pub text: String,
-    /// "A fact · saved 2d ago", "Something that happened · saved 4m ago", "Saved 3 times · 1h ago".
+    /// "A fact · saved 2 d ago", "Something that happened · saved 4 min ago", "Saved 3 times · 1 h ago".
     pub origin: String,
     pub score: f64,
 }

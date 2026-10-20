@@ -317,7 +317,7 @@ pub fn to_slint_data(n: &Notification) -> crate::NotificationData {
         summary: title.into(),
         body: body.into(),
         urgency: urgency_int(n.urgency),
-        time_ago: crate::bridge::format_time_ago(seconds_since(&n.created_at)).into(),
+        time_ago: yantrik_foundation::time::ago_secs(seconds_since(&n.created_at)).into(),
         is_read: n.read,
         sender_line: sender_line(n).into(),
         sender_short: crate::notification_sender::sender_summary(n).into(),
@@ -349,10 +349,10 @@ pub fn to_slint_data(n: &Notification) -> crate::NotificationData {
 }
 
 /// The one row a run of a mind's turn notices folds into: "Yantrik Mind finished 12 turns ·
-/// last 2m ago", pressed to show the cards inside it. Read when every card in it is.
+/// last 2 min ago", pressed to show the cards inside it. Read when every card in it is.
 fn turn_group_row(run: &crate::notification_groups::Run, open: bool) -> crate::NotificationData {
     let newest = run.notes.first().map(|n| seconds_since(&n.created_at)).unwrap_or(0.0);
-    let ago = crate::bridge::format_time_ago(newest);
+    let ago = yantrik_foundation::time::ago_secs(newest);
     let first = run.notes.first();
     crate::NotificationData {
         id: slint::SharedString::default(),

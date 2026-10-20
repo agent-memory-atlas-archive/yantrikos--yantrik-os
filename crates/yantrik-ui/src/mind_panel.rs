@@ -43,7 +43,7 @@ pub const ACT_ROWS: usize = 2;
 /// How far back the panel's Recent reaches: two hours.
 pub const RECENT_SECS: u64 = 2 * 3600;
 
-/// How often the panel is rebuilt. Its clocks ("2m", "4m ago") move in minutes; a second is below
+/// How often the panel is rebuilt. Its clocks ("2m", "4 min ago") move in minutes; a second is below
 /// noticing and costs two short locks.
 const TICK: Duration = Duration::from_secs(1);
 
@@ -532,21 +532,10 @@ pub fn act_lines(acts: &[Act], now: u64, count: usize) -> Vec<ActLine> {
         .map(|a| ActLine {
             what: words::act_sentence(&a.app, &a.action, &a.outcome),
             detail: words::act_detail(&a.app, &a.action, &a.outcome),
-            when: ago(now, a.unix),
+            when: yantrik_foundation::time::ago(std::time::Duration::from_secs(now.saturating_sub(a.unix))),
             outcome: if a.outcome.trim().is_empty() { "not reported".into() } else { a.outcome.trim().to_string() },
         })
         .collect()
-}
-
-/// "just now", "4m ago", "3h ago", "2d ago". A time ahead of the clock reads as "just now".
-pub fn ago(now: u64, then: u64) -> String {
-    let secs = now.saturating_sub(then);
-    match secs {
-        0..=59 => "just now".into(),
-        60..=3599 => format!("{}m ago", secs / 60),
-        3600..=86_399 => format!("{}h ago", secs / 3600),
-        _ => format!("{}d ago", secs / 86_400),
-    }
 }
 
 // ── The whole panel ─────────────────────────────────────────────────
@@ -1189,16 +1178,14 @@ mod tests {
             rows,
             [
                 ("Added an event to your calendar", "just now", "not reported"),
-                ("Copied in your files", "1m ago", "ok"),
-                ("Couldn\u{2019}t move in your files", "4m ago", "failed"),
-                ("Wrote a note", "2h ago", "ok"),
+                ("Copied in your files", "1 min ago", "ok"),
+                ("Couldn\u{2019}t move in your files", "4 min ago", "failed"),
+                ("Wrote a note", "2 h ago", "ok"),
             ]
         );
         assert_eq!(lines[2].detail, "files.move · failed", "the raw id stays, in the tooltip");
         let old_failures = act_lines(&[act(now - 11 * 86_400, "terminal", "run", "failed")], now, ACT_ROWS);
         assert!(old_failures.is_empty(), "a failure older than a day is aged out of the panel");
-        assert_eq!(ago(now, now + 30), "just now", "a clock that disagrees is not a negative age");
-        assert_eq!(ago(now, now - 200_000), "2d ago");
     }
 
     /// The panel's Recent: at most two, from the last two hours. A seven-hour-old render is not
