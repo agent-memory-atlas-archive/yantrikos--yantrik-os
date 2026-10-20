@@ -44,6 +44,12 @@ pub enum Request<A: App> {
     },
     /// The invocation this command runs under has reached its outcome (`Settle::Explicit`).
     Settle(Result<(), Refused>),
+    /// A new value for the settings, written through the persistence lane. With
+    /// `replace_unusable`, a file in recovery is replaced by it.
+    SaveSettings {
+        value: A::Settings,
+        replace_unusable: bool,
+    },
     Close(WindowId),
     Exit,
 }
@@ -171,6 +177,24 @@ impl<A: App> Effects<A> {
         self.requests.push(Request::Settle(result));
     }
 
+    /// Save the settings: the value is the app's at once, the write is ordered behind earlier
+    /// ones, and `Event::SettingsSaved` or `Event::SettingsNotSaved` says how it went. Over a
+    /// file in recovery the value is held in memory and `SettingsNotSaved` says why.
+    pub fn save_settings(&mut self, value: A::Settings) {
+        self.requests.push(Request::SaveSettings {
+            value,
+            replace_unusable: false,
+        });
+    }
+
+    /// The person chose to replace a settings file this app could not read with `value`.
+    pub fn replace_settings_file(&mut self, value: A::Settings) {
+        self.requests.push(Request::SaveSettings {
+            value,
+            replace_unusable: true,
+        });
+    }
+
     /// Close a window. A `CloseRequested` flow ends here once any saving is done.
     pub fn close(&mut self, window: WindowId) {
         self.requests.push(Request::Close(window));
@@ -207,6 +231,7 @@ impl<A: App> Request<A> {
             Request::StopTimer(_) => "stop_timer",
             Request::Report { .. } => "report",
             Request::Settle(_) => "settle",
+            Request::SaveSettings { .. } => "save_settings",
             Request::Close(_) => "close",
             Request::Exit => "exit",
         }

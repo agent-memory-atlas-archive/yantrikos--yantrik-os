@@ -65,6 +65,7 @@ impl App for Counter {
     type Ui = CounterWin;
     type Model = Model;
     type Command = Command;
+    type Settings = ();
     const ID: &'static str = "counter-test";
 
     fn model(_: &Boot) -> Result<Model, Startup> {

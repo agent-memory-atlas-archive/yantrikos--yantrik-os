@@ -17,20 +17,23 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
-use std::sync::{mpsc, Arc};
+use std::sync::Arc;
 
-use serde_json::Value;
 use slint::ComponentHandle as _;
 
 use crate::app::{App, Changed, Event, ExitReason, WindowId};
 use crate::effects::{Effects, Request};
 use crate::intents::{Invocation, InvocationId, Origin};
 use crate::jobs::{Cancel, Concurrency, Deliver, Executor, Finished, JobId, JobKey};
+use crate::persist::{Lane, Report, Written};
 use crate::problems;
 use crate::queue::{self, Inbox, Post, Wake};
 use crate::refused::Refused;
+use crate::settings::Store;
 use crate::timers::Timers;
+use crate::watch::Seen;
 
+mod persisted;
 mod settlement;
 use settlement::Open;
 
@@ -38,7 +41,11 @@ use settlement::Open;
 pub enum Inbound<A: App> {
     Command(A::Command),
     Finished(Finished<A::Command>),
-    Event(Event),
+    Event(Event<A::Settings>),
+    /// The persistence lane finished a write.
+    Written(Written),
+    /// The housekeeping thread saw a file change.
+    Seen(Seen),
 }
 
 /// A job the core is waiting on.
@@ -55,6 +62,8 @@ pub struct Core<A: App> {
     ui: A::Ui,
     timers: RefCell<Box<dyn Timers<A::Command>>>,
     executor: RefCell<Box<dyn Executor<A::Command>>>,
+    settings: RefCell<Store<A::Settings>>,
+    lane: RefCell<Box<dyn Lane>>,
     jobs: RefCell<HashMap<JobId, Waiting>>,
     by_key: RefCell<HashMap<JobKey, JobId>>,
     next_job: Cell<u64>,
@@ -80,17 +89,28 @@ impl<A: App> Deliver<A::Command> for PostDeliver<A> {
     }
 }
 
+/// Makes the timers over the sink that applies a fired command.
+pub type MakeTimers<C> = Box<dyn FnOnce(crate::timers::Sink<C>) -> Box<dyn Timers<C>>>;
+/// Makes the persistence lane over where its outcomes go.
+pub type MakeLane = Box<dyn FnOnce(Arc<dyn Report>) -> Box<dyn Lane>>;
+
+/// What the core is built over, besides the model and the window.
+pub struct Parts<A: App> {
+    /// The job pool.
+    pub executor: Box<dyn Executor<A::Command>>,
+    pub timers: MakeTimers<A::Command>,
+    pub lane: MakeLane,
+    /// The settings as opened for the boot.
+    pub settings: Store<A::Settings>,
+    /// How a post from another thread gets the UI thread to call [`Core::drain`].
+    pub wake: Wake,
+}
+
 impl<A: App> Core<A> {
-    /// A core over `model` and `ui`, with the executor and timers it is given. `wake` is how a
-    /// post from another thread gets the UI thread to call [`Core::drain`].
-    pub fn new(
-        model: A::Model,
-        ui: A::Ui,
-        executor: Box<dyn Executor<A::Command>>,
-        timers: impl FnOnce(crate::timers::Sink<A::Command>) -> Box<dyn Timers<A::Command>>,
-        wake: Wake,
-    ) -> Rc<Core<A>> {
-        let (post, inbox) = queue::bounded(queue::CAPACITY, wake);
+    /// A core over `model` and `ui`, with the parts it is given.
+    pub fn new(model: A::Model, ui: A::Ui, parts: Parts<A>) -> Rc<Core<A>> {
+        let (post, inbox) = queue::bounded(queue::CAPACITY, parts.wake);
+        let report: Arc<dyn Report> = Arc::new(persisted::PostWritten(post.clone()));
         Rc::new_cyclic(|weak: &std::rc::Weak<Core<A>>| {
             let sink_core = weak.clone();
             let sink: crate::timers::Sink<A::Command> = Rc::new(move |command| {
@@ -102,8 +122,10 @@ impl<A: App> Core<A> {
                 id: A::ID,
                 model: RefCell::new(model),
                 ui,
-                timers: RefCell::new(timers(sink)),
-                executor: RefCell::new(executor),
+                timers: RefCell::new((parts.timers)(sink)),
+                executor: RefCell::new(parts.executor),
+                settings: RefCell::new(parts.settings),
+                lane: RefCell::new((parts.lane)(report)),
                 jobs: RefCell::new(HashMap::new()),
                 by_key: RefCell::new(HashMap::new()),
                 next_job: Cell::new(1),
@@ -292,6 +314,10 @@ impl<A: App> Core<A> {
                         self.settle(invocation.id, result.map_err(|r| r.sentence));
                     }
                 }
+                Request::SaveSettings {
+                    value,
+                    replace_unusable,
+                } => self.save_settings(value, replace_unusable),
                 Request::Close(window) => self.close_window(window),
                 Request::Exit => self.request_exit(ExitReason::App),
             }
@@ -415,17 +441,27 @@ impl<A: App> Core<A> {
                 Inbound::Command(command) => self.run(command),
                 Inbound::Finished(finished) => self.finished(finished),
                 Inbound::Event(event) => self.event(event),
+                Inbound::Written(written) => self.written(written),
+                Inbound::Seen(seen) => self.seen(seen),
             }
         }
     }
 
-    fn event(&self, event: Event) {
+    /// An event: the app's command for it, or the default.
+    pub(crate) fn event(&self, event: Event<A::Settings>) {
         let command = A::event(event.clone(), &self.model.borrow());
         match (command, event) {
             (Some(command), _) => self.run(command),
             (None, Event::CloseRequested(window)) => self.close_window(window),
             (None, Event::ExitRequested(reason)) => self.request_exit(reason),
             (None, Event::Activated(_)) => {}
+            (None, Event::SettingsSaved) => {}
+            (None, Event::SettingsChangedOutside(_)) => {}
+            (None, Event::SettingsNotSaved(sentence)) => {
+                problems::record_failure(self.id, "settings", &sentence);
+            }
+            // The app's own value stands; the file is brought back to it.
+            (None, Event::SettingsConflict { mine, .. }) => self.resolve_settings(mine),
         }
     }
 
@@ -448,10 +484,16 @@ impl<A: App> Core<A> {
     }
 
     /// The end, in order: no more posts, no more timers, every job cancelled, every open answer
-    /// refused, a bounded wait for the pool. Nothing in the model is touched here.
+    /// refused, a bounded wait for the pool and for the writes still in the lane. Nothing in the
+    /// model is touched here.
     pub fn shutdown(&self, grace: std::time::Duration) -> bool {
         self.inbox.close();
         self.timers.borrow_mut().stop_all();
+        // A save asked for is a save made, before the process ends.
+        self.flush_settings();
+        if !self.lane.borrow().drain(grace) {
+            tracing::warn!(app = self.id, "a write did not finish within the grace period");
+        }
         // Every owed answer is refused as a closing, before a cancelled job can call it replaced.
         let owed: Vec<InvocationId> = self.open.borrow().keys().copied().collect();
         for id in owed {

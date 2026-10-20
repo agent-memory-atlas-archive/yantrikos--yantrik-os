@@ -8,10 +8,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::app::{App, Boot, Event, WindowId};
-use crate::cx::{Core, Cx, Inbound};
+use crate::cx::{Core, Cx, Inbound, Parts};
 use crate::intents::{self, Intents};
 use crate::jobs::Threads;
+use crate::paths::Paths;
+use crate::persist::Threaded;
 use crate::timers::SlintTimers;
+use crate::watch::Watch;
 use crate::window::Window;
 use crate::{boot, instance, problems, theme};
 
@@ -40,15 +43,19 @@ fn drain_on_ui_thread() {
 pub fn run<A: App>() -> ExitCode {
     boot::init_tracing(A::ID);
     boot::choose_backend();
-    let boot = Boot {
-        args: std::env::args_os().skip(1).collect(),
-    };
+    let paths = Paths::for_app(A::ID);
 
-    // One instance per app: a second launch asks the running copy to come forward, and exits.
-    let Some(_instance) = instance::claim(A::ID) else {
+    // One instance per app and profile: a second launch asks the running copy to come forward,
+    // and exits.
+    let Some(_instance) = instance::claim(&paths.instance_name()) else {
         return ExitCode::SUCCESS;
     };
 
+    let (boot, store) = Boot::<A::Settings>::open(paths, std::env::args_os().skip(1).collect());
+    if let crate::settings::Health::Recovery(e) = &boot.settings_health {
+        tracing::warn!(app = A::ID, "{e}; running on the defaults");
+        problems::record_failure(A::ID, "settings", &e.to_string());
+    }
     let model = match A::model(&boot) {
         Ok(model) => model,
         Err(e) => return startup_failed(A::ID, "model", &e.sentence),
@@ -57,7 +64,8 @@ pub fn run<A: App>() -> ExitCode {
         Ok(ui) => ui,
         Err(e) => return startup_failed(A::ID, "window", &e.to_string()),
     };
-    ui.apply_theme(&theme::load());
+    let theme_now = theme::load();
+    ui.apply_theme(&theme_now);
     ui.connect_chrome();
 
     let wake: crate::queue::Wake = Arc::new(|| {
@@ -66,11 +74,24 @@ pub fn run<A: App>() -> ExitCode {
     let core = Core::<A>::new(
         model,
         ui,
-        Box::new(Threads::new(A::ID, JOB_THREADS, JOBS_WAITING)),
-        |sink| Box::new(SlintTimers::new(sink)),
-        wake,
+        Parts {
+            executor: Box::new(Threads::new(A::ID, JOB_THREADS, JOBS_WAITING)),
+            timers: Box::new(|sink| Box::new(SlintTimers::new(sink))),
+            lane: Box::new(|report| Box::new(Threaded::new(A::ID, report))),
+            settings: store,
+            wake,
+        },
     );
     install(&core);
+    // A file of an older schema is rewritten at this one, once.
+    core.flush_settings();
+    // The settings file (an outside edit) and the shell's theme, watched until the end.
+    let _watch = Watch::start(
+        A::ID,
+        boot.paths.config_file().to_path_buf(),
+        theme_now,
+        core.notice(),
+    );
 
     let cx = Cx::new(core.clone());
     A::wire(&cx);
