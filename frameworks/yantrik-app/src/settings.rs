@@ -11,6 +11,7 @@
 //! problem record is filed, and an ordinary save does not overwrite that file until the person
 //! chooses to (`Store::take_over`).
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::de::DeserializeOwned;
@@ -73,24 +74,31 @@ pub struct Store<T: Settings> {
     health: Health,
     /// The file as last read or written, so an outside change is told from this app's own echo.
     fingerprint: Option<Fingerprint>,
+    /// The bytes handed to the lane for each revision not yet known to have landed. A file that
+    /// reads as one of these is this app's own write seen early (the watcher polled between the
+    /// rename and the outcome's arrival), not an outside edit.
+    in_flight: BTreeMap<Revision, Fingerprint>,
 }
 
-/// What the file looked like: its size, modification time and a hash of its bytes. Content is
-/// hashed because an edit that keeps the size and the time (an editor that preserves mtime,
-/// a coarse filesystem clock) is still an edit.
+/// What the file's content is: its length and a hash of its bytes. Content, not the modification
+/// time: an edit that keeps the size and the time (an editor that preserves mtime, a coarse
+/// filesystem clock) is still an edit, and a rewrite with the same bytes is not one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fingerprint {
     len: u64,
-    modified: Option<std::time::SystemTime>,
     hash: u64,
 }
 
 impl Fingerprint {
     /// The file's fingerprint now, or `None` when it is absent or unreadable.
     pub fn of(path: &Path) -> Option<Fingerprint> {
-        let meta = std::fs::metadata(path).ok()?;
         let bytes = std::fs::read(path).ok()?;
-        Some(Fingerprint { len: meta.len(), modified: meta.modified().ok(), hash: hash(&bytes) })
+        Some(Fingerprint::of_bytes(&bytes))
+    }
+
+    /// The fingerprint the file will have once these bytes are in it.
+    pub fn of_bytes(bytes: &[u8]) -> Fingerprint {
+        Fingerprint { len: bytes.len() as u64, hash: hash(bytes) }
     }
 }
 
@@ -121,6 +129,23 @@ pub enum Opened<T: Settings> {
     Recovery(SettingsError),
 }
 
+/// A serde error without the values it quotes: a settings file may hold a token, and this
+/// sentence goes to the log, a problem record and the window. The kind and the place stay.
+pub fn describe(e: &serde_json::Error) -> String {
+    use serde_json::error::Category;
+    let kind = match e.classify() {
+        Category::Io => "could not be read",
+        Category::Syntax => "is not valid JSON",
+        Category::Eof => "ends early",
+        Category::Data => "has a value of the wrong kind",
+    };
+    if e.line() > 0 {
+        format!("{kind} (line {}, column {})", e.line(), e.column())
+    } else {
+        kind.to_string()
+    }
+}
+
 /// Reads and migrates the file at `path`, without touching it.
 pub fn read_file<T: Settings>(path: &Path) -> Opened<T> {
     let text = match std::fs::read_to_string(path) {
@@ -130,7 +155,7 @@ pub fn read_file<T: Settings>(path: &Path) -> Opened<T> {
     };
     let envelope: Envelope = match serde_json::from_str(&text) {
         Ok(e) => e,
-        Err(e) => return Opened::Recovery(SettingsError::Malformed(e.to_string())),
+        Err(e) => return Opened::Recovery(SettingsError::Malformed(describe(&e))),
     };
     if envelope.schema > T::SCHEMA {
         return Opened::Recovery(SettingsError::Newer { found: envelope.schema, known: T::SCHEMA });
@@ -146,7 +171,7 @@ pub fn read_file<T: Settings>(path: &Path) -> Opened<T> {
     };
     match serde_json::from_value::<T>(raw) {
         Ok(value) => Opened::Read { value, rewrite },
-        Err(e) => Opened::Recovery(SettingsError::Malformed(e.to_string())),
+        Err(e) => Opened::Recovery(SettingsError::Malformed(describe(&e))),
     }
 }
 
@@ -160,6 +185,8 @@ impl<T: Settings> Store<T> {
     /// Opens the store at `path`. Never fails: a file that cannot be used leaves the store in
     /// recovery, which `health` says.
     pub fn open(path: PathBuf) -> Store<T> {
+        // A temporary a killed process left beside the file is swept; nothing else would.
+        yantrik_foundation::json_store::sweep_stale_temps(&path, std::time::Duration::from_secs(600));
         let (committed, health, rewrite) = match read_file::<T>(&path) {
             Opened::Read { value, rewrite } => (value, Health::Fine, rewrite),
             Opened::Missing => (T::default(), Health::Fine, false),
@@ -174,6 +201,7 @@ impl<T: Settings> Store<T> {
             committed_revision: 0,
             health,
             fingerprint,
+            in_flight: BTreeMap::new(),
         };
         if rewrite {
             // An older schema, migrated: owed one write at the new schema.
@@ -219,24 +247,36 @@ impl<T: Settings> Store<T> {
         Some(self.revision)
     }
 
-    /// The bytes to write for the desired value at `revision`, unless recovery forbids it.
-    pub fn bytes_to_write(&self) -> Option<(Revision, Vec<u8>)> {
+    /// The bytes to write for the desired value at `revision`, unless recovery forbids it. The
+    /// bytes are remembered as in flight, so the file reading as them is this app's own write.
+    pub fn bytes_to_write(&mut self) -> Option<(Revision, Vec<u8>)> {
         if self.in_recovery() || !self.is_pending() {
             return None;
         }
-        render(&self.desired).ok().map(|bytes| (self.revision, bytes))
+        let bytes = render(&self.desired).ok()?;
+        self.in_flight.insert(self.revision, Fingerprint::of_bytes(&bytes));
+        Some((self.revision, bytes))
     }
 
     /// The write of `revision` landed. Only the newest revision moves the committed value; an
-    /// older write's success is nothing.
+    /// older write's success is nothing. The file is this app's now, whatever it was before: a
+    /// write queued before the file went bad has replaced it with a good one, so recovery ends.
     pub fn committed_at(&mut self, revision: Revision) {
+        let written = self.in_flight.remove(&revision);
         if revision > self.committed_revision {
             self.committed_revision = revision;
             if revision == self.revision {
                 self.committed = self.desired.clone();
             }
-            self.fingerprint = Fingerprint::of(&self.path);
+            // What was written is known without reading the file back, so an outside edit that
+            // lands between the write and this is not mistaken for the app's own.
+            self.fingerprint = written.or_else(|| Fingerprint::of(&self.path));
+            if self.in_recovery() {
+                tracing::info!("a write of this app's own landed over the unusable settings file; recovery ends");
+                self.health = Health::Fine;
+            }
         }
+        self.in_flight.retain(|r, _| *r > self.committed_revision);
     }
 
     /// The person chose to replace an unusable file with this app's settings: recovery ends and
@@ -259,6 +299,11 @@ impl<T: Settings> Store<T> {
         if now == self.fingerprint {
             return Reloaded::Unchanged;
         }
+        // The app's own write, seen by the watcher before its outcome reached the core.
+        if now.as_ref().is_some_and(|n| self.in_flight.values().any(|f| f == n)) {
+            return Reloaded::Unchanged;
+        }
+        let was_unusable = self.in_recovery();
         let outside = match read_file::<T>(&self.path) {
             Opened::Read { value, .. } => value,
             Opened::Missing => T::default(),
@@ -270,12 +315,15 @@ impl<T: Settings> Store<T> {
         };
         self.fingerprint = now;
         self.health = Health::Fine;
-        if self.is_pending() && outside != self.desired {
+        // A file repaired by hand while the app held a value it could not save: the repair is
+        // the person's choice (§6), and the held value gives way to it.
+        if self.is_pending() && outside != self.desired && !was_unusable {
             return Reloaded::Conflict(Conflict { outside, mine: self.desired.clone() });
         }
         self.committed = outside.clone();
         self.committed_revision = self.revision;
         self.desired = outside.clone();
+        self.in_flight.clear();
         Reloaded::Adopted(outside)
     }
 
@@ -403,5 +451,68 @@ mod tests {
         assert!(matches!(store.reload(), Reloaded::Unusable(SettingsError::Malformed(_))));
         assert!(store.in_recovery());
         assert_eq!(store.get().step, 8, "recovery keeps the values");
+    }
+
+    /// The app's own write, seen by the watcher before its outcome reached the core, is not an
+    /// outside change; and an outside edit landing between the write and its outcome is.
+    #[test]
+    fn the_apps_own_write_is_known_before_its_outcome_arrives() {
+        let path = dir("echo").join("app.json");
+        let mut store = Store::<Prefs>::open(path.clone());
+        let rev = store.desire(Prefs { step: 4, unit: "c".into() }).unwrap();
+        let (_, bytes) = store.bytes_to_write().unwrap();
+        write_atomically(&path, &bytes).unwrap();
+        // The watcher polls now, before `committed_at`.
+        assert_eq!(store.reload(), Reloaded::Unchanged, "its own bytes, in flight");
+        assert!(store.is_pending());
+        // An outside edit lands before the outcome is handled.
+        std::fs::write(&path, r#"{"schema":2,"settings":{"step":6,"unit":"c"}}"#).unwrap();
+        store.committed_at(rev);
+        assert!(store.changed_outside(), "the fingerprint is the bytes written, not the file read back");
+        let Reloaded::Adopted(outside) = store.reload() else { panic!("adopted") };
+        assert_eq!(outside.step, 6);
+    }
+
+    /// A file repaired by hand while the app held a value it could not save: the repair is the
+    /// person's choice and is adopted; the held value gives way.
+    #[test]
+    fn a_repaired_file_is_adopted_over_a_value_held_in_recovery() {
+        let path = dir("repair").join("app.json");
+        std::fs::write(&path, "{not json").unwrap();
+        let mut store = Store::<Prefs>::open(path.clone());
+        store.desire(Prefs { step: 9, unit: "f".into() });
+        assert!(store.in_recovery() && store.is_pending());
+        std::fs::write(&path, r#"{"schema":2,"settings":{"step":2,"unit":"c"}}"#).unwrap();
+        let Reloaded::Adopted(repaired) = store.reload() else { panic!("the repair is adopted, not a conflict") };
+        assert_eq!(repaired.step, 2);
+        assert!(!store.in_recovery() && !store.is_pending());
+        assert_eq!(store.get().step, 2);
+    }
+
+    /// A write queued before the file went bad lands over it: the file is the app's again.
+    #[test]
+    fn a_write_of_our_own_landing_ends_recovery() {
+        let path = dir("unstick").join("app.json");
+        let mut store = Store::<Prefs>::open(path.clone());
+        let rev = store.desire(Prefs { step: 3, unit: "c".into() }).unwrap();
+        let (_, bytes) = store.bytes_to_write().unwrap();
+        std::fs::write(&path, "garbage").unwrap();
+        assert!(matches!(store.reload(), Reloaded::Unusable(_)));
+        write_atomically(&path, &bytes).unwrap();
+        store.committed_at(rev);
+        assert!(!store.in_recovery(), "the file is ours again");
+        assert!(!store.changed_outside());
+        assert!(store.desire(Prefs { step: 5, unit: "c".into() }).is_some());
+        assert!(store.bytes_to_write().is_some(), "saves flow again");
+    }
+
+    #[test]
+    fn a_malformed_file_is_described_without_its_values() {
+        let path = dir("secret").join("app.json");
+        std::fs::write(&path, r#"{"schema":2,"settings":{"step":"sk-SECRET-TOKEN","unit":"c"}}"#).unwrap();
+        let store = Store::<Prefs>::open(path);
+        let Health::Recovery(SettingsError::Malformed(said)) = store.health() else { panic!("recovery") };
+        assert!(!said.contains("SECRET"), "{said}");
+        assert!(said.contains("wrong kind"), "{said}");
     }
 }

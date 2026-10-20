@@ -126,11 +126,15 @@ pub enum Agents<A: App> {
     /// Not an agent, with this sentence.
     Refused(&'static str),
     /// An agent, if the rule allows this call.
-    Rule(Box<dyn Fn(&A::Model, &Args<'_>) -> Result<(), Refused>>),
+    Rule(AgentRule<A>),
 }
 
+/// A rule read from the model that says whether an agent may raise an intent with these arguments.
+pub type AgentRule<A> = Box<dyn Fn(&<A as App>::Model, &Args<'_>) -> Result<(), Refused>>;
+/// A rule read from the model that every intent of the app is held to.
+pub type StateRule<A> = Rc<dyn Fn(&<A as App>::Model) -> Result<(), Refused>>;
 type Parse<A> = Box<dyn Fn(&Args<'_>) -> Result<<A as App>::Command, Refused>>;
-type Reply<A> = Rc<dyn Fn(&<A as App>::Model) -> Value>;
+pub(crate) type Reply<A> = Rc<dyn Fn(&<A as App>::Model) -> Value>;
 
 /// A command with its wire contract.
 pub struct Intent<A: App> {
@@ -184,7 +188,7 @@ impl<A: App> Intent<A> {
 /// The app's intents, declared in `App::intents`.
 pub struct Intents<A: App> {
     intents: Vec<Intent<A>>,
-    state_rule: Option<Rc<dyn Fn(&A::Model) -> Result<(), Refused>>>,
+    state_rule: Option<StateRule<A>>,
 }
 
 impl<A: App> Default for Intents<A> {
@@ -226,8 +230,29 @@ impl<A: App> Intents<A> {
 
 /// The surface's registry for `table`, with every intent's handler bound to `core`. Serving it is
 /// the runner's (`control::App::from_registry`); a test acts on it directly.
+/// The most an intent may keep the Mind waiting for an explicit settlement, whatever it declares.
+pub const MAX_SETTLE_WAIT: Duration = Duration::from_secs(30);
+
 pub fn registry<A: App>(core: &Rc<Core<A>>, table: Intents<A>) -> LocalRegistry {
     let mut registry = LocalRegistry::new(A::ID);
+    // An intent an agent may never raise is refused by the dispatch before it decides anything,
+    // so a call that cannot run is never shown as an approval card and spends no grant. The
+    // model-reading rules (`Agents::Rule`, the app's state rule) cannot run there: they are the
+    // UI thread's, so they run in the handler, after a grant was spent, and fail closed.
+    let never_for_agents: std::collections::HashMap<String, &'static str> = table
+        .intents
+        .iter()
+        .filter_map(|i| match i.agents {
+            Agents::Refused(sentence) => Some((i.action.name.clone(), sentence)),
+            _ => None,
+        })
+        .collect();
+    registry.set_state_rule(Box::new(move |action: &str| {
+        match never_for_agents.get(action) {
+            Some(sentence) if agent_is_calling() => Err((*sentence).to_string()),
+            _ => Ok(()),
+        }
+    }));
     let weak = Rc::downgrade(core);
     let describe = weak.clone();
     registry.set_describe(Box::new(move || match describe.upgrade() {
@@ -267,6 +292,9 @@ pub fn registry<A: App>(core: &Rc<Core<A>>, table: Intents<A>) -> LocalRegistry 
                     Ok(core.read(|m| reply(m)))
                 }
                 Settle::Explicit { within } => {
+                    // The wait holds an RPC worker; an app's deadline is capped so two hung
+                    // jobs cannot pin both workers until shutdown.
+                    let within = within.min(MAX_SETTLE_WAIT);
                     let (tx, rx) = mpsc::sync_channel(1);
                     let id = core.open_settlement(tx, reply.clone());
                     if let Err(refused) = core.run_invocation(origin, command, Some(id)) {

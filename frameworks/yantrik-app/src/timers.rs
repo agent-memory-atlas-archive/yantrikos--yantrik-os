@@ -94,25 +94,39 @@ impl<C: 'static> ManualTimers<C> {
         self.now
     }
 
-    /// Moves the clock by `by`, firing every timer that comes due, in order; a repeating timer
-    /// is re-armed from the time it fired.
+    /// Moves the clock by `by`, firing every timer that comes due, in order, through the sink; a
+    /// repeating timer is re-armed from the time it fired. For a clock behind a `RefCell`, use
+    /// [`ManualTimers::fire_next`] so the borrow is released before the command runs.
     pub fn advance(&mut self, by: Duration) {
         let until = self.now + by;
-        loop {
-            let Some(((at, id), _)) = self.due.iter().next().map(|(k, v)| (*k, v.0)) else {
-                break;
-            };
-            if at > until {
-                break;
-            }
-            let (period, fire) = self.due.remove(&(at, id)).expect("the entry just seen");
-            self.now = at;
-            (self.sink)(fire());
-            if let Some(period) = period {
-                self.due.insert((at + period, id), (Some(period), fire));
-            }
+        while let Some(command) = self.fire_next(until) {
+            (self.sink)(command);
         }
-        self.now = until;
+        self.settle(until);
+    }
+
+    /// The next timer due by `until`, fired: the clock moves to its deadline, a repeating one is
+    /// re-armed, and its command is returned for the caller to apply, outside any borrow of
+    /// this clock, so a command that arms or stops a timer is fine. `None` when nothing is due.
+    pub fn fire_next(&mut self, until: Duration) -> Option<C> {
+        let ((at, id), _) = self.due.iter().next().map(|(k, v)| (*k, v.0))?;
+        if at > until {
+            return None;
+        }
+        let (period, fire) = self.due.remove(&(at, id)).expect("the entry just seen");
+        self.now = at;
+        let command = fire();
+        if let Some(period) = period {
+            self.due.insert((at + period, id), (Some(period), fire));
+        }
+        Some(command)
+    }
+
+    /// Moves the clock to `until` once everything due has fired.
+    pub fn settle(&mut self, until: Duration) {
+        if until > self.now {
+            self.now = until;
+        }
     }
 
     fn arm(&mut self, id: TimerId, interval: Duration, period: Option<Duration>, fire: Fire<C>) {
@@ -149,10 +163,9 @@ mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    fn fired() -> (
-        Sink<&'static str>,
-        Rc<RefCell<Vec<(&'static str, Duration)>>>,
-    ) {
+    type Log = Rc<RefCell<Vec<(&'static str, Duration)>>>;
+
+    fn fired() -> (Sink<&'static str>, Log) {
         let log = Rc::new(RefCell::new(Vec::new()));
         let l = log.clone();
         // The time is read back from the test's own clock, through the closure's argument.

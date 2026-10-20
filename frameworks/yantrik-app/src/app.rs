@@ -61,8 +61,10 @@ pub enum Event<S> {
     /// settings in its model answers this with the command that adopts them.
     SettingsChangedOutside(S),
     /// The settings file was edited outside this app while a save of this app's was pending.
-    /// `None` keeps this app's value and writes it; an app that prefers the file answers with a
-    /// command that saves `outside`.
+    /// `None` keeps this app's value and writes it, and files a problem record saying an outside
+    /// edit lost (never silently, §6); an app that prefers the file answers with a command that
+    /// saves `outside`. A file repaired by hand while the app was in recovery is not a conflict:
+    /// the repair is the person's choice and arrives as `SettingsChangedOutside`.
     SettingsConflict { outside: S, mine: S },
 }
 

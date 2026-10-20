@@ -16,11 +16,13 @@ use crate::timers::TimerId;
 pub enum Request<A: App> {
     /// A command to apply after this one, in order. Not a transaction: it is judged on its own.
     Then(A::Command),
-    /// Work off the UI thread. The job returns the command that carries its result.
+    /// Work off the UI thread. The job returns the command that carries its result; `failed` is
+    /// applied instead if it ends without one (a panic, a pool refusal, a key already running).
     Spawn {
         id: JobId,
         key: Option<JobKey>,
         mode: Concurrency,
+        failed: Option<A::Command>,
         job: Job<A::Command>,
     },
     Cancel(JobId),
@@ -64,13 +66,24 @@ pub struct Effects<A: App> {
 
 impl<A: App> Effects<A> {
     /// For the runtime: job ids continue from `next_job`; `invocation` is what the command runs
-    /// under, if it came through the surface.
+    /// under, if it came through the surface. Every part counts as changed until `changed`
+    /// narrows it (§3), so an `update` that forgets to say never leaves the window stale.
     pub(crate) fn new(next_job: u64, invocation: Option<Invocation>) -> Effects<A> {
+        Effects {
+            requests: Vec::new(),
+            changed: Changed::all(),
+            next_job,
+            invocation,
+        }
+    }
+
+    /// For `App::start`, which reads the model and changes nothing: no redraw unless it says.
+    pub(crate) fn starting(next_job: u64) -> Effects<A> {
         Effects {
             requests: Vec::new(),
             changed: Changed::none(),
             next_job,
-            invocation,
+            invocation: None,
         }
     }
 
@@ -100,9 +113,13 @@ impl<A: App> Effects<A> {
         self.invocation.map(|i| i.id)
     }
 
-    /// Mark a part of the model changed, so `render` redraws it.
+    /// Mark a part of the model changed, so `render` redraws it. The first call narrows the
+    /// redraw from every part to this one; later calls add to it.
     pub fn changed(&mut self, part: &'static str) {
-        self.changed.add(part);
+        match &mut self.changed {
+            Changed::All => self.changed = Changed::Parts(vec![part]),
+            parts => parts.add(part),
+        }
     }
 
     pub fn then(&mut self, command: impl Into<A::Command>) {
@@ -111,7 +128,17 @@ impl<A: App> Effects<A> {
 
     /// Work off the UI thread, unkeyed: it runs beside anything else.
     pub fn spawn(&mut self, job: impl FnOnce(&Cancel) -> A::Command + Send + 'static) -> JobId {
-        self.spawn_as(None, Concurrency::Parallel, job)
+        self.spawn_as(None, Concurrency::Parallel, None, job)
+    }
+
+    /// [`Effects::spawn`], with the command applied if the job ends without a result: a panic,
+    /// or the pool at its bound. An `update` that set `loading` uses it to clear it.
+    pub fn spawn_or(
+        &mut self,
+        failed: A::Command,
+        job: impl FnOnce(&Cancel) -> A::Command + Send + 'static,
+    ) -> JobId {
+        self.spawn_as(None, Concurrency::Parallel, Some(failed), job)
     }
 
     /// Work off the UI thread under a key, so two of a kind cannot run at once:
@@ -123,13 +150,26 @@ impl<A: App> Effects<A> {
         mode: Concurrency,
         job: impl FnOnce(&Cancel) -> A::Command + Send + 'static,
     ) -> JobId {
-        self.spawn_as(Some(key), mode, job)
+        self.spawn_as(Some(key), mode, None, job)
+    }
+
+    /// [`Effects::spawn_keyed`], with the command applied if the job ends without a result:
+    /// a panic, the pool at its bound, or `RejectIfRunning` finding one of its kind running.
+    pub fn spawn_keyed_or(
+        &mut self,
+        key: JobKey,
+        mode: Concurrency,
+        failed: A::Command,
+        job: impl FnOnce(&Cancel) -> A::Command + Send + 'static,
+    ) -> JobId {
+        self.spawn_as(Some(key), mode, Some(failed), job)
     }
 
     fn spawn_as(
         &mut self,
         key: Option<JobKey>,
         mode: Concurrency,
+        failed: Option<A::Command>,
         job: impl FnOnce(&Cancel) -> A::Command + Send + 'static,
     ) -> JobId {
         let id = JobId(self.next_job);
@@ -138,6 +178,7 @@ impl<A: App> Effects<A> {
             id,
             key,
             mode,
+            failed,
             job: Box::new(job),
         });
         id

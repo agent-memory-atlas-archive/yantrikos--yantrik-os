@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -91,42 +92,53 @@ fn perform(write: Write, report: &dyn Report) {
 pub struct Threaded {
     queue: Arc<Mutex<Queue>>,
     sender: mpsc::Sender<()>,
-    busy: Arc<Mutex<usize>>,
+    /// Writes taken from the queue and not yet finished. What waits is the queue's length plus
+    /// this; a write the queue skips as superseded is never counted, so the count cannot leak.
+    in_flight: Arc<AtomicUsize>,
 }
 
 impl Threaded {
     pub fn new(name: &str, report: Arc<dyn Report>) -> Threaded {
         let queue = Arc::new(Mutex::new(Queue::default()));
-        let busy = Arc::new(Mutex::new(0usize));
+        let in_flight = Arc::new(AtomicUsize::new(0));
         let (sender, receiver) = mpsc::channel::<()>();
         let q = queue.clone();
-        let b = busy.clone();
+        let busy = in_flight.clone();
         std::thread::Builder::new()
             .name(format!("{name}-persist"))
             .spawn(move || {
                 while receiver.recv().is_ok() {
                     loop {
-                        let next = q.lock().unwrap_or_else(|p| p.into_inner()).pop(report.as_ref());
+                        // Taken and counted under the one lock, so `waiting` never reads zero
+                        // between the pop and the count.
+                        let next = {
+                            let mut queue = q.lock().unwrap_or_else(|p| p.into_inner());
+                            let next = queue.pop(report.as_ref());
+                            if next.is_some() {
+                                busy.fetch_add(1, Ordering::AcqRel);
+                            }
+                            next
+                        };
                         let Some(write) = next else { break };
                         perform(write, report.as_ref());
-                        *b.lock().unwrap_or_else(|p| p.into_inner()) -= 1;
+                        busy.fetch_sub(1, Ordering::AcqRel);
                     }
                 }
             })
             .expect("the persist thread");
-        Threaded { queue, sender, busy }
+        Threaded { queue, sender, in_flight }
     }
 }
 
 impl Lane for Threaded {
     fn write(&mut self, write: Write) {
-        *self.busy.lock().unwrap_or_else(|p| p.into_inner()) += 1;
         self.queue.lock().unwrap_or_else(|p| p.into_inner()).push(write);
         let _ = self.sender.send(());
     }
 
     fn waiting(&self) -> usize {
-        *self.busy.lock().unwrap_or_else(|p| p.into_inner())
+        self.queue.lock().unwrap_or_else(|p| p.into_inner()).writes.len()
+            + self.in_flight.load(Ordering::Acquire)
     }
 
     fn drain(&self, grace: Duration) -> bool {
@@ -230,5 +242,15 @@ mod tests {
         assert!(lane.drain(Duration::from_secs(5)));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "x");
         assert_eq!(log.0.lock().unwrap().len(), 1);
+        // Fifty saves of one key in a burst: most are superseded, and none of them is left
+        // counted as waiting, so the drain ends when the last one lands, not at its deadline.
+        for revision in 2..=51 {
+            lane.write(Write { key: PersistKey::Settings, revision, path: path.clone(), bytes: revision.to_string().into_bytes() });
+        }
+        let started = Instant::now();
+        assert!(lane.drain(Duration::from_secs(5)));
+        assert!(started.elapsed() < Duration::from_secs(2), "drained when done, not at the deadline");
+        assert_eq!(lane.waiting(), 0);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "51");
     }
 }
