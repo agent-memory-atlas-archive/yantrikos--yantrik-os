@@ -1039,6 +1039,7 @@ pub fn publish(
                 .with("bar_minds", crate::control_overlays::bar_minds_for_describe(
                     ui.global::<crate::AgentsState>().get_request_minds(),
                     ui.global::<crate::AgentsState>().get_needs_count(),
+                    ui.get_cards_pending(),
                 ))
                 .with("quick_settings", crate::control_overlays::panel_for_describe(ui.get_quick_settings_open(), screen, "close_quick_settings"))
                 .with("power_menu", crate::control_overlays::panel_for_describe(ui.get_power_menu_open(), screen, "close_power_menu"))
@@ -2155,10 +2156,11 @@ pub fn publish(
             // means the panel is as the caller found it.
             Action::new(
                 "set_mind_panel",
-                "Open the mind panel at the right edge, or fold it to its strip. Kept across restarts, one choice for the desktop and one for everywhere else",
+                "Pin the mind panel at the right edge, fold it to its strip, or hide it (the default: it takes no room). Kept across restarts, one choice for the desktop and one for everywhere else",
             )
             .risk("safe")
-            .arg(Param::flag("expanded").describe("true to open the panel, false for the strip"))
+            .arg(Param::text("shape").describe("`pinned`, `strip` or `hidden`").optional())
+            .arg(Param::flag("expanded").describe("Older form: true is `pinned`, false is `strip`").optional())
             .arg(
                 Param::text("where")
                     .describe("`desktop` or `elsewhere`. Left out, wherever the shell is now")
@@ -2166,13 +2168,24 @@ pub fn publish(
             ),
             move |args| {
                 let ui = panel_ui()?;
-                let expanded = args["expanded"].as_bool().ok_or("`expanded` must be true or false")?;
+                let shape = match (args["shape"].as_str(), args["expanded"].as_bool()) {
+                    (Some(s), _) => crate::mind_panel::Shape::parse(s)
+                        .ok_or_else(|| format!("`shape` is `pinned`, `strip` or `hidden`, not `{s}`"))?,
+                    (None, Some(true)) => crate::mind_panel::Shape::Pinned,
+                    (None, Some(false)) => crate::mind_panel::Shape::Strip,
+                    (None, None) => return Err("give `shape`: `pinned`, `strip` or `hidden`".into()),
+                };
+                // Hiding it is the person's: what the Mind is doing is not the Mind's to take off the
+                // screen (security review of #878, L2). Pinning or folding it stays open to anyone.
+                if shape == crate::mind_panel::Shape::Hidden {
+                    persons_only("set_mind_panel shape=hidden")?;
+                }
                 let place = match args["where"].as_str().map(str::trim).filter(|w| !w.is_empty()) {
                     Some(w) => crate::mind_panel::Place::parse(w)
                         .ok_or_else(|| format!("`where` is `desktop` or `elsewhere`, not `{w}`"))?,
                     None => crate::mind_panel::Place::of_screen(ui.get_current_screen()),
                 };
-                crate::mind_panel::set(&ui, place, expanded)?;
+                crate::mind_panel::set(&ui, place, shape)?;
                 // Read back, the way `pin_app` answers with the pinned list.
                 Ok(crate::mind_panel::for_describe(&ui))
             },
@@ -3571,6 +3584,21 @@ mod lasting_settings_grade_tests {
                  written:\n{declaration}"
             );
         }
+    }
+
+    /// Security review of #878, L2: an agent may pin or fold the mind panel, but only the person
+    /// may hide it.
+    #[test]
+    fn only_the_person_may_hide_the_mind_panel() {
+        let src = include_str!("control.rs");
+        let code = src.split("#[cfg(test)]").next().unwrap();
+        let at = code.find("\"set_mind_panel\",").expect("the action");
+        let body = &code[at..at + code[at..].find("crate::mind_panel::for_describe(&ui)").expect("its answer")];
+        assert!(body.contains("if shape == crate::mind_panel::Shape::Hidden {
+                    persons_only(\"set_mind_panel shape=hidden\")?;"), "{body}");
+        let hidden = body.find("persons_only(").unwrap();
+        let applied = body.find("crate::mind_panel::set(&ui, place, shape)").unwrap();
+        assert!(hidden < applied, "refused before anything is changed");
     }
 
     /// And the walk's keeps are keeps: the shell's show, read and window verbs do not write
