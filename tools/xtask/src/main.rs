@@ -113,6 +113,9 @@ fn report(members: &[workspace::Member], unplaced: &[String], v: &ratchet::Verdi
         soft,
         rules::SOFT_LINES
     );
+    for (old, new) in &v.moved {
+        println!("  moved: {old} -> {new} (rewrite the baseline with --write)");
+    }
     for (f, was) in &v.grew {
         println!(
             "  grew: {} {} ({was} -> {} lines)",

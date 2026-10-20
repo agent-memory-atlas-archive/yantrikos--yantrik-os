@@ -104,6 +104,8 @@ members = [
     "tests/windows-core",
     # How an app's UI is compiled: the style, YantrikUI's tokens and kit as libraries (step 2).
     "frameworks/yantrik-app-build",
+    # YantrikApp: what every app's process is made of (design/app-framework-2026-10-21.md).
+    "frameworks/yantrik-app",
     # YantrikFoundation: the rules every app, service and the shell share (docs/architecture.md, L0).
     "frameworks/yantrik-foundation",
     # The workspace's own checks: `cargo run -q -p xtask -- check-architecture` (docs/architecture.md).
@@ -117,6 +119,8 @@ members = [
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
+# Typed errors (docs/architecture.md): each module its own enum, sentences only at the wire.
+thiserror = "2"
 
 # Database
 rusqlite = { version = "0.37", features = ["bundled"] }  # matches upstream yantrikdb 0.10.1 (one crate may link sqlite3)
@@ -194,6 +198,7 @@ yantrik-surface = { path = "crates/yantrik-surface" }
 yantrik-app-runtime = { path = "crates/yantrik-app-runtime" }
 yantrik-shown-address = { path = "crates/yantrik-shown-address" }
 yantrik-app-build = { path = "frameworks/yantrik-app-build" }
+yantrik-app = { path = "frameworks/yantrik-app" }
 yantrik-foundation = { path = "frameworks/yantrik-foundation" }
 yantrik-file-follow = { path = "crates/yantrik-file-follow" }
 yantrik-install-target = { path = "crates/yantrik-install-target" }

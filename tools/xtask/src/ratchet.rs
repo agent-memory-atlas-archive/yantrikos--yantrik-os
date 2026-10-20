@@ -82,6 +82,9 @@ pub struct Verdict {
     pub fixed: Vec<(String, String)>,
     /// Still there, with a measure that grew (reported, not failed, while the rules are new).
     pub grew: Vec<(Finding, usize)>,
+    /// A file that moved and carried its break with it, as (old path, new path): neither new nor
+    /// fixed. The baseline is rewritten to the new path.
+    pub moved: Vec<(String, String)>,
     /// Still there.
     pub kept: usize,
 }
@@ -112,21 +115,88 @@ pub fn judge(findings: &[Finding], baseline: &Baseline) -> Verdict {
             v.fixed.push(key.clone());
         }
     }
+    // A move: a new sized entry and a fixed one, under the same rule, with the same measure. The
+    // file went somewhere else, unchanged, and its break went with it (a crate moved into
+    // frameworks/ is not new slop).
+    let mut i = 0;
+    while i < v.new.len() {
+        let f = &v.new[i];
+        let twin = f.measure.and_then(|m| {
+            v.fixed.iter().position(|(rule, subject)| {
+                *rule == f.rule && baseline.get(&(rule.clone(), subject.clone())) == Some(&Some(m))
+            })
+        });
+        match twin {
+            Some(j) => {
+                let (_, old) = v.fixed.remove(j);
+                let f = v.new.remove(i);
+                v.moved.push((old, f.subject));
+                v.kept += 1;
+            }
+            None => i += 1,
+        }
+    }
     v
 }
 
 /// Entries in `now` that `before` does not have: what was added to the baseline, by `--write` on
-/// a first run or by hand. A changed line count is not an addition.
+/// a first run or by hand. A changed line count is not an addition, and nor is a file that moved:
+/// an entry gone from `before` with the same rule and measure as one new in `now`.
 pub fn added(before: &Baseline, now: &Baseline) -> Vec<(String, String)> {
-    now.keys()
-        .filter(|k| !before.contains_key(*k))
-        .cloned()
-        .collect()
+    let mut gone: Vec<(&(String, String), &Option<usize>)> = before
+        .iter()
+        .filter(|(k, _)| !now.contains_key(*k))
+        .collect();
+    let mut out = Vec::new();
+    for (key, measure) in now.iter().filter(|(k, _)| !before.contains_key(*k)) {
+        let twin = measure.and_then(|m| {
+            gone.iter()
+                .position(|(k, was)| k.0 == key.0 && **was == Some(m))
+        });
+        match twin {
+            Some(j) => {
+                gone.remove(j);
+            }
+            None => out.push(key.clone()),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_file_that_moved_carries_its_break_with_it() {
+        let base = parse("size crates/old/big.rs 2066\nsize y.rs 1300\n").unwrap();
+        let today = [sized("frameworks/new/big.rs", 2066), sized("y.rs", 1300)];
+        let v = judge(&today, &base);
+        assert!(v.passes(), "new {:?} fixed {:?}", v.new, v.fixed);
+        assert_eq!(
+            v.moved,
+            vec![(
+                "crates/old/big.rs".to_string(),
+                "frameworks/new/big.rs".to_string()
+            )]
+        );
+        assert_eq!(v.kept, 2);
+        // A different size is not a move: the file changed, and the break is judged afresh.
+        let v = judge(
+            &[sized("frameworks/new/big.rs", 2070), sized("y.rs", 1300)],
+            &base,
+        );
+        assert!(!v.passes());
+        assert!(v.moved.is_empty());
+        // The same for the baseline held to its base.
+        let now = parse("size frameworks/new/big.rs 2066\nsize y.rs 1300\n").unwrap();
+        assert!(
+            added(&base, &now).is_empty(),
+            "a moved entry is not an addition"
+        );
+        let now = parse("size frameworks/new/big.rs 2070\nsize y.rs 1300\n").unwrap();
+        assert_eq!(added(&base, &now).len(), 1);
+    }
 
     #[test]
     fn a_line_added_to_the_baseline_is_found() {

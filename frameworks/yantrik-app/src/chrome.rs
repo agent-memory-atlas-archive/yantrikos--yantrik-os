@@ -86,7 +86,7 @@ pub fn on_activated(window: &slint::Window, mut f: impl FnMut() + 'static) {
 ///
 /// ```rust,ignore
 /// let ui = NotesApp::new()?;
-/// yantrik_app_runtime::window_chrome!(ui);
+/// yantrik_app::window_chrome!(ui);
 /// ```
 ///
 /// A macro because every app's `WindowChrome` is a type of its own, generated into that app's

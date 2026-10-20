@@ -11105,6 +11105,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "yantrik-app"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "slint",
+ "tokio",
+ "tracing",
+ "yantrik-foundation",
+ "yantrik-ipc-contracts",
+ "yantrik-ipc-transport",
+ "yantrik-surface",
+]
+
+[[package]]
 name = "yantrik-app-build"
 version = "0.1.0"
 dependencies = [
@@ -11115,17 +11131,15 @@ dependencies = [
 name = "yantrik-app-runtime"
 version = "0.1.0"
 dependencies = [
- "libc",
  "serde",
  "serde_json",
  "slint",
- "tokio",
  "tracing",
  "tracing-subscriber",
+ "yantrik-app",
+ "yantrik-foundation",
  "yantrik-ipc-contracts",
  "yantrik-ipc-transport",
- "yantrik-shown-address",
- "yantrik-surface",
  "yantrik-version",
 ]
 
@@ -11458,6 +11472,12 @@ dependencies = [
 [[package]]
 name = "yantrik-foundation"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "yantrik-shown-address",
+ "yantrik-version",
+]
 
 [[package]]
 name = "yantrik-gateway"

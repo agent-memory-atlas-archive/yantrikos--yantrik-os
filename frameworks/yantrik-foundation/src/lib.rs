@@ -4,4 +4,6 @@
 
 #![warn(unreachable_pub)]
 
+pub mod place;
+pub mod problems;
 pub mod time;
