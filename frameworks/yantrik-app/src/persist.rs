@@ -312,11 +312,11 @@ mod tests {
         d
     }
 
-    fn put(key: PersistKey, revision: u64, path: &PathBuf, bytes: &[u8], delay: Duration) -> Write {
+    fn put(key: PersistKey, revision: u64, path: &std::path::Path, bytes: &[u8], delay: Duration) -> Write {
         Write {
             key,
             revision,
-            path: path.clone(),
+            path: path.to_path_buf(),
             op: Op::Put(bytes.to_vec()),
             delay,
         }
