@@ -289,7 +289,55 @@ pub fn registry<A: App>(core: &Rc<Core<A>>, table: Intents<A>) -> LocalRegistry 
         };
         registry.add(action, Box::new(handler));
     }
+    registry.add(crate::launch::action(), Box::new(launch_handler(weak)));
     registry
+}
+
+/// The `launch` action: a second copy's launch, applied once and answered as `present` is.
+///
+/// Request ids seen are remembered (the last [`crate::launch::REMEMBERED`]), so a retry of a
+/// hand-over that was answered late opens nothing twice; it still brings the window forward. A
+/// launch for another profile is refused: that is another instance's. An agent's call is refused
+/// as `present`'s is: the desktop's hand-over is not a way to open files past the intents.
+fn launch_handler<A: App>(
+    core: std::rc::Weak<Core<A>>,
+) -> impl Fn(&Value) -> Result<Value, String> + 'static {
+    let seen: std::cell::RefCell<std::collections::VecDeque<String>> =
+        std::cell::RefCell::new(std::collections::VecDeque::new());
+    move |args: &Value| {
+        if agent_is_calling() {
+            return Err("launch is the desktop's own hand-over between two launches of an app; an \
+                        agent drives the app through its other actions"
+                .into());
+        }
+        let core = core.upgrade().ok_or("the app is closing")?;
+        let launch = crate::launch::Launch::from_value(&args["launch"])?;
+        let profile = core.paths().profile().to_string();
+        if launch.profile != profile {
+            return Err(format!(
+                "that launch is for profile `{}`; this instance runs profile `{profile}`",
+                launch.profile
+            ));
+        }
+        let fresh = {
+            let mut seen = seen.borrow_mut();
+            if seen.contains(&launch.request) {
+                false
+            } else {
+                if seen.len() >= crate::launch::REMEMBERED {
+                    seen.pop_front();
+                }
+                seen.push_back(launch.request.clone());
+                true
+            }
+        };
+        if fresh {
+            core.event(crate::app::Event::Launch(launch));
+        } else {
+            tracing::info!(app = A::ID, "a launch handed over twice; applied once");
+        }
+        crate::present::handle(args)
+    }
 }
 
 #[cfg(test)]

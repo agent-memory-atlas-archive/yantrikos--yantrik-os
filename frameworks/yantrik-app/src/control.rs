@@ -779,7 +779,15 @@ impl App {
     /// Must be called from the thread that owns the window, before `run()`. Failing to serve is
     /// not fatal: an app whose socket cannot be bound is still a working app, it is only invisible
     /// to the mind, and taking the window down over that would be the worse outcome.
-    pub fn serve(mut self) {
+    pub fn serve(self) {
+        let name = self.registry.app_id().to_string();
+        self.serve_as(&name);
+    }
+
+    /// [`App::serve`] on the socket named `instance` (`app-<instance>.sock`): the app's id for
+    /// the default profile, `<id>-<profile>` for another, so a second profile is a second
+    /// instance with a surface of its own (design §2.2 step 3).
+    pub fn serve_as(mut self, instance: &str) {
         // Every surface answers `present`, so a second launch can ask the copy that holds the
         // single-instance slot to show its window (`present`). An app that declared its own keeps
         // it. Not the desktop's own surface: nothing launches the shell a second time, and it has
@@ -796,7 +804,7 @@ impl App {
         let app_id = self.registry.app_id().to_string();
         let action_count = self.registry.action_count();
         REGISTRY.with(|cell| *cell.borrow_mut() = Some(self.registry));
-        serve_rpc(&app_id, action_count);
+        serve_rpc(&app_id, instance, action_count);
     }
 }
 
@@ -804,11 +812,15 @@ impl App {
 ///
 /// Split out of [`App::serve`] so the test below can put the registry on a stand-in UI thread
 /// and still bind exactly the same server. `serve` itself is byte-for-byte what it always did.
-fn serve_rpc(app_id: &str, action_count: usize) {
+fn serve_rpc(app_id: &str, instance: &str, action_count: usize) {
     {
-        let service_id = service_id_for(app_id);
+        let service_id = service_id_for(instance);
         let app_id = app_id.to_string();
-        link_other_names(&app_id);
+        // The other names an app answers to are the default profile's; a second profile's socket
+        // is reached by its own name only.
+        if instance == app_id {
+            link_other_names(&app_id);
+        }
         std::thread::Builder::new()
             .name(format!("{service_id}-rpc"))
             .spawn(move || {
@@ -1891,7 +1903,7 @@ mod tests {
                     ],
                 )
             }));
-            serve_rpc(APP, 4);
+            serve_rpc(APP, APP, 4);
 
             // Thirty seconds is a bound on a hung server, not a budget for a slow one: the server
             // binds on its own thread after building a tokio runtime, and the failure this loop

@@ -5,9 +5,12 @@
 
 use std::sync::Arc;
 
+use std::time::Duration;
+
 use super::{Core, Inbound};
 use crate::app::{App, Event};
-use crate::persist::{PersistKey, Report, Write, Written};
+use crate::drafts;
+use crate::persist::{Op, PersistKey, Report, Write, Written, SUPERSEDED};
 use crate::queue::Post;
 use crate::settings::{Health, Reloaded};
 use crate::watch::{Notice, Seen};
@@ -71,7 +74,42 @@ impl<A: App> Core<A> {
             key: PersistKey::Settings,
             revision,
             path,
-            bytes,
+            op: Op::Put(bytes),
+            delay: Duration::ZERO,
+        });
+    }
+
+    /// `fx.save_draft` and `fx.checkpoint_draft`: the next revision of the draft, to the lane.
+    pub(super) fn save_draft(&self, name: String, bytes: Vec<u8>, delay: Duration) {
+        self.draft_op(name, Op::Put(bytes), delay);
+    }
+
+    /// `fx.discard_draft`: the file removed, ordered behind any save of it.
+    pub(super) fn discard_draft(&self, name: String) {
+        self.draft_op(name, Op::Remove, Duration::ZERO);
+    }
+
+    fn draft_op(&self, name: String, op: Op, delay: Duration) {
+        if !drafts::valid_name(&name) {
+            self.event(Event::DraftNotSaved {
+                name,
+                why: "not a draft name (letters, digits, dashes and underscores, up to 64)".into(),
+            });
+            return;
+        }
+        let revision = {
+            let mut drafts = self.drafts.borrow_mut();
+            let revision = drafts.entry(name.clone()).or_insert(0);
+            *revision += 1;
+            *revision
+        };
+        let path = drafts::path_in(self.paths.state_dir(), &name);
+        self.lane.borrow_mut().write(Write {
+            key: PersistKey::Draft(name),
+            revision,
+            path,
+            op,
+            delay,
         });
     }
 
@@ -89,16 +127,22 @@ impl<A: App> Core<A> {
                 }
             }
             // A newer write took its place; its outcome is the one that counts.
-            (PersistKey::Settings, Err(e)) if e == "superseded" => {}
+            (_, Err(e)) if e == SUPERSEDED => {}
             (PersistKey::Settings, Err(e)) => {
                 tracing::error!(app = self.id, error = %e, "the settings were not saved");
                 self.event(Event::SettingsNotSaved(format!(
                     "the settings could not be written: {e}"
                 )));
             }
-            // Drafts land in step 4c.
-            (PersistKey::Draft(name), result) => {
-                tracing::debug!(app = self.id, draft = name, ?result, "a draft write landed");
+            (PersistKey::Draft(name), Ok(())) => {
+                let latest = self.drafts.borrow().get(&name).copied() == Some(written.revision);
+                if latest {
+                    self.event(Event::DraftSaved(name));
+                }
+            }
+            (PersistKey::Draft(name), Err(why)) => {
+                tracing::error!(app = self.id, draft = %name, error = %why, "a draft was not saved");
+                self.event(Event::DraftNotSaved { name, why });
             }
         }
     }

@@ -8,10 +8,13 @@
 //! - a timer ticks every four seconds through the same path;
 //! - the step the button adds is a setting: saved through `fx.save_settings`, read back at the
 //!   next start, adopted when the file is edited outside, held when the file is unusable;
+//! - the files a launch names are opened through `Event::Launch`, whether the first launch's or
+//!   one a second copy handed over; what is typed is a draft, kept through `fx.save_draft`;
 //! - `render` is the only code that writes the window, `describe` the only view the Mind reads.
 //!
 //! `main.rs` is three lines. The tests run it headless through `yantrik-testing`.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -51,6 +54,9 @@ impl Settings for Prefs {
     const SCHEMA: u32 = 1;
 }
 
+/// The draft's name under the state dir.
+pub const DRAFT: &str = "text";
+
 #[derive(Debug, Default)]
 pub struct Model {
     pub count: i32,
@@ -59,6 +65,10 @@ pub struct Model {
     pub prefs: Prefs,
     /// A line about the settings the person should see, if there is one.
     pub note: Option<String>,
+    /// The files every launch so far asked to open, in order.
+    pub opened: Vec<PathBuf>,
+    /// What was typed and not yet cleared: a draft.
+    pub text: String,
 }
 
 #[derive(Debug, Clone)]
@@ -75,6 +85,12 @@ pub enum Command {
     StepFromFile(Prefs),
     /// The settings file could not be saved, or could; the note says so.
     Note(Option<String>),
+    /// A launch's files.
+    Open(Vec<PathBuf>),
+    /// More text typed; the draft follows.
+    Type(String),
+    /// The text sent somewhere: the draft is done with.
+    Clear,
 }
 
 pub struct Hello;
@@ -94,6 +110,8 @@ impl App for Hello {
         Ok(Model {
             prefs: boot.settings.clone(),
             note,
+            // What was being typed when the app last ran, if anything.
+            text: boot.drafts.json::<String>(DRAFT).unwrap_or_default(),
             ..Model::default()
         })
     }
@@ -129,6 +147,15 @@ impl App for Hello {
             Command::Note(note) => {
                 m.note = note;
                 fx.changed(PART_NOTE);
+            }
+            Command::Open(files) => m.opened.extend(files),
+            Command::Type(more) => {
+                m.text.push_str(&more);
+                fx.save_draft(DRAFT, serde_json::to_vec(&m.text).unwrap_or_default());
+            }
+            Command::Clear => {
+                m.text.clear();
+                fx.discard_draft(DRAFT);
             }
             Command::Fetch => {
                 // One fetch at a time; a second press replaces the first, whose result is dropped.
@@ -173,10 +200,13 @@ impl App for Hello {
             .with("count", m.count)
             .with("step", m.prefs.step)
             .with("fetched", m.fetched.clone().unwrap_or_default())
+            .with("opened", m.opened.len())
+            .with("text", m.text.clone())
     }
 
     fn event(event: Event<Prefs>, _: &Model) -> Option<Command> {
         match event {
+            Event::Launch(launch) if !launch.files.is_empty() => Some(Command::Open(launch.files)),
             Event::SettingsChangedOutside(prefs) => Some(Command::StepFromFile(prefs)),
             Event::SettingsNotSaved(why) => Some(Command::Note(Some(why))),
             Event::SettingsSaved => Some(Command::Note(None)),
@@ -350,6 +380,68 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "{not json", "held, not overwritten");
         assert_eq!(app.model(|m| m.prefs.step), 9, "the app runs on the new value regardless");
         assert!(app.model(|m| m.note.clone()).unwrap().contains("kept until the file is replaced"));
+    }
+
+    #[test]
+    fn the_first_launch_opens_its_files_and_a_handed_over_one_opens_once() {
+        use yantrik_app::launch::Launch;
+        let app = TestApp::<Hello>::start_at(
+            Paths::temporary(Hello::ID),
+            vec!["/tmp/a.txt".into(), "b.txt".into()],
+        );
+        let opened = app.model(|m| m.opened.clone());
+        assert_eq!(opened.len(), 2);
+        assert!(opened[1].is_absolute(), "a relative path is made absolute: {:?}", opened[1]);
+        // A second copy hands its launch over; a retry with the same request id opens nothing twice.
+        let handed = Launch::of_files("default", std::path::Path::new("/"), [PathBuf::from("/tmp/c.txt")]);
+        let answer = app.act("launch", json!({ "launch": handed })).unwrap();
+        assert_eq!(answer.envelope()["result"]["window"], json!(false), "headless: no window to show");
+        assert_eq!(app.model(|m| m.opened.len()), 3);
+        app.act("launch", json!({ "launch": handed })).unwrap();
+        assert_eq!(app.model(|m| m.opened.len()), 3, "the retry is answered, not applied");
+        // Another profile's launch, an agent's call and a malformed one are refused.
+        let mut other = handed.clone();
+        other.profile = "work".into();
+        assert!(app.act("launch", json!({ "launch": other })).unwrap_err().contains("profile"));
+        let e = app.act_as(Call::new("launch", json!({ "launch": handed })).as_agent("t")).unwrap_err();
+        assert!(e.contains("agent"));
+        assert!(app.act("launch", json!({ "launch": {"version": 1} })).is_err());
+        assert_eq!(app.describe()["state"]["opened"], json!(3));
+    }
+
+    #[test]
+    fn an_option_the_app_does_not_take_is_refused_at_start() {
+        let result = std::panic::catch_unwind(|| {
+            TestApp::<Hello>::start_at(Paths::temporary(Hello::ID), vec!["--fast".into()])
+        });
+        let message = match result {
+            Err(payload) => payload,
+            Ok(_) => panic!("the app started with an option it does not take"),
+        };
+        let said = message.downcast_ref::<String>().cloned().unwrap_or_default();
+        assert!(said.contains("not an option"), "{said}");
+    }
+
+    #[test]
+    fn what_is_typed_is_a_draft_that_survives_a_restart_until_cleared() {
+        let paths = Paths::temporary(Hello::ID);
+        {
+            let app = TestApp::<Hello>::start_at(paths.clone(), Vec::new());
+            app.run(Command::Type("hel".into()));
+            app.run(Command::Type("lo".into()));
+            assert_eq!(app.writes_waiting(), 2, "both saves are queued; the lane keeps the newest");
+            // No `run_writes`: a shutdown writes what is owed, debounce or not.
+            assert!(app.shutdown());
+            assert!(yantrik_app::drafts::path_in(paths.state_dir(), DRAFT).exists());
+        }
+        let app = TestApp::<Hello>::start_at(paths.clone(), Vec::new());
+        assert_eq!(app.model(|m| m.text.clone()), "hello");
+        app.run(Command::Clear);
+        app.run_writes();
+        assert!(!yantrik_app::drafts::path_in(paths.state_dir(), DRAFT).exists());
+        drop(app);
+        let app = TestApp::<Hello>::start_at(paths, Vec::new());
+        assert_eq!(app.model(|m| m.text.clone()), "");
     }
 
     #[test]

@@ -11,8 +11,10 @@ use std::ffi::OsString;
 
 use crate::control::View;
 use crate::cx::Cx;
+use crate::drafts::Drafts;
 use crate::effects::Effects;
 use crate::intents::Intents;
+use crate::launch::Launch;
 use crate::paths::Paths;
 use crate::refused::Refused;
 use crate::settings::{Health, Settings, Store};
@@ -42,6 +44,9 @@ pub enum ExitReason {
 /// [`App::Settings`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event<S> {
+    /// The first launch, once, after `start`; and every launch handed over by a second copy. The
+    /// files to open or the deep link's intent are in it. `None` opens nothing.
+    Launch(Launch),
     /// The person asked a window to close. `None` from [`App::event`] closes it now; a command
     /// keeps it open until something runs `fx.close(window)`, so "Save changes?" is a flow.
     CloseRequested(WindowId),
@@ -64,15 +69,24 @@ pub enum Event<S> {
     /// `None` keeps this app's value and writes it; an app that prefers the file answers with a
     /// command that saves `outside`.
     SettingsConflict { outside: S, mine: S },
+    /// The last `fx.save_draft` of this name reached the disk. `None` does nothing.
+    DraftSaved(String),
+    /// A draft did not reach the disk. `None` files a problem record.
+    DraftNotSaved { name: String, why: String },
 }
 
 /// What the runner knows before any window exists.
 #[derive(Debug, Clone)]
 pub struct Boot<S = ()> {
-    /// The command line after the program name. Parsed into a `Launch` in step 4c.
+    /// The command line after the program name, as given.
     pub args: Vec<OsString>,
+    /// What the command line asked for: files, or a deep link. Read here; applied once as
+    /// `Event::Launch` after `start`.
+    pub launch: Launch,
     /// Where this app's files are.
     pub paths: Paths,
+    /// The drafts found at start, by name. The app reads back what it kept.
+    pub drafts: Drafts,
     /// The settings as read from disk (migrated if older), or the defaults when there is no file
     /// or it could not be used.
     pub settings: S,
@@ -83,17 +97,23 @@ pub struct Boot<S = ()> {
 }
 
 impl<S: Settings> Boot<S> {
-    /// Opens the settings at `paths` and makes the boot the app's `model` is given. Never fails:
-    /// an unusable file is `settings_health`, not an error.
-    pub fn open(paths: Paths, args: Vec<OsString>) -> (Boot<S>, Store<S>) {
+    /// Parses the launch, opens the settings and reads the drafts at `paths`, and makes the boot
+    /// the app's `model` is given. An unusable settings file is `settings_health`, not an error;
+    /// a command line the app does not take is.
+    pub fn open(paths: Paths, args: Vec<OsString>) -> Result<(Boot<S>, Store<S>), Startup> {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
+        let launch = Launch::parse(paths.id(), paths.profile(), &cwd, &args)?;
         let store = Store::<S>::open(paths.config_file().to_path_buf());
+        let drafts = Drafts::read(paths.state_dir());
         let boot = Boot {
             args,
+            launch,
+            drafts,
             paths,
             settings: store.get().clone(),
             settings_health: store.health().clone(),
         };
-        (boot, store)
+        Ok((boot, store))
     }
 }
 

@@ -9,14 +9,16 @@ use std::time::Duration;
 
 use crate::app::{App, Boot, Event, WindowId};
 use crate::cx::{Core, Cx, Inbound, Parts};
+use crate::instance::Held;
 use crate::intents::{self, Intents};
 use crate::jobs::Threads;
 use crate::paths::Paths;
 use crate::persist::Threaded;
+use crate::present::Presented;
 use crate::timers::SlintTimers;
 use crate::watch::Watch;
 use crate::window::Window;
-use crate::{boot, instance, problems, theme};
+use crate::{boot, instance, launch, problems, theme};
 
 /// How long shutdown waits for the job pool before exiting without it.
 pub const GRACE: Duration = Duration::from_secs(2);
@@ -44,14 +46,40 @@ pub fn run<A: App>() -> ExitCode {
     boot::init_tracing(A::ID);
     boot::choose_backend();
     let paths = Paths::for_app(A::ID);
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    // The launch is parsed before the claim: a command line this app does not take is said and
+    // refused here, whichever copy would have run it. Opening the settings and drafts writes
+    // nothing, so a copy that hands over and exits leaves no trace.
+    let (boot, store) = match Boot::<A::Settings>::open(paths.clone(), args) {
+        Ok(opened) => opened,
+        Err(e) => return startup_failed(A::ID, "launch", &e.sentence),
+    };
 
-    // One instance per app and profile: a second launch asks the running copy to come forward,
-    // and exits.
-    let Some(_instance) = instance::claim(&paths.instance_name()) else {
+    // One instance per app and profile: a second launch hands what it was asked to open to the
+    // running copy, which shows its window, and exits.
+    let instance = paths.instance_name();
+    let claimed = instance::claim_or_hand_over(&instance, |_| {
+        match launch::hand_over(&instance, &boot.launch) {
+            Presented::Unanswered(why) => {
+                tracing::warn!(app = A::ID, "the running copy did not answer the hand-over: {why}");
+                Held::OwnerGone
+            }
+            answered => {
+                match answered.sentence(A::ID) {
+                    None => tracing::info!(app = A::ID, "Already running; handed the launch to it"),
+                    Some(said) => {
+                        tracing::warn!(app = A::ID, answer = ?answered, "{said}");
+                        eprintln!("{said}");
+                    }
+                }
+                Held::HandedOver
+            }
+        }
+    });
+    let Some(_instance) = claimed else {
         return ExitCode::SUCCESS;
     };
 
-    let (boot, store) = Boot::<A::Settings>::open(paths, std::env::args_os().skip(1).collect());
     if let crate::settings::Health::Recovery(e) = &boot.settings_health {
         tracing::warn!(app = A::ID, "{e}; running on the defaults");
         problems::record_failure(A::ID, "settings", &e.to_string());
@@ -79,6 +107,7 @@ pub fn run<A: App>() -> ExitCode {
             timers: Box::new(|sink| Box::new(SlintTimers::new(sink))),
             lane: Box::new(|report| Box::new(Threaded::new(A::ID, report))),
             settings: store,
+            paths: boot.paths.clone(),
             wake,
         },
     );
@@ -97,13 +126,16 @@ pub fn run<A: App>() -> ExitCode {
     A::wire(&cx);
     core.render_all();
     core.start();
+    // The launch is applied once, here (§2.2 step 11): the files to open, or the deep link.
+    core.event(Event::Launch(boot.launch.clone()));
 
-    // The surface: the app's intents, and `present` for the desktop's own handover. Served only
-    // now that commands can be applied.
+    // The surface: the app's intents, `present` for the desktop's own handover, and `launch`
+    // for a second copy's. Served only now that commands can be applied, on the instance's own
+    // socket (`app-<id>[-<profile>].sock`).
     let mut table = Intents::new();
     A::intents(&mut table);
     let registry = intents::registry(&core, table);
-    crate::control::App::from_registry(registry).serve();
+    crate::control::App::from_registry(registry).serve_as(&instance);
 
     let closed = crate::run_until_closed(core.ui(), A::ID);
     core.shutdown(GRACE);

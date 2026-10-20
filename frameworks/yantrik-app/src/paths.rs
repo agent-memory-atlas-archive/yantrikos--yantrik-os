@@ -95,13 +95,14 @@ impl Paths {
         &self.profile
     }
 
-    /// The name the instance claim and the socket are keyed by: the id, or `id@profile` for a
-    /// profile other than the default, so two profiles are two instances.
+    /// The name the instance claim and the control socket are keyed by: the id, or
+    /// `<id>-<profile>` for a profile other than the default (the socket is then
+    /// `app-<id>-<profile>.sock`, as the design's §2.2 has it), so two profiles are two instances.
     pub fn instance_name(&self) -> String {
         if self.profile == DEFAULT_PROFILE {
             self.id.clone()
         } else {
-            format!("{}@{}", self.id, self.profile)
+            format!("{}-{}", self.id, self.profile)
         }
     }
 
@@ -139,7 +140,7 @@ mod tests {
         assert_eq!(p.cache_dir(), Path::new("/r/cache/yantrik/weather"));
         assert_eq!(p.instance_name(), "weather");
         let q = Paths::under(Path::new("/r"), "weather", "work");
-        assert_eq!(q.instance_name(), "weather@work");
+        assert_eq!(q.instance_name(), "weather-work");
     }
 
     #[test]
