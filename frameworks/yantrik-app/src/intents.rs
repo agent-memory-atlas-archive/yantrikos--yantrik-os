@@ -126,11 +126,15 @@ pub enum Agents<A: App> {
     /// Not an agent, with this sentence.
     Refused(&'static str),
     /// An agent, if the rule allows this call.
-    Rule(Box<dyn Fn(&A::Model, &Args<'_>) -> Result<(), Refused>>),
+    Rule(AgentRule<A>),
 }
 
+/// A rule read from the model that says whether an agent may raise an intent with these arguments.
+pub type AgentRule<A> = Box<dyn Fn(&<A as App>::Model, &Args<'_>) -> Result<(), Refused>>;
+/// A rule read from the model that every intent of the app is held to.
+pub type StateRule<A> = Rc<dyn Fn(&<A as App>::Model) -> Result<(), Refused>>;
 type Parse<A> = Box<dyn Fn(&Args<'_>) -> Result<<A as App>::Command, Refused>>;
-type Reply<A> = Rc<dyn Fn(&<A as App>::Model) -> Value>;
+pub(crate) type Reply<A> = Rc<dyn Fn(&<A as App>::Model) -> Value>;
 
 /// A command with its wire contract.
 pub struct Intent<A: App> {
@@ -184,7 +188,7 @@ impl<A: App> Intent<A> {
 /// The app's intents, declared in `App::intents`.
 pub struct Intents<A: App> {
     intents: Vec<Intent<A>>,
-    state_rule: Option<Rc<dyn Fn(&A::Model) -> Result<(), Refused>>>,
+    state_rule: Option<StateRule<A>>,
 }
 
 impl<A: App> Default for Intents<A> {

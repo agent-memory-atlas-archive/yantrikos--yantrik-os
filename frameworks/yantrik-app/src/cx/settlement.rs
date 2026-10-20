@@ -6,19 +6,18 @@
 //! queued, by that job panicking or being refused, by it being replaced, by a queued command of
 //! it being refused, by the deadline (the waiter times out on its own), or by shutdown.
 
-use std::rc::Rc;
 use std::sync::mpsc;
 
 use serde_json::Value;
 
 use super::Core;
 use crate::app::App;
-use crate::intents::InvocationId;
+use crate::intents::{InvocationId, Reply};
 
 /// An invocation whose answer is still owed (`Settle::Explicit`).
 pub(super) struct Open<A: App> {
     pub(super) answer: mpsc::SyncSender<Result<Value, String>>,
-    pub(super) reply: Rc<dyn Fn(&A::Model) -> Value>,
+    pub(super) reply: Reply<A>,
     /// Jobs started under it and not yet landed.
     pub(super) jobs: usize,
     /// Commands queued under it (`then`, a result waiting its turn) and not yet applied. The
@@ -56,7 +55,7 @@ impl<A: App> Core<A> {
     pub fn open_settlement(
         &self,
         answer: mpsc::SyncSender<Result<Value, String>>,
-        reply: Rc<dyn Fn(&A::Model) -> Value>,
+        reply: Reply<A>,
     ) -> InvocationId {
         let id = InvocationId(self.next_invocation.get());
         self.next_invocation.set(id.0 + 1);
