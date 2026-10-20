@@ -9,7 +9,9 @@ Description: Let an external client draw the window switcher session
  Version 2 adds pictures: the renderer may ask for a listed window, which labwc
  renders offscreen from the window's own scene subtree (as upstream labwc's
  thumbnail switcher, src/cycle/osd-thumbnail.c, does) and hands over in a
- sealed memory file, at most 40 a second.
+ sealed memory file, at most 40 a second. While the renderer draws the
+ session, a held Tab steps once a second (each window stays in front that long)
+ instead of at the keyboard's repeat rate.
  Built for Yantrik OS's Alt+Tab (yantrikos/yantrik-os#867, #849).
 Author: Yantrik OS <dev@yantrikos.com>
 Forwarded: not-yet
@@ -51,7 +53,7 @@ Reviewed-by: security review of yantrikos/yantrik-os#872 (findings 1-5 addressed
  	bool tearing_hint;
 --- labwc-0.8.3.orig/include/window-switcher-renderer.h
 +++ labwc-0.8.3/include/window-switcher-renderer.h
-@@ -0,0 +1,47 @@
+@@ -0,0 +1,52 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +#ifndef LABWC_WINDOW_SWITCHER_RENDERER_H
 +#define LABWC_WINDOW_SWITCHER_RENDERER_H
@@ -88,6 +90,11 @@ Reviewed-by: security review of yantrikos/yantrik-os#872 (findings 1-5 addressed
 +
 +/* Whether labwc should skip drawing its own OSD for the current session */
 +bool switcher_renderer_draws(struct server *server);
++/*
++ * How often a held key repeats in a window switcher session the renderer draws, in ms (each
++ * window stays in front this long while Tab is held); 0 when labwc's own repeat applies.
++ */
++int switcher_renderer_repeat_ms(struct server *server);
 +
 +/* keyboard.c: end_cycling() commits; mark it before osd_finish() */
 +void switcher_renderer_note_commit(struct server *server);
@@ -327,6 +334,29 @@ Reviewed-by: security review of yantrikos/yantrik-os#872 (findings 1-5 addressed
  	return false;
  }
  
+@@ -578,6 +590,11 @@
+ 
+ 	handle_compositor_keybindings(keyboard, &event);
+ 	int next_repeat_ms = 1000 / keyboard->keybind_repeat_rate;
++	/* A held key in the drawn window switcher steps at its own pace */
++	int switcher_ms = switcher_renderer_repeat_ms(keyboard->base.seat->server);
++	if (switcher_ms > 0) {
++		next_repeat_ms = switcher_ms;
++	}
+ 	wl_event_source_timer_update(keyboard->keybind_repeat,
+ 		next_repeat_ms);
+ 
+@@ -597,8 +614,9 @@
+ 		keyboard->keybind_repeat_rate = wlr_keyboard->repeat_info.rate;
+ 		keyboard->keybind_repeat = wl_event_loop_add_timer(
+ 			server->wl_event_loop, handle_keybind_repeat, keyboard);
++		int switcher_ms = switcher_renderer_repeat_ms(server);
+ 		wl_event_source_timer_update(keyboard->keybind_repeat,
+-			wlr_keyboard->repeat_info.delay);
++			switcher_ms > 0 ? switcher_ms : wlr_keyboard->repeat_info.delay);
+ 	}
+ }
+ 
 --- labwc-0.8.3.orig/src/meson.build
 +++ labwc-0.8.3/src/meson.build
 @@ -1,4 +1,5 @@
@@ -432,7 +462,7 @@ Reviewed-by: security review of yantrikos/yantrik-os#872 (findings 1-5 addressed
  		view->impl->set_activated(view, activated);
 --- labwc-0.8.3.orig/src/window-switcher-renderer.c
 +++ labwc-0.8.3/src/window-switcher-renderer.c
-@@ -0,0 +1,731 @@
+@@ -0,0 +1,742 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * An external client that draws the window switcher session.
@@ -495,6 +525,7 @@ Reviewed-by: security review of yantrikos/yantrik-os#872 (findings 1-5 addressed
 +#define THUMB_MIN 16
 +#define THUMB_MAX 1024
 +#define CAPTURES_PER_SECOND 40
++#define SWITCHER_REPEAT_MS 1000
 +
 +struct switcher_renderer {
 +	struct server *server;
@@ -1112,6 +1143,16 @@ Reviewed-by: security review of yantrikos/yantrik-os#872 (findings 1-5 addressed
 +{
 +	struct switcher_renderer *r = server->switcher_renderer;
 +	return r && r->active && r->resource && !r->fallback;
++}
++
++int
++switcher_renderer_repeat_ms(struct server *server)
++{
++	if (server->input_mode != LAB_INPUT_STATE_WINDOW_SWITCHER
++			|| !switcher_renderer_draws(server)) {
++		return 0;
++	}
++	return SWITCHER_REPEAT_MS;
 +}
 +
 +void
