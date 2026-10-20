@@ -14,8 +14,9 @@
 //!
 //! Pictures (protocol version 2): each card shows its window as labwc last drew it. They are
 //! asked for when the list arrives, and the front card's again every `LIVE_EVERY` while the
-//! stack is up and still, so it is a live picture. A card
-//! with no picture yet (labwc too old, nothing drawn, or still on its way) shows the app's tile.
+//! stack is up and still, so it is a live picture. A card is its picture, in the window's own
+//! shape; one with no picture yet (labwc too old, nothing drawn, or still on its way) shows the
+//! app's icon and name.
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -76,8 +77,14 @@ const SHOW_AFTER: Duration = Duration::from_millis(100);
 const MOST_TYPED: usize = 24;
 /// The frame the design was drawn in; the output is scaled from it.
 const DESIGN: (f32, f32) = (1280.0, 800.0);
-/// Tile colours, the dock's family (blue, teal, green, amber, red, sky, violet, gold).
-const TILES: [u32; 8] = [0x5b9be8, 0x2bb5a6, 0x4bbf6b, 0xe0a94a, 0xe5626a, 0x7cc4f0, 0x9b7be8, 0xd9c27a];
+/// A card's edge behind the front, and the selected one's (the theme's accent).
+const EDGE: (u8, u8, u8) = (0x34, 0x42, 0x54);
+const ACCENT: (u8, u8, u8) = (0x8f, 0xb4, 0xe3);
+/// The time line's marker moves to a new window's time in this long.
+const MARKER_GLIDE: f32 = 0.18;
+/// The caption fades out in this long, changes, and fades in again in CAPTION_IN.
+const CAPTION_OUT: f32 = 0.06;
+const CAPTION_IN: f32 = 0.09;
 
 /// How quickly a card follows its place (the spring's natural frequency, radians a second).
 /// Critically damped: it arrives without overshoot in about 4 / STIFFNESS seconds, and a new
@@ -94,10 +101,10 @@ const GLIDE_SCALE: u32 = 2;
 /// How often the front card's picture is asked for again while the stack is up and still
 /// (never while cards move: the compositor's time goes to the motion then).
 const LIVE_EVERY: Duration = Duration::from_millis(500);
-/// The picture size asked for until the overlay's size is known: the front card's body at the
-/// design size. After that it is the front card's body in output pixels, so the front card is
-/// drawn 1:1 (labwc keeps the window's aspect ratio inside it).
-const PICTURE: (u32, u32) = (602, 328);
+/// The picture size asked for until the overlay's size is known: the front card's slot at the
+/// design size. After that it is the front slot in output pixels. labwc keeps the window's aspect
+/// ratio inside it, and the front card is drawn at the size it sends, so it is drawn 1:1.
+const PICTURE: (u32, u32) = (640, 400);
 /// The largest picture labwc sends (its THUMB_MAX), so a bad size is refused before it is read.
 const PICTURE_MOST: u32 = 1024;
 
@@ -177,18 +184,23 @@ struct Session {
     shown: bool,
     typed: String,
     started: std::time::Instant,
-    /// Pictures by window id, as labwc last sent them this session.
-    pictures: HashMap<u32, Image>,
+    /// Pictures by window id, as labwc last sent them this session, with their size.
+    pictures: HashMap<u32, (Image, (u32, u32))>,
     live: bool,
     /// Each card as drawn: where it is, how fast it is going and where it is going (depths).
     springs: HashMap<u32, model::Spring>,
     /// The frame loop is running: cards are moving.
     animating: bool,
+    /// The time line's selected marker, in design pixels.
+    marker: model::Tween,
+    /// The window whose caption is fading out, and how long since the selection changed.
+    caption_was: Option<u32>,
+    caption_t: f32,
 }
 
 impl Session {
     fn new(id: u32) -> Session {
-        Session { id, windows: Vec::new(), incoming: Vec::new(), collecting: false, selected: None, acked: false, scheduled: false, shown: false, typed: String::new(), started: std::time::Instant::now(), pictures: HashMap::new(), live: false, springs: HashMap::new(), animating: false }
+        Session { id, windows: Vec::new(), incoming: Vec::new(), collecting: false, selected: None, acked: false, scheduled: false, shown: false, typed: String::new(), started: std::time::Instant::now(), pictures: HashMap::new(), live: false, springs: HashMap::new(), animating: false, marker: model::Tween::at(140.0, MARKER_GLIDE), caption_was: None, caption_t: f32::MAX }
     }
 
     fn selected_index(&self) -> usize {
@@ -221,6 +233,14 @@ impl Session {
             springs.insert(w.id, sp);
         }
         self.springs = springs;
+        if sel < self.windows.len() {
+            self.marker = model::Tween::at(model::line_ys(&self.windows)[sel], MARKER_GLIDE);
+        }
+    }
+
+    /// Nothing left to move: every card at its place, the marker at its time, the caption in.
+    fn still(&self) -> bool {
+        self.springs.values().all(|sp| sp.settled()) && self.marker.done() && self.caption_t >= CAPTION_OUT + CAPTION_IN
     }
 
     /// Move the selection. Every card's target moves; the card that goes from the front to the
@@ -228,12 +248,31 @@ impl Session {
     /// coming from the back to the front arrives from in front.
     fn select(&mut self, id: u32) {
         let old = self.selected_index();
+        let was = self.selected;
         self.selected = Some(id);
         let (n, sel) = (self.windows.len(), self.selected_index());
         if n == 0 {
             return;
         }
         let animate = self.shown;
+        let to = model::line_ys(&self.windows)[sel];
+        if animate {
+            self.marker.retarget(to);
+            if was != Some(id) {
+                // Fading out already: the one going keeps fading; otherwise the old one starts to.
+                if self.caption_t >= CAPTION_OUT {
+                    self.caption_was = was;
+                    self.caption_t = 0.0;
+                }
+            }
+        } else {
+            self.marker = model::Tween::at(to, MARKER_GLIDE);
+        }
+        // One step either way (Tab, Shift+Tab) goes round the end of the list: the front card
+        // leaves past the viewer, or the back one arrives from in front. A jump (a typed name) is
+        // one direct move, every card gliding straight to its new place, none of them see-through.
+        let step = (sel + n - old) % n;
+        let round = step == 1 || step + 1 == n;
         for (i, w) in self.windows.iter().enumerate() {
             let target = model::depth(i, sel, n) as f32;
             let was = model::depth(i, old, n) as f32;
@@ -242,7 +281,11 @@ impl Session {
                 *sp = model::Spring::at(target);
                 continue;
             }
-            sp.retarget(target, n);
+            if round {
+                sp.retarget(target, n);
+            } else {
+                sp.glide_to(target);
+            }
         }
     }
 }
@@ -278,6 +321,7 @@ fn main() {
     let window = MinimalSoftwareWindow::new(RepaintBufferType::SwappedBuffers);
     slint::platform::set_platform(Box::new(Headless(window.clone()))).expect("one platform");
     let view = SwitcherView::new().expect("the switcher view");
+    view.global::<AppInitial>().on_of(|id| yantrik_ui_kit::app_tile::initial(&id).into());
     view.show().ok();
     warm_up(&window, &view);
 
@@ -331,28 +375,27 @@ fn main() {
 fn warm_up(window: &Rc<MinimalSoftwareWindow>, view: &SwitcherView) {
     let started = std::time::Instant::now();
     let (w, h) = (DESIGN.0 as u32, DESIGN.1 as u32);
-    let card = Card {
-        x: 150.0,
-        y: 214.0,
+    let card = |icon: &str| Card {
+        x: 80.0,
+        y: 240.0,
         w: 640.0,
         h: 400.0,
         dim: 0.3,
         fade: 0.5,
         front: true,
+        edge_width: 2.0,
+        edge: slint::Color::from_rgb_u8(ACCENT.0, ACCENT.1, ACCENT.2),
+        icon_id: icon.into(),
         name: "Warming up ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyz 0123456789".into(),
-        letter: "W".into(),
-        tile: slint::Color::from_rgb_u8(0x5b, 0x9b, 0xe8),
-        ago: "4 min ago".into(),
-        other_desktop: true,
-        minimized: true,
-        body_x: 19.0,
-        body_y: 56.0,
-        body_w: 602.0,
-        body_h: 328.0,
+        note: "minimized".into(),
         picture: Image::default(),
-        has_picture: false,
+        has_picture: true,
+        panes: ModelRc::new(VecModel::from(vec![Pane { x: 0.0, y: 0.0, w: 640.0, h: 60.0 }, Pane { x: 500.0, y: 60.0, w: 140.0, h: 340.0 }])),
     };
-    view.set_cards(ModelRc::new(VecModel::from(vec![card])));
+    view.set_cards(ModelRc::new(VecModel::from(vec![card("notes"), card("unknown")])));
+    view.set_dots(ModelRc::new(VecModel::from(vec![Dot { y: 200.0, label: "Notes".into(), on: true }])));
+    view.set_caption_icon("terminal".into());
+    view.set_caption_alpha(0.5);
     view.set_caption_title("Warming up".into());
     view.set_caption_where("this desktop · used 4 min ago".into());
     view.set_typed("abc".into());
@@ -363,6 +406,7 @@ fn warm_up(window: &Rc<MinimalSoftwareWindow>, view: &SwitcherView) {
         renderer.render(&mut pixels, w as usize);
     });
     view.set_typed("".into());
+    view.set_caption_alpha(1.0);
     debug(format_args!("warmed up in {} ms", started.elapsed().as_millis()));
 }
 
@@ -440,7 +484,7 @@ impl App {
                 let Some(s) = self.session.as_mut().filter(|s| s.id == session) else { return };
                 match picture(fd, width, height, stride) {
                     Some(image) => {
-                        s.pictures.insert(id, image);
+                        s.pictures.insert(id, (image, (width, height)));
                         self.draw();
                     }
                     None => debug(format_args!("session {session}: a picture of {id} could not be read")),
@@ -470,6 +514,12 @@ impl App {
         let region = self.compositor.wl_compositor().create_region(&self.qh, ());
         layer.wl_surface().set_input_region(Some(&region));
         region.destroy();
+        // Every pixel is drawn opaque (the navy ground), and saying so lets labwc skip drawing
+        // the desktop under it.
+        let opaque = self.compositor.wl_compositor().create_region(&self.qh, ());
+        opaque.add(0, 0, i32::MAX, i32::MAX);
+        layer.wl_surface().set_opaque_region(Some(&opaque));
+        opaque.destroy();
         self.viewport = self.viewporter.as_ref().map(|v| v.get_viewport(layer.wl_surface(), &self.qh, ()));
         layer.commit();
         debug(format_args!("overlay requested"));
@@ -485,7 +535,7 @@ impl App {
     /// at a time; a new Tab while it runs only moves targets.
     fn animate(&mut self) {
         let Some(s) = self.session.as_mut() else { return };
-        if s.animating || s.springs.values().all(|sp| sp.settled()) {
+        if s.animating || s.still() {
             return;
         }
         s.animating = true;
@@ -501,7 +551,9 @@ impl App {
             for sp in s.springs.values_mut() {
                 sp.step(dt, STIFFNESS, APPEAR, n);
             }
-            let done = s.springs.values().all(|sp| sp.settled());
+            s.marker.step(dt);
+            s.caption_t = (s.caption_t + dt).min(1.0);
+            let done = s.still();
             if done {
                 for sp in s.springs.values_mut() {
                     sp.snap();
@@ -583,7 +635,7 @@ impl App {
         // Cards, deepest first so the front one is painted last; a card leaving past the front
         // (depth below 0) is painted over everything.
         let drawn = s.drawn();
-        let mut cards: Vec<(f32, Card)> = s
+        let mut cards: Vec<(f32, (f32, f32, f32, f32), Card)> = s
             .windows
             .iter()
             .enumerate()
@@ -591,67 +643,99 @@ impl App {
                 let (d, appear) = drawn[i];
                 (d > -1.0 && d < model::VISIBLE as f32).then(|| {
                     let p = model::place_at(d);
-                    let body = model::body(p.w * scale, p.h * scale);
-                    let rgb = TILES[model::tile_slot(win)];
+                    let slot = (p.x * sx, p.y * sy, p.w * scale, p.h * scale);
+                    let pic = s.pictures.get(&win.id);
+                    let aspect = pic.map(|(_, (pw, ph))| *pw as f32 / *ph as f32).unwrap_or(DESIGN.0 / DESIGN.1);
+                    let (mut x, mut y, mut cw, mut ch) = model::fit(slot, aspect, d);
+                    // At rest in front, the card is the picture's own size, so it is drawn 1:1.
+                    if let Some((_, (pw, ph))) = pic.filter(|_| !gliding && d.abs() < 1e-3) {
+                        let (pw, ph) = (*pw as f32, *ph as f32);
+                        if (pw - cw).abs() <= 2.0 && (ph - ch).abs() <= 2.0 {
+                            (cw, ch) = (pw, ph);
+                            y = slot.1 + slot.3 - ph;
+                        }
+                    }
+                    (x, y, cw, ch) = (x.round(), y.round(), cw.round(), ch.round());
+                    let k = model::chosen(d);
+                    let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * k).round() as u8;
+                    let note = match (pic.is_some(), !win.current_workspace, win.minimized) {
+                        (true, _, _) | (false, false, false) => "",
+                        (false, true, true) => "on another desktop · minimized",
+                        (false, true, false) => "on another desktop",
+                        (false, false, true) => "minimized",
+                    };
                     (
                         d,
+                        (x, y, cw, ch),
                         Card {
-                            x: px(p.x * sx),
-                            y: px(p.y * sy),
-                            w: px(p.w * scale),
-                            h: px(p.h * scale),
+                            x: px(x),
+                            y: px(y),
+                            w: px(cw),
+                            h: px(ch),
                             dim: model::dim(d),
                             fade: model::fade(d) * appear,
-                            front: d.abs() < 0.5,
+                            front: d < 0.5,
+                            edge_width: if k > 0.5 { 2.0 * scale } else { scale.max(1.0) },
+                            edge: slint::Color::from_rgb_u8(mix(EDGE.0, ACCENT.0), mix(EDGE.1, ACCENT.1), mix(EDGE.2, ACCENT.2)),
+                            icon_id: model::icon_id(win).into(),
                             name: model::name(win).into(),
-                            letter: model::letter(win).into(),
-                            tile: slint::Color::from_rgb_u8((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8),
-                            ago: model::ago(win.idle_ms).unwrap_or_default().into(),
-                            other_desktop: !win.current_workspace,
-                            minimized: win.minimized,
-                            body_x: body.0,
-                            body_y: body.1,
-                            body_w: body.2,
-                            body_h: body.3,
-                            picture: s.pictures.get(&win.id).cloned().unwrap_or_default(),
-                            has_picture: s.pictures.contains_key(&win.id),
+                            note: note.into(),
+                            picture: pic.map(|(image, _)| image.clone()).unwrap_or_default(),
+                            has_picture: pic.is_some(),
+                            panes: ModelRc::default(),
                         },
                     )
                 })
             })
             .collect();
         cards.sort_by(|a, b| b.0.total_cmp(&a.0));
-        let cards: Vec<Card> = cards.into_iter().map(|(_, c)| c).collect();
+        // Each card is drawn only where the nearest opaque card in front of it leaves it showing
+        // (a card fading in or out hides nothing).
+        let cover: Vec<Option<(f32, f32, f32, f32)>> =
+            (0..cards.len()).map(|k| cards[k + 1..].iter().find(|(_, _, c)| c.fade >= 0.999).map(|(_, rect, _)| *rect)).collect();
+        let cards: Vec<Card> = cards
+            .into_iter()
+            .zip(cover)
+            .map(|((_, rect, mut c), cover)| {
+                let panes: Vec<Pane> =
+                    model::uncovered(rect, cover, 12.0 * scale).into_iter().map(|(x, y, w, h)| Pane { x, y, w, h }).collect();
+                c.panes = ModelRc::new(VecModel::from(panes));
+                c
+            })
+            .collect();
 
-        let (line_top, line_height) = (120.0 * sy, 480.0 * sy);
-        let ys = model::spread(s.windows.iter().map(|win| line_top + model::timeline_pos(win.idle_ms) * line_height).collect(), 18.0 * scale);
+        // The time line: each window at its time, moved apart from its neighbours only as far as
+        // keeps their names from touching.
+        let ys = model::line_ys(&s.windows);
         let dots: Vec<Dot> = s
             .windows
             .iter()
             .enumerate()
-            .map(|(i, win)| Dot { y: px(ys[i]), label: model::clean(&model::name(win), 28).into(), on: i == sel })
+            .map(|(i, win)| Dot { y: px(ys[i] * sy), label: model::clean(&model::name(win), 28).into(), on: i == sel })
             .collect();
-        let ticks: Vec<Tick> =
-            model::ticks().into_iter().map(|(label, pos)| Tick { y: px(line_top + pos * line_height), label: label.into() }).collect();
+        let ticks: Vec<Tick> = model::ticks().into_iter().map(|(label, pos)| Tick { y: px((140.0 + pos * 480.0) * sy), label: label.into() }).collect();
 
-        let front = &s.windows[sel];
-        // Pictures are asked at the front card's picture area, at full size.
+        // The caption: the window going, fading out, then the selected one fading in.
+        let (caption, caption_alpha) = match s.caption_was.and_then(|id| s.windows.iter().find(|w| w.id == id)) {
+            Some(was) if s.caption_t < CAPTION_OUT => (was, 1.0 - s.caption_t / CAPTION_OUT),
+            _ => (&s.windows[sel], ((s.caption_t - CAPTION_OUT) / CAPTION_IN).clamp(0.0, 1.0)),
+        };
+        // Pictures are asked at the front card's slot, at full size.
         if !gliding {
-            let full = model::body(model::place_at(0.0).w * scale, model::place_at(0.0).h * scale);
-            self.picture_size = (full.2.max(16.0) as u32, full.3.max(16.0) as u32);
+            let front = model::place_at(0.0);
+            self.picture_size = (((front.w * scale).round() as u32).max(16), ((front.h * scale).round() as u32).max(16));
         }
         self.view.set_cards(ModelRc::new(VecModel::from(cards)));
         self.view.set_dots(ModelRc::new(VecModel::from(dots)));
         self.view.set_ticks(ModelRc::new(VecModel::from(ticks)));
-        self.view.set_line_x(px(1040.0 * sx));
-        self.view.set_line_top(px(line_top));
-        self.view.set_line_height(px(line_height));
-        self.view.set_caption_x(px(150.0 * sx));
-        self.view.set_caption_y(px(640.0 * sy));
-        self.view.set_caption_title(model::name(front).into());
-        self.view.set_caption_where(model::whereabouts(front).into());
+        self.view.set_marker_y(px(s.marker.value() * sy));
+        self.view.set_caption_title(model::name(caption).into());
+        self.view.set_caption_where(model::whereabouts(caption).into());
+        self.view.set_caption_icon(model::icon_id(caption).into());
+        self.view.set_caption_alpha(caption_alpha);
         self.view.set_typed(s.typed.clone().into());
-        self.view.set_more(if n > model::VISIBLE { format!("+{} deeper", n - model::VISIBLE).into() } else { "".into() });
+        self.view.set_sx(sx);
+        self.view.set_sy(sy);
         self.view.set_scale(scale);
 
         self.window.set_size(slint::PhysicalSize::new(w, h));

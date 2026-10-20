@@ -19,6 +19,8 @@ wayland-backend = "0.3"
 bitflags = "2"
 # So build.rs can resolve the shared theme's include path via `links`.
 yantrik-design-tokens = { workspace = true }
+# AppTile and the app icons, the dock's own (and its include path, via `links`); the app names.
+yantrik-ui-kit = { workspace = true }
 
 [build-dependencies]
 slint-build = "1.17"
