@@ -58,9 +58,13 @@ pub enum Inbound<A: App> {
     Written(Written),
     /// The housekeeping thread saw a file change.
     Seen(Seen),
-    /// The rest of a drain that reached [`PENDING_PER_DRAIN`]: posted by the core to itself.
-    Continue,
+    /// The rest of a drain that reached [`PENDING_PER_DRAIN`]: posted by the core to itself, and
+    /// by nothing else (the token cannot be made outside this crate).
+    Continue(Continuation),
 }
+
+/// The core's own token for [`Inbound::Continue`].
+pub struct Continuation(());
 
 /// A job the core is waiting on.
 struct Waiting<C> {
@@ -93,6 +97,13 @@ pub struct Core<A: App> {
     inbox: Inbox<Inbound<A>>,
     pending: RefCell<VecDeque<(Option<Invocation>, A::Command)>>,
     applying: Cell<bool>,
+    /// Queued commands this wake may still apply: one [`PENDING_PER_DRAIN`] per wake, shared by
+    /// every drain within it, so a flood is bounded per wake and not per call.
+    budget: Cell<usize>,
+    /// Inside [`Core::drain`]: a `run` from within it draws on the wake's budget, not a fresh one.
+    in_wake: Cell<bool>,
+    /// Whether a `Continue` is already in the inbox: at most one is ever outstanding.
+    continue_posted: Cell<bool>,
     last_refusal: RefCell<Option<Refused>>,
     exit: Cell<Option<ExitReason>>,
     window_shown: Cell<bool>,
@@ -160,6 +171,9 @@ impl<A: App> Core<A> {
                 inbox,
                 pending: RefCell::new(VecDeque::new()),
                 applying: Cell::new(false),
+                budget: Cell::new(PENDING_PER_DRAIN),
+                in_wake: Cell::new(false),
+                continue_posted: Cell::new(false),
                 last_refusal: RefCell::new(None),
                 exit: Cell::new(None),
                 window_shown: Cell::new(true),
@@ -203,6 +217,7 @@ impl<A: App> Core<A> {
     /// Draw everything: the first render. A callback a binding fires during it is queued, as
     /// one fired during any other render is.
     pub fn render_all(&self) {
+        self.fresh_wake();
         self.applying.set(true);
         A::render(
             &self.ui,
@@ -217,6 +232,7 @@ impl<A: App> Core<A> {
     /// `App::start`, and its effects. `start` cannot change the model (it reads it), so nothing
     /// is redrawn unless it says so; the first render has just happened.
     pub fn start(&self) {
+        self.fresh_wake();
         let mut fx = Effects::starting(self.next_job.get());
         A::start(&self.model.borrow(), &mut fx);
         let (requests, changed, next) = fx.into_parts();
@@ -237,8 +253,17 @@ impl<A: App> Core<A> {
             self.queue(None, command);
             return;
         }
+        self.fresh_wake();
         let _ = self.apply(None, command);
         self.drain_pending();
+    }
+
+    /// A call from outside [`Core::drain`] (a Slint callback, a timer, the surface's hop, the
+    /// first render) is a wake of its own, with the whole budget.
+    fn fresh_wake(&self) {
+        if !self.in_wake.get() {
+            self.budget.set(PENDING_PER_DRAIN);
+        }
     }
 
     /// Apply a command that came through the surface, under an invocation. Returns the first
@@ -265,6 +290,7 @@ impl<A: App> Core<A> {
             self.queue(Some(invocation), command);
             return Ok(());
         }
+        self.fresh_wake();
         let result = self.apply(Some(invocation), command);
         self.drain_pending();
         if result.is_ok() {
@@ -282,15 +308,17 @@ impl<A: App> Core<A> {
         self.pending.borrow_mut().push_back((invocation, command));
     }
 
-    /// Applies what is queued, up to [`PENDING_PER_DRAIN`]; the rest wait for the next wake, so
-    /// the event loop draws between floods. A queued command's refusal is its invocation's
-    /// terminal outcome.
+    /// Applies what is queued while this wake's budget lasts; the rest wait for the next wake,
+    /// so the event loop draws between floods, and one `Continue` at most is left in the inbox
+    /// to bring that wake about. A queued command's refusal is its invocation's terminal
+    /// outcome.
     fn drain_pending(&self) {
-        for _ in 0..PENDING_PER_DRAIN {
+        while self.budget.get() > 0 {
             let next = self.pending.borrow_mut().pop_front();
             let Some((invocation, command)) = next else {
                 return;
             };
+            self.budget.set(self.budget.get() - 1);
             if let Some(invocation) = invocation {
                 self.count_queued(invocation.id, -1);
             }
@@ -302,12 +330,14 @@ impl<A: App> Core<A> {
                 }
             }
         }
-        if !self.pending.borrow().is_empty() {
+        if !self.pending.borrow().is_empty() && !self.continue_posted.replace(true) {
             tracing::warn!(
                 app = self.id,
-                "{PENDING_PER_DRAIN} queued commands applied in one drain; the rest wait for the next wake"
+                "{PENDING_PER_DRAIN} queued commands applied in one wake; the rest wait for the next"
             );
-            let _ = self.post.post_control(Inbound::Continue);
+            if self.post.post_control(Inbound::Continue(Continuation(()))).is_err() {
+                self.continue_posted.set(false);
+            }
         }
     }
 
@@ -553,8 +583,11 @@ impl<A: App> Core<A> {
         }
     }
 
-    /// Everything posted since the last drain, in order. The wake calls this.
+    /// Everything posted since the last drain, in order: one wake, with one budget for what is
+    /// queued. The wake calls this.
     pub fn drain(&self) {
+        self.in_wake.set(true);
+        self.budget.set(PENDING_PER_DRAIN);
         for inbound in self.inbox.drain() {
             match inbound {
                 Inbound::Command(command) => self.run(command),
@@ -562,9 +595,13 @@ impl<A: App> Core<A> {
                 Inbound::Event(event) => self.event(event),
                 Inbound::Written(written) => self.written(written),
                 Inbound::Seen(seen) => self.seen(seen),
-                Inbound::Continue => self.drain_pending(),
+                Inbound::Continue(_) => {
+                    self.continue_posted.set(false);
+                    self.drain_pending();
+                }
             }
         }
+        self.in_wake.set(false);
     }
 
     /// An event: the app's command for it, or the default. The runner raises the first
