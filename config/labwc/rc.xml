@@ -50,8 +50,13 @@
     The row is the title alone. labwc's default fields put the protocol first, so every row began
     "[xdg-shell]", and the app id after it, which is empty for the shell's own apps (seen on 520,
     17 Oct 2026).
+
+    renderer: with Yantrik's labwc build (packaging/labwc), labwc launches yantrik-switcher and
+    lets it draw the session as a stack in time (#867); labwc still owns the keys, the order and
+    the commit, and draws this OSD itself whenever the renderer is slow or gone. A stock labwc
+    ignores the attribute, so this file is the same for both.
   -->
-  <windowSwitcher show="yes" preview="no" outlines="no" allWorkspaces="yes">
+  <windowSwitcher renderer="/opt/yantrik/bin/yantrik-switcher" show="yes" preview="no" outlines="no" allWorkspaces="yes">
     <fields>
       <field content="title" width="100%" />
     </fields>

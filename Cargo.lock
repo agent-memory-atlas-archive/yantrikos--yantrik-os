@@ -11828,6 +11828,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "yantrik-switcher"
+version = "0.1.0"
+dependencies = [
+ "bitflags 2.13.2",
+ "slint",
+ "slint-build",
+ "smithay-client-toolkit 0.20.0",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-scanner",
+ "yantrik-design-tokens",
+]
+
+[[package]]
 name = "yantrik-sysmon-core-tests"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,259 @@
+// Alt+Tab, drawn (#867). labwc owns the session; this draws what it is told: the windows as a
+// stack in time, the selected one in front, older ones stepping back and fading, a time line of
+// when each was last used, and a caption. Positions, sizes and fades are computed in model.rs and
+// scaled in main.rs, so this file only paints.
+//
+// Fades are baked into the colours (`with-alpha`) rather than `opacity`, which the software
+// renderer would draw through an extra layer per card.
+import { Theme } from "theme.slint";
+
+export struct Card {
+    x: length,
+    y: length,
+    w: length,
+    h: length,
+    alpha: float,
+    front: bool,
+    name: string,
+    letter: string,
+    tile: color,
+    ago: string,
+    other-desktop: bool,
+    minimized: bool,
+}
+
+export struct Dot {
+    y: length,
+    label: string,
+    on: bool,
+}
+
+export struct Tick {
+    y: length,
+    label: string,
+}
+
+component Tile inherits Rectangle {
+    in property <string> letter;
+    in property <color> tint;
+    in property <float> alpha: 1.0;
+    in property <length> size: 24px;
+    width: root.size;
+    height: root.size;
+    border-radius: root.size * 0.24;
+    background: root.tint.with-alpha(root.alpha);
+    Text {
+        width: parent.width;
+        height: parent.height;
+        text: root.letter;
+        color: Theme.bg-deep.with-alpha(root.alpha);
+        font-size: root.size * 0.52;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+export component SwitcherView inherits Window {
+    in property <[Card]> cards;
+    in property <[Dot]> dots;
+    in property <[Tick]> ticks;
+    in property <length> line-x: 1040px;
+    in property <length> line-top: 120px;
+    in property <length> line-height: 480px;
+    in property <length> caption-x: 150px;
+    in property <length> caption-y: 640px;
+    in property <string> caption-title;
+    in property <string> caption-where;
+    in property <string> typed;
+    in property <string> more;
+    in property <float> scale: 1.0;
+
+    background: transparent;
+    default-font-family: "Barlow";
+
+    // The desktop, dimmed, so the stack reads against anything.
+    Rectangle {
+        background: #05080dc4;
+    }
+
+    // Deepest card first, so the selected one is drawn last, on top.
+    for card in root.cards: Rectangle {
+        x: card.x;
+        y: card.y;
+        width: card.w;
+        height: card.h;
+        border-radius: 14px * root.scale * card.w / (640px * root.scale);
+        background: Theme.bg-card.with-alpha(card.alpha);
+        clip: true;
+
+        // The card's head: tile, name, how long ago.
+        Rectangle {
+            y: 0;
+            height: 44px * root.scale * card.w / (640px * root.scale);
+            background: Theme.bg-elevated.with-alpha(card.alpha);
+            HorizontalLayout {
+                padding-left: parent.height * 0.32;
+                padding-right: parent.height * 0.32;
+                spacing: parent.height * 0.24;
+                alignment: start;
+                VerticalLayout {
+                    alignment: center;
+                    Tile {
+                        size: 44px * root.scale * card.w / (640px * root.scale) * 0.56;
+                        letter: card.letter;
+                        tint: card.tile;
+                        alpha: card.alpha;
+                    }
+                }
+                Text {
+                    text: card.name;
+                    color: Theme.text-primary.with-alpha(card.alpha);
+                    font-size: parent.height * 0.36;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
+                Text {
+                    text: card.ago;
+                    color: Theme.text-secondary.with-alpha(card.alpha);
+                    font-size: parent.height * 0.30;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        // The body: the app's tile, large. Pictures of windows come later (design, "Pictures").
+        Tile {
+            x: (parent.width - self.width) / 2;
+            y: parent.height * 0.5 - self.height * 0.35;
+            size: min(parent.width, parent.height) * 0.26;
+            letter: card.letter;
+            tint: card.tile;
+            alpha: card.alpha;
+        }
+        if card.other-desktop || card.minimized: Text {
+            x: 0;
+            y: parent.height - self.height - parent.height * 0.08;
+            width: parent.width;
+            horizontal-alignment: center;
+            text: card.other-desktop && card.minimized ? "on another desktop · minimized"
+                : card.other-desktop ? "on another desktop" : "minimized";
+            color: Theme.text-dim.with-alpha(card.alpha);
+            font-size: 13px * root.scale;
+        }
+
+        // The edge last, so the head does not cover it.
+        Rectangle {
+            border-radius: parent.border-radius;
+            border-width: card.front ? 2px : 1px;
+            border-color: card.front ? Theme.accent : Theme.border-card.with-alpha(card.alpha * 0.9);
+        }
+    }
+
+    // The time line: when each window was last used.
+    Text {
+        x: root.line-x - 80px * root.scale;
+        y: root.line-top - 36px * root.scale;
+        text: "HOW LONG AGO";
+        color: Theme.text-dim;
+        font-size: 12px * root.scale;
+        letter-spacing: 1.2px * root.scale;
+    }
+    Rectangle {
+        x: root.line-x;
+        y: root.line-top;
+        width: 2px * root.scale;
+        height: root.line-height;
+        background: Theme.border-strong;
+    }
+    for tick in root.ticks: Text {
+        x: root.line-x - 72px * root.scale;
+        y: tick.y - 8px * root.scale;
+        width: 62px * root.scale;
+        horizontal-alignment: right;
+        text: tick.label;
+        color: Theme.text-dim;
+        font-size: 12px * root.scale;
+        font-family: "JetBrains Mono";
+    }
+    for dot in root.dots: Rectangle {
+        x: root.line-x + 1px * root.scale - self.width / 2;
+        y: dot.y - self.height / 2;
+        width: (dot.on ? 12px : 8px) * root.scale;
+        height: self.width;
+        border-radius: self.width / 2;
+        background: dot.on ? Theme.accent : Theme.text-dim;
+        Text {
+            x: 18px * root.scale;
+            y: (parent.height - self.height) / 2;
+            text: dot.label;
+            color: dot.on ? Theme.text-primary : Theme.text-secondary;
+            font-size: (dot.on ? 15px : 13px) * root.scale;
+            font-weight: dot.on ? 600 : 400;
+            overflow: elide;
+            width: 200px * root.scale;
+        }
+    }
+
+    // The caption: what the selected window is, where, and when it was last used.
+    VerticalLayout {
+        x: root.caption-x;
+        y: root.caption-y;
+        width: 760px * root.scale;
+        height: 70px * root.scale;
+        spacing: 6px * root.scale;
+        Text {
+            text: root.caption-title;
+            color: Theme.text-primary;
+            font-size: 22px * root.scale;
+            font-weight: 600;
+            overflow: elide;
+        }
+        Text {
+            text: root.caption-where;
+            color: Theme.text-secondary;
+            font-size: 15px * root.scale;
+            overflow: elide;
+        }
+    }
+
+    if root.typed != "": Rectangle {
+        x: 56px * root.scale;
+        y: 58px * root.scale;
+        width: 360px * root.scale;
+        height: 44px * root.scale;
+        border-radius: 10px * root.scale;
+        background: Theme.bg-card;
+        border-width: 1px;
+        border-color: Theme.accent;
+        Text {
+            x: 16px * root.scale;
+            text: "Jump to: " + root.typed;
+            color: Theme.text-primary;
+            font-size: 16px * root.scale;
+            vertical-alignment: center;
+        }
+    }
+
+    if root.more != "": Text {
+        x: 700px * root.scale;
+        y: 40px * root.scale;
+        text: root.more;
+        color: Theme.text-dim;
+        font-size: 13px * root.scale;
+    }
+
+    // What the keys do. Arrows and Escape are labwc's, as they always were.
+    Text {
+        x: 0;
+        y: root.height - 52px * root.scale;
+        width: root.width;
+        horizontal-alignment: center;
+        text: "Tab  deeper     Shift+Tab  back up     release Alt  go there     type  jump     Esc  stay put";
+        color: Theme.text-dim;
+        font-size: 13px * root.scale;
+        font-family: "JetBrains Mono";
+    }
+}
