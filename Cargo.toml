@@ -108,6 +108,10 @@ members = [
     "frameworks/yantrik-app",
     # How an app is tested without a display (dev-only).
     "frameworks/yantrik-testing",
+    # The typed clients every app reaches the platform through (design/app-framework-2026-10-21.md, §5).
+    "frameworks/yantrik-services",
+    "frameworks/yantrik-mind",
+    "frameworks/yantrik-notifications",
     # The toy app on the framework: the runner, a model, commands, a job and a timer.
     "examples/hello-app",
     # YantrikFoundation: the rules every app, service and the shell share (docs/architecture.md, L0).
@@ -204,6 +208,9 @@ yantrik-shown-address = { path = "crates/yantrik-shown-address" }
 yantrik-app-build = { path = "frameworks/yantrik-app-build" }
 yantrik-app = { path = "frameworks/yantrik-app" }
 yantrik-testing = { path = "frameworks/yantrik-testing" }
+yantrik-services = { path = "frameworks/yantrik-services" }
+yantrik-mind = { path = "frameworks/yantrik-mind" }
+yantrik-notifications = { path = "frameworks/yantrik-notifications" }
 yantrik-foundation = { path = "frameworks/yantrik-foundation" }
 yantrik-file-follow = { path = "crates/yantrik-file-follow" }
 yantrik-install-target = { path = "crates/yantrik-install-target" }

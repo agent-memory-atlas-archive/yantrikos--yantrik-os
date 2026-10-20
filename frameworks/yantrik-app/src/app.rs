@@ -75,6 +75,10 @@ pub enum Event<S> {
     DraftSaved(String),
     /// A draft did not reach the disk. `None` files a problem record.
     DraftNotSaved { name: String, why: String },
+    /// Whether the Mind can answer changed (the shell came or went, a model answered or did not),
+    /// as the housekeeping thread heard it. An app with an AI control shows `reach.hint()` in its
+    /// place, or offers it again. `None` does nothing.
+    ReachChanged(yantrik_mind::Reach),
 }
 
 /// What the runner knows before any window exists.

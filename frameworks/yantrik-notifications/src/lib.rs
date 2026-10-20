@@ -8,7 +8,7 @@
 //! the notifications service existed and **nothing in the tree ever called it**.
 //!
 //! ```rust,ignore
-//! use yantrik_app_runtime::notify::{self, Notification};
+//! use yantrik_notifications::{self as notify, Notification};
 //!
 //! notify::send(
 //!     Notification::new("Downloads", "debian-13.iso finished")
@@ -90,6 +90,28 @@ impl Notification {
             replaces_id: None,
             image: None,
         }
+    }
+
+    /// The one line being said, with the speaker left for the framework to fill in from the
+    /// app's own id (`fx.notify`), so no app spells its own name twice.
+    pub fn titled(title: impl Into<String>) -> Self {
+        Notification::new("", title)
+    }
+
+    /// Names the speaker if [`Notification::titled`] left it blank.
+    pub fn from_app(mut self, app: &str) -> Self {
+        if self.app.is_empty() {
+            self.app = app.to_string();
+        }
+        self
+    }
+
+    pub fn app(&self) -> &str {
+        &self.app
+    }
+
+    pub fn title(&self) -> &str {
+        &self.title
     }
 
     /// A sentence or two of detail under the title.
@@ -197,7 +219,7 @@ fn deliver(request: AddRequest) {
     let app = request.app.clone();
     let title = request.title.clone();
 
-    if let Err(e) = crate::service::ensure(SERVICE) {
+    if let Err(e) = yantrik_ipc_transport::service::ensure(SERVICE) {
         report_unreachable(&app, &title, &e);
         return;
     }
@@ -244,12 +266,18 @@ mod tests {
     use super::*;
     use std::time::Instant;
 
+    /// Held by every test that sets `XDG_RUNTIME_DIR`: the environment is process-wide.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
     #[test]
     fn a_send_returns_immediately_with_no_service_running() {
         // The whole point. This runs in a test process with no notifications socket and no
         // shell to ask for one, so the delivery thread will spend a couple of seconds failing —
         // and the caller, which in a real app is the UI thread, must not wait for any of it.
-        let _env = crate::env_lock();
+        let _env = env_lock();
         std::env::set_var("XDG_RUNTIME_DIR", std::env::temp_dir());
         let started = Instant::now();
         for i in 0..3 {
@@ -266,7 +294,7 @@ mod tests {
     fn the_number_of_sends_in_flight_is_bounded() {
         // Anything on this machine can call `send`. A caller in a loop has to lose
         // notifications rather than spawn threads until the process dies.
-        let _env = crate::env_lock();
+        let _env = env_lock();
         std::env::set_var("XDG_RUNTIME_DIR", std::env::temp_dir());
         for i in 0..(MAX_IN_FLIGHT * 20) {
             send(Notification::new("flood", format!("{i}")));

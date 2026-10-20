@@ -151,6 +151,7 @@ impl<A: App> Core<A> {
     pub(super) fn seen(&self, seen: Seen) {
         match seen {
             Seen::Theme(theme) => self.ui.apply_theme(&theme),
+            Seen::Reach(reach) => self.event(Event::ReachChanged(reach)),
             Seen::SettingsFile => {
                 let reloaded = self.settings.borrow_mut().reload();
                 match reloaded {

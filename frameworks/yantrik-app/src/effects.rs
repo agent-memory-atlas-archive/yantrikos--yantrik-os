@@ -61,6 +61,8 @@ pub enum Request<A: App> {
     },
     /// The draft's file removed.
     DiscardDraft(String),
+    /// One line to the person through the notifications service, from this app.
+    Notify(yantrik_notifications::Notification),
     Close(WindowId),
     Exit,
 }
@@ -271,6 +273,23 @@ impl<A: App> Effects<A> {
         self.requests.push(Request::DiscardDraft(name.into()));
     }
 
+    /// Tell the person something, in one line, through the notifications service. Never blocks;
+    /// a button on it names one of this app's intents, which the shell calls when it is pressed.
+    /// `Notification::titled` leaves the app's name for the framework to fill in.
+    pub fn notify(&mut self, notification: yantrik_notifications::Notification) {
+        self.requests.push(Request::Notify(notification));
+    }
+
+    /// Ask the desktop for something (open a web address or a file, copy text) off the UI
+    /// thread; `then` turns what came of it into the command that carries it back.
+    pub fn desktop(
+        &mut self,
+        request: crate::desktop::DesktopRequest,
+        then: impl FnOnce(crate::desktop::DesktopOutcome) -> A::Command + Send + 'static,
+    ) -> JobId {
+        self.spawn(move |_| then(crate::desktop::perform(request)))
+    }
+
     /// Close a window. A `CloseRequested` flow ends here once any saving is done.
     pub fn close(&mut self, window: WindowId) {
         self.requests.push(Request::Close(window));
@@ -310,6 +329,7 @@ impl<A: App> Request<A> {
             Request::SaveSettings { .. } => "save_settings",
             Request::SaveDraft { .. } => "save_draft",
             Request::DiscardDraft(_) => "discard_draft",
+            Request::Notify(_) => "notify",
             Request::Close(_) => "close",
             Request::Exit => "exit",
         }

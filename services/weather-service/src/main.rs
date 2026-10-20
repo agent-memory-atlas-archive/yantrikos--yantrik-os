@@ -178,6 +178,26 @@ impl ServiceHandler for WeatherHandler {
                 let result = fetch_alerts(&loc, fahrenheit)?;
                 Ok(serde_json::to_value(result).unwrap())
             }
+            // Everything about a place in one answer: what an app's refresh asks for (the app
+            // framework's step 5), in place of five round trips, each a provider request.
+            "weather.forecast" => {
+                let loc = parse_location(&params)?;
+                let fahrenheit = params["fahrenheit"].as_bool().unwrap_or(false);
+                let days = params["days"].as_u64().unwrap_or(7) as u32;
+                let hours = params["hours"].as_u64().unwrap_or(24) as u32;
+                self.places.remember(&loc, fahrenheit);
+                let outlook = fetch_outlook(&loc, fahrenheit)?;
+                let current = outlook.current.clone();
+                self.places.learned(&loc, fahrenheit, outlook);
+                let result = yantrik_ipc_contracts::weather::Forecast {
+                    current,
+                    hourly: fetch_hourly(&loc, hours, fahrenheit)?,
+                    daily: fetch_daily(&loc, days, fahrenheit)?,
+                    alerts: fetch_alerts(&loc, fahrenheit)?,
+                    air_quality: fetch_air_quality(&loc)?,
+                };
+                Ok(serde_json::to_value(result).unwrap())
+            }
             "weather.air_quality" => {
                 let loc = parse_location(&params)?;
                 let result = fetch_air_quality(&loc)?;

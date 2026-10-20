@@ -28,6 +28,7 @@ use yantrik_app::jobs::{Concurrency, JobKey, Scope};
 use yantrik_app::refused::Refused;
 use yantrik_app::settings::{Health, Settings};
 use yantrik_app::timers::TimerId;
+use yantrik_app::Notification;
 
 slint::include_modules!();
 yantrik_app::window!(HelloApp);
@@ -69,6 +70,8 @@ pub struct Model {
     pub opened: Vec<PathBuf>,
     /// What was typed and not yet cleared: a draft.
     pub text: String,
+    /// Whether the Mind can answer, as last heard; `None` until the first word.
+    pub reach: Option<yantrik_app::mind::Reach>,
 }
 
 #[derive(Debug, Clone)]
@@ -81,6 +84,8 @@ pub enum Command {
     Tick,
     /// The count back to zero.
     Reset,
+    /// The Mind's reach, as the watcher heard it.
+    Reach(yantrik_app::mind::Reach),
     /// A new step, saved.
     SetStep(i32),
     /// The step as the file says now (edited outside this app).
@@ -177,13 +182,25 @@ impl App for Hello {
                 );
             }
             Command::Fetched(result) => {
-                m.fetched = Some(result.unwrap_or_else(|e| format!("not fetched: {e}")));
+                let line = match &result {
+                    Ok(text) => text.clone(),
+                    Err(e) => format!("not fetched: {e}"),
+                };
+                // One line to the person, through the notifications service; the button calls
+                // this app's own `add` intent when it is pressed.
+                fx.notify(Notification::titled(line.clone()).action("add", "Count it"));
+                m.fetched = Some(line);
                 fx.changed(PART_FETCH);
             }
             Command::Tick => m.ticks += 1,
             Command::Reset => {
                 m.count = 0;
                 fx.changed(PART_COUNT);
+            }
+            Command::Reach(reach) => {
+                m.reach = Some(reach);
+                m.note = reach.hint().map(str::to_string);
+                fx.changed(PART_NOTE);
             }
         }
         Ok(())
@@ -213,6 +230,7 @@ impl App for Hello {
     fn event(event: Event<Prefs>, _: &Model) -> Option<Command> {
         match event {
             Event::Launch(launch) if !launch.files.is_empty() => Some(Command::Open(launch.files)),
+            Event::ReachChanged(reach) => Some(Command::Reach(reach)),
             Event::SettingsChangedOutside(prefs) => Some(Command::StepFromFile(prefs)),
             Event::SettingsNotSaved(why) => Some(Command::Note(Some(why))),
             Event::SettingsSaved => Some(Command::Note(None)),
@@ -448,6 +466,23 @@ mod tests {
         drop(app);
         let app = TestApp::<Hello>::start_at(paths, Vec::new());
         assert_eq!(app.model(|m| m.text.clone()), "");
+    }
+
+    /// A notification never holds the UI thread (there is no service in a test, and the send
+    /// still returns at once), and the Mind's reach reaches the app as an event.
+    #[test]
+    fn a_notification_does_not_wait_and_the_minds_reach_is_an_event() {
+        use yantrik_app::mind::Reach;
+        let app = TestApp::<Hello>::start();
+        let started = std::time::Instant::now();
+        app.run(Command::Fetched(Ok("the weather is fine".into())));
+        assert!(started.elapsed() < Duration::from_millis(500), "the notify held the UI thread");
+        assert_eq!(app.model(|m| m.reach), None);
+        app.seen(Seen::Reach(Reach::NoModel));
+        assert_eq!(app.model(|m| m.reach), Some(Reach::NoModel));
+        assert_eq!(app.ui(|ui| ui.get_notice()), yantrik_app::mind::NO_MODEL_HINT);
+        app.seen(Seen::Reach(Reach::Ready));
+        assert_eq!(app.ui(|ui| ui.get_notice()), "");
     }
 
     #[test]
