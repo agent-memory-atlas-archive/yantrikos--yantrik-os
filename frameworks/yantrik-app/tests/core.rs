@@ -445,14 +445,31 @@ fn a_rejected_job_runs_its_failed_command() {
 /// wait for the next wake.
 #[test]
 fn a_then_cycle_yields_to_the_event_loop() {
+    use yantrik_app::cx::PENDING_PER_DRAIN;
     let app = TestApp::<Counter>::start();
     app.run(Command::Ping);
-    let pings = app.model(|m| m.log.iter().filter(|l| *l == "ping").count());
-    assert_eq!(pings, yantrik_app::cx::PENDING_PER_DRAIN + 1);
+    let pings = || app.model(|m| m.log.iter().filter(|l| *l == "ping").count());
+    assert_eq!(pings(), PENDING_PER_DRAIN + 1);
     assert_eq!(app.pending_commands(), 1, "the rest waits");
+    // Other commands arrive meanwhile: the budget is one per wake, shared by all of them, so a
+    // wake applies one budget of pings however many commands it drains, and the inbox holds at
+    // most one `Continue`, so posting to it keeps working while the cycle runs.
+    let post = app.post();
+    for _ in 0..100 {
+        post.post(Inbound::Command(Command::Add(0))).unwrap();
+    }
     app.tick();
-    let pings = app.model(|m| m.log.iter().filter(|l| *l == "ping").count());
-    assert_eq!(pings, 2 * yantrik_app::cx::PENDING_PER_DRAIN + 1);
+    assert_eq!(pings(), 2 * PENDING_PER_DRAIN + 1, "one budget for the whole wake");
+    assert_eq!(app.pending_commands(), 1);
+    assert!(
+        post.post(Inbound::Command(Command::Add(0))).is_ok(),
+        "the inbox is not full of continues"
+    );
+    app.tick();
+    assert_eq!(pings(), 3 * PENDING_PER_DRAIN + 1);
+    // A wake of its own (a button) gets its own budget.
+    app.run(Command::Add(0));
+    assert_eq!(pings(), 4 * PENDING_PER_DRAIN + 1);
 }
 
 /// An `update` that changes the model and does not say which part redraws every part.
