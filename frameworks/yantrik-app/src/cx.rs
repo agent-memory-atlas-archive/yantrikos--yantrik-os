@@ -8,18 +8,25 @@
 //! uses.
 //!
 //! Re-entrancy: a command raised while one is being applied (from `then`, or a Slint callback
-//! fired by `render`) is queued and applied after the current one's render, never nested.
+//! fired by `render`) is queued and applied after the current one's render, never nested. One
+//! drain applies at most [`PENDING_PER_DRAIN`] queued commands before yielding to the event
+//! loop, so a `then` cycle cannot freeze drawing.
+//!
+//! Capacity: commands share the bounded inbox and a flood of them is refused; a job's outcome
+//! does not. It goes through the inbox's reserved lane, bounded by the pool itself, so saturation
+//! never loses a result and never leaves a key marked running (§4).
 //!
 //! Invocations: a command that came through the surface runs under an [`Invocation`]; the jobs
 //! and `then` chains it starts carry it, so a late result, a panic or a replacement is known to
-//! belong to it, and an intent that settles explicitly is answered exactly once.
+//! belong to it, and an intent that settles explicitly is answered exactly once, and only when
+//! nothing of it is still running or queued.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
-use std::rc::Rc;
-use std::sync::{mpsc, Arc};
+use std::ops::Deref;
+use std::rc::{Rc, Weak};
+use std::sync::Arc;
 
-use serde_json::Value;
 use slint::ComponentHandle as _;
 
 use crate::app::{App, Changed, Event, ExitReason, WindowId};
@@ -34,18 +41,25 @@ use crate::timers::Timers;
 mod settlement;
 use settlement::Open;
 
+/// How many queued (`then`) commands one drain applies before the rest wait for the next wake.
+pub const PENDING_PER_DRAIN: usize = queue::CAPACITY;
+
 /// What reaches the core from any thread.
 pub enum Inbound<A: App> {
     Command(A::Command),
     Finished(Finished<A::Command>),
     Event(Event),
+    /// The rest of a drain that reached [`PENDING_PER_DRAIN`]: posted by the core to itself.
+    Continue,
 }
 
 /// A job the core is waiting on.
-struct Waiting {
+struct Waiting<C> {
     cancel: Cancel,
     key: Option<JobKey>,
     invocation: Option<Invocation>,
+    /// Applied if the job ends without a result (a panic, a refusal), so the app hears of it.
+    failed: Option<C>,
 }
 
 /// The core, on the UI thread. One per app process; a test makes its own.
@@ -55,7 +69,7 @@ pub struct Core<A: App> {
     ui: A::Ui,
     timers: RefCell<Box<dyn Timers<A::Command>>>,
     executor: RefCell<Box<dyn Executor<A::Command>>>,
-    jobs: RefCell<HashMap<JobId, Waiting>>,
+    jobs: RefCell<HashMap<JobId, Waiting<A::Command>>>,
     by_key: RefCell<HashMap<JobKey, JobId>>,
     next_job: Cell<u64>,
     next_invocation: Cell<u64>,
@@ -75,8 +89,9 @@ struct PostDeliver<A: App>(Post<Inbound<A>>);
 
 impl<A: App> Deliver<A::Command> for PostDeliver<A> {
     fn deliver(&self, finished: Finished<A::Command>) {
-        // A late result after shutdown is dropped, as the design says it must be.
-        let _ = self.0.post(Inbound::Finished(finished));
+        // The reserved lane: a full inbox of commands cannot lose a result. A late result after
+        // shutdown is dropped, as the design says it must be.
+        let _ = self.0.post_control(Inbound::Finished(finished));
     }
 }
 
@@ -91,7 +106,7 @@ impl<A: App> Core<A> {
         wake: Wake,
     ) -> Rc<Core<A>> {
         let (post, inbox) = queue::bounded(queue::CAPACITY, wake);
-        Rc::new_cyclic(|weak: &std::rc::Weak<Core<A>>| {
+        Rc::new_cyclic(|weak: &Weak<Core<A>>| {
             let sink_core = weak.clone();
             let sink: crate::timers::Sink<A::Command> = Rc::new(move |command| {
                 if let Some(core) = sink_core.upgrade() {
@@ -149,34 +164,41 @@ impl<A: App> Core<A> {
         self.exit.get()
     }
 
-    /// Draw everything: the first render.
+    /// Draw everything: the first render. A callback a binding fires during it is queued, as
+    /// one fired during any other render is.
     pub fn render_all(&self) {
+        self.applying.set(true);
         A::render(
             &self.ui,
             WindowId::PRIMARY,
             &self.model.borrow(),
             &Changed::all(),
         );
+        self.applying.set(false);
+        self.drain_pending();
     }
 
-    /// `App::start`, and its effects.
+    /// `App::start`, and its effects. `start` cannot change the model (it reads it), so nothing
+    /// is redrawn unless it says so; the first render has just happened.
     pub fn start(&self) {
-        let mut fx = Effects::new(self.next_job.get(), None);
+        let mut fx = Effects::starting(self.next_job.get());
         A::start(&self.model.borrow(), &mut fx);
         let (requests, changed, next) = fx.into_parts();
         self.next_job.set(next);
+        self.applying.set(true);
         self.current.set(None);
         self.commit(requests);
         if !changed.is_empty() {
             A::render(&self.ui, WindowId::PRIMARY, &self.model.borrow(), &changed);
         }
+        self.applying.set(false);
         self.drain_pending();
     }
 
     /// Apply a local command now (on the UI thread), or queue it if one is being applied.
     pub fn run(&self, command: A::Command) {
         if self.applying.get() {
-            self.pending.borrow_mut().push_back((None, command));
+            self.queue(None, command);
             return;
         }
         let _ = self.apply(None, command);
@@ -185,13 +207,16 @@ impl<A: App> Core<A> {
 
     /// Apply a command that came through the surface, under an invocation. Returns the first
     /// command's refusal, if it was refused. An explicit settlement opened for `id` is settled
-    /// here with the reply when the invocation started no job.
+    /// here with the reply when the invocation started no job and queued nothing more.
     pub fn run_invocation(
         &self,
         origin: Origin,
         command: A::Command,
         id: Option<InvocationId>,
     ) -> Result<(), Refused> {
+        if self.post.is_closed() {
+            return Err(Refused::new("closing", "The app is closing."));
+        }
         let id = id.unwrap_or_else(|| {
             let id = InvocationId(self.next_invocation.get());
             self.next_invocation.set(id.0 + 1);
@@ -201,9 +226,7 @@ impl<A: App> Core<A> {
         if self.applying.get() {
             // A surface call while a command is applied cannot happen on one UI thread, but the
             // queue is the safe answer if it ever does.
-            self.pending
-                .borrow_mut()
-                .push_back((Some(invocation), command));
+            self.queue(Some(invocation), command);
             return Ok(());
         }
         let result = self.apply(Some(invocation), command);
@@ -214,17 +237,47 @@ impl<A: App> Core<A> {
         result
     }
 
+    /// Queues a command behind the one being applied, under `invocation` if it has one; an open
+    /// settlement counts it, so the invocation is not settled while it waits.
+    fn queue(&self, invocation: Option<Invocation>, command: A::Command) {
+        if let Some(invocation) = invocation {
+            self.count_queued(invocation.id, 1);
+        }
+        self.pending.borrow_mut().push_back((invocation, command));
+    }
+
+    /// Applies what is queued, up to [`PENDING_PER_DRAIN`]; the rest wait for the next wake, so
+    /// the event loop draws between floods. A queued command's refusal is its invocation's
+    /// terminal outcome.
     fn drain_pending(&self) {
-        loop {
+        for _ in 0..PENDING_PER_DRAIN {
             let next = self.pending.borrow_mut().pop_front();
             let Some((invocation, command)) = next else {
                 return;
             };
-            let _ = self.apply(invocation, command);
             if let Some(invocation) = invocation {
-                self.settle_if_idle(invocation.id);
+                self.count_queued(invocation.id, -1);
+            }
+            let result = self.apply(invocation, command);
+            if let Some(invocation) = invocation {
+                match result {
+                    Ok(()) => self.settle_if_idle(invocation.id),
+                    Err(refused) => self.settle(invocation.id, Err(refused.sentence)),
+                }
             }
         }
+        if !self.pending.borrow().is_empty() {
+            tracing::warn!(
+                app = self.id,
+                "{PENDING_PER_DRAIN} queued commands applied in one drain; the rest wait for the next wake"
+            );
+            let _ = self.post.post_control(Inbound::Continue);
+        }
+    }
+
+    /// Commands queued and not yet applied.
+    pub fn pending_commands(&self) -> usize {
+        self.pending.borrow().len()
     }
 
     /// One command: update, commit its effects if it was accepted, render what changed.
@@ -258,15 +311,19 @@ impl<A: App> Core<A> {
     }
 
     /// The effects of an accepted command, in order. `self.current` is the invocation it ran
-    /// under.
+    /// under. Always under `applying`, so a command an effect raises is queued.
     fn commit(&self, requests: Vec<Request<A>>) {
         let invocation = self.current.get();
         for request in requests {
             match request {
-                Request::Then(command) => {
-                    self.pending.borrow_mut().push_back((invocation, command))
-                }
-                Request::Spawn { id, key, mode, job } => self.spawn(id, key, mode, job, invocation),
+                Request::Then(command) => self.queue(invocation, command),
+                Request::Spawn {
+                    id,
+                    key,
+                    mode,
+                    failed,
+                    job,
+                } => self.spawn(id, key, mode, failed, job, invocation),
                 Request::Cancel(id) => self.cancel(id),
                 Request::Every {
                     id,
@@ -303,9 +360,11 @@ impl<A: App> Core<A> {
         id: JobId,
         key: Option<JobKey>,
         mode: Concurrency,
+        failed: Option<A::Command>,
         job: crate::jobs::Job<A::Command>,
         invocation: Option<Invocation>,
     ) {
+        let mut replaces = None;
         if let Some(key) = &key {
             let running = self.by_key.borrow().get(key).copied();
             match (running, mode) {
@@ -315,9 +374,21 @@ impl<A: App> Core<A> {
                         ?key,
                         "a job of this kind is running; this one is not started"
                     );
+                    // The work was refused: an invocation waiting on it is told so, not told
+                    // "done" from a model the job never touched; and the app hears of it through
+                    // its `failed` command, as it would of a panic.
+                    if let Some(invocation) = invocation {
+                        self.settle(
+                            invocation.id,
+                            Err("a job of this kind is already running".into()),
+                        );
+                    }
+                    if let Some(failed) = failed {
+                        self.queue(invocation, failed);
+                    }
                     return;
                 }
-                (Some(old), Concurrency::ReplacePrevious) => self.cancel(old),
+                (Some(old), Concurrency::ReplacePrevious) => replaces = Some(old),
                 _ => {}
             }
             self.by_key.borrow_mut().insert(key.clone(), id);
@@ -329,12 +400,18 @@ impl<A: App> Core<A> {
                 cancel: cancel.clone(),
                 key,
                 invocation,
+                failed,
             },
         );
         if let Some(invocation) = invocation {
             if let Some(open) = self.open.borrow_mut().get_mut(&invocation.id) {
                 open.jobs += 1;
             }
+        }
+        // The new job is counted before the old one is cancelled, so a replacement within one
+        // invocation never leaves it with nothing running for an instant and settles it.
+        if let Some(old) = replaces {
+            self.cancel(old);
         }
         let deliver: Arc<dyn Deliver<A::Command>> = Arc::new(PostDeliver(self.post.clone()));
         self.executor.borrow_mut().spawn(id, cancel, job, deliver);
@@ -369,7 +446,8 @@ impl<A: App> Core<A> {
     }
 
     /// A finished job: its result is applied only if the core is still waiting on it, under the
-    /// invocation it started from.
+    /// invocation it started from. A job that ended without a result (a panic, a refusal) runs
+    /// the `failed` command it was spawned with, and an invocation waiting on it is told.
     fn finished(&self, finished: Finished<A::Command>) {
         match finished {
             Finished::Done { id, command } => {
@@ -379,31 +457,52 @@ impl<A: App> Core<A> {
                     return;
                 };
                 self.forget_key(id, waiting.key);
-                let last = waiting.invocation.is_some_and(|i| self.job_landed(i.id));
+                if let Some(invocation) = waiting.invocation {
+                    self.job_landed(invocation.id);
+                }
                 if self.applying.get() {
-                    self.pending
-                        .borrow_mut()
-                        .push_back((waiting.invocation, command));
+                    self.queue(waiting.invocation, command);
                 } else {
-                    let _ = self.apply(waiting.invocation, command);
+                    let result = self.apply(waiting.invocation, command);
                     self.drain_pending();
-                }
-                if let (true, Some(invocation)) = (last, waiting.invocation) {
-                    self.settle_if_idle(invocation.id);
-                }
-            }
-            Finished::Panicked { id, what } => {
-                let waited = self.jobs.borrow_mut().remove(&id);
-                tracing::error!(app = self.id, job = id.0, what, "a job panicked");
-                problems::record_failure(self.id, "job", &what);
-                if let Some(waiting) = waited {
-                    self.forget_key(id, waiting.key);
                     if let Some(invocation) = waiting.invocation {
-                        if self.job_landed(invocation.id) {
-                            self.settle(invocation.id, Err(format!("the work failed: {what}")));
+                        match result {
+                            Ok(()) => self.settle_if_idle(invocation.id),
+                            Err(refused) => self.settle(invocation.id, Err(refused.sentence)),
                         }
                     }
                 }
+            }
+            Finished::Panicked { id, what } => {
+                tracing::error!(app = self.id, job = id.0, what, "a job panicked");
+                problems::record_failure(self.id, "job", &what);
+                self.ended_without_result(id, format!("the work failed: {what}"));
+            }
+            Finished::Refused { id, why } => {
+                tracing::warn!(app = self.id, job = id.0, why, "a job was not started");
+                problems::record_failure(self.id, "job_refused", &why);
+                self.ended_without_result(id, format!("the work could not start: {why}"));
+            }
+        }
+    }
+
+    fn ended_without_result(&self, id: JobId, outcome: String) {
+        let waited = self.jobs.borrow_mut().remove(&id);
+        let Some(waiting) = waited else {
+            return;
+        };
+        self.forget_key(id, waiting.key);
+        if let Some(invocation) = waiting.invocation {
+            if self.job_landed(invocation.id) {
+                self.settle(invocation.id, Err(outcome));
+            }
+        }
+        if let Some(failed) = waiting.failed {
+            if self.applying.get() {
+                self.queue(waiting.invocation, failed);
+            } else {
+                let _ = self.apply(waiting.invocation, failed);
+                self.drain_pending();
             }
         }
     }
@@ -415,6 +514,7 @@ impl<A: App> Core<A> {
                 Inbound::Command(command) => self.run(command),
                 Inbound::Finished(finished) => self.finished(finished),
                 Inbound::Event(event) => self.event(event),
+                Inbound::Continue => self.drain_pending(),
             }
         }
     }
@@ -487,9 +587,10 @@ impl<A: App> Core<A> {
     }
 }
 
-/// The handle a view binds callbacks with. Cloning shares the core; it never leaves the UI
-/// thread (it holds an `Rc`).
-pub struct Cx<A: App>(pub(crate) Rc<Core<A>>);
+/// The handle a view binds callbacks with. It holds the core weakly: the callbacks live in the
+/// window, the window lives in the core, and a strong handle there would keep the core alive
+/// for ever. Cloning shares it; it never leaves the UI thread.
+pub struct Cx<A: App>(pub(crate) Weak<Core<A>>);
 
 impl<A: App> Clone for Cx<A> {
     fn clone(&self) -> Self {
@@ -497,31 +598,55 @@ impl<A: App> Clone for Cx<A> {
     }
 }
 
+/// The window, borrowed through a [`Cx`] for as long as the guard lives.
+pub struct UiRef<A: App>(Rc<Core<A>>);
+
+impl<A: App> Deref for UiRef<A> {
+    type Target = A::Ui;
+
+    fn deref(&self) -> &A::Ui {
+        &self.0.ui
+    }
+}
+
 impl<A: App> Cx<A> {
     pub fn new(core: Rc<Core<A>>) -> Cx<A> {
-        Cx(core)
+        Cx(Rc::downgrade(&core))
     }
 
     pub fn id(&self) -> &'static str {
-        self.0.id
+        A::ID
+    }
+
+    /// The core, while it lives. At wire time it always does; a callback fired as the window is
+    /// torn down may find it gone, and then does nothing.
+    fn core(&self) -> Option<Rc<Core<A>>> {
+        self.0.upgrade()
+    }
+
+    fn core_or_panic(&self) -> Rc<Core<A>> {
+        self.core().expect("the core outlives the window bound to it")
     }
 
     pub fn run(&self, command: impl Into<A::Command>) {
-        self.0.run(command.into());
+        match self.core() {
+            Some(core) => core.run(command.into()),
+            None => tracing::debug!(app = A::ID, "a command after the core was dropped; ignored"),
+        }
     }
 
     pub fn read<R>(&self, f: impl FnOnce(&A::Model) -> R) -> R {
-        self.0.read(f)
+        self.core_or_panic().read(f)
     }
 
     /// The window, for a view that binds a list model at wire time. Not for `update`.
-    pub fn ui(&self) -> &A::Ui {
-        &self.0.ui
+    pub fn ui(&self) -> UiRef<A> {
+        UiRef(self.core_or_panic())
     }
 
     /// The `Send` endpoint, for tests and for anything off the UI thread.
     pub fn post(&self) -> Post<Inbound<A>> {
-        self.0.post()
+        self.core_or_panic().post()
     }
 
     /// A Slint callback of no arguments that runs the command `f` makes.
@@ -550,7 +675,11 @@ impl<A: App> Cx<A> {
         let cx = self.clone();
         move |t| match f(t) {
             Ok(command) => cx.run(command),
-            Err(refused) => cx.0.refuse(refused),
+            Err(refused) => {
+                if let Some(core) = cx.core() {
+                    core.refuse(refused);
+                }
+            }
         }
     }
 }

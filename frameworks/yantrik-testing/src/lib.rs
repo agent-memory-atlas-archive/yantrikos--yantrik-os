@@ -56,10 +56,13 @@ pub mod headless {
             &self,
             event: Box<dyn FnOnce() + Send>,
         ) -> Result<(), slint::EventLoopError> {
-            // There is no loop to hand it to: a test's posts are drained by `TestApp::tick`.
-            // What Slint itself posts (nothing, in a headless test) runs at once.
-            event();
-            Ok(())
+            // Onto the one UI thread, as a step of its own, whichever thread asked: a closure
+            // that upgrades a `slint::Weak` must run where the component was made.
+            super::ui_thread()
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .send(event)
+                .map_err(|_| slint::EventLoopError::EventLoopTerminated)
         }
     }
 
@@ -156,7 +159,9 @@ impl<C: Send + 'static> Executor<C> for SharedJobs<C> {
 }
 
 /// The virtual clock, shared between the core and the test.
-struct SharedTimers<C: 'static>(Rc<RefCell<ManualTimers<C>>>);
+type Clock<C> = Rc<RefCell<ManualTimers<C>>>;
+
+struct SharedTimers<C: 'static>(Clock<C>);
 
 impl<C: 'static> Timers<C> for SharedTimers<C> {
     fn every(&mut self, id: TimerId, period: Duration, fire: Fire<C>) {
@@ -184,7 +189,7 @@ impl<C: 'static> Timers<C> for SharedTimers<C> {
 struct Under<A: App> {
     core: Rc<Core<A>>,
     jobs: SharedJobs<A::Command>,
-    clock: Rc<RefCell<ManualTimers<A::Command>>>,
+    clock: Clock<A::Command>,
     registry: LocalRegistry,
 }
 
@@ -297,8 +302,7 @@ impl<A: App> TestApp<A> {
                 .unwrap_or_else(|e| panic!("{}: the model did not start: {e}", A::ID));
             let ui = A::Ui::make().unwrap_or_else(|e| panic!("{}: no headless window: {e}", A::ID));
             let jobs = SharedJobs(Arc::new(Mutex::new(Manual::new())));
-            let made: Rc<RefCell<Option<Rc<RefCell<ManualTimers<A::Command>>>>>> =
-                Rc::new(RefCell::new(None));
+            let made: Rc<RefCell<Option<Clock<A::Command>>>> = Rc::new(RefCell::new(None));
             let made_out = made.clone();
             let core = Core::<A>::new(
                 model,
@@ -381,12 +385,26 @@ impl<A: App> TestApp<A> {
         })
     }
 
-    /// Moves the virtual clock, firing every timer that comes due.
+    /// Moves the virtual clock, firing every timer that comes due. Each timer's command runs
+    /// with the clock released, so a command that arms or stops a timer is fine.
     pub fn advance(&self, by: Duration) {
         self.with(move |u| {
-            u.clock.borrow_mut().advance(by);
+            let until = u.clock.borrow().now() + by;
+            loop {
+                let fired = u.clock.borrow_mut().fire_next(until);
+                match fired {
+                    Some(command) => u.core.run(command),
+                    None => break,
+                }
+            }
+            u.clock.borrow_mut().settle(until);
             u.core.drain();
         });
+    }
+
+    /// Commands queued behind the one being applied (`then`), not yet applied.
+    pub fn pending_commands(&self) -> usize {
+        self.with(|u| u.core.pending_commands())
     }
 
     pub fn model<R: Send + 'static>(&self, f: impl FnOnce(&A::Model) -> R + Send + 'static) -> R {

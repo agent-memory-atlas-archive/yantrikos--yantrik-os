@@ -226,8 +226,29 @@ impl<A: App> Intents<A> {
 
 /// The surface's registry for `table`, with every intent's handler bound to `core`. Serving it is
 /// the runner's (`control::App::from_registry`); a test acts on it directly.
+/// The most an intent may keep the Mind waiting for an explicit settlement, whatever it declares.
+pub const MAX_SETTLE_WAIT: Duration = Duration::from_secs(30);
+
 pub fn registry<A: App>(core: &Rc<Core<A>>, table: Intents<A>) -> LocalRegistry {
     let mut registry = LocalRegistry::new(A::ID);
+    // An intent an agent may never raise is refused by the dispatch before it decides anything,
+    // so a call that cannot run is never shown as an approval card and spends no grant. The
+    // model-reading rules (`Agents::Rule`, the app's state rule) cannot run there: they are the
+    // UI thread's, so they run in the handler, after a grant was spent, and fail closed.
+    let never_for_agents: std::collections::HashMap<String, &'static str> = table
+        .intents
+        .iter()
+        .filter_map(|i| match i.agents {
+            Agents::Refused(sentence) => Some((i.action.name.clone(), sentence)),
+            _ => None,
+        })
+        .collect();
+    registry.set_state_rule(Box::new(move |action: &str| {
+        match never_for_agents.get(action) {
+            Some(sentence) if agent_is_calling() => Err((*sentence).to_string()),
+            _ => Ok(()),
+        }
+    }));
     let weak = Rc::downgrade(core);
     let describe = weak.clone();
     registry.set_describe(Box::new(move || match describe.upgrade() {
@@ -267,6 +288,9 @@ pub fn registry<A: App>(core: &Rc<Core<A>>, table: Intents<A>) -> LocalRegistry 
                     Ok(core.read(|m| reply(m)))
                 }
                 Settle::Explicit { within } => {
+                    // The wait holds an RPC worker; an app's deadline is capped so two hung
+                    // jobs cannot pin both workers until shutdown.
+                    let within = within.min(MAX_SETTLE_WAIT);
                     let (tx, rx) = mpsc::sync_channel(1);
                     let id = core.open_settlement(tx, reply.clone());
                     if let Err(refused) = core.run_invocation(origin, command, Some(id)) {

@@ -42,6 +42,8 @@ pub enum Command {
     Fetch,
     Fetched(Result<String, String>),
     Tick,
+    /// The count back to zero.
+    Reset,
 }
 
 pub struct Hello;
@@ -97,6 +99,10 @@ impl App for Hello {
                 fx.changed(PART_FETCH);
             }
             Command::Tick => m.ticks += 1,
+            Command::Reset => {
+                m.count = 0;
+                fx.changed(PART_COUNT);
+            }
         }
         Ok(())
     }
@@ -142,7 +148,7 @@ impl App for Hello {
         table.add(
             Intent::new(
                 Action::new("reset", "Set the count back to zero").risk("sensitive"),
-                |_| Ok(Command::Add(i32::MIN / 2)),
+                |_| Ok(Command::Reset),
             )
             .agents(Agents::Refused("An agent may count but not reset.")),
         );
