@@ -9,6 +9,7 @@ name = "yantrik-switcher"
 path = "src/main.rs"
 
 [dependencies]
+yantrik-foundation = { workspace = true }
 slint = { workspace = true }
 smithay-client-toolkit = { version = "0.20", default-features = false, features = ["calloop"] }
 wayland-client = "0.31"

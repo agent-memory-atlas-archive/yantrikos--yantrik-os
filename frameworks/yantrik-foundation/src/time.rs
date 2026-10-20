@@ -89,16 +89,29 @@ pub fn ago_long(elapsed: Duration) -> String {
     }
 }
 
+/// How long ago to the minute, for a time line where the minutes matter (Alt+Tab): "4 min ago",
+/// "1 h ago", "2 h 15 min ago". From a day on it is [`ago`]'s "2 d ago".
+pub fn ago_precise(elapsed: Duration) -> String {
+    let s = elapsed.as_secs();
+    if s < HOUR || s >= DAY {
+        return ago(elapsed);
+    }
+    match (s / HOUR, (s % HOUR) / MIN) {
+        (h, 0) => format!("{h} h ago"),
+        (h, m) => format!("{h} h {m} min ago"),
+    }
+}
+
 /// [`ago`] for `then`, seen at `now`. A `then` after `now` is "just now".
 pub fn ago_between(then: SystemTime, now: SystemTime) -> String {
     ago(now.duration_since(then).unwrap_or_default())
 }
 
 /// [`ago`] for an age in seconds, as unix timestamps are subtracted. A negative or non-finite age
-/// is "just now".
+/// is "just now"; an absurdly large one is held to a million years, where `Duration` would panic.
 pub fn ago_secs(secs: f64) -> String {
     let secs = if secs.is_finite() && secs > 0.0 {
-        secs
+        secs.min(1e6 * YEAR as f64)
     } else {
         0.0
     };
@@ -159,6 +172,16 @@ mod tests {
     }
 
     #[test]
+    fn the_precise_form_keeps_the_minutes_within_a_day() {
+        let p = |s: u64| ago_precise(Duration::from_secs(s));
+        assert_eq!(p(5), "just now");
+        assert_eq!(p(4 * MIN), "4 min ago");
+        assert_eq!(p(HOUR), "1 h ago");
+        assert_eq!(p(2 * HOUR + 15 * MIN + 30), "2 h 15 min ago");
+        assert_eq!(p(DAY + HOUR), "1 d ago");
+    }
+
+    #[test]
     fn a_time_ahead_of_the_clock_is_just_now() {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
         assert_eq!(ago_between(now + Duration::from_secs(500), now), "just now");
@@ -169,6 +192,11 @@ mod tests {
         assert_eq!(ago_secs(-30.0), "just now");
         assert_eq!(ago_secs(f64::NAN), "just now");
         assert_eq!(ago_secs(f64::INFINITY), "just now");
+        assert_eq!(
+            ago_secs(1e300),
+            "1000000 y ago",
+            "a huge age does not panic"
+        );
         assert_eq!(ago_secs(125.9), "2 min ago");
     }
 

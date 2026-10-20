@@ -11863,6 +11863,7 @@ dependencies = [
  "wayland-scanner",
  "yantrik-app-build",
  "yantrik-design-tokens",
+ "yantrik-foundation",
  "yantrik-ui-kit",
 ]
 
