@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use crate::app::{App, Boot, Event, WindowId};
 use crate::cx::{Core, Cx, Inbound};
+use crate::intents::{self, Intents};
 use crate::jobs::Threads;
 use crate::timers::SlintTimers;
 use crate::window::Window;
@@ -76,8 +77,12 @@ pub fn run<A: App>() -> ExitCode {
     core.render_all();
     core.start();
 
-    // The surface, for the desktop's own handover (`present`). Intents are step 3.
-    crate::control::App::new(A::ID).serve();
+    // The surface: the app's intents, and `present` for the desktop's own handover. Served only
+    // now that commands can be applied.
+    let mut table = Intents::new();
+    A::intents(&mut table);
+    let registry = intents::registry(&core, table);
+    crate::control::App::from_registry(registry).serve();
 
     let closed = crate::run_until_closed(core.ui(), A::ID);
     core.shutdown(GRACE);

@@ -7,7 +7,9 @@
 use std::time::Duration;
 
 use crate::app::{App, Changed, WindowId};
+use crate::intents::{Invocation, InvocationId, Origin};
 use crate::jobs::{Cancel, Concurrency, Job, JobId, JobKey};
+use crate::refused::Refused;
 use crate::timers::TimerId;
 
 /// One request, as the runtime applies it after the command commits.
@@ -40,6 +42,8 @@ pub enum Request<A: App> {
         what: &'static str,
         error: String,
     },
+    /// The invocation this command runs under has reached its outcome (`Settle::Explicit`).
+    Settle(Result<(), Refused>),
     Close(WindowId),
     Exit,
 }
@@ -49,21 +53,45 @@ pub struct Effects<A: App> {
     requests: Vec<Request<A>>,
     changed: Changed,
     next_job: u64,
+    invocation: Option<Invocation>,
 }
 
 impl<A: App> Effects<A> {
-    /// For the runtime: job ids continue from `next_job`.
-    pub(crate) fn new(next_job: u64) -> Effects<A> {
+    /// For the runtime: job ids continue from `next_job`; `invocation` is what the command runs
+    /// under, if it came through the surface.
+    pub(crate) fn new(next_job: u64, invocation: Option<Invocation>) -> Effects<A> {
         Effects {
             requests: Vec::new(),
             changed: Changed::none(),
             next_job,
+            invocation,
         }
     }
 
     /// For a test of `update`: nothing is run, and [`Effects::requests`] says what was asked.
     pub fn recording() -> Effects<A> {
-        Effects::new(1)
+        Effects::new(1, None)
+    }
+
+    /// The same, as if the command came through the surface from `origin`.
+    pub fn recording_from(origin: Origin) -> Effects<A> {
+        Effects::new(
+            1,
+            Some(Invocation {
+                id: InvocationId(1),
+                origin,
+            }),
+        )
+    }
+
+    /// Where this command came from: a button or a timer here, or the surface.
+    pub fn origin(&self) -> Origin {
+        self.invocation.map_or(Origin::Local, |i| i.origin)
+    }
+
+    /// The invocation this command runs under, if it came through the surface.
+    pub fn invocation(&self) -> Option<InvocationId> {
+        self.invocation.map(|i| i.id)
     }
 
     /// Mark a part of the model changed, so `render` redraws it.
@@ -136,6 +164,13 @@ impl<A: App> Effects<A> {
         });
     }
 
+    /// The invocation this command runs under has reached its outcome: the Mind is answered
+    /// from the committed model, or with the refusal. Nothing happens for a command that did
+    /// not come through the surface, or whose intent settles on return.
+    pub fn settle(&mut self, result: Result<(), Refused>) {
+        self.requests.push(Request::Settle(result));
+    }
+
     /// Close a window. A `CloseRequested` flow ends here once any saving is done.
     pub fn close(&mut self, window: WindowId) {
         self.requests.push(Request::Close(window));
@@ -171,6 +206,7 @@ impl<A: App> Request<A> {
             Request::After { .. } => "after",
             Request::StopTimer(_) => "stop_timer",
             Request::Report { .. } => "report",
+            Request::Settle(_) => "settle",
             Request::Close(_) => "close",
             Request::Exit => "exit",
         }

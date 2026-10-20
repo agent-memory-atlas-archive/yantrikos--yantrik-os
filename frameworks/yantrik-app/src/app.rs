@@ -9,8 +9,10 @@
 
 use std::ffi::OsString;
 
+use crate::control::View;
 use crate::cx::Cx;
 use crate::effects::Effects;
+use crate::intents::Intents;
 use crate::refused::Refused;
 use crate::window::Window;
 
@@ -148,6 +150,18 @@ pub trait App: Sized + 'static {
     /// The only function that writes Slint properties. After every applied command, with the
     /// parts that changed; once at start with `Changed::All`.
     fn render(ui: &Self::Ui, window: WindowId, model: &Self::Model, changed: &Changed);
+
+    /// The Mind's view of the app: a projection of the committed model, never the model itself
+    /// (no caches, no credentials). Runs on every `describe` and around every `act`.
+    fn describe(model: &Self::Model) -> View {
+        let _ = model;
+        View::new(Self::ID)
+    }
+
+    /// The commands the Mind, keys and menus may raise by name (`intents::Intent`).
+    fn intents(table: &mut Intents<Self>) {
+        let _ = table;
+    }
 
     /// A framework event the app may turn into a command. `None` takes the default.
     fn event(event: Event, model: &Self::Model) -> Option<Self::Command> {

@@ -2,18 +2,22 @@
 //! small enough to read in one sitting.
 //!
 //! - the model is plain Rust, changed only by `update`;
-//! - the button and a future Mind action are the same command, `Add`;
-//! - `Fetch` starts a job off the UI thread, and `Fetched` carries its result back;
+//! - the button and the Mind's `add` are the same command, `Add`;
+//! - `Fetch` starts a job off the UI thread, and `Fetched` carries its result back; the Mind's
+//!   `fetch` is answered when it lands;
 //! - a timer ticks every four seconds through the same path;
-//! - `render` is the only code that writes the window.
+//! - `render` is the only code that writes the window, `describe` the only view the Mind reads.
 //!
 //! `main.rs` is three lines. The tests run it headless through `yantrik-testing`.
 
 use std::time::Duration;
 
+use serde_json::json;
 use yantrik_app::app::{App, Boot, Changed, Startup, WindowId};
+use yantrik_app::control::{Action, Param, View};
 use yantrik_app::cx::Cx;
 use yantrik_app::effects::Effects;
+use yantrik_app::intents::{Agents, Intent, Intents, Settle};
 use yantrik_app::jobs::{Concurrency, JobKey, Scope};
 use yantrik_app::refused::Refused;
 use yantrik_app::timers::TimerId;
@@ -105,42 +109,97 @@ impl App for Hello {
             ui.set_fetched(m.fetched.clone().unwrap_or_default().into());
         }
     }
+
+    fn describe(m: &Model) -> View {
+        View::new(format!("Hello — count {}", m.count))
+            .with("count", m.count)
+            .with("fetched", m.fetched.clone().unwrap_or_default())
+    }
+
+    fn intents(table: &mut Intents<Self>) {
+        table.add(
+            Intent::new(
+                Action::new("add", "Add to the count")
+                    .arg(Param::integer("by").default(1).describe("How much to add")),
+                |a| {
+                    Ok(Command::Add(i32::try_from(a.integer("by")?).map_err(
+                        |_| Refused::new("too_big", "That is too big."),
+                    )?))
+                },
+            )
+            .reply(|m: &Model| json!({ "count": m.count })),
+        );
+        table.add(
+            Intent::new(
+                Action::new("fetch", "Fetch the weather, and answer once it has arrived"),
+                |_| Ok(Command::Fetch),
+            )
+            .settles(Settle::Explicit {
+                within: Duration::from_secs(5),
+            })
+            .reply(|m: &Model| json!({ "fetched": m.fetched })),
+        );
+        table.add(
+            Intent::new(
+                Action::new("reset", "Set the count back to zero").risk("sensitive"),
+                |_| Ok(Command::Add(i32::MIN / 2)),
+            )
+            .agents(Agents::Refused("An agent may count but not reset.")),
+        );
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use yantrik_testing::TestApp;
+    use yantrik_testing::{Call, TestApp};
 
     #[test]
-    fn the_button_and_the_model_agree() {
+    fn the_button_the_mind_and_the_model_agree() {
         let app = TestApp::<Hello>::start();
         app.ui(|ui| ui.invoke_add_one());
         app.run(Command::Add(2));
-        assert_eq!(app.model(|m| m.count), 3);
-        assert_eq!(app.ui(|ui| ui.get_count()), 3);
+        let answer = app.act("add", json!({"by": 3})).unwrap();
+        assert_eq!(answer.envelope()["result"], json!({"count": 6}));
+        assert_eq!(app.model(|m| m.count), 6);
+        assert_eq!(app.ui(|ui| ui.get_count()), 6);
+        assert_eq!(app.describe()["state"]["count"], json!(6));
     }
 
     #[test]
     fn an_overflow_is_refused_and_changes_nothing() {
         let app = TestApp::<Hello>::start();
         app.run(Command::Add(i32::MAX));
-        app.run(Command::Add(1));
+        let e = app.act("add", json!({"by": 1})).unwrap_err();
+        assert_eq!(e, "That would overflow the counter.");
         assert_eq!(app.model(|m| m.count), i32::MAX);
-        assert_eq!(app.last_refusal().map(|r| r.kind), Some("overflow"));
     }
 
     #[test]
-    fn a_fetch_lands_when_its_job_runs() {
+    fn a_fetch_is_answered_when_its_job_lands() {
         let app = TestApp::<Hello>::start();
-        app.run(Command::Fetch);
+        let pending = app.act("fetch", json!({})).unwrap();
         assert_eq!(
             app.ui(|ui| ui.get_fetched()),
             "",
             "nothing until the job runs"
         );
         app.run_jobs();
+        assert_eq!(
+            pending.settle().unwrap()["fetched"],
+            json!("the weather is fine")
+        );
         assert_eq!(app.ui(|ui| ui.get_fetched()), "the weather is fine");
+    }
+
+    #[test]
+    fn an_agent_may_not_reset_but_the_person_may() {
+        let app = TestApp::<Hello>::start();
+        let e = app
+            .act_as(Call::new("reset", json!({})).as_agent("agent-token"))
+            .unwrap_err();
+        assert_eq!(e, "An agent may count but not reset.");
+        assert!(app.act("reset", json!({})).is_ok());
     }
 
     #[test]

@@ -739,6 +739,11 @@ impl App {
         }
     }
 
+    /// A surface built elsewhere (`intents::registry`), to serve.
+    pub fn from_registry(registry: Registry) -> Self {
+        Self { registry }
+    }
+
     /// What this app reports when asked. Runs on the UI thread; keep it cheap.
     pub fn describe(mut self, f: impl Fn() -> View + 'static) -> Self {
         self.registry.set_describe(Box::new(f));
