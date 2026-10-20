@@ -392,8 +392,9 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
+/// The list column's age, by the tile's rule: an unreadable time (the epoch) says nothing.
 fn format_modified(time: std::time::SystemTime) -> String {
-    yantrik_foundation::time::ago_between(time, std::time::SystemTime::now())
+    ago(time, std::time::SystemTime::now())
 }
 
 fn file_icon(name: &str) -> String {
