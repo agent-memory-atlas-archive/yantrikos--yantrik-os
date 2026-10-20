@@ -77,6 +77,11 @@ pub enum Finished<C> {
         id: JobId,
         what: String,
     },
+    /// The job was not started: the pool is at its bound. Its id reaches a terminal state.
+    Refused {
+        id: JobId,
+        why: String,
+    },
 }
 
 /// Where a finished job is delivered: the bridge, in the runtime; a channel, in a test.
@@ -95,7 +100,12 @@ pub trait Executor<C: Send + 'static>: Send {
 }
 
 fn run_job<C>(id: JobId, cancel: &Cancel, job: Job<C>, deliver: &dyn Deliver<C>) {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(cancel))) {
+    // The panic is caught here and filed once by the core; the hook stays out of it, or one
+    // survived panic would read as a crash and a failure both.
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::problems::without_panic_records(|| job(cancel))
+    }));
+    match outcome {
         Ok(command) => deliver.deliver(Finished::Done { id, command }),
         Err(panic) => {
             let what = panic
@@ -151,9 +161,9 @@ impl<C: Send + 'static> Threads<C> {
 impl<C: Send + 'static> Executor<C> for Threads<C> {
     fn spawn(&mut self, id: JobId, cancel: Cancel, job: Job<C>, deliver: Arc<dyn Deliver<C>>) {
         if self.pending.load(Ordering::Acquire) >= self.waiting {
-            deliver.deliver(Finished::Panicked {
+            deliver.deliver(Finished::Refused {
                 id,
-                what: "the app is busier than it can be".into(),
+                why: "the app is busier than it can be".into(),
             });
             return;
         }
@@ -242,6 +252,7 @@ mod tests {
             let line = match finished {
                 Finished::Done { id, command } => format!("{} done {command}", id.0),
                 Finished::Panicked { id, what } => format!("{} panicked {what}", id.0),
+                Finished::Refused { id, why } => format!("{} refused {why}", id.0),
             };
             self.0.lock().unwrap().push(line);
         }
@@ -328,7 +339,7 @@ mod tests {
         pool.drain(Duration::from_secs(5));
         let lines = sink.0.lock().unwrap().clone();
         assert!(
-            lines.contains(&"2 panicked the app is busier than it can be".to_string()),
+            lines.contains(&"2 refused the app is busier than it can be".to_string()),
             "{lines:?}"
         );
         assert!(lines.contains(&"1 done a".to_string()));

@@ -337,6 +337,25 @@ pub fn list_in(dir: &Path) -> Vec<(PathBuf, Problem)> {
     out
 }
 
+thread_local! {
+    // Set while a panic on this thread is somebody else's to file (a job the runtime catches).
+    static WITHOUT_RECORDS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `f` with this thread's panics kept out of the problem records: for work the caller
+/// catches and files once itself. The hook still runs, so the trace reaches stderr. The flag is
+/// restored however `f` ends, so a panic in it leaves the thread's next work recorded as usual.
+pub fn without_panic_records<R>(f: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            WITHOUT_RECORDS.with(|w| w.set(self.0));
+        }
+    }
+    let _restore = Restore(WITHOUT_RECORDS.with(|w| w.replace(true)));
+    f()
+}
+
 /// Install a panic hook that writes a `panic` record and then lets the previous hook print the
 /// panic as it always did. Idempotent enough: installing twice chains twice, which only means two
 /// files for one panic, so the runtime calls it once from `init_tracing`.
@@ -344,6 +363,10 @@ pub fn install_panic_hook(program: &str) {
     let program = program.to_string();
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        if WITHOUT_RECORDS.with(|w| w.get()) {
+            previous(info);
+            return;
+        }
         let message = if let Some(s) = info.payload().downcast_ref::<&str>() {
             (*s).to_string()
         } else if let Some(s) = info.payload().downcast_ref::<String>() {

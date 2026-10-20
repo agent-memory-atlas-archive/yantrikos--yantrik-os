@@ -79,13 +79,14 @@ pub fn run<A: App>() -> ExitCode {
     // The surface, for the desktop's own handover (`present`). Intents are step 3.
     crate::control::App::new(A::ID).serve();
 
-    let closed = crate::run_until_closed(core.ui(), A::ID);
+    let ending = crate::event_loop::run_until_ending(core.ui(), A::ID);
     core.shutdown(GRACE);
     DRAIN.with(|cell| *cell.borrow_mut() = None);
-    if closed || core.exit_reason().is_some() {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::from(1)
+    // A close, an `fx.exit()` and a logout are all 0; only a loop that failed with the display
+    // still there is 1, and that one has its problem record.
+    match ending {
+        crate::event_loop::Ending::Failure if core.exit_reason().is_none() => ExitCode::from(1),
+        _ => ExitCode::SUCCESS,
     }
 }
 

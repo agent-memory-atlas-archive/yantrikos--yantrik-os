@@ -77,6 +77,22 @@ impl<C: Send + 'static> Post<C> {
         Ok(())
     }
 
+    /// Posts on the reserved lane: never refused as full, only as closed. For what is bounded
+    /// elsewhere and must not be lost to a flood of commands: a job's outcome (bounded by the
+    /// pool), the core's own continuation of a drain. Not for anything a caller can repeat.
+    pub fn post_control(&self, command: C) -> Result<(), Dropped> {
+        if self.0.closed.load(Ordering::Acquire) {
+            return Err(Dropped::Closed);
+        }
+        self.0
+            .queue
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push_back(command);
+        (self.0.wake)();
+        Ok(())
+    }
+
     pub fn is_closed(&self) -> bool {
         self.0.closed.load(Ordering::Acquire)
     }

@@ -62,6 +62,12 @@ const EPROTO: i32 = 71;
 ///
 /// See the module documentation for why the display is asked rather than the error read.
 pub fn run_until_closed<C: slint::ComponentHandle + 'static>(ui: &C, program: &str) -> bool {
+    run_until_ending(ui, program) == Ending::Closed
+}
+
+/// [`run_until_closed`], saying how the loop ended, so a runner can tell a logout (exit 0, no
+/// record) from a failure (exit 1, a record).
+pub fn run_until_ending<C: slint::ComponentHandle + 'static>(ui: &C, program: &str) -> Ending {
     // How a second launch gets this window back in front of the person (`present`). Installed
     // here because every app's window reaches its loop through this call, and before the loop,
     // because a request posted to it is run only once the loop is running.
@@ -74,7 +80,7 @@ pub fn run_until_closed<C: slint::ComponentHandle + 'static>(ui: &C, program: &s
         Ok(())
     });
     match ui.run() {
-        Ok(()) => true,
+        Ok(()) => Ending::Closed,
         Err(error) => {
             let socket = wayland_socket();
             ended_in_error(
@@ -83,16 +89,17 @@ pub fn run_until_closed<C: slint::ComponentHandle + 'static>(ui: &C, program: &s
                 socket.as_deref(),
                 GRACE,
                 &problems::dir(),
-            );
-            false
+            )
         }
     }
 }
 
-/// How a loop that returned an error ended.
+/// How the loop ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Ending {
-    /// The display went away and took the loop with it.
+pub enum Ending {
+    /// The window was closed, or the app asked to quit.
+    Closed,
+    /// The display went away and took the loop with it: a logout, not a crash.
     DisplayGone,
     /// The loop failed while the display was still there, or with an error no lost display
     /// produces.
@@ -110,6 +117,8 @@ fn ended_in_error(
     let still_there = socket.map(|s| still_answering(s, grace));
     let ending = classify(error, still_there);
     match ending {
+        // Not an error's ending; here for the match.
+        Ending::Closed => {}
         Ending::DisplayGone => {
             tracing::warn!(
                 program,

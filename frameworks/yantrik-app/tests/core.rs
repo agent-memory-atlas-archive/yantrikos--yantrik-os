@@ -47,6 +47,15 @@ enum Command {
     Fetch(i32),
     Fetched(i32),
     Tick,
+    /// A keyed job that is not started while one of its kind runs; `Busy` is applied instead.
+    Guarded(i32),
+    Busy,
+    /// Arms a one-shot timer that fires `Chain` again: a timer's command arming a timer.
+    Chain,
+    /// Asks for itself again: a `then` cycle.
+    Ping,
+    /// Changes the model without saying which part: every part is redrawn.
+    Quiet,
 }
 
 struct Counter;
@@ -99,6 +108,27 @@ impl App for Counter {
                 m.log.push(format!("fetched {tag}"));
             }
             Command::Tick => m.log.push("tick".into()),
+            Command::Guarded(tag) => {
+                fx.spawn_keyed_or(
+                    JobKey {
+                        feature: "guard",
+                        scope: Scope::App,
+                    },
+                    Concurrency::RejectIfRunning,
+                    Command::Busy,
+                    move |_| Command::Fetched(tag),
+                );
+            }
+            Command::Busy => m.log.push("busy".into()),
+            Command::Chain => {
+                m.log.push("chain".into());
+                fx.after(TimerId("chain"), Duration::from_secs(1), Command::Chain);
+            }
+            Command::Ping => {
+                m.log.push("ping".into());
+                fx.then(Command::Ping);
+            }
+            Command::Quiet => m.n += 10,
         }
         Ok(())
     }
@@ -186,6 +216,76 @@ fn a_close_request_with_no_handler_ends_the_process() {
     );
     app.tick();
     assert_eq!(app.exit_reason(), Some(ExitReason::LastWindowClosed));
+}
+
+/// §4: saturation cannot lose a job's outcome. The inbox is filled to its capacity with commands,
+/// then the job lands: its result still arrives, and its key is free again.
+#[test]
+fn a_full_inbox_does_not_lose_a_jobs_result() {
+    let app = TestApp::<Counter>::start();
+    app.run(Command::Fetch(7));
+    let post = app.post();
+    for _ in 0..yantrik_app::queue::CAPACITY {
+        post.post(Inbound::Command(Command::Add(0))).unwrap();
+    }
+    assert_eq!(
+        post.post(Inbound::Command(Command::Add(0))),
+        Err(Dropped::Full),
+        "commands are refused at the bound"
+    );
+    app.run_jobs();
+    assert!(app.model(|m| m.log.contains(&"fetched 7".to_string())));
+    assert_eq!(app.jobs_waiting(), 0, "the key is free again");
+    app.run(Command::Fetch(8));
+    app.run_jobs();
+    assert!(app.model(|m| m.log.contains(&"fetched 8".to_string())));
+}
+
+/// A timer's command that arms a timer: the clock is released before the command runs.
+#[test]
+fn a_timers_command_may_arm_a_timer() {
+    let app = TestApp::<Counter>::start();
+    app.run(Command::Chain);
+    app.advance(Duration::from_millis(3500));
+    assert_eq!(
+        app.model(|m| m.log.iter().filter(|l| *l == "chain").count()),
+        4,
+        "the first, then one a second"
+    );
+}
+
+/// A keyed job refused because one of its kind runs tells the app so, through its `failed`
+/// command, as a panicked or refused job would.
+#[test]
+fn a_rejected_job_runs_its_failed_command() {
+    let app = TestApp::<Counter>::start();
+    app.run(Command::Guarded(1));
+    app.run(Command::Guarded(2));
+    assert_eq!(app.model(|m| m.log.clone()), vec!["busy"]);
+    app.run_jobs();
+    assert_eq!(app.model(|m| m.log.clone()), vec!["busy", "fetched 1"]);
+}
+
+/// A `then` cycle cannot freeze the UI thread: one drain applies a bounded number and the rest
+/// wait for the next wake.
+#[test]
+fn a_then_cycle_yields_to_the_event_loop() {
+    let app = TestApp::<Counter>::start();
+    app.run(Command::Ping);
+    let pings = app.model(|m| m.log.iter().filter(|l| *l == "ping").count());
+    assert_eq!(pings, yantrik_app::cx::PENDING_PER_DRAIN + 1);
+    assert_eq!(app.pending_commands(), 1, "the rest waits");
+    app.tick();
+    let pings = app.model(|m| m.log.iter().filter(|l| *l == "ping").count());
+    assert_eq!(pings, 2 * yantrik_app::cx::PENDING_PER_DRAIN + 1);
+}
+
+/// An `update` that changes the model and does not say which part redraws every part.
+#[test]
+fn a_command_that_names_no_part_redraws_everything() {
+    let app = TestApp::<Counter>::start();
+    app.run(Command::Quiet);
+    assert_eq!(app.ui(|ui| (ui.get_count(), ui.get_renders())), (10, 2));
 }
 
 #[test]
