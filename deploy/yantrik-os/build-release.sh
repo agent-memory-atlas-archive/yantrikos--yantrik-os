@@ -321,12 +321,32 @@ echo "   + share/grub-theme (the boot menu's theme and fonts)"
 # `yantrik-update` reads after an apply to install whatever an older machine lacks. Root acts on
 # it (apt), so it is hash-listed below like everything else root installs from share/.
 install -m 0644 "$SCRIPT_DIR/packages.list" "$ROOT/share/packages.list"
+# The packages this OS patches (#872): labwc with the window switcher renderer, built from the
+# reviewed patch by packaging/labwc/build-deb.sh (CI runs it in debian:trixie before this). Root
+# installs them (apt in `yantrik-update` reconcile, dpkg in the image build), so they are
+# hash-listed below. Without one, Alt+Tab is labwc's own OSD; YANTRIK_REQUIRE_DEBS=1 (CI) makes
+# that a failure, so a published build never quietly ships without it.
+debs_found=0
+for deb in "$PROJECT_ROOT/packaging/labwc/dist/"*.deb; do
+  [ -f "$deb" ] || continue
+  mkdir -p "$ROOT/share/debs"
+  install -m 0644 "$deb" "$ROOT/share/debs/$(basename "$deb")"
+  debs_found=$((debs_found + 1))
+  echo "   + share/debs/$(basename "$deb")"
+done
+if [ "$debs_found" = 0 ]; then
+  [ "${YANTRIK_REQUIRE_DEBS:-0}" = 1 ]     && fail "no patched labwc in packaging/labwc/dist (packaging/labwc/build-deb.sh builds it) — Alt+Tab would be labwc's own"
+  echo "   (no patched labwc in packaging/labwc/dist: this build keeps labwc's own Alt+Tab)"
+fi
 # What the updater installs as root, by content: every file under share/ it copies into /usr/lib,
 # /etc/polkit-1, /etc/sysctl.d, /etc/containers, /etc/systemd/system or /boot/grub/themes, and the
 # package list it runs apt from, with its sha256. It rides in bin/, which the
 # updater installs with plain cp as root, so it is root's on the machine whoever could write
 # share/; the updater installs nothing as root whose hash is not in it (#419).
-(cd "$ROOT/share" && sha256sum packages.list root-helpers/* polkit/* sysctl/* containers/* systemd/* grub-theme/*) > "$ROOT/bin/yantrik-root-files.sha256"
+# An empty directory among these leaves its glob as it is, and sha256sum fails the build; only
+# debs/ may be empty (a build without the patched labwc), so it is listed on its own.
+(cd "$ROOT/share" && sha256sum packages.list root-helpers/* polkit/* sysctl/* containers/* systemd/* grub-theme/* \
+   && { ! compgen -G 'debs/*.deb' >/dev/null || sha256sum debs/*.deb; }) > "$ROOT/bin/yantrik-root-files.sha256"
 [ "$(wc -l < "$ROOT/bin/yantrik-root-files.sha256")" -ge 4 ] || fail "the root-files list is short: $(cat "$ROOT/bin/yantrik-root-files.sha256")"
 mkdir -p "$ROOT/share/labwc-mind"
 cp "$PROJECT_ROOT/config/labwc-mind/rc.xml" "$ROOT/share/labwc-mind/rc.xml"

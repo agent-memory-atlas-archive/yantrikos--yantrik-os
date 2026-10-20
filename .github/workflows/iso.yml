@@ -193,9 +193,32 @@ jobs:
       - name: Build the workspace (release)
         run: cargo build --release --workspace --locked
 
+      # labwc with the window switcher renderer (#872): the reviewed patch on the labwc trixie
+      # has today (its security updates included), so a Debian fix reaches Yantrik's build at the
+      # next nightly; a patch that no longer applies fails the build. The container sees the
+      # packaging read-only and writes only dist/: nothing it runs can touch target/release.
+      # The image is pinned by digest: it holds the archive keys every apt-get in it checks.
+      - name: Build Yantrik's labwc (packaging/labwc)
+        run: |
+          mkdir -p packaging/labwc/dist
+          docker run --rm -v "$PWD/packaging/labwc:/src:ro" -v "$PWD/packaging/labwc/dist:/out" \
+            -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+            debian:trixie@sha256:913f6706df59a68922d1dd08f78c2476560a8d367897200a6005b00e5f67c2d5 bash -c '
+            set -euo pipefail
+            sed -i "s/^Types: deb$/Types: deb deb-src/" /etc/apt/sources.list.d/debian.sources
+            apt-get update -qq
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends build-essential devscripts dpkg-dev fakeroot patch >/dev/null
+            out="$(bash /src/build-deb.sh /tmp/labwc | tail -1)"
+            cp "$out" /out/
+            chown -R "$HOST_UID:$HOST_GID" /out'
+          ls -la packaging/labwc/dist
+          sha256sum packaging/labwc/dist/*.deb
+
       - name: Package the release bundle
         id: bundle
         env:
+          # A published build always carries Yantrik's labwc (#872).
+          YANTRIK_REQUIRE_DEBS: "1"
           # The build that was published before this one, so the bundle's CHANGELOG.md is
           # "what changed since the last image" rather than a guess.
           YANTRIK_PREVIOUS: ${{ needs.decide.outputs.previous }}
