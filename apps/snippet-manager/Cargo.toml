@@ -9,6 +9,7 @@ name = "yantrik-snippet-manager"
 path = "src/main.rs"
 
 [dependencies]
+yantrik-foundation = { workspace = true }
 yantrik-app-runtime = { path = "../../crates/yantrik-app-runtime" }
 yantrik-ipc-contracts = { workspace = true }
 yantrik-ipc-transport = { workspace = true }

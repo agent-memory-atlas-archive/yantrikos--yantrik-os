@@ -508,17 +508,6 @@ pub fn for_describe(room: &Workroom, page: &str, opened: Option<&str>, narrowed:
     view
 }
 
-/// "3m ago", "just now".
-pub fn ago(secs: u64) -> String {
-    match secs {
-        0..=9 => "just now".to_string(),
-        10..=59 => format!("{secs}s ago"),
-        60..=3599 => format!("{}m ago", secs / 60),
-        3600..=86_399 => format!("{}h ago", secs / 3600),
-        _ => format!("{}d ago", secs / 86_400),
-    }
-}
-
 // ── A task's detail ─────────────────────────────────────────────────
 
 /// One line of the changes ledger.
@@ -1248,14 +1237,6 @@ mod tests {
         assert!(mind.get("desks").is_none() && mind.get("requests_waiting").is_none(), "{mind}");
         assert!(!mind.to_string().contains("tidy the photos folder"), "{mind}");
         assert!(!mind.to_string().contains("Which folder?"), "{mind}");
-    }
-
-    #[test]
-    fn ages_read_as_a_person_says_them() {
-        assert_eq!(ago(3), "just now");
-        assert_eq!(ago(42), "42s ago");
-        assert_eq!(ago(190), "3m ago");
-        assert_eq!(ago(7300), "2h ago");
     }
 
     /// The route showed the agents a run started and Stop on a parent stops them (review of #584,

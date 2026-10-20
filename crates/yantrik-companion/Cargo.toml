@@ -5,6 +5,7 @@ edition = "2021"
 description = "Yantrik companion agent — instincts, urges, context, learning, all in-process"
 
 [dependencies]
+yantrik-foundation = { workspace = true }
 yantrik-companion-core = { workspace = true }
 yantrik-companion-instincts = { workspace = true }
 yantrik-companion-cortex = { workspace = true }

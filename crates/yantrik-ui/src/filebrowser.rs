@@ -120,18 +120,7 @@ pub fn ago(modified: std::time::SystemTime, now: std::time::SystemTime) -> Strin
     if modified == std::time::UNIX_EPOCH {
         return String::new();
     }
-    let secs = now.duration_since(modified).map(|d| d.as_secs()).unwrap_or(0);
-    const MIN: u64 = 60;
-    const HOUR: u64 = 60 * MIN;
-    const DAY: u64 = 24 * HOUR;
-    match secs {
-        s if s < MIN => "just now".into(),
-        s if s < HOUR => format!("{} min ago", s / MIN),
-        s if s < DAY => format!("{} h ago", s / HOUR),
-        s if s < 30 * DAY => format!("{} d ago", s / DAY),
-        s if s < 365 * DAY => format!("{} mo ago", s / (30 * DAY)),
-        s => format!("{} y ago", s / (365 * DAY)),
-    }
+    yantrik_foundation::time::ago_between(modified, now)
 }
 
 /// [`ago`], from now.
@@ -404,22 +393,7 @@ fn format_size(bytes: u64) -> String {
 }
 
 fn format_modified(time: std::time::SystemTime) -> String {
-    let duration = time
-        .elapsed()
-        .unwrap_or_else(|_| std::time::Duration::from_secs(0));
-    let secs = duration.as_secs();
-
-    if secs < 60 {
-        "now".to_string()
-    } else if secs < 3600 {
-        format!("{}m", secs / 60)
-    } else if secs < 86400 {
-        format!("{}h", secs / 3600)
-    } else if secs < 86400 * 30 {
-        format!("{}d", secs / 86400)
-    } else {
-        format!("{}mo", secs / (86400 * 30))
-    }
+    yantrik_foundation::time::ago_between(time, std::time::SystemTime::now())
 }
 
 fn file_icon(name: &str) -> String {
@@ -696,46 +670,7 @@ fn file_type_name(name: &str) -> String {
 }
 
 fn format_modified_full(time: std::time::SystemTime) -> String {
-    let duration = time.elapsed().unwrap_or_default();
-    let secs = duration.as_secs();
-    if secs < 60 {
-        "Just now".to_string()
-    } else if secs < 3600 {
-        let m = secs / 60;
-        if m == 1 {
-            "1 minute ago".to_string()
-        } else {
-            format!("{} minutes ago", m)
-        }
-    } else if secs < 86400 {
-        let h = secs / 3600;
-        if h == 1 {
-            "1 hour ago".to_string()
-        } else {
-            format!("{} hours ago", h)
-        }
-    } else if secs < 86400 * 30 {
-        let d = secs / 86400;
-        if d == 1 {
-            "Yesterday".to_string()
-        } else {
-            format!("{} days ago", d)
-        }
-    } else if secs < 86400 * 365 {
-        let mo = secs / (86400 * 30);
-        if mo == 1 {
-            "1 month ago".to_string()
-        } else {
-            format!("{} months ago", mo)
-        }
-    } else {
-        let y = secs / (86400 * 365);
-        if y == 1 {
-            "1 year ago".to_string()
-        } else {
-            format!("{} years ago", y)
-        }
-    }
+    yantrik_foundation::time::ago_long(time.elapsed().unwrap_or_default())
 }
 
 fn format_file_permissions(meta: &Option<std::fs::Metadata>) -> String {

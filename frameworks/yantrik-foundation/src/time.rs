@@ -1,20 +1,20 @@
 //! How long ago something happened, in the one way the OS says it.
 //!
-//! Before this module the OS said it nine ways: "4m ago" in the Mind panel, "4 min ago" in Files,
-//! "95 min ago" in Weather, "10s ago" in the Agents workroom. Now every surface says the same:
+//! Before this module the OS said it eleven ways: "4m ago" in the Mind panel, "4 min ago" on a
+//! Files tile, "4m" in the Files list, "4 minutes ago" in its details, "95 min ago" in Weather,
+//! "10s ago" in the Agents workroom. Now there is one rule in two lengths:
 //!
-//! | elapsed            | said          |
-//! |--------------------|---------------|
-//! | under a minute     | `just now`    |
-//! | under an hour      | `4 min ago`   |
-//! | under a day        | `3 h ago`     |
-//! | under 30 days      | `2 d ago`     |
-//! | under a year       | `5 mo ago`    |
-//! | a year or more     | `2 y ago`     |
+//! | elapsed            | [`ago`], in lists and tiles | [`ago_long`], in a details pane |
+//! |--------------------|-----------------------------|---------------------------------|
+//! | under a minute     | `just now`                  | `just now`                      |
+//! | under an hour      | `4 min ago`                 | `4 minutes ago`                 |
+//! | under a day        | `3 h ago`                   | `3 hours ago`                   |
+//! | under 30 days      | `2 d ago`                   | `2 days ago`                    |
+//! | under a year       | `5 mo ago`                  | `5 months ago`                  |
+//! | a year or more     | `2 y ago`                   | `2 years ago`                   |
 //!
-//! Units are words a person reads aloud, whole numbers only, always rounded down: a thing saved
-//! 59 minutes ago was not saved "1 h ago". A time ahead of the clock (a clock that moved) is
-//! "just now", never a negative age.
+//! Whole numbers only, always rounded down: a thing saved 59 minutes ago was not saved "1 h ago".
+//! A time ahead of the clock (a clock that moved) is "just now", never a negative age.
 
 use std::time::{Duration, SystemTime};
 
@@ -24,15 +24,68 @@ const DAY: u64 = 24 * HOUR;
 const MONTH: u64 = 30 * DAY;
 const YEAR: u64 = 365 * DAY;
 
-/// How long ago, for something `elapsed` in the past.
+/// The band an age falls in: how many of which unit. `None` under a minute.
+fn band(elapsed: Duration) -> Option<(u64, Unit)> {
+    let s = elapsed.as_secs();
+    Some(match s {
+        s if s < MIN => return None,
+        s if s < HOUR => (s / MIN, Unit::Minute),
+        s if s < DAY => (s / HOUR, Unit::Hour),
+        s if s < MONTH => (s / DAY, Unit::Day),
+        s if s < YEAR => (s / MONTH, Unit::Month),
+        s => (s / YEAR, Unit::Year),
+    })
+}
+
+#[derive(Clone, Copy)]
+enum Unit {
+    Minute,
+    Hour,
+    Day,
+    Month,
+    Year,
+}
+
+impl Unit {
+    fn short(self) -> &'static str {
+        match self {
+            Unit::Minute => "min",
+            Unit::Hour => "h",
+            Unit::Day => "d",
+            Unit::Month => "mo",
+            Unit::Year => "y",
+        }
+    }
+
+    fn long(self, n: u64) -> &'static str {
+        match (self, n) {
+            (Unit::Minute, 1) => "minute",
+            (Unit::Minute, _) => "minutes",
+            (Unit::Hour, 1) => "hour",
+            (Unit::Hour, _) => "hours",
+            (Unit::Day, 1) => "day",
+            (Unit::Day, _) => "days",
+            (Unit::Month, 1) => "month",
+            (Unit::Month, _) => "months",
+            (Unit::Year, 1) => "year",
+            (Unit::Year, _) => "years",
+        }
+    }
+}
+
+/// How long ago, short enough for a list or a tile: "4 min ago".
 pub fn ago(elapsed: Duration) -> String {
-    match elapsed.as_secs() {
-        s if s < MIN => "just now".into(),
-        s if s < HOUR => format!("{} min ago", s / MIN),
-        s if s < DAY => format!("{} h ago", s / HOUR),
-        s if s < MONTH => format!("{} d ago", s / DAY),
-        s if s < YEAR => format!("{} mo ago", s / MONTH),
-        s => format!("{} y ago", s / YEAR),
+    match band(elapsed) {
+        None => "just now".into(),
+        Some((n, unit)) => format!("{n} {} ago", unit.short()),
+    }
+}
+
+/// How long ago, in full words for a details pane: "4 minutes ago".
+pub fn ago_long(elapsed: Duration) -> String {
+    match band(elapsed) {
+        None => "just now".into(),
+        Some((n, unit)) => format!("{n} {} ago", unit.long(n)),
     }
 }
 
@@ -87,6 +140,22 @@ mod tests {
         assert_eq!(secs(MONTH), "1 mo ago");
         assert_eq!(secs(YEAR - 1), "12 mo ago");
         assert_eq!(secs(2 * YEAR), "2 y ago");
+    }
+
+    #[test]
+    fn the_long_form_has_the_same_bands_in_full_words() {
+        let long = |s: u64| ago_long(Duration::from_secs(s));
+        assert_eq!(long(30), "just now");
+        assert_eq!(long(MIN), "1 minute ago");
+        assert_eq!(long(12 * MIN), "12 minutes ago");
+        assert_eq!(long(HOUR), "1 hour ago");
+        assert_eq!(long(5 * HOUR), "5 hours ago");
+        assert_eq!(long(DAY + 5), "1 day ago");
+        assert_eq!(long(3 * DAY), "3 days ago");
+        assert_eq!(long(MONTH), "1 month ago");
+        assert_eq!(long(7 * MONTH), "7 months ago");
+        assert_eq!(long(YEAR), "1 year ago");
+        assert_eq!(long(3 * YEAR), "3 years ago");
     }
 
     #[test]
