@@ -82,9 +82,9 @@ const TILES: [u32; 8] = [0x5b9be8, 0x2bb5a6, 0x4bbf6b, 0xe0a94a, 0xe5626a, 0x7cc
 /// How quickly a card follows its place (the spring's natural frequency, radians a second).
 /// Critically damped: it arrives without overshoot in about 4 / STIFFNESS seconds, and a new
 /// target mid-way only bends its path, so held Tab streams the cards one after another.
-const STIFFNESS: f32 = 22.0;
+const STIFFNESS: f32 = 12.0;
 /// How long a card that re-enters at the back of the stack takes to fade in.
-const APPEAR: f32 = 0.16;
+const APPEAR: f32 = 0.24;
 /// A frame while cards glide (about 60 a second).
 const FRAME: Duration = Duration::from_millis(16);
 /// While cards glide, frames are drawn at this fraction of the output's size and the compositor

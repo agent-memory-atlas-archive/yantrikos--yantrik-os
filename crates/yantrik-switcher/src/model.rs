@@ -94,6 +94,9 @@ pub fn fade(d: f32) -> f32 {
     }
 }
 
+/// How far a card may trail its place, in depths.
+pub const LAG_MOST: f32 = 1.0;
+
 /// A card in motion: a critically damped spring from where it is drawn (`pos`) to where it
 /// belongs (`target`), both depths in the stack.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -140,6 +143,11 @@ impl Spring {
             self.vel += a * h;
             self.pos += self.vel * h;
             left -= h;
+        }
+        // Never more than LAG_MOST behind its place: a held Tab moves places faster than a soft
+        // spring follows, and the card in front must stay the one Alt's release would choose.
+        if self.leaving.is_none() && (self.pos - self.target).abs() > LAG_MOST {
+            self.pos = self.target + LAG_MOST * (self.pos - self.target).signum();
         }
         if self.appear < 1.0 {
             self.appear = (self.appear + dt / appear).min(1.0);
@@ -514,5 +522,18 @@ mod tests {
         assert_eq!(dim(0.0), 0.0);
         assert!(dim(1.0) > 0.0 && dim(3.0) > dim(1.0));
         assert_eq!(dim(-0.5), 0.0);
+    }
+
+    #[test]
+    fn a_held_tab_never_leaves_the_front_card_behind_the_selection() {
+        // Soft spring (12), a new place every 40 ms for a second: it trails by at most a depth.
+        let mut sp = Spring::at(20.0);
+        for k in 1..=25 {
+            sp.retarget(20.0 - k as f32, 64);
+            for _ in 0..3 {
+                sp.step(0.0134, 12.0, 0.24, 64);
+                assert!((sp.pos - sp.target).abs() <= LAG_MOST + 1e-4);
+            }
+        }
     }
 }
