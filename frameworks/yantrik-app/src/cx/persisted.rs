@@ -14,7 +14,6 @@ use crate::persist::{Op, PersistKey, Report, Write, Written, SUPERSEDED};
 use crate::queue::Post;
 use crate::settings::{Health, Reloaded};
 use crate::watch::{Notice, Seen};
-use crate::window::Window as _;
 
 /// Delivers a finished write to the core's queue.
 pub(super) struct PostWritten<A: App>(pub(super) Post<Inbound<A>>);
@@ -151,7 +150,7 @@ impl<A: App> Core<A> {
     /// The housekeeping thread saw a change.
     pub(super) fn seen(&self, seen: Seen) {
         match seen {
-            Seen::Theme(theme) => self.ui.apply_theme(&theme),
+            Seen::Theme(theme) => self.apply_theme(&theme),
             Seen::Reach(reach) => self.event(Event::ReachChanged(reach)),
             Seen::File { key, seen } => self.event(Event::FileChanged { key, seen }),
             Seen::SettingsFile => {

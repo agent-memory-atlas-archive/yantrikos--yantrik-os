@@ -22,7 +22,7 @@ use crate::window::Window;
 
 /// One window of the app. `PRIMARY` is the one the runner makes at start; the design allows
 /// more, and nothing here assumes there is only one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct WindowId(pub u32);
 
 impl WindowId {
@@ -223,6 +223,13 @@ pub trait App: Sized + 'static {
     /// Bind the window's callbacks to commands. Once, on the UI thread, after the window is made
     /// and themed.
     fn wire(cx: &Cx<Self>);
+
+    /// Bind a window opened later (`fx.open_window`) to commands, as `wire` does the first.
+    /// The id is the window's, so a command can say which window it came from. The default
+    /// binds nothing.
+    fn wire_window(cx: &Cx<Self>, ui: &Self::Ui, window: WindowId) {
+        let _ = (cx, ui, window);
+    }
 
     /// The first effects: an initial fetch, timers. After `wire` and the first `render`.
     fn start(model: &Self::Model, fx: &mut Effects<Self>) {

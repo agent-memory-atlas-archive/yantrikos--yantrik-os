@@ -77,6 +77,8 @@ pub enum Request<A: App> {
         apply: crate::rail::Apply,
         authority: yantrik_ipc_transport::gate::Authority,
     },
+    /// Another window, under this id: made, wired by `App::wire_window`, drawn and shown.
+    OpenWindow(WindowId),
     Close(WindowId),
     Exit,
 }
@@ -326,6 +328,15 @@ impl<A: App> Effects<A> {
     }
 
     /// Close a window. A `CloseRequested` flow ends here once any saving is done.
+    /// Opens another window of the app and returns its id. It is wired by `App::wire_window`,
+    /// drawn whole by `render` with this id, and shown; every later render reaches it too. Its
+    /// close button raises `Event::CloseRequested` with this id.
+    pub fn open_window(&mut self) -> WindowId {
+        let id = crate::cx::next_window_id();
+        self.requests.push(Request::OpenWindow(id));
+        id
+    }
+
     pub fn close(&mut self, window: WindowId) {
         self.requests.push(Request::Close(window));
     }
@@ -368,6 +379,7 @@ impl<A: App> Request<A> {
             Request::Unwatch(_) => "unwatch",
             Request::Notify(_) => "notify",
             Request::ApplyAsAgent { .. } => "apply_as_agent",
+            Request::OpenWindow(_) => "open_window",
             Request::Close(_) => "close",
             Request::Exit => "exit",
         }

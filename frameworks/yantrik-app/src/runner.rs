@@ -32,7 +32,7 @@ thread_local! {
     static DRAIN: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
 }
 
-fn drain_on_ui_thread() {
+pub(crate) fn drain_on_ui_thread() {
     DRAIN.with(|cell| {
         if let Some(drain) = cell.borrow().as_ref() {
             drain();
@@ -130,6 +130,7 @@ pub fn run<A: App>() -> ExitCode {
         },
     );
     install(&core);
+    core.set_theme(theme_now);
     // A file of an older schema is rewritten at this one, once.
     core.flush_settings();
     // The settings file (an outside edit), the shell's theme and the documents' files, watched
