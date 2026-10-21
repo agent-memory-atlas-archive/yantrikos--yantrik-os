@@ -56,7 +56,7 @@ fn reading(ui: &WeatherApp, m: &Model) {
             wind_speed: c.wind_speed.as_str().into(),
             wind_direction: c.wind_direction.as_str().into(),
             uv_index: c.uv_index.as_str().into(),
-            visibility: c.visibility.as_str().into(),
+            visibility: visibility_figure(&c.visibility).into(),
             pressure: c.pressure.as_str().into(),
             cloud_cover: c.cloud_cover.as_str().into(),
             dew_point: c.dew_point.as_str().into(),
@@ -73,6 +73,10 @@ fn reading(ui: &WeatherApp, m: &Model) {
             ..ui.get_current()
         },
     };
+    ui.set_place_label(place_label(&current.location).into());
+    let (number, unit) = split_unit(&current.temperature);
+    ui.set_reading_number(number.into());
+    ui.set_reading_unit(unit.into());
     ui.set_current(current);
 
     if r.current.is_some() {
@@ -121,6 +125,31 @@ fn reading(ui: &WeatherApp, m: &Model) {
             .collect();
         ui.set_weather_alerts(ModelRc::new(VecModel::from(alerts)));
         ui.set_air_quality(air_quality_line(&r.aqi.value, &r.aqi.label).into());
+        ui.set_air_quality_unhealthy(r.aqi.level >= 2);
+    }
+}
+
+/// A distance, or `—`: a qualitative word from the source belongs on the condition line, not
+/// among measurements (brief §3.2).
+fn visibility_figure(v: &str) -> String {
+    let v = v.trim();
+    if v.is_empty() || v == "--" || !v.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        "—".to_string()
+    } else {
+        v.to_string()
+    }
+}
+
+/// The place as the title bar names it: the part before the geocoder's `, Country`.
+fn place_label(location: &str) -> String {
+    location.split(',').next().unwrap_or(location).trim().to_string()
+}
+
+/// `16°C` → (`16°`, `C`); a reading without a unit letter keeps its text and an empty unit.
+fn split_unit(temperature: &str) -> (String, String) {
+    match temperature.strip_suffix('C').or_else(|| temperature.strip_suffix('F')) {
+        Some(number) if number.ends_with('°') => (number.to_string(), temperature[number.len()..].to_string()),
+        _ => (temperature.to_string(), String::new()),
     }
 }
 
@@ -161,5 +190,10 @@ mod tests {
         assert!(!is_nothing("2.4mm"));
         assert_eq!(air_quality_line("--", "N/A"), "");
         assert_eq!(air_quality_line("42", "Good"), "Air quality 42 · Good");
+        assert_eq!(visibility_figure("Good"), "—");
+        assert_eq!(visibility_figure("16 km"), "16 km");
+        assert_eq!(place_label("Llanfairpwllgwyngyll, United Kingdom"), "Llanfairpwllgwyngyll");
+        assert_eq!(split_unit("16°C"), ("16°".to_string(), "C".to_string()));
+        assert_eq!(split_unit("--"), ("--".to_string(), String::new()));
     }
 }

@@ -93,6 +93,27 @@ impl Model {
     }
 }
 
+#[cfg(test)]
+impl Model {
+    /// A model with no reading, for the unit tests that need nothing but the policy.
+    pub fn for_tests() -> Model {
+        Model {
+            prefs: Prefs::default(),
+            reading: Reading::default(),
+            loading: false,
+            source: Source::Nothing,
+            degraded: None,
+            notice: String::new(),
+            last_fetch: None,
+            rail: Rail::new(Arc::new(yantrik_app::mind::fake::FakeMind::new())),
+            weather: Arc::new(yantrik_services::weather::FakeWeather::new()),
+            mind: Arc::new(yantrik_app::mind::fake::FakeMind::new()),
+            fall_back: false,
+            config_file: String::new(),
+        }
+    }
+}
+
 /// "3 min", "1 hr", "2 hr"; `None` under a minute.
 fn age_words(elapsed: Duration) -> Option<String> {
     let secs = elapsed.as_secs();
@@ -143,6 +164,33 @@ pub enum Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The policy, minute by minute: nothing under fifteen unless the reading came by fallback;
+    /// `Updated` to thirty; `Last reading`, stale, after; the fallback suffix on whatever shows.
+    #[test]
+    fn freshness_follows_the_policy() {
+        fn model(age_min: u64, source: Source) -> Model {
+            let mut m = Model::for_tests();
+            m.last_fetch = Some(Instant::now() - Duration::from_secs(age_min * 60));
+            m.source = source;
+            m
+        }
+        let table: [(u64, Source, &str, bool); 8] = [
+            (0, Source::Service, "", false),
+            (14, Source::Service, "", false),
+            (16, Source::Service, "Updated 16 min ago", false),
+            (29, Source::Service, "Updated 29 min ago", false),
+            (31, Source::Service, "Last reading 31 min ago", true),
+            (61, Source::Service, "Last reading 1 hr ago", true),
+            (0, Source::Direct, "Updated just now · Open-Meteo fallback", false),
+            (31, Source::Direct, "Last reading 31 min ago · Open-Meteo fallback", true),
+        ];
+        for (age, source, line, stale) in table {
+            let f = model(age, source).freshness();
+            assert_eq!((f.line.as_str(), f.stale), (line, stale), "{age} min, {source:?}");
+        }
+        assert_eq!(Model::for_tests().freshness(), Freshness { line: String::new(), stale: false }, "no reading yet");
+    }
 
     #[test]
     fn the_age_is_said_in_minutes_then_hours() {

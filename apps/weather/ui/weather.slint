@@ -16,6 +16,7 @@ import { YListItem } from "@yantrik-kit/y_list_item.slint";
 import { YPopover } from "@yantrik-kit/y_popover.slint";
 import { YInput } from "@yantrik-kit/y_input.slint";
 import { MeasuredPair } from "@yantrik-kit/measured_pair.slint";
+import { AppColor } from "@yantrik-kit/app_color.slint";
 
 // ── Data structs ──
 
@@ -71,6 +72,12 @@ export struct WeatherSavedLocation {
     lat: float,
     lon: float,
     is-active: bool,
+}
+
+// A label and its value, as the measured-pair grid is given them.
+struct Pair {
+    label: string,
+    value: string,
 }
 
 export struct WeatherAlert {
@@ -165,6 +172,7 @@ component DayRow inherits Rectangle {
             font-size: Theme.fs-body;
             font-weight: Theme.fw-title-2;
             vertical-alignment: center;
+            overflow: elide;
         }
         Rectangle {
             width: 24px;
@@ -178,11 +186,12 @@ component DayRow inherits Rectangle {
         }
         Text {
             text: root.day.low;
-            width: 32px;
+            width: 36px;
             color: Theme.text-secondary;
             font-size: Theme.fs-body;
             horizontal-alignment: right;
             vertical-alignment: center;
+            overflow: elide;
         }
         Text {
             text: "–";
@@ -194,12 +203,13 @@ component DayRow inherits Rectangle {
         }
         Text {
             text: root.day.high;
-            width: 32px;
+            width: 36px;
             color: Theme.text-primary;
             font-size: Theme.fs-body;
             font-weight: Theme.fw-title-2;
             horizontal-alignment: right;
             vertical-alignment: center;
+            overflow: elide;
         }
         Text {
             text: root.day.precip-chance;
@@ -265,6 +275,15 @@ export component WeatherDashboard inherits Rectangle {
     in property <string> hourly-zone-note: "";
     // "Air quality 42 · Good" when the source gives it; "" otherwise.
     in property <string> air-quality: "";
+    // Unhealthy (the source's level 2): a notice bar above the reading, not a line below it.
+    in property <bool> air-quality-unhealthy: false;
+    // The reading split for the type: `16°` at the greeting size, `C` at the display size.
+    in property <string> reading-number: "--";
+    in property <string> reading-unit: "";
+    // The place as the title bar names it (the part before the geocoder's `, Country`).
+    in property <string> place-label: "";
+    // Alerts past the second are shown when the person asks.
+    in-out property <bool> alerts-expanded: false;
     in property <[WeatherAlert]> weather-alerts: [];
     // What could not be done, in one line (a place that could not be added). "" when nothing.
     in property <string> notice: "";
@@ -293,6 +312,20 @@ export component WeatherDashboard inherits Rectangle {
     // from the content's own width: that would be a binding loop, since the grid is the content.
     property <length> content-estimate: root.width - (root.narrow ? 0px : 280px);
     out property <int> pairs-columns: root.content-estimate < 560px + 2 * Theme.sp-6 ? 2 : 3;
+    // One column's width: the content less its padding and the gaps, shared equally.
+    out property <length> pair-column: (root.content-estimate - 2 * Theme.sp-6 - (root.pairs-columns - 1) * Theme.sp-6) / root.pairs-columns;
+    // The six readings, in reading order, as rows of the grid.
+    property <[Pair]> pairs: [
+        { label: "Humidity", value: root.current.humidity },
+        { label: "Wind", value: root.current.wind-speed + " " + root.current.wind-direction },
+        { label: "UV", value: root.current.uv-index },
+        { label: "Visibility", value: root.current.visibility },
+        { label: "Pressure", value: root.current.pressure },
+        { label: "Cloud", value: root.current.cloud-cover },
+    ];
+    property <[[Pair]]> pair-rows: root.pairs-columns == 3
+        ? [[root.pairs[0], root.pairs[1], root.pairs[2]], [root.pairs[3], root.pairs[4], root.pairs[5]]]
+        : [[root.pairs[0], root.pairs[1]], [root.pairs[2], root.pairs[3]], [root.pairs[4], root.pairs[5]]];
     out property <length> content-width: content-flick.width;
     property <length> HOUR-COL: 64px;
     out property <length> hour-column-width: HOUR-COL;
@@ -316,7 +349,7 @@ export component WeatherDashboard inherits Rectangle {
             }
             // The place is the popover's anchor; refresh takes the tint only once the reading is stale.
             actions: [
-                { id: "place", icon: Icons.pin, label: root.current.location, active: root.places-open },
+                { id: "place", icon: Icons.pin, label: root.place-label, active: root.places-open },
                 { id: "refresh", icon: Icons.refresh, active: root.stale, tooltip: "Fetch again" },
             ];
             back => { root.back-pressed(); }
@@ -335,22 +368,31 @@ export component WeatherDashboard inherits Rectangle {
                     padding: Theme.sp-6;
                     spacing: 0;
 
-                    // ── Danger first: at most two bars, the rest folded ──
+                    // ── Danger first: two bars, the rest behind one row that opens them ──
                     for alert[i] in root.weather-alerts : VerticalLayout {
-                        if i < 2 : YNoticeBar {
+                        if i < 2 || root.alerts-expanded : YNoticeBar {
                             text: alert.title + " — " + alert.description;
                             tone: alert.severity >= 1 ? 1 : 0;
                             icon-path: Icons.warning;
                             dismissible: false;
                         }
-                        if i < 2 : Rectangle { height: Theme.sp-3; }
+                        if i < 2 || root.alerts-expanded : Rectangle { height: Theme.sp-3; }
                     }
                     if root.weather-alerts.length > 2 : YListItem {
-                        title: (root.weather-alerts.length - 2) + " more alerts";
+                        title: root.alerts-expanded ? "Fewer alerts"
+                            : (root.weather-alerts.length - 2 == 1 ? "1 more alert"
+                                : (root.weather-alerts.length - 2) + " more alerts");
                         icon-path: Icons.warning;
                         two-line: false;
+                        clicked => { root.alerts-expanded = !root.alerts-expanded; }
                     }
-                    if root.weather-alerts.length > 0 : Rectangle { height: Theme.sp-3; }
+                    if root.air-quality-unhealthy && root.air-quality != "" : YNoticeBar {
+                        text: root.air-quality;
+                        tone: 1;
+                        icon-path: Icons.warning;
+                        dismissible: false;
+                    }
+                    if root.weather-alerts.length > 0 || root.air-quality-unhealthy : Rectangle { height: Theme.sp-3; }
 
                     if root.notice != "" : YNoticeBar {
                         text: root.notice;
@@ -378,14 +420,23 @@ export component WeatherDashboard inherits Rectangle {
                                 commands: Icons.weather-kind(root.current.icon);
                                 size: 36px;
                                 thickness: 1.25px;
-                                tint: root.current.is-day ? Theme.amber : Theme.holo-blue;
+                                // The app's own hue by day (azure, the dock tile's), and no colour
+                                // at night: neither gold (Yantrik's) nor the accent (attention).
+                                tint: root.current.is-day ? AppColor.for-app("weather") : Theme.text-secondary;
                                 y: (parent.height - self.height) / 2;
                             }
                         }
                         Text {
-                            text: root.current.is-loading && root.current.temperature == "--" ? "…" : root.current.temperature;
+                            text: root.current.is-loading && root.reading-number == "--" ? "…" : root.reading-number;
                             color: Theme.text-primary;
                             font-size: Theme.fs-greeting;
+                            font-weight: Theme.fw-body;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: root.reading-unit;
+                            color: Theme.text-secondary;
+                            font-size: Theme.fs-display;
                             font-weight: Theme.fw-body;
                             vertical-alignment: center;
                         }
@@ -400,46 +451,29 @@ export component WeatherDashboard inherits Rectangle {
                     }
                     Rectangle { height: Theme.sp-6; }
 
-                    // ── The measurements, a fixed grid ──
-                    if root.pairs-columns == 3 : VerticalLayout {
+                    // ── The measurements: one grid, every column the same width, so the
+                    //    pairs line up across rows and a long value elides inside its column ──
+                    VerticalLayout {
                         spacing: Theme.sp-3;
-                        HorizontalLayout {
+                        for row[r] in root.pair-rows : HorizontalLayout {
                             spacing: Theme.sp-6;
-                            MeasuredPair { label: "Humidity"; value: root.current.humidity; }
-                            MeasuredPair { label: "Wind"; value: root.current.wind-speed + " " + root.current.wind-direction; }
-                            MeasuredPair { label: "UV"; value: root.current.uv-index; }
-                        }
-                        HorizontalLayout {
-                            spacing: Theme.sp-6;
-                            MeasuredPair { label: "Visibility"; value: root.current.visibility; }
-                            MeasuredPair { label: "Pressure"; value: root.current.pressure; }
-                            MeasuredPair { label: "Cloud"; value: root.current.cloud-cover; }
-                        }
-                    }
-                    if root.pairs-columns == 2 : VerticalLayout {
-                        spacing: Theme.sp-3;
-                        HorizontalLayout {
-                            spacing: Theme.sp-6;
-                            MeasuredPair { label: "Humidity"; value: root.current.humidity; }
-                            MeasuredPair { label: "Wind"; value: root.current.wind-speed + " " + root.current.wind-direction; }
-                        }
-                        HorizontalLayout {
-                            spacing: Theme.sp-6;
-                            MeasuredPair { label: "UV"; value: root.current.uv-index; }
-                            MeasuredPair { label: "Visibility"; value: root.current.visibility; }
-                        }
-                        HorizontalLayout {
-                            spacing: Theme.sp-6;
-                            MeasuredPair { label: "Pressure"; value: root.current.pressure; }
-                            MeasuredPair { label: "Cloud"; value: root.current.cloud-cover; }
+                            alignment: start;
+                            for pair[c] in row : MeasuredPair {
+                                label: pair.label;
+                                value: pair.value;
+                                column-width: root.pair-column;
+                            }
                         }
                     }
 
                     // ── Freshness, by policy; air quality as a secondary line ──
                     if root.freshness != "" : Rectangle { height: Theme.sp-3; }
                     if root.freshness != "" : Text {
+                        // The words say stale ("Last reading …") and the refresh button takes the
+                        // attention tint; the line itself stays secondary (the light theme's
+                        // warning token is below AA at 12px).
                         text: root.freshness;
-                        color: root.stale ? Theme.color-warning : Theme.text-secondary;
+                        color: Theme.text-secondary;
                         font-size: Theme.fs-caption;
                         overflow: elide;
                     }
@@ -453,11 +487,22 @@ export component WeatherDashboard inherits Rectangle {
 
                     // ── Today ──
                     Rectangle { height: Theme.sp-7; }
-                    Text {
-                        text: "Today" + root.hourly-zone-note;
-                        color: Theme.text-primary;
-                        font-size: Theme.fs-title-2;
-                        font-weight: Theme.fw-title-2;
+                    HorizontalLayout {
+                        spacing: Theme.sp-2;
+                        alignment: start;
+                        Text {
+                            text: "Today";
+                            color: Theme.text-primary;
+                            font-size: Theme.fs-title-2;
+                            font-weight: Theme.fw-title-2;
+                            vertical-alignment: center;
+                        }
+                        if root.hourly-zone-note != "" : Text {
+                            text: root.hourly-zone-note;
+                            color: Theme.text-secondary;
+                            font-size: Theme.fs-caption;
+                            vertical-alignment: center;
+                        }
                     }
                     Rectangle { height: Theme.sp-3; }
                     hours := Flickable {
@@ -480,7 +525,6 @@ export component WeatherDashboard inherits Rectangle {
                             }
                         }
                     }
-                    caption-probe := Text { visible: false; text: "0%"; font-size: Theme.fs-caption; }
 
                     // ── This week ──
                     Rectangle { height: Theme.sp-7; }
@@ -529,6 +573,10 @@ export component WeatherDashboard inherits Rectangle {
         }
     }
 
+    // One caption line, measured once for the hour columns' precipitation slot. Outside every
+    // layout: an invisible element inside one would still take its row.
+    caption-probe := Text { visible: false; text: "0%"; font-size: Theme.fs-caption; x: 0; y: 0; }
+
     // ── The places, under the place name in the title bar ──
     YPopover {
         open: root.places-open;
@@ -550,8 +598,8 @@ export component WeatherDashboard inherits Rectangle {
                 horizontal-stretch: 1;
                 clicked => { root.weather-select-location(i); root.places-open = false; }
             }
-            // Remove: the last place cannot go, and the app says so in the notice.
-            Rectangle {
+            // Remove: not drawn for the last place, which cannot go (a drawn control works).
+            if root.weather-saved-locations.length > 1 : Rectangle {
                 width: 36px;
                 border-radius: Theme.r-sm;
                 background: remove-hover.has-hover ? Theme.hover-fill : transparent;

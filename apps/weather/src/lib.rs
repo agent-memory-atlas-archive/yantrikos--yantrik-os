@@ -271,9 +271,8 @@ mod tests {
         app.run(Command::RemoveLocation(1));
         app.run(Command::RemoveLocation(0));
         assert_eq!(app.model(|m| m.prefs.locations.len()), 1);
-        // The last place cannot go: the button's refusal is the notice, so it is drawn.
-        assert!(app.model(|m| !m.notice.is_empty()));
-        assert_eq!(app.ui(|ui| ui.get_notice()), app.model(|m| m.notice.clone()));
+        // The last place cannot go; its remove control is not drawn, so the refusal is a refusal.
+        assert_eq!(app.last_refusal().unwrap().kind, "last_place");
     }
 
     #[test]

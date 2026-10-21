@@ -10,11 +10,17 @@ import { Theme } from "theme.slint";
 export component MeasuredPair inherits HorizontalLayout {
     in property <string> label;
     in property <string> value;
+    // The grid's column: every pair in a column takes it, so the values start at one x across
+    // rows. The label keeps a fixed share; a value too long for the rest elides, the label never.
+    in property <length> column-width: 160px;
+    in property <length> label-width: 76px;
+    width: root.column-width;
     spacing: Theme.sp-2;
     alignment: start;
 
     Text {
         text: root.label;
+        width: root.label-width;
         color: Theme.text-secondary;
         font-size: Theme.fs-body;
         font-weight: Theme.fw-body;
@@ -23,6 +29,7 @@ export component MeasuredPair inherits HorizontalLayout {
     }
     Text {
         text: root.value;
+        horizontal-stretch: 1;
         color: Theme.text-primary;
         font-size: Theme.fs-body;
         font-weight: Theme.fw-title-2;

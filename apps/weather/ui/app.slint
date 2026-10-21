@@ -49,6 +49,11 @@ export component WeatherApp inherits AppWindow {
     in property <bool> stale <=> dash.stale;
     in property <string> hourly-zone-note <=> dash.hourly-zone-note;
     in property <string> air-quality <=> dash.air-quality;
+    in property <bool> air-quality-unhealthy <=> dash.air-quality-unhealthy;
+    in property <string> reading-number <=> dash.reading-number;
+    in property <string> reading-unit <=> dash.reading-unit;
+    in property <string> place-label <=> dash.place-label;
+    in-out property <bool> alerts-expanded <=> dash.alerts-expanded;
     in property <[WeatherAlert]> weather-alerts <=> dash.weather-alerts;
     in property <string> notice <=> dash.notice;
 

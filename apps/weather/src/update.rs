@@ -102,13 +102,9 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Effects<Weather>) -> Res
         }
         Command::RemoveLocation(idx) => {
             let was_active = m.prefs.active == idx;
-            if let Err(refused) = places::remove(&mut m.prefs, idx) {
-                // A button's refusal is said where the person is looking, as a notice that
-                // commits: a refused command's effects are dropped, so this one is not refused.
-                m.notice = refused.sentence;
-                fx.changed(PART_NOTICE);
-                return Ok(());
-            }
+            // The remove control is not drawn for the last place, so a refusal here is a
+            // caller's error, and stays a refusal for the framework to log.
+            places::remove(&mut m.prefs, idx)?;
             kept(m, fx);
             if was_active {
                 start_fetch(m, fx);
