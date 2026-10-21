@@ -10,8 +10,9 @@
 //! - *Not now*: the bar is put away and editing goes on; saving stays refused until a choice.
 //!
 //! Both resolutions write the window's text as a note of its own before anything else, so no path
-//! here can lose it. A change to a note with nothing unsaved asks nothing: as before, Refresh
-//! reads it.
+//! here can lose it. A change to a note with nothing unsaved asks nothing: the note is read again
+//! and shown, with a quiet line saying so ([`follow`]). A note with unsaved edits is never
+//! replaced that way: typing before the read lands makes it a conflict, and the person chooses.
 
 use yantrik_app::documents::{DocumentId, Fingerprint, Observed, OutsideState};
 use yantrik_app::effects::Effects;
@@ -44,6 +45,60 @@ pub fn seen(m: &mut Model, fx: &mut Effects<Notes>, key: &str, seen: Observed) {
         fx.changed(STATUS);
     }
     fx.changed(OUTSIDE);
+    if matches!(after, OutsideState::Changed { .. }) {
+        follow(m, fx);
+    }
+}
+
+/// The open note's file changed outside and the note has nothing unsaved: it is read again, and
+/// [`reread`] shows it. Edits made since the change was seen make it the conflict it now is,
+/// judged by the document. While the store is busy, the read waits for it (`reread_owed`).
+pub fn follow(m: &mut Model, fx: &mut Effects<Notes>) {
+    let Some(c) = m.current() else { return };
+    let OutsideState::Changed { now } = c.outside().clone() else { return };
+    let (doc, id, unsaved) = (c.doc.id, c.id().to_string(), c.unsaved());
+    if unsaved {
+        if let Some(d) = m.documents.get_mut(doc) {
+            d.observe(Observed::File(now));
+        }
+        m.status = save_state(m).into();
+        fx.changed(STATUS);
+        fx.changed(OUTSIDE);
+        return;
+    }
+    if m.busy.is_some() {
+        m.pane.reread_owed = true;
+        return;
+    }
+    let lost = Command::Reread { doc, result: Err(said::JOB_LOST.into()) };
+    begin(m, fx, Work::Reread, lost, move |vault| Command::Reread { doc, result: vault.read_note(&id) });
+}
+
+/// The changed note, read again. Shown in place of what the window held when nothing there is
+/// unsaved, as *Take theirs* shows it (the undo history starts again); a key typed while the read
+/// ran makes it a conflict instead, so nothing typed is replaced. A file found gone is a deletion.
+pub fn reread(m: &mut Model, fx: &mut Effects<Notes>, doc: DocumentId, result: Result<Option<NoteText>, String>) {
+    m.busy = None;
+    let still_changed =
+        m.current().is_some_and(|c| c.doc.id == doc && matches!(c.outside(), OutsideState::Changed { .. }));
+    match result {
+        Err(e) => say(m, fx, &said::reread_failed(&e)),
+        Ok(_) if !still_changed => {}
+        Ok(Some(theirs)) if !m.unsaved() => take_theirs(m, fx, doc, theirs, said::UPDATED_FROM_DISK),
+        Ok(theirs) => {
+            let seen = match &theirs {
+                Some(t) => Observed::File(Fingerprint::of_bytes(t.text.as_bytes())),
+                None => Observed::Gone,
+            };
+            if let Some(d) = m.documents.get_mut(doc) {
+                d.observe(seen);
+            }
+            fx.changed(OUTSIDE);
+        }
+    }
+    m.status = save_state(m).into();
+    fx.changed(STATUS);
+    after_store(m, fx);
 }
 
 /// Why the open note has nothing for a resolution to do, or `None` when it may go ahead. `theirs`
@@ -108,7 +163,9 @@ pub fn resolved(
     match (resolution, resolved.theirs, latest) {
         // Nothing else can be shown while the store works; the kept note is listed either way.
         (_, _, None) => relist(m, fx),
-        (Resolution::TakeTheirs, Ok(Some(theirs)), Some((_, at))) if at == seq => take_theirs(m, fx, doc, theirs),
+        (Resolution::TakeTheirs, Ok(Some(theirs)), Some((_, at))) if at == seq => {
+            take_theirs(m, fx, doc, theirs, said::TOOK_THEIRS)
+        }
         (Resolution::TakeTheirs, Ok(Some(_)), Some(_)) => stay(m, fx, said::TYPED_MEANWHILE.into()),
         (Resolution::TakeTheirs, Err(e), Some(_)) => stay(m, fx, said::theirs_unread(&e)),
         (Resolution::TakeTheirs, Ok(None), Some((latest, _))) => {
@@ -124,7 +181,7 @@ pub fn resolved(
 
 /// The file's text replaces the window's (already kept as a recovery note), from a baseline the
 /// watch starts again at, with the view's undo history cleared.
-fn take_theirs(m: &mut Model, fx: &mut Effects<Notes>, doc: DocumentId, theirs: NoteText) {
+fn take_theirs(m: &mut Model, fx: &mut Effects<Notes>, doc: DocumentId, theirs: NoteText, sentence: &str) {
     let Some(d) = m.documents.get_mut(doc) else { return };
     d.take_theirs(theirs.clone(), Fingerprint::of_bytes(theirs.text.as_bytes()));
     if let Some((key, path, seen)) = d.watch_entry() {
@@ -139,7 +196,7 @@ fn take_theirs(m: &mut Model, fx: &mut Effects<Notes>, doc: DocumentId, theirs: 
     if let Some(n) = m.library.iter_mut().find(|n| n.id == id && !n.trash) {
         *n = Note { id, content: theirs, modified, trash: false, stored: true };
     }
-    shown_resolved(m, fx, said::TOOK_THEIRS);
+    shown_resolved(m, fx, sentence);
 }
 
 /// The window moves to the kept note. The original is listed as its files hold it now, or not at

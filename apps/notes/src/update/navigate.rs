@@ -22,6 +22,7 @@ pub const LIBRARY_FULL: &str = "Library reached its note or text limit (2,000 no
 pub fn show_note(m: &mut Model, fx: &mut Effects<Notes>, note: Option<Note>) {
     // What the pane held about the last note's outside change is not about this one.
     m.pane.outside_later = false;
+    m.pane.reread_owed = false;
     m.pane.theirs = None;
     if m.pane.dialog == super::outside::COMPARE_DIALOG {
         m.pane.dialog = 0;

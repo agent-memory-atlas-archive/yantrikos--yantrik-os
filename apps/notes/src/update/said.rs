@@ -43,7 +43,7 @@ pub fn blocked(outside: &OutsideState) -> &'static str {
 }
 
 /// What the outside bar says, or `None` when there is nothing for the person to choose. An
-/// outside change to a note with nothing unsaved is not a choice: Refresh reads it, as before.
+/// outside change to a note with nothing unsaved is not a choice: the note is read again.
 pub fn outside(outside: &OutsideState) -> Option<&'static str> {
     match outside {
         OutsideState::Conflict { .. } => {
@@ -66,6 +66,8 @@ pub fn replaced(what: Replaced) -> &'static str {
     }
 }
 
+/// A note with nothing unsaved, read again after another program changed it.
+pub const UPDATED_FROM_DISK: &str = "Updated from the copy on disk.";
 pub const TOOK_THEIRS: &str =
     "Now showing the version on disk. Your text was kept as a separate note with the same title.";
 pub const KEPT_MINE: &str = "Your text is now a separate note. The original is left as the other program wrote it.";
@@ -92,6 +94,11 @@ pub fn theirs_unread(error: &str) -> String {
          nothing was replaced.",
         reason(error)
     )
+}
+
+/// A note with nothing unsaved changed on disk and could not be read again.
+pub fn reread_failed(error: &str) -> String {
+    format!("This note changed on disk but could not be read again ({}); Refresh tries again.", reason(error))
 }
 
 /// The version on disk could not be read for a comparison.

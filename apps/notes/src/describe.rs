@@ -103,8 +103,8 @@ pub fn view(m: &Model) -> View {
 
 /// `describe.outside`: what is known of changes made to the open note's file by another program.
 /// `conflict` and `deleted` wait on a choice (`keep_mine_as_copy`, `take_theirs`, `compare`), and
-/// until then the note is not saved; `changed` is a change to a note with nothing unsaved, which
-/// `reload` reads.
+/// until then the note is not saved; `changed` is a change to a note with nothing unsaved, while
+/// Notes reads it again (then `clean`).
 fn outside(state: &OutsideState) -> &'static str {
     match state {
         OutsideState::Clean => "clean",

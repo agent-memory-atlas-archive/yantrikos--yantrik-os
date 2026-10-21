@@ -110,26 +110,6 @@ fn a_change_the_watch_sees_first_is_offered_at_once_and_no_save_is_tried_over_it
     assert_eq!(file(&path), "theirs");
 }
 
-/// Parity: a change to a note with nothing unsaved asks nothing of the person; Refresh reads it.
-/// `describe` says the file changed (step 8d), so a mind's revision check sees it.
-#[test]
-fn an_outside_change_to_a_saved_note_changes_nothing_until_a_reload() {
-    let (app, path) = with_note("Clean");
-    let before = app.revision();
-    std::fs::write(&path, "# Clean\n\nfrom elsewhere\n").unwrap();
-    app.look_at_files();
-    assert!(matches!(outside(&app), OutsideState::Changed { .. }));
-    assert_eq!(bar(&app), 0, "no choice is asked for");
-    assert_eq!(notice(&app), "");
-    assert_eq!(app.ui(|ui| ui.get_content().to_string()), "# Clean\n\n", "the window is as it was");
-    assert_eq!(state(&app)["outside"], "changed");
-    assert_ne!(app.revision(), before, "describe says the file changed");
-    app.run(Command::Window(WindowAction::Reload));
-    settle(&app);
-    assert_eq!(app.model(|m| m.current().unwrap().text().to_string()), "# Clean\n\nfrom elsewhere\n");
-    assert!(matches!(outside(&app), OutsideState::Clean), "read afresh, a fresh document");
-}
-
 /// Gate row "Conflicting outside edit": our own save does not raise a change.
 #[test]
 fn our_own_save_is_not_an_outside_edit_and_the_watch_follows_the_open_note() {

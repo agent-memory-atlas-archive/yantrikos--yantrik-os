@@ -78,6 +78,8 @@ pub enum Work {
     Resolve,
     /// The other version read, for a comparison.
     Compare,
+    /// The open note read again: another program changed it, and nothing here was unsaved.
+    Reread,
 }
 
 /// An action held until the open note is saved.
@@ -138,6 +140,8 @@ pub struct Pane {
     /// *Not now*: the outside bar is put away until a save is refused or the file changes again.
     /// Saving stays refused all the while.
     pub outside_later: bool,
+    /// The open note's file changed while the store was busy: it is read again once it is not.
+    pub reread_owed: bool,
     pub path: String,
     /// The notebook and tags fields as typed (the sidecar keeps them cut to length).
     pub notebook: String,
@@ -228,6 +232,7 @@ impl Model {
                 dialog: 0,
                 theirs: None,
                 outside_later: false,
+                reread_owed: false,
                 path: String::new(),
                 notebook: String::new(),
                 tags: String::new(),

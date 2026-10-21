@@ -39,6 +39,8 @@ pub enum Command {
     Resolved { doc: DocumentId, seq: u64, resolution: Resolution, result: Result<Box<Resolved>, String> },
     /// The file's version read for a comparison: `None` when the file is gone.
     Compared { doc: DocumentId, result: Result<Option<NoteText>, String> },
+    /// A note with nothing unsaved, read again after another program changed it.
+    Reread { doc: DocumentId, result: Result<Option<NoteText>, String> },
     /// The disk the vault writes through, for a test to make a write fail.
     #[cfg(test)]
     UseDisk(std::sync::Arc<dyn yantrik_app::documents::disk::Disk>),
