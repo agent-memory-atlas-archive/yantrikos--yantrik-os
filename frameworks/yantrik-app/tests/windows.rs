@@ -13,7 +13,6 @@ slint::slint! {
     export component PairWin inherits Window {
         in-out property <int> count: 0;
         in-out property <int> shown-window: -1;
-        in-out property <int> renders: 0;
         callback bump();
     }
 }
@@ -38,6 +37,10 @@ struct Model {
 enum Command {
     Open,
     Bump(WindowId),
+    /// Closes this window and opens another in one command: a window replaced.
+    Replace(WindowId),
+    /// Asks the process to end, then for a window.
+    ExitThenOpen,
 }
 
 struct Pair;
@@ -68,12 +71,19 @@ impl App for Pair {
                 m.count += 1;
                 m.bumps.push(window);
             }
+            Command::Replace(window) => {
+                fx.close(window);
+                m.opened.push(fx.open_window());
+            }
+            Command::ExitThenOpen => {
+                fx.exit();
+                m.opened.push(fx.open_window());
+            }
         }
         Ok(())
     }
 
     fn render(ui: &PairWin, window: WindowId, m: &Model, _: &Changed) {
-        ui.set_renders(ui.get_renders() + 1);
         ui.set_count(m.count);
         ui.set_shown_window(window.0 as i32);
     }
@@ -163,4 +173,43 @@ fn a_refused_command_opens_no_window() {
     let app = TestApp::<Refusing>::start();
     app.run(());
     assert_eq!(app.windows(), vec![WindowId::PRIMARY]);
+}
+
+#[test]
+fn a_second_launch_brings_forward_an_open_window_and_never_a_closed_one() {
+    let app = TestApp::<Pair>::start();
+    let second = opened(&app);
+    app.close_requested(WindowId::PRIMARY);
+    assert!(app.present().is_ok());
+    assert_eq!(app.windows(), vec![second], "the closed first window stays closed");
+    // So closing what is on screen ends the app, and nothing visible is left behind.
+    app.close_requested(second);
+    assert_eq!(app.exit_reason(), Some(ExitReason::LastWindowClosed));
+}
+
+#[test]
+fn a_closed_first_window_is_not_drawn() {
+    let app = TestApp::<Pair>::start();
+    let second = opened(&app);
+    app.close_requested(WindowId::PRIMARY);
+    app.run(Command::Bump(second));
+    assert_eq!(app.ui(|ui| ui.get_count()), 0, "closed before the change");
+    assert_eq!(app.window(second, |ui| ui.get_count()), Some(1));
+}
+
+#[test]
+fn closing_the_last_window_and_opening_one_in_one_command_replaces_it() {
+    let app = TestApp::<Pair>::start();
+    app.run(Command::Replace(WindowId::PRIMARY));
+    let replacement = *app.model(|m| m.opened.clone()).last().unwrap();
+    assert_eq!(app.windows(), vec![replacement]);
+    assert_eq!(app.exit_reason(), None);
+}
+
+#[test]
+fn no_window_is_made_once_the_process_is_ending() {
+    let app = TestApp::<Pair>::start();
+    app.run(Command::ExitThenOpen);
+    assert_eq!(app.exit_reason(), Some(ExitReason::App));
+    assert_eq!(app.windows(), vec![WindowId::PRIMARY], "nothing flashes up while ending");
 }

@@ -91,6 +91,10 @@ pub enum Event<S> {
         key: String,
         seen: crate::documents::Observed,
     },
+    /// A window `fx.open_window` returned the id of could not be made; nothing will be drawn for
+    /// it, and the app drops what it attached to the id. `None` does nothing more: the failure is
+    /// already logged and filed as a problem record.
+    WindowNotOpened { window: WindowId, why: String },
 }
 
 /// What the runner knows before any window exists.

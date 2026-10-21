@@ -79,6 +79,12 @@ pub fn run_until_ending<C: slint::ComponentHandle + 'static>(ui: &C, program: &s
         crate::chrome::bring_back(ui.window());
         Ok(())
     });
+    run_loop(ui, program)
+}
+
+/// The loop alone, for a runner that installed its own presenter (the framework's, through its
+/// core, which knows every window).
+pub(crate) fn run_loop<C: slint::ComponentHandle + 'static>(ui: &C, program: &str) -> Ending {
     match ui.run() {
         Ok(()) => Ending::Closed,
         Err(error) => {

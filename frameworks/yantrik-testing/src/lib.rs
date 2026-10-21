@@ -392,6 +392,8 @@ impl<A: App> TestApp<A> {
                 .unwrap_or_else(|p| p.into_inner())
                 .clone()
                 .expect("the lane was made");
+            // Hermetic: a window opened in a test wears the default theme, not this machine's.
+            core.set_theme(yantrik_app::theme::ThemeSettings::default());
             core.flush_settings();
             A::wire(&Cx::new(core.clone()));
             core.render_all();
@@ -530,6 +532,11 @@ impl<A: App> TestApp<A> {
         f: impl FnOnce(&A::Ui) -> R + Send + 'static,
     ) -> Option<R> {
         self.with(move |u| u.core.window(id).map(|ui| f(&ui)))
+    }
+
+    /// A second launch asked for the app (`present`).
+    pub fn present(&self) -> Result<(), String> {
+        self.with(|u| u.core.present())
     }
 
     /// The person pressed a window's close button: `Event::CloseRequested` for it.

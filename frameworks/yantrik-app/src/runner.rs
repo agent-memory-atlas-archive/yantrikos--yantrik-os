@@ -163,7 +163,10 @@ pub fn run<A: App>() -> ExitCode {
     let registry = crate::control::App::from_registry(registry).serve_as(&instance);
     core.attach_registry(registry);
 
-    let ending = crate::event_loop::run_until_ending(core.ui(), A::ID);
+    // A second launch's `present` goes through the core, which knows which windows are open.
+    let presenting = Rc::downgrade(&core);
+    crate::present::install(move || presenting.upgrade().ok_or("the app is closing")?.present());
+    let ending = crate::event_loop::run_loop(core.ui(), A::ID);
     core.shutdown(GRACE);
     DRAIN.with(|cell| *cell.borrow_mut() = None);
     // A close, an `fx.exit()` and a logout are all 0; only a loop that failed with the display
