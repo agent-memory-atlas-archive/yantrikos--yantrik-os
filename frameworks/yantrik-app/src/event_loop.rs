@@ -83,9 +83,16 @@ pub fn run_until_ending<C: slint::ComponentHandle + 'static>(ui: &C, program: &s
 }
 
 /// The loop alone, for a runner that installed its own presenter (the framework's, through its
-/// core, which knows every window).
+/// core, which knows every window). It runs until the core asks it to end (`quit_event_loop`
+/// from `request_exit`), not until Slint sees no window shown: a command that closes the last
+/// window and opens another hides one before it shows the other, and Slint would end the loop
+/// in between.
 pub(crate) fn run_loop<C: slint::ComponentHandle + 'static>(ui: &C, program: &str) -> Ending {
-    match ui.run() {
+    let ran = ui
+        .show()
+        .and_then(|()| slint::run_event_loop_until_quit())
+        .and_then(|()| ui.hide());
+    match ran {
         Ok(()) => Ending::Closed,
         Err(error) => {
             let socket = wayland_socket();

@@ -422,7 +422,9 @@ impl<A: App> Core<A> {
     /// under. Always under `applying`, so a command an effect raises is queued.
     fn commit(&self, requests: Vec<Request<A>>) {
         let invocation = self.current.get();
-        let mut closed = false;
+        // Closed after everything else this command asked for, so a window it replaces is on
+        // screen before the old one goes.
+        let mut closing = Vec::new();
         for request in requests {
             match request {
                 Request::Then(command) => self.queue(invocation, command),
@@ -491,15 +493,15 @@ impl<A: App> Core<A> {
                     }
                 }
                 Request::OpenWindow(window) => self.open_window(window),
-                Request::Close(window) => {
-                    self.close_window(window);
-                    closed = true;
-                }
+                Request::Close(window) => closing.push(window),
                 Request::Exit => self.request_exit(ExitReason::App),
             }
         }
         // Once every effect is applied: a close and an open in one command replace a window.
-        if closed {
+        if !closing.is_empty() {
+            for window in closing {
+                self.close_window(window);
+            }
             self.exit_if_no_window();
         }
     }
