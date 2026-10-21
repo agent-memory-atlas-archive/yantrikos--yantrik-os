@@ -8,12 +8,18 @@
 //!
 //! The file is opened without following a link and created private (0600), because it sits in a
 //! directory whose contents decide whether a process runs.
+//!
+//! On a local filesystem a second `hold` of the same file is refused even within one process. On
+//! NFS (and CIFS with some mount options) Linux turns `flock` into a POSIX lock, which never
+//! conflicts within a process and is released when any descriptor of the file is closed: there it
+//! excludes other processes only, so a caller must not rely on an in-process refusal.
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
 /// Held while it lives; the lock goes with it (and with the process).
 #[derive(Debug)]
+#[must_use = "the lock is released when this is dropped; bind it for as long as it must be held"]
 pub struct FileLock {
     _file: File,
     path: PathBuf,
@@ -39,6 +45,15 @@ impl std::fmt::Display for LockError {
         match self {
             LockError::Held => write!(f, "held by another copy"),
             LockError::Io(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for LockError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            LockError::Held => None,
+            LockError::Io(e) => Some(e),
         }
     }
 }
@@ -70,7 +85,8 @@ pub fn hold(path: &Path) -> Result<FileLock, LockError> {
     Ok(FileLock { _file: file, path: path.to_path_buf() })
 }
 
-/// Windows development builds: no `flock`, and one person's desktop; the open file stands in.
+/// Windows development builds: no lock at all (the file is opened shared, so a second `hold`
+/// succeeds and `Held` is never returned). The instance's pid file is what guards there.
 #[cfg(not(unix))]
 pub fn hold(path: &Path) -> Result<FileLock, LockError> {
     let file = std::fs::OpenOptions::new()

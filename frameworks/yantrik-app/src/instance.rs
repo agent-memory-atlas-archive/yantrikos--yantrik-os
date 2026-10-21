@@ -214,7 +214,11 @@ fn claim_in(
         Ok(()) => Some(InstanceGuard { path, _lock: lock }),
         Err(e) => {
             // Not being able to write the pid file is not a reason to refuse to run.
-            tracing::warn!(app = app_name, error = %e, "Could not write pid file; the lock alone guards");
+            if lock.is_some() {
+                tracing::warn!(app = app_name, error = %e, "Could not write pid file; the lock alone guards");
+            } else {
+                tracing::warn!(app = app_name, error = %e, "Could not write pid file or take the lock; running unguarded");
+            }
             Some(InstanceGuard {
                 path: PathBuf::new(),
                 _lock: lock,
