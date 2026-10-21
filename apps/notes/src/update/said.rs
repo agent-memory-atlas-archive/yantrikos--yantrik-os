@@ -232,6 +232,8 @@ pub const CHOOSE_FIRST: &str =
 pub const TYPED_DURING_TRASH: &str = "Moved to Trash. What you typed meanwhile is kept as a new note.";
 
 pub const WAIT_BEFORE_CLOSING: &str = "Please wait for the current operation before closing.";
+/// A window's close that would ask, while another window's close prompt waits for its answer.
+pub const ANSWER_THE_OTHER_FIRST: &str = "Answer the other window's question first.";
 /// A close asked to save, and no save could start.
 pub const NOT_SAVED_NOW: &str = "The note could not be saved now, so the window stays open.";
 

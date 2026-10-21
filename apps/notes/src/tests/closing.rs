@@ -13,7 +13,7 @@ use super::windows::{two_notes_two_windows, type_in};
 use super::{draft_file, failing, file, notice, settle, unsaved, with_note};
 use crate::command::{Command, WindowAction};
 use crate::update::closing::CLOSE_DIALOG;
-use crate::update::AUTOSAVE_AFTER;
+use crate::update::{said, AUTOSAVE_AFTER};
 use crate::Notes;
 
 const TYPED: &str = "# Closing\n\nlast words";
@@ -280,4 +280,21 @@ fn another_notes_failed_autosave_does_not_end_this_windows_close() {
     assert_eq!(file(&right), "# Right\n\n");
     let right_text = app.model(move |m| m.pane_of(second).and_then(|p| m.current_in(p)).unwrap().text().to_string());
     assert_eq!(right_text, RIGHT, "Right's text is kept, unsaved");
+}
+
+/// #918's review, 5: a window's close that would ask while another window's prompt waits says why
+/// nothing happened.
+#[test]
+fn a_close_that_waits_for_another_windows_prompt_says_so() {
+    let (app, first, _, second, _) = two_notes_two_windows();
+    type_in(&app, first, LEFT);
+    type_in(&app, second, RIGHT);
+    app.close_requested(second);
+    app.close_requested(first);
+    assert_eq!(app.window(first, |ui| ui.get_dialog()), Some(0), "not asked over the other");
+    assert_eq!(notice(&app), said::ANSWER_THE_OTHER_FIRST);
+    assert_eq!(app.window(second, |ui| ui.get_dialog()), Some(CLOSE_DIALOG), "the other still asks");
+    app.window(second, |ui| ui.invoke_action("close-cancel".into()));
+    app.close_requested(first);
+    assert_eq!(app.window(first, |ui| ui.get_dialog()), Some(CLOSE_DIALOG), "asked once the other is answered");
 }

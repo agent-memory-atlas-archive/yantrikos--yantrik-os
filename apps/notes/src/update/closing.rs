@@ -14,7 +14,8 @@
 //!   autosave, in another window) is said, and the close goes on with the notes it asked about.
 //! - *Don't save* drops the edits and their draft, and closes.
 //!
-//! A second close while one waits asks nothing and saves nothing more. A library open read-only
+//! A second close while one waits asks nothing and saves nothing more; another window's close
+//! that would ask says to answer the first, or to wait for its save. A library open read-only
 //! cannot save, so the prompt offers only *Don't save* and *Cancel*, and says Export keeps a copy.
 
 use yantrik_app::app::WindowId;
@@ -74,6 +75,17 @@ fn ask(m: &mut Model, fx: &mut Effects<Notes>, window: Option<WindowId>, closing
     if let Some(flow) = &m.closing {
         let another_window = window.is_some() && flow.window.is_some() && flow.window != window;
         if !(another_window && nothing_to_ask) {
+            // Another close waits, so this one says why nothing happened. The same close again
+            // needs no words: its prompt, or its save, is already under way.
+            if flow.window != window {
+                let sentence = match flow.stage {
+                    Stage::Asking => said::ANSWER_THE_OTHER_FIRST,
+                    _ => said::WAIT_BEFORE_CLOSING,
+                };
+                m.notice = sentence.into();
+                m.lasting_notice = false;
+                fx.changed(STATUS);
+            }
             return;
         }
     }
