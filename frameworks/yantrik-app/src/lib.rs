@@ -13,6 +13,7 @@ pub mod chrome;
 pub mod companion;
 pub mod control;
 pub mod cx;
+pub mod desktop;
 pub mod drafts;
 pub mod effects;
 pub mod event_loop;
@@ -35,7 +36,13 @@ pub mod window;
 pub use app::{App, Boot, Changed, Event, ExitReason, Startup, WindowId};
 pub use boot::init_tracing;
 pub use cx::Cx;
+pub use desktop::{DesktopOutcome, DesktopRequest};
 pub use drafts::Drafts;
+// The Mind and notifications, typed, as their own crates (step 5); named here so an app has
+// one dependency.
+pub use yantrik_mind as mind;
+pub use yantrik_notifications as notifications;
+pub use yantrik_notifications::Notification;
 pub use effects::Effects;
 pub use event_loop::run_until_closed;
 pub use intents::{Agents, Args, Intent, Intents, InvocationId, Origin, Settle};

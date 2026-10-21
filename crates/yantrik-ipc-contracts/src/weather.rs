@@ -79,6 +79,17 @@ pub struct LocationSuggestion {
     pub lon: f64,
 }
 
+/// Everything about a place, in one answer: what `weather.forecast` returns, so an app refreshes
+/// with one round trip instead of five.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Forecast {
+    pub current: CurrentWeather,
+    pub hourly: Vec<HourlyForecast>,
+    pub daily: Vec<DailyForecast>,
+    pub alerts: Vec<WeatherAlert>,
+    pub air_quality: AirQuality,
+}
+
 /// Weather service operations.
 pub trait WeatherService: Send + Sync {
     fn current(&self, location: &Location) -> Result<CurrentWeather, ServiceError>;

@@ -25,6 +25,8 @@ pub enum Seen {
     SettingsFile,
     /// The shell's theme is not what it was.
     Theme(ThemeSettings),
+    /// Whether the Mind can answer is not what it was (the first tick says what it is).
+    Reach(yantrik_mind::Reach),
 }
 
 /// Where sightings go: the core's queue.
@@ -50,10 +52,18 @@ impl Watch {
                 let shell_settings = theme::settings_path();
                 let mut shell_seen = Fingerprint::of(&shell_settings);
                 let mut theme_seen = theme_now;
+                let mut reach_seen: Option<yantrik_mind::Reach> = None;
                 while !stopping.load(Ordering::Acquire) {
                     std::thread::sleep(EVERY);
                     if stopping.load(Ordering::Acquire) {
                         break;
+                    }
+                    // The Mind's reach is read from what its own watcher last heard: a bounded
+                    // first wait on this thread, nothing after, and never on the UI thread (§5).
+                    let reach_now = yantrik_mind::reach();
+                    if reach_seen != Some(reach_now) {
+                        reach_seen = Some(reach_now);
+                        notice.seen(Seen::Reach(reach_now));
                     }
                     let now = Fingerprint::of(&settings_file);
                     if now != settings_seen {

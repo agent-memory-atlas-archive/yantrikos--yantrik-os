@@ -11133,6 +11133,8 @@ dependencies = [
  "yantrik-foundation",
  "yantrik-ipc-contracts",
  "yantrik-ipc-transport",
+ "yantrik-mind",
+ "yantrik-notifications",
  "yantrik-surface",
  "yantrik-testing",
  "yantrik-version",
@@ -11157,6 +11159,7 @@ dependencies = [
  "yantrik-foundation",
  "yantrik-ipc-contracts",
  "yantrik-ipc-transport",
+ "yantrik-notifications",
 ]
 
 [[package]]
@@ -11613,6 +11616,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "yantrik-mind"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "yantrik-ipc-contracts",
+ "yantrik-ipc-transport",
+]
+
+[[package]]
 name = "yantrik-mind-view-title"
 version = "0.1.0"
 dependencies = [
@@ -11712,6 +11724,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "yantrik-notifications"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tracing",
+ "yantrik-ipc-contracts",
+ "yantrik-ipc-transport",
+]
+
+[[package]]
 name = "yantrik-ocr"
 version = "0.1.0"
 dependencies = [
@@ -11784,6 +11806,17 @@ dependencies = [
  "yantrik-ipc-contracts",
  "yantrik-ipc-transport",
  "yantrik-surface",
+]
+
+[[package]]
+name = "yantrik-services"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "yantrik-ipc-contracts",
+ "yantrik-ipc-transport",
 ]
 
 [[package]]

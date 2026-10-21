@@ -178,6 +178,34 @@ impl ServiceHandler for WeatherHandler {
                 let result = fetch_alerts(&loc, fahrenheit)?;
                 Ok(serde_json::to_value(result).unwrap())
             }
+            // Everything about a place in one answer: what an app's refresh asks for (the app
+            // framework's step 5), in place of five round trips, each a provider request.
+            "weather.forecast" => {
+                let loc = parse_location(&params)?;
+                let fahrenheit = params["fahrenheit"].as_bool().unwrap_or(false);
+                let days = params["days"].as_u64().unwrap_or(7) as u32;
+                let hours = params["hours"].as_u64().unwrap_or(24) as u32;
+                self.places.remember(&loc, fahrenheit);
+                // One provider call for everything about the place: the current conditions,
+                // the hours, the days and the alerts are all read from the same answer. Air
+                // quality is another host; its failure is its own and never blanks the reading.
+                let json = open_meteo_forecast(&loc, fahrenheit)?;
+                let outlook = parse_outlook(&json);
+                let current = outlook.current.clone();
+                self.places.learned(&loc, fahrenheit, outlook);
+                let air_quality = fetch_air_quality(&loc).unwrap_or_else(|e| {
+                    tracing::warn!(error = %e.message, "air quality not fetched; the reading stands without it");
+                    air_quality_unknown()
+                });
+                let result = yantrik_ipc_contracts::weather::Forecast {
+                    current,
+                    hourly: parse_hourly(&json, hours),
+                    daily: parse_daily(&json, days),
+                    alerts: parse_alerts(&json, fahrenheit),
+                    air_quality,
+                };
+                Ok(serde_json::to_value(result).unwrap())
+            }
             "weather.air_quality" => {
                 let loc = parse_location(&params)?;
                 let result = fetch_air_quality(&loc)?;
@@ -507,6 +535,11 @@ fn fetch_hourly(
     fahrenheit: bool,
 ) -> Result<Vec<HourlyForecast>, ServiceError> {
     let json = open_meteo_forecast(loc, fahrenheit)?;
+    Ok(parse_hourly(&json, hours))
+}
+
+/// The hours from the current one on, at most `hours` of them, out of one provider answer.
+fn parse_hourly(json: &serde_json::Value, hours: u32) -> Vec<HourlyForecast> {
     let h = &json["hourly"];
 
     let (times, temps, codes) = match (
@@ -515,7 +548,7 @@ fn fetch_hourly(
         h["weather_code"].as_array(),
     ) {
         (Some(t), Some(te), Some(c)) => (t, te, c),
-        _ => return Ok(Vec::new()),
+        _ => return Vec::new(),
     };
 
     let precip_probs = h["precipitation_probability"].as_array();
@@ -549,7 +582,7 @@ fn fetch_hourly(
         });
     }
 
-    Ok(result)
+    result
 }
 
 fn fetch_daily(
@@ -558,7 +591,12 @@ fn fetch_daily(
     fahrenheit: bool,
 ) -> Result<Vec<DailyForecast>, ServiceError> {
     let json = open_meteo_forecast(loc, fahrenheit)?;
-    Ok(parse_days(&json, days as usize)
+    Ok(parse_daily(&json, days))
+}
+
+/// The days as the app reads them, out of one provider answer.
+fn parse_daily(json: &serde_json::Value, days: u32) -> Vec<DailyForecast> {
+    parse_days(json, days as usize)
         .into_iter()
         .map(|d| DailyForecast {
             icon: wmo_icon(d.code, true).to_string(),
@@ -572,7 +610,7 @@ fn fetch_daily(
             sunrise: d.sunrise,
             sunset: d.sunset,
         })
-        .collect())
+        .collect()
 }
 
 /// The days of an Open-Meteo forecast answer, today first, at most `days` of them, in the unit
@@ -645,6 +683,11 @@ fn weekday(date: &str) -> Option<&'static str> {
 
 fn fetch_alerts(loc: &Location, fahrenheit: bool) -> Result<Vec<WeatherAlert>, ServiceError> {
     let json = open_meteo_forecast(loc, fahrenheit)?;
+    Ok(parse_alerts(&json, fahrenheit))
+}
+
+/// The alerts the conditions warrant, out of one provider answer.
+fn parse_alerts(json: &serde_json::Value, fahrenheit: bool) -> Vec<WeatherAlert> {
     let c = &json["current"];
     let d = &json["daily"];
 
@@ -656,7 +699,12 @@ fn fetch_alerts(loc: &Location, fahrenheit: bool) -> Result<Vec<WeatherAlert>, S
         .and_then(|v| v.as_f64())
         .unwrap_or(0.0);
 
-    Ok(generate_alerts(weather_code, wind_speed, uv_index, fahrenheit))
+    generate_alerts(weather_code, wind_speed, uv_index, fahrenheit)
+}
+
+/// Air quality when its host did not answer: the app shows `--` and says nothing more.
+fn air_quality_unknown() -> AirQuality {
+    AirQuality { value: 0.0, label: "N/A".to_string(), level: 0 }
 }
 
 fn fetch_air_quality(loc: &Location) -> Result<AirQuality, ServiceError> {

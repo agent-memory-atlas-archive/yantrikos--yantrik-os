@@ -421,6 +421,11 @@ impl<A: App> Core<A> {
                 } => self.save_settings(value, replace_unusable),
                 Request::SaveDraft { name, bytes, delay } => self.save_draft(name, bytes, delay),
                 Request::DiscardDraft(name) => self.discard_draft(name),
+                // Never blocks: the send is a thread of its own, bounded by the crate.
+                Request::Notify(notification) => {
+                    // Always this app's: the name comes from the framework, not the caller (§5).
+                    yantrik_notifications::send(notification.as_app(self.id));
+                }
                 Request::Close(window) => self.close_window(window),
                 Request::Exit => self.request_exit(ExitReason::App),
             }
@@ -628,6 +633,7 @@ impl<A: App> Core<A> {
             (None, Event::DraftNotSaved { name, why }) => {
                 problems::record_failure(self.id, "draft", &format!("{name}: {why}"));
             }
+            (None, Event::ReachChanged(_)) => {}
         }
     }
 
