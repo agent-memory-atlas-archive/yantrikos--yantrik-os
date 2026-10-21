@@ -4,6 +4,7 @@
 use yantrik_ipc_contracts::email::{EmailAccountSummary, EmailDetail, EmailSummary, OAuthBeginResult, TestAccountResult};
 
 use crate::backend::look::Loaded;
+use crate::model::Keep;
 use crate::state::{Draft, GoogleOutcome};
 
 /// Why the mailbox is being read.
@@ -146,10 +147,24 @@ pub enum Command {
     MarkedOnOpen { id: String, folder: String, outcome: Result<(), String> },
     /// Mark read (`true`), or flag: the toolbar's star turns the flag round, `flag` sets it.
     Mark { pick: Pick, flag: Flag, toggle: bool },
-    Marked { target: Target, flag: Flag, call: Result<(), String>, listed: Option<Result<Vec<EmailSummary>, String>> },
+    /// `read` is the folder listed after the change: the message's own.
+    Marked {
+        target: Target,
+        flag: Flag,
+        wanted: bool,
+        call: Result<(), String>,
+        read: String,
+        listed: Option<Result<Vec<EmailSummary>, String>>,
+    },
     Delete(i32),
     Archive(i32),
-    Removed { target: Target, how: Removal, call: Result<(), String>, listed: Option<Result<Vec<EmailSummary>, String>> },
+    Removed {
+        target: Target,
+        how: Removal,
+        call: Result<(), String>,
+        read: String,
+        listed: Option<Result<Vec<EmailSummary>, String>>,
+    },
     ToggleThread(i32),
     OpenOriginal,
     /// The sentence the notice says about it, whichever way it went.
@@ -166,8 +181,8 @@ pub enum Command {
     Sent(Result<(), String>),
     CancelCompose(Draft),
     SaveDraft(Draft),
-    /// A draft written (`closing`: by Cancel) or not.
-    DraftWritten { draft: Draft, closing: bool, outcome: Result<(), String> },
+    /// A draft written, or not, and why it was.
+    DraftWritten { draft: Draft, keep: Keep, outcome: Result<(), String> },
     DraftCleared { after_send: bool, outcome: Result<(), String> },
     // ── The companion ──
     Ask(Ask),

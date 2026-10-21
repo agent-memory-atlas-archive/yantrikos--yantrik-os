@@ -88,6 +88,9 @@ pub fn looked(m: &mut Model, why: Look, folder: &str, loaded: Loaded, fx: &mut E
         // The count it returned, because that is what was observed.
         m.sync_status = format!("Synced \u{00b7} {count} in {folder}");
     }
+    if why == Look::Start {
+        super::compose::offer_unsent(m, fx);
+    }
 }
 
 /// Put a folder's messages into the model, through the triage filter.
@@ -193,7 +196,10 @@ pub fn listed(m: &mut Model, why: Listing, folder: String, outcome: Result<Vec<E
             m.folder = folder.clone();
             set_rows(m, &messages, fx);
             m.sync_status = "Synced".into();
-            clear_notice(m, fx);
+            // The listing after a send is the app's own refresh: what the send said stays said.
+            if why != Listing::AfterSend {
+                clear_notice(m, fx);
+            }
             m.answer = match why {
                 Listing::SearchCleared => search_answer(m, count),
                 Listing::Folder | Listing::AfterSend => {

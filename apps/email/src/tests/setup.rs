@@ -187,3 +187,18 @@ fn no_browser_puts_the_address_on_the_screen_and_no_client_is_said() {
     assert_eq!(act(&app, "begin_google_sign_in", json!({})).unwrap_err(), "This build has no Google client id.");
     assert_eq!(state(&app)["has_account"], false);
 }
+
+/// Review L3 (#920): Cancel pressed before the sign-in's start has landed ends the flow that
+/// start opened, instead of leaving it polling with its listener open.
+#[test]
+fn cancel_before_the_google_begin_lands_ends_the_flow_it_started() {
+    let mail = google();
+    let app = started(&mail);
+    app.ui(|ui| ui.invoke_sign_in_with_google());
+    app.ui(|ui| ui.invoke_cancel_google_sign_in());
+    quiet(&app);
+    assert_eq!(mail.asked_for("email.oauth_cancel"), [json!({ "flow_id": "f1" })]);
+    assert!(!app.ui(|ui| ui.get_google_waiting()));
+    assert!(app.model(|m| m.google.flow.is_none()));
+    assert_eq!(app.timers_armed(), 0, "nothing polls");
+}

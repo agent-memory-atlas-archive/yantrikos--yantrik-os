@@ -102,8 +102,9 @@ pub fn marked_on_open(m: &mut Model, id: &str, folder: &str, outcome: Result<(),
     }
 }
 
-/// Mark a message read, or set its star: the change is asked for, then the folder is listed
-/// again, so what is reported is an observation of the mailbox rather than of the request.
+/// Mark a message read, or set its star: the change is asked for, then the message's own folder
+/// is listed again, so what is reported is an observation of the mailbox rather than of the
+/// request.
 pub fn mark(m: &mut Model, pick: &Pick, flag: Flag, toggle: bool, fx: &mut Effects<Email>) -> Result<(), Refused> {
     if matches!(pick, Pick::Key(key) if *key < 0) {
         return Ok(());
@@ -121,26 +122,29 @@ pub fn mark(m: &mut Model, pick: &Pick, flag: Flag, toggle: bool, fx: &mut Effec
         Flag::Starred => !toggle || !target.flagged,
     };
     let account = m.account();
-    let folder = m.folder.clone();
     let mail = m.mail.clone();
     fx.spawn_or(Command::Unfinished(Work::Change), move |_| {
         // In the mailbox the row was listed from: the same UID starred in INBOX was a different
-        // message's star (#288).
+        // message's star (#288). The same mailbox is read back.
+        let read = target.folder.clone();
         let call = match flag {
-            Flag::Read => calls::mark_read(mail.as_ref(), &account, &target.folder, &target.id, wanted),
-            Flag::Starred => calls::mark_starred(mail.as_ref(), &account, &target.folder, &target.id, wanted),
+            Flag::Read => calls::mark_read(mail.as_ref(), &account, &read, &target.id, wanted),
+            Flag::Starred => calls::mark_starred(mail.as_ref(), &account, &read, &target.id, wanted),
         };
-        let listed = call.is_ok().then(|| calls::list_messages(mail.as_ref(), &account, &folder, 1));
-        Command::Marked { target, flag, call, listed }
+        let listed = call.is_ok().then(|| calls::list_messages(mail.as_ref(), &account, &read, 1));
+        Command::Marked { target, flag, wanted, call, read, listed }
     });
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn marked(
     m: &mut Model,
     target: Target,
     flag: Flag,
+    wanted: bool,
     call: Result<(), String>,
+    read: &str,
     listed: Option<Result<Vec<EmailSummary>, String>>,
     fx: &mut Effects<Email>,
 ) {
@@ -152,10 +156,14 @@ pub fn marked(
         say(m, fx, text.clone());
         return fx.settle(Err(Refused::new("not_changed", text)));
     }
-    let observed = match observe(m, &target.id, listed, flag, fx) {
+    // The server took the change: the open message's own flag follows it at once, so the pane's
+    // star can be taken off again whichever folder is on screen.
+    set_open_flag(m, &target, flag, wanted, fx);
+    let observed = match observe(m, &target.id, read, listed, flag, fx) {
         Ok(observed) => observed,
         Err(e) => return fx.settle(Err(Refused::new("not_observed", e))),
     };
+    set_open_flag(m, &target, flag, observed, fx);
     if flag == Flag::Read {
         change_counts_of(m, &target.folder, |c| c.after_read_change(target.was_read, observed), fx);
     }
@@ -169,15 +177,35 @@ pub fn marked(
     fx.settle(Ok(()));
 }
 
-/// The folder read back, and one message's flag read off what came.
+/// The open message's flag, when the change was to the open message.
+fn set_open_flag(m: &mut Model, target: &Target, flag: Flag, value: bool, fx: &mut Effects<Email>) {
+    if let Some(open) = m.open.as_mut().filter(|o| o.id == target.id && o.folder == target.folder) {
+        match flag {
+            Flag::Read => open.detail.is_read = value,
+            Flag::Starred => open.detail.is_flagged = value,
+        }
+        fx.changed(part::OPEN);
+    }
+}
+
+/// The rows a read-back of `read` found, drawn only while `read` is the folder on screen: a
+/// read-back of another folder, or of this one after the person moved on, is checked and never
+/// painted over the folder they are looking at.
+fn draw_if_on_screen(m: &mut Model, read: &str, messages: &[EmailSummary], fx: &mut Effects<Email>) {
+    if m.folder == read {
+        set_rows(m, messages, fx);
+    }
+}
+
+/// The message's folder read back, and its flag read off what came.
 fn observe(
     m: &mut Model,
     id: &str,
+    read: &str,
     listed: Option<Result<Vec<EmailSummary>, String>>,
     flag: Flag,
     fx: &mut Effects<Email>,
 ) -> Result<bool, String> {
-    let folder = m.folder.clone();
     let messages = match listed {
         Some(Ok(messages)) => messages,
         Some(Err(e)) => {
@@ -185,17 +213,17 @@ fn observe(
             say(m, fx, text.clone());
             return Err(text);
         }
-        None => return Err(format!("the message is no longer in {folder}")),
+        None => return Err(format!("the message is no longer in {read}")),
     };
-    set_rows(m, &messages, fx);
-    m.rows
+    draw_if_on_screen(m, read, &messages, fx);
+    messages
         .iter()
-        .find(|r| r.id == id)
-        .map(|r| match flag {
-            Flag::Read => r.item.is_read,
-            Flag::Starred => r.item.is_flagged,
+        .find(|s| s.id == id)
+        .map(|s| match flag {
+            Flag::Read => s.is_read,
+            Flag::Starred => s.is_starred,
         })
-        .ok_or_else(|| format!("the message is no longer in {folder}"))
+        .ok_or_else(|| format!("the message is no longer in {read}"))
 }
 
 /// Delete a message, or archive it, and check it is gone. Neither can be taken back, so the
@@ -216,15 +244,16 @@ pub fn remove(m: &mut Model, key: i32, archive: bool, fx: &mut Effects<Email>) {
     // account failed every time and said nothing.
     let how = if archive { Removal::Move(m.archive_folder()) } else { Removal::Delete };
     let account = m.account();
-    let folder = m.folder.clone();
     let mail = m.mail.clone();
     fx.spawn_or(Command::Unfinished(Work::Change), move |_| {
+        // The message's own folder is read back: that is where it has to be gone from.
+        let read = target.folder.clone();
         let call = match &how {
-            Removal::Delete => calls::delete_message(mail.as_ref(), &account, &target.folder, &target.id),
-            Removal::Move(to) => calls::move_message(mail.as_ref(), &account, &target.folder, &target.id, to),
+            Removal::Delete => calls::delete_message(mail.as_ref(), &account, &read, &target.id),
+            Removal::Move(to) => calls::move_message(mail.as_ref(), &account, &read, &target.id, to),
         };
-        let listed = call.is_ok().then(|| calls::list_messages(mail.as_ref(), &account, &folder, 1));
-        Command::Removed { target, how, call, listed }
+        let listed = call.is_ok().then(|| calls::list_messages(mail.as_ref(), &account, &read, 1));
+        Command::Removed { target, how, call, read, listed }
     });
 }
 
@@ -233,6 +262,7 @@ pub fn removed(
     target: Target,
     how: Removal,
     call: Result<(), String>,
+    read: &str,
     listed: Option<Result<Vec<EmailSummary>, String>>,
     fx: &mut Effects<Email>,
 ) {
@@ -249,38 +279,40 @@ pub fn removed(
         say(m, fx, text.clone());
         return log_failure(&how, &text);
     }
-    let folder = m.folder.clone();
     let messages = match listed {
         Some(Ok(messages)) => messages,
         Some(Err(e)) => {
-            let text = format!("The {what} was made and {folder} could not be read back: {e}");
+            let text = format!("The {what} was made and {read} could not be read back: {e}");
             say(m, fx, text.clone());
             return log_failure(&how, &text);
         }
         None => return,
     };
-    set_rows(m, &messages, fx);
-    if m.rows.iter().any(|r| r.id == target.id) {
-        let text = format!("The mail server reported the {what} of \u{201c}{subject}\u{201d} and it is still in {folder}.");
+    draw_if_on_screen(m, read, &messages, fx);
+    // Gone from its own folder: the listing is that folder's, so a message of the same UID in
+    // another mailbox is not mistaken for it.
+    if messages.iter().any(|s| s.id == target.id) {
+        let text = format!("The mail server reported the {what} of \u{201c}{subject}\u{201d} and it is still in {read}.");
         say(m, fx, text.clone());
         return log_failure(&how, &text);
     }
-    // Only if it was the message being read. Clearing the pane for a row somebody deleted
-    // further down the list would take a message off the screen that is still in the mailbox.
-    if m.open.as_ref().is_some_and(|o| o.detail.subject == *subject) {
+    // Only if it was the message being read: the same message, in the same folder. Clearing the
+    // pane for a row somebody deleted further down the list would take a message off the screen
+    // that is still in the mailbox.
+    if m.open.as_ref().is_some_and(|o| o.id == target.id && o.folder == target.folder) {
         m.open = None;
         fx.changed(part::OPEN);
     }
     clear_notice(m, fx);
     match &how {
         Removal::Delete => {
-            change_counts_of(m, &folder, |c| c.after_removal(target.was_read), fx);
+            change_counts_of(m, &target.folder, |c| c.after_removal(target.was_read), fx);
             tracing::info!(subject = %subject, "message deleted");
         }
         Removal::Move(to) => {
             // Both ends of the move: it left this folder and arrived in that one.
             change_counts_of(m, to, |c| c.after_arrival(target.was_read), fx);
-            change_counts_of(m, &folder, |c| c.after_removal(target.was_read), fx);
+            change_counts_of(m, &target.folder, |c| c.after_removal(target.was_read), fx);
             tracing::info!(subject = %subject, to = %to, "message moved");
         }
     }

@@ -27,7 +27,7 @@ fn a_panicking_worker_brings_its_busy_flag_down_and_says_so() {
     app.ui(|ui| ui.invoke_send_email("a@example.com".into(), "".into(), "".into(), "s".into(), "b".into()));
     quiet(&app);
     assert!(notice(&app).starts_with("The send did not finish, so this window cannot say whether the message went."));
-    assert!(!app.model(|m| m.composer.sending));
+    assert!(app.model(|m| m.composer.sending.is_none()));
 }
 
 #[test]

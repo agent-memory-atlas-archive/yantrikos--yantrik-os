@@ -197,6 +197,7 @@ fn status(ui: &EmailApp, m: &Model) {
     ui.set_ai_is_working(m.ai_working);
     ui.set_email_ai_intent(m.ai_intent.clone().into());
     ui.set_is_composing(m.composer.open);
+    ui.set_is_sending(m.composer.sending.is_some());
     ui.set_email_draft_status(m.composer.status.clone().into());
     ui.set_email_search_active(m.search.active);
     ui.set_email_search_count(m.search.count);

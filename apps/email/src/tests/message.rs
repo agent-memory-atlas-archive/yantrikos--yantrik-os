@@ -230,3 +230,78 @@ fn the_original_reaches_the_browser_without_its_remote_images() {
     quiet(&app);
     assert!(notice(&app).ends_with("but the browser could not be opened: xdg-open exited 3"), "{}", notice(&app));
 }
+
+/// Review M2 (#920): the toolbar's Delete on a message opened in INBOX, pressed while Archive is
+/// on screen, deletes it in INBOX, reads INBOX back, counts INBOX, and leaves Archive's rows as
+/// they are. Archive holds a message with the same UID, as mailboxes do.
+#[test]
+fn the_toolbar_deletes_an_open_message_from_another_folder_in_that_folder() {
+    let mail = with_inbox().answering("email.delete_message", json!({}));
+    mail.set_for("email.list_messages", "Archive", Ok(json!([message("101", "Archive", "Old minutes", "Ravi K. <ravi@example.com>", true, false)])));
+    let app = started(&mail);
+    act(&app, "open_message", json!({ "which": 1 })).unwrap();
+    act(&app, "select_folder", json!({ "folder": "Archive" })).unwrap();
+    mail.set_for("email.list_messages", "INBOX", Ok(json!([inbox()[1], inbox()[2]])));
+    app.ui(|ui| {
+        let id = ui.get_email_detail().id;
+        ui.invoke_delete_email(id);
+    });
+    quiet(&app);
+    assert_eq!(mail.asked_for("email.delete_message"), [json!({ "account_id": "acct-1", "folder": "INBOX", "message_id": "101" })]);
+    assert_eq!(notice(&app), "");
+    assert_eq!(app.ui(|ui| ui.get_email_detail().id), 0, "the pane it was open in is cleared");
+    let folders = state(&app)["folders"].clone();
+    assert_eq!(folders[0]["counts"], json!({ "unread": 2, "total": 2 }), "INBOX lost it");
+    assert_eq!(folders[1]["counts"], json!({ "unread": 0, "total": 10 }), "Archive did not");
+    assert_eq!(listed(&app), [(0, "Old minutes".to_string())], "Archive's rows are still on screen");
+}
+
+/// Review M2 (#920): the toolbar's star on a message opened in another folder follows the
+/// server's answer, so it can be taken off again.
+#[test]
+fn the_toolbar_star_on_an_open_message_from_another_folder_can_be_taken_off() {
+    let mail = with_inbox();
+    mail.set_for("email.list_messages", "Archive", Ok(json!([])));
+    let app = started(&mail);
+    act(&app, "open_message", json!({ "which": 1 })).unwrap();
+    act(&app, "select_folder", json!({ "folder": "Archive" })).unwrap();
+    let mut starred = inbox();
+    starred[0]["is_starred"] = json!(true);
+    mail.set_for("email.list_messages", "INBOX", Ok(starred));
+    let star = |app: &yantrik_testing::TestApp<crate::Email>| {
+        app.ui(|ui| {
+            let id = ui.get_email_detail().id;
+            ui.invoke_mark_flagged(id);
+        });
+        quiet(app);
+    };
+    star(&app);
+    assert!(app.ui(|ui| ui.get_email_detail().is_flagged), "the pane's star is on");
+    mail.set_for("email.list_messages", "INBOX", Ok(inbox()));
+    star(&app);
+    let asked: Vec<(String, bool)> = mail
+        .asked_for("email.mark_starred")
+        .iter()
+        .map(|p| (p["folder"].as_str().unwrap_or_default().to_string(), p["starred"].as_bool().unwrap_or_default()))
+        .collect();
+    assert_eq!(asked, [("INBOX".to_string(), true), ("INBOX".to_string(), false)]);
+    assert!(!app.ui(|ui| ui.get_email_detail().is_flagged), "and off again");
+    assert_eq!(notice(&app), "");
+}
+
+/// Review M3 (#920): a change's read-back of INBOX that lands after Archive has been opened does
+/// not paint INBOX's rows under Archive's name.
+#[test]
+fn a_read_back_of_a_folder_no_longer_on_screen_does_not_paint_over_it() {
+    let mail = with_inbox().answering("email.delete_message", json!({}));
+    mail.set_for("email.list_messages", "Archive", Ok(json!([message("201", "Archive", "Old minutes", "Ravi K. <ravi@example.com>", true, false)])));
+    let app = started(&mail);
+    app.ui(|ui| ui.invoke_folder_clicked(1));
+    app.ui(|ui| ui.invoke_delete_email(0));
+    mail.set_for("email.list_messages", "INBOX", Ok(json!([inbox()[1], inbox()[2]])));
+    quiet(&app);
+    assert_eq!(state(&app)["folder"], "Archive");
+    assert_eq!(listed(&app), [(0, "Old minutes".to_string())]);
+    assert_eq!(notice(&app), "");
+    assert_eq!(state(&app)["folders"][0]["counts"], json!({ "unread": 1, "total": 2 }), "INBOX is the folder counted");
+}

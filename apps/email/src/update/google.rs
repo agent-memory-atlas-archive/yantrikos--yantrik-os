@@ -78,6 +78,15 @@ pub fn sign_in(m: &mut Model, fx: &mut Effects<Email>) -> Result<(), Refused> {
 pub fn begun(m: &mut Model, begun: Result<OAuthBeginResult, String>, opened: Option<Result<(), String>>, fx: &mut Effects<Email>) {
     m.setup.busy = false;
     fx.changed(part::SETUP);
+    // Cancelled (or the form opened afresh) before the start landed: the flow it opened is ended
+    // at the service, so no listener is left open and nothing polls.
+    if !m.google.waiting {
+        if let Ok(begun) = begun {
+            let mail = m.mail.clone();
+            fx.spawn(move |_| Command::GoogleCancelled(calls::oauth_cancel(mail.as_ref(), &begun.flow_id)));
+        }
+        return;
+    }
     let begun = match begun {
         Ok(begun) => begun,
         Err(e) => {

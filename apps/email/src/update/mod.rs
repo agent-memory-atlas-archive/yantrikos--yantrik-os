@@ -35,10 +35,12 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Effects<Email>) -> Resul
         Command::Fetched { target, outcome } => message::fetched(m, target, outcome, fx),
         Command::MarkedOnOpen { id, folder, outcome } => message::marked_on_open(m, &id, &folder, outcome, fx),
         Command::Mark { pick, flag, toggle } => return message::mark(m, &pick, flag, toggle, fx),
-        Command::Marked { target, flag, call, listed } => message::marked(m, target, flag, call, listed, fx),
+        Command::Marked { target, flag, wanted, call, read, listed } => {
+            message::marked(m, target, flag, wanted, call, &read, listed, fx)
+        }
         Command::Delete(key) => message::remove(m, key, false, fx),
         Command::Archive(key) => message::remove(m, key, true, fx),
-        Command::Removed { target, how, call, listed } => message::removed(m, target, how, call, listed, fx),
+        Command::Removed { target, how, call, read, listed } => message::removed(m, target, how, call, &read, listed, fx),
         Command::ToggleThread(idx) => message::toggle_thread(m, idx, fx),
         Command::OpenOriginal => message::open_original(m, fx),
         Command::OriginalOpened(sentence) => say(m, fx, sentence),
@@ -54,7 +56,7 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Effects<Email>) -> Resul
         Command::Sent(outcome) => compose::sent(m, outcome, fx),
         Command::CancelCompose(draft) => compose::cancel(m, draft, fx),
         Command::SaveDraft(draft) => compose::save_draft(m, draft, fx),
-        Command::DraftWritten { draft, closing, outcome } => compose::draft_written(m, draft, closing, outcome, fx),
+        Command::DraftWritten { draft, keep, outcome } => compose::draft_written(m, draft, keep, outcome, fx),
         Command::DraftCleared { after_send, outcome } => compose::draft_cleared(m, after_send, outcome, fx),
         Command::Ask(ask) => ai::ask(m, ask, fx),
         Command::Answered { ask, about, outcome } => ai::answered(m, ask, about, outcome, fx),
@@ -106,9 +108,12 @@ fn unfinished(m: &mut Model, work: Work, fx: &mut Effects<Email>) {
         Work::Open => "The message could not be opened; try again.",
         Work::Change => "The change to that message did not finish; Sync shows the folder as it is now.",
         Work::Send => {
-            m.composer.sending = false;
+            // The job panicked or never started; the framework does not say which, so the
+            // sentence is the one that is true of both. The text stays in the composer and the
+            // draft.
+            compose::keep_after_send(m, fx);
             m.sync_status = "Not sent".into();
-            "The send did not finish, so this window cannot say whether the message went. Look in Sent before sending it again."
+            "The send did not finish, so this window cannot say whether the message went. It is kept as a draft; look in Sent before sending it again."
         }
         Work::Draft => {
             compose::next_file_op(m, fx);

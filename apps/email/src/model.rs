@@ -163,8 +163,12 @@ pub struct Composer {
     /// The draft file as it was last read or written: what Compose reopens. An error is a file
     /// that is there and could not be read, said when Compose is pressed.
     pub kept: Result<Option<Draft>, String>,
-    /// True while a send is in flight, so a second press cannot send the message twice.
-    pub sending: bool,
+    /// What is being sent, while a send is in flight: the window says so, a second press cannot
+    /// send the message twice, and an edit made meanwhile is told apart from what went.
+    pub sending: Option<Draft>,
+    /// A message that was being sent when the app last closed, read back at start: whether it went
+    /// is not known, so it is offered again as the draft.
+    pub unsent_at_start: Option<Draft>,
     /// True while the draft file is being written or removed.
     pub writing: bool,
     /// What to do to the draft file once the write in flight lands: only the latest.
@@ -174,10 +178,25 @@ pub struct Composer {
 /// A write or a removal of the draft file.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FileOp {
-    /// `closing` when Cancel kept it, which says so on the notice line.
-    Save { draft: Draft, closing: bool },
+    Save { draft: Draft, keep: Keep },
     Clear { after_send: bool },
 }
+
+/// Why the draft file is written, which decides what is said when it lands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Keep {
+    /// Save Draft: the composer's status says so.
+    Saved,
+    /// Cancel: the notice says Compose reopens it.
+    Closing,
+    /// Around a send, so the text survives whatever becomes of it: said only when it fails.
+    Quietly,
+}
+
+/// The framework draft that holds a message while it is being sent. It goes through the
+/// persistence lane, which is written before the process ends, so a send still waiting for a
+/// worker when the window closes is not lost with it.
+pub const SENDING: &str = "sending";
 
 /// What the setup form's fields are cleared to when `part::SETUP_FIELDS` is drawn.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -289,7 +308,8 @@ impl Model {
                 text: Draft::default(),
                 status: String::new(),
                 kept,
-                sending: false,
+                sending: None,
+                unsent_at_start: None,
                 writing: false,
                 queued: None,
             },

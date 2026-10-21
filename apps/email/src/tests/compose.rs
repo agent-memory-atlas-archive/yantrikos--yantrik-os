@@ -202,3 +202,95 @@ fn a_draft_from_before_the_framework_is_brought_across_once_and_kept() {
     assert!(!other_files.draft.exists());
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Review M1 (#920): a send in flight is shown, a second press says so, and what is typed while
+/// the first one is out is kept, never closed away with it.
+#[test]
+fn a_send_in_flight_is_shown_and_an_edit_made_meanwhile_is_kept() {
+    let mail = with_inbox().answering("email.send_message", json!({}));
+    let app = started(&mail);
+    let file = app.paths().data_dir().join(files::DRAFT);
+    app.ui(|ui| ui.invoke_compose_new());
+    type_into_composer(&app, &draft("a@example.com", "draft v1"));
+    app.ui(|ui| ui.invoke_send_email("a@example.com".into(), "".into(), "".into(), "Plans".into(), "draft v1".into()));
+    assert_eq!(app.ui(|ui| ui.get_email_sync_status()), "Sending\u{2026}");
+    assert!(app.ui(|ui| ui.get_is_sending()), "Send says a send is in flight");
+
+    type_into_composer(&app, &draft("a@example.com", "draft v2 with the fix"));
+    app.ui(|ui| ui.invoke_send_email("a@example.com".into(), "".into(), "".into(), "Plans".into(), "draft v2 with the fix".into()));
+    assert_eq!(notice(&app), "A message is already being sent; wait for it before sending again.");
+    quiet(&app);
+
+    let bodies: Vec<String> =
+        mail.asked_for("email.send_message").iter().map(|p| p["body"].as_str().unwrap_or_default().to_string()).collect();
+    assert_eq!(bodies, ["draft v1"], "one send, of what was there when Send was pressed");
+    assert!(!app.ui(|ui| ui.get_is_sending()));
+    assert!(app.ui(|ui| ui.get_is_composing()), "the composer stays open with the edit");
+    assert_eq!(app.ui(|ui| ui.get_compose_body()), "draft v2 with the fix");
+    assert_eq!(state::load_draft(&file).unwrap().map(|d| d.body), Some("draft v2 with the fix".to_string()));
+    assert_eq!(
+        notice(&app),
+        "The message was sent as it was when Send was pressed. What was changed since is still in the composer, kept as a draft."
+    );
+}
+
+/// Review L1 (#920): a send that failed or never came back leaves its text where Compose finds
+/// it.
+#[test]
+fn a_send_that_does_not_come_back_leaves_its_text_in_compose() {
+    for mail in [
+        with_inbox().failing("email.send_message", "554 rejected"),
+        with_inbox().panicking("email.send_message"),
+    ] {
+        let app = started(&mail);
+        let file = app.paths().data_dir().join(files::DRAFT);
+        app.ui(|ui| ui.invoke_compose_new());
+        type_into_composer(&app, &draft("a@example.com", "the only copy"));
+        app.ui(|ui| ui.invoke_send_email("a@example.com".into(), "".into(), "".into(), "Plans".into(), "the only copy".into()));
+        quiet(&app);
+        assert_eq!(state::load_draft(&file).unwrap().map(|d| d.body), Some("the only copy".to_string()));
+        type_into_composer(&app, &Draft::default());
+        app.ui(|ui| ui.invoke_compose_new());
+        assert_eq!(app.ui(|ui| ui.get_compose_body()), "the only copy");
+    }
+}
+
+/// Review L1 (#920): a send still waiting for a worker when the window closes is gone with the
+/// process, so its text is offered again at the next start, with what is and is not known.
+#[test]
+fn a_send_still_queued_when_the_window_closes_is_offered_again_at_the_next_start() {
+    let mail = with_inbox().answering("email.send_message", json!({}));
+    let paths = Paths::temporary(Email::ID);
+    let (app, _) = start_at(paths.clone(), &mail, FakeMind::new());
+    quiet(&app);
+    app.ui(|ui| ui.invoke_compose_new());
+    type_into_composer(&app, &draft("a@example.com", "queued when it closed"));
+    app.ui(|ui| ui.invoke_send_email("a@example.com".into(), "".into(), "".into(), "Plans".into(), "queued when it closed".into()));
+    let _ = app.shutdown();
+    drop(app);
+    assert!(mail.asked_for("email.send_message").is_empty(), "the send never ran");
+
+    let (again, _) = start_at(paths, &mail, FakeMind::new());
+    quiet(&again);
+    assert_eq!(
+        notice(&again),
+        "A message was being sent when Email closed, and whether it went is not known. It is kept as a draft: look in Sent before sending it again."
+    );
+    again.ui(|ui| ui.invoke_compose_new());
+    assert_eq!(again.ui(|ui| ui.get_compose_body()), "queued when it closed");
+}
+
+/// The draft is private mail: written whole, and readable only by its owner.
+#[cfg(unix)]
+#[test]
+fn the_draft_is_written_whole_and_only_for_its_owner() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let app = started(&with_inbox());
+    let file = app.paths().data_dir().join(files::DRAFT);
+    app.ui(|ui| ui.invoke_compose_new());
+    type_into_composer(&app, &draft("a@example.com", "private"));
+    app.ui(|ui| ui.invoke_save_draft());
+    quiet(&app);
+    assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
+    assert!(!file.with_extension("json.part").exists(), "nothing is left beside it");
+}

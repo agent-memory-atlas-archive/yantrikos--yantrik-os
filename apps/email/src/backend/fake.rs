@@ -93,6 +93,12 @@ impl FakeMail {
         self.0.lock().unwrap().always.insert(method.into(), answer);
     }
 
+    /// `method` answers this when it is asked about `folder`, before what it answers for every
+    /// folder: each mailbox lists its own messages.
+    pub fn set_for(&self, method: &str, folder: &str, answer: Answer) {
+        self.0.lock().unwrap().always.insert(format!("{method}@{folder}"), answer);
+    }
+
     pub fn panicking(self, method: &str) -> FakeMail {
         self.0.lock().unwrap().panics.push(method.into());
         self
@@ -127,7 +133,12 @@ impl MailService for FakeMail {
             drop(script);
             panic!("the fake mail service was told to panic on {method}");
         }
-        script.always.get(method).cloned().unwrap_or_else(|| Err(UNREACHABLE.into()))
+        let folder = script.asked.last().and_then(|(_, p)| p["folder"].as_str()).map(|f| format!("{method}@{f}"));
+        folder
+            .and_then(|key| script.always.get(&key))
+            .or_else(|| script.always.get(method))
+            .cloned()
+            .unwrap_or_else(|| Err(UNREACHABLE.into()))
     }
 
     fn open_in_browser(&self, url: &str) -> Result<(), String> {

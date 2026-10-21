@@ -51,8 +51,14 @@ impl App for Email {
     fn model(boot: &Boot) -> Result<Model, Startup> {
         let files = files::Files::for_app(&boot.paths);
         files::import_legacy_draft(&boot.paths, &files, files::legacy_draft().as_deref());
-        let kept = state::load_draft(&files.draft);
+        let mut kept = state::load_draft(&files.draft);
+        // A message that was being sent when Email last closed is the newest text there is.
+        let unsent = boot.drafts.json::<state::Draft>(model::SENDING).filter(|d| !d.is_empty());
+        if let Some(unsent) = &unsent {
+            kept = Ok(Some(unsent.clone()));
+        }
         let mut model = Model::new(backend::for_app(&boot.paths), boot.mind.clone(), files, kept);
+        model.composer.unsent_at_start = unsent;
         if demo::asked() {
             demo::populate(&mut model);
         }

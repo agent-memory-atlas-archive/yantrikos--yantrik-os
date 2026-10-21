@@ -29,6 +29,9 @@ impl Draft {
     }
 }
 
+/// Write the draft whole: beside the file and renamed over it, so a crash in the middle leaves
+/// the previous draft rather than half of this one, and readable only by its owner, because an
+/// unsent message is private mail.
 pub fn save_draft(path: &Path, draft: &Draft) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)
@@ -36,7 +39,30 @@ pub fn save_draft(path: &Path, draft: &Draft) -> Result<(), String> {
     }
     let text = serde_json::to_string_pretty(draft)
         .map_err(|e| format!("could not write the draft: {e}"))?;
-    std::fs::write(path, text).map_err(|e| format!("could not write {}: {e}", path.display()))
+    let beside = path.with_extension("json.part");
+    let written = write_private(&beside, text.as_bytes()).and_then(|()| std::fs::rename(&beside, path));
+    written.map_err(|e| {
+        let _ = std::fs::remove_file(&beside);
+        format!("could not write {}: {e}", path.display())
+    })
+}
+
+/// A new file with these bytes, synced, mode 0600 where the platform has modes.
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    // A file left by an earlier attempt could carry other permissions; the mode applies only to
+    // a file this call creates.
+    let _ = std::fs::remove_file(path);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
 }
 
 /// The kept draft, or `None` when there is not one. A file that is there and unreadable is an
