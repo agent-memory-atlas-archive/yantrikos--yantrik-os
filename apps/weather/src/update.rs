@@ -10,7 +10,7 @@ use yantrik_app::Refused;
 
 use crate::forecast;
 use crate::geocode;
-use crate::model::{Command, Model, DEGRADED_NOTICE, PART_AI, PART_NOTICE, PART_PLACES, PART_READING, PART_UPDATED};
+use crate::model::{Command, Model, DEGRADED_NOTICE, PART_NOTICE, PART_PLACES, PART_READING, PART_UPDATED};
 use crate::places;
 use crate::Weather;
 
@@ -34,12 +34,10 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Effects<Weather>) -> Res
             m.source = fetched.source;
             m.loading = false;
             m.last_fetch = Some(Instant::now());
-            match &fetched.degraded {
-                Some(why) if m.source == forecast::Source::Direct => {
-                    m.notice = format!("{DEGRADED_NOTICE} — the weather service did not answer ({why}).");
-                }
-                _ if m.notice.starts_with(DEGRADED_NOTICE) => m.notice.clear(),
-                _ => {}
+            // The fallback is the freshness line's to say; the notice strip is for what could
+            // not be done. A strip an older build wrote is cleared.
+            if m.notice.starts_with(DEGRADED_NOTICE) {
+                m.notice.clear();
             }
             m.degraded = fetched.degraded;
             fx.changed(PART_READING);
@@ -92,7 +90,12 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Effects<Weather>) -> Res
         }
         Command::RemoveLocation(idx) => {
             let was_active = m.prefs.active == idx;
-            places::remove(&mut m.prefs, idx)?;
+            if let Err(refused) = places::remove(&mut m.prefs, idx) {
+                // The button's refusal is said where the person is looking.
+                m.notice = refused.sentence.clone();
+                fx.changed(PART_NOTICE);
+                return Err(refused);
+            }
             kept(m, fx);
             if was_active {
                 start_fetch(m, fx);
@@ -103,46 +106,6 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Effects<Weather>) -> Res
             kept(m, fx);
             start_fetch(m, fx);
         }
-        Command::Explain => {
-            let Some(current) = m.reading.current.clone().filter(|_| !m.loading) else {
-                m.ai.response = "There is no reading yet — refresh first.".into();
-                fx.changed(PART_AI);
-                return Ok(());
-            };
-            if let Some(hint) = m.rail.reach().hint() {
-                m.ai.response = hint.into();
-                fx.changed(PART_AI);
-                return Ok(());
-            }
-            m.ai.working = true;
-            m.ai.response.clear();
-            fx.changed(PART_AI);
-            let prompt = crate::rail::conditions_prompt(&current);
-            let mind = m.mind.clone();
-            fx.spawn_keyed(
-                JobKey {
-                    feature: "ai",
-                    scope: Scope::App,
-                },
-                Concurrency::ReplacePrevious,
-                move |_| Command::Explained(mind.ask(&prompt)),
-            );
-        }
-        Command::Explained(outcome) => {
-            m.ai.working = false;
-            m.ai.response = match outcome {
-                Ok(text) => text,
-                Err(e) => {
-                    tracing::warn!(error = %e, "companion call failed");
-                    e.to_string()
-                }
-            };
-            fx.changed(PART_AI);
-        }
-        Command::DismissAi => {
-            m.ai.panel_open = false;
-            fx.changed(PART_AI);
-        }
         Command::TickUpdated => fx.changed(PART_UPDATED),
         Command::PrefsFromFile(prefs) => {
             m.prefs = prefs.normalised();
@@ -151,6 +114,10 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Effects<Weather>) -> Res
         }
         Command::Note(line) => {
             m.notice = line;
+            fx.changed(PART_NOTICE);
+        }
+        Command::DismissNotice => {
+            m.notice.clear();
             fx.changed(PART_NOTICE);
         }
         Command::Rail(command) => rail::update::<Weather>(m, command, fx)?,

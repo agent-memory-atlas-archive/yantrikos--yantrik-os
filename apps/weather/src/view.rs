@@ -4,8 +4,7 @@ use slint::{ModelRc, SharedString, VecModel};
 use yantrik_app::app::Changed;
 use yantrik_app::rail::{self, RailView as _};
 
-use crate::forecast::hourly_source;
-use crate::model::{Model, PART_AI, PART_NOTICE, PART_PLACES, PART_READING, PART_UPDATED};
+use crate::model::{Model, PART_NOTICE, PART_PLACES, PART_READING, PART_UPDATED};
 use crate::{WeatherAlert, WeatherApp, WeatherCurrent, WeatherDaily, WeatherHourly, WeatherSavedLocation};
 
 pub fn render(ui: &WeatherApp, m: &Model, changed: &Changed) {
@@ -34,15 +33,10 @@ pub fn render(ui: &WeatherApp, m: &Model, changed: &Changed) {
     if changed.has(PART_NOTICE) {
         ui.set_notice(m.notice.as_str().into());
     }
-    if changed.has(PART_UPDATED) {
-        ui.set_weather_last_updated(m.last_updated_text().into());
-    }
-    if changed.has(PART_AI) {
-        ui.set_ai_is_working(m.ai.working);
-        ui.set_ai_response(m.ai.response.as_str().into());
-        if !m.ai.panel_open && ui.get_ai_panel_open() {
-            ui.set_ai_panel_open(false);
-        }
+    if changed.has(PART_UPDATED) || changed.has(PART_READING) {
+        let fresh = m.freshness();
+        ui.set_freshness(fresh.line.as_str().into());
+        ui.set_stale(fresh.stale);
     }
     if changed.has(rail::PART) {
         ui.render_rail(&m.rail);
@@ -79,16 +73,11 @@ fn reading(ui: &WeatherApp, m: &Model) {
             ..ui.get_current()
         },
     };
-    let location = current.location.trim().to_string();
-    ui.set_hourly_tz_label(if location.is_empty() {
-        SharedString::new()
-    } else {
-        format!("{location} time").into()
-    });
-    ui.set_hourly_source(hourly_source(&location).into());
     ui.set_current(current);
 
     if r.current.is_some() {
+        let now = r.hourly.iter().position(|h| h.is_current).unwrap_or(0);
+        ui.set_hourly_now(now as i32);
         let hourly: Vec<WeatherHourly> = r
             .hourly
             .iter()
@@ -96,7 +85,7 @@ fn reading(ui: &WeatherApp, m: &Model) {
                 time: h.time.as_str().into(),
                 icon: h.icon.as_str().into(),
                 temp: h.temp.as_str().into(),
-                precip: h.precip.as_str().into(),
+                precip: precip_figure(&h.precip).into(),
                 is_current: h.is_current,
                 temp_value: h.temp_value,
                 t_min: h.t_min,
@@ -112,7 +101,7 @@ fn reading(ui: &WeatherApp, m: &Model) {
                 icon: d.icon.as_str().into(),
                 high: d.high.as_str().into(),
                 low: d.low.as_str().into(),
-                precip_chance: d.precip_chance.as_str().into(),
+                precip_chance: if is_nothing(&d.precip_chance) { SharedString::new() } else { d.precip_chance.as_str().into() },
                 high_value: d.high_value,
                 low_value: d.low_value,
                 temp_range_min: d.temp_range_min,
@@ -130,28 +119,47 @@ fn reading(ui: &WeatherApp, m: &Model) {
                 icon: a.icon.as_str().into(),
             })
             .collect();
-        match r.severe() {
-            Some(alert) => {
-                ui.set_weather_severe_alert_active(true);
-                ui.set_weather_severe_alert_text(alert.description.as_str().into());
-                ui.set_weather_severe_alert_level(
-                    match alert.severity {
-                        0 => "watch",
-                        1 => "warning",
-                        _ => "emergency",
-                    }
-                    .into(),
-                );
-            }
-            None => {
-                ui.set_weather_severe_alert_active(false);
-                ui.set_weather_severe_alert_text(SharedString::default());
-                ui.set_weather_severe_alert_level(SharedString::default());
-            }
-        }
         ui.set_weather_alerts(ModelRc::new(VecModel::from(alerts)));
-        ui.set_weather_aqi_value(r.aqi.value.as_str().into());
-        ui.set_weather_aqi_label(r.aqi.label.as_str().into());
-        ui.set_weather_aqi_level(r.aqi.level);
+        ui.set_air_quality(air_quality_line(&r.aqi.value, &r.aqi.label).into());
+    }
+}
+
+/// The chance of rain is shown from ten percent; under that the slot stays and the figure goes.
+fn precip_figure(precip: &str) -> String {
+    let percent: u32 = precip.trim_end_matches('%').trim().parse().unwrap_or(0);
+    if percent >= 10 {
+        precip.to_string()
+    } else {
+        String::new()
+    }
+}
+
+/// `0mm`, `0 mm`, `--`, `` : nothing to say.
+fn is_nothing(figure: &str) -> bool {
+    let f = figure.trim();
+    f.is_empty() || f == "--" || f.trim_end_matches("mm").trim() == "0" || f == "0%"
+}
+
+/// `Air quality 42 · Good`; nothing when the source gave nothing.
+fn air_quality_line(value: &str, label: &str) -> String {
+    if value.trim().is_empty() || value.trim() == "--" {
+        return String::new();
+    }
+    format!("Air quality {value} · {label}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn figures_that_say_nothing_are_left_out() {
+        assert_eq!(precip_figure("40%"), "40%");
+        assert_eq!(precip_figure("5%"), "");
+        assert_eq!(precip_figure(""), "");
+        assert!(is_nothing("0mm") && is_nothing("0 mm") && is_nothing("--") && is_nothing(""));
+        assert!(!is_nothing("2.4mm"));
+        assert_eq!(air_quality_line("--", "N/A"), "");
+        assert_eq!(air_quality_line("42", "Good"), "Air quality 42 · Good");
     }
 }

@@ -5,6 +5,7 @@
 //! call), or straight from Open-Meteo when the service does not answer; places and the unit
 //! live in the framework's settings store at the file the app always used; the agent rail is the
 //! framework's; the four actions are intents, graded as they were; and `main.rs` is three lines.
+//! The screen follows design/weather-redesign-2026-10-21.md (step 7).
 
 use std::time::Duration;
 
@@ -67,7 +68,6 @@ impl App for Weather {
                 }
             },
             last_fetch: None,
-            ai: Default::default(),
             rail: Rail::new(boot.mind.clone()),
             weather: boot.services.weather.clone(),
             mind: boot.mind.clone(),
@@ -88,8 +88,7 @@ impl App for Weather {
             let want = toggled.ui().get_weather_use_fahrenheit();
             toggled.run(Command::SetUnits(want));
         });
-        ui.on_ai_explain_pressed(cx.cmd(|| Command::Explain));
-        ui.on_ai_dismiss(cx.cmd(|| Command::DismissAi));
+        ui.on_dismiss_notice(cx.cmd(|| Command::DismissNotice));
         // No `back-pressed`: there is no parent screen in a window of its own. The rail's
         // context rows are plain rows, not buttons (`context-opens` stays false).
         drop(ui);
@@ -199,8 +198,10 @@ mod tests {
         assert_eq!(state["saved_locations"], json!([{ "name": "London", "active": true }]));
         assert!(state["config_file"].as_str().unwrap().ends_with("weather.json"));
         assert_eq!(app.describe()["summary"], json!("Weather — 21°C in London, Overcast, feels like 19°C"));
-        assert_eq!(app.ui(|ui| ui.get_hourly_source()), "Open-Meteo · London");
-        assert_eq!(app.ui(|ui| ui.get_weather_last_updated()), "Updated just now");
+        // Under fifteen minutes and from the service: no freshness line at all.
+        assert_eq!(app.ui(|ui| ui.get_freshness()), "");
+        assert!(!app.ui(|ui| ui.get_stale()));
+        assert_eq!(app.ui(|ui| ui.get_pairs_columns()), 2, "the headless window is narrow: two pairs to a row");
     }
 
     #[test]
@@ -363,10 +364,6 @@ mod tests {
         assert_eq!(card.verb, "Close");
         assert!(card.applies.is_none(), "an answer to read, nothing to apply");
         assert!(mind.prompts()[0].starts_with("It is Overcast at 12°C"));
-        // The header's AI Insights button asks the same question.
-        app.run(Command::Explain);
-        app.run_jobs();
-        assert_eq!(mind.prompts().len(), 2);
-        assert_eq!(mind.prompts()[1], mind.prompts()[0]);
+        assert_eq!(mind.prompts().len(), 1, "the rail is the one entry point; no app panel asks twice");
     }
 }

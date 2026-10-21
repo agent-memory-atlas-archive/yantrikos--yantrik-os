@@ -135,19 +135,6 @@ pub struct Fetched {
     pub degraded: Option<String>,
 }
 
-/// Who the forecast is from. Both paths end at Open-Meteo.
-pub const PROVIDER: &str = "Open-Meteo";
-
-/// The line under the hourly header: the provider, and the place it was asked about.
-pub fn hourly_source(location: &str) -> String {
-    let location = location.trim();
-    if location.is_empty() {
-        PROVIDER.to_string()
-    } else {
-        format!("{PROVIDER} · {location}")
-    }
-}
-
 /// The reading for `place`: the service, or Open-Meteo directly when it does not answer and
 /// `fall_back` allows (a test's app never reaches the internet). Blocking: a job's work.
 pub fn fetch(
@@ -292,12 +279,6 @@ pub fn from_forecast(f: Forecast, location_name: &str, fahrenheit: bool) -> Read
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_hourly_strip_names_its_provider_and_place() {
-        assert_eq!(hourly_source("Paris"), "Open-Meteo · Paris");
-        assert_eq!(hourly_source("  "), "Open-Meteo");
-    }
 
     #[test]
     fn a_forecast_is_read_in_the_apps_words() {
