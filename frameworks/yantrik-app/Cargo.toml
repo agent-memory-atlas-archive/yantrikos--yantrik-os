@@ -14,6 +14,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+# The settings store's errors (settings.rs).
+thiserror = { workspace = true }
 # `--version` for every app binary, from what is installed (boot.rs).
 yantrik-version = { workspace = true }
 # The control surface serves JSON-RPC on its own thread; the transport server is async.
@@ -29,6 +31,5 @@ yantrik-surface = { workspace = true }
 libc = { workspace = true }
 
 [dev-dependencies]
-thiserror = { workspace = true }
 # The headless harness the core tests run on (a dev-dependency cycle cargo allows).
 yantrik-testing = { workspace = true }

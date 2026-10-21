@@ -26,12 +26,15 @@ use std::time::Duration;
 
 use serde_json::Value;
 use yantrik_app::app::{App, Boot, ExitReason};
-use yantrik_app::cx::{Core, Cx, Inbound};
+use yantrik_app::cx::{Core, Cx, Inbound, Parts};
 use yantrik_app::intents::{self, Intents};
 use yantrik_app::jobs::{Cancel, Deliver, Executor, Job, JobId, Manual};
+use yantrik_app::paths::Paths;
+use yantrik_app::persist::{Lane, ManualLane, Report, Write};
 use yantrik_app::queue::Post;
 use yantrik_app::refused::Refused;
 use yantrik_app::timers::{Fire, ManualTimers, Sink, TimerId, Timers};
+use yantrik_app::watch::Seen;
 use yantrik_app::window::Window;
 use yantrik_ipc_transport::gate::{Authority, Mode};
 use yantrik_surface::{AgentTokenScope, CallerScope, Later, LaterScope, LocalRegistry};
@@ -200,11 +203,33 @@ impl<C: 'static> Timers<C> for SharedTimers<C> {
     }
 }
 
+/// The manual persistence lane, shared between the core and the test.
+#[derive(Clone)]
+struct SharedLane(Arc<ManualLane>);
+
+impl Lane for SharedLane {
+    fn write(&mut self, write: Write) {
+        // `ManualLane::write` takes `&mut`, but its queue is behind a lock: the shared handle
+        // may push through it.
+        self.0.push(write);
+    }
+
+    fn waiting(&self) -> usize {
+        self.0.waiting()
+    }
+
+    fn drain(&self, grace: Duration) -> bool {
+        self.0.drain(grace)
+    }
+}
+
 /// What lives on the UI thread for one app under test.
 struct Under<A: App> {
     core: Rc<Core<A>>,
     jobs: SharedJobs<A::Command>,
     clock: Clock<A::Command>,
+    lane: Arc<ManualLane>,
+    paths: Paths,
     registry: LocalRegistry,
 }
 
@@ -307,30 +332,49 @@ pub struct TestApp<A: App> {
 }
 
 impl<A: App> TestApp<A> {
-    /// Boots the app as the runner would: the model from `boot`, the window headless, `wire`,
-    /// the first render, `start`, the intents in a registry (not served). Effects `start` asked
-    /// for are staged: jobs wait for [`TestApp::run_jobs`], timers for [`TestApp::advance`].
-    pub fn start_with(boot: Boot) -> TestApp<A> {
+    /// Boots the app as the runner would, with its files at `paths` and `args` on its command
+    /// line: the settings opened, the model from the boot, the window headless, `wire`, the
+    /// first render, `start`, the intents in a registry (not served). Effects `start` asked for
+    /// are staged: jobs wait for [`TestApp::run_jobs`], timers for [`TestApp::advance`], writes
+    /// for [`TestApp::run_writes`]. Starting twice at the same `paths` is a restart.
+    pub fn start_at(paths: Paths, args: Vec<std::ffi::OsString>) -> TestApp<A> {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         on_ui(move || {
+            let (boot, store) = Boot::<A::Settings>::open(paths.clone(), args);
             let model = A::model(&boot)
                 .unwrap_or_else(|e| panic!("{}: the model did not start: {e}", A::ID));
             let ui = A::Ui::make().unwrap_or_else(|e| panic!("{}: no headless window: {e}", A::ID));
             let jobs = SharedJobs(Arc::new(Mutex::new(Manual::new())));
             let made: Rc<RefCell<Option<Clock<A::Command>>>> = Rc::new(RefCell::new(None));
             let made_out = made.clone();
+            let lane_made: Arc<Mutex<Option<Arc<ManualLane>>>> = Arc::new(Mutex::new(None));
+            let lane_out = lane_made.clone();
             let core = Core::<A>::new(
                 model,
                 ui,
-                Box::new(jobs.clone()),
-                move |sink: Sink<A::Command>| {
-                    let timers = Rc::new(RefCell::new(ManualTimers::new(sink)));
-                    *made_out.borrow_mut() = Some(timers.clone());
-                    Box::new(SharedTimers(timers))
+                Parts {
+                    executor: Box::new(jobs.clone()),
+                    timers: Box::new(move |sink: Sink<A::Command>| {
+                        let timers = Rc::new(RefCell::new(ManualTimers::new(sink)));
+                        *made_out.borrow_mut() = Some(timers.clone());
+                        Box::new(SharedTimers(timers))
+                    }),
+                    lane: Box::new(move |report: Arc<dyn Report>| {
+                        let lane = Arc::new(ManualLane::new(report));
+                        *lane_out.lock().unwrap_or_else(|p| p.into_inner()) = Some(lane.clone());
+                        Box::new(SharedLane(lane))
+                    }),
+                    settings: store,
+                    wake: Arc::new(|| {}),
                 },
-                Arc::new(|| {}),
             );
             let clock = made.borrow().clone().expect("the timers were made");
+            let lane = lane_made
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone()
+                .expect("the lane was made");
+            core.flush_settings();
             A::wire(&Cx::new(core.clone()));
             core.render_all();
             core.start();
@@ -341,6 +385,8 @@ impl<A: App> TestApp<A> {
                 core,
                 jobs,
                 clock,
+                lane,
+                paths,
                 registry,
             });
             APPS.with(|apps| apps.borrow_mut().insert(id, under));
@@ -351,8 +397,14 @@ impl<A: App> TestApp<A> {
         }
     }
 
+    /// Boots the app with files of its own under the temporary directory and no arguments.
     pub fn start() -> TestApp<A> {
-        TestApp::start_with(Boot::default())
+        TestApp::start_at(Paths::temporary(A::ID), Vec::new())
+    }
+
+    /// Where this app's files are.
+    pub fn paths(&self) -> Paths {
+        self.with(|u| u.paths.clone())
     }
 
     /// One step on the UI thread, with this app's core.
@@ -415,6 +467,37 @@ impl<A: App> TestApp<A> {
             u.clock.borrow_mut().settle(until);
             u.core.drain();
         });
+    }
+
+    /// Does every write waiting in the persistence lane, in order, and applies what came of
+    /// them (`Event::SettingsSaved`, or not).
+    pub fn run_writes(&self) {
+        self.with(|u| {
+            u.lane.write_all();
+            u.core.drain();
+        });
+    }
+
+    pub fn writes_waiting(&self) -> usize {
+        self.with(|u| u.core.writes_waiting())
+    }
+
+    /// What the housekeeping thread would have seen, raised by the test: the settings file
+    /// edited outside the app, or the shell's theme changed.
+    pub fn seen(&self, seen: Seen) {
+        self.with(move |u| {
+            let _ = u.core.post().post(Inbound::Seen(seen));
+            u.core.drain();
+        });
+    }
+
+    /// The settings as committed to disk, by the store's account.
+    pub fn committed_settings(&self) -> A::Settings {
+        self.with(|u| u.core.committed_settings())
+    }
+
+    pub fn settings_pending(&self) -> bool {
+        self.with(|u| u.core.settings_pending())
     }
 
     /// Commands queued behind the one being applied (`then`), not yet applied.

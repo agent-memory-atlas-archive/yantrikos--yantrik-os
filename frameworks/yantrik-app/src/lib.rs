@@ -18,12 +18,16 @@ pub mod event_loop;
 pub mod instance;
 pub mod intents;
 pub mod jobs;
+pub mod paths;
+pub mod persist;
 pub mod present;
 pub mod queue;
 pub mod refused;
 pub mod runner;
+pub mod settings;
 pub mod theme;
 pub mod timers;
+pub mod watch;
 pub mod window;
 
 pub use app::{App, Boot, Changed, Event, ExitReason, Startup, WindowId};
@@ -33,8 +37,10 @@ pub use effects::Effects;
 pub use event_loop::run_until_closed;
 pub use intents::{Agents, Args, Intent, Intents, InvocationId, Origin, Settle};
 pub use jobs::{Cancel, Concurrency, JobId, JobKey, Scope};
+pub use paths::Paths;
 pub use refused::{Explain, Refused};
 pub use runner::run;
+pub use settings::{Health, Settings, SettingsError};
 pub use timers::TimerId;
 pub use window::Window;
 // Moved to Foundation (L0): the one rule for an address, and the problem records every process

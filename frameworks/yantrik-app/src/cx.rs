@@ -1,11 +1,11 @@
 //! The UI-thread core: the one place the model lives, and how commands reach it
 //! (design/app-framework-2026-10-21.md, §§2.3, 3, 4).
 //!
-//! [`Core`] owns the model, the window, the timers, the job table and the open settlements. It
-//! applies a command by calling `update`, committing the effects it asked for, and calling
-//! `render` for the parts that changed. Nothing else touches the model. [`Cx`] is the handle a
-//! view uses to bind callbacks, and [`Core::post`] is the `Send` endpoint every other thread
-//! uses.
+//! [`Core`] owns the model, the window, the timers, the job table, the open settlements and the
+//! settings store. It applies a command by calling `update`, committing the effects it asked
+//! for, and calling `render` for the parts that changed. Nothing else touches the model. [`Cx`]
+//! is the handle a view uses to bind callbacks, and [`Core::post`] is the `Send` endpoint every
+//! other thread uses.
 //!
 //! Re-entrancy: a command raised while one is being applied (from `then`, or a Slint callback
 //! fired by `render`) is queued and applied after the current one's render, never nested. One
@@ -26,6 +26,7 @@ use std::collections::{HashMap, VecDeque};
 use std::ops::Deref;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use slint::ComponentHandle as _;
 
@@ -33,11 +34,15 @@ use crate::app::{App, Changed, Event, ExitReason, WindowId};
 use crate::effects::{Effects, Request};
 use crate::intents::{Invocation, InvocationId, Origin};
 use crate::jobs::{Cancel, Concurrency, Deliver, Executor, Finished, JobId, JobKey};
+use crate::persist::{Lane, Report, Written};
 use crate::problems;
 use crate::queue::{self, Inbox, Post, Wake};
 use crate::refused::Refused;
+use crate::settings::Store;
 use crate::timers::Timers;
+use crate::watch::Seen;
 
+mod persisted;
 mod settlement;
 use settlement::Open;
 
@@ -48,7 +53,11 @@ pub const PENDING_PER_DRAIN: usize = queue::CAPACITY;
 pub enum Inbound<A: App> {
     Command(A::Command),
     Finished(Finished<A::Command>),
-    Event(Event),
+    Event(Event<A::Settings>),
+    /// The persistence lane finished a write.
+    Written(Written),
+    /// The housekeeping thread saw a file change.
+    Seen(Seen),
     /// The rest of a drain that reached [`PENDING_PER_DRAIN`]: posted by the core to itself, and
     /// by nothing else (the token cannot be made outside this crate).
     Continue(Continuation),
@@ -73,6 +82,8 @@ pub struct Core<A: App> {
     ui: A::Ui,
     timers: RefCell<Box<dyn Timers<A::Command>>>,
     executor: RefCell<Box<dyn Executor<A::Command>>>,
+    settings: RefCell<Store<A::Settings>>,
+    lane: RefCell<Box<dyn Lane>>,
     jobs: RefCell<HashMap<JobId, Waiting<A::Command>>>,
     by_key: RefCell<HashMap<JobKey, JobId>>,
     next_job: Cell<u64>,
@@ -106,17 +117,28 @@ impl<A: App> Deliver<A::Command> for PostDeliver<A> {
     }
 }
 
+/// Makes the timers over the sink that applies a fired command.
+pub type MakeTimers<C> = Box<dyn FnOnce(crate::timers::Sink<C>) -> Box<dyn Timers<C>>>;
+/// Makes the persistence lane over where its outcomes go.
+pub type MakeLane = Box<dyn FnOnce(Arc<dyn Report>) -> Box<dyn Lane>>;
+
+/// What the core is built over, besides the model and the window.
+pub struct Parts<A: App> {
+    /// The job pool.
+    pub executor: Box<dyn Executor<A::Command>>,
+    pub timers: MakeTimers<A::Command>,
+    pub lane: MakeLane,
+    /// The settings as opened for the boot.
+    pub settings: Store<A::Settings>,
+    /// How a post from another thread gets the UI thread to call [`Core::drain`].
+    pub wake: Wake,
+}
+
 impl<A: App> Core<A> {
-    /// A core over `model` and `ui`, with the executor and timers it is given. `wake` is how a
-    /// post from another thread gets the UI thread to call [`Core::drain`].
-    pub fn new(
-        model: A::Model,
-        ui: A::Ui,
-        executor: Box<dyn Executor<A::Command>>,
-        timers: impl FnOnce(crate::timers::Sink<A::Command>) -> Box<dyn Timers<A::Command>>,
-        wake: Wake,
-    ) -> Rc<Core<A>> {
-        let (post, inbox) = queue::bounded(queue::CAPACITY, wake);
+    /// A core over `model` and `ui`, with the parts it is given.
+    pub fn new(model: A::Model, ui: A::Ui, parts: Parts<A>) -> Rc<Core<A>> {
+        let (post, inbox) = queue::bounded(queue::CAPACITY, parts.wake);
+        let report: Arc<dyn Report> = Arc::new(persisted::PostWritten(post.clone()));
         Rc::new_cyclic(|weak: &Weak<Core<A>>| {
             let sink_core = weak.clone();
             let sink: crate::timers::Sink<A::Command> = Rc::new(move |command| {
@@ -128,8 +150,10 @@ impl<A: App> Core<A> {
                 id: A::ID,
                 model: RefCell::new(model),
                 ui,
-                timers: RefCell::new(timers(sink)),
-                executor: RefCell::new(executor),
+                timers: RefCell::new((parts.timers)(sink)),
+                executor: RefCell::new(parts.executor),
+                settings: RefCell::new(parts.settings),
+                lane: RefCell::new((parts.lane)(report)),
                 jobs: RefCell::new(HashMap::new()),
                 by_key: RefCell::new(HashMap::new()),
                 next_job: Cell::new(1),
@@ -379,6 +403,10 @@ impl<A: App> Core<A> {
                         self.settle(invocation.id, result.map_err(|r| r.sentence));
                     }
                 }
+                Request::SaveSettings {
+                    value,
+                    replace_unusable,
+                } => self.save_settings(value, replace_unusable),
                 Request::Close(window) => self.close_window(window),
                 Request::Exit => self.request_exit(ExitReason::App),
             }
@@ -547,6 +575,8 @@ impl<A: App> Core<A> {
                 Inbound::Command(command) => self.run(command),
                 Inbound::Finished(finished) => self.finished(finished),
                 Inbound::Event(event) => self.event(event),
+                Inbound::Written(written) => self.written(written),
+                Inbound::Seen(seen) => self.seen(seen),
                 Inbound::Continue(_) => {
                     self.continue_posted.set(false);
                     self.drain_pending();
@@ -556,13 +586,28 @@ impl<A: App> Core<A> {
         self.in_wake.set(false);
     }
 
-    fn event(&self, event: Event) {
+    /// An event: the app's command for it, or the default.
+    pub(crate) fn event(&self, event: Event<A::Settings>) {
         let command = A::event(event.clone(), &self.model.borrow());
         match (command, event) {
             (Some(command), _) => self.run(command),
             (None, Event::CloseRequested(window)) => self.close_window(window),
             (None, Event::ExitRequested(reason)) => self.request_exit(reason),
             (None, Event::Activated(_)) => {}
+            (None, Event::SettingsSaved) => {}
+            (None, Event::SettingsChangedOutside(_)) => {}
+            (None, Event::SettingsNotSaved(sentence)) => {
+                problems::record_failure(self.id, "settings", &sentence);
+            }
+            // The app's own value stands and the file is brought back to it; never silently
+            // (§6): the outside edit that lost is written down, so it can be found.
+            (None, Event::SettingsConflict { mine, .. }) => {
+                let why = "the settings file was edited outside the app while a save was \
+                           pending; the app's value stands and was written over the edit";
+                tracing::warn!(app = self.id, why);
+                problems::record_failure(self.id, "settings_conflict", why);
+                self.resolve_settings(mine);
+            }
         }
     }
 
@@ -584,11 +629,16 @@ impl<A: App> Core<A> {
         }
     }
 
-    /// The end, in order: no more posts, no more timers, every job cancelled, every open answer
-    /// refused, a bounded wait for the pool. Nothing in the model is touched here.
-    pub fn shutdown(&self, grace: std::time::Duration) -> bool {
+    /// The end, in order: no more posts, no more timers, the writes owed handed to the lane,
+    /// every open answer refused, every job cancelled, then one bounded wait shared by the lane
+    /// and the pool (§4: the grace is the whole of it, not one per drain). Nothing in the model
+    /// is touched here.
+    pub fn shutdown(&self, grace: Duration) -> bool {
+        let deadline = Instant::now() + grace;
         self.inbox.close();
         self.timers.borrow_mut().stop_all();
+        // A save asked for is a save made, before the process ends.
+        self.flush_settings();
         // Every owed answer is refused as a closing, before a cancelled job can call it replaced.
         let owed: Vec<InvocationId> = self.open.borrow().keys().copied().collect();
         for id in owed {
@@ -598,14 +648,27 @@ impl<A: App> Core<A> {
         for id in ids {
             self.cancel(id);
         }
-        let drained = self.executor.borrow().drain(grace);
+        let written = self
+            .lane
+            .borrow()
+            .drain(deadline.saturating_duration_since(Instant::now()));
+        if !written {
+            tracing::warn!(
+                app = self.id,
+                "a write did not finish within the grace period; it is not durable"
+            );
+        }
+        let drained = self
+            .executor
+            .borrow()
+            .drain(deadline.saturating_duration_since(Instant::now()));
         if !drained {
             tracing::warn!(
                 app = self.id,
                 "a job did not stop within the grace period; exiting without it"
             );
         }
-        drained
+        written && drained
     }
 
     /// Jobs the core is waiting on.

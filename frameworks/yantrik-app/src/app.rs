@@ -13,7 +13,9 @@ use crate::control::View;
 use crate::cx::Cx;
 use crate::effects::Effects;
 use crate::intents::Intents;
+use crate::paths::Paths;
 use crate::refused::Refused;
+use crate::settings::{Health, Settings, Store};
 use crate::window::Window;
 
 /// One window of the app. `PRIMARY` is the one the runner makes at start; the design allows
@@ -36,9 +38,10 @@ pub enum ExitReason {
     Logout,
 }
 
-/// Something the framework saw that the app may turn into a command.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Event {
+/// Something the framework saw that the app may turn into a command. `S` is the app's
+/// [`App::Settings`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum Event<S> {
     /// The person asked a window to close. `None` from [`App::event`] closes it now; a command
     /// keeps it open until something runs `fx.close(window)`, so "Save changes?" is a flow.
     CloseRequested(WindowId),
@@ -47,13 +50,53 @@ pub enum Event {
     ExitRequested(ExitReason),
     /// A window became the active one.
     Activated(WindowId),
+    /// The last `fx.save_settings` reached the disk. `None` does nothing.
+    SettingsSaved,
+    /// A save did not reach the disk; the value is kept in memory and will be tried again with
+    /// the next save. `None` files a problem record and does nothing else; an app with a notice
+    /// line shows the sentence.
+    SettingsNotSaved(String),
+    /// The settings file was edited outside this app and nothing of this app's was pending: the
+    /// value is the file's now. `None` leaves the model as it was, so an app that keeps its
+    /// settings in its model answers this with the command that adopts them.
+    SettingsChangedOutside(S),
+    /// The settings file was edited outside this app while a save of this app's was pending.
+    /// `None` keeps this app's value and writes it, and files a problem record saying an outside
+    /// edit lost (never silently, §6); an app that prefers the file answers with a command that
+    /// saves `outside`. A file repaired by hand while the app was in recovery is not a conflict:
+    /// the repair is the person's choice and arrives as `SettingsChangedOutside`.
+    SettingsConflict { outside: S, mine: S },
 }
 
 /// What the runner knows before any window exists.
-#[derive(Debug, Clone, Default)]
-pub struct Boot {
-    /// The command line after the program name. Parsed into a `Launch` in step 4.
+#[derive(Debug, Clone)]
+pub struct Boot<S = ()> {
+    /// The command line after the program name. Parsed into a `Launch` in step 4c.
     pub args: Vec<OsString>,
+    /// Where this app's files are.
+    pub paths: Paths,
+    /// The settings as read from disk (migrated if older), or the defaults when there is no file
+    /// or it could not be used.
+    pub settings: S,
+    /// Whether the settings file is this app's to write. In recovery the app runs on the
+    /// defaults, and a save is held in memory until the person chooses to replace the file
+    /// (`fx.replace_settings_file`).
+    pub settings_health: Health,
+}
+
+impl<S: Settings> Boot<S> {
+    /// Opens the settings at `paths` and makes the boot the app's `model` is given. Never fails:
+    /// an unusable file is `settings_health`, not an error.
+    pub fn open(paths: Paths, args: Vec<OsString>) -> (Boot<S>, Store<S>) {
+        let store = Store::<S>::open(paths.config_file().to_path_buf());
+        let boot = Boot {
+            args,
+            paths,
+            settings: store.get().clone(),
+            settings_health: store.health().clone(),
+        };
+        (boot, store)
+    }
 }
 
 /// Why the app could not start. Printed as a sentence, filed as a problem, exit 1.
@@ -122,13 +165,16 @@ pub trait App: Sized + 'static {
     /// Plain data, `Send` and `Clone`: it crosses from worker threads, timers (which make one
     /// each time they fire) and the surface's thread.
     type Command: Send + Clone + 'static;
+    /// What the app remembers between runs: typed, with a schema number, kept at
+    /// `Paths::config_file`. `()` for an app with nothing to remember.
+    type Settings: Settings;
 
     /// The app's one id: the instance claim, the socket, the tracing target. The manifest
     /// (step 4) supplies it from `yantrik.toml`.
     const ID: &'static str;
 
-    /// Build the model before any window exists. No UI.
-    fn model(boot: &Boot) -> Result<Self::Model, Startup>;
+    /// Build the model before any window exists. No UI. `boot.settings` is what was saved.
+    fn model(boot: &Boot<Self::Settings>) -> Result<Self::Model, Startup>;
 
     /// Bind the window's callbacks to commands. Once, on the UI thread, after the window is made
     /// and themed.
@@ -164,7 +210,7 @@ pub trait App: Sized + 'static {
     }
 
     /// A framework event the app may turn into a command. `None` takes the default.
-    fn event(event: Event, model: &Self::Model) -> Option<Self::Command> {
+    fn event(event: Event<Self::Settings>, model: &Self::Model) -> Option<Self::Command> {
         let _ = (event, model);
         None
     }

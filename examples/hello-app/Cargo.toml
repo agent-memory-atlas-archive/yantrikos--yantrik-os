@@ -20,6 +20,7 @@ yantrik-app = { workspace = true }
 yantrik-design-tokens = { workspace = true }
 yantrik-ui-kit = { workspace = true }
 slint = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
