@@ -28,6 +28,8 @@ mod prefs;
 mod rail;
 mod update;
 mod view;
+#[cfg(test)]
+mod store_tests;
 
 pub use forecast::{Reading, Source};
 pub use model::{Command, Model};
