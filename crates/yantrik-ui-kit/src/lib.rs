@@ -664,11 +664,14 @@ mod every_app_is_an_app_window {
             let base_window = src.contains(" inherits AppWindow {");
             let plain_window = src.contains(" inherits Window {");
             // A bar nobody connected draws its buttons and does nothing when they are pressed.
-            // The chrome is connected by `window_chrome!(ui)` directly, or through the
-            // framework's `Window` adapter (`yantrik_app::window!(App)` then
-            // `ui.connect_chrome()`), which expands to the same macro.
+            // The chrome is connected by `window_chrome!(ui)` directly, through the framework's
+            // `Window` adapter (`yantrik_app::window!(App)` then `ui.connect_chrome()`), which
+            // expands to the same macro, or by the runner for an app on the framework, whose
+            // main is three lines (`yantrik_app::run::<App>()`; frameworks/yantrik-app/src/runner.rs).
             let main = std::fs::read_to_string(dir.join("src/main.rs")).unwrap_or_default();
-            let connected = main.contains("window_chrome!(") || main.contains(".connect_chrome()");
+            let connected = main.contains("window_chrome!(")
+                || main.contains(".connect_chrome()")
+                || main.contains("yantrik_app::run::<");
             if base_window && !connected {
                 wrong.push(format!(
                     "{app}: inherits AppWindow, but main never calls window_chrome! or \
