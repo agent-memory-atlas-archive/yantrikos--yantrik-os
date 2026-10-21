@@ -81,7 +81,15 @@ pub fn render(ui: &NotesApp, window: WindowId, m: &Model, changed: &Changed) {
         }
     }
     if changed.has(CHROME) {
-        let prompt = leaving::prompt(m).or_else(|| closing::prompt(m)).unwrap_or_default();
+        // Each window draws only the prompt that asks in it.
+        let prompt = if leaving::asks_in(m, window) {
+            leaving::prompt(m)
+        } else if closing::asks_in(m, window) {
+            closing::prompt(m)
+        } else {
+            None
+        };
+        let prompt = prompt.unwrap_or_default();
         ui.set_close_heading(prompt.heading.into());
         ui.set_close_said(prompt.sentence.into());
         ui.set_close_saves(prompt.saves);

@@ -53,6 +53,9 @@ pub struct Model {
     pub pending: Option<Pending>,
     /// A close or a quit asking about unsaved notes, or waiting on their saves.
     pub closing: Option<CloseFlow>,
+    /// The window the close prompt asks in, while `closing` asks: the window asked to close, or
+    /// the one a quit was asked from. It is drawn and answered there and nowhere else.
+    pub close_asked_in: WindowId,
     /// An action that would leave a note whose file is gone, waiting on the person's answer
     /// (update/leaving.rs).
     pub leaving: Option<Pending>,
@@ -62,6 +65,9 @@ pub struct Model {
     /// note whose file still holds it is ours to keep if another program replaces it
     /// (update/follow.rs), however often it was closed, reopened or reloaded since.
     pub written: BTreeMap<String, Fingerprint>,
+    /// Drafts whose text moved to another note, by the draft that took it over: each old draft is
+    /// removed once the new one is on disk, or the note it moved to is saved (update/drafts.rs).
+    pub handed_over: Vec<(String, String)>,
     /// The document, and its edit, whose draft could not be written: tried again at its next edit.
     pub draft_failed_at: Option<(DocumentId, u64)>,
     /// A call from the surface waiting for the work it started.
@@ -238,9 +244,11 @@ impl Model {
             notice_in: None,
             pending: None,
             closing: None,
+            close_asked_in: WindowId::PRIMARY,
             leaving: None,
             recovery,
             written: BTreeMap::new(),
+            handed_over: Vec::new(),
             draft_failed_at: None,
             asked: None,
             answer: Value::Null,

@@ -52,7 +52,9 @@ pub struct Prompt {
 
 /// The person asked a window to close.
 pub fn requested(m: &mut Model, fx: &mut Effects<Notes>, window: WindowId) {
-    leaving::put_away(m, fx);
+    if leaving::asks_in(m, window) {
+        leaving::put_away(m, fx);
+    }
     m.keep_unsaved_dirty();
     let closing = m.documents.closing_window(window);
     ask(m, fx, Some(window), closing);
@@ -126,6 +128,7 @@ fn ask(m: &mut Model, fx: &mut Effects<Notes>, window: Option<WindowId>, closing
         return close(m, fx, window);
     }
     m.closing = Some(CloseFlow::new(window, asked));
+    m.close_asked_in = m.pane.window;
     m.pane.dialog = CLOSE_DIALOG;
     fx.changed(CHROME);
 }
@@ -136,11 +139,29 @@ pub fn answer(m: &mut Model, fx: &mut Effects<Notes>, choice: Choice) {
     let asking = flow.stage == Stage::Asking;
     let next = flow.answer(choice);
     if asking {
-        // The prompt goes from the window that showed it.
-        m.panes_mut().filter(|p| p.dialog == CLOSE_DIALOG).for_each(|p| p.dialog = 0);
+        // The prompt goes from the window that showed it, and from no other.
+        if let Some(pane) = m.pane_of_mut(m.close_asked_in).filter(|p| p.dialog == CLOSE_DIALOG) {
+            pane.dialog = 0;
+        }
         fx.changed(CHROME);
     }
     apply(m, fx, next);
+}
+
+/// The person's answer, from the focused window: a prompt that asks is answered only from the
+/// window it asks in, never from another window's dialog.
+pub fn answer_from(m: &mut Model, fx: &mut Effects<Notes>, choice: Choice) {
+    let asking = m.closing.as_ref().is_some_and(|f| f.stage == Stage::Asking);
+    if !asking || asks_in(m, m.pane.window) {
+        answer(m, fx, choice);
+    }
+}
+
+/// Whether the close prompt asks in `window`: each prompt is drawn, and answered, only in the
+/// window it asked in (leaving.rs keeps the same rule), so two prompts in two windows never
+/// cross over.
+pub fn asks_in(m: &Model, window: WindowId) -> bool {
+    m.closing.as_ref().is_some_and(|f| f.stage == Stage::Asking) && m.close_asked_in == window
 }
 
 /// A store job landed, and the store is idle. A close waiting on its saves closes if everything
@@ -310,9 +331,9 @@ pub fn prompt(m: &Model) -> Option<Prompt> {
     Some(Prompt { heading, sentence, saves, save })
 }
 
-/// Escape, or the dialog put away by the window: the person cancelled the prompt.
+/// Escape, or the dialog put away by the window it asks in: the person cancelled the prompt.
 pub fn put_away(m: &mut Model, fx: &mut Effects<Notes>) {
-    if m.closing.as_ref().is_some_and(|f| f.stage == Stage::Asking) {
+    if asks_in(m, m.pane.window) {
         answer(m, fx, Choice::Cancel);
     }
 }

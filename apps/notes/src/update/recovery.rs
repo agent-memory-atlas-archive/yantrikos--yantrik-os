@@ -31,11 +31,21 @@ use crate::Notes;
 /// its note's file and the interrupted save the journal held, if it was the same note's. The
 /// newer of draft and journal wins; one equal to the file is not offered. A draft that loses is
 /// removed: the file already holds it, or the interrupted save, newer, came back as a note of
-/// its own (`Vault::load`). Returns the sentence that says how many are offered, when the bar's
-/// one is not all of them.
+/// its own (`Vault::load`). A draft whose text another note, or a newer offer, already holds is
+/// removed too: it moved to that note, and Notes stopped before its old draft was. Returns the
+/// sentence that says how many are offered, when the bar's one is not all of them.
 pub fn weigh(m: &mut Model, fx: &mut Effects<Notes>, interrupted: Option<&Interrupted>) -> Option<String> {
     let found = m.recovery.found.take()?;
     for Found { offer, at_ms, seq } in found {
+        // Already safe: another note holds exactly this text (its copy landed, and Notes stopped
+        // before the old draft was removed), or a newer offer does (the old draft and the one that
+        // took it over are both on disk). Offering it would let Restore make it twice.
+        let held = !m.alike(&offer.content, &offer.id).is_empty()
+            || m.recovery.offers.iter().any(|o| o.content == offer.content);
+        if held {
+            fx.discard_draft(&offer.draft);
+            continue;
+        }
         let file = m.library.iter().find(|n| !n.trash && n.id == offer.id).map(|n| &n.content);
         let journal = interrupted
             .filter(|j| j.id == offer.id)

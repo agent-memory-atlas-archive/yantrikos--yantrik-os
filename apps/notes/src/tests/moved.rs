@@ -146,7 +146,9 @@ fn a_copy_that_cannot_be_saved_is_offered_once_as_itself() {
     let copy = app.model(|m| m.current().unwrap().id().to_string());
     app.run_writes();
     assert!(draft_file(&app, &vault(&app).join(&copy)).exists(), "the copy's draft is written");
-    assert!(!draft_file(&app, &path).exists(), "and the original's is gone");
+    // Its landing (`DraftSaved`) releases the original's, removed by the lane's next write.
+    app.run_writes();
+    assert!(!draft_file(&app, &path).exists(), "and then the original's is gone");
     let again = killed_and_started_again(app);
     // The copy's draft is offered, or the store's journal of its interrupted save came back as
     // a recovered note; either way the text is there once, and never under the original.
@@ -219,4 +221,57 @@ fn discard_of_an_offer_whose_file_is_gone_says_nothing_is_kept() {
     act(&app, "discard_draft", json!({})).expect("discarded");
     assert_eq!(notice(&app), said::DISCARDED_GONE);
     crashed_offers_nothing(app, "discard");
+}
+
+/// The 925 review, finding 3 (P2): Notes stops after the kept note landed but before the lane
+/// removed the old draft. Both are on disk; the start offers nothing, since a note already holds
+/// the text, and removes the stale draft.
+#[test]
+fn a_kill_between_the_kept_note_and_the_old_drafts_removal_offers_nothing() {
+    let (app, path) = in_conflict();
+    press(&app, "keep-mine");
+    assert_eq!(kept(&app, "copy-"), MINE, "the copy is on disk");
+    assert!(draft_file(&app, &path).exists(), "and the old draft still is: the lane has not run");
+    let again = killed_and_started_again(app);
+    assert_eq!(offered(&again), Vec::<String>::new(), "the text is a note already: nothing to Restore twice");
+    again.run_writes();
+    assert!(!draft_file(&again, &path).exists(), "the stale draft is removed");
+}
+
+/// The same with two drafts of one text on disk and no note holding it: offered once.
+#[test]
+fn two_drafts_of_one_text_are_offered_once() {
+    let (app, path) = in_conflict();
+    failing(&app).fail(Step::Write, ".md", None);
+    press(&app, "copy");
+    let copy = app.model(|m| m.current().unwrap().id().to_string());
+    app.run_writes();
+    assert!(draft_file(&app, &path).exists() && draft_file(&app, &vault(&app).join(&copy)).exists(), "both drafts");
+    let again = killed_and_started_again(app);
+    let offers = state(&again)["recovery"].as_array().unwrap().clone();
+    let listed = again.model(|m| m.library.iter().filter(|n| n.content.text == MINE).count());
+    assert_eq!(offers.len() + listed, 1, "once: {offers:?}");
+}
+
+/// The 925 review, finding 4: the new draft's write fails, so the old draft is kept until the
+/// copy is saved; then it goes.
+#[test]
+fn an_old_draft_stays_until_the_new_one_is_on_disk_or_the_copy_is_saved() {
+    let (app, path) = in_conflict();
+    let disk = failing(&app);
+    disk.fail(Step::Write, ".md", None);
+    press(&app, "copy");
+    let copy = vault(&app).join(app.model(|m| m.current().unwrap().id().to_string()));
+    // A folder where the copy's draft would go: the lane cannot write it.
+    std::fs::create_dir_all(draft_file(&app, &copy)).unwrap();
+    app.run_writes();
+    app.run_writes();
+    assert!(notice(&app).starts_with(said::DRAFT_NOT_KEPT_START), "{}", notice(&app));
+    assert!(draft_file(&app, &path).exists(), "the old draft is the text's only copy for a crash, so it stays");
+    disk.heal();
+    app.run(Command::Window(WindowAction::Save));
+    settle(&app);
+    assert_eq!(file(&copy), MINE, "the copy is saved");
+    app.run_writes();
+    assert!(!draft_file(&app, &path).exists(), "and only then the old draft goes");
 }

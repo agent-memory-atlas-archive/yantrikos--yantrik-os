@@ -10,6 +10,7 @@
 //!   deleted the file, and this honours it once they say so. The document goes from every window,
 //!   with its draft, and the library lists it no more; said once, and nothing is offered later.
 
+use yantrik_app::app::WindowId;
 use yantrik_app::documents::{Choice, DocumentId, OutsideState};
 use yantrik_app::effects::Effects;
 
@@ -33,11 +34,30 @@ pub fn ask(m: &mut Model, fx: &mut Effects<Notes>, action: WindowAction) {
     fx.changed(CHROME);
 }
 
-/// The person answered the prompt. The answer comes from the window that asked, so it acts there.
+/// Whether the leaving prompt asks in `window`: the window it was asked in, and no other. Each
+/// prompt is drawn, and answered, only where it asked (closing.rs keeps the same rule).
+pub fn asks_in(m: &Model, window: WindowId) -> bool {
+    m.leaving.as_ref().is_some_and(|l| l.window == window)
+}
+
+/// The person answered the prompt, in the window it asked in (`asks_in`): it acts there. A note
+/// that is no longer gone by then (its file came back) asks nothing more: the action goes ahead
+/// as any other would, its note saved first when it has edits.
 pub fn answer(m: &mut Model, fx: &mut Effects<Notes>, choice: Choice) {
     let Some(leaving) = put_down(m, fx) else { return };
+    let window = leaving.window;
+    m.within(window, |m| answered(m, fx, leaving, choice));
+}
+
+fn answered(m: &mut Model, fx: &mut Effects<Notes>, leaving: Pending, choice: Choice) {
+    let still_gone = m.current().is_some_and(|c| *c.outside() == OutsideState::Deleted);
     match choice {
         Choice::Cancel => {}
+        Choice::Save | Choice::DontSave if !still_gone => {
+            if let Step::Window(action) = leaving.step {
+                window::act(m, fx, action);
+            }
+        }
         // What waited goes ahead once the kept note has landed (`after_store`); a keep that
         // fails, or cannot start, takes it with it and says why.
         Choice::Save if m.busy.is_some() => say(m, fx, said::WAIT_FOR_THE_STORE),
@@ -61,9 +81,18 @@ pub fn answer(m: &mut Model, fx: &mut Effects<Notes>, choice: Choice) {
     }
 }
 
-/// Escape, a close, or a quit: the prompt is put away, and nothing goes ahead.
+/// Escape, a close of its window, or a quit: the prompt is put away, and nothing goes ahead.
 pub fn put_away(m: &mut Model, fx: &mut Effects<Notes>) {
     put_down(m, fx);
+}
+
+/// `doc` is no longer a note whose file is gone (its file came back, or it was let go in another
+/// window): a prompt asking about it asks a question that is no longer true, so it goes.
+pub fn no_longer_gone(m: &mut Model, fx: &mut Effects<Notes>, doc: DocumentId) {
+    let asked_about = m.leaving.as_ref().and_then(|l| m.pane_of(l.window)).and_then(|p| m.document_in(p));
+    if asked_about == Some(doc) {
+        put_down(m, fx);
+    }
 }
 
 fn put_down(m: &mut Model, fx: &mut Effects<Notes>) -> Option<Pending> {
@@ -101,6 +130,8 @@ fn let_go(m: &mut Model, fx: &mut Effects<Notes>) -> Option<String> {
     if let Some(d) = m.documents.get_mut(doc) {
         drafts::discard(d, fx);
     }
+    // Let go here, it is no question for a window that was asking about it.
+    no_longer_gone(m, fx, doc);
     show_note(m, fx, None);
     windows::follow_to(m, fx, doc, None);
     show(m, fx);

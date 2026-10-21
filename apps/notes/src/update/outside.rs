@@ -22,7 +22,7 @@ use yantrik_app::documents::{DocumentId, Fingerprint, Observed, OutsideState};
 use yantrik_app::effects::Effects;
 
 use super::navigate::show_note;
-use super::{after_store, begin, drafts, failed, follow, refreshed, relist, said, save_state, set_status, show, windows};
+use super::{after_store, begin, drafts, failed, follow, leaving, refreshed, relist, said, save_state, set_status, show, windows};
 use crate::command::{Command, Resolution};
 use crate::model::{Current, Model, Work};
 use crate::note::{now, Note, NoteText};
@@ -53,6 +53,9 @@ pub fn seen(m: &mut Model, fx: &mut Effects<Notes>, key: &str, seen: Observed) {
     if after != before {
         // News for every window on the note, *Not now* or not.
         let doc = d.id;
+        if before == OutsideState::Deleted {
+            leaving::no_longer_gone(m, fx, doc);
+        }
         for window in m.windows_showing(doc) {
             if let Some(pane) = m.pane_of_mut(window) {
                 pane.outside_later = false;

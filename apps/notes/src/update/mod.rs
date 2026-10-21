@@ -107,7 +107,9 @@ fn dispatch(m: &mut Model, fx: &mut Effects<Notes>, command: Command) {
             }
             // Escape on the close prompt is its Cancel, in the window that shows the prompt.
             if asked_here && dialog != closing::CLOSE_DIALOG {
-                leaving::put_away(m, fx);
+                if leaving::asks_in(m, m.pane.window) {
+                    leaving::put_away(m, fx);
+                }
                 closing::put_away(m, fx);
             }
             fx.changed(MODEL_ONLY);

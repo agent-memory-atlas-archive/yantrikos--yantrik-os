@@ -47,8 +47,8 @@ pub fn act(m: &mut Model, fx: &mut Effects<Notes>, action: WindowAction) {
         WindowAction::NotNow => outside::not_now(m, fx),
         // The close prompt answers while a save it asked for is in flight. The same prompt asks
         // before leaving a note whose file is gone.
-        WindowAction::Close(choice) if m.leaving.is_some() => leaving::answer(m, fx, choice),
-        WindowAction::Close(choice) => closing::answer(m, fx, choice),
+        WindowAction::Close(choice) if leaving::asks_in(m, m.pane.window) => leaving::answer(m, fx, choice),
+        WindowAction::Close(choice) => closing::answer_from(m, fx, choice),
         // Drops the note and its draft, neither of which is the store's: nothing to wait for.
         WindowAction::LetGo => leaving::let_go_pressed(m, fx),
         // Drops a draft, which is not the store's: nothing to wait for.
