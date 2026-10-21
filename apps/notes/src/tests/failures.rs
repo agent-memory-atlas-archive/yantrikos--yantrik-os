@@ -186,7 +186,6 @@ fn a_read_only_vault_keeps_one_save_in_flight_and_one_notice() {
     assert_eq!((notice(&app), unsaved(&app)), (String::new(), false));
 }
 
-
 /// #918's review, 2: two notes in two windows, both saves failed. Once the disk takes writes and
 /// one note saves, the other is saved too, with no key pressed in it; and the notice of its
 /// failure is not cleared while it is still not on disk.

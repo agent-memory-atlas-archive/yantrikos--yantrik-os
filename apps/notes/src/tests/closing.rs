@@ -257,7 +257,6 @@ fn a_failure_while_quitting_over_two_notes_keeps_everything_and_says_which() {
     assert!(app.model(|m| m.closing.is_none()), "the close is over; quitting again asks again");
 }
 
-
 /// #918's review, 3: another note's autosave failing while this window's close waits to save does
 /// not end the close. This window's note is still saved and the window closes, and the failure is
 /// said with the title of the note it is about.

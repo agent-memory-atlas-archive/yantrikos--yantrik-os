@@ -361,7 +361,6 @@ fn a_note_typed_back_to_its_file_in_another_window_is_saved_to_every_reader() {
     assert_eq!(file(&path), saved);
 }
 
-
 /// #918's review, 1: a window closed from the taskbar or the window manager while the person types
 /// in another leaves the focus, `describe` and the surface's calls in the person's window.
 #[test]
@@ -407,4 +406,30 @@ fn closing_the_focused_window_gives_the_focus_back_to_the_window_the_person_was_
     assert_eq!((app.windows(), app.model(|m| m.pane.window)), (vec![first, third], third));
     app.close_requested(third);
     assert_eq!((app.windows(), app.model(|m| m.pane.window)), (vec![first], first));
+}
+
+/// #918's review, 4: an offer for a note no window shows is on one window's bar, the focused
+/// one's, and moves with the person; it is never offered in two windows at once.
+#[test]
+fn an_offer_for_a_note_no_window_shows_is_on_one_windows_bar_only() {
+    let (app, _) = with_note("Third");
+    note(&app, "Left", "");
+    note(&app, "Right", "");
+    act(&app, "open_note", json!({ "title": "Third" })).unwrap();
+    app.run(Command::Edit("# Third\n\ntyped before the crash".into()));
+    app.run_writes();
+    let app = killed_and_started_again(app);
+    press_in(&app, WindowId::PRIMARY, WindowAction::Open { id: note_id(&app, "Left"), trash: false });
+    let answer = act(&app, "open_in_new_window", json!({ "title": "Right" })).expect("opened");
+    let second = WindowId(answer["window"].as_u64().unwrap() as u32);
+    let bars = |app: &TestApp<Notes>| {
+        app.windows().into_iter().map(|w| app.window(w, |ui| ui.get_recovery()).unwrap()).collect::<Vec<_>>()
+    };
+    assert_eq!(app.windows(), vec![WindowId::PRIMARY, second]);
+    assert_eq!(bars(&app), vec![0, 2], "on the focused window's bar only");
+    app.event(Event::Activated(WindowId::PRIMARY));
+    assert_eq!(bars(&app), vec![2, 0], "and it moves with the person");
+    press_in(&app, WindowId::PRIMARY, WindowAction::RestoreDraft);
+    assert_eq!(editor(&app, WindowId::PRIMARY), "# Third\n\ntyped before the crash");
+    assert_eq!(bars(&app), vec![0, 0], "restored once, offered nowhere after");
 }

@@ -118,19 +118,25 @@ pub fn shown(m: &Model) -> Option<&Offer> {
     shown_in(m, &m.pane)
 }
 
-/// The offer a window's bar shows: its own note's, or else the newest whose note no other window
-/// shows. An offer appears in the window that shows its note, and is not offered twice.
+/// The offer a window's bar shows: its own note's, or else the newest whose note no window shows,
+/// on one window's bar only: the focused window's, or, when that bar holds its own note's offer,
+/// the lowest numbered window's whose bar is free. An offer appears in the window that shows its
+/// note, moves with the person otherwise, and is never offered in two windows at once.
 pub fn shown_in<'a>(m: &'a Model, pane: &Pane) -> Option<&'a Offer> {
-    let open = m.current_in(pane).map(|c| c.id().to_string());
-    if let Some(offer) = open.and_then(|id| m.recovery.offer_for(&id)) {
+    if let Some(offer) = own(m, pane) {
         return Some(offer);
     }
-    let elsewhere: Vec<String> = m
-        .panes()
-        .filter(|p| p.window != pane.window)
-        .filter_map(|p| m.current_in(p).map(|c| c.id().to_string()))
-        .collect();
-    m.recovery.offers.iter().find(|o| !elsewhere.contains(&o.id))
+    let free = m.panes().filter(|p| own(m, p).is_none()).map(|p| p.window).min_by_key(|w| (*w != m.pane.window, *w));
+    if free != Some(pane.window) {
+        return None;
+    }
+    let open: Vec<String> = m.panes().filter_map(|p| m.current_in(p).map(|c| c.id().to_string())).collect();
+    m.recovery.offers.iter().find(|o| !open.contains(&o.id))
+}
+
+/// The offer for the note a window shows, if it has one.
+fn own<'a>(m: &'a Model, pane: &Pane) -> Option<&'a Offer> {
+    m.current_in(pane).and_then(|c| m.recovery.offer_for(c.id()))
 }
 
 /// *Restore*: the offered text back in its note, open in the window. Reached through the guards,

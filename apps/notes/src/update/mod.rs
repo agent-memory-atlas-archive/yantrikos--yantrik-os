@@ -23,7 +23,7 @@ use crate::pane::Cue;
 use crate::store::Vault;
 use crate::view::listing;
 use crate::view::preview;
-use crate::view::render::{CUES, EDIT, LIBRARY, MODEL_ONLY, NOTE, PREVIEW, STATUS};
+use crate::view::render::{CUES, EDIT, LIBRARY, MODEL_ONLY, NOTE, OUTSIDE, PREVIEW, STATUS};
 use crate::Notes;
 
 pub mod closing;
@@ -51,6 +51,7 @@ const WORKER_STOPPED: &str = "Storage worker stopped. Keep this window open to p
 pub fn update(m: &mut Model, command: Command, fx: &mut Effects<Notes>) -> Result<(), Refused> {
     // A cue is for the render of the command that set it, and for no later one.
     m.panes_mut().for_each(|p| p.cues.clear());
+    let focused = m.pane.window;
     // A command from a window acts there; one from a window already closed does nothing.
     let Some(command) = windows::arrive(m, command) else { return Ok(()) };
     // A job's outcome, a file seen changed, or a close is applied in the window it is about, and
@@ -69,6 +70,10 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Effects<Notes>) -> Resul
     }
     if let Some(here) = back {
         m.focus(here);
+    }
+    // An offer whose note no window shows is on the focused window's bar: it moves with the person.
+    if m.pane.window != focused && !m.recovery.offers.is_empty() {
+        fx.changed(OUTSIDE);
     }
     if !refused {
         surface::finish(m, fx);
