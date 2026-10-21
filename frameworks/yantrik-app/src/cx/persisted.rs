@@ -152,7 +152,12 @@ impl<A: App> Core<A> {
         match seen {
             Seen::Theme(theme) => self.apply_theme(&theme),
             Seen::Reach(reach) => self.event(Event::ReachChanged(reach)),
-            Seen::File { key, seen } => self.event(Event::FileChanged { key, seen }),
+            // A look taken before the app re-armed the watch is older than what the app knows.
+            Seen::File { key, seen, arming } => {
+                if self.watched.is_current(&key, arming) {
+                    self.event(Event::FileChanged { key, seen });
+                }
+            }
             Seen::SettingsFile => {
                 let reloaded = self.settings.borrow_mut().reload();
                 match reloaded {

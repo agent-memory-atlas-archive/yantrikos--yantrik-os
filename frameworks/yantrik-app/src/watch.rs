@@ -28,8 +28,8 @@ pub enum Seen {
     Theme(ThemeSettings),
     /// Whether the Mind can answer is not what it was (the first tick says what it is).
     Reach(yantrik_mind::Reach),
-    /// A watched document's file is not what was last seen (`fx.watch`).
-    File { key: String, seen: Observed },
+    /// A watched document's file is not what was last seen (`fx.watch`), under `arming`.
+    File { key: String, seen: Observed, arming: u64 },
 }
 
 /// Where sightings go: the core's queue.
@@ -89,8 +89,8 @@ impl Watch {
                             notice.seen(Seen::Theme(theme_now));
                         }
                     }
-                    for (key, seen) in files.poll() {
-                        notice.seen(Seen::File { key, seen });
+                    for (key, seen, arming) in files.poll() {
+                        notice.seen(Seen::File { key, seen, arming });
                     }
                 }
             })
