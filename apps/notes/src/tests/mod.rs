@@ -14,8 +14,11 @@ use crate::command::Command;
 use crate::update::{said, AUTOSAVE_AFTER};
 use crate::Notes;
 
+mod failures;
+mod outside;
 mod parity;
 mod read_notes;
+mod resolve;
 mod saving;
 mod startup;
 mod store;
