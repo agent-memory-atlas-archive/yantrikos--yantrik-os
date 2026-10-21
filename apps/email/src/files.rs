@@ -61,15 +61,14 @@ pub fn is_unsure(draft: &Path) -> bool {
 /// Puts the mark beside the draft, or takes it away. From a job.
 pub fn set_unsure(draft: &Path, unsure: bool) -> Result<(), String> {
     let mark = unsure_mark(draft);
-    let done = if unsure {
-        std::fs::write(&mark, b"")
-    } else {
-        match std::fs::remove_file(&mark) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            other => other,
-        }
-    };
-    done.map_err(|e| format!("could not write {}: {e}", mark.display()))
+    if unsure {
+        // Written as the draft is: whole, 0600, never through a link.
+        return crate::state::write_whole(&mark, b"");
+    }
+    match std::fs::remove_file(&mark) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("could not remove {}: {e}", mark.display())),
+        _ => Ok(()),
+    }
 }
 
 /// Where builds before the framework kept the draft, whatever the session's data folder was.

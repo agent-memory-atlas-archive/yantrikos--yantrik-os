@@ -39,12 +39,32 @@ pub fn save_draft(path: &Path, draft: &Draft) -> Result<(), String> {
     }
     let text = serde_json::to_string_pretty(draft)
         .map_err(|e| format!("could not write the draft: {e}"))?;
-    let beside = path.with_extension("json.part");
-    let written = write_private(&beside, text.as_bytes()).and_then(|()| std::fs::rename(&beside, path));
+    write_whole(path, text.as_bytes())
+}
+
+/// Write `bytes` to `path` whole: to `<path>.part`, created new (so a link there is never
+/// followed) with mode 0600, synced, renamed over `path` (which replaces a link rather than
+/// following it), and the folder synced, so the rename itself survives a power cut.
+pub fn write_whole(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let beside = std::path::PathBuf::from(format!("{}.part", path.display()));
+    let written = write_private(&beside, bytes)
+        .and_then(|()| std::fs::rename(&beside, path))
+        .and_then(|()| sync_folder(path));
     written.map_err(|e| {
         let _ = std::fs::remove_file(&beside);
         format!("could not write {}: {e}", path.display())
     })
+}
+
+/// The folder a file was just renamed into, synced. Only where a folder can be opened and synced.
+fn sync_folder(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    if let Some(dir) = path.parent() {
+        std::fs::File::open(dir)?.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
 }
 
 /// A new file with these bytes, synced, mode 0600 where the platform has modes.

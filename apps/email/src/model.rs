@@ -176,6 +176,9 @@ pub struct Composer {
     pub unsure: bool,
     /// Cancel was pressed while a send was out: the send's own sentence says where the edit went.
     pub closed_during_send: bool,
+    /// The sentence about a message unsent at the last close is owed, once the first look has
+    /// landed. Dropped when the person keeps or discards the draft first: they have chosen.
+    pub announce_unsent: bool,
     /// True while the draft file is being written or removed.
     pub writing: bool,
     /// What to do to the draft file once the write in flight lands: only the latest.
@@ -337,6 +340,7 @@ impl Model {
                 kept_unsure: false,
                 unsure: false,
                 closed_during_send: false,
+                announce_unsent: false,
                 writing: false,
                 queued: None,
             },

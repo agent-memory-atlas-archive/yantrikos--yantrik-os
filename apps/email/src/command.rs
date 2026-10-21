@@ -181,6 +181,8 @@ pub enum Command {
     Sent(Result<(), String>),
     CancelCompose(Draft),
     SaveDraft(Draft),
+    /// At start, before any press: a message unsent at the last close becomes the draft file.
+    OfferUnsent,
     /// A write or a removal of the draft file landed, or did not.
     DraftDone { op: FileOp, outcome: Result<(), String> },
     // ── The companion ──

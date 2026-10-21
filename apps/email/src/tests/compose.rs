@@ -11,11 +11,11 @@ use crate::files::{self, Files};
 use crate::state::{self, Draft};
 use crate::Email;
 
-fn draft(to: &str, body: &str) -> Draft {
+pub(super) fn draft(to: &str, body: &str) -> Draft {
     Draft { to: to.into(), subject: "Plans".into(), body: body.into(), ..Draft::default() }
 }
 
-fn type_into_composer(app: &yantrik_testing::TestApp<Email>, d: &Draft) {
+pub(super) fn type_into_composer(app: &yantrik_testing::TestApp<Email>, d: &Draft) {
     let d = d.clone();
     app.ui(move |ui| {
         ui.set_compose_to(d.to.into());

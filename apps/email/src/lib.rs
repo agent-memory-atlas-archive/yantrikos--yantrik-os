@@ -77,6 +77,12 @@ impl App for Email {
         if !m.looked {
             fx.then(Command::Look(command::Look::Start));
         }
+        // Applied within `start`, before the window takes a press: whatever the person then does
+        // to the draft is a file operation queued after this one, so their choice is the last
+        // word.
+        if m.composer.unsent_at_start.is_some() {
+            fx.then(Command::OfferUnsent);
+        }
     }
 
     fn update(m: &mut Model, command: Command, fx: &mut Effects<Self>) -> Result<(), Refused> {

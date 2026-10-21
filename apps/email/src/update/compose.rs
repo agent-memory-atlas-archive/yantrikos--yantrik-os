@@ -58,6 +58,14 @@ pub fn compose(m: &mut Model, to: String, subject: String, body: String, fx: &mu
     m.composer.text.subject = subject;
     m.composer.text.body = body;
     fx.changed(part::COMPOSE_TEXT);
+    // New text: not the message whose send may have gone, so it is not said or kept as one.
+    if m.composer.unsure {
+        m.composer.unsure = false;
+        m.composer.status = "Draft restored".into();
+        if m.notice == UNSURE {
+            super::clear_notice(m, fx);
+        }
+    }
 }
 
 /// Reply, or reply to all: the composer opened on the message that is open. None of this needs a
@@ -145,7 +153,8 @@ pub fn sent(m: &mut Model, outcome: Result<(), String>, fx: &mut Effects<Email>)
             // The composer stays open, holding what was typed, and so does the draft. It did not
             // go this time; an earlier send of it whose outcome was not known still is not.
             let unsure = m.composer.unsure;
-            keep_after_send(m, unsure, fx);
+            let went = m.composer.sending.clone();
+            keep_after_send(m, unsure, went, fx);
             m.sync_status = "Not sent".into();
             say(m, fx, format!("Could not send the message: {e}"));
         }
@@ -153,11 +162,12 @@ pub fn sent(m: &mut Model, outcome: Result<(), String>, fx: &mut Effects<Email>)
 }
 
 /// A send that did not go, or whose outcome is not known (`unsure`): the composer's text becomes
-/// the draft, and the lane copy goes once it has landed.
-pub fn keep_after_send(m: &mut Model, unsure: bool, fx: &mut Effects<Email>) {
+/// the draft, or what was sent (`went`) when the composer was emptied meanwhile, and the lane copy
+/// goes once it has landed. A failure is known, so it is never left to be offered as unknown.
+pub fn keep_after_send(m: &mut Model, unsure: bool, went: Option<Draft>, fx: &mut Effects<Email>) {
     m.composer.sending = None;
     m.composer.unsure = unsure;
-    let text = m.composer.text.clone();
+    let text = if m.composer.text.is_empty() { went.unwrap_or_default() } else { m.composer.text.clone() };
     if !text.is_empty() {
         file_op(m, FileOp::Save { draft: text, keep: Keep::Quietly, unsure, release_lane: true }, fx);
     }
@@ -166,6 +176,7 @@ pub fn keep_after_send(m: &mut Model, unsure: bool, fx: &mut Effects<Email>) {
 /// Close the composer and keep what was typed. Closing it used to discard it silently, which is
 /// the worst thing a mail client can do to a message that is not finished.
 pub fn cancel(m: &mut Model, draft: Draft, fx: &mut Effects<Email>) {
+    m.composer.announce_unsent = false;
     m.composer.open = false;
     m.composer.closed_during_send = m.composer.sending.is_some();
     fx.changed(part::STATUS);
@@ -184,6 +195,7 @@ pub fn save_draft(m: &mut Model, draft: Draft, fx: &mut Effects<Email>) {
         m.composer.status.clear();
         return say(m, fx, "There is nothing in the composer to save.");
     }
+    m.composer.announce_unsent = false;
     m.composer.text = draft.clone();
     let unsure = m.composer.unsure;
     file_op(m, FileOp::Save { draft, keep: Keep::Saved, unsure, release_lane: false }, fx);

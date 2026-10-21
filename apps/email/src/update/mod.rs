@@ -57,6 +57,7 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Effects<Email>) -> Resul
         Command::Sent(outcome) => compose::sent(m, outcome, fx),
         Command::CancelCompose(draft) => compose::cancel(m, draft, fx),
         Command::SaveDraft(draft) => compose::save_draft(m, draft, fx),
+        Command::OfferUnsent => drafts::write_unsent(m, fx),
         Command::DraftDone { op, outcome } => drafts::done(m, op, outcome, fx),
         Command::Ask(ask) => ai::ask(m, ask, fx),
         Command::Answered { ask, about, outcome } => ai::answered(m, ask, about, outcome, fx),
@@ -111,7 +112,8 @@ fn unfinished(m: &mut Model, work: Work, fx: &mut Effects<Email>) {
             // The job panicked or never started; the framework does not say which, so the
             // sentence is the one that is true of both. The text stays in the composer and the
             // draft.
-            compose::keep_after_send(m, true, fx);
+            let went = m.composer.sending.clone();
+            compose::keep_after_send(m, true, went, fx);
             m.sync_status = "Not sent".into();
             "The send did not finish, so this window cannot say whether the message went. It is kept as a draft; look in Sent before sending it again."
         }

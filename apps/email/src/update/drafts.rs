@@ -118,12 +118,21 @@ fn closing_sentence(m: &Model) -> Option<&'static str> {
     }
 }
 
-/// A message that was being sent when the app last closed: written to the draft file, marked as
-/// of unknown outcome, and said. Called once the first look has landed or failed, so the look's
-/// own notice cannot clear the sentence. Its lane copy goes when the file has landed.
-pub fn offer_unsent(m: &mut Model, fx: &mut Effects<Email>) {
+/// A message that was being sent when the app last closed becomes the draft file, marked as of
+/// unknown outcome. Applied in `start`, before any press, so a draft the person keeps or discards
+/// afterwards is written after it. Its lane copy goes when the file has landed.
+pub fn write_unsent(m: &mut Model, fx: &mut Effects<Email>) {
     let Some(unsent) = m.composer.unsent_at_start.take() else { return };
+    m.composer.announce_unsent = true;
     file_op(m, FileOp::Save { draft: unsent, keep: Keep::Quietly, unsure: true, release_lane: true }, fx);
+}
+
+/// The sentence about it, once the first look has landed or failed, so the look's own notice
+/// cannot clear it; unless the person has already kept or discarded the draft.
+pub fn offer_unsent(m: &mut Model, fx: &mut Effects<Email>) {
+    if !std::mem::take(&mut m.composer.announce_unsent) {
+        return;
+    }
     let sentence = if m.notice.is_empty() { UNSENT_AT_START.to_string() } else { format!("{} {UNSENT_AT_START}", m.notice) };
     say(m, fx, sentence);
 }
