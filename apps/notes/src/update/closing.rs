@@ -30,7 +30,7 @@ use yantrik_app::effects::Effects;
 
 use super::navigate::show_note;
 use super::saving::{self, How};
-use super::{drafts, leaving, outside, show, windows};
+use super::{drafts, leaving, outside, prompts, show, windows};
 use crate::command::Resolution;
 use crate::model::Model;
 use crate::update::said;
@@ -62,7 +62,9 @@ pub fn requested(m: &mut Model, fx: &mut Effects<Notes>, window: WindowId) {
 
 /// The app was asked to end: every note with edits not on disk, asked about once.
 pub fn quit(m: &mut Model, fx: &mut Effects<Notes>) {
-    leaving::put_away(m, fx);
+    if leaving::asks_in(m, m.pane.window) {
+        leaving::put_away(m, fx);
+    }
     m.keep_unsaved_dirty();
     let closing = m.documents.quitting();
     ask(m, fx, None, closing);
@@ -91,39 +93,25 @@ fn ask(m: &mut Model, fx: &mut Effects<Notes>, window: Option<WindowId>, closing
         Closing::Ask(documents) => documents.into_iter().filter(|d| m.unsaved_doc(*d)).collect(),
     };
     let nothing_to_ask = asked.is_empty() && unstored_at_close(m, window) == 0;
-    // One close at a time: a second while the first asks or saves changes nothing. A save that
-    // failed ends the flow (`failed`), so the person who asks again is asked again. Another
-    // window with nothing to ask still closes: only the window whose close is asking waits.
-    if let Some(flow) = &m.closing {
-        let another_window = window.is_some() && flow.window.is_some() && flow.window != window;
-        if !(another_window && nothing_to_ask) {
-            // Another close waits, so this one says why nothing happened. The same close again
-            // needs no words: its prompt, or its save, is already under way.
-            if flow.window != window {
-                let sentence = match flow.stage {
-                    Stage::Asking => said::ANSWER_THE_OTHER_FIRST,
-                    _ => said::WAIT_BEFORE_CLOSING,
-                };
-                // In the window whose close waits, not in the one asking its question.
-                match window {
-                    Some(window) => m.say_in(window, sentence),
-                    None => {
-                        m.notice = sentence.into();
-                        m.lasting_notice = false;
-                    }
-                }
-                fx.changed(STATUS);
-            }
-            return;
+    // The same close again needs no words: its prompt, or its save, is already under way. A save
+    // that failed ends the flow (`failed`), so the person who asks again is asked again.
+    if m.closing.as_ref().is_some_and(|f| f.window == window) {
+        return;
+    }
+    // One prompt at a time, of any kind (prompts.rs): while another window's asks, this one is
+    // refused, said in the window that asked. A window with nothing to ask still closes.
+    let raised_in = window.unwrap_or(m.pane.window);
+    if let Some(sentence) = prompts::waits_on_another(m, raised_in, window.is_none()) {
+        let closes_anyway = window.is_some() && nothing_to_ask && m.closing.as_ref().is_none_or(|f| f.window.is_some());
+        if !closes_anyway {
+            return prompts::refuse(m, fx, raised_in, sentence);
         }
     }
     if nothing_to_ask {
         // A store job in flight would land on a closed window: the window waits for it, in words.
         // Quitting does not; the framework's shutdown waits for the job within its grace.
         if let Some(window) = window.filter(|_| m.busy.is_some()) {
-            m.say_in(window, said::WAIT_BEFORE_CLOSING);
-            fx.changed(STATUS);
-            return;
+            return prompts::refuse(m, fx, window, said::WAIT_BEFORE_CLOSING);
         }
         return close(m, fx, window);
     }

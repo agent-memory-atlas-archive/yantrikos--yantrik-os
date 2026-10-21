@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use yantrik_app::app::{ExitReason, WindowId};
 use yantrik_testing::TestApp;
 
-use super::windows::{two_notes_two_windows, type_in};
+use super::windows::two_notes_two_windows;
 use super::{bar, draft_file, file, killed_and_started_again, note, notice, settle, state, vault, with_note};
 use crate::command::{Command, WindowAction};
 use crate::update::closing::CLOSE_DIALOG;
@@ -184,50 +184,6 @@ fn drawn(app: &TestApp<Notes>, window: WindowId) -> (i32, String, String) {
 fn from(app: &TestApp<Notes>, window: WindowId, action: WindowAction) {
     app.run(Command::From { window, command: Box::new(Command::Window(action)) });
     settle(app);
-}
-
-/// The second window asks to close over "Right"; the first, on "Left" whose file is gone, asks to
-/// leave it. Each window draws its own question.
-fn two_prompts() -> (TestApp<Notes>, WindowId, WindowId, PathBuf) {
-    let (app, first, left, second, right) = two_notes_two_windows();
-    type_in(&app, second, "# Right\n\nunsaved");
-    std::fs::remove_file(&left).unwrap();
-    app.look_at_files();
-    app.close_requested(second);
-    let id = right.file_name().unwrap().to_str().unwrap().to_string();
-    from(&app, first, WindowAction::Open { id, trash: false });
-    let questions = (drawn(&app, first), drawn(&app, second));
-    let left_asks = (CLOSE_DIALOG, "Save \"Left\" as a new note first?".to_string(), said::SAVE_AS_NEW.to_string());
-    let right_asks = (CLOSE_DIALOG, "Save \"Right\" before closing?".to_string(), said::SAVE.to_string());
-    assert_eq!(questions, (left_asks, right_asks), "each window draws its own question");
-    (app, first, second, right)
-}
-
-/// The 925 review, P1: *Don't save* in the window closing closes it, and the other window's
-/// question is left as it was, to be answered there.
-#[test]
-fn two_prompts_in_two_windows_never_cross_dont_save() {
-    let (app, first, second, right) = two_prompts();
-    app.window(second, |ui| ui.invoke_action("close-discard".into()));
-    settle(&app);
-    assert_eq!(app.windows(), vec![first], "the window asked to close closed");
-    assert_eq!(file(&right), "# Right\n\n", "its edit was dropped, as asked");
-    assert_eq!(drawn(&app, first).1, "Save \"Left\" as a new note first?", "the other question still asks");
-    app.ui(|ui| ui.invoke_action("close-cancel".into()));
-    settle(&app);
-    assert_eq!((drawn(&app, first).0, open_title(&app)), (0, Some("Left".to_string())));
-}
-
-/// P1b: *Save* in the window closing saves its own note and closes it.
-#[test]
-fn two_prompts_in_two_windows_never_cross_save() {
-    let (app, first, second, right) = two_prompts();
-    app.window(second, |ui| ui.invoke_action("close-save".into()));
-    settle(&app);
-    assert_eq!(file(&right), "# Right\n\nunsaved", "its own note was saved");
-    assert_eq!(app.windows(), vec![first]);
-    assert_eq!(notice(&app), "", "nothing was refused");
-    assert_eq!(drawn(&app, first).1, "Save \"Left\" as a new note first?");
 }
 
 /// P4: the file comes back while the prompt asks to leave it. The question is no longer true,

@@ -98,7 +98,9 @@ pub fn render(ui: &NotesApp, window: WindowId, m: &Model, changed: &Changed) {
         ui.set_query(pane.query.clone().into());
         ui.set_preview(pane.preview);
         ui.set_focus_mode(pane.focus_mode);
-        ui.set_dialog(pane.dialog);
+        // The prompt dialog only with a live prompt of this window's behind it (update/prompts.rs).
+        let orphaned = pane.dialog == closing::CLOSE_DIALOG && !(leaving::asks_in(m, window) || closing::asks_in(m, window));
+        ui.set_dialog(if orphaned { 0 } else { pane.dialog });
         ui.set_path(pane.path.clone().into());
     }
     if changed.has(NOTE) || changed.has(OUTSIDE) {
@@ -146,11 +148,12 @@ fn unsaved_in(m: &Model, pane: &Pane) -> bool {
 /// save refused over a change outside): the bar says that once, in full, and the footer says it
 /// in two words.
 fn notice<'a>(m: &'a Model, pane: &Pane) -> &'a str {
-    let repeats_bar = bar(m, pane).is_some_and(|(state, _)| m.notice == said::blocked(state));
-    if repeats_bar || m.notice_elsewhere(pane.window) {
+    let line = m.notice_for(pane.window);
+    let repeats_bar = bar(m, pane).is_some_and(|(state, _)| line == said::blocked(state));
+    if repeats_bar {
         ""
     } else {
-        &m.notice
+        line
     }
 }
 

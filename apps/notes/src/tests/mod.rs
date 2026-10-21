@@ -27,6 +27,7 @@ mod leaving;
 mod moved;
 mod outside;
 mod parity;
+mod prompts;
 mod read_notes;
 mod read_only;
 mod recovery;

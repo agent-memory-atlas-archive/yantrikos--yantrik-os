@@ -17,6 +17,7 @@ use yantrik_app::intents::InvocationId;
 use crate::claim::Claim;
 use crate::command::Step;
 use crate::note::{Note, NoteText};
+use crate::notice::ScopedNotice;
 use crate::pane::Pane;
 use crate::recovery::Recovery;
 use crate::store::Vault;
@@ -48,7 +49,7 @@ pub struct Model {
     /// The window the notice is about, when it is about one window only (its close was refused
     /// while another window's prompt waits): drawn there and nowhere else. Kept with the sentence
     /// it was said with, so any later notice, which replaces the sentence, is every window's again.
-    pub notice_in: Option<(WindowId, String)>,
+    pub notice_in: Option<ScopedNotice>,
     /// An action waiting for the open note to be saved first.
     pub pending: Option<Pending>,
     /// A close or a quit asking about unsaved notes, or waiting on their saves.
@@ -315,18 +316,6 @@ impl Model {
                 file.gone_at = Some(seq);
             }
         }
-    }
-
-    /// `sentence` in the notice, about `window` alone: only that window draws it (`notice_in`).
-    pub fn say_in(&mut self, window: WindowId, sentence: &str) {
-        self.notice = sentence.into();
-        self.lasting_notice = false;
-        self.notice_in = Some((window, sentence.into()));
-    }
-
-    /// Whether the notice is about a window other than `window` alone, so `window` does not draw it.
-    pub fn notice_elsewhere(&self, window: WindowId) -> bool {
-        self.notice_in.as_ref().is_some_and(|(w, sentence)| *w != window && *sentence == self.notice)
     }
 
     /// The focused window's note's offered text, while its offer waits (`offered_in`).

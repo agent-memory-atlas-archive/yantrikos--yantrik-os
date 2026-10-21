@@ -28,6 +28,7 @@ mod describe;
 mod intents;
 mod model;
 mod note;
+mod notice;
 mod pane;
 mod recovery;
 mod store;

@@ -98,3 +98,15 @@ fn a_copy_and_a_recovered_note_say_so_on_their_cards() {
     assert_eq!(markers.len(), 2, "{markers:?}");
     assert!(markers.contains(&"Copy".to_string()) && markers.contains(&"Recovered".to_string()), "{markers:?}");
 }
+
+/// The empty state in a half-width window: its heading wraps rather than running off the edge.
+#[test]
+fn the_empty_state_fits_a_narrow_window() {
+    let app = super::started();
+    app.ui(|ui| {
+        ui.show().unwrap();
+        ui.window().set_size(slint::PhysicalSize::new(640, 680));
+    });
+    assert!(!app.ui(|ui| ui.get_opened()));
+    screenshot(&app, "notes-empty-narrow.png");
+}

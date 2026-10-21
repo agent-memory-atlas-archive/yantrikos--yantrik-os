@@ -16,7 +16,7 @@ use yantrik_app::effects::Effects;
 
 use super::closing::{Prompt, CLOSE_DIALOG};
 use super::navigate::show_note;
-use super::{drafts, outside, said, show, window, windows};
+use super::{drafts, outside, prompts, said, show, window, windows};
 use crate::command::{Resolution, Step, WindowAction};
 use crate::model::{Model, Pending};
 use crate::view::render::{CHROME, OUTSIDE, STATUS};
@@ -29,6 +29,10 @@ pub fn asks(m: &Model, action: &WindowAction) -> bool {
 
 /// Asks, in the focused window, before `action` leaves its note whose file is gone.
 pub fn ask(m: &mut Model, fx: &mut Effects<Notes>, action: WindowAction) {
+    // One prompt at a time, of any kind: another window's prompt is answered first (prompts.rs).
+    if let Some(sentence) = prompts::waits_on_another(m, m.pane.window, false) {
+        return prompts::refuse(m, fx, m.pane.window, sentence);
+    }
     m.leaving = Some(Pending { step: Step::Window(action), window: m.pane.window, refuse_if_unsaved: false });
     m.pane.dialog = CLOSE_DIALOG;
     fx.changed(CHROME);
@@ -69,13 +73,13 @@ fn answered(m: &mut Model, fx: &mut Effects<Notes>, leaving: Pending, choice: Ch
             }
         }
         Choice::DontSave => {
-            let Some(sentence) = let_go(m, fx) else { return };
+            let Some((sentence, windows)) = let_go(m, fx) else { return };
             if let Step::Window(action) = leaving.step {
                 window::act(m, fx, action);
             }
             // Said once, unless what went ahead had something of its own to say.
             if m.notice.is_empty() {
-                say(m, fx, &sentence);
+                said_in(m, fx, windows, &sentence);
             }
         }
     }
@@ -116,17 +120,19 @@ pub fn prompt(m: &Model) -> Option<Prompt> {
 /// The deleted bar's *Let it go*, or *Discard*: the focused window's note whose file is gone.
 pub fn let_go_pressed(m: &mut Model, fx: &mut Effects<Notes>) {
     match let_go(m, fx) {
-        Some(sentence) => say(m, fx, &sentence),
+        Some((sentence, windows)) => said_in(m, fx, windows, &sentence),
         None => say(m, fx, said::NOTHING_TO_LET_GO),
     }
 }
 
 /// Lets the focused window's note whose file is gone go: its draft removed, its document closed in
-/// every window that shows it, and with it its card (`show_note`). Returns what is said of it;
-/// `None`, and nothing done, when the note's file is not gone.
-fn let_go(m: &mut Model, fx: &mut Effects<Notes>) -> Option<String> {
+/// every window that shows it, and with it its card (`show_note`). Returns what is said of it, and
+/// the windows that showed it, where it is said; `None`, and nothing done, when the note's file is
+/// not gone.
+fn let_go(m: &mut Model, fx: &mut Effects<Notes>) -> Option<(String, Vec<WindowId>)> {
     let c = m.current().filter(|c| *c.outside() == OutsideState::Deleted)?;
     let (doc, sentence): (DocumentId, String) = (c.doc.id, said::let_go(&c.title(), c.edited_since_gone()));
+    let windows = m.windows_showing(doc);
     if let Some(d) = m.documents.get_mut(doc) {
         drafts::discard(d, fx);
     }
@@ -136,7 +142,12 @@ fn let_go(m: &mut Model, fx: &mut Effects<Notes>) -> Option<String> {
     windows::follow_to(m, fx, doc, None);
     show(m, fx);
     fx.changed(OUTSIDE);
-    Some(sentence)
+    Some((sentence, windows))
+}
+
+fn said_in(m: &mut Model, fx: &mut Effects<Notes>, windows: Vec<WindowId>, sentence: &str) {
+    m.say_in(windows, sentence);
+    fx.changed(STATUS);
 }
 
 fn say(m: &mut Model, fx: &mut Effects<Notes>, sentence: &str) {
