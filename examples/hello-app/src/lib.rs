@@ -26,12 +26,18 @@ use yantrik_app::effects::Effects;
 use yantrik_app::intents::{Agents, Intent, Intents, Settle};
 use yantrik_app::jobs::{Concurrency, JobKey, Scope};
 use yantrik_app::refused::Refused;
+use yantrik_app::mind::Reach;
+use yantrik_app::rail::{
+    self, Apply, ContextItem, HasRail, Prompt, Proposal, Rail, RailCommand, RailView, Source,
+    Suggestion,
+};
 use yantrik_app::settings::{Health, Settings};
 use yantrik_app::timers::TimerId;
 use yantrik_app::Notification;
 
 slint::include_modules!();
 yantrik_app::window!(HelloApp);
+yantrik_app::rail_window!(HelloApp);
 
 pub const PART_COUNT: &str = "count";
 pub const PART_FETCH: &str = "fetch";
@@ -72,6 +78,94 @@ pub struct Model {
     pub text: String,
     /// Whether the Mind can answer, as last heard; `None` until the first word.
     pub reach: Option<yantrik_app::mind::Reach>,
+    /// The agent rail: the framework's, fed by `Source` below.
+    pub rail: Rail,
+}
+
+/// What the rail knows and offers here: the count, and two things to do about it.
+impl Source for Model {
+    fn context(&self) -> Vec<ContextItem> {
+        vec![ContextItem {
+            id: "count".into(),
+            label: format!("Count {}", self.count),
+            detail: "what the button has added".into(),
+            source: "file".into(),
+        }]
+    }
+
+    fn suggestions(&self, reach: Reach) -> Vec<Suggestion> {
+        if reach != Reach::Ready {
+            return Vec::new();
+        }
+        vec![
+            Suggestion {
+                id: "double".into(),
+                label: "Double the count".into(),
+                detail: "asks the Mind, then adds the count again".into(),
+                icon: "spark".into(),
+                proposes: true,
+            },
+            Suggestion {
+                id: "wipe".into(),
+                label: "Start over".into(),
+                detail: "asks the Mind, then resets".into(),
+                icon: "spark".into(),
+                proposes: true,
+            },
+        ]
+    }
+
+    fn prompt(&self, suggestion: &str) -> Option<Prompt> {
+        match suggestion {
+            "double" => Some(Prompt {
+                text: format!("The count is {}. Say ok to double it.", self.count),
+                title: "Double the count".into(),
+                source: "from the count on screen".into(),
+            }),
+            "wipe" => Some(Prompt {
+                text: "Say ok to start over.".into(),
+                title: "Start over".into(),
+                source: "from the count on screen".into(),
+            }),
+            _ => None,
+        }
+    }
+
+    fn proposal(&self, suggestion: &str, answer: &str) -> Proposal {
+        let (title, impact, verb, applies) = match suggestion {
+            "double" => (
+                "Double the count",
+                format!("adds {} to the count", self.count),
+                "Double",
+                Apply { intent: "add".into(), args: json!({ "by": self.count }) },
+            ),
+            _ => (
+                "Start over",
+                "sets the count to zero".to_string(),
+                "Reset",
+                Apply { intent: "reset".into(), args: json!({}) },
+            ),
+        };
+        Proposal {
+            title: title.into(),
+            body: answer.into(),
+            source: "from the count on screen".into(),
+            impact,
+            destructive: suggestion == "wipe",
+            verb: verb.into(),
+            applies: Some(applies),
+        }
+    }
+}
+
+impl HasRail for Model {
+    fn rail(&self) -> &Rail {
+        &self.rail
+    }
+
+    fn rail_mut(&mut self) -> &mut Rail {
+        &mut self.rail
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -98,6 +192,8 @@ pub enum Command {
     Type(String),
     /// The text sent somewhere: the draft is done with.
     Clear,
+    /// The agent rail's own.
+    Rail(RailCommand),
 }
 
 pub struct Hello;
@@ -119,6 +215,7 @@ impl App for Hello {
             note,
             // What was being typed when the app last ran, if anything.
             text: boot.drafts.json::<String>(DRAFT).unwrap_or_default(),
+            rail: Rail::new(boot.mind.clone()),
             ..Model::default()
         })
     }
@@ -126,6 +223,11 @@ impl App for Hello {
     fn wire(cx: &Cx<Self>) {
         cx.ui().on_add_one(cx.cmd(|| Command::AddStep));
         cx.ui().on_fetch(cx.cmd(|| Command::Fetch));
+        rail::wire(cx);
+    }
+
+    fn rail(command: RailCommand) -> Option<Command> {
+        Some(Command::Rail(command))
     }
 
     fn start(_: &Model, fx: &mut Effects<Self>) {
@@ -202,6 +304,7 @@ impl App for Hello {
                 m.note = reach.hint().map(str::to_string);
                 fx.changed(PART_NOTE);
             }
+            Command::Rail(command) => rail::update::<Self>(m, command, fx)?,
         }
         Ok(())
     }
@@ -215,6 +318,9 @@ impl App for Hello {
         }
         if changed.has(PART_NOTE) {
             ui.set_notice(m.note.clone().unwrap_or_default().into());
+        }
+        if changed.has(rail::PART) {
+            ui.render_rail(&m.rail);
         }
     }
 
@@ -345,6 +451,100 @@ mod tests {
             .unwrap_err();
         assert_eq!(e, "An agent may count but not reset.");
         assert!(app.act("reset", json!({})).is_ok());
+    }
+
+    /// The rail's apply holds to the person's switches (design §3.2): a ceiling below the
+    /// intent's grade refuses it in the card; a card dismissed before its authority was read is
+    /// not applied; a second press while one applies is refused; and Private mode stops both
+    /// the ask and the apply.
+    #[test]
+    fn the_rails_apply_holds_to_the_ceiling_the_card_shown_and_private_mode() {
+        use yantrik_app::gate::{Authority, Mode};
+        use yantrik_app::mind::fake::FakeMind;
+        let home = RailHome::take("switches");
+
+        let permissive = || Authority { ceiling: "dangerous".into(), mode: Mode::named("bypass_all"), granted: false, asks_above: None };
+        let mind = std::sync::Arc::new(FakeMind::new().answers((0..6).map(|_| Ok("ok".to_string()))));
+        let app = TestApp::<Hello>::start_at_with(Paths::temporary(Hello::ID), Vec::new(), mind.clone());
+        app.run(Command::Add(4));
+        app.advance(Duration::from_millis(300));
+        app.seen(Seen::Reach(Reach::Ready));
+        let card_applies = |app: &TestApp<Hello>| app.model(|m| m.rail.proposal().unwrap().applies.clone().unwrap());
+
+        // 1. A ceiling of `safe` refuses `add` (standard): the refusal lands in the card, the
+        //    count does not move, and the read the press started (it lands as `Authorised`
+        //    under this home's default authority) is dropped: nothing is applying by then.
+        app.ui(|ui| ui.invoke_agent_suggestion_activated("double".into()));
+        app.run_jobs();
+        let apply = card_applies(&app);
+        app.run(Command::Rail(RailCommand::Apply));
+        assert!(app.model(|m| m.rail.is_applying()));
+        let strict = Authority { ceiling: "safe".into(), mode: Mode::named("ask"), granted: false, asks_above: None };
+        app.run(Command::Rail(RailCommand::Authorised { apply, authority: strict }));
+        assert_eq!(app.model(|m| m.count), 4, "refused by the ceiling");
+        assert_eq!(app.ui(|ui| ui.get_proposal().verb), "Close");
+        assert!(!app.ui(|ui| ui.get_proposal().body).is_empty(), "the refusal is the card's body");
+        app.run_jobs();
+        assert_eq!(app.model(|m| m.count), 4, "the late authority applied nothing");
+        app.ui(|ui| ui.invoke_proposal_dismissed());
+
+        // 2. Dismissed before the authority arrived: nothing applies, nothing is drawn.
+        app.ui(|ui| ui.invoke_agent_suggestion_activated("double".into()));
+        app.run_jobs();
+        let apply = card_applies(&app);
+        app.run(Command::Rail(RailCommand::Apply));
+        app.ui(|ui| ui.invoke_proposal_dismissed());
+        app.run(Command::Rail(RailCommand::Authorised { apply, authority: permissive() }));
+        app.run_jobs();
+        assert_eq!(app.model(|m| m.count), 4, "a dismissed card is not applied");
+        assert!(app.model(|m| m.rail.proposal().is_none()));
+
+        // 3. A second press while one applies is refused, as is a new ask.
+        app.ui(|ui| ui.invoke_agent_suggestion_activated("double".into()));
+        app.run_jobs();
+        app.run(Command::Rail(RailCommand::Apply));
+        app.run(Command::Rail(RailCommand::Apply));
+        assert_eq!(app.last_refusal().unwrap().kind, "applying");
+        app.run(Command::Rail(RailCommand::Activate("wipe".into())));
+        assert_eq!(app.last_refusal().unwrap().kind, "applying");
+        app.run_jobs();
+        assert_eq!(app.model(|m| m.count), 8, "the one press applied, through the machine's own authority");
+        assert!(app.model(|m| m.rail.proposal().is_none()));
+
+        // 4. A read made for one press never applies another card: Apply on card 1, Dismiss,
+        //    a new card, Apply on card 2 — the stale `Authorised` for card 1 is dropped (the
+        //    keyed job replaced it), and card 2 applies through its own read.
+        app.ui(|ui| ui.invoke_agent_suggestion_activated("double".into()));
+        app.run_jobs();
+        let stale = card_applies(&app);
+        app.run(Command::Rail(RailCommand::Apply));
+        app.ui(|ui| ui.invoke_proposal_dismissed());
+        app.ui(|ui| ui.invoke_agent_suggestion_activated("wipe".into()));
+        app.run_jobs();
+        app.run(Command::Rail(RailCommand::Apply));
+        app.run(Command::Rail(RailCommand::Authorised { apply: stale, authority: permissive() }));
+        assert_eq!(app.model(|m| m.count), 8, "card 1's intent was not applied on card 2's press");
+        app.run_jobs();
+        assert_eq!(app.ui(|ui| ui.get_proposal().body), "An agent may count but not reset.", "card 2 applied through its own read");
+        app.ui(|ui| ui.invoke_proposal_dismissed());
+
+        // 5. Private mode: the ask is not sent, and an apply pressed while private is refused.
+        home.privacy(true);
+        app.ui(|ui| ui.invoke_agent_suggestion_activated("double".into()));
+        app.run_jobs();
+        assert_eq!(mind.prompts().len(), 5, "nothing of the desktop went to the Mind");
+        assert!(app.ui(|ui| ui.get_proposal().body).contains("Private mode"));
+        app.ui(|ui| ui.invoke_proposal_dismissed());
+        home.privacy(false);
+        app.ui(|ui| ui.invoke_agent_suggestion_activated("double".into()));
+        app.run_jobs();
+        assert_eq!(mind.prompts().len(), 6);
+        home.privacy(true);
+        app.run(Command::Rail(RailCommand::Apply));
+        app.run_jobs();
+        assert_eq!(app.model(|m| m.count), 8, "not applied while private");
+        assert!(app.ui(|ui| ui.get_proposal().body).contains("Private mode"));
+        assert_eq!(app.ui(|ui| ui.get_proposal().verb), "Close");
     }
 
     #[test]
@@ -491,6 +691,106 @@ mod tests {
         assert_eq!(app.ui(|ui| ui.get_notice()), yantrik_app::mind::NO_MODEL_HINT);
         app.seen(Seen::Reach(Reach::Ready));
         assert_eq!(app.ui(|ui| ui.get_notice()), "");
+    }
+
+    /// The rail's jobs read Private mode and the machine's authority from `$HOME`. Each rail
+    /// test runs in a home of its own, one at a time, and the home it came from is put back
+    /// however the test ends (a panic included), so a desktop with Private mode on cannot fail
+    /// the tests and one failing test cannot poison the next.
+    static RAIL_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct RailHome {
+        _turn: std::sync::MutexGuard<'static, ()>,
+        dir: std::path::PathBuf,
+        before: Option<std::ffi::OsString>,
+    }
+
+    impl RailHome {
+        fn take(name: &str) -> RailHome {
+            let turn = RAIL_ENV.lock().unwrap_or_else(|p| p.into_inner());
+            let dir = std::env::temp_dir().join(format!("yantrik-hello-home-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(dir.join(".config/yantrik")).unwrap();
+            let before = std::env::var_os("HOME");
+            std::env::set_var("HOME", &dir);
+            RailHome { _turn: turn, dir, before }
+        }
+
+        fn privacy(&self, private: bool) {
+            std::fs::write(
+                self.dir.join(".config/yantrik/privacy.json"),
+                format!(r#"{{"private": {private}}}"#),
+            )
+            .unwrap();
+        }
+    }
+
+    impl Drop for RailHome {
+        fn drop(&mut self) {
+            match self.before.take() {
+                Some(h) => std::env::set_var("HOME", h),
+                None => std::env::remove_var("HOME"),
+            }
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// The rail: fed by the model, refreshed on a change (debounced) and when the Mind's reach
+    /// changes; a suggestion asks the Mind from a job; the answer is a card; applying it runs
+    /// the app's own intent as an agent through the admitted path.
+    #[test]
+    fn the_rail_follows_the_model_asks_the_mind_and_applies_through_the_intents() {
+        use yantrik_app::gate::{Authority, Mode};
+        use yantrik_app::mind::fake::FakeMind;
+        use yantrik_app::slint::Model as _;
+        let _home = RailHome::take("follows");
+        // Three asks below: "double", "wipe", "double" again.
+        let mind = std::sync::Arc::new(FakeMind::new().answers((0..3).map(|_| Ok("ok".to_string()))));
+        let app = TestApp::<Hello>::start_at_with(Paths::temporary(Hello::ID), Vec::new(), mind.clone());
+        // The first refresh ran at start: the context is there, the suggestions wait for a Mind.
+        assert_eq!(app.ui(|ui| ui.get_agent_context().row_count()), 1);
+        assert_eq!(app.ui(|ui| ui.get_agent_suggestions().row_count()), 0);
+        assert_eq!(app.ui(|ui| ui.get_agent_unavailable()), yantrik_app::mind::OFFLINE_HINT);
+        // A model change refreshes the rail after the debounce, not before.
+        app.run(Command::Add(4));
+        assert_eq!(app.model(|m| m.rail.context()[0].label.clone()), "Count 0");
+        app.advance(Duration::from_millis(300));
+        assert_eq!(app.model(|m| m.rail.context()[0].label.clone()), "Count 4");
+        // The Mind can answer now: the suggestions appear.
+        app.seen(Seen::Reach(Reach::Ready));
+        assert_eq!(app.ui(|ui| ui.get_agent_suggestions().row_count()), 2);
+        assert_eq!(app.ui(|ui| ui.get_agent_unavailable()), "");
+        // A suggestion asks the Mind from a job; the card waits, then carries the answer.
+        app.ui(|ui| ui.invoke_agent_suggestion_activated("double".into()));
+        assert!(app.ui(|ui| ui.get_proposal_working()));
+        app.run_jobs();
+        assert_eq!(mind.prompts(), vec!["The count is 4. Say ok to double it."]);
+        assert_eq!(app.ui(|ui| ui.get_proposal().body), "ok");
+        assert_eq!(app.ui(|ui| ui.get_proposal().impact), "adds 4 to the count");
+        // Applying runs `add` as an agent through the admitted path, with the authority given.
+        let permissive = Authority { ceiling: "dangerous".into(), mode: Mode::named("bypass_all"), granted: false, asks_above: None };
+        let apply = app.model(|m| m.rail.proposal().unwrap().applies.clone().unwrap());
+        // The press first: an authority that arrives for no press is dropped.
+        app.run(Command::Rail(RailCommand::Apply));
+        app.run(Command::Rail(RailCommand::Authorised { apply, authority: permissive.clone() }));
+        assert_eq!(app.model(|m| m.count), 8);
+        assert!(app.model(|m| m.rail.proposal().is_none()), "an applied card closes");
+        // A proposal that applies an intent agents may not raise is refused, in the card.
+        app.ui(|ui| ui.invoke_agent_suggestion_activated("wipe".into()));
+        app.run_jobs();
+        let apply = app.model(|m| m.rail.proposal().unwrap().applies.clone().unwrap());
+        app.run(Command::Rail(RailCommand::Apply));
+        app.run(Command::Rail(RailCommand::Authorised { apply, authority: permissive }));
+        assert_eq!(app.model(|m| m.count), 8, "nothing applied");
+        assert_eq!(app.ui(|ui| ui.get_proposal().body), "An agent may count but not reset.");
+        assert_eq!(app.ui(|ui| ui.get_proposal().verb), "Close");
+        // `Apply` itself reads the machine's authority in a job before applying.
+        app.ui(|ui| ui.invoke_proposal_dismissed());
+        app.ui(|ui| ui.invoke_agent_suggestion_activated("double".into()));
+        app.run_jobs();
+        app.ui(|ui| ui.invoke_proposal_applied());
+        assert_eq!(app.jobs_waiting(), 1, "the authority is read off the UI thread");
+        app.ui(|ui| ui.render_rail(&Rail::default()));
     }
 
     #[test]

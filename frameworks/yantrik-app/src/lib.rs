@@ -25,6 +25,7 @@ pub mod paths;
 pub mod persist;
 pub mod present;
 pub mod queue;
+pub mod rail;
 pub mod refused;
 pub mod runner;
 pub mod settings;
@@ -49,6 +50,7 @@ pub use intents::{Agents, Args, Intent, Intents, InvocationId, Origin, Settle};
 pub use jobs::{Cancel, Concurrency, JobId, JobKey, Scope};
 pub use launch::Launch;
 pub use paths::Paths;
+pub use rail::{Rail, RailCommand};
 pub use refused::{Explain, Refused};
 pub use runner::run;
 pub use settings::{Health, Settings, SettingsError};
@@ -57,6 +59,8 @@ pub use window::Window;
 // Moved to Foundation (L0): the one rule for an address, and the problem records every process
 // writes. Named here so the modules above keep their `crate::problems` paths.
 pub use yantrik_foundation::{place, problems};
+// The machine's ceiling and mode, as the rail and a test of it name them.
+pub use yantrik_ipc_transport::gate;
 
 /// Held by every test in this crate that sets `XDG_RUNTIME_DIR`, or binds a socket under it.
 ///

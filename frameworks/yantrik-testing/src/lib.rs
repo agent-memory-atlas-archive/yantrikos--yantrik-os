@@ -230,7 +230,7 @@ struct Under<A: App> {
     clock: Clock<A::Command>,
     lane: Arc<ManualLane>,
     paths: Paths,
-    registry: LocalRegistry,
+    registry: Rc<LocalRegistry>,
 }
 
 // ── Acting as the Mind ──────────────────────────────────────────────
@@ -338,9 +338,19 @@ impl<A: App> TestApp<A> {
     /// are staged: jobs wait for [`TestApp::run_jobs`], timers for [`TestApp::advance`], writes
     /// for [`TestApp::run_writes`]. Starting twice at the same `paths` is a restart.
     pub fn start_at(paths: Paths, args: Vec<std::ffi::OsString>) -> TestApp<A> {
+        TestApp::start_at_with(paths, args, Arc::new(yantrik_mind::fake::FakeMind::new()))
+    }
+
+    /// [`TestApp::start_at`] with the Mind the app is given: a `FakeMind` the test keeps a
+    /// handle to, so it can set the reach and read the prompts.
+    pub fn start_at_with(
+        paths: Paths,
+        args: Vec<std::ffi::OsString>,
+        mind: Arc<dyn yantrik_mind::Mind>,
+    ) -> TestApp<A> {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         on_ui(move || {
-            let (boot, store) = Boot::<A::Settings>::open(paths.clone(), args)
+            let (boot, store) = Boot::<A::Settings>::open(paths.clone(), args, mind)
                 .unwrap_or_else(|e| panic!("{}: the launch was refused: {e}", A::ID));
             let model = A::model(&boot)
                 .unwrap_or_else(|e| panic!("{}: the model did not start: {e}", A::ID));
@@ -384,7 +394,8 @@ impl<A: App> TestApp<A> {
             core.event(Event::Launch(boot.launch.clone()));
             let mut table = Intents::new();
             A::intents(&mut table);
-            let registry = intents::registry(&core, table);
+            let registry = Rc::new(intents::registry(&core, table));
+            core.attach_registry(registry.clone());
             let under: Rc<dyn Any> = Rc::new(Under {
                 core,
                 jobs,

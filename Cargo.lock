@@ -12003,6 +12003,7 @@ dependencies = [
  "slint",
  "yantrik-app",
  "yantrik-ipc-transport",
+ "yantrik-mind",
  "yantrik-surface",
 ]
 
