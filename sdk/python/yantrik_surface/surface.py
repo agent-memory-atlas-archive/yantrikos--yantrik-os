@@ -791,7 +791,24 @@ class Surface:
         }
         if private:
             answer["private"] = True
+        else:
+            self._recheck_private(answer, self.describe_timeout)
         return answer
+
+    def _recheck_private(self, reply, timeout):
+        """Private mode may have come on while the call waited for, or ran on, the app's thread.
+        If it has, the app's view in `reply` becomes the private one, read again (or, when the app
+        does not answer that, the private view with nothing of the app), and `reply` is marked —
+        the crate's `recheck_private` (#926 review, L1)."""
+        if not privacy.is_private():
+            return
+        try:
+            summary, state, revision = self._turn(lambda: self._published(True), timeout)
+        except wire.RpcError:
+            summary, state, revision = self._private_of({})
+        if "summary" in reply or "state" in reply:
+            reply.update(summary=summary, state=state, revision=revision)
+        reply["private"] = True
 
     # ── act ──────────────────────────────────────────────────────────────────
 
@@ -903,6 +920,8 @@ class Surface:
         }
         if private:
             reply["private"] = True
+        else:
+            self._recheck_private(reply, timeout)
         return reply
 
     def _dispatch(self, name, args, expect, authority, private=False):

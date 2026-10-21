@@ -105,20 +105,20 @@ impl<D: ?Sized, H: ?Sized> Registry<D, H> {
         &self.shown_in_private
     }
 
-    /// What this surface's in-process reads ([`Registry::describe`], [`Registry::act`]) ask to
-    /// learn whether the person is in Private mode. Unset, they read the file the shell
-    /// publishes. A test pins its own app here; a door reads the file itself and passes the
-    /// answer to [`Registry::describe_in`] and [`Registry::act_in`].
+    /// One more reason this surface's in-process reads ([`Registry::describe`], [`Registry::act`])
+    /// take the person to be private: a test's pin on its own app. It can only add — the file the
+    /// shell publishes is read whatever the source says — so nothing installed here makes a
+    /// surface less private than the person made it. Public because the framework that pins is
+    /// another crate; a door never consults it, it reads the file itself and passes the answer
+    /// to [`Registry::describe_in`] and [`Registry::act_in`].
     pub fn set_privacy_source(&mut self, source: Box<PrivacySource>) {
         self.privacy = Some(source);
     }
 
-    /// Whether the person is in Private mode, as this surface's in-process reads see it now.
+    /// Whether the person is in Private mode, as this surface's in-process reads see it now: the
+    /// file, or the source when it says so.
     pub fn private_now(&self) -> bool {
-        match &self.privacy {
-            Some(source) => source(),
-            None => yantrik_ipc_transport::privacy::is_private(),
-        }
+        self.privacy.as_ref().is_some_and(|source| source()) || yantrik_ipc_transport::privacy::is_private()
     }
 }
 
@@ -162,10 +162,34 @@ pub fn finish_later_published(
         private = yantrik_ipc_transport::privacy::is_private();
         read(private)
     })?;
-    if private {
-        mark(&mut reply);
+    match reply.as_object_mut() {
+        Some(map) if !private => {
+            map.remove("private");
+        }
+        _ => mark(&mut reply),
     }
     Ok(reply)
+}
+
+/// A reply built under `was_private`, held to Private mode as it is once the reply is built: the
+/// person may have turned it on while the call waited for, or ran on, the app's thread. If it came
+/// on, the app's view in the reply is replaced with the private one, which `republish` reads
+/// again — or, when the app does not answer that, the private view with nothing of the app — and
+/// the reply is marked. Every door calls this after its hop, as [`finish_later_published`] does
+/// after work finished later (#926 review, L1).
+pub fn recheck_private(was_private: bool, reply: &mut Value, republish: impl FnOnce() -> Option<View>) {
+    if was_private || !yantrik_ipc_transport::privacy::is_private() {
+        return;
+    }
+    let view = republish().unwrap_or_else(|| private_view(None, &[], None));
+    if let Some(map) = reply.as_object_mut() {
+        if map.contains_key("summary") || map.contains_key("state") {
+            map.insert("revision".to_string(), view.revision().into());
+            map.insert("summary".to_string(), view.summary.into());
+            map.insert("state".to_string(), view.state);
+        }
+    }
+    mark(reply);
 }
 
 /// `"private": true` beside `app` in a reply.

@@ -8,7 +8,12 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use serde_json::{json, Value};
 use yantrik_ipc_transport::privacy;
-use yantrik_surface::{answer_later, Action, Surface, View, PRIVATE_SUMMARY};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use yantrik_surface::{answer_later, Action, LocalRegistry, Surface, View, PRIVATE_SUMMARY};
+
+/// Set by a test: the next describe turns Private mode on while it runs.
+static FLIP_IN_DESCRIBE: AtomicBool = AtomicBool::new(false);
 
 const SENTINEL: &str = "Reminder: call Priya SENTINEL-924";
 
@@ -32,7 +37,16 @@ fn machine() -> MutexGuard<'static, ()> {
 
 fn reminders() -> Surface {
     Surface::new("reminders")
-        .describe(|| View::new(format!("Reminders — next: {SENTINEL}")).with("next", SENTINEL))
+        .describe(|| {
+            if FLIP_IN_DESCRIBE.swap(false, Ordering::SeqCst) {
+                privacy::publish(true, 1).expect("privacy.json written");
+            }
+            View::new(format!("Reminders — next: {SENTINEL}")).with("next", SENTINEL)
+        })
+        .action(Action::new("go_private", "Turn Private mode on mid-call").risk("safe"), |_| {
+            privacy::publish(true, 1).map_err(|e| e.to_string())?;
+            Ok(json!({ "ok": true }))
+        })
         .action(Action::new("snooze", "Snooze the next reminder").risk("safe"), |_| Ok(json!({ "snoozed": true })))
         .action(Action::new("sync", "Fetch reminders, off the worker").risk("safe"), |_| {
             // The person turns Private mode on while the work runs.
@@ -79,3 +93,38 @@ fn a_services_work_finished_later_is_read_back_under_private_mode_as_it_is_then(
     assert!(!leaks(&reply), "{reply}");
     privacy::publish(false, 1).unwrap();
 }
+
+/// #926 review, L1: Private mode turned on while a service builds its answer holds for it.
+#[test]
+fn private_mode_turned_on_during_a_services_call_holds_for_that_answer() {
+    let _machine = machine();
+    let surface = reminders();
+    let acted = answer(&surface, "app.act", json!({ "action": "go_private", "args": {} }));
+    assert_eq!(acted["private"], true, "{acted}");
+    assert!(!leaks(&acted), "{acted}");
+
+    privacy::publish(false, 1).unwrap();
+    FLIP_IN_DESCRIBE.store(true, Ordering::SeqCst);
+    let described = answer(&surface, "app.describe", json!({}));
+    assert_eq!(described["private"], true, "{described}");
+    assert_eq!(described["summary"], PRIVATE_SUMMARY);
+    assert!(!leaks(&described), "{described}");
+    privacy::publish(false, 1).unwrap();
+}
+
+/// #926 review, L2: a privacy source can only add. One that says "not private" does not make a
+/// registry's own reads ignore the file the person's Private mode is in.
+#[test]
+fn a_privacy_source_cannot_make_a_surface_less_private_than_the_file() {
+    let _machine = machine();
+    let mut reg = LocalRegistry::new("reminders");
+    reg.set_describe(Box::new(|| View::new(SENTINEL).with("next", SENTINEL)));
+    reg.set_privacy_source(Box::new(|| false));
+    privacy::publish(true, 1).unwrap();
+    let described = reg.describe();
+    assert_eq!(described["private"], true, "{described}");
+    assert!(!leaks(&described), "{described}");
+    privacy::publish(false, 1).unwrap();
+    assert_eq!(reg.describe()["state"]["next"], SENTINEL);
+}
+

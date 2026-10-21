@@ -10,7 +10,7 @@ use yantrik_ipc_transport::server::{PeerCred, RpcServer, ServiceHandler};
 
 use crate::call::{next_action_id, refusal, service_id_for, ActCall, NO_SUCH_METHOD};
 use crate::context::{AgentTokenScope, Caller, CallerScope, LaterScope};
-use crate::private::finish_later_published;
+use crate::private::{finish_later_published, recheck_private};
 use crate::registry::{Registry, SharedDescriber, SharedHandler};
 
 /// One surface — what it reports, what it can be asked to do — answering `app.describe`,
@@ -104,8 +104,12 @@ impl Surface {
             "app.describe" => {
                 // Handlers that care who is asking read `caller()` inside describe as well.
                 let _scope = CallerScope::enter(peer.map(Caller::from));
-                // Private mode read for this call, here on the worker (`crate::private`).
-                Some(Ok(self.registry.describe_in(yantrik_ipc_transport::privacy::is_private())))
+                // Private mode read for this call, here on the worker, and again once the
+                // answer is built (`crate::private`).
+                let private = yantrik_ipc_transport::privacy::is_private();
+                let mut answer = self.registry.describe_in(private);
+                recheck_private(private, &mut answer, || Some(self.registry.published(true)));
+                Some(Ok(answer))
             }
             "app.act" => Some(self.act(params, peer, Authority::now())),
             "app.explain" => Some(self.explain(params)),
@@ -185,7 +189,8 @@ impl Surface {
             });
             (answer, later.take())
         };
-        let envelope = answer.map_err(refusal)?;
+        let mut envelope = answer.map_err(refusal)?;
+        recheck_private(private, &mut envelope, || Some(self.registry.published(true)));
         match later {
             Some(work) => {
                 finish_later_published(envelope, work, |private| Some(self.registry.published(private)))

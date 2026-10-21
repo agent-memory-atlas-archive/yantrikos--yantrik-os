@@ -107,6 +107,37 @@ class TestPrivateSurface(test_mind_door.TestTheDoor):
         self.private(False)
         self.assertEqual(self.call(server.path, "app.describe")["result"]["state"]["title"], sentinel)
 
+    def test_private_mode_turned_on_during_a_call_holds_for_that_calls_answer(self):
+        # #926 review, L1: the person turns it on while the call runs on the app's thread.
+        sentinel = "Call Priya SENTINEL-924"
+        flip = []
+        s = Surface("notes")
+
+        @s.view
+        def state():
+            if flip:
+                flip.pop()
+                self.private()
+            return {"title": sentinel}
+
+        @s.action("go_private", grade="safe")
+        def go_private() -> dict:
+            "Turn Private mode on mid-call."
+            self.private()
+            return {"ok": True}
+
+        server = s.serve_in_thread()
+        self.addCleanup(s.stop)
+        acted = self.call(server.path, "app.act", {"action": "go_private", "args": {}})["result"]
+        self.assertIs(acted["private"], True, acted)
+        self.assertNotIn("SENTINEL-924", json.dumps(acted))
+        self.private(False)
+        flip.append(True)
+        described = self.call(server.path, "app.describe")["result"]
+        self.assertIs(described["private"], True, described)
+        self.assertEqual(described["summary"], privacy.PRIVATE_SUMMARY)
+        self.assertNotIn("SENTINEL-924", json.dumps(described))
+
     def test_an_app_cannot_show_the_private_views_own_keys(self):
         s = Surface("notes")
         for key in privacy.RESERVED_KEYS + ("", "  "):

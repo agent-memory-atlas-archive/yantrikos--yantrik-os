@@ -40,21 +40,23 @@ pub(crate) fn wire<A: App>(registry: &mut LocalRegistry, core: Weak<Core<A>>, sh
         let windows = core.upgrade().map(|core| core.windows_open().len()).unwrap_or(0);
         View::new(A::ID).with("open", windows > 0).with("windows_open", windows as u64)
     }));
-    registry.set_privacy_source(source(paths));
+    if let Some(source) = source(paths) {
+        registry.set_privacy_source(source);
+    }
 }
 
-/// Where an in-process read of the app at `paths` learns Private mode: the file the shell
-/// publishes, read per call; under test, that or this app's pin.
-fn source(paths: &Paths) -> Box<PrivacySource> {
+/// What an in-process read of the app at `paths` asks beside the file the shell publishes (which
+/// the registry always reads): under test, this app's pin; in a shipped build, nothing.
+fn source(paths: &Paths) -> Option<Box<PrivacySource>> {
     #[cfg(any(test, feature = "testing"))]
     {
         let key = paths.state_dir().to_path_buf();
-        Box::new(move || testing::pinned(&key) || yantrik_ipc_transport::privacy::is_private())
+        Some(Box::new(move || testing::pinned(&key)))
     }
     #[cfg(not(any(test, feature = "testing")))]
     {
         let _ = paths;
-        Box::new(yantrik_ipc_transport::privacy::is_private)
+        None
     }
 }
 

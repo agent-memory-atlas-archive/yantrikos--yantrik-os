@@ -169,7 +169,7 @@ use yantrik_ipc_contracts::email::ServiceError;
 use yantrik_ipc_transport::privacy;
 use yantrik_ipc_transport::server::{PeerCred, RpcServer, ServiceHandler};
 use yantrik_surface::{
-    finish_later_published, next_action_id, refusal, ActCall, Later, LaterScope, LocalRegistry,
+    finish_later_published, next_action_id, recheck_private, refusal, ActCall, Later, LaterScope, LocalRegistry,
     NO_SUCH_METHOD, UNANSWERED,
 };
 
@@ -627,10 +627,13 @@ impl ControlRpc {
         who: Option<Caller>,
     ) -> Result<serde_json::Value, ServiceError> {
         match method {
-            // Private mode read here, for this call, where file IO belongs (`private_mode`).
+            // Private mode read here, for this call, where file IO belongs, and again once the
+            // answer is back from the UI thread (`private_mode`).
             "app.describe" => {
                 let private = privacy::is_private();
-                on_ui_thread(who, move |reg| reg.describe_in(private)).map_err(unanswered)
+                let mut answer = on_ui_thread(who, move |reg| reg.describe_in(private)).map_err(unanswered)?;
+                recheck_private(private, &mut answer, || on_ui_thread(who, |reg| reg.published(true)).ok());
+                Ok(answer)
             }
 
             "app.act" => {
@@ -704,6 +707,10 @@ impl ControlRpc {
                 // An action that legitimately refuses is an application error, not a transport
                 // failure: -32602 keeps it out of the client's circuit breaker.
                 .map_err(refusal)
+                .map(|mut reply| {
+                    recheck_private(private, &mut reply, || on_ui_thread(who, |reg| reg.published(true)).ok());
+                    reply
+                })
             }
 
             // The sentence about ONE call, in the app's own words (#137). The shell asks this
@@ -767,6 +774,16 @@ impl App {
     /// What this app reports when asked. Runs on the UI thread; keep it cheap.
     pub fn describe(mut self, f: impl Fn() -> View + 'static) -> Self {
         self.registry.set_describe(Box::new(f));
+        self
+    }
+
+    /// Keys of this surface's `describe` state kept while the person is in Private mode (#924,
+    /// [`private_mode`]): default-deny, each listed by name, and only a key whose whole value says
+    /// nothing about the person. A framework app lists its keys in `Intents::shown_in_private`.
+    pub fn shown_in_private(mut self, keys: &[&str]) -> Self {
+        for key in keys {
+            self.registry.show_in_private(key);
+        }
         self
     }
 

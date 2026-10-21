@@ -9,6 +9,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
@@ -198,6 +199,9 @@ fn a_privacy_file_that_cannot_be_read_hides_the_app_too() {
 
 const SURFACE: &str = "private-door-test";
 
+/// Set by a test: the next describe turns Private mode on while it runs on the UI thread.
+static FLIP_IN_DESCRIBE: AtomicBool = AtomicBool::new(false);
+
 /// A window surface on this runtime, served on the test UI thread, as a shipped window serves it.
 fn door() -> &'static str {
     static ADDRESS: OnceLock<String> = OnceLock::new();
@@ -206,10 +210,22 @@ fn door() -> &'static str {
         drop(TestApp::<Diary>::start());
         slint::invoke_from_event_loop(|| {
             control::App::new(SURFACE)
-                .describe(|| View::new(format!("Inbox — {SENTINEL}")).with("subject", SENTINEL))
+                .describe(|| {
+                    if FLIP_IN_DESCRIBE.swap(false, Ordering::SeqCst) {
+                        privacy::publish(true, 1).expect("privacy.json written");
+                    }
+                    View::new(format!("Inbox — {SENTINEL}")).with("subject", SENTINEL)
+                })
                 .action(
                     Action::new("mark_read", "Mark the open message read").risk("safe"),
                     |_| Ok(json!({ "marked": true })),
+                )
+                .action(
+                    Action::new("go_private", "Turn Private mode on, as the person might mid-call").risk("safe"),
+                    |_| {
+                        privacy::publish(true, 1).map_err(|e| e.to_string())?;
+                        Ok(json!({ "ok": true }))
+                    },
                 )
                 .action(
                     Action::new("sync", "Fetch mail, off the UI thread").risk("safe"),
@@ -288,3 +304,22 @@ fn work_finished_later_is_read_back_under_private_mode_as_it_is_then() {
     assert_eq!(reply["result"]["summary"], PRIVATE_SUMMARY);
     assert!(!leaks(&reply), "{reply}");
 }
+
+/// #926 review, L1: the person turns Private mode on while the call is on the UI thread. The door
+/// reads it again once the answer is back, so what was built before the flip is not what goes out.
+#[test]
+fn private_mode_turned_on_during_a_call_holds_for_that_calls_answer() {
+    let _machine = machine();
+    let acted = call("app.act", json!({ "action": "go_private", "args": {} }));
+    assert_eq!(acted["result"]["private"], true, "{acted}");
+    assert_eq!(acted["result"]["summary"], PRIVATE_SUMMARY);
+    assert!(!leaks(&acted), "{acted}");
+
+    privacy::publish(false, 1).unwrap();
+    FLIP_IN_DESCRIBE.store(true, Ordering::SeqCst);
+    let described = call("app.describe", json!({}));
+    assert_eq!(described["result"]["private"], true, "{described}");
+    assert_eq!(described["result"]["state"], json!({ "private": true }));
+    assert!(!leaks(&described), "{described}");
+}
+
