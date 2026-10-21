@@ -12,14 +12,21 @@
 //!
 //! A stale file (the previous instance crashed) is detected by checking that the pid is still
 //! alive, so a crash never locks the user out of an app until reboot.
+//!
+//! The pid file alone was check-then-create: two launches in one instant both found no live pid,
+//! and the second unlinked the first's fresh file before making its own, so both ran. The slot is
+//! now an exclusive `flock` on `<app>.lock` beside it ([`crate::lock`]), atomic and released on any
+//! death. The pid file is still written and still read, so a copy from a build before the lock,
+//! which knows only the pid file, is seen, and sees this one, across an upgrade.
 
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 
-/// Held for the life of the process; removes the pid file on drop.
+/// Held for the life of the process; removes the pid file on drop, and the lock goes with it.
 pub struct InstanceGuard {
     path: PathBuf,
+    _lock: Option<crate::lock::FileLock>,
 }
 
 impl Drop for InstanceGuard {
@@ -160,8 +167,23 @@ fn claim_in(
         tracing::warn!(app = app_name, dir = %dir.display(), "Pid directory is not private to us; running unguarded");
         return Some(InstanceGuard {
             path: PathBuf::new(),
+            _lock: None,
         });
     }
+    // The slot itself: atomic, so two launches in one instant cannot both take it.
+    let lock = match crate::lock::hold(&dir.join(format!("{app_name}.lock"))) {
+        Ok(lock) => Some(lock),
+        Err(crate::lock::LockError::Held) => {
+            tracing::info!(app = app_name, "Already running; handing this launch to it");
+            held(app_name);
+            return None;
+        }
+        Err(crate::lock::LockError::Io(e)) => {
+            // The pid file below still guards; only the instant-race protection is lost.
+            tracing::warn!(app = app_name, error = %e, "Could not take the instance lock; the pid file alone guards");
+            None
+        }
+    };
     let path = dir.join(format!("{app_name}.pid"));
 
     if let Ok(existing) = fs::read_to_string(&path) {
@@ -181,19 +203,21 @@ fn claim_in(
 
     // Unlink, then create only if absent: a plain create follows a link left at the name, and a
     // `notes.pid` pointing at ~/.ssh/authorized_keys would have been emptied by the next launch.
-    // `create_new` (O_EXCL) never follows one. If another launch wins the gap, we run unguarded.
+    // `create_new` (O_EXCL) never follows one. Under the lock no copy of this build can race the
+    // gap; the pid file is kept for builds that know only it.
     let _ = fs::remove_file(&path);
     let created = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&path);
     match created.and_then(|mut f| write!(f, "{}", std::process::id())) {
-        Ok(()) => Some(InstanceGuard { path }),
+        Ok(()) => Some(InstanceGuard { path, _lock: lock }),
         Err(e) => {
             // Not being able to write the pid file is not a reason to refuse to run.
-            tracing::warn!(app = app_name, error = %e, "Could not write pid file; running unguarded");
+            tracing::warn!(app = app_name, error = %e, "Could not write pid file; the lock alone guards");
             Some(InstanceGuard {
                 path: PathBuf::new(),
+                _lock: lock,
             })
         }
     }
@@ -253,6 +277,21 @@ mod tests {
         );
         let _ = first.kill();
         let _ = first.wait();
+    }
+
+    #[test]
+    fn two_launches_in_one_instant_do_not_both_run() {
+        // The first launch holds the slot; its pid file names this very process, which the pid
+        // check alone takes as no holder. Only the lock stops the second.
+        let dir = private_dir("instant").join("yantrik");
+        let first = claim_in(&dir, "notes", |_| panic!("the first launch found the slot held"));
+        assert!(first.is_some());
+        let mut asked = false;
+        let second = claim_in(&dir, "notes", |_| asked = true);
+        assert!(second.is_none(), "a second copy ran beside the first");
+        assert!(asked, "the running copy was asked to show its window");
+        drop(first);
+        assert!(claim_in(&dir, "notes", |_| panic!("still held")).is_some(), "released with the guard");
     }
 
     #[test]
