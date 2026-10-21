@@ -39,8 +39,13 @@ fn teal_stays_off_screens_that_are_not_a_minds() {
 /// ("Scanning..." looked destructive). These screens use the kit's YButton now.
 #[test]
 fn a_primary_button_is_the_accent_not_the_apps_colour() {
-    for file in ["container_manager.slint", "permission_dashboard.slint", "network_manager.slint"] {
-        let src = read(&format!("{UI}{file}"));
+    // Network's screen is its own since it moved onto YantrikApp (apps/network-manager/ui/).
+    for file in [
+        format!("{UI}container_manager.slint"),
+        format!("{UI}permission_dashboard.slint"),
+        "apps/network-manager/ui/network_manager.slint".to_string(),
+    ] {
+        let src = read(&file);
         assert!(!src.contains("primary ? AppIdentity.accent"), "{file} fills its primary with the app's colour");
         assert!(src.contains("import { YButton }"), "{file} uses the kit's button");
     }
