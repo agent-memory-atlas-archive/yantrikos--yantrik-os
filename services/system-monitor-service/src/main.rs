@@ -30,11 +30,13 @@ fn main() {
 struct SysMonHandler {
     /// `app.describe` and `app.act`, dispatched as an app window's are.
     surface: Surface,
+    /// Whether the person is in Private mode, read per call; a stand-in in tests.
+    private: fn() -> bool,
 }
 
 impl SysMonHandler {
     fn new() -> SysMonHandler {
-        SysMonHandler { surface: sysmon_surface() }
+        SysMonHandler { surface: sysmon_surface(), private: yantrik_service_sdk::is_private }
     }
 }
 
@@ -69,6 +71,12 @@ impl ServiceHandler for SysMonHandler {
         // among them, and nothing else (#161).
         if method == "sysmon.kill_process" {
             yantrik_service_sdk::desktop_programs_only(peer, method)?;
+        }
+        // Which programs the person is running says what they are doing: nobody's while they are
+        // private (#926 review, M2), as System Monitor's own describe already hides it. The
+        // window falls back to reading the machine itself.
+        if method == "sysmon.processes" {
+            yantrik_service_sdk::refuse_while_private(self.private)?;
         }
         match method {
             "sysmon.snapshot" => {
@@ -931,6 +939,22 @@ mod through_the_handler {
 /// The same rule with the ceiling, the mode and the shell's grant store pinned per case.
 #[cfg(all(test, unix))]
 mod tests {
+    /// #926 review, M2: the process list answers nobody while the person is private; the
+    /// machine's figures still do.
+    #[test]
+    fn in_private_mode_the_process_list_answers_nobody() {
+        use yantrik_service_sdk::ServiceHandler as _;
+        let private = super::SysMonHandler { private: || true, ..super::SysMonHandler::new() };
+        let err = private
+            .handle_from("sysmon.processes", serde_json::json!({ "limit": 5 }), None)
+            .unwrap_err();
+        assert_eq!(err.code, -32602);
+        assert!(err.message.starts_with("PRIVATE:"), "{}", err.message);
+        assert!(private.handle_from("sysmon.snapshot", serde_json::json!({}), None).is_ok());
+        let open = super::SysMonHandler { private: || false, ..super::SysMonHandler::new() };
+        assert!(open.handle_from("sysmon.processes", serde_json::json!({ "limit": 5 }), None).is_ok());
+    }
+
     /// #161: the raw kill answers only the desktop's own programs. This test binary is none of
     /// them, so its kill is refused and the process lives on.
     #[cfg(target_os = "linux")]

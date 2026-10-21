@@ -68,7 +68,9 @@ fn main() {
         .spawn(move || bus_thread(rx))
         .expect("spawn a11y-bus thread");
 
-    ServiceBuilder::new("a11y").handler(A11y { tx }).run();
+    ServiceBuilder::new("a11y")
+        .handler(A11y { tx, private: yantrik_service_sdk::is_private })
+        .run();
 }
 
 /// Owns the connection and answers one request at a time.
@@ -149,6 +151,8 @@ fn bus_thread(rx: mpsc::Receiver<Request>) {
 
 struct A11y {
     tx: Sender<Request>,
+    /// Whether the person is in Private mode, read per call; a stand-in in tests.
+    private: fn() -> bool,
 }
 
 impl A11y {
@@ -181,6 +185,11 @@ impl ServiceHandler for A11y {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, ServiceError> {
+        // Every window's title and every element's text, and acting on them: nobody's while the
+        // person is private (#926 review, M2). `a11y.status` is counts, and still answers.
+        if matches!(method, "a11y.windows" | "a11y.describe" | "a11y.act") {
+            yantrik_service_sdk::refuse_while_private(self.private)?;
+        }
         match method {
             "a11y.windows" => self.ask(Request::Windows),
 
@@ -221,5 +230,28 @@ impl ServiceHandler for A11y {
                 ),
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod private_mode_tests {
+    use super::*;
+
+    /// The windows and their text, and acting on them, are refused while private, before the
+    /// accessibility thread is asked anything; the status still answers.
+    #[test]
+    fn in_private_mode_no_window_or_text_is_read_and_nothing_is_acted_on() {
+        let (tx, rx) = mpsc::channel::<Request>();
+        let a11y = A11y { tx, private: || true };
+        for (method, params) in [
+            ("a11y.windows", serde_json::json!({})),
+            ("a11y.describe", serde_json::json!({ "window": "w1" })),
+            ("a11y.act", serde_json::json!({ "element": "e1", "action": "click" })),
+        ] {
+            let err = a11y.handle(method, params).unwrap_err();
+            assert_eq!(err.code, -32602, "{method}");
+            assert!(err.message.starts_with("PRIVATE:"), "{method}: {}", err.message);
+        }
+        assert!(rx.try_recv().is_err(), "the accessibility thread was asked nothing");
     }
 }
