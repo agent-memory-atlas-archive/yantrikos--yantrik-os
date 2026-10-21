@@ -24,8 +24,10 @@ use std::time::SystemTime;
 use super::{Fingerprint, Observed};
 
 /// What says a file may have changed since the last look: its length and modification time, and
-/// on Unix its inode and change time too, so a same-length write within one coarse clock tick
-/// and an atomic replace that keeps the old mtime are still seen.
+/// on Unix its inode and change time too, so an atomic replace (a new inode) and a write whose
+/// mtime was set back (`touch -r`, `cp -p`, `rsync -t`, caught by the change time) are still
+/// seen. A same-length write in place within one clock tick is not: the kernel sets the mtime
+/// and the change time from the same clock reading.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Stamp {
     len: u64,
