@@ -167,6 +167,11 @@ pub fn run<A: App>() -> ExitCode {
     // A second launch's `present` goes through the core, which knows which windows are open.
     let presenting = Rc::downgrade(&core);
     crate::present::install(move || presenting.upgrade().ok_or("the app is closing")?.present());
+    // A logout or a shutdown (SIGTERM, SIGHUP) asks the app, so it can save, rather than
+    // killing it (`quit`). Without the handler the signals keep their default.
+    if let Err(e) = crate::quit::listen::<A>(core.post(), crate::quit::SIGNAL_DEADLINE) {
+        tracing::warn!(app = A::ID, "SIGTERM and SIGHUP will end the app unasked: {e}");
+    }
     // An exit asked for in `start` or for the launch ends here, with no loop: Slint drops a quit
     // posted before its loop runs. The first window is shown only if it is still open.
     let first_open = core.windows_open().contains(&WindowId::PRIMARY);
@@ -176,6 +181,11 @@ pub fn run<A: App>() -> ExitCode {
             crate::event_loop::run_loop(core.ui(), A::ID, show_first)
         }
     };
+    // The compositor went (a logout, or a shutdown that signals the whole session at once): no
+    // one is there, and the app is owed its logout before the end, as it is for a signal.
+    if ending == crate::event_loop::Ending::DisplayGone {
+        core.display_gone();
+    }
     core.shutdown(GRACE);
     DRAIN.with(|cell| *cell.borrow_mut() = None);
     // A close, an `fx.exit()` and a logout are all 0; only a loop that failed with the display
