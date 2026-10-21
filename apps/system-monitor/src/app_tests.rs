@@ -329,7 +329,9 @@ fn an_agent_in_ask_mode_cannot_end_a_process_but_may_change_the_view() {
     let (app, machine) = start(FakeMachine::new().reads(normal()).running([4242]));
     app.run_jobs();
     let refused = app.act_as(Call::new("kill_process", json!({ "pid": 4242 })).as_agent("mind").in_mode("ask"));
-    assert!(refused.is_err(), "a dangerous intent needs the person's word in ask mode");
+    // Refused by the gate, for its grade: not for any other reason a call can fail.
+    let why = refused.err().expect("a dangerous intent needs the person's word in ask mode");
+    assert!(why.starts_with("GRANT:") && why.contains("kill_process"), "{why}");
     app.run_jobs();
     assert!(machine.signalled().is_empty(), "nothing was signalled");
     assert!(app
