@@ -18,6 +18,11 @@
 # callbacks (`snip_save`).
 
 [unset-property]
+calendar = [
+  { name = "agent-context", reason = "Written by the framework's rail: `yantrik_app::rail_window!(CalendarApp)` in apps/calendar/src/lib.rs implements RailView, whose render_rail sets the rail's rows from the model on every rail change. The macro's expansion is not text under apps/calendar/src, so the lint cannot see the setter; tests/window.rs reads the rows back off the window." },
+  { name = "agent-suggestions", reason = "As agent-context: render_rail, from `yantrik_app::rail_window!`, sets the suggestions; tests/window.rs reads them back." },
+  { name = "agent-unavailable", reason = "As agent-context: render_rail, from `yantrik_app::rail_window!`, sets the sentence shown when the Mind cannot answer." },
+]
 
 [dead-handler]
 image-viewer = [
