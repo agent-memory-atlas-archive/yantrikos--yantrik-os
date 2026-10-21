@@ -21,7 +21,6 @@ layer yantrik-ui->yantrik-chat
 layer yantrik-ui->yantrik-companion
 layer yantrik-ui->yantrik-ml
 size apps/arcade/src/verify.rs 1584
-size apps/calendar/src/main.rs 2271
 size apps/document-editor/src/main.rs 1630
 size apps/download-manager/src/engine.rs 2039
 size apps/email/src/main.rs 2689
@@ -96,6 +95,5 @@ size services/notifications-service/src/reminders.rs 1238
 size services/notifications-service/src/store.rs 1230
 size services/system-monitor-service/src/main.rs 1431
 size services/weather-service/src/main.rs 1410
-size tests/calendar-core/lib.rs 1852
 size tests/email-core/lib.rs 1905
 size tests/ui-preview/preview.slint 1251

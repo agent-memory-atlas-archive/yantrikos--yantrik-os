@@ -56,7 +56,7 @@ fn segments(event: &SourceEvent, first: NaiveDate, last: NaiveDate) -> Vec<TimeE
                 color_index: event.color_index,
             });
         }
-        day = day + Duration::days(1);
+        day += Duration::days(1);
     }
     out
 }
@@ -72,7 +72,7 @@ fn all_day_columns(event: &SourceEvent, first: NaiveDate, last: NaiveDate) -> Ve
     let through = end.max(start.date()).min(last);
     while day <= through {
         out.push((day - first).num_days() as i32);
-        day = day + Duration::days(1);
+        day += Duration::days(1);
     }
     out
 }

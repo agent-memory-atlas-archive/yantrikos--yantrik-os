@@ -48,17 +48,9 @@ fn describe_says_which_day_today_is() {
     assert_eq!(today_line(date(2026, 9, 23)), "2026-09-23 Wednesday");
     assert_eq!(today_line(date(2026, 1, 4)), "2026-01-04 Sunday");
 
-    // And the app really publishes it — the line above would keep passing if the field
-    // were dropped from the describe. Pinned against the source, as `control.rs` in the
-    // shell pins its own describe wiring, because the closure needs a live window.
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src/main.rs");
-    let src = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
-    assert!(
-        src.contains(".with(\"today\", views::today_line("),
-        "the calendar's describe must carry `today`"
-    );
+    // And the app really publishes it — the line above would keep passing if the field were
+    // dropped from the describe. That is read off the running app's describe now, not off its
+    // source: `tests::describe::the_describe_says_which_day_today_is`.
 }
 
 // ── Moving an appointment ────────────────────────────────────────

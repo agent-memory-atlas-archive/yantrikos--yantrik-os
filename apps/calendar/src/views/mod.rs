@@ -55,6 +55,15 @@ impl ViewMode {
         }
     }
 
+    /// The screen's number for it: the inverse of [`ViewMode::from_index`].
+    pub fn index(self) -> i32 {
+        match self {
+            ViewMode::Month => 0,
+            ViewMode::Week => 1,
+            ViewMode::Day => 2,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             ViewMode::Month => "month",

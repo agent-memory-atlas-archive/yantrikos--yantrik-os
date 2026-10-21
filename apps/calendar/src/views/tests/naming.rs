@@ -149,22 +149,6 @@ fn the_index_keeps_every_name_until_the_cap_then_drops_the_oldest() {
     );
 }
 
-/// The index is worth only what the app actually publishes. Pinned against the source, as
-/// `describe_says_which_day_today_is` pins the day line, because the closure needs a live
-/// window — and dropping this key is exactly the quiet half of #54: the card keeps working,
-/// it just stops saying what the thing is.
-#[test]
-fn the_describe_publishes_what_its_ids_stand_for() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src/main.rs");
-    let src = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
-    assert!(
-        src.contains(".with(\"naming\", serde_json::Value::Object(naming))"),
-        "the calendar's describe must carry the id→name index"
-    );
-    assert!(
-        src.contains("views::naming_index(&event_refs(&s.events))"),
-        "built by the capped index over the events in hand, not a second formatter in main.rs"
-    );
-}
+// The index is worth only what the app actually publishes: dropping the key is exactly the quiet
+// half of #54, where the card keeps working and stops saying what the thing is. That is read off
+// the running app's describe: `tests::describe::the_describe_publishes_what_its_ids_stand_for`.

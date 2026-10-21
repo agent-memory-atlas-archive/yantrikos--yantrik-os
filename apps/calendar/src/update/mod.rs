@@ -1,0 +1,179 @@
+//! The only code that changes the model: every button, intent, timer and job result lands here
+//! as a `Command`, and asks for its effects.
+//!
+//! The person's buttons and the Mind's intents are the same commands where they do the same
+//! thing: a day picked, a month stepped, an event stored, taken off or moved go through one path
+//! each, so neither can report an outcome the other would not. Every read of the store and every
+//! write runs in a job (`work.rs`); what it found comes back here as a command.
+
+use yantrik_app::effects::Effects;
+use yantrik_app::Refused;
+
+use crate::command::Command;
+use crate::events;
+use crate::model::{Model, NOTHING, PART_CALENDAR, PART_CLOCK};
+use crate::views;
+use crate::work::{self, Listing, Range, Read};
+use crate::Calendar;
+
+mod ai;
+mod change;
+mod form;
+mod navigate;
+mod remove;
+
+/// The rail's suggestion and the header's AI button ask the same question.
+pub use ai::EXPLAIN;
+/// The rail's other suggestion: back to today.
+pub use ai::TODAY;
+/// The card an answer about the day is drawn on, by the rail or by the header's own ask.
+pub use ai::answer_card;
+/// The first wake at midnight, armed at start.
+pub use navigate::arm_midnight;
+
+type Fx = Effects<Calendar>;
+
+pub fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refused> {
+    match command {
+        Command::PrevMonth
+        | Command::NextMonth
+        | Command::ShowMonth(_)
+        | Command::DayClicked(_)
+        | Command::SelectDay(_)
+        | Command::SwitchView(_)
+        | Command::SetView(_)
+        | Command::Today
+        | Command::ShowDate(_)
+        | Command::Refresh
+        | Command::Minute
+        | Command::Midnight
+        | Command::Watch
+        | Command::Activated
+        | Command::Listed(_)
+        | Command::Followed(_)
+        | Command::ReadFailed
+        | Command::OpenNoticeEvent
+        | Command::NoticeEvent(_)
+        | Command::Between(_)
+        | Command::BetweenRead(_) => navigate::update(m, command, fx),
+        Command::OpenForm
+        | Command::UseTemplate { .. }
+        | Command::SaveForm { .. }
+        | Command::CancelForm
+        | Command::Add(_)
+        | Command::Saved(_) => form::update(m, command, fx),
+        Command::DeleteRow(_) | Command::Delete { .. } | Command::Removed(_) => remove::update(m, command, fx),
+        Command::Update { .. } | Command::Moved(_) => change::update(m, command, fx),
+        Command::Kept(kept) => {
+            // The caller gets the rule, with the ids and the other door; the person gets which
+            // event, that it is untouched, and who asked.
+            m.notice.kept(kept.refused, &kept.title, kept.who.as_deref(), &kept.id);
+            fx.changed(crate::model::PART_NOTICE);
+            fx.settle(Err(Refused::new("not_yours", kept.why)));
+            Ok(())
+        }
+        Command::Declined(why) => {
+            fx.changed(NOTHING);
+            fx.settle(Err(Refused::new("not_found", why)));
+            Ok(())
+        }
+        Command::WorkFailed(work) => {
+            remove::work_failed(m, work, fx);
+            Ok(())
+        }
+        Command::DismissNotice => {
+            m.notice.say("");
+            fx.changed(crate::model::PART_NOTICE);
+            Ok(())
+        }
+        Command::Explain | Command::DismissAi | Command::Explained(_) | Command::Rail(_) => {
+            ai::update(m, command, fx)
+        }
+        Command::Attach(inbox) => {
+            m.inbox = Some(inbox);
+            fx.changed(NOTHING);
+            Ok(())
+        }
+    }
+}
+
+/// Read the store for the range on screen, in a job. Without `force` the job asks the store's
+/// revision first and lists only when the range or the store moved (`work::reread`).
+pub(crate) fn read(m: &mut Model, fx: &mut Fx, force: bool) {
+    let wanted = m.visible_range();
+    let held = m.held();
+    let api = m.machine.api.clone();
+    let sequence = m.reads.sequence.clone();
+    m.reads.in_flight += 1;
+    fx.spawn_or(Command::ReadFailed, move |_| {
+        Command::Listed(Box::new(work::reread(api.as_ref(), &sequence, wanted, &held, force)))
+    });
+}
+
+/// A read, applied if it is still the window's: for the range on screen, and taken after the read
+/// whose events are in hand. Says whether it was.
+///
+/// A read for a range the window has since left is dropped: the read for where the window is now
+/// was asked for when it moved. Of two reads for the same range, the one taken later wins,
+/// whatever order they land in.
+pub(crate) fn apply(m: &mut Model, listing: Listing) -> bool {
+    if listing.wanted != m.visible_range() || listing.seq < m.reads.shown {
+        return false;
+    }
+    m.reads.shown = listing.seq;
+    match listing.read {
+        Read::Unmoved => {}
+        Read::Listed { events, revision } => {
+            m.events = events;
+            m.range = Some(listing.wanted);
+            m.revision = revision;
+        }
+        Read::Failed(e) => {
+            tracing::warn!(error = %e, "could not read the calendar");
+            m.events.clear();
+            m.range = None;
+            m.revision = None;
+        }
+    }
+    true
+}
+
+/// The store read again after a write: applied, or when the window has moved since the write was
+/// asked for, a read of where it is now.
+pub(crate) fn apply_after_write(m: &mut Model, fx: &mut Fx, listing: Listing) {
+    if !apply(m, listing) {
+        read(m, fx, true);
+    }
+    redraw(m, fx);
+}
+
+/// Everything on screen is drawn again from the model, and the clock read with it: anything that
+/// changes the month, the selected day, the view, or what is stored ends here.
+pub(crate) fn redraw(m: &mut Model, fx: &mut Fx) {
+    m.now = m.machine.clock.now();
+    m.utc_offset = m.machine.clock.utc_offset_seconds();
+    fx.changed(PART_CALENDAR);
+    fx.changed(PART_CLOCK);
+}
+
+/// Put the window on `date`: its month, that day picked. What an action just changed is then what
+/// the window shows, and what the answer's first line says. `add_event` used to leave the window
+/// on whatever day was picked, so a mind adding to the 30th read "3 things on day 25", saw no sign
+/// of its event, and added it again (yantrik-mind R2, T3 rep 3), and the duplicate became a false
+/// claim in the next task. A string that does not start with a date leaves the window where it is.
+pub(crate) fn show_date(m: &mut Model, date: &str) {
+    if let Some((year, month, day)) = events::ymd(date) {
+        m.year = year;
+        m.month = month;
+        m.selected_day = day;
+    }
+}
+
+/// The range the window will need once it is on `date` (where `show_date` puts it), for a job that
+/// reads the store after a write. The window's own range when `date` is not a date.
+pub(crate) fn range_at(m: &Model, date: &str) -> Range {
+    match events::ymd(date) {
+        Some((year, month, day)) => views::visible_range(year, month, m.view, day, m.week_start),
+        None => m.visible_range(),
+    }
+}
