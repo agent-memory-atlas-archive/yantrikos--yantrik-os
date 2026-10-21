@@ -27,7 +27,8 @@ tracing = { workspace = true }
 chrono = { workspace = true }
 
 [dev-dependencies]
-yantrik-testing = { workspace = true }
+# `activate`: the window manager giving the window the keyboard, as the runner hears it.
+yantrik-testing = { workspace = true, features = ["testing"] }
 
 [build-dependencies]
 yantrik-app-build = { workspace = true }

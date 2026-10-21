@@ -5,7 +5,7 @@
 use std::time::Duration;
 
 use serde_json::json;
-use yantrik_app::app::{Event, WindowId};
+use yantrik_app::app::WindowId;
 
 use super::{a_week, open, open_at};
 use crate::command::Command;
@@ -116,13 +116,29 @@ fn a_window_left_on_today_follows_the_date_across_midnight() {
     assert_eq!(f.state()["today"], json!("2026-09-24 Thursday"));
     f.app.ui(|ui| ui.invoke_day_clicked(12));
     f.quiet();
+    // The person goes elsewhere for a day and comes back: the window manager's focus, as the
+    // framework hears it from winit, is `Event::Activated`.
+    f.app.deactivate(WindowId::PRIMARY);
     f.clock.advance(86_400);
-    f.app.event(Event::Activated(WindowId::PRIMARY));
+    f.app.activate(WindowId::PRIMARY);
     f.quiet();
     assert_eq!(f.app.ui(|ui| ui.get_selected_day()), 12, "a day the person picked stays picked");
     use slint::Model as _;
     let marked: Vec<i32> = f.app.ui(|ui| ui.get_days().iter().filter(|d| d.is_today).map(|d| d.day_number).collect());
     assert_eq!(marked, [25]);
+}
+
+/// Brought back to the front after midnight, with no timer fired since: the window follows the
+/// date at once, through the framework's `Event::Activated` (it sets no winit hook of its own).
+#[test]
+fn coming_back_to_the_window_after_midnight_follows_the_date() {
+    let f = open_at(a_week(), "2026-09-23 23:59:30");
+    f.app.deactivate(WindowId::PRIMARY);
+    f.clock.advance(60);
+    f.app.activate(WindowId::PRIMARY);
+    f.quiet();
+    assert_eq!(f.app.ui(|ui| ui.get_selected_day()), 24);
+    assert_eq!(f.state()["today"], json!("2026-09-24 Thursday"));
 }
 
 #[test]
