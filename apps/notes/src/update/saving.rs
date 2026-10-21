@@ -36,6 +36,11 @@ pub fn save(m: &mut Model, fx: &mut Effects<Notes>, how: How) {
     }
     let Some(doc) = m.current_id() else { return };
     let Some((d, _)) = m.current_mut() else { return };
+    // Notes says unsaved by comparing with the file; the document counts edits. Every change is
+    // an edit of the document and a landed save sets what the file holds to the ticket's content,
+    // so unsaved (checked above) implies dirty. If they ever parted, no save would start and the
+    // caller would wait out its deadline: caught here instead.
+    debug_assert!(d.dirty(), "Notes' unsaved note must be a dirty document");
     let begun = match how {
         How::Autosave => d.begin_save(),
         How::Asked => d.retry_save(),

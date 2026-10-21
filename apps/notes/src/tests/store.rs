@@ -232,3 +232,33 @@ fn a_sidecar_left_by_a_failed_save_is_ours_at_the_next_start() {
     let recovered = loaded.notes.iter().find(|r| r.id.starts_with("recovered-")).expect("a recovered note");
     assert_eq!(recovered.field("tags"), "two");
 }
+
+/// The file must be byte for byte what the note was read from: a fingerprint that happens to
+/// match (or is made to) does not let a save replace someone else's text.
+#[test]
+fn the_check_compares_the_text_itself_not_its_fingerprint() {
+    let dir = fixture("exact");
+    let vault = Vault::real(dir.clone());
+    vault.initialize().unwrap();
+    let n = Note::blank("Exact");
+    save(&vault, &n.id, None, &n.content).unwrap();
+    std::fs::write(dir.join(&n.id), "theirs").unwrap();
+    let mut mine = n.content.clone();
+    mine.text.push_str("mine");
+    // A ticket whose fingerprint matches the file now, for a note read as something else.
+    let refused = vault.save(&SaveJob {
+        id: n.id.clone(),
+        ticket: SaveTicket {
+            document: DocumentId(1),
+            seq: 1,
+            content: mine,
+            baseline: Some(Fingerprint::of_bytes(b"theirs")),
+            unsure: None,
+        },
+        on_disk: Some(n.content.clone()),
+        meta_unsure: None,
+        modified: 0,
+    });
+    assert!(refused.unwrap_err().error.conflict);
+    assert_eq!(text(&dir.join(&n.id)), "theirs");
+}

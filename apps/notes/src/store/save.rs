@@ -48,17 +48,24 @@ impl SaveFailed {
 
 impl Vault {
     /// Saves an open note. The store refuses to write over a file that is neither what the note
-    /// was read from nor a write of ours (`SaveTicket::may_replace`), and over a sidecar that is
-    /// neither, with [`CHANGED_ON_DISK`].
+    /// was read from nor a write of ours, and over a sidecar that is neither, with
+    /// [`CHANGED_ON_DISK`].
+    ///
+    /// What the note was read from is compared byte for byte, as the store always did: the
+    /// fingerprint is a change detector, not a hash a synced vault's other writer cannot choose
+    /// to match. Only our own unsure write, whose bytes this job does not hold, is known by its
+    /// fingerprint (`SaveTicket::unsure`, the document's rule).
     pub fn save(&self, job: &SaveJob) -> Result<Saved, SaveFailed> {
         let content = &job.ticket.content;
         let record = Record::of(&job.id, content, job.on_disk.as_ref(), job.modified);
+        let baseline_text = job.on_disk.as_ref().map(|d| d.text.as_str());
         let baseline_meta = job.on_disk.as_ref().map(|d| d.meta.as_str()).unwrap_or_default();
+        let ours = |text: &str| job.ticket.unsure.as_ref() == Some(&Fingerprint::of_bytes(text.as_bytes()));
         self.write_note(
             &job.id,
             content,
             Some(&record),
-            |text| job.ticket.may_replace(text),
+            |text| text == baseline_text || text.is_some_and(ours),
             |meta| meta == baseline_meta || Some(meta) == job.meta_unsure.as_deref(),
         )
     }
@@ -77,7 +84,7 @@ impl Vault {
         id: &str,
         content: &NoteText,
         journal: Option<&Record>,
-        text_ok: impl FnOnce(Option<&Fingerprint>) -> bool,
+        text_ok: impl FnOnce(Option<&str>) -> bool,
         meta_ok: impl FnOnce(&str) -> bool,
     ) -> Result<Saved, SaveFailed> {
         validate(&content.text).map_err(SaveFailed::wrote_nothing)?;
@@ -92,8 +99,7 @@ impl Vault {
         }
         let on_disk = read(&text_path, LIMIT).map_err(SaveFailed::wrote_nothing)?;
         let meta_on_disk = read(&meta_path, META_LIMIT).map_err(SaveFailed::wrote_nothing)?;
-        let seen = on_disk.as_deref().map(|t| Fingerprint::of_bytes(t.as_bytes()));
-        if !text_ok(seen.as_ref()) || !meta_ok(meta_on_disk.as_deref().unwrap_or_default()) {
+        if !text_ok(on_disk.as_deref()) || !meta_ok(meta_on_disk.as_deref().unwrap_or_default()) {
             return Err(SaveFailed { error: SaveError::conflict(CHANGED_ON_DISK), meta_unsure: None });
         }
         let written = Fingerprint::of_bytes(content.text.as_bytes());
