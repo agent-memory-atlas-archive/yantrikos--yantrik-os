@@ -89,7 +89,6 @@ members = [
     # Members now, so `cargo test --workspace` is enough to run everything; the guard test
     # `a_test_crate_runs_when_ci_runs` in crates/yantrik-ui-kit keeps new ones from drifting.
     "tests/calendar-core",
-    "tests/container-core",
     "tests/document-core",
     "tests/email-core",
     "tests/files-core",

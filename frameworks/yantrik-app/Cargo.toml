@@ -6,6 +6,10 @@ publish = false
 license = "GPL-3.0-only"
 description = "YantrikApp: what every app's process is made of: its one instance, its window's chrome and event loop, its control surface for the Mind, and its theme"
 
+[features]
+# The fault-injecting disk (documents::disk::FaultyDisk), for an app's tests: never shipped.
+testing = []
+
 # Step 1 of design/app-framework-2026-10-21.md: the modules below are yantrik-app-runtime's, moved
 # here unchanged. The App trait and the runner (step 2) are built beside them.
 [dependencies]
@@ -30,6 +34,8 @@ yantrik-ipc-contracts = { workspace = true }
 yantrik-ipc-transport = { workspace = true }
 # The control surface's dispatch, with no UI; `control` adds the hop to the UI thread.
 yantrik-surface = { workspace = true }
+# A document's key from its path, resistant to a chosen collision (documents/mod.rs).
+sha2 = { workspace = true }
 
 # geteuid, for checking the pid-file directory is really ours before trusting it (instance.rs).
 [target.'cfg(unix)'.dependencies]

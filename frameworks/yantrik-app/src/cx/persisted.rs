@@ -153,6 +153,7 @@ impl<A: App> Core<A> {
         match seen {
             Seen::Theme(theme) => self.ui.apply_theme(&theme),
             Seen::Reach(reach) => self.event(Event::ReachChanged(reach)),
+            Seen::File { key, seen } => self.event(Event::FileChanged { key, seen }),
             Seen::SettingsFile => {
                 let reloaded = self.settings.borrow_mut().reload();
                 match reloaded {

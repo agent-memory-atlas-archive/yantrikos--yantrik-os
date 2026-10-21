@@ -14,6 +14,7 @@ hex 4 crates/yantrik-ui-slint/ui/email.slint
 hex 1 crates/yantrik-ui-slint/ui/file_browser.slint
 hex 12 crates/yantrik-ui-slint/ui/settings.slint
 hex 11 crates/yantrik-ui-slint/ui/terminal_workbench.slint
+private-control 1 apps/container-manager/ui/container_manager.slint
 private-control 1 crates/yantrik-ui-slint/ui/about.slint
 private-control 1 crates/yantrik-ui-slint/ui/agents_nav.slint
 private-control 1 crates/yantrik-ui-slint/ui/agents_start.slint
@@ -40,7 +41,6 @@ private-control 1 crates/yantrik-ui-slint/ui/components/onboard_kit.slint
 private-control 1 crates/yantrik-ui-slint/ui/components/question_card.slint
 private-control 1 crates/yantrik-ui-slint/ui/components/quick_settings_parts.slint
 private-control 1 crates/yantrik-ui-slint/ui/components/whisper_card.slint
-private-control 1 crates/yantrik-ui-slint/ui/container_manager.slint
 private-control 4 crates/yantrik-ui-slint/ui/device_dashboard.slint
 private-control 1 crates/yantrik-ui-slint/ui/file_browser.slint
 private-control 1 crates/yantrik-ui-slint/ui/image_viewer.slint

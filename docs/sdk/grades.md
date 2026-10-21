@@ -49,12 +49,13 @@ calendar's author explains why that is `sensitive` and not `dangerous`:
 
 Stopping a container interrupts whatever it was serving, though it can be started again:
 
-<!-- from: apps/container-manager/src/main.rs -->
+<!-- from: apps/container-manager/src/intents.rs -->
 ```rust
-            // Recoverable, but it interrupts whatever the container was serving.
-            Action::new("stop", "Stop a running container")
-                .arg(Param::text("container"))
-                .risk("sensitive"),
+    named(
+        table,
+        Action::new("stop", "Stop a running container").risk("sensitive"),
+        Verb::Stop,
+    );
 ```
 
 And a grade can be about what an action does to the *person* rather than to the machine. Email's

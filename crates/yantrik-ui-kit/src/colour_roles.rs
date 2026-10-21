@@ -17,22 +17,39 @@ const SYSTEM_MONITOR: &str = "apps/system-monitor/ui/system_monitor.slint";
 /// The kit, where the status row and the tier badge live now that two screens share each.
 const KIT: &str = "crates/yantrik-ui-kit/slint/";
 
+/// A screen's source, wherever it lives now: in its app once the app is on YantrikApp
+/// (`apps/<app>/ui/<file>`), in the shell's folder until then.
+fn screen(file: &str) -> String {
+    let root: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+    let moved = std::fs::read_dir(root.join("apps"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|app| app.path().join("ui").join(file))
+        .find(|path| path.is_file());
+    match moved {
+        Some(path) => std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display())),
+        None => read(&format!("{UI}{file}")),
+    }
+}
+
 /// Screens that are not a mind's, and so must not draw the minds' teal. Containers' "Run New",
 /// About's version pill and section bars, the Skills chips, the System and System Monitor bars,
 /// the setup and login screens, and the shared chart, toast and ribbon all did.
 #[test]
 fn teal_stays_off_screens_that_are_not_a_minds() {
-    for file in [
+    for (file, src) in [
         "container_manager.slint", "about.slint", "skill_store.slint", "settings.slint",
         "system_dashboard.slint", "recipes.slint", "permission_dashboard.slint",
         "installer.slint", "onboarding.slint", "onboarding_first_run.slint", "login.slint", "terminal.slint",
         "components/onboard_kit.slint", "components/app_ribbon.slint", "components/window_frame.slint",
+        "system_monitor.slint",
     ]
-    .map(|file| format!("{UI}{file}"))
+    .map(|file| (file.to_string(), screen(file)))
     .into_iter()
-    .chain([SYSTEM_MONITOR.to_string(), format!("{KIT}model_tier_badge.slint")])
+    // The badge lives in the kit; the shell's file of that name only re-exports it.
+    .chain([(format!("{KIT}model_tier_badge.slint"), read(&format!("{KIT}model_tier_badge.slint")))])
     {
-        let src = read(&file);
         for teal in ["Theme.cyan", "Theme.tint-cyan"] {
             assert!(!src.contains(teal), "{file} draws `{teal}`, the minds' colour");
         }
@@ -47,7 +64,7 @@ fn teal_stays_off_screens_that_are_not_a_minds() {
 #[test]
 fn a_primary_button_is_the_accent_not_the_apps_colour() {
     for file in ["container_manager.slint", "permission_dashboard.slint", "network_manager.slint"] {
-        let src = read(&format!("{UI}{file}"));
+        let src = screen(file);
         assert!(!src.contains("primary ? AppIdentity.accent"), "{file} fills its primary with the app's colour");
         assert!(src.contains("import { YButton }"), "{file} uses the kit's button");
     }
