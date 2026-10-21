@@ -7,11 +7,14 @@
 
 use std::path::PathBuf;
 
+use yantrik_app::app::WindowId;
 use yantrik_app::effects::Effects;
 
 use super::navigate::show_note;
 use super::saving::{self, How};
-use super::{after_store, begin, drafts, failed, recovery, refreshed, relist, said, show, WORKER_STOPPED};
+use super::{
+    after_store, begin, drafts, failed, recovery, refreshed, relist, said, set_status, show, windows, WORKER_STOPPED,
+};
 use crate::command::Command;
 use crate::model::{Model, Work};
 use crate::note::Note;
@@ -29,26 +32,50 @@ pub fn load(m: &mut Model, fx: &mut Effects<Notes>) {
 const KEPT_OVER_CHANGE: &str =
     "The open note changed on disk while you typed in it. What you typed is kept, unsaved; the note was not read again.";
 
-/// The library as read. The open note stays open: read afresh if its file is still there, or, if
-/// it has text typed while the library was read, kept as it is.
+/// A window's note before a reload: the window, what its note was opened from, and whether it
+/// holds text not on disk.
+struct Before {
+    window: WindowId,
+    key: Option<(String, bool)>,
+    kept: bool,
+}
+
+/// The library as read. Each window's note stays open: read afresh if its file is still there, or,
+/// if it has text typed while the library was read, kept as it is.
 pub fn loaded(m: &mut Model, fx: &mut Effects<Notes>, result: Result<Loaded, String>) {
     m.busy = None;
     match result {
         Ok(loaded) => {
             let was_read_only = m.vault.read_only().is_some();
             m.vault = m.vault.with_access(loaded.read_only.clone());
-            let key = m.current().map(|c| (c.id().to_string(), c.trash()));
+            let before: Vec<Before> = m
+                .panes()
+                .map(|p| {
+                    let c = m.current_in(p);
+                    let key = c.as_ref().map(|c| (c.id().to_string(), c.trash()));
+                    Before { window: p.window, key, kept: c.is_some_and(|c| c.unsaved()) }
+                })
+                .collect();
             m.library = loaded.notes;
-            let again = key.and_then(|(id, trash)| m.library.iter().find(|n| n.id == id && n.trash == trash).cloned());
-            let kept = m.unsaved();
+            let again = |m: &Model, key: &Option<(String, bool)>| {
+                let (id, trash) = key.as_ref()?;
+                m.library.iter().find(|n| n.id == *id && n.trash == *trash).cloned()
+            };
             // The file is no longer what the note was read from, so reading it again would have
             // shown something else. What that change means is the outside-change flow's to say;
             // here it is only never read over the text.
-            let changed = kept && m.current().is_some_and(|c| again.as_ref().map(|n| &n.content) != c.file.on_disk.as_ref());
-            if !kept {
-                // Closed first, so the note read afresh is a fresh document and not the old one.
-                show_note(m, fx, None);
-                show_note(m, fx, again);
+            let changed = before.iter().filter(|b| b.kept).any(|b| {
+                let c = m.pane_of(b.window).and_then(|p| m.current_in(p));
+                c.is_some_and(|c| again(m, &b.key).as_ref().map(|n| &n.content) != c.file.on_disk.as_ref())
+            });
+            // Closed first in every window that reads its note afresh, so a note read again is a
+            // fresh document and not the old one, even when two windows show it.
+            for b in before.iter().filter(|b| !b.kept) {
+                m.within(b.window, |m| show_note(m, fx, None));
+            }
+            for b in before.iter().filter(|b| !b.kept) {
+                let note = again(m, &b.key);
+                m.within(b.window, |m| show_note(m, fx, note));
             }
             m.ready = true;
             // What the last run kept and did not save is weighed once, against the library as
@@ -60,20 +87,26 @@ pub fn loaded(m: &mut Model, fx: &mut Effects<Notes>, result: Result<Loaded, Str
                 changed.then_some(KEPT_OVER_CHANGE),
                 offered.as_deref(),
             ]);
-            if kept {
-                still_typing(m, fx);
-                // Kept while the vault refused writes: its save may have been refused already, and
-                // the autosave does not try a failed save again until something changes. Saved
-                // now, as the person's own save would be, so no further key is needed.
-                if was_read_only && m.vault.read_only().is_none() {
-                    saving::save(m, fx, How::Asked);
-                }
-            } else {
-                show(m, fx);
+            let writable_again = was_read_only && m.vault.read_only().is_none();
+            for b in &before {
+                m.within(b.window, |m| {
+                    if !b.kept {
+                        return show(m, fx);
+                    }
+                    still_typing(m, fx);
+                    // Kept while the vault refused writes: its save may have been refused already,
+                    // and the autosave does not try a failed save again until something changes.
+                    // Saved now, as the person's own save would be, so no further key is needed.
+                    // The store does one thing at a time, so this starts the first window's; the
+                    // others' failed saves follow as each lands (saving::retry_failed).
+                    if writable_again {
+                        saving::save(m, fx, How::Asked);
+                    }
+                });
             }
             after_store(m, fx);
         }
-        Err(e) => failed(m, fx, e),
+        Err(e) => failed(m, fx, None, e),
     }
 }
 
@@ -102,11 +135,16 @@ pub fn trashed(m: &mut Model, fx: &mut Effects<Notes>, id: &str, result: Result<
             // The Trash holds the note as its file held it. Text typed while the job ran is in
             // the window only: it becomes a note of its own, saved at once, never closed away.
             let typed = m.current().filter(|c| c.id() == id && c.unsaved()).map(|c| c.content().clone());
-            if let (Some(_), Some(d)) = (&typed, m.current_id().and_then(|doc| m.documents.get_mut(doc))) {
+            let doc = m.current_id();
+            if let (Some(_), Some(d)) = (&typed, doc.and_then(|doc| m.documents.get_mut(doc))) {
                 // Its text moves to the new note, whose own draft takes over.
                 drafts::discard(d, fx);
             }
             show_note(m, fx, None);
+            // The note is in the Trash for every window that showed it.
+            if let Some(doc) = doc {
+                windows::follow_to(m, fx, doc, None);
+            }
             match typed {
                 Some(content) => {
                     let kept = Note { id: format!("recovered-{}.md", uuid7::uuid7()), content, ..Note::default() };
@@ -125,7 +163,7 @@ pub fn trashed(m: &mut Model, fx: &mut Effects<Notes>, id: &str, result: Result<
             }
             after_store(m, fx);
         }
-        Err(e) => failed(m, fx, e),
+        Err(e) => failed(m, fx, None, e),
     }
 }
 
@@ -156,10 +194,18 @@ pub fn export(m: &mut Model, fx: &mut Effects<Notes>, path: PathBuf) {
     });
 }
 
+/// Which job a note came back from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Opened {
+    /// The Trash: the note every window showed there is the restored one now.
+    Restored,
+    Imported,
+}
+
 /// A note restored from the Trash, or imported: in the library, open, and the whole library
 /// shown again. If the open note has text typed while the job ran, it stays open instead, and the
 /// new note waits in the list.
-pub fn opened(m: &mut Model, fx: &mut Effects<Notes>, result: Result<Note, String>) {
+pub fn opened(m: &mut Model, fx: &mut Effects<Notes>, result: Result<Note, String>, how: Opened) {
     m.busy = None;
     match result {
         Ok(note) => {
@@ -168,7 +214,11 @@ pub fn opened(m: &mut Model, fx: &mut Effects<Notes>, result: Result<Note, Strin
             let kept = m.unsaved();
             let title = note.title();
             if !kept {
-                show_note(m, fx, Some(note));
+                let from = m.current_id();
+                show_note(m, fx, Some(note.clone()));
+                if let (Opened::Restored, Some(doc)) = (how, from) {
+                    windows::follow_to(m, fx, doc, Some(&note));
+                }
             }
             m.pane.folder = "all".into();
             m.pane.query.clear();
@@ -189,7 +239,7 @@ pub fn opened(m: &mut Model, fx: &mut Effects<Notes>, result: Result<Note, Strin
             }
             after_store(m, fx);
         }
-        Err(e) => failed(m, fx, e),
+        Err(e) => failed(m, fx, None, e),
     }
 }
 
@@ -217,13 +267,13 @@ pub fn exported(m: &mut Model, fx: &mut Effects<Notes>, result: Result<(), Strin
         Ok(()) => {
             m.pane.dialog = 0;
             m.notice = "Exported to the requested file.".into();
-            m.status = "All changes saved".into();
+            set_status(m, "All changes saved");
             fx.changed(CHROME);
             fx.changed(STATUS);
             landed(m);
             after_store(m, fx);
         }
-        Err(e) => failed(m, fx, e),
+        Err(e) => failed(m, fx, None, e),
     }
 }
 

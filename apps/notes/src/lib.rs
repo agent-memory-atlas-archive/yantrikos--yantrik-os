@@ -6,6 +6,9 @@
 //! jobs one at a time with the edits made meanwhile as one follow-up, its file watched while it
 //! is open; the autosave is a framework timer; the twenty-one actions are intents, worded and
 //! graded as they were; and `main.rs` is three lines.
+//!
+//! Step 8d-3b: a note can be open in more than one window. Each window is a view with a pane of
+//! its own (pane.rs), and a note two windows show is one document (update/windows.rs).
 
 use std::path::PathBuf;
 
@@ -25,6 +28,7 @@ mod describe;
 mod intents;
 mod model;
 mod note;
+mod pane;
 mod recovery;
 mod store;
 mod undo;
@@ -94,7 +98,11 @@ impl App for Notes {
 
     fn wire(cx: &Cx<Self>) {
         let ui = cx.ui();
-        view::wire(cx, &ui);
+        view::wire(cx, &ui, WindowId::PRIMARY);
+    }
+
+    fn wire_window(cx: &Cx<Self>, ui: &NotesApp, window: WindowId) {
+        view::wire(cx, ui, window);
     }
 
     fn start(_: &Model, fx: &mut Effects<Self>) {
@@ -105,8 +113,8 @@ impl App for Notes {
         update::update(m, command, fx)
     }
 
-    fn render(ui: &NotesApp, _: WindowId, m: &Model, changed: &Changed) {
-        view::render::render(ui, m, changed);
+    fn render(ui: &NotesApp, window: WindowId, m: &Model, changed: &Changed) {
+        view::render::render(ui, window, m, changed);
     }
 
     fn describe(m: &Model) -> View {
@@ -120,6 +128,8 @@ impl App for Notes {
     fn event(event: Event<()>, _: &Model) -> Option<Command> {
         match event {
             Event::CloseRequested(window) => Some(Command::CloseRequested(window)),
+            Event::Activated(window) => Some(Command::From { window, command: Box::new(Command::Activated) }),
+            Event::WindowNotOpened { window, why } => Some(Command::WindowNotOpened { window, why }),
             Event::ExitRequested(ExitReason::Logout) => Some(Command::LoggingOut),
             Event::ExitRequested(_) => Some(Command::Quit),
             Event::DraftSaved(name) => Some(Command::DraftSaved(name)),

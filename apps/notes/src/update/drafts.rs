@@ -1,7 +1,7 @@
-//! The open note's draft, kept while it has edits not on disk (design §2, "Drafts are per
-//! document, ordered by `seq`").
+//! Each open note's draft, kept while it has edits not on disk (design §2, "Drafts are per
+//! document, ordered by `seq`"). A note two windows show is one document, so it has one draft.
 //!
-//! After every command the document is asked whether a draft is owed: one is, when it is dirty
+//! After every command each document is asked whether a draft is owed: one is, when it is dirty
 //! and its last draft is older than its edits. The framework writes it through its drafts lane
 //! after a debounce, so typing is not a write per key, and a newer draft of the same note takes
 //! the place of one still waiting. It is removed once a save of the same edits or later ones has
@@ -11,7 +11,7 @@
 use std::path::Path;
 
 use yantrik_app::documents::draft::ENVELOPE_VERSION;
-use yantrik_app::documents::{Document, DraftState, Envelope, Fingerprint, OutsideState, Source};
+use yantrik_app::documents::{Document, DocumentId, DraftState, Envelope, Fingerprint, OutsideState, Source};
 use yantrik_app::effects::Effects;
 
 use crate::model::{Model, NoteFile};
@@ -21,11 +21,17 @@ use crate::update::said;
 use crate::view::render::STATUS;
 use crate::Notes;
 
-/// Brings the open note's draft up to date: kept when owed, removed when its edits are saved. A
+/// Brings every open note's draft up to date: kept when owed, removed when its edits are saved. A
 /// draft that could not be written is tried again at the next edit, not at every command: the
 /// failure itself arrives as a command, and must not ask for the same write again.
 pub fn sync(m: &mut Model, fx: &mut Effects<Notes>) {
-    let Some(id) = m.current_id() else { return };
+    let open: Vec<DocumentId> = m.documents.iter().map(|d| d.id).collect();
+    for id in open {
+        sync_one(m, fx, id);
+    }
+}
+
+fn sync_one(m: &mut Model, fx: &mut Effects<Notes>, id: DocumentId) {
     let Some(d) = m.documents.get_mut(id) else { return };
     if d.draft_superseded() {
         fx.discard_draft(&d.source.key());
@@ -79,19 +85,19 @@ pub fn discard(document: &mut Document<NoteText>, fx: &mut Effects<Notes>) {
 
 /// The latest draft of `name` reached the disk: a notice that said it could not is answered.
 pub fn saved(m: &mut Model, fx: &mut Effects<Notes>, name: &str) {
-    let open = m.current().is_some_and(|c| c.doc.source.key() == name);
+    let open = m.documents.by_key(name).is_some();
     if open && m.notice.starts_with(said::DRAFT_NOT_KEPT_START) {
         m.notice.clear();
         fx.changed(STATUS);
     }
 }
 
-/// A draft of `name` could not be written. Said when it is the open note's and its edits are
-/// still not on disk; a draft of a note already saved or closed protects nothing now.
+/// A draft of `name` could not be written. Said when it is an open note's (in any window) and its
+/// edits are still not on disk; a draft of a note already saved or closed protects nothing now.
 pub fn not_saved(m: &mut Model, fx: &mut Effects<Notes>, name: &str, why: &str) {
-    let Some(id) = m.current_id() else { return };
+    let Some(id) = m.documents.by_key(name) else { return };
     let Some(d) = m.documents.get_mut(id) else { return };
-    if d.source.key() != name || !d.dirty() {
+    if !d.dirty() {
         return;
     }
     let sentence = said::draft_not_kept(why);

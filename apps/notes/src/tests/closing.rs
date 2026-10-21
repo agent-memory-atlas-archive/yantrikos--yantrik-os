@@ -1,14 +1,19 @@
 //! Gate row "Close cancelled" (design/notes-gate-2026-10-21.md §3): close as a document flow. A
 //! clean close asks nothing; a dirty one asks *Save / Don't save / Cancel* once, and each answer
-//! does exactly what it says. One note in two views is 3b's.
+//! does exactly what it says. Closing one of two windows on a note is in tests/windows.rs; quitting
+//! with two notes unsaved in two windows is here.
+
+use std::path::PathBuf;
 
 use yantrik_app::app::{Event, ExitReason, WindowId};
 use yantrik_app::documents::disk::Step;
 use yantrik_testing::TestApp;
 
+use super::windows::{two_notes_two_windows, type_in};
 use super::{draft_file, failing, file, notice, settle, unsaved, with_note};
 use crate::command::{Command, WindowAction};
 use crate::update::closing::CLOSE_DIALOG;
+use crate::update::{said, AUTOSAVE_AFTER};
 use crate::Notes;
 
 const TYPED: &str = "# Closing\n\nlast words";
@@ -145,8 +150,8 @@ fn a_second_close_during_the_save_asks_nothing_and_saves_nothing_more() {
     assert_eq!(app.exit_reason(), Some(ExitReason::LastWindowClosed));
 }
 
-/// Quitting asks once over every note with edits not on disk. Notes shows one note at a time in
-/// 3a, so one is asked about here; two open at once (two windows) is 3b's.
+/// Quitting asks once over every note with edits not on disk; with one window, one is asked about
+/// (two windows on two notes are below).
 #[test]
 fn quitting_asks_once_and_ends_once_saved() {
     let (app, path) = typed();
@@ -198,4 +203,98 @@ fn closing_a_read_only_library_with_unsaved_text_offers_dont_save() {
     press(&app, "close-discard");
     assert_eq!(app.exit_reason(), Some(ExitReason::LastWindowClosed));
     assert_eq!(file(&path), saved, "nothing was written into the library");
+}
+
+/// Two windows on two notes, each with text not on disk, and the app asked to end.
+fn two_unsaved_then_quit() -> (TestApp<Notes>, WindowId, PathBuf, WindowId, PathBuf) {
+    let (app, first, left, second, right) = two_notes_two_windows();
+    app.run(Command::From { window: first, command: Box::new(Command::Edit(LEFT.into())) });
+    app.run(Command::From { window: second, command: Box::new(Command::Edit(RIGHT.into())) });
+    app.event(Event::ExitRequested(ExitReason::App));
+    app.event(Event::ExitRequested(ExitReason::App));
+    (app, first, left, second, right)
+}
+
+const LEFT: &str = "# Left\n\nleft words";
+const RIGHT: &str = "# Right\n\nright words";
+
+/// Quitting with two notes unsaved in two windows asks once, over both, in the focused window;
+/// Save saves one, then the other, and quits only when both have landed.
+#[test]
+fn quitting_with_two_unsaved_notes_in_two_windows_asks_once_and_saves_both() {
+    let (app, first, left, second, right) = two_unsaved_then_quit();
+    let asked = |w: WindowId| app.window(w, |ui| (ui.get_dialog(), ui.get_close_heading().to_string())).unwrap();
+    assert_eq!(asked(second), (CLOSE_DIALOG, "Save 2 notes before Notes closes?".into()), "asked once, over both");
+    assert_eq!(asked(first).0, 0, "in one window");
+    let said = app.window(second, |ui| ui.get_close_said().to_string()).unwrap();
+    assert!(said.contains("Left") && said.contains("Right"), "{said}");
+    app.window(second, |ui| ui.invoke_action("close-save".into()));
+    assert_eq!((app.jobs_waiting(), app.exit_reason()), (1, None), "one save at a time, and no quit yet");
+    assert!(app.run_one_job(), "the first lands, and the second starts");
+    assert_eq!((app.jobs_waiting(), app.exit_reason()), (1, None), "still not quit: one is not on disk");
+    settle(&app);
+    assert_eq!((file(&left), file(&right)), (LEFT.to_string(), RIGHT.to_string()));
+    assert_eq!(app.exit_reason(), Some(ExitReason::App));
+}
+
+/// A save that fails while quitting over two notes keeps both windows, both texts and the app,
+/// and says which note did not save.
+#[test]
+fn a_failure_while_quitting_over_two_notes_keeps_everything_and_says_which() {
+    let (app, first, left, second, right) = two_unsaved_then_quit();
+    let name = right.file_name().unwrap().to_str().unwrap().to_string();
+    failing(&app).fail(Step::Rename, &name, None);
+    app.window(second, |ui| ui.invoke_action("close-save".into()));
+    settle(&app);
+    assert_eq!(app.exit_reason(), None, "Notes stays open");
+    assert_eq!(app.windows(), vec![first, second], "with both windows");
+    assert!(notice(&app).starts_with("\"Right\" was not saved, so Notes stays open."), "{}", notice(&app));
+    assert!(notice(&app).contains("injected failure at Rename"), "and why: {}", notice(&app));
+    assert_eq!(file(&left), LEFT, "the one that could be saved is");
+    assert_eq!(file(&right), "# Right\n\n", "the other is not, and its file is as it was");
+    let right_text = app.model(move |m| m.pane_of(second).and_then(|p| m.current_in(p)).unwrap().text().to_string());
+    assert_eq!(right_text, RIGHT, "its text is kept, unsaved");
+    assert!(app.model(|m| m.closing.is_none()), "the close is over; quitting again asks again");
+}
+
+/// #918's review, 3: another note's autosave failing while this window's close waits to save does
+/// not end the close. This window's note is still saved and the window closes, and the failure is
+/// said with the title of the note it is about.
+#[test]
+fn another_notes_failed_autosave_does_not_end_this_windows_close() {
+    let (app, first, left, second, right) = two_notes_two_windows();
+    type_in(&app, first, LEFT);
+    type_in(&app, second, RIGHT);
+    failing(&app).fail(Step::Rename, right.file_name().unwrap().to_str().unwrap(), None);
+    app.advance(AUTOSAVE_AFTER);
+    assert_eq!(app.jobs_waiting(), 1, "Right's autosave is in flight");
+    app.close_requested(first);
+    app.window(first, |ui| ui.invoke_action("close-save".into()));
+    assert!(app.run_one_job(), "Right's save lands, failed");
+    assert!(notice(&app).starts_with("\"Right\": "), "named: {}", notice(&app));
+    assert!(notice(&app).contains("injected failure at Rename"), "{}", notice(&app));
+    assert!(app.model(|m| m.closing.is_some()), "the close still waits on Left");
+    settle(&app);
+    assert_eq!(file(&left), LEFT, "Left is saved");
+    assert_eq!(app.windows(), vec![second], "and its window closed");
+    assert_eq!(file(&right), "# Right\n\n");
+    let right_text = app.model(move |m| m.pane_of(second).and_then(|p| m.current_in(p)).unwrap().text().to_string());
+    assert_eq!(right_text, RIGHT, "Right's text is kept, unsaved");
+}
+
+/// #918's review, 5: a window's close that would ask while another window's prompt waits says why
+/// nothing happened.
+#[test]
+fn a_close_that_waits_for_another_windows_prompt_says_so() {
+    let (app, first, _, second, _) = two_notes_two_windows();
+    type_in(&app, first, LEFT);
+    type_in(&app, second, RIGHT);
+    app.close_requested(second);
+    app.close_requested(first);
+    assert_eq!(app.window(first, |ui| ui.get_dialog()), Some(0), "not asked over the other");
+    assert_eq!(notice(&app), said::ANSWER_THE_OTHER_FIRST);
+    assert_eq!(app.window(second, |ui| ui.get_dialog()), Some(CLOSE_DIALOG), "the other still asks");
+    app.window(second, |ui| ui.invoke_action("close-cancel".into()));
+    app.close_requested(first);
+    assert_eq!(app.window(first, |ui| ui.get_dialog()), Some(CLOSE_DIALOG), "asked once the other is answered");
 }

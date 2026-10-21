@@ -13,12 +13,16 @@
 //! here can lose it. They pass the library's limits: a one-off recovery is not growth, and
 //! refusing it would leave a person whose library is full no way out of the conflict but to lose
 //! their text. A change to a note with nothing unsaved asks nothing: it is followed (follow.rs).
+//!
+//! A note two windows show has one conflict: both show the bar, and a choice made in either
+//! resolves it for both. *Keep mine* moves every window on it to the kept note; *Take theirs*
+//! starts every window's undo history again.
 
 use yantrik_app::documents::{DocumentId, Fingerprint, Observed, OutsideState};
 use yantrik_app::effects::Effects;
 
 use super::navigate::show_note;
-use super::{after_store, begin, failed, follow, refreshed, relist, said, save_state, show};
+use super::{after_store, begin, failed, follow, refreshed, relist, said, save_state, set_status, show, windows};
 use crate::command::{Command, Resolution};
 use crate::model::{Current, Model, Work};
 use crate::note::{now, Note, NoteText};
@@ -40,8 +44,14 @@ pub fn seen(m: &mut Model, fx: &mut Effects<Notes>, key: &str, seen: Observed) {
         fx.watch(&key, path, seen);
     }
     if after != before {
-        m.pane.outside_later = false;
-        m.status = save_state(m).into();
+        // News for every window on the note, *Not now* or not.
+        let doc = d.id;
+        for window in m.windows_showing(doc) {
+            if let Some(pane) = m.pane_of_mut(window) {
+                pane.outside_later = false;
+            }
+        }
+        set_status(m, save_state(m));
         fx.changed(STATUS);
     }
     fx.changed(OUTSIDE);
@@ -98,7 +108,7 @@ pub fn resolved(
     m.busy = None;
     let resolved = match result {
         Ok(resolved) => *resolved,
-        Err(e) => return failed(m, fx, said::not_kept(&e)),
+        Err(e) => return failed(m, fx, None, said::not_kept(&e)),
     };
     m.library.push(resolved.kept.clone());
     if let Some(asked) = m.asked.as_mut() {
@@ -143,6 +153,8 @@ pub(super) fn take_theirs(m: &mut Model, fx: &mut Effects<Notes>, doc: DocumentI
         *n = Note { id, content: theirs, modified, trash: false, stored: true };
     }
     shown_resolved(m, fx, sentence);
+    // Every other window on the note shows the file's text too, its undo history started again.
+    windows::follow(m, fx, true);
 }
 
 /// The window moves to the kept note. The original is listed as its files hold it now, or not at
@@ -172,12 +184,14 @@ fn switch_to_kept(
     let typed_meanwhile = latest != kept.content;
     // The kept note is a write of ours: another program replacing it keeps it again (follow.rs).
     m.written.insert(kept.id.clone(), Fingerprint::of_bytes(kept.content.text.as_bytes()));
-    show_note(m, fx, Some(kept));
+    show_note(m, fx, Some(kept.clone()));
     if typed_meanwhile {
         if let Some((d, _)) = m.current_mut() {
             d.edit(|c| *c = latest);
         }
     }
+    // The text moved to the kept note in every window that showed it.
+    windows::follow_to(m, fx, doc, Some(&kept));
     shown_resolved(m, fx, sentence);
     if m.unsaved() {
         refreshed(m, fx);
@@ -199,7 +213,7 @@ fn shown_resolved(m: &mut Model, fx: &mut Effects<Notes>, sentence: &str) {
 
 /// Nothing was replaced; the window keeps its note, in conflict, and says why.
 fn stay(m: &mut Model, fx: &mut Effects<Notes>, sentence: String) {
-    m.status = save_state(m).into();
+    set_status(m, save_state(m));
     relist(m, fx);
     say(m, fx, &sentence);
 }
@@ -221,7 +235,7 @@ pub fn compared(m: &mut Model, fx: &mut Effects<Notes>, doc: DocumentId, result:
     m.busy = None;
     let theirs = match result {
         Ok(theirs) => theirs,
-        Err(e) => return failed(m, fx, said::compare_unread(&e)),
+        Err(e) => return failed(m, fx, None, said::compare_unread(&e)),
     };
     if theirs.is_none() {
         if let Some(d) = m.documents.get_mut(doc) {
@@ -236,13 +250,14 @@ pub fn compared(m: &mut Model, fx: &mut Effects<Notes>, doc: DocumentId, result:
     if let Some(asked) = m.asked.as_mut() {
         asked.landed = true;
     }
-    m.status = save_state(m).into();
+    set_status(m, save_state(m));
     fx.changed(STATUS);
     fx.changed(OUTSIDE);
     after_store(m, fx);
 }
 
-/// *Not now*: the bar is put away; the next save the person asks for is refused and brings it back.
+/// *Not now*: the bar is put away in this window; the next save the person asks for is refused and
+/// brings it back.
 pub fn not_now(m: &mut Model, fx: &mut Effects<Notes>) {
     m.pane.outside_later = true;
     fx.changed(OUTSIDE);

@@ -30,7 +30,7 @@ fn two_quick_edits_during_a_save_produce_exactly_one_follow_up() {
     assert_eq!(app.jobs_waiting(), 0, "and nothing after it");
     assert_eq!(file(&path), "# Draft\n\none two three", "the follow-up wrote the latest edit");
     assert!(!unsaved(&app));
-    assert_eq!(app.model(|m| m.status.clone()), "All changes saved");
+    assert_eq!(app.model(|m| m.pane.status.clone()), "All changes saved");
 }
 
 #[test]
@@ -42,7 +42,7 @@ fn a_failed_save_stays_unsaved_and_the_autosave_does_not_retry_it_until_somethin
     autosave(&app);
     assert!(unsaved(&app), "a failed save keeps the edits as edits");
     assert!(notice(&app).contains("injected failure at Write"), "{}", notice(&app));
-    assert_eq!(app.model(|m| m.status.clone()), "Needs attention · draft kept");
+    assert_eq!(app.model(|m| m.pane.status.clone()), "Needs attention · draft kept");
     let tried = disk.hits.lock().unwrap().len();
     // Ticks, and the autosave itself, find the same content failed: nothing is tried again.
     app.advance(AUTOSAVE_AFTER * 6);
@@ -102,7 +102,7 @@ fn a_change_the_watch_sees_first_is_offered_at_once_and_no_save_is_tried_over_it
     autosave(&app);
     assert_eq!(app.jobs_waiting(), 0, "a save over it is not even tried");
     assert_eq!(notice(&app), "", "the autosave adds nothing to what the bar says");
-    assert_eq!(app.model(|m| m.status.clone()), said::WAITING_ON_CHOICE);
+    assert_eq!(app.model(|m| m.pane.status.clone()), said::WAITING_ON_CHOICE);
     app.run(Command::Window(WindowAction::Save));
     assert_eq!(app.jobs_waiting(), 0);
     assert_eq!(notice(&app), not_saved_over(), "the person's own Save is refused in words");

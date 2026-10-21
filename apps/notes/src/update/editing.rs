@@ -3,9 +3,11 @@
 
 use yantrik_app::effects::Effects;
 
-use super::{refreshed, saving};
-use crate::model::{Cue, Model};
+use super::{refreshed, said, saving};
+use crate::model::Model;
+use crate::pane::Cue;
 use crate::store::{validate, VAULT_LIMIT};
+use crate::undo::Stepped;
 use crate::view::render::{CONTENT, CUES, STATUS};
 use crate::Notes;
 
@@ -35,7 +37,10 @@ pub fn edit(m: &mut Model, fx: &mut Effects<Notes>, text: String) {
     }
     let mut previous = String::new();
     doc.edit(|c| previous = std::mem::replace(&mut c.text, text));
-    m.pane.history.edited(previous);
+    // This window's history, against the text as this edit left it.
+    if let Some(d) = m.current_id().and_then(|id| m.documents.get(id)) {
+        m.pane.history.edited(previous, &d.content.text);
+    }
     refreshed(m, fx);
 }
 
@@ -69,10 +74,30 @@ pub fn pin(m: &mut Model, fx: &mut Effects<Notes>) {
     saving::save(m, fx, saving::How::Asked);
 }
 
-/// One step back through this view's history of the open note, or forward again.
-pub fn undo(m: &mut Model, fx: &mut Effects<Notes>, redo: bool) {
-    let Some(now) = m.current().filter(|c| !c.trash()).map(|c| c.text().to_string()) else { return };
-    let Some(text) = m.pane.history.step(redo, now) else { return };
+/// What an undo or redo came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Undone {
+    Stepped,
+    /// Nothing to take back (or put back) in this window.
+    Nothing,
+    /// The note was changed in another window since: this window's history was dropped.
+    Dropped,
+}
+
+/// One step back through this view's history of the open note, or forward again. A history the
+/// other window's edits overtook is dropped, and said, rather than stepped over them.
+pub fn undo(m: &mut Model, fx: &mut Effects<Notes>, redo: bool) -> Undone {
+    let Some(now) = m.current().filter(|c| !c.trash()).map(|c| c.text().to_string()) else { return Undone::Nothing };
+    let text = match m.pane.history.step(redo, now) {
+        Stepped::To(text) => text,
+        Stepped::Nothing => return Undone::Nothing,
+        Stepped::Dropped => {
+            m.notice = said::UNDO_DROPPED.into();
+            m.lasting_notice = false;
+            fx.changed(STATUS);
+            return Undone::Dropped;
+        }
+    };
     let caret = text.len() as i32;
     if let Some((doc, _)) = m.current_mut() {
         doc.edit(|c| c.text = text);
@@ -81,4 +106,5 @@ pub fn undo(m: &mut Model, fx: &mut Effects<Notes>, redo: bool) {
     fx.changed(CONTENT);
     fx.changed(CUES);
     refreshed(m, fx);
+    Undone::Stepped
 }

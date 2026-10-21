@@ -1,13 +1,21 @@
-//! Saving the open note through its document: one save in flight, the edits made meanwhile in
-//! one follow-up, a failed save not retried by the autosave until something changes and said with
-//! how much of it reached the disk, and a file changed outside never written over: the person
+//! Saving a note through its document: one save in flight, of any note, the edits made meanwhile
+//! in one follow-up, a failed save not retried by the autosave until something changes and said
+//! with how much of it reached the disk, and a file changed outside never written over: the person
 //! chooses what happens to the two versions first (outside.rs). Another program's version a save
 //! replaced is kept by the store and said here.
+//!
+//! A save that lands shows the disk takes writes again, so a note whose save failed before is then
+//! saved again, one at a time, with no key pressed in it ([`retry_failed`]); its failure stays said
+//! until it is on disk.
 
-use yantrik_app::documents::{BeginSave, DocumentId, Durability, Fingerprint, SaveError, SaveOutcome, SaveTicket};
+use yantrik_app::documents::{
+    BeginSave, DocumentId, Durability, Fingerprint, SaveError, SaveOutcome, SaveState, SaveTicket,
+};
 use yantrik_app::effects::Effects;
 
-use super::{after_store, begin, drafts, failed, refreshed, relist, said, save_state, AUTOSAVE};
+use super::{
+    after_store, begin, drafts, failed, refreshed, relist, said, save_state, set_status, AUTOSAVE, AUTOSAVE_AFTER,
+};
 use crate::command::Command;
 use crate::model::{Model, Work};
 use crate::note::{Note, NoteText};
@@ -24,30 +32,44 @@ pub enum How {
     Asked,
 }
 
-/// Saves the open note, if it has edits not on disk.
+/// The autosave's debounce ran out: every note with edits not on disk is saved, each in a window
+/// that shows it, the focused window's first. The store does one thing at a time, so one save
+/// starts now; its landing arms the debounce again (`refreshed`), and the next is saved then.
+pub fn autosave(m: &mut Model, fx: &mut Effects<Notes>) {
+    let focused = m.current_id();
+    let others = m.documents.iter().map(|d| d.id).filter(|id| Some(*id) != focused);
+    let order: Vec<DocumentId> = focused.into_iter().chain(others).collect();
+    for doc in order {
+        if m.unsaved_doc(doc) {
+            save_document(m, fx, doc, How::Autosave);
+        }
+        if m.busy.is_some() {
+            return;
+        }
+    }
+}
+
+/// Saves `doc` in a window that shows it, if it has edits not on disk.
+pub fn save_document(m: &mut Model, fx: &mut Effects<Notes>, doc: DocumentId, how: How) {
+    if let Some(window) = m.windows_showing(doc).first().copied() {
+        m.within(window, |m| save(m, fx, how));
+    }
+}
+
+/// Saves the focused window's note, if it has edits not on disk.
 pub fn save(m: &mut Model, fx: &mut Effects<Notes>, how: How) {
-    // The store does one thing at a time; a save already in flight takes the edits as its
-    // follow-up below.
-    if m.busy.is_some_and(|w| w != Work::Save) {
+    let Some(doc) = m.current_id() else { return };
+    // The store does one thing at a time. A save of this note already in flight takes the edits
+    // as its follow-up below; a save of another note is followed by this one's once it lands.
+    if m.busy.is_some_and(|w| w != Work::Save(doc)) {
         return;
     }
     fx.stop_timer(AUTOSAVE);
     if !m.ready || !m.current().is_some_and(|c| c.unsaved() && !c.trash()) {
         return;
     }
-    let Some(doc) = m.current_id() else { return };
+    m.keep_unsaved_dirty();
     let Some((d, _)) = m.current_mut() else { return };
-    // Notes says unsaved by comparing with the file; the document counts edits. Every change is
-    // an edit of the document and a landed save sets what the file holds to the ticket's content,
-    // so unsaved (checked above) implies dirty. If they ever parted, no save would start and the
-    // caller would wait out its deadline. A test fails on it; a running Notes says so in its log
-    // and goes on, because a panic here would take the unsaved text with it.
-    if !d.dirty() {
-        if cfg!(test) {
-            panic!("Notes' unsaved note must be a dirty document");
-        }
-        tracing::error!("an unsaved note is not a dirty document; no save is started for it");
-    }
     let begun = match how {
         How::Autosave => d.begin_save(),
         How::Asked => d.retry_save(),
@@ -64,16 +86,16 @@ pub fn save(m: &mut Model, fx: &mut Effects<Notes>, how: How) {
 /// the footer only: the bar already asks, or the person put it away with *Not now*. A save the
 /// person (or a close, or an action) asked for is refused in words and brings the bar back.
 fn blocked(m: &mut Model, fx: &mut Effects<Notes>, how: How) {
-    let Some(sentence) = m.current().map(|c| said::blocked(c.outside())) else { return };
+    let Some((doc, sentence)) = m.current().map(|c| (c.doc.id, said::blocked(c.outside()))) else { return };
     match how {
         How::Autosave => {
-            m.status = save_state(m).into();
+            set_status(m, save_state(m));
             fx.changed(STATUS);
         }
         How::Asked => {
             m.pane.outside_later = false;
             fx.changed(OUTSIDE);
-            failed(m, fx, sentence.into());
+            failed(m, fx, Some(doc), sentence.into());
         }
     }
 }
@@ -100,12 +122,12 @@ fn spawn(m: &mut Model, fx: &mut Effects<Notes>, doc: DocumentId, ticket: SaveTi
             ..SaveFailed::wrote_nothing("")
         }),
     };
-    begin(m, fx, Work::Save, lost, move |vault| Command::SaveLanded { doc, seq, result: vault.save(&job) });
+    begin(m, fx, Work::Save(doc), lost, move |vault| Command::SaveLanded { doc, seq, result: vault.save(&job) });
 }
 
 /// A save of `doc` at `seq` landed.
 pub fn landed(m: &mut Model, fx: &mut Effects<Notes>, doc: DocumentId, seq: u64, result: Result<Saved, SaveFailed>) {
-    if m.busy == Some(Work::Save) {
+    if m.busy == Some(Work::Save(doc)) {
         m.busy = None;
     }
     // Another program's version the replace took the place of is in the library, or beside it,
@@ -142,14 +164,15 @@ pub fn landed(m: &mut Model, fx: &mut Effects<Notes>, doc: DocumentId, seq: u64,
             }
             // Another program's write that this save replaced is said, and stays said while the
             // person types on (one kept by the store was said above, with where it is kept); a
-            // failure's notice is answered by this landing.
+            // failure's notice is answered by this landing, unless another note's save still
+            // stands failed.
             match replaced {
                 _ if theirs.is_some() => {}
                 Some(what) => {
                     m.notice = said::replaced(what).into();
                     m.lasting_notice = true;
                 }
-                None if !m.lasting_notice => m.notice.clear(),
+                None if !m.lasting_notice && still_failed(m, doc).is_empty() => m.notice.clear(),
                 None => {}
             }
             refreshed(m, fx);
@@ -158,6 +181,7 @@ pub fn landed(m: &mut Model, fx: &mut Effects<Notes>, doc: DocumentId, seq: u64,
                 spawn(m, fx, doc, ticket);
             }
             after_store(m, fx);
+            retry_failed(m, fx, doc);
         }
         Err(failure) => {
             let conflict = failure.error.conflict;
@@ -185,8 +209,39 @@ pub fn landed(m: &mut Model, fx: &mut Effects<Notes>, doc: DocumentId, seq: u64,
             }
             // A sighting the save was holding is judged now, and may be the bar's news.
             fx.changed(OUTSIDE);
-            failed(m, fx, sentence);
+            failed(m, fx, Some(doc), sentence);
+            // Another note's edits that waited behind this save are still saved at the next tick;
+            // this one is not tried again by the autosave until it changes.
+            if m.documents.iter().any(|d| d.id != doc && m.unsaved_doc(d.id)) {
+                fx.after(AUTOSAVE, AUTOSAVE_AFTER, Command::Autosave);
+            }
         }
+    }
+}
+
+/// The notes other than `except` whose last save failed and whose edits are still not on disk.
+fn still_failed(m: &Model, except: DocumentId) -> Vec<DocumentId> {
+    m.documents
+        .iter()
+        .filter(|d| d.id != except && matches!(d.save, SaveState::Failed { .. }))
+        .map(|d| d.id)
+        .filter(|id| m.unsaved_doc(*id))
+        .collect()
+}
+
+/// A save of `saved` just landed, so the disk takes writes again: the next note whose save failed
+/// is saved again, in a window that shows it, as the person's own Save would be, rather than left
+/// off disk until it is edited. One at a time, and only on a success: a retry that fails ends the
+/// retries, so none is tried over and over. Not while a close or an action waits on the store
+/// (each saves what it needs first), nor for a note whose file changed outside (the person
+/// chooses first).
+fn retry_failed(m: &mut Model, fx: &mut Effects<Notes>, saved: DocumentId) {
+    if m.busy.is_some() || m.closing.is_some() || m.pending.is_some() {
+        return;
+    }
+    let next = still_failed(m, saved).into_iter().find(|id| m.documents.get(*id).is_some_and(|d| !d.blocked()));
+    if let Some(next) = next {
+        save_document(m, fx, next, How::Asked);
     }
 }
 

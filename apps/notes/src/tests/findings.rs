@@ -441,6 +441,8 @@ fn a_held_deletion_comes_back_as_a_deletion_after_a_crash() {
     assert_eq!(outside(&app), OutsideState::Deleted, "{:?}", outside(&app));
     assert!(!path.exists(), "the file is not made again");
     assert_eq!(bar(&app), 2, "Save as new is offered");
+    // #917's review, F: said as what it is, one version and its file gone, not two to choose between.
+    assert_eq!(super::notice(&app), crate::update::said::RESTORED_GONE);
     app.ui(|ui| ui.invoke_action("keep-mine".into()));
     settle(&app);
     assert_eq!(kept_as(&app, "copy-"), vec![MINE.to_string()], "and keeps my version as a new note");

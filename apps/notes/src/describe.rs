@@ -7,6 +7,7 @@ use yantrik_app::documents::{DraftState, Durability, OutsideState, SaveState};
 
 use crate::model::Model;
 use crate::note::Note;
+use crate::pane::Pane;
 use crate::store::{read, LIMIT};
 
 /// The one line a mind reads first, and the state behind it.
@@ -83,7 +84,7 @@ pub fn view(m: &Model) -> View {
         .with("library_ready", m.ready)
         .with("busy", m.busy.is_some())
         .with("notice", m.notice.clone())
-        .with("status", m.status.clone())
+        .with("status", m.pane.status.clone())
         .with("folder", m.pane.folder.clone())
         .with("preview", m.pane.preview)
         .with("focus", m.pane.focus_mode)
@@ -107,6 +108,31 @@ pub fn view(m: &Model) -> View {
                 })
                 .collect::<Vec<_>>(),
         )
+        // Every key above is about the focused window, the one the actions act on; these say
+        // which window that is, and what each open window shows.
+        .with("focused_window", m.pane.window.0 as i64)
+        .with("windows", windows(m))
+}
+
+/// `describe.windows`: every open window, in the order they were opened, with the note it shows
+/// and whether it is the focused one. Two windows naming one note show one note: an edit in
+/// either is in both.
+fn windows(m: &Model) -> Vec<Value> {
+    let mut panes: Vec<&Pane> = m.panes().collect();
+    panes.sort_by_key(|p| p.window);
+    panes
+        .into_iter()
+        .map(|p| {
+            let note = m.current_in(p);
+            json!({
+                "window": p.window.0,
+                "focused": p.window == m.pane.window,
+                "open_note": note.as_ref().map(|n| n.id().to_string()),
+                "title": note.as_ref().map(|n| n.title()),
+                "unsaved": note.as_ref().is_some_and(|n| n.unsaved()),
+            })
+        })
+        .collect()
 }
 
 /// `describe.outside`: what is known of changes made to the open note's file by another program.

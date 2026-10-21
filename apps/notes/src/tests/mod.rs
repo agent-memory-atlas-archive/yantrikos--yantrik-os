@@ -32,6 +32,7 @@ mod store;
 mod surface;
 mod version;
 mod window;
+mod windows;
 
 /// A Notes with its library read.
 pub fn started() -> TestApp<Notes> {

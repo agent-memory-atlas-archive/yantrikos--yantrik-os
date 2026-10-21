@@ -8,6 +8,12 @@ use crate::store::{Loaded, Reread, Resolved, SaveFailed, Saved};
 
 #[derive(Clone)]
 pub enum Command {
+    /// Something a window asked: its window is focused first, and it acts there.
+    From { window: WindowId, command: Box<Command> },
+    /// A window became the one the person is in (its editor or keys took the focus back).
+    Activated,
+    /// A window `open_window` gave the id of could not be made: its pane goes.
+    WindowNotOpened { window: WindowId, why: String },
     /// Read the library (at start, and `reload`).
     Load,
     /// One of the window's actions, by the id its button or key sends.
@@ -89,6 +95,8 @@ pub enum WindowAction {
     DiscardDraft,
     /// The recovery bar's *Show*: the note it offers, opened to see the unsaved text.
     ShowDraft,
+    /// The open note, in a window of its own as well: one note, two views.
+    NewWindow,
 }
 
 /// How an outside change to the open note is resolved. Either way the window's text is kept as a
@@ -141,6 +149,7 @@ impl WindowAction {
             "restore-draft" => WindowAction::RestoreDraft,
             "discard-draft" => WindowAction::DiscardDraft,
             "show-draft" => WindowAction::ShowDraft,
+            "new-window" => WindowAction::NewWindow,
             other => {
                 if let Some(title) = other.strip_prefix("new:") {
                     WindowAction::New(Some(title.into()))
@@ -235,6 +244,8 @@ pub enum Act {
     Compare,
     RestoreDraft,
     DiscardDraft,
+    /// A note (by title or file name; the focused window's when empty) in a new window.
+    OpenInNewWindow { wanted: String },
     /// A required argument given empty: refused, in the window's notice too.
     Refuse(String),
 }

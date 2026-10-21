@@ -4,20 +4,26 @@
 //! The helpers below are the moments the window has always been brought up to date at: a note
 //! shown, a note changed, the list redrawn, a store job started, a store job failed, and what
 //! happens once a store job lands (the action that waited for a save, the close that waited).
+//!
+//! Every command acts in the focused window (pane.rs): one from a window focuses it first, and a
+//! job's outcome is applied in the window it is about, then the focus goes back (windows.rs).
 
 use std::time::Duration;
 
+use yantrik_app::app::WindowId;
+use yantrik_app::documents::DocumentId;
 use yantrik_app::effects::Effects;
 use yantrik_app::timers::TimerId;
 use yantrik_app::Refused;
 
 use crate::command::{Command, Step};
-use crate::model::{Cue, Model, Work};
+use crate::model::{Model, Work};
 use crate::note::now;
+use crate::pane::Cue;
 use crate::store::Vault;
 use crate::view::listing;
 use crate::view::preview;
-use crate::view::render::{CUES, EDIT, LIBRARY, MODEL_ONLY, NOTE, PREVIEW, STATUS};
+use crate::view::render::{CUES, EDIT, LIBRARY, MODEL_ONLY, NOTE, OUTSIDE, PREVIEW, STATUS};
 use crate::Notes;
 
 pub mod closing;
@@ -33,6 +39,7 @@ pub mod said;
 pub mod saving;
 mod surface;
 mod window;
+pub mod windows;
 
 /// The autosave's debounce: this long after the last change, the open note is saved.
 pub const AUTOSAVE: TimerId = TimerId("notes.autosave");
@@ -43,11 +50,44 @@ const WORKER_STOPPED: &str = "Storage worker stopped. Keep this window open to p
 
 pub fn update(m: &mut Model, command: Command, fx: &mut Effects<Notes>) -> Result<(), Refused> {
     // A cue is for the render of the command that set it, and for no later one.
-    m.pane.cues.clear();
-    if read_only::refused(m, fx, &command) || recovery::refused(m, fx, &command) {
-        return Ok(());
+    m.panes_mut().for_each(|p| p.cues.clear());
+    let focused = m.pane.window;
+    // A command from a window acts there; one from a window already closed does nothing.
+    let Some(command) = windows::arrive(m, command) else { return Ok(()) };
+    // A job's outcome, a file seen changed, or a close is applied in the window it is about, and
+    // the focus goes back to the person's window after.
+    let back = windows::applies_in(m, &command).map(|there| {
+        let here = m.pane.window;
+        m.focus(there);
+        here
+    });
+    let refused = read_only::refused(m, fx, &command) || recovery::refused(m, fx, &command);
+    if !refused {
+        dispatch(m, fx, command);
+        // Before the drafts are brought up to date: a draft is kept for a dirty document only.
+        m.keep_unsaved_dirty();
+        drafts::sync(m, fx);
     }
+    if let Some(here) = back {
+        m.focus(here);
+    }
+    // An offer whose note no window shows is on the focused window's bar: it moves with the person.
+    if m.pane.window != focused && !m.recovery.offers.is_empty() {
+        fx.changed(OUTSIDE);
+    }
+    if !refused {
+        surface::finish(m, fx);
+    }
+    Ok(())
+}
+
+fn dispatch(m: &mut Model, fx: &mut Effects<Notes>, command: Command) {
     match command {
+        // `arrive` has taken the window off every one, and focused it.
+        Command::From { .. } => {}
+        // The focus moved to the window it came from: `describe` says which.
+        Command::Activated => fx.changed(MODEL_ONLY),
+        Command::WindowNotOpened { window, why } => windows::not_opened(m, fx, window, &why),
         Command::Load => library::load(m, fx),
         Command::Window(action) => window::act(m, fx, action),
         Command::Edit(text) => editing::edit(m, fx, text),
@@ -58,19 +98,20 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Effects<Notes>) -> Resul
             relist(m, fx);
         }
         Command::ViewSynced { focus_mode, dialog } => {
+            let asked_here = m.pane.dialog == closing::CLOSE_DIALOG;
             m.pane.focus_mode = focus_mode;
             m.pane.dialog = dialog;
             if dialog != outside::COMPARE_DIALOG {
                 m.pane.theirs = None;
             }
-            // Escape on the close prompt is its Cancel.
-            if dialog != closing::CLOSE_DIALOG {
+            // Escape on the close prompt is its Cancel, in the window that shows the prompt.
+            if asked_here && dialog != closing::CLOSE_DIALOG {
                 closing::put_away(m, fx);
             }
             fx.changed(MODEL_ONLY);
         }
         Command::Surface(act) => surface::act(m, fx, act),
-        Command::Autosave => saving::save(m, fx, saving::How::Autosave),
+        Command::Autosave => saving::autosave(m, fx),
         Command::CloseRequested(window) => closing::requested(m, fx, window),
         Command::Quit => closing::quit(m, fx),
         Command::LoggingOut => closing::logging_out(m, fx),
@@ -80,7 +121,8 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Effects<Notes>) -> Resul
         Command::Loaded(result) => library::loaded(m, fx, result),
         Command::SaveLanded { doc, seq, result } => saving::landed(m, fx, doc, seq, result),
         Command::Trashed { id, result } => library::trashed(m, fx, &id, result),
-        Command::Restored(result) | Command::Imported(result) => library::opened(m, fx, result),
+        Command::Restored(result) => library::opened(m, fx, result, library::Opened::Restored),
+        Command::Imported(result) => library::opened(m, fx, result, library::Opened::Imported),
         Command::Exported(result) => library::exported(m, fx, result),
         Command::Resolved { doc, seq, resolution, result } => outside::resolved(m, fx, doc, seq, resolution, result),
         Command::Compared { doc, result } => outside::compared(m, fx, doc, result),
@@ -91,9 +133,6 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Effects<Notes>) -> Resul
             fx.changed(MODEL_ONLY);
         }
     }
-    drafts::sync(m, fx);
-    surface::finish(m, fx);
-    Ok(())
 }
 
 /// The footer's words for the open note's save state.
@@ -109,15 +148,27 @@ fn save_state(m: &Model) -> &'static str {
     }
 }
 
-/// The open note changed: its title, count and save state are said again, and the autosave's
-/// debounce starts over.
+/// The footer's line, in the focused window and in every other window showing the same note: one
+/// note has one save state, whichever window it is read in.
+fn set_status(m: &mut Model, status: &str) {
+    for window in m.others_showing() {
+        if let Some(pane) = m.pane_of_mut(window) {
+            pane.status = status.into();
+        }
+    }
+    m.pane.status = status.into();
+}
+
+/// The open note changed: its title, count and save state are said again, in every window that
+/// shows it, and the autosave's debounce starts over.
 fn refreshed(m: &mut Model, fx: &mut Effects<Notes>) {
     if m.current().is_none() {
         return;
     }
-    m.status = save_state(m).into();
+    set_status(m, save_state(m));
     fx.changed(EDIT);
     fx.changed(STATUS);
+    windows::follow(m, fx, false);
     fx.after(AUTOSAVE, AUTOSAVE_AFTER, Command::Autosave);
 }
 
@@ -126,7 +177,7 @@ fn refreshed(m: &mut Model, fx: &mut Effects<Notes>) {
 fn show(m: &mut Model, fx: &mut Effects<Notes>) {
     m.pane.history.clear();
     let (notebook, tags) = m.shown().map(|c| (c.field("notebook"), c.field("tags"))).unwrap_or_default();
-    m.status = save_state(m).into();
+    set_status(m, save_state(m));
     m.pane.notebook = notebook;
     m.pane.tags = tags;
     fx.changed(NOTE);
@@ -139,10 +190,17 @@ fn show(m: &mut Model, fx: &mut Effects<Notes>) {
     fx.changed(CUES);
 }
 
-/// The library list, worked out again for the pane's section and search.
+/// The library list, worked out again in every window for its section and search: a note saved,
+/// made or moved in one window is listed so in the others too.
 fn relist(m: &mut Model, fx: &mut Effects<Notes>) {
-    let open = m.shown_note();
-    m.pane.listing = listing::list(&m.library, open.as_ref(), &m.pane.folder, &m.pane.query, now());
+    let at = now();
+    let listings: Vec<(WindowId, listing::Listing)> = m
+        .panes()
+        .map(|p| (p.window, listing::list(&m.library, m.shown_note_in(p).as_ref(), &p.folder, &p.query, at)))
+        .collect();
+    for (pane, (_, listing)) in m.panes_mut().zip(listings) {
+        pane.listing = listing;
+    }
     fx.changed(LIBRARY);
 }
 
@@ -163,15 +221,18 @@ fn begin(
     job: impl FnOnce(&Vault) -> Command + Send + 'static,
 ) {
     m.busy = Some(work);
-    m.status = "Working…".into();
+    m.job_window = m.pane.window;
+    set_status(m, "Working…");
     fx.changed(STATUS);
     let vault = m.vault.clone();
     fx.spawn_or(lost, move |_| job(&vault));
 }
 
 /// A store job failed: said in the notice, the draft kept, and nothing waits on it any more. A
-/// call from the surface that waited for this save to go on is refused.
-fn failed(m: &mut Model, fx: &mut Effects<Notes>, sentence: String) {
+/// call from the surface that waited for this save to go on is refused. `doc` is the note whose
+/// save failed, `None` for any other job: a note the person's window does not show is named, and
+/// a close waiting on other notes' saves goes on with them.
+fn failed(m: &mut Model, fx: &mut Effects<Notes>, doc: Option<DocumentId>, sentence: String) {
     if let Some(pending) = m.pending.take() {
         if pending.refuse_if_unsaved {
             if let Some(asked) = m.asked.as_mut() {
@@ -184,11 +245,23 @@ fn failed(m: &mut Model, fx: &mut Effects<Notes>, sentence: String) {
             }
         }
     }
-    closing::failed(m, &sentence);
+    let sentence = closing::failed(m, doc, &sentence).unwrap_or_else(|| named(m, doc, sentence));
     m.notice = sentence;
     m.lasting_notice = false;
-    m.status = "Needs attention · draft kept".into();
+    set_status(m, "Needs attention · draft kept");
     fx.changed(STATUS);
+    if m.busy.is_none() {
+        closing::progress(m, fx);
+    }
+}
+
+/// `sentence`, with the title of the note it is about when the person's window does not show it:
+/// a failure in another window is never read as one of the note in front of them.
+fn named(m: &Model, doc: Option<DocumentId>, sentence: String) -> String {
+    match doc.filter(|d| !m.in_view(*d)).and_then(|d| m.note_of(d)) {
+        Some(note) => said::note_failed(&note.title(), &sentence),
+        None => sentence,
+    }
 }
 
 /// A store job landed: once the open note is saved, what waited for it goes ahead (the action,
@@ -198,17 +271,32 @@ fn after_store(m: &mut Model, fx: &mut Effects<Notes>) {
     if m.busy.is_some() {
         return;
     }
-    if !m.unsaved() {
-        if let Some(pending) = m.pending.take() {
-            run(m, fx, pending.step);
+    // The action runs in the window it was asked in, once that window's note is saved.
+    if let Some(window) = m.pending.as_ref().map(|p| p.window) {
+        let ran = m.within(window, |m| {
+            if !m.unsaved() {
+                if let Some(pending) = m.pending.take() {
+                    run(m, fx, pending.step);
+                }
+            } else {
+                saving::save(m, fx, saving::How::Asked);
+            }
+        });
+        // Its window closed meanwhile: there is nothing left for it to act on.
+        if ran.is_none() {
+            m.pending = None;
         }
-    } else if m.pending.is_some() {
-        saving::save(m, fx, saving::How::Asked);
     }
     closing::progress(m, fx);
-    // A change to the open note seen while the store was busy is followed now that it is not.
-    if m.busy.is_none() && std::mem::take(&mut m.pane.reread_owed) {
-        follow::follow(m, fx);
+    // A change seen while the store was busy is followed now that it is not, in its window.
+    for window in m.windows() {
+        let owed = m.pane_of(window).is_some_and(|p| p.reread_owed);
+        if owed && m.busy.is_none() {
+            m.within(window, |m| {
+                m.pane.reread_owed = false;
+                follow::follow(m, fx);
+            });
+        }
     }
 }
 

@@ -1,16 +1,19 @@
 //! Gate row "Save failure" (design/notes-gate-2026-10-21.md §3), on Notes with a real vault: every
 //! way a save can fail, through the framework's fault-injecting disk. Each failure keeps the edits
 //! as edits, says in the notice how much reached the disk, reports it in `describe.save_failure`,
-//! is not retried by the autosave, and is retried by the person's Save.
+//! is not retried by the autosave, and is retried by the person's Save, and once another note's save
+//! lands (#918's review, 2).
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use yantrik_app::app::WindowId;
 use yantrik_app::documents::disk::{FaultyDisk, Step};
 use yantrik_testing::TestApp;
 
-use super::{bar, failing, file, note, notice, settle, started, state, unsaved, vault};
+use super::windows::{two_notes_two_windows, type_in};
+use super::{autosave, bar, failing, file, note, notice, settle, started, state, unsaved, vault};
 use crate::command::{Command, WindowAction};
 use crate::update::AUTOSAVE_AFTER;
 use crate::Notes;
@@ -38,7 +41,7 @@ fn tries(disk: &FaultyDisk) -> usize {
 }
 
 fn status(app: &TestApp<Notes>) -> String {
-    app.model(|m| m.status.clone())
+    app.model(|m| m.pane.status.clone())
 }
 
 /// What every failure shares: the edits kept as edits, no retry until something changes, and the
@@ -181,4 +184,79 @@ fn a_read_only_vault_keeps_one_save_in_flight_and_one_notice() {
     settle(&app);
     assert_eq!(file(&path), "# Kept\n\nfive!", "the latest text, once the vault is writable");
     assert_eq!((notice(&app), unsaved(&app)), (String::new(), false));
+}
+
+/// #918's review, 2: two notes in two windows, both saves failed. Once the disk takes writes and
+/// one note saves, the other is saved too, with no key pressed in it; and the notice of its
+/// failure is not cleared while it is still not on disk.
+#[test]
+fn once_one_note_saves_after_the_disk_heals_the_other_failed_note_is_saved_too() {
+    let (app, first, left, second, right) = two_notes_two_windows();
+    let disk = failing(&app);
+    disk.fail(Step::Rename, ".md", None);
+    type_in(&app, first, "# Left\n\nL");
+    autosave(&app);
+    type_in(&app, second, "# Right\n\nR");
+    autosave(&app);
+    assert_eq!((file(&left), file(&right)), ("# Left\n\n".into(), "# Right\n\n".into()), "both failed");
+    disk.heal();
+    type_in(&app, first, "# Left\n\nL2");
+    app.advance(AUTOSAVE_AFTER);
+    assert!(app.run_one_job(), "Left's save lands");
+    assert_eq!(file(&left), "# Left\n\nL2");
+    assert_eq!(app.jobs_waiting(), 1, "and Right's is tried again at once");
+    assert!(notice(&app).contains("injected failure at Rename"), "not cleared while Right is not on disk");
+    settle(&app);
+    assert_eq!(file(&right), "# Right\n\nR", "with no key pressed in it");
+    assert_eq!(notice(&app), "", "and now nothing has failed");
+    let unsaved_right = app.model(move |m| m.pane_of(second).and_then(|p| m.current_in(p)).unwrap().unsaved());
+    assert!(!unsaved_right);
+}
+
+/// The retries go on only through successes: a note that fails again ends them, nothing is tried
+/// over and over, and the notice names the note it is about.
+#[test]
+fn a_retry_that_fails_again_ends_the_retries() {
+    let (app, first, left, second, right) = two_notes_two_windows();
+    let answer = super::act(&app, "open_in_new_window", serde_json::json!({ "title": "Left" })).expect("opened");
+    let third = WindowId(answer["window"].as_u64().unwrap() as u32);
+    let third_note = PathBuf::from(note(&app, "Third", "")["path"].as_str().unwrap());
+    let disk = failing(&app);
+    disk.fail(Step::Rename, ".md", None);
+    for (window, text) in [(first, "# Left\n\nL"), (second, "# Right\n\nR"), (third, "# Third\n\nT")] {
+        type_in(&app, window, text);
+        autosave(&app);
+    }
+    disk.heal();
+    for path in [&right, &third_note] {
+        disk.fail(Step::Rename, path.file_name().unwrap().to_str().unwrap(), None);
+    }
+    let tried = tries(&disk);
+    type_in(&app, first, "# Left\n\nL2");
+    autosave(&app);
+    assert_eq!(file(&left), "# Left\n\nL2");
+    assert_eq!(tries(&disk), tried + 1, "one other note tried again; it failed, and the retries end there");
+    for _ in 0..4 {
+        app.advance(AUTOSAVE_AFTER * 2);
+        settle(&app);
+    }
+    assert_eq!((tries(&disk), app.jobs_waiting()), (tried + 1, 0), "nothing is tried over and over");
+    let said = notice(&app);
+    assert!(said.starts_with("\"Right\"") || said.starts_with("\"Third\""), "names the note: {said}");
+    assert_eq!((file(&right), file(&third_note)), ("# Right\n\n".into(), "# Third\n\n".into()));
+}
+
+/// A note whose autosave waited behind another note's save that failed is still saved at the next
+/// tick, not only once it is edited again.
+#[test]
+fn a_note_waiting_behind_a_failed_save_is_still_saved_by_the_autosave() {
+    let (app, first, left, second, right) = two_notes_two_windows();
+    failing(&app).fail(Step::Rename, left.file_name().unwrap().to_str().unwrap(), None);
+    type_in(&app, second, "# Right\n\nR");
+    type_in(&app, first, "# Left\n\nL");
+    autosave(&app);
+    assert_eq!(file(&right), "# Right\n\n", "the focused window's note went first, and failed");
+    autosave(&app);
+    assert_eq!(file(&right), "# Right\n\nR", "and the other's turn still comes");
+    assert_eq!(file(&left), "# Left\n\n");
 }
