@@ -32,12 +32,16 @@ impl<A: App> TestApp<A> {
 
     /// The window manager gave `id` the keyboard, as winit's `Focused(true)` says it under the
     /// runner: `Event::Activated` for it, unless it is already the active window or is closed.
+    /// With this crate's `testing` feature.
+    #[cfg(feature = "testing")]
     pub fn activate(&self, id: WindowId) {
         self.with(move |u| u.core.focus_for_test(id, true));
     }
 
     /// The window manager took the keyboard from `id` (another window, or another app's): no
-    /// event, but its next [`TestApp::activate`] raises one again.
+    /// event, but its next [`TestApp::activate`] raises one again. With this crate's `testing`
+    /// feature.
+    #[cfg(feature = "testing")]
     pub fn deactivate(&self, id: WindowId) {
         self.with(move |u| u.core.focus_for_test(id, false));
     }

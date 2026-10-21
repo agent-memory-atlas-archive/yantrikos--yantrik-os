@@ -1,5 +1,5 @@
 //! `cargo run -q -p xtask -- check-architecture [--write | --since <old baseline>]`: the layers,
-//! the build paths and the file sizes of docs/architecture.md, held by a baseline that may only
+//! the build paths, the test-only features and the file sizes of docs/architecture.md, held by a baseline that may only
 //! shrink. `--since` also fails on any entry the baseline has that the given older copy of it does
 //! not, so a line added to the baseline by hand is caught (CI passes the pull request's base).
 
@@ -52,6 +52,7 @@ fn check(write: bool, since: Option<&Path>) -> Result<bool, String> {
     let unplaced = rules::unplaced(&members, &placements);
     let mut findings = rules::layers(&members, &placements);
     findings.extend(rules::build_paths(&members, &placements, read));
+    findings.extend(rules::testing_features(&members));
     let (sized, soft) = rules::sizes(&line_counts(&root)?);
     findings.extend(sized);
 
@@ -138,6 +139,10 @@ fn report(members: &[workspace::Member], unplaced: &[String], v: &ratchet::Verdi
                 ("layer", _) => println!("  layer {}: a dependency that points up", f.subject),
                 ("build-path", _) => println!(
                     "  build-path {}: reaches into another crate's folder",
+                    f.subject
+                ),
+                ("testing-feature", _) => println!(
+                    "  testing-feature {}: a build that is not a test turns on a test-only feature",
                     f.subject
                 ),
                 (_, Some(n)) => println!(
