@@ -46,6 +46,10 @@ pub enum ExitReason {
 pub enum Event<S> {
     /// The first launch, once, after `start`; and every launch handed over by a second copy. The
     /// files to open or the deep link's intent are in it. `None` opens nothing.
+    ///
+    /// The intent was admitted before it got here (`intents::admit`): its name is one this app
+    /// declares, its arguments pass the declared parameters' check, and one that came by
+    /// hand-over is graded standard or below. The app runs it as the person's own command.
     Launch(Launch),
     /// The person asked a window to close. `None` from [`App::event`] closes it now; a command
     /// keeps it open until something runs `fx.close(window)`, so "Save changes?" is a flow.
@@ -72,6 +76,7 @@ pub enum Event<S> {
     /// the repair is the person's choice and arrives as `SettingsChangedOutside`.
     SettingsConflict { outside: S, mine: S },
     /// The last `fx.save_draft` of this name reached the disk. `None` does nothing.
+    /// A discard raises nothing: this means the draft is on disk at its latest revision.
     DraftSaved(String),
     /// A draft did not reach the disk. `None` files a problem record.
     DraftNotSaved { name: String, why: String },

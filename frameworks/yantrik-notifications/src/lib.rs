@@ -106,6 +106,14 @@ impl Notification {
         self
     }
 
+    /// This app's, whatever name it was built with: the framework's `fx.notify` sends every
+    /// notification under the app that asked, so no app files one under another's name and has
+    /// the shell route its buttons there.
+    pub fn as_app(mut self, app: &str) -> Self {
+        self.app = app.to_string();
+        self
+    }
+
     pub fn app(&self) -> &str {
         &self.app
     }
