@@ -664,11 +664,15 @@ mod every_app_is_an_app_window {
             let base_window = src.contains(" inherits AppWindow {");
             let plain_window = src.contains(" inherits Window {");
             // A bar nobody connected draws its buttons and does nothing when they are pressed.
+            // The chrome is connected by `window_chrome!(ui)` directly, or through the
+            // framework's `Window` adapter (`yantrik_app::window!(App)` then
+            // `ui.connect_chrome()`), which expands to the same macro.
             let main = std::fs::read_to_string(dir.join("src/main.rs")).unwrap_or_default();
-            if base_window && !main.contains("window_chrome!(") {
+            let connected = main.contains("window_chrome!(") || main.contains(".connect_chrome()");
+            if base_window && !connected {
                 wrong.push(format!(
-                    "{app}: inherits AppWindow, but main never calls window_chrome!, so its \
-                     minimise, maximise, close and drag do nothing"
+                    "{app}: inherits AppWindow, but main never calls window_chrome! or \
+                     connect_chrome(), so its minimise, maximise, close and drag do nothing"
                 ));
             }
             match (NOT_YET.contains(&app.as_str()), base_window, plain_window) {
@@ -689,7 +693,8 @@ mod every_app_is_an_app_window {
              `export component MyApp inherits AppWindow`, with the bar as data (`app-id`, \
              `header-icon`, `header-actions`, `header-action(id)`), the app's own content as the \
              children, `export {{ WindowChrome }} from \"app_window.slint\";` beside the import, \
-             and `yantrik_app_runtime::window_chrome!(ui)` once in main. See \
+             and once in main either `yantrik_app::window!(MyApp)` with `ui.connect_chrome()` \
+             or `yantrik_app_runtime::window_chrome!(ui)`. See \
              crates/yantrik-ui-kit/slint/app_window.slint.",
             wrong.join("\n  ")
         );
