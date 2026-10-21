@@ -7,7 +7,6 @@ build-path apps/document-editor/build.rs
 build-path apps/download-manager/build.rs
 build-path apps/email/build.rs
 build-path apps/music-player/build.rs
-build-path apps/network-manager/build.rs
 build-path apps/notes/build.rs
 build-path apps/presentation/build.rs
 build-path apps/snippet-manager/build.rs
@@ -28,7 +27,7 @@ size apps/document-editor/src/main.rs 1630
 size apps/download-manager/src/engine.rs 2039
 size apps/email/src/main.rs 2689
 size apps/music-player/src/main.rs 1233
-size apps/network-manager/src/main.rs 1261
+size apps/network-manager/ui/network_manager.slint 1463
 size apps/notes/src/main.rs 1904
 size apps/presentation/src/main.rs 1610
 size apps/snippet-manager/src/main.rs 1336
@@ -61,7 +60,6 @@ size crates/yantrik-ui-slint/ui/device_dashboard.slint 1360
 size crates/yantrik-ui-slint/ui/download_manager.slint 1231
 size crates/yantrik-ui-slint/ui/email.slint 2288
 size crates/yantrik-ui-slint/ui/installer.slint 1610
-size crates/yantrik-ui-slint/ui/network_manager.slint 1463
 size crates/yantrik-ui-slint/ui/notes_editor.slint 1574
 size crates/yantrik-ui-slint/ui/onboarding.slint 1426
 size crates/yantrik-ui-slint/ui/onboarding_first_run.slint 1220
