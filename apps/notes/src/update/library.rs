@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use yantrik_app::effects::Effects;
 
 use super::navigate::show_note;
+use super::saving::{self, How};
 use super::{after_store, begin, failed, refreshed, relist, show, WORKER_STOPPED};
 use crate::command::Command;
 use crate::model::{Model, Work};
@@ -34,6 +35,7 @@ pub fn loaded(m: &mut Model, fx: &mut Effects<Notes>, result: Result<Loaded, Str
     m.busy = None;
     match result {
         Ok(loaded) => {
+            let was_read_only = m.vault.read_only().is_some();
             m.vault = m.vault.with_access(loaded.read_only.clone());
             let key = m.current().map(|c| (c.id().to_string(), c.trash()));
             m.library = loaded.notes;
@@ -52,6 +54,12 @@ pub fn loaded(m: &mut Model, fx: &mut Effects<Notes>, result: Result<Loaded, Str
             m.notice = sentences([loaded.read_only.as_deref(), Some(loaded.notice.as_str()), changed.then_some(KEPT_OVER_CHANGE)]);
             if kept {
                 still_typing(m, fx);
+                // Kept while the vault refused writes: its save may have been refused already, and
+                // the autosave does not try a failed save again until something changes. Saved
+                // now, as the person's own save would be, so no further key is needed.
+                if was_read_only && m.vault.read_only().is_none() {
+                    saving::save(m, fx, How::Asked);
+                }
             } else {
                 show(m, fx);
             }

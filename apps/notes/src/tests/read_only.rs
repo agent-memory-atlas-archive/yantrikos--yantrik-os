@@ -36,7 +36,29 @@ fn read_only_library() -> (TestApp<Notes>, Arc<FaultyDisk>) {
     settle(&app);
     assert_eq!(state(&app)["notice"], READ_ONLY, "the window says why");
     assert_eq!(state(&app)["library_ready"], true, "and the library is open to read");
+    assert!(app.ui(|ui| ui.get_read_only()), "and the editor and fields take no keys");
     (app, disk)
+}
+
+/// A read-only library holding text typed during the reload that found it so, whose owed save
+/// the vault has refused: the note's file, what it holds, and the text kept.
+fn holding_unsaved_text() -> (TestApp<Notes>, Arc<FaultyDisk>, PathBuf, String, String) {
+    let app = started();
+    let path = PathBuf::from(note(&app, "Draft", "")["path"].as_str().unwrap());
+    let saved = std::fs::read_to_string(&path).unwrap();
+    let disk = turn_read_only(&app);
+    // Typed while the reload runs: kept when it lands, so a save of it is owed.
+    let typed = format!("{saved}typed meanwhile\n");
+    app.run(Command::Edit(typed.clone()));
+    settle(&app);
+    assert!(app.model(|m| m.unsaved()));
+    autosave(&app);
+    (app, disk, path, saved, typed)
+}
+
+/// How many times the marker has been tried since the library went read-only.
+fn marker_tries(disk: &FaultyDisk) -> usize {
+    disk.hits.lock().unwrap().iter().filter(|p| p.ends_with(MARKER)).count()
 }
 
 fn open_note(app: &TestApp<Notes>) -> (String, String) {
@@ -126,19 +148,64 @@ fn the_first_refresh_that_can_make_the_marker_makes_the_library_writable_again()
 
 #[test]
 fn a_save_owed_when_the_library_turns_read_only_is_refused_and_the_text_is_kept() {
-    let app = started();
-    let path = PathBuf::from(note(&app, "Draft", "")["path"].as_str().unwrap());
-    let saved = std::fs::read_to_string(&path).unwrap();
-    turn_read_only(&app);
-    // Typed while the reload runs: kept when it lands, so a save of it is owed.
-    let typed = format!("{saved}typed meanwhile\n");
-    app.run(Command::Edit(typed.clone()));
-    settle(&app);
-    assert!(app.model(|m| m.unsaved()));
-    autosave(&app);
+    let (app, _disk, path, saved, typed) = holding_unsaved_text();
     assert_eq!(state(&app)["notice"], READ_ONLY, "the vault refused the save");
     assert_eq!(app.model(|m| m.status.clone()), "Needs attention · draft kept");
     assert_eq!(open_note(&app).1, typed, "the text is kept");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), saved, "and nothing was written");
     assert!(!vault(&app).join(".recovery-v2/pending.json").exists(), "not even the journal");
+}
+
+#[test]
+fn a_refresh_once_the_folder_is_fixed_makes_the_library_writable_and_saves_the_kept_text() {
+    let (app, disk, path, _, typed) = holding_unsaved_text();
+    disk.heal();
+    // No save first: the vault would refuse it, and this Refresh is what makes it writable.
+    app.run(Command::Window(WindowAction::Reload));
+    settle(&app);
+    assert_eq!(app.model(|m| m.vault.read_only().map(str::to_string)), None);
+    assert_eq!(std::fs::read_to_string(vault(&app).join(MARKER)).unwrap(), "2\n");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), typed, "saved with no further key");
+    assert!(!app.model(|m| m.unsaved()));
+    assert_eq!(state(&app)["notice"], "");
+    assert!(!app.ui(|ui| ui.get_read_only()), "the editor takes keys again");
+}
+
+#[test]
+fn a_reload_call_on_a_read_only_library_with_unsaved_text_reloads_and_is_answered_truly() {
+    let (app, disk, path, saved, typed) = holding_unsaved_text();
+    let tries = marker_tries(&disk);
+    let still = act(&app, "reload", json!({})).unwrap();
+    assert_eq!(marker_tries(&disk), tries + 1, "the library was read again");
+    assert_eq!(still["notice"], READ_ONLY, "and is still read-only, as the answer says");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), saved);
+    assert_eq!(open_note(&app).1, typed, "the text is kept across it");
+
+    disk.heal();
+    let healed = act(&app, "reload", json!({})).unwrap();
+    assert_eq!(healed["notice"], "", "answered once the library is writable and the text saved");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), typed);
+}
+
+#[test]
+fn an_export_call_on_a_read_only_library_with_unsaved_text_exports_the_text_in_the_window() {
+    let (app, _disk, _, _, typed) = holding_unsaved_text();
+    let to = super::store::fixture("read-only-unsaved-export").join("out.md");
+    let exported = act(&app, "export", json!({ "path": to.display().to_string() })).unwrap();
+    assert_eq!(exported["matches_note"], true);
+    assert_eq!(std::fs::read_to_string(&to).unwrap(), typed);
+}
+
+#[test]
+fn an_export_into_a_read_only_vault_or_a_folder_in_it_is_refused() {
+    let (app, _disk) = read_only_library();
+    let before = snapshot(&vault(&app));
+    // The folder itself is writable here, as a vault a newer Notes wrote may be.
+    let link = super::store::fixture("into-vault").join("vault");
+    std::os::unix::fs::symlink(vault(&app), &link).unwrap();
+    for to in [vault(&app).join("out.md"), vault(&app).join(".trash-v2/out.md"), link.join("out.md")] {
+        let refused = act(&app, "export", json!({ "path": to.display().to_string() }));
+        assert_eq!(refused, Err(READ_ONLY.to_string()), "{}", to.display());
+    }
+    assert_eq!(snapshot(&vault(&app)), before, "an export wrote into the read-only vault");
 }
