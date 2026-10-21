@@ -6,37 +6,12 @@ use serde_json::json;
 use yantrik_app::app::{ExitReason, WindowId};
 use yantrik_app::documents::disk::Step;
 use yantrik_app::documents::OutsideState;
-use yantrik_testing::TestApp;
 
-use super::{act, autosave, failing, note, settle, started};
+use super::{
+    act, autosave, bar, failing, file, not_saved_over, note, notice, outside, settle, state, unsaved, with_note,
+};
 use crate::command::{Command, WindowAction};
-use crate::store::CHANGED_ON_DISK;
-use crate::update::AUTOSAVE_AFTER;
-use crate::Notes;
-
-/// A saved note, open, and where its file is.
-fn with_note(title: &str) -> (TestApp<Notes>, std::path::PathBuf) {
-    let app = started();
-    let answer = note(&app, title, "");
-    let path = std::path::PathBuf::from(answer["path"].as_str().unwrap());
-    (app, path)
-}
-
-fn file(path: &std::path::Path) -> String {
-    std::fs::read_to_string(path).unwrap()
-}
-
-fn unsaved(app: &TestApp<Notes>) -> bool {
-    app.model(|m| m.unsaved())
-}
-
-fn notice(app: &TestApp<Notes>) -> String {
-    app.model(|m| m.notice.clone())
-}
-
-fn outside(app: &TestApp<Notes>) -> OutsideState {
-    app.model(|m| m.current().unwrap().doc.outside.clone())
-}
+use crate::update::{said, AUTOSAVE_AFTER};
 
 #[test]
 fn two_quick_edits_during_a_save_produce_exactly_one_follow_up() {
@@ -88,6 +63,8 @@ fn a_failed_save_stays_unsaved_and_the_autosave_does_not_retry_it_until_somethin
     assert_eq!(notice(&app), "");
 }
 
+/// Gate row "Conflicting outside edit": with the watch disabled (it never looks here), the store's
+/// own check still refuses, and the person is offered the same choices.
 #[test]
 fn the_store_refuses_to_save_over_a_file_changed_outside() {
     let (app, path) = with_note("Shared");
@@ -96,7 +73,8 @@ fn the_store_refuses_to_save_over_a_file_changed_outside() {
     autosave(&app);
     assert_eq!(file(&path), "theirs", "never last-writer-wins");
     assert!(unsaved(&app), "my text is kept as edits");
-    assert_eq!(notice(&app), CHANGED_ON_DISK);
+    assert_eq!(notice(&app), not_saved_over());
+    assert_eq!(bar(&app), 1, "and the person is offered the choices");
     // Once the store has refused, the document knows: every later save is refused at once, in
     // the same words, with no job.
     assert!(matches!(outside(&app), OutsideState::Conflict { .. }));
@@ -104,7 +82,7 @@ fn the_store_refuses_to_save_over_a_file_changed_outside() {
     assert_eq!(app.jobs_waiting(), 0);
     assert_eq!(file(&path), "theirs");
     let e = act(&app, "save", json!({})).unwrap_err();
-    assert_eq!(e, CHANGED_ON_DISK);
+    assert_eq!(e, not_saved_over());
     // The way out is still a copy.
     app.run(Command::Window(WindowAction::Copy));
     settle(&app);
@@ -112,34 +90,27 @@ fn the_store_refuses_to_save_over_a_file_changed_outside() {
     assert_eq!(file(&path), "theirs");
 }
 
+/// Gate row "Conflicting outside edit": the change is detected before the next save.
 #[test]
-fn a_change_the_watch_sees_first_blocks_the_save_with_the_same_refusal() {
+fn a_change_the_watch_sees_first_is_offered_at_once_and_no_save_is_tried_over_it() {
     let (app, path) = with_note("Watched");
     app.run(Command::Edit("# Watched\n\nmine".into()));
     std::fs::write(&path, "theirs").unwrap();
     app.look_at_files();
     assert!(matches!(outside(&app), OutsideState::Conflict { .. }));
-    assert_eq!(notice(&app), "", "nothing is said until a save meets it, as before");
+    assert_eq!(bar(&app), 1, "the choices are offered as soon as the watch sees it");
+    assert_eq!(state(&app)["outside"], "conflict");
     autosave(&app);
     assert_eq!(app.jobs_waiting(), 0, "a save over it is not even tried");
-    assert_eq!(notice(&app), CHANGED_ON_DISK);
+    assert_eq!(notice(&app), "", "the autosave adds nothing to what the bar says");
+    assert_eq!(app.model(|m| m.status.clone()), said::WAITING_ON_CHOICE);
+    app.run(Command::Window(WindowAction::Save));
+    assert_eq!(app.jobs_waiting(), 0);
+    assert_eq!(notice(&app), not_saved_over(), "the person's own Save is refused in words");
     assert_eq!(file(&path), "theirs");
 }
 
-#[test]
-fn an_outside_change_to_a_saved_note_changes_nothing_until_a_reload() {
-    let (app, path) = with_note("Clean");
-    let before = app.revision();
-    std::fs::write(&path, "# Clean\n\nfrom elsewhere\n").unwrap();
-    app.look_at_files();
-    assert!(matches!(outside(&app), OutsideState::Changed { .. }));
-    assert_eq!(app.revision(), before, "the window and describe are as they were");
-    app.run(Command::Window(WindowAction::Reload));
-    settle(&app);
-    assert_eq!(app.model(|m| m.current().unwrap().text().to_string()), "# Clean\n\nfrom elsewhere\n");
-    assert!(matches!(outside(&app), OutsideState::Clean), "read afresh, a fresh document");
-}
-
+/// Gate row "Conflicting outside edit": our own save does not raise a change.
 #[test]
 fn our_own_save_is_not_an_outside_edit_and_the_watch_follows_the_open_note() {
     let (app, path) = with_note("Mine");
@@ -149,6 +120,8 @@ fn our_own_save_is_not_an_outside_edit_and_the_watch_follows_the_open_note() {
     app.look_at_files();
     app.look_at_files();
     assert!(matches!(outside(&app), OutsideState::Clean), "{:?}", outside(&app));
+    assert_eq!((bar(&app), notice(&app)), (0, String::new()), "nothing is offered, nothing said");
+    assert_eq!(state(&app)["outside"], "clean");
     app.run(Command::Edit("# Mine\n\nsaved by us, twice".into()));
     autosave(&app);
     assert_eq!(file(&path), "# Mine\n\nsaved by us, twice");

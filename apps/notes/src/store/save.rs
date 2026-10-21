@@ -38,11 +38,14 @@ pub struct Saved {
 pub struct SaveFailed {
     pub error: SaveError,
     pub meta_unsure: Option<String>,
+    /// The library is open read-only and refused the save before writing anything. Its sentence
+    /// is the library's own, which says what to do, so it is said as it is.
+    pub read_only: bool,
 }
 
 impl SaveFailed {
     fn wrote_nothing(sentence: impl Into<String>) -> SaveFailed {
-        SaveFailed { error: SaveError::new(sentence), meta_unsure: None }
+        SaveFailed { error: SaveError::new(sentence), meta_unsure: None, read_only: false }
     }
 }
 
@@ -54,8 +57,12 @@ impl Vault {
     /// What the note was read from is compared byte for byte, as the store always did: the
     /// fingerprint is a change detector, not a hash a synced vault's other writer cannot choose
     /// to match. Only our own unsure write, whose bytes this job does not hold, is known by its
-    /// fingerprint (`SaveTicket::unsure`, the document's rule).
+    /// fingerprint (`SaveTicket::unsure`, the document's rule). A library open read-only refuses
+    /// before anything, the journal included, in its own words (`SaveFailed::read_only`).
     pub fn save(&self, job: &SaveJob) -> Result<Saved, SaveFailed> {
+        if let Some(why) = self.read_only() {
+            return Err(SaveFailed { read_only: true, ..SaveFailed::wrote_nothing(why) });
+        }
         let content = &job.ticket.content;
         let record = Record::of(&job.id, content, job.on_disk.as_ref(), job.modified);
         let baseline_text = job.on_disk.as_ref().map(|d| d.text.as_str());
@@ -100,7 +107,8 @@ impl Vault {
         let on_disk = read(&text_path, LIMIT).map_err(SaveFailed::wrote_nothing)?;
         let meta_on_disk = read(&meta_path, META_LIMIT).map_err(SaveFailed::wrote_nothing)?;
         if !text_ok(on_disk.as_deref()) || !meta_ok(meta_on_disk.as_deref().unwrap_or_default()) {
-            return Err(SaveFailed { error: SaveError::conflict(CHANGED_ON_DISK), meta_unsure: None });
+            let error = SaveError::conflict(CHANGED_ON_DISK);
+            return Err(SaveFailed { error, meta_unsure: None, read_only: false });
         }
         let written = Fingerprint::of_bytes(content.text.as_bytes());
         // A file there passed the check, so it is one this save may replace; with none, a create
@@ -108,10 +116,12 @@ impl Vault {
         self.put(&text_path, &content.text, on_disk.is_some()).map_err(|e| SaveFailed {
             error: SaveError::after_writing(e.step.durability(), written.clone(), e.error),
             meta_unsure: None,
+            read_only: false,
         })?;
         self.write_meta(&meta_path, &content.meta).map_err(|(durability, sentence)| SaveFailed {
             meta_unsure: (durability == Durability::Unknown).then(|| content.meta.clone()),
             error: SaveError::after_writing(durability, written.clone(), sentence),
+            read_only: false,
         })?;
         if journal.is_some() {
             // Everything landed; only the journal is left. Kept, it replays as an identical note
@@ -119,6 +129,7 @@ impl Vault {
             self.remove(&self.journal()).map_err(|sentence| SaveFailed {
                 error: SaveError::after_writing(Durability::Unknown, written.clone(), sentence),
                 meta_unsure: Some(content.meta.clone()),
+                read_only: false,
             })?;
         }
         Ok(Saved { content: content.clone(), written, modified: now() })

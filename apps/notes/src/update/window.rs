@@ -2,8 +2,8 @@
 
 use yantrik_app::effects::Effects;
 
-use super::{editing, library, navigate, reblock, saving};
-use crate::command::{Step, WindowAction};
+use super::{editing, library, navigate, outside, reblock, saving};
+use crate::command::{Resolution, Step, WindowAction};
 use crate::model::{Cue, Model, Pending};
 use crate::store::expand_home;
 use crate::view::render::{CHROME, CUES, STATUS};
@@ -38,6 +38,7 @@ pub fn act(m: &mut Model, fx: &mut Effects<Notes>, action: WindowAction) {
         }
         WindowAction::Undo => editing::undo(m, fx, false),
         WindowAction::Redo => editing::undo(m, fx, true),
+        WindowAction::NotNow => outside::not_now(m, fx),
         other => {
             if may_go_on(m, fx, &other) {
                 guarded(m, fx, other);
@@ -68,6 +69,7 @@ fn may_go_on(m: &mut Model, fx: &mut Effects<Notes>, action: &WindowAction) -> b
         return false;
     }
     m.notice.clear();
+    m.lasting_notice = false;
     fx.changed(STATUS);
     true
 }
@@ -94,6 +96,9 @@ fn guarded(m: &mut Model, fx: &mut Effects<Notes>, action: WindowAction) {
         WindowAction::Trash => library::trash(m, fx),
         WindowAction::Restore => library::restore(m, fx),
         WindowAction::Copy => navigate::copy(m, fx),
+        WindowAction::KeepMine => outside::resolve(m, fx, Resolution::KeepMine),
+        WindowAction::TakeTheirs => outside::resolve(m, fx, Resolution::TakeTheirs),
+        WindowAction::Compare => outside::compare(m, fx),
         WindowAction::Import => open_dialog(m, fx, Dialog::Import),
         WindowAction::Export => {
             if m.current().is_some() {
@@ -109,7 +114,11 @@ fn guarded(m: &mut Model, fx: &mut Effects<Notes>, action: WindowAction) {
             }
         }
         // The view's own actions were handled before the guards.
-        WindowAction::Focus | WindowAction::Preview | WindowAction::Undo | WindowAction::Redo => {}
+        WindowAction::Focus
+        | WindowAction::Preview
+        | WindowAction::Undo
+        | WindowAction::Redo
+        | WindowAction::NotNow => {}
     }
 }
 
@@ -155,6 +164,7 @@ mod tests {
             Some(WindowAction::Open { id: "a.md".into(), trash: true })
         );
         assert_eq!(WindowAction::parse("confirm", path), Some(WindowAction::Confirm { path: "/tmp/x.md".into() }));
+        assert_eq!(WindowAction::parse("take-theirs", path), Some(WindowAction::TakeTheirs));
         assert_eq!(WindowAction::parse("nonsense", path), None);
         assert!(WindowAction::Trash.navigates() && !WindowAction::Copy.navigates());
     }

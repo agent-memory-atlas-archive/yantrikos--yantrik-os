@@ -116,6 +116,28 @@ fn every_change_is_refused_with_the_reason_and_nothing_is_written() {
     assert_eq!(snapshot(&vault(&app)), before, "a refused change wrote to the vault");
 }
 
+/// An outside change under text a read-only library holds unsaved: the two resolutions write a
+/// note, so they are refused at the door with the reason; Compare only reads, so it works.
+#[test]
+fn a_conflict_in_a_read_only_library_is_compared_but_not_resolved() {
+    let (app, _disk, path, _saved, typed) = holding_unsaved_text();
+    std::fs::write(&path, "# Draft\n\ntheirs\n").unwrap();
+    app.look_at_files();
+    assert_eq!(state(&app)["outside"], "conflict");
+    let before = snapshot(&vault(&app));
+    for action in [WindowAction::KeepMine, WindowAction::TakeTheirs] {
+        app.run(Command::Window(action.clone()));
+        settle(&app);
+        assert_eq!(state(&app)["notice"], READ_ONLY, "{action:?}");
+    }
+    for name in ["keep_mine_as_copy", "take_theirs"] {
+        assert_eq!(act(&app, name, json!({})), Err(READ_ONLY.to_string()), "{name}");
+    }
+    assert_eq!(act(&app, "compare", json!({})).unwrap()["theirs"], "# Draft\n\ntheirs\n");
+    assert_eq!(open_note(&app).1, typed, "the text is kept");
+    assert_eq!(snapshot(&vault(&app)), before, "nothing was written");
+}
+
 #[test]
 fn reading_and_exporting_go_on_in_a_read_only_library() {
     let (app, _disk) = read_only_library();

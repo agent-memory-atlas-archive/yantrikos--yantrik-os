@@ -3,8 +3,8 @@
 use yantrik_app::app::WindowId;
 use yantrik_app::documents::{DocumentId, Observed};
 
-use crate::note::Note;
-use crate::store::{Loaded, SaveFailed, Saved};
+use crate::note::{Note, NoteText};
+use crate::store::{Loaded, Reread, Resolved, SaveFailed, Saved};
 
 #[derive(Clone)]
 pub enum Command {
@@ -34,6 +34,14 @@ pub enum Command {
     Restored(Result<Note, String>),
     Imported(Result<Note, String>),
     Exported(Result<(), String>),
+    /// An outside change resolved (`resolution`) for document `doc`, whose edits were at `seq`.
+    /// Boxed: it carries two notes, and every command is moved through the app's queue.
+    Resolved { doc: DocumentId, seq: u64, resolution: Resolution, result: Result<Box<Resolved>, String> },
+    /// The file's version read for a comparison: `None` when the file is gone.
+    Compared { doc: DocumentId, result: Result<Option<NoteText>, String> },
+    /// A note with nothing unsaved, read again after another program changed it. `Err`: our own
+    /// last write could not be kept first, so nothing was read. Boxed, as `Resolved` is.
+    Reread { doc: DocumentId, result: Result<Box<Reread>, String> },
     /// The disk the vault writes through, for a test to make a write fail.
     #[cfg(test)]
     UseDisk(std::sync::Arc<dyn yantrik_app::documents::disk::Disk>),
@@ -60,6 +68,33 @@ pub enum WindowAction {
     New(Option<String>),
     /// Open a library row: its file name, and whether it is in the Trash.
     Open { id: String, trash: bool },
+    /// The outside bar's choices: *Keep mine as a copy* (*Save as new* for a deleted file),
+    /// *Take theirs*, *Compare*, *Not now*.
+    KeepMine,
+    TakeTheirs,
+    Compare,
+    NotNow,
+}
+
+/// How an outside change to the open note is resolved. Either way the window's text is kept as a
+/// note of its own first, and the other program's file is never written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resolution {
+    /// The window moves to the kept note; the original is left as the file holds it.
+    KeepMine,
+    /// The window's note takes the file's text; the kept note is the recovery.
+    TakeTheirs,
+}
+
+impl Resolution {
+    /// What the kept note's file name starts with: a copy, as *Save a copy* names one, or a
+    /// recovered note, as the journal's replay names one.
+    pub fn kept_prefix(self) -> &'static str {
+        match self {
+            Resolution::KeepMine => "copy",
+            Resolution::TakeTheirs => "recovered",
+        }
+    }
 }
 
 impl WindowAction {
@@ -81,6 +116,10 @@ impl WindowAction {
             "export" => WindowAction::Export,
             "confirm" => WindowAction::Confirm { path: path() },
             "new" => WindowAction::New(None),
+            "keep-mine" => WindowAction::KeepMine,
+            "take-theirs" => WindowAction::TakeTheirs,
+            "compare" => WindowAction::Compare,
+            "not-now" => WindowAction::NotNow,
             other => {
                 if let Some(title) = other.strip_prefix("new:") {
                     WindowAction::New(Some(title.into()))
@@ -113,6 +152,9 @@ impl WindowAction {
                 | WindowAction::New(_)
                 | WindowAction::Undo
                 | WindowAction::Redo
+                // Each writes the window's text as a note of its own; Compare only reads.
+                | WindowAction::KeepMine
+                | WindowAction::TakeTheirs
         )
     }
 
@@ -163,6 +205,9 @@ pub enum Act {
     Redo,
     Import { path: String },
     Export { path: String },
+    KeepMineAsCopy,
+    TakeTheirs,
+    Compare,
     /// A required argument given empty: refused, in the window's notice too.
     Refuse(String),
 }
@@ -186,6 +231,8 @@ impl Act {
                 | Act::Undo
                 | Act::Redo
                 | Act::Import { .. }
+                | Act::KeepMineAsCopy
+                | Act::TakeTheirs
         )
     }
 }

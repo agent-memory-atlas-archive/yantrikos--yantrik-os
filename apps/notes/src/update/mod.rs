@@ -21,9 +21,12 @@ use crate::view::render::{CUES, EDIT, LIBRARY, MODEL_ONLY, NOTE, PREVIEW, STATUS
 use crate::Notes;
 
 mod editing;
+mod follow;
 mod library;
 mod navigate;
+mod outside;
 mod read_only;
+pub mod said;
 pub mod saving;
 mod surface;
 mod window;
@@ -54,17 +57,23 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Effects<Notes>) -> Resul
         Command::ViewSynced { focus_mode, dialog } => {
             m.pane.focus_mode = focus_mode;
             m.pane.dialog = dialog;
+            if dialog != outside::COMPARE_DIALOG {
+                m.pane.theirs = None;
+            }
             fx.changed(MODEL_ONLY);
         }
         Command::Surface(act) => surface::act(m, fx, act),
         Command::Autosave => saving::save(m, fx, saving::How::Autosave),
         Command::CloseRequested(window) => saving::close(m, fx, window),
-        Command::FileChanged { key, seen } => saving::seen(m, fx, &key, seen),
+        Command::FileChanged { key, seen } => outside::seen(m, fx, &key, seen),
         Command::Loaded(result) => library::loaded(m, fx, result),
         Command::SaveLanded { doc, seq, result } => saving::landed(m, fx, doc, seq, result),
         Command::Trashed { id, result } => library::trashed(m, fx, &id, result),
         Command::Restored(result) | Command::Imported(result) => library::opened(m, fx, result),
         Command::Exported(result) => library::exported(m, fx, result),
+        Command::Resolved { doc, seq, resolution, result } => outside::resolved(m, fx, doc, seq, resolution, result),
+        Command::Compared { doc, result } => outside::compared(m, fx, doc, result),
+        Command::Reread { doc, result } => follow::reread(m, fx, doc, result),
         #[cfg(test)]
         Command::UseDisk(disk) => {
             m.vault = Vault::new(m.vault.dir().to_path_buf(), disk);
@@ -79,6 +88,8 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Effects<Notes>) -> Resul
 fn save_state(m: &Model) -> &'static str {
     match m.current() {
         Some(c) if c.trash() => "Recoverable deletion",
+        // No autosave is pending while the person's choice is: saving is refused until then.
+        Some(c) if c.unsaved() && c.doc.blocked() => said::WAITING_ON_CHOICE,
         Some(c) if c.unsaved() => "Unsaved · autosave pending",
         _ => "All changes saved",
     }
@@ -87,8 +98,10 @@ fn save_state(m: &Model) -> &'static str {
 /// The open note changed: its title, count and save state are said again, and the autosave's
 /// debounce starts over.
 fn refreshed(m: &mut Model, fx: &mut Effects<Notes>) {
-    let Some(current) = m.current() else { return };
-    m.status = if current.unsaved() { "Unsaved · autosave pending" } else { "All changes saved" }.into();
+    if m.current().is_none() {
+        return;
+    }
+    m.status = save_state(m).into();
     fx.changed(EDIT);
     fx.changed(STATUS);
     fx.after(AUTOSAVE, AUTOSAVE_AFTER, Command::Autosave);
@@ -163,6 +176,7 @@ fn failed(m: &mut Model, fx: &mut Effects<Notes>, sentence: String) {
     }
     m.quitting = None;
     m.notice = sentence;
+    m.lasting_notice = false;
     m.status = "Needs attention · draft kept".into();
     fx.changed(STATUS);
 }
@@ -183,6 +197,10 @@ fn after_store(m: &mut Model, fx: &mut Effects<Notes>) {
         }
     } else if m.quitting.is_some() || m.pending.is_some() {
         saving::save(m, fx, saving::How::Asked);
+    }
+    // A change to the open note seen while the store was busy is followed now that it is not.
+    if m.busy.is_none() && std::mem::take(&mut m.pane.reread_owed) {
+        follow::follow(m, fx);
     }
 }
 

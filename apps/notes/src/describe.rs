@@ -3,6 +3,7 @@
 
 use serde_json::{json, Value};
 use yantrik_app::control::View;
+use yantrik_app::documents::{Durability, OutsideState, SaveState};
 
 use crate::model::Model;
 use crate::note::Note;
@@ -27,8 +28,14 @@ pub fn view(m: &Model) -> View {
         None => format!("Notes — nothing open, {library}"),
         Some(n) => {
             let lines = n.text().lines().count();
+            // What waits on a choice about an outside change is said in the line a mind reads first.
+            let waiting = match n.outside() {
+                OutsideState::Conflict { .. } => ", changed outside Notes",
+                OutsideState::Deleted => ", its file was moved or deleted",
+                OutsideState::Clean | OutsideState::Changed { .. } => "",
+            };
             format!(
-                "Notes — \"{}\" open{} ({} line{}, {}), {library}",
+                "Notes — \"{}\" open{} ({} line{}, {}{waiting}), {library}",
                 n.title(),
                 if n.trash() { " from Trash" } else { "" },
                 lines,
@@ -57,6 +64,8 @@ pub fn view(m: &Model) -> View {
         .with("lines", open.as_ref().map(|n| n.text().lines().count() as i64))
         .with("characters", open.as_ref().map(|n| n.text().chars().count() as i64))
         .with("trashed_note_open", open.as_ref().is_some_and(|n| n.trash()))
+        .with("outside", open.as_ref().map(|n| outside(n.outside())))
+        .with("save_failure", open.as_ref().and_then(|n| save_failure(&n.doc.save)))
         .with("content", open.as_ref().map(|n| n.text().chars().take(4000).collect::<String>()))
         // The `.meta` sidecar travels with the text — `tags`, `notebook` and `pinned` live in it —
         // so it belongs in the view a revision is hashed from: a caller whose "unchanged since I
@@ -90,6 +99,30 @@ pub fn view(m: &Model) -> View {
                 })
                 .collect::<Vec<_>>(),
         )
+}
+
+/// `describe.outside`: what is known of changes made to the open note's file by another program.
+/// `conflict` and `deleted` wait on a choice (`keep_mine_as_copy`, `take_theirs`, `compare`), and
+/// until then the note is not saved; `changed` is a change to a note with nothing unsaved, while
+/// Notes reads it again (then `clean`).
+fn outside(state: &OutsideState) -> &'static str {
+    match state {
+        OutsideState::Clean => "clean",
+        OutsideState::Changed { .. } => "changed",
+        OutsideState::Conflict { .. } => "conflict",
+        OutsideState::Deleted => "deleted",
+    }
+}
+
+/// `describe.save_failure`: how much of the open note's last save reached the disk when it
+/// failed (`not_written`, `content_only`, `unknown`), or nothing when it did not fail.
+fn save_failure(state: &SaveState) -> Option<&'static str> {
+    let SaveState::Failed { error, .. } = state else { return None };
+    Some(match error.durability {
+        Durability::NotWritten => "not_written",
+        Durability::ContentOnly => "content_only",
+        Durability::Unknown => "unknown",
+    })
 }
 
 /// What the open note now is, read back out of the model and off the disk rather than predicted:

@@ -164,7 +164,8 @@ fn real_notes_autosave_navigation_conflict_trash_preview_and_idle() {
     });
     settle(&app);
     assert!(ui(&app, |ui| ui.get_modified()));
-    assert!(ui(&app, |ui| ui.get_notice().to_string()).contains("changed on disk"));
+    assert!(ui(&app, |ui| ui.get_notice().to_string()).contains("another program changed this note"));
+    assert_eq!(ui(&app, |ui| ui.get_outside()), 1, "the choices are offered");
     ui(&app, |ui| ui.invoke_action("new".into()));
     settle(&app);
     assert_eq!(ui(&app, |ui| ui.get_note_title().to_string()), "Draft kept");
@@ -211,3 +212,30 @@ fn escape_and_cancel_close_the_dialog_and_the_model_hears_of_it() {
     assert_eq!(super::state(&app)["focus"], false, "describe says what the window shows");
 }
 
+
+/// The outside bar and the comparison, drawn: the choices are kit buttons the person can press,
+/// and Escape closes the comparison as it closes every dialog.
+#[test]
+fn the_outside_bar_and_the_comparison_are_drawn_and_answer_the_keys() {
+    let (app, path) = super::with_note("Shared");
+    ui(&app, |ui| {
+        ui.show().unwrap();
+        ui.window().set_size(slint::PhysicalSize::new(1120, 760));
+    });
+    ui(&app, |ui| {
+        ui.set_content("# Shared\n\nmine, typed here".into());
+        ui.invoke_edited("# Shared\n\nmine, typed here".into());
+    });
+    std::fs::write(&path, "# Shared\n\ntheirs, written elsewhere\n").unwrap();
+    app.look_at_files();
+    let said = ui(&app, |ui| (ui.get_outside(), ui.get_outside_said().to_string()));
+    assert_eq!(said, (1, crate::update::said::outside(&super::outside(&app)).unwrap().to_string()));
+    screenshot(&app, "notes-outside-bar.png");
+    ui(&app, |ui| ui.invoke_action("compare".into()));
+    settle(&app);
+    assert_eq!(ui(&app, |ui| ui.get_dialog()), 3);
+    screenshot(&app, "notes-compare.png");
+    app.ui(|ui| tap(ui, &SharedString::from(Key::Escape)));
+    assert_eq!(app.model(|m| (m.pane.dialog, m.pane.theirs.is_none())), (0, true), "closed, and forgotten");
+    assert_eq!(ui(&app, |ui| ui.get_outside()), 1, "the choice is still to be made");
+}

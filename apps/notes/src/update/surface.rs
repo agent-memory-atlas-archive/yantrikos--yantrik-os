@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use yantrik_app::effects::Effects;
 use yantrik_app::Refused;
 
-use super::{editing, relist, run, saving, window};
+use super::{editing, outside, relist, run, saving, window};
 use crate::command::{Act, Step, WindowAction};
 use crate::describe::{listed, read_notes, written};
 use crate::model::{Asked, Expect, Model, Pending};
@@ -120,6 +120,9 @@ pub fn act(m: &mut Model, fx: &mut Effects<Notes>, act: Act) {
                 save_then(m, fx, Step::Import { path });
             }
         }
+        Act::KeepMineAsCopy => resolve(m, fx, WindowAction::KeepMine, false),
+        Act::TakeTheirs => resolve(m, fx, WindowAction::TakeTheirs, true),
+        Act::Compare => resolve(m, fx, WindowAction::Compare, true),
         Act::Export { path } => {
             let to = expand_home(path.trim());
             if !to.is_absolute() {
@@ -150,7 +153,7 @@ pub fn finish(m: &mut Model, fx: &mut Effects<Notes>) {
     let Some(asked) = m.asked.take() else { return };
     let outcome = match asked.refused {
         Some(sentence) => Err(sentence),
-        None => answer(m, asked.expect, asked.landed),
+        None => answer(m, asked.expect, asked.landed, asked.kept),
     };
     match outcome {
         Ok(answer) => {
@@ -161,8 +164,9 @@ pub fn finish(m: &mut Model, fx: &mut Effects<Notes>) {
     }
 }
 
-/// The answer for what the call waited on, read from the model and the disk now.
-fn answer(m: &Model, expect: Expect, landed: bool) -> Result<Value, String> {
+/// The answer for what the call waited on, read from the model and the disk now. `kept` is the
+/// note an outside change's resolution kept the window's text as.
+fn answer(m: &Model, expect: Expect, landed: bool, kept: Option<String>) -> Result<Value, String> {
     // What went wrong, as the notice says it, or else what is known not to have happened.
     let why = |otherwise: String| if m.notice.is_empty() { otherwise } else { m.notice.clone() };
     let note = || written(m).ok_or_else(|| NOTHING_OPEN.to_string());
@@ -204,6 +208,21 @@ fn answer(m: &Model, expect: Expect, landed: bool) -> Result<Value, String> {
             answer["copied_from"] = json!(from);
             Ok(answer)
         }
+        Expect::TookTheirs { id } => {
+            let took = m.current().is_some_and(|c| c.id() == id && !c.doc.blocked());
+            if !took {
+                return Err(why("Nothing was replaced; the window still holds its own text.".into()));
+            }
+            let mut answer = note()?;
+            answer["kept_as"] = json!(kept);
+            Ok(answer)
+        }
+        Expect::Compared => {
+            if !landed {
+                return Err(why("The version on disk could not be read, so nothing was compared.".into()));
+            }
+            compared(m).ok_or_else(|| NOTHING_OPEN.to_string())
+        }
         Expect::Reloaded => Ok(json!({
             "notes": m.library.iter().filter(|n| !n.trash).count(),
             "in_trash": m.library.iter().filter(|n| n.trash).count(),
@@ -242,7 +261,58 @@ pub(super) fn refuse(m: &mut Model, fx: &mut Effects<Notes>, sentence: String) {
 }
 
 fn ask(m: &mut Model, fx: &Effects<Notes>, expect: Expect) {
-    m.asked = Some(Asked { invocation: fx.invocation(), expect, refused: None, landed: false });
+    m.asked = Some(Asked { invocation: fx.invocation(), expect, refused: None, landed: false, kept: None });
+}
+
+/// A choice about an outside change, through the same command as the bar's button. Refused, in
+/// the same words the window would use, when the open note has nothing to resolve.
+fn resolve(m: &mut Model, fx: &mut Effects<Notes>, action: WindowAction, theirs: bool) {
+    if let Some(sentence) = outside::unresolvable(m.current(), theirs) {
+        return refuse(m, fx, sentence.into());
+    }
+    let Some(id) = m.current().map(|c| c.id().to_string()) else { return };
+    let expect = match action {
+        WindowAction::TakeTheirs => Expect::TookTheirs { id },
+        WindowAction::Compare => Expect::Compared,
+        _ => Expect::Copied { from: id },
+    };
+    ask(m, fx, expect);
+    window::act(m, fx, action);
+}
+
+/// How much of each side a comparison answers with: two of them fit a safe read's answer.
+const COMPARED_CHARS: usize = 1500;
+
+/// The comparison as a mind reads it: both texts (each cut at [`COMPARED_CHARS`], and said when it
+/// is) with their sidecars, whether they are the same, and the first line where the texts part.
+fn compared(m: &Model) -> Option<Value> {
+    let c = m.current()?;
+    let mine = c.content();
+    let theirs = m.pane.theirs.as_ref();
+    let cut = |text: &str| text.chars().take(COMPARED_CHARS).collect::<String>();
+    let first_difference = theirs.and_then(|theirs| {
+        let (mut a, mut b) = (mine.text.lines(), theirs.text.lines());
+        // The first line number where one side has a line the other does not; none when equal.
+        (1..)
+            .find_map(|line| match (a.next(), b.next()) {
+                (None, None) => Some(None),
+                (x, y) if x != y => Some(Some(line)),
+                _ => None,
+            })
+            .flatten()
+    });
+    Some(json!({
+        "title": c.title(),
+        "mine": cut(&mine.text),
+        "mine_cut_short": mine.text.chars().count() > COMPARED_CHARS,
+        "mine_metadata": mine.meta,
+        "theirs": theirs.map(|t| cut(&t.text)),
+        "theirs_cut_short": theirs.is_some_and(|t| t.text.chars().count() > COMPARED_CHARS),
+        "theirs_metadata": theirs.map(|t| t.meta.as_str()),
+        "file_exists": theirs.is_some(),
+        "identical": theirs == Some(mine),
+        "first_different_line": first_difference,
+    }))
 }
 
 /// The calls that leave the open note save it first, and need the library open to do so.
