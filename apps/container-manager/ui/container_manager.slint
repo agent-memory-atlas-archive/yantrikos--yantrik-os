@@ -1,14 +1,14 @@
-// Container Manager — Docker/Podman container management. Screen 26.
+// Container Manager — Docker/Podman container management: the app's own screen (moved here from the shell's folder; it was screen 26).
 
-import { Theme } from "theme.slint";
-import { Icon, Icons } from "components/icon.slint";
-import { AppHeader } from "components/app_header.slint";
-import { AgentRail, AgentContextItem, AgentSuggestion } from "components/agent_rail.slint";
-import { AgentProposalCard, AgentProposal } from "components/agent_proposal.slint";
-import { AppColor, AppIdentity } from "components/app_color.slint";
-import { YEmptyState } from "components/y_empty_state.slint";
-import { YNoticeBar } from "components/notice_bar.slint";
-import { YButton } from "components/y_button.slint";
+import { Theme } from "@yantrik-design/theme.slint";
+import { Icon, Icons } from "@yantrik-kit/icon.slint";
+import { AppHeader } from "@yantrik-kit/app_header.slint";
+import { AgentRail, AgentContextItem, AgentSuggestion } from "@yantrik-kit/agent_rail.slint";
+import { AgentProposalCard, AgentProposal } from "@yantrik-kit/agent_proposal.slint";
+import { AppColor, AppIdentity } from "@yantrik-kit/app_color.slint";
+import { YEmptyState } from "@yantrik-kit/y_empty_state.slint";
+import { YNoticeBar } from "@yantrik-kit/notice_bar.slint";
+import { YButton } from "@yantrik-kit/y_button.slint";
 
 // ── Data structs ──
 
