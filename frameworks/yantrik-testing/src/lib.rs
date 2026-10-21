@@ -25,7 +25,7 @@ use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use serde_json::Value;
-use yantrik_app::app::{App, Boot, ExitReason};
+use yantrik_app::app::{App, Boot, Event, ExitReason};
 use yantrik_app::cx::{Core, Cx, Inbound, Parts};
 use yantrik_app::intents::{self, Intents};
 use yantrik_app::jobs::{Cancel, Deliver, Executor, Job, JobId, Manual};
@@ -340,7 +340,8 @@ impl<A: App> TestApp<A> {
     pub fn start_at(paths: Paths, args: Vec<std::ffi::OsString>) -> TestApp<A> {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         on_ui(move || {
-            let (boot, store) = Boot::<A::Settings>::open(paths.clone(), args);
+            let (boot, store) = Boot::<A::Settings>::open(paths.clone(), args)
+                .unwrap_or_else(|e| panic!("{}: the launch was refused: {e}", A::ID));
             let model = A::model(&boot)
                 .unwrap_or_else(|e| panic!("{}: the model did not start: {e}", A::ID));
             let ui = A::Ui::make().unwrap_or_else(|e| panic!("{}: no headless window: {e}", A::ID));
@@ -365,6 +366,7 @@ impl<A: App> TestApp<A> {
                         Box::new(SharedLane(lane))
                     }),
                     settings: store,
+                    paths: paths.clone(),
                     wake: Arc::new(|| {}),
                 },
             );
@@ -378,6 +380,8 @@ impl<A: App> TestApp<A> {
             A::wire(&Cx::new(core.clone()));
             core.render_all();
             core.start();
+            // As the runner does: the launch, once, after `start`.
+            core.event(Event::Launch(boot.launch.clone()));
             let mut table = Intents::new();
             A::intents(&mut table);
             let registry = intents::registry(&core, table);
@@ -480,6 +484,12 @@ impl<A: App> TestApp<A> {
 
     pub fn writes_waiting(&self) -> usize {
         self.with(|u| u.core.writes_waiting())
+    }
+
+    /// A framework event, raised by the test as the runner would raise it (a launch handed over,
+    /// a close request): the app's `event` answers it, or the default happens.
+    pub fn event(&self, event: Event<A::Settings>) {
+        self.with(move |u| u.core.event(event));
     }
 
     /// What the housekeeping thread would have seen, raised by the test: the settings file

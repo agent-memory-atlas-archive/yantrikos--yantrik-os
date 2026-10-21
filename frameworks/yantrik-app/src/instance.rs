@@ -91,6 +91,41 @@ pub fn claim(app_name: &str) -> Option<InstanceGuard> {
     claim_in(&runtime_dir(), app_name, present_running)
 }
 
+/// What a launch that found the slot held made of the copy holding it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Held {
+    /// The running copy took the launch (or at least answered); this process exits.
+    HandedOver,
+    /// It did not answer: it may have died with its pid file behind it. The slot is checked
+    /// again, once, and this process may become the owner.
+    OwnerGone,
+}
+
+/// [`claim`], handing the launch to the running copy through `hand_over` instead of asking it
+/// only to present. A copy that does not answer is given one re-check of the slot (the design's
+/// §2.2 step 4): a dead owner's stale pid file is taken over, a live one that is stuck is left.
+pub fn claim_or_hand_over(
+    app_name: &str,
+    mut hand_over: impl FnMut(&str) -> Held,
+) -> Option<InstanceGuard> {
+    let dir = runtime_dir();
+    for attempt in 0..2 {
+        let mut gone = false;
+        let claimed = claim_in(&dir, app_name, |name| {
+            gone = hand_over(name) == Held::OwnerGone;
+        });
+        match claimed {
+            Some(guard) => return Some(guard),
+            None if gone && attempt == 0 => {
+                tracing::warn!(app = app_name, "the running copy did not answer; checking the slot again");
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            None => return None,
+        }
+    }
+    None
+}
+
 /// Ask the running copy of `app_name` to show its window, and say what came of it.
 ///
 /// For a launch that found the app already running by a guard of its own, as Notes does; `claim`

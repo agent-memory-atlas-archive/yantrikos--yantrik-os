@@ -137,7 +137,7 @@ impl Presented {
     }
 }
 
-/// Read the reply to one `app.act present`.
+/// Read the reply to one `app.act present` (or `launch`, which answers the same way).
 fn read(reply: Result<serde_json::Value, yantrik_ipc_transport::RpcError>) -> Presented {
     match reply {
         Err(e) if e.code == yantrik_surface::REFUSED => Presented::Refused(e.message),
@@ -159,15 +159,28 @@ fn read(reply: Result<serde_json::Value, yantrik_ipc_transport::RpcError>) -> Pr
 ///
 /// Called by a launch that found the single-instance slot held, before it exits.
 pub fn ask(app_id: &str) -> Presented {
-    let service = control::service_id_for(app_id);
-    let address = yantrik_ipc_transport::mind_door::client_address(&service)
-        .unwrap_or_else(|| yantrik_ipc_transport::RpcServer::default_address(&service));
-    ask_at(&address)
+    let here = std::env::var("WAYLAND_DISPLAY").ok();
+    call(app_id, ACTION, serde_json::json!({ "display": here }))
 }
 
-/// [`ask`], at a socket named outright. Split out so a test can serve the first copy in a
-/// directory of its own.
+/// One `app.act` on the running copy's surface that answers as `present` does: `present`
+/// itself, or `launch` (`crate::launch::hand_over`).
+pub(crate) fn call(instance: &str, action: &str, args: serde_json::Value) -> Presented {
+    let service = control::service_id_for(instance);
+    let address = yantrik_ipc_transport::mind_door::client_address(&service)
+        .unwrap_or_else(|| yantrik_ipc_transport::RpcServer::default_address(&service));
+    call_at(&address, action, args)
+}
+
+/// [`ask`], at a socket named outright, for the test that serves the first copy in a directory
+/// of its own.
+#[cfg(test)]
 pub(crate) fn ask_at(address: &str) -> Presented {
+    let here = std::env::var("WAYLAND_DISPLAY").ok();
+    call_at(address, ACTION, serde_json::json!({ "display": here }))
+}
+
+fn call_at(address: &str, action: &str, args: serde_json::Value) -> Presented {
     // Waited for before the one call, rather than calling in a loop: a failed call trips the
     // client's breaker for five seconds, and every retry after it fails without being sent.
     let deadline = Instant::now() + BIND_WAIT;
@@ -177,8 +190,7 @@ pub(crate) fn ask_at(address: &str) -> Presented {
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    let here = std::env::var("WAYLAND_DISPLAY").ok();
-    let request = serde_json::json!({ "action": ACTION, "args": { "display": here } });
+    let request = serde_json::json!({ "action": action, "args": args });
     read(
         yantrik_ipc_transport::SyncRpcClient::new(address)
             .with_timeout(ANSWER_WAIT)

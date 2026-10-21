@@ -84,6 +84,9 @@ pub struct Core<A: App> {
     executor: RefCell<Box<dyn Executor<A::Command>>>,
     settings: RefCell<Store<A::Settings>>,
     lane: RefCell<Box<dyn Lane>>,
+    paths: crate::paths::Paths,
+    /// Each draft's latest revision, so a write's outcome is known to be the latest or not.
+    drafts: RefCell<HashMap<String, u64>>,
     jobs: RefCell<HashMap<JobId, Waiting<A::Command>>>,
     by_key: RefCell<HashMap<JobKey, JobId>>,
     next_job: Cell<u64>,
@@ -130,6 +133,8 @@ pub struct Parts<A: App> {
     pub lane: MakeLane,
     /// The settings as opened for the boot.
     pub settings: Store<A::Settings>,
+    /// Where the app's files are: the drafts go under the state dir.
+    pub paths: crate::paths::Paths,
     /// How a post from another thread gets the UI thread to call [`Core::drain`].
     pub wake: Wake,
 }
@@ -154,6 +159,8 @@ impl<A: App> Core<A> {
                 executor: RefCell::new(parts.executor),
                 settings: RefCell::new(parts.settings),
                 lane: RefCell::new((parts.lane)(report)),
+                paths: parts.paths,
+                drafts: RefCell::new(HashMap::new()),
                 jobs: RefCell::new(HashMap::new()),
                 by_key: RefCell::new(HashMap::new()),
                 next_job: Cell::new(1),
@@ -180,6 +187,11 @@ impl<A: App> Core<A> {
 
     pub fn ui(&self) -> &A::Ui {
         &self.ui
+    }
+
+    /// Where the app's files are.
+    pub fn paths(&self) -> &crate::paths::Paths {
+        &self.paths
     }
 
     /// The `Send` endpoint for other threads.
@@ -407,6 +419,8 @@ impl<A: App> Core<A> {
                     value,
                     replace_unusable,
                 } => self.save_settings(value, replace_unusable),
+                Request::SaveDraft { name, bytes, delay } => self.save_draft(name, bytes, delay),
+                Request::DiscardDraft(name) => self.discard_draft(name),
                 Request::Close(window) => self.close_window(window),
                 Request::Exit => self.request_exit(ExitReason::App),
             }
@@ -586,11 +600,13 @@ impl<A: App> Core<A> {
         self.in_wake.set(false);
     }
 
-    /// An event: the app's command for it, or the default.
-    pub(crate) fn event(&self, event: Event<A::Settings>) {
+    /// An event: the app's command for it, or the default. The runner raises the first
+    /// `Event::Launch` through this; a test may raise any.
+    pub fn event(&self, event: Event<A::Settings>) {
         let command = A::event(event.clone(), &self.model.borrow());
         match (command, event) {
             (Some(command), _) => self.run(command),
+            (None, Event::Launch(_)) => {}
             (None, Event::CloseRequested(window)) => self.close_window(window),
             (None, Event::ExitRequested(reason)) => self.request_exit(reason),
             (None, Event::Activated(_)) => {}
@@ -607,6 +623,10 @@ impl<A: App> Core<A> {
                 tracing::warn!(app = self.id, why);
                 problems::record_failure(self.id, "settings_conflict", why);
                 self.resolve_settings(mine);
+            }
+            (None, Event::DraftSaved(_)) => {}
+            (None, Event::DraftNotSaved { name, why }) => {
+                problems::record_failure(self.id, "draft", &format!("{name}: {why}"));
             }
         }
     }

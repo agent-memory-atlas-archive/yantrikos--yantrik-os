@@ -52,6 +52,15 @@ pub enum Request<A: App> {
         value: A::Settings,
         replace_unusable: bool,
     },
+    /// A draft's bytes, written through the lane after `delay` unless a newer save of the same
+    /// draft comes first.
+    SaveDraft {
+        name: String,
+        bytes: Vec<u8>,
+        delay: Duration,
+    },
+    /// The draft's file removed.
+    DiscardDraft(String),
     Close(WindowId),
     Exit,
 }
@@ -236,6 +245,32 @@ impl<A: App> Effects<A> {
         });
     }
 
+    /// Keep a draft: written after [`crate::drafts::DEBOUNCE`], or sooner if the app closes; a
+    /// newer save of the same name meanwhile takes its place, so typing is not a write per key.
+    /// `Event::DraftSaved` or `Event::DraftNotSaved` says how it went. The app owns the bytes'
+    /// schema and reads them back from `Boot::drafts`.
+    pub fn save_draft(&mut self, name: &str, bytes: Vec<u8>) {
+        self.requests.push(Request::SaveDraft {
+            name: name.into(),
+            bytes,
+            delay: crate::drafts::DEBOUNCE,
+        });
+    }
+
+    /// A draft written now: a meaningful transition (a document switched, a send pressed).
+    pub fn checkpoint_draft(&mut self, name: &str, bytes: Vec<u8>) {
+        self.requests.push(Request::SaveDraft {
+            name: name.into(),
+            bytes,
+            delay: Duration::ZERO,
+        });
+    }
+
+    /// The draft is no longer needed: its file is removed.
+    pub fn discard_draft(&mut self, name: &str) {
+        self.requests.push(Request::DiscardDraft(name.into()));
+    }
+
     /// Close a window. A `CloseRequested` flow ends here once any saving is done.
     pub fn close(&mut self, window: WindowId) {
         self.requests.push(Request::Close(window));
@@ -273,6 +308,8 @@ impl<A: App> Request<A> {
             Request::Report { .. } => "report",
             Request::Settle(_) => "settle",
             Request::SaveSettings { .. } => "save_settings",
+            Request::SaveDraft { .. } => "save_draft",
+            Request::DiscardDraft(_) => "discard_draft",
             Request::Close(_) => "close",
             Request::Exit => "exit",
         }
