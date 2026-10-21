@@ -33,8 +33,20 @@ pub enum Fired<C> {
     LingerOver,
 }
 
-/// The timer a linger's backstop is armed under. Reserved: an app's own timer never needs it.
-pub const LINGER: TimerId = TimerId("yantrik-app.linger");
+/// The names of the framework's own timers start with this. An app's `fx.every`, `fx.after` or
+/// `fx.stop_timer` under one is dropped, with a warning (`Effects`), so no command of the app's
+/// can stop, replace or re-arm a deadline the framework keeps.
+const FRAMEWORK: &str = "yantrik-app.";
+
+/// The timer a linger's backstop is armed under: the framework's own.
+pub(crate) const LINGER: TimerId = TimerId("yantrik-app.linger");
+
+impl TimerId {
+    /// Whether this is one of the framework's own timers, which the app may not touch.
+    pub fn is_framework(self) -> bool {
+        self.0.starts_with(FRAMEWORK)
+    }
+}
 
 pub trait Timers<C: 'static> {
     fn every(&mut self, id: TimerId, period: Duration, fire: Fire<C>);
