@@ -295,7 +295,10 @@ mod tests {
         assert!(second.is_none(), "a second copy ran beside the first");
         assert!(asked, "the running copy was asked to show its window");
         drop(first);
-        assert!(claim_in(&dir, "notes", |_| panic!("still held")).is_some(), "released with the guard");
+        assert!(
+            crate::lock::soon(|| claim_in(&dir, "notes", |_| {}).is_some()),
+            "released with the guard"
+        );
     }
 
     #[test]

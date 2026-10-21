@@ -99,6 +99,23 @@ pub fn hold(path: &Path) -> Result<FileLock, LockError> {
     Ok(FileLock { _file: file, path: path.to_path_buf() })
 }
 
+/// For tests: whether `f` holds within a second. A lock dropped in a test can stay held for a
+/// moment by a child another test forked just then: the child shares the open file until it
+/// starts its program, when `O_CLOEXEC` closes it. A real app is not affected; a test must wait.
+#[cfg(all(test, unix))]
+pub(crate) fn soon(mut f: impl FnMut() -> bool) -> bool {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    loop {
+        if f() {
+            return true;
+        }
+        if std::time::Instant::now() > until {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -118,7 +135,7 @@ mod tests {
         let first = hold(&path).expect("free");
         assert!(matches!(hold(&path), Err(LockError::Held)), "atomic: no gap between check and take");
         drop(first);
-        assert!(hold(&path).is_ok(), "released with its guard");
+        assert!(soon(|| hold(&path).is_ok()), "released with its guard");
         let _ = std::fs::remove_dir_all(&d);
     }
 
