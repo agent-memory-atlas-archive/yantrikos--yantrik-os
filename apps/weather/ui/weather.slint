@@ -89,7 +89,8 @@ component HourColumn inherits Rectangle {
     in property <length> caption-line: 16px;
 
     width: root.column-width;
-    background: root.hour.is-current ? Theme.accent-dim : (hover.has-hover ? Theme.hover-fill : transparent);
+    // The selection tint (accent at 12%), as a selected row has it; not the opaque accent-dim.
+    background: root.hour.is-current ? Theme.bg-selected : (hover.has-hover ? Theme.hover-fill : transparent);
     border-radius: Theme.r-sm;
 
     hover := TouchArea {}
@@ -460,6 +461,9 @@ export component WeatherDashboard inherits Rectangle {
                     }
                     Rectangle { height: Theme.sp-3; }
                     hours := Flickable {
+                        // Whole columns only: a half column at the edge read as a cut, not a row that
+                        // scrolls. From the window's width, as the pair grid is (the content's own would loop).
+                        width: Math.max(root.HOUR-COL, Math.floor((root.content-estimate - 2 * Theme.sp-6) / root.HOUR-COL) * root.HOUR-COL);
                         height: hours-row.preferred-height;
                         viewport-width: hours-row.preferred-width;
                         // Opens with the current hour in view and two columns before it.
