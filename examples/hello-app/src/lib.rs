@@ -465,7 +465,7 @@ mod tests {
 
         let permissive = || Authority { ceiling: "dangerous".into(), mode: Mode::named("bypass_all"), granted: false, asks_above: None };
         let mind = std::sync::Arc::new(FakeMind::new().answers((0..6).map(|_| Ok("ok".to_string()))));
-        let app = TestApp::<Hello>::start_at_with(Paths::temporary(Hello::ID), Vec::new(), mind.clone());
+        let app = TestApp::<Hello>::start_at_with(Paths::temporary(Hello::ID), Vec::new(), mind.clone(), yantrik_app::Services::fakes());
         app.run(Command::Add(4));
         app.advance(Duration::from_millis(300));
         app.seen(Seen::Reach(Reach::Ready));
