@@ -11709,6 +11709,7 @@ dependencies = [
  "serde",
  "serde_json",
  "slint",
+ "tracing",
  "uuid7",
  "yantrik-app",
  "yantrik-app-build",

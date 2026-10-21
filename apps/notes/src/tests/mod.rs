@@ -16,6 +16,7 @@ use crate::Notes;
 mod parity;
 mod read_notes;
 mod saving;
+mod startup;
 mod store;
 mod surface;
 mod window;

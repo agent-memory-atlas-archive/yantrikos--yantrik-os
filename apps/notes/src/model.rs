@@ -13,6 +13,7 @@ use yantrik_app::app::WindowId;
 use yantrik_app::documents::{Document, DocumentId, Documents, ViewId};
 use yantrik_app::intents::InvocationId;
 
+use crate::claim::Claim;
 use crate::command::Step;
 use crate::note::{Note, NoteText};
 use crate::store::Vault;
@@ -43,6 +44,8 @@ pub struct Model {
     pub asked: Option<Asked>,
     /// What the last call from the surface is answered with.
     pub answer: Value,
+    /// This copy's hold on the library, let go with the model.
+    _claim: Claim,
 }
 
 /// What an open note's files hold, beside its document.
@@ -185,7 +188,7 @@ impl Current<'_> {
 }
 
 impl Model {
-    pub fn new(vault: Vault) -> Model {
+    pub fn new(vault: Vault, claim: Claim) -> Model {
         Model {
             vault,
             library: Vec::new(),
@@ -216,6 +219,7 @@ impl Model {
             quitting: None,
             asked: None,
             answer: Value::Null,
+            _claim: claim,
         }
     }
 

@@ -17,6 +17,7 @@ use yantrik_app::intents::Intents;
 use yantrik_app::paths::Paths;
 use yantrik_app::Refused;
 
+mod claim;
 mod command;
 mod describe;
 mod intents;
@@ -47,6 +48,18 @@ fn vault_dir(paths: &Paths) -> PathBuf {
     }
 }
 
+/// Where the old builds' lock is. Under `cargo test`, inside the test's own root: the tests'
+/// apps run side by side in one process, and none may stand in for the person's running Notes.
+fn legacy_lock(paths: &Paths) -> Option<PathBuf> {
+    if cfg!(test) {
+        let dir = paths.state_dir();
+        let _ = std::fs::create_dir_all(dir);
+        Some(dir.join(claim::LEGACY_NAME))
+    } else {
+        claim::legacy_path()
+    }
+}
+
 impl App for Notes {
     type Ui = NotesApp;
     type Model = Model;
@@ -54,8 +67,18 @@ impl App for Notes {
     type Settings = ();
     const ID: &'static str = "notes";
 
+    /// The model, once this copy holds the library (`claim`). A copy that does not is the second
+    /// one: the first is asked to show its window, as the old build did, and this one stops.
     fn model(boot: &Boot) -> Result<Model, Startup> {
-        Ok(Model::new(store::Vault::real(vault_dir(&boot.paths))))
+        let dir = vault_dir(&boot.paths);
+        let claim = claim::hold(legacy_lock(&boot.paths).as_deref(), &dir).map_err(|claim::Held| {
+            // Never from a test: it would ask the person's own Notes to come forward.
+            if !cfg!(test) {
+                yantrik_app::instance::present_running(Self::ID);
+            }
+            Startup::new(claim::ALREADY_RUNNING)
+        })?;
+        Ok(Model::new(store::Vault::real(dir), claim))
     }
 
     fn wire(cx: &Cx<Self>) {
