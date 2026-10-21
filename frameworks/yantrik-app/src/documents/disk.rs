@@ -69,9 +69,10 @@ static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
 pub struct RealDisk;
 
 impl RealDisk {
-    /// A temp file beside `path`, made by this call and by nothing else (`create_new`), private
-    /// until it carries the destination's own mode.
-    fn create_temp(path: &Path) -> std::io::Result<(PathBuf, std::fs::File)> {
+    /// A temp file beside `path`, made by this call and by nothing else (`create_new`), private.
+    /// For a replace (`wear_mode`) it then carries the destination's own mode; a create has no
+    /// destination to take one from, and stays private.
+    fn create_temp(path: &Path, wear_mode: bool) -> std::io::Result<(PathBuf, std::fs::File)> {
         let parent = path.parent().ok_or_else(|| std::io::Error::other("no parent directory"))?;
         let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         let n = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
@@ -85,7 +86,7 @@ impl RealDisk {
         }
         let file = options.open(&temp)?;
         // A note made private stays private: the replacement wears the original's mode.
-        if let Ok(meta) = std::fs::metadata(path) {
+        if let Some(meta) = wear_mode.then(|| std::fs::metadata(path).ok()).flatten() {
             if let Err(e) = file.set_permissions(meta.permissions()) {
                 drop(file);
                 let _ = std::fs::remove_file(&temp);
@@ -104,7 +105,7 @@ impl Disk for RealDisk {
         if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
             return Err(DiskError { step: Step::Check, error: "the file is a link, and is not replaced".into() });
         }
-        let (temp, mut file) = RealDisk::create_temp(path).map_err(fail(Step::CreateTemp))?;
+        let (temp, mut file) = RealDisk::create_temp(path, true).map_err(fail(Step::CreateTemp))?;
         let result = (|| {
             file.write_all(bytes).map_err(fail(Step::Write))?;
             file.sync_all().map_err(fail(Step::SyncFile))?;
@@ -121,7 +122,7 @@ impl Disk for RealDisk {
 
     fn create_new(&self, path: &Path, bytes: &[u8]) -> Result<(), DiskError> {
         let fail = |step: Step| move |e: std::io::Error| DiskError { step, error: e.to_string() };
-        let (temp, mut file) = RealDisk::create_temp(path).map_err(fail(Step::CreateTemp))?;
+        let (temp, mut file) = RealDisk::create_temp(path, false).map_err(fail(Step::CreateTemp))?;
         let result = (|| {
             file.write_all(bytes).map_err(fail(Step::Write))?;
             file.sync_all().map_err(fail(Step::SyncFile))?;
