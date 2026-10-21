@@ -11,7 +11,7 @@ pub fn view(m: &Model) -> View {
     if let Some(error) = &r.error {
         return View::new(format!("Weather — {error}"))
             .with("error", error.clone())
-            .with("notice", m.notice.clone())
+            .with("notice", if m.notice.is_empty() { fallback_sentence(m).unwrap_or_default() } else { m.notice.clone() })
             .with("reading_from", m.source.reading_from());
     }
     let now = r.current.clone().unwrap_or_default();
@@ -70,6 +70,14 @@ pub fn view(m: &Model) -> View {
         )
     };
 
+    // The notice the Mind reads: what could not be done, or, under a fallback reading, why the
+    // service was not used — the screen says the fallback in its freshness line, `describe`
+    // keeps the sentence it always had.
+    let notice = if !m.notice.is_empty() {
+        m.notice.clone()
+    } else {
+        fallback_sentence(m).unwrap_or_default()
+    };
     View::new(summary)
         .with("location", location)
         .with("temperature", now.temperature)
@@ -90,5 +98,13 @@ pub fn view(m: &Model) -> View {
         .with("saved_locations", serde_json::Value::Array(saved))
         .with("reading_from", m.source.reading_from())
         .with("config_file", m.config_file.clone())
-        .with("notice", m.notice.clone())
+        .with("notice", notice)
+}
+
+/// `Readings came straight from Open-Meteo — the weather service did not answer (<why>).` when
+/// the reading on screen came by fallback; `None` otherwise.
+fn fallback_sentence(m: &Model) -> Option<String> {
+    let why = m.degraded.as_ref()?;
+    (m.source == crate::forecast::Source::Direct)
+        .then(|| format!("{} — the weather service did not answer ({why}).", crate::model::DEGRADED_NOTICE))
 }
