@@ -15,14 +15,30 @@ pub struct Resolved {
     pub theirs: Result<Option<NoteText>, String>,
 }
 
+/// A note with nothing unsaved, read again after another program changed it.
+#[derive(Debug, Clone)]
+pub struct Reread {
+    /// Our own last write, kept as a note of its own before anything replaces it; `None` when
+    /// the window held no write of ours.
+    pub kept: Option<Note>,
+    /// What the note's files hold now, as in [`Resolved::theirs`].
+    pub theirs: Result<Option<NoteText>, String>,
+}
+
 impl Vault {
     /// Saves `mine` as a new note named `kept_id`, then reads note `id` as its files hold it now.
     /// The new note is written first, so the person's text is on disk before anything is decided
     /// about it, and it is created, never written over anything.
     pub fn keep_beside(&self, id: &str, kept_id: &str, mine: &NoteText) -> Result<Resolved, String> {
-        let saved = self.save_new(kept_id, mine)?;
-        let kept = Note { id: kept_id.into(), content: saved.content, modified: saved.modified, trash: false, stored: true };
+        let kept = self.keep_as(kept_id, mine)?;
         Ok(Resolved { kept, theirs: self.read_note(id) })
+    }
+
+    /// Reads note `id` again, keeping `ours` (a new note's name and our last write) first when
+    /// given. If ours cannot be kept, nothing is read: the caller must not replace it.
+    pub fn reread(&self, id: &str, ours: Option<(&str, &NoteText)>) -> Result<Reread, String> {
+        let kept = ours.map(|(kept_id, text)| self.keep_as(kept_id, text)).transpose()?;
+        Ok(Reread { kept, theirs: self.read_note(id) })
     }
 
     /// Note `id` as its files hold it now, held to the limits a loaded note is: `None` when its
@@ -33,5 +49,11 @@ impl Vault {
         validate(&text)?;
         let meta = read(&meta_path, META_LIMIT)?.unwrap_or_default();
         Ok(Some(NoteText { text, meta }))
+    }
+
+    /// `text` as a new note named `kept_id`, created, never over anything.
+    fn keep_as(&self, kept_id: &str, text: &NoteText) -> Result<Note, String> {
+        let saved = self.save_new(kept_id, text)?;
+        Ok(Note { id: kept_id.into(), content: saved.content, modified: saved.modified, trash: false, stored: true })
     }
 }

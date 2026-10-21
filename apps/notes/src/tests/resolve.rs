@@ -176,6 +176,36 @@ fn take_theirs_on_a_file_found_gone_keeps_my_text_as_a_new_note() {
     assert_eq!(notice(&app), said::NOTHING_TO_TAKE);
 }
 
+/// Review finding 3: with the library at its limit, refusing the kept note would leave no way out
+/// of the conflict (saving is refused, and so is everything that leaves the note) but to lose the
+/// text. A resolution's kept note is a one-off recovery, so it passes the limit.
+#[test]
+fn a_full_library_still_lets_a_conflict_be_resolved() {
+    for (choice, prefix, sentence) in
+        [("keep-mine", "copy-", said::KEPT_MINE), ("take-theirs", "recovered-", said::TOOK_THEIRS)]
+    {
+        let paths = yantrik_app::paths::Paths::temporary(Notes::ID);
+        std::fs::create_dir_all(paths.data_dir()).unwrap();
+        for i in 0..crate::store::MAX_NOTES {
+            std::fs::write(paths.data_dir().join(format!("n{i:04}.md")), format!("# Note {i}\n")).unwrap();
+        }
+        let app = TestApp::<Notes>::start_at(paths, Vec::new());
+        settle(&app);
+        app.run(Command::Window(WindowAction::Open { id: "n0007.md".into(), trash: false }));
+        app.run(Command::Edit("# Note 7\n\nmine".into()));
+        let path = vault(&app).join("n0007.md");
+        std::fs::write(&path, "# Note 7\n\ntheirs\n").unwrap();
+        app.look_at_files();
+        assert_eq!(bar(&app), 1, "{choice}");
+        press(&app, choice);
+        assert_eq!(notice(&app), sentence, "{choice}");
+        let kept = listed(&app, prefix).unwrap_or_else(|| panic!("{choice}: my text is kept"));
+        assert_eq!(file(&vault(&app).join(&kept.id)), "# Note 7\n\nmine");
+        assert_eq!(app.model(|m| m.library.len()), crate::store::MAX_NOTES + 1, "{choice}: past the limit, once");
+        assert_eq!(file(&path), "# Note 7\n\ntheirs\n");
+    }
+}
+
 /// Neither choice goes on unless the window's text is on disk first.
 #[test]
 fn a_choice_whose_kept_note_cannot_be_written_changes_nothing() {

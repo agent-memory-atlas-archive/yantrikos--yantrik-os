@@ -4,7 +4,7 @@ use yantrik_app::app::WindowId;
 use yantrik_app::documents::{DocumentId, Observed};
 
 use crate::note::{Note, NoteText};
-use crate::store::{Loaded, Resolved, SaveFailed, Saved};
+use crate::store::{Loaded, Reread, Resolved, SaveFailed, Saved};
 
 #[derive(Clone)]
 pub enum Command {
@@ -39,8 +39,9 @@ pub enum Command {
     Resolved { doc: DocumentId, seq: u64, resolution: Resolution, result: Result<Box<Resolved>, String> },
     /// The file's version read for a comparison: `None` when the file is gone.
     Compared { doc: DocumentId, result: Result<Option<NoteText>, String> },
-    /// A note with nothing unsaved, read again after another program changed it.
-    Reread { doc: DocumentId, result: Result<Option<NoteText>, String> },
+    /// A note with nothing unsaved, read again after another program changed it. `Err`: our own
+    /// last write could not be kept first, so nothing was read. Boxed, as `Resolved` is.
+    Reread { doc: DocumentId, result: Result<Box<Reread>, String> },
     /// The disk the vault writes through, for a test to make a write fail.
     #[cfg(test)]
     UseDisk(std::sync::Arc<dyn yantrik_app::documents::disk::Disk>),

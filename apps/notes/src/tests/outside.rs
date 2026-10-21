@@ -1,9 +1,9 @@
 //! Gate row "Conflicting outside edit" (design/notes-gate-2026-10-21.md §3): a change during an
 //! in-flight save in each of the three orders it can meet the save in, before the store's check
 //! (the save loses), between the check and the rename (the save wins, and says so), after the
-//! rename (a change to what was saved), and a change to the sidecar alone; and a note with nothing
-//! unsaved, which follows its file. Detection before the next save, the store's check with the
-//! watch off, and our own save are in saving.rs.
+//! rename (a change to what was saved), and a change to the sidecar alone. A note with nothing
+//! unsaved, which follows its file, is follow.rs's; detection before the next save, the store's
+//! check with the watch off, and our own save are in saving.rs.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -13,9 +13,12 @@ use yantrik_app::cx::Inbound;
 use yantrik_app::documents::disk::{Disk, DiskError, RealDisk};
 use yantrik_app::documents::{Fingerprint, Observed, OutsideState, Replaced};
 
-use super::{act, autosave, bar, file, not_saved_over, notice, outside, settle, state, unsaved, vault, with_note};
+use yantrik_testing::TestApp;
+
+use super::{act, autosave, bar, file, not_saved_over, notice, outside, settle, unsaved, with_note};
 use crate::command::{Command, WindowAction};
 use crate::update::{said, AUTOSAVE_AFTER};
+use crate::Notes;
 
 #[test]
 fn a_change_before_the_stores_check_wins_and_the_save_becomes_a_conflict() {
@@ -66,8 +69,9 @@ impl Disk for WrittenBeforeOurRename {
     }
 }
 
-#[test]
-fn a_change_between_the_check_and_the_rename_is_replaced_and_said() {
+/// A saved note whose next save replaced another program's write between the store's check and
+/// its rename, with the watch seeing that write in that moment; the save has landed.
+pub(super) fn replaced_once() -> (TestApp<Notes>, PathBuf) {
     let (app, path) = with_note("Race");
     let (key, _) = app.watched().remove(0);
     let theirs = "# Race\n\ntheirs";
@@ -85,6 +89,12 @@ fn a_change_between_the_check_and_the_rename_is_replaced_and_said() {
     })));
     app.run(Command::Edit("# Race\n\nmine".into()));
     autosave(&app);
+    (app, path)
+}
+
+#[test]
+fn a_change_between_the_check_and_the_rename_is_replaced_and_said() {
+    let (app, path) = replaced_once();
     assert_eq!(file(&path), "# Race\n\nmine", "ours landed over theirs");
     assert_eq!(notice(&app), said::replaced(Replaced::OutsideEdit), "and the person is told");
     assert_eq!((outside(&app), bar(&app), unsaved(&app)), (OutsideState::Clean, 0, false));
@@ -152,74 +162,4 @@ fn a_change_to_the_sidecar_alone_is_caught_by_the_stores_check_and_resolved_like
     let kept = kept.expect("my version is kept");
     assert_eq!((kept.content.text.as_str(), kept.field("tags").as_str()), ("# Tagged\n\nmine", "mine"));
     assert!(!unsaved(&app));
-}
-
-fn text(app: &yantrik_testing::TestApp<crate::Notes>) -> String {
-    app.model(|m| m.current().unwrap().text().to_string())
-}
-
-/// A note with nothing unsaved follows its file: read again and shown, said in one quiet line,
-/// and its undo history starts again, as *Take theirs* does.
-#[test]
-fn a_saved_note_changed_outside_is_read_again_and_shown() {
-    let (app, path) = with_note("Clean");
-    app.run(Command::Edit("# Clean\n\nmine".into()));
-    autosave(&app);
-    std::fs::write(&path, "# Clean\n\nfrom elsewhere\n").unwrap();
-    app.look_at_files();
-    assert_eq!(app.jobs_waiting(), 1, "the note is read again");
-    settle(&app);
-    assert_eq!(app.ui(|ui| ui.get_content().to_string()), "# Clean\n\nfrom elsewhere\n", "and shown");
-    assert_eq!(notice(&app), said::UPDATED_FROM_DISK);
-    assert_eq!((outside(&app), bar(&app), unsaved(&app)), (OutsideState::Clean, 0, false));
-    assert_eq!(state(&app)["outside"], "clean");
-    app.run(Command::Window(WindowAction::Undo));
-    assert_eq!(text(&app), "# Clean\n\nfrom elsewhere\n", "no undo puts the old text back");
-    // The watch goes on from the file as read: another look is quiet, and the next save lands.
-    app.look_at_files();
-    assert_eq!(app.jobs_waiting(), 0);
-    app.run(Command::Edit("# Clean\n\nfrom elsewhere\nand here".into()));
-    autosave(&app);
-    assert_eq!(file(&path), "# Clean\n\nfrom elsewhere\nand here");
-}
-
-/// Never replaced once something is typed: a key between the change and the read landing makes
-/// it the conflict it is, and the person chooses.
-#[test]
-fn a_key_typed_before_the_reread_lands_makes_it_a_conflict_and_nothing_is_lost() {
-    let (app, path) = with_note("Clean");
-    std::fs::write(&path, "theirs").unwrap();
-    app.look_at_files();
-    assert_eq!(app.jobs_waiting(), 1, "the read is in flight");
-    app.run(Command::Edit("# Clean\n\ntyped".into()));
-    settle(&app);
-    assert_eq!(text(&app), "# Clean\n\ntyped", "what was typed is not replaced");
-    assert!(matches!(outside(&app), OutsideState::Conflict { .. }));
-    assert_eq!(bar(&app), 1, "the choices are offered");
-    assert_ne!(notice(&app), said::UPDATED_FROM_DISK);
-    autosave(&app);
-    assert_eq!(file(&path), "theirs", "and nothing is saved over theirs");
-    app.ui(|ui| ui.invoke_action("keep-mine".into()));
-    settle(&app);
-    let copy = app.model(|m| m.current().unwrap().id().to_string());
-    assert_eq!(file(&vault(&app).join(copy)), "# Clean\n\ntyped");
-    assert_eq!(file(&path), "theirs");
-}
-
-/// A change seen while the store works on something else is read once the store is free.
-#[test]
-fn a_change_seen_while_the_store_works_is_read_again_once_it_is_done() {
-    let (app, path) = with_note("Clean");
-    let out = vault(&app).parent().unwrap().join(format!("exported-{}.md", std::process::id()));
-    let export = app.act("export", serde_json::json!({ "path": out.display().to_string() })).unwrap();
-    assert_eq!(app.jobs_waiting(), 1, "the export is in flight");
-    std::fs::write(&path, "# Clean\n\nfrom elsewhere\n").unwrap();
-    app.look_at_files();
-    assert_eq!(app.jobs_waiting(), 1, "the read waits for the store");
-    settle(&app);
-    export.settle().expect("the export is answered");
-    assert_eq!(file(&out), "# Clean\n\n");
-    assert_eq!(text(&app), "# Clean\n\nfrom elsewhere\n");
-    assert_eq!(notice(&app), said::UPDATED_FROM_DISK);
-    assert_eq!(outside(&app), OutsideState::Clean);
 }

@@ -62,6 +62,9 @@ pub struct NoteFile {
     pub on_disk: Option<NoteText>,
     /// A sidecar of ours a failed save may have left on disk.
     pub meta_unsure: Option<String>,
+    /// What the files hold is our own write from this run. If another program replaces it while
+    /// nothing is unsaved, it is kept as a recovered note first (update/follow.rs).
+    pub ours: bool,
     pub modified: u64,
 }
 

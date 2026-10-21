@@ -68,6 +68,9 @@ pub fn replaced(what: Replaced) -> &'static str {
 
 /// A note with nothing unsaved, read again after another program changed it.
 pub const UPDATED_FROM_DISK: &str = "Updated from the copy on disk.";
+/// The same, when what it replaced was our own last write, kept first.
+pub const UPDATED_KEEPING_OURS: &str =
+    "Updated from the copy on disk; your last version is kept as a separate note with the same title.";
 pub const TOOK_THEIRS: &str =
     "Now showing the version on disk. Your text was kept as a separate note with the same title.";
 pub const KEPT_MINE: &str = "Your text is now a separate note. The original is left as the other program wrote it.";
@@ -99,6 +102,15 @@ pub fn theirs_unread(error: &str) -> String {
 /// A note with nothing unsaved changed on disk and could not be read again.
 pub fn reread_failed(error: &str) -> String {
     format!("This note changed on disk but could not be read again ({}); Refresh tries again.", reason(error))
+}
+
+/// Our own last write could not be kept as a note, so the note was not updated from the disk.
+pub fn ours_not_kept(error: &str) -> String {
+    format!(
+        "This note changed on disk, but your last version could not be kept as a separate note ({}), \
+         so it was not replaced: the window still shows your version.",
+        reason(error)
+    )
 }
 
 /// The version on disk could not be read for a comparison.

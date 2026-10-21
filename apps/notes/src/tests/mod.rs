@@ -15,6 +15,7 @@ use crate::update::{said, AUTOSAVE_AFTER};
 use crate::Notes;
 
 mod failures;
+mod follow;
 mod outside;
 mod parity;
 mod read_notes;

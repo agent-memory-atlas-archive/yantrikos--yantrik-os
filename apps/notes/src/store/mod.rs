@@ -21,7 +21,7 @@ mod write;
 
 pub use load::Loaded;
 pub use read::read;
-pub use resolve::Resolved;
+pub use resolve::{Reread, Resolved};
 pub use save::{SaveFailed, SaveJob, Saved};
 
 /// The most text one note may hold.

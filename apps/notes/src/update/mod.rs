@@ -21,6 +21,7 @@ use crate::view::render::{CUES, EDIT, LIBRARY, MODEL_ONLY, NOTE, PREVIEW, STATUS
 use crate::Notes;
 
 mod editing;
+mod follow;
 mod library;
 mod navigate;
 mod outside;
@@ -68,7 +69,7 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Effects<Notes>) -> Resul
         Command::Exported(result) => library::exported(m, fx, result),
         Command::Resolved { doc, seq, resolution, result } => outside::resolved(m, fx, doc, seq, resolution, result),
         Command::Compared { doc, result } => outside::compared(m, fx, doc, result),
-        Command::Reread { doc, result } => outside::reread(m, fx, doc, result),
+        Command::Reread { doc, result } => follow::reread(m, fx, doc, result),
         #[cfg(test)]
         Command::UseDisk(disk) => {
             m.vault = Vault::new(m.vault.dir().to_path_buf(), disk);
@@ -195,7 +196,7 @@ fn after_store(m: &mut Model, fx: &mut Effects<Notes>) {
     }
     // A change to the open note seen while the store was busy is followed now that it is not.
     if m.busy.is_none() && std::mem::take(&mut m.pane.reread_owed) {
-        outside::follow(m, fx);
+        follow::follow(m, fx);
     }
 }
 

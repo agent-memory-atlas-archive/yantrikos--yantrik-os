@@ -120,6 +120,7 @@ pub fn landed(m: &mut Model, fx: &mut Effects<Notes>, doc: DocumentId, seq: u64,
             let Some(file) = m.files.get_mut(&doc) else { return };
             file.on_disk = Some(saved.content.clone());
             file.meta_unsure = None;
+            file.ours = true;
             file.modified = saved.modified;
             let entry = Note { id: file.id.clone(), content: saved.content, modified: saved.modified, trash: false, stored: true };
             match m.library.iter_mut().find(|n| n.id == entry.id && !n.trash) {

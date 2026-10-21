@@ -62,7 +62,7 @@ pub fn show_note(m: &mut Model, fx: &mut Effects<Notes>, note: Option<Note>) {
     }
     m.files.insert(
         doc,
-        NoteFile { id: note.id, trash: note.trash, on_disk, meta_unsure: None, modified: note.modified },
+        NoteFile { id: note.id, trash: note.trash, on_disk, meta_unsure: None, ours: false, modified: note.modified },
     );
     m.pane.view = Some(m.documents.show(doc, m.pane.window));
 }
