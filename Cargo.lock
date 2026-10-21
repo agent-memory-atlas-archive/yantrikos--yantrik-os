@@ -11340,22 +11340,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "yantrik-container-core-tests"
-version = "0.1.0"
-
-[[package]]
 name = "yantrik-container-manager"
 version = "0.1.0"
 dependencies = [
- "serde",
  "serde_json",
  "slint",
  "tracing",
+ "yantrik-app",
  "yantrik-app-build",
- "yantrik-app-runtime",
  "yantrik-design-tokens",
- "yantrik-ipc-contracts",
- "yantrik-ipc-transport",
+ "yantrik-testing",
  "yantrik-ui-kit",
 ]
 
