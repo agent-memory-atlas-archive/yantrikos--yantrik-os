@@ -1,13 +1,12 @@
 // Yantrik Image Viewer — standalone app window.
-// Wraps the shared ImageViewer component in its own Window.
+// Wraps the app's ImageViewer screen (image_viewer.slint, beside this file) in its own Window.
 
-import { Theme } from "theme.slint";
-import { AppWindow } from "app_window.slint";
-export { WindowChrome } from "app_window.slint";
-import { AgentContextItem } from "components/agent_rail.slint";
-import { AppIdentity } from "app_color.slint";
+import { Theme, ThemeMode, AccentPreset } from "@yantrik-design/theme.slint";
+import { AppWindow } from "@yantrik-kit/app_window.slint";
+export { WindowChrome } from "@yantrik-kit/app_window.slint";
+import { AgentContextItem } from "@yantrik-kit/agent_rail.slint";
+import { AppIdentity } from "@yantrik-kit/app_color.slint";
 import { ImageViewer } from "image_viewer.slint";
-import { ThemeMode, AccentPreset } from "theme.slint";
 
 export { AgentContextItem, ThemeMode, AccentPreset }
 

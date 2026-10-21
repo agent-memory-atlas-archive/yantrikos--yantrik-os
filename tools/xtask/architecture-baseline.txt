@@ -7,7 +7,6 @@ build-path apps/container-manager/build.rs
 build-path apps/document-editor/build.rs
 build-path apps/download-manager/build.rs
 build-path apps/email/build.rs
-build-path apps/image-viewer/build.rs
 build-path apps/music-player/build.rs
 build-path apps/network-manager/build.rs
 build-path apps/notes/build.rs

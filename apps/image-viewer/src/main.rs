@@ -670,7 +670,7 @@ mod describe_tests {
         }
         let screen = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../crates/yantrik-ui-slint/ui/image_viewer.slint"
+            "/ui/image_viewer.slint"
         ))
         .expect("the screen");
         assert!(
@@ -697,7 +697,7 @@ mod describe_tests {
         }
         let screen = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../crates/yantrik-ui-slint/ui/image_viewer.slint"
+            "/ui/image_viewer.slint"
         ))
         .expect("the screen");
         // The pixels arrive turned; a transform on top would turn them twice.
