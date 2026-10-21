@@ -584,9 +584,11 @@ export component SystemMonitorProbe inherits Window {
     }
 }
 
-// The Weather dashboard at the app's own default window size (#220), filled with fixture data by
-// src/weather_tests.rs. The running app fills the agent rail's context, so the rail is open —
-// 280px — at 1000×720, which is exactly where the hero's stat tiles used to run under it.
+// The Weather screen at the app's own default window size (#220) and snapped (#505), filled
+// with fixture data by src/weather_tests.rs. The running app fills the agent rail's context, so
+// the rail is open — 280px — at 1000×720. The screen is the app's (apps/weather/ui, on the
+// include path), redesigned to design/weather-redesign-2026-10-21.md: the checks read how many
+// measured pairs share a row and that the content keeps its width.
 import { WeatherDashboard, WeatherCurrent, WeatherHourly, WeatherDaily } from "weather.slint";
 export { WeatherCurrent, WeatherHourly, WeatherDaily } from "weather.slint";
 import { AgentContextItem, AgentSuggestion } from "components/agent_rail.slint";
@@ -602,15 +604,10 @@ export component WeatherProbe inherits Window {
     in property <[WeatherHourly]> hourly;
     in property <[WeatherDaily]> daily;
     in property <[AgentContextItem]> agent-context;
-    in property <string> hourly-tz-label;
-    // The hero geometry, mirrored out of the dashboard for the same reason.
-    out property <length> hero-row-width: dash.hero-row-width;
-    out property <length> hero-tiles-x: dash.hero-tiles-x;
-    out property <length> hero-tiles-width: dash.hero-tiles-width;
-    out property <length> hero-tiles-abs-right: dash.hero-tiles-abs-right;
-    out property <length> content-space-right: dash.content-space-right;
-    out property <length> hourly-tz-width: dash.hourly-tz-width;
-    out property <length> hero-tile-width: dash.hero-tile-width;
+    // The screen's geometry, mirrored out for the checks.
+    out property <int> pairs-columns: dash.pairs-columns;
+    out property <length> content-width: dash.content-width;
+    out property <length> hour-column-width: dash.hour-column-width;
     out property <bool> rail-shown: dash.rail-shown;
     dash := WeatherDashboard {
         width: 100%;
@@ -620,8 +617,7 @@ export component WeatherProbe inherits Window {
         hourly: root.hourly;
         daily: root.daily;
         agent-context: root.agent-context;
-        hourly-tz-label: root.hourly-tz-label;
-        weather-last-updated: "Updated 4 min ago";
+        freshness: "Updated 19 min ago";
     }
 }
 
