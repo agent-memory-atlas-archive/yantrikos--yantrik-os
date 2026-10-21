@@ -23,6 +23,7 @@ mod findings;
 mod follow;
 mod gone;
 mod kept;
+mod leaving;
 mod moved;
 mod outside;
 mod parity;

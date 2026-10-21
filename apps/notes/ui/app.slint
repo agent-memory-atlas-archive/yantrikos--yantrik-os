@@ -51,6 +51,8 @@ export component NotesApp inherits AppWindow {
  in property <string> close-said;
  // The prompt offers Save: there is something to save, in a library that may be written.
  in property <bool> close-saves;
+ // Its label: "Save as new" for a note whose file is gone.
+ in property <string> close-save-label:"Save";
  // Unsaved text from before Notes closed, offered back: the bar's sentence, empty when none.
  in property <string> recovery-said;
  // Where the bar's offer stands: 0 none, 1 its note open (its text drawn), 2 its note listed
@@ -62,6 +64,8 @@ export component NotesApp inherits AppWindow {
  // An outside change the person chooses about: 0 none, 1 changed under unsaved edits, 2 file gone.
  in property <int> outside;
  in property <string> outside-said;
+ // A file gone under edits the person made: the bar's last choice reads Discard, not Let it go.
+ in property <bool> outside-edited;
  // The file's side of the comparison, or that it is gone.
  in property <string> theirs;
  in property <bool> theirs-gone;
@@ -131,6 +135,8 @@ export component NotesApp inherits AppWindow {
     if root.outside==1 : YButton{label:"Take theirs";variant:1;size:0;clicked=>{root.action("take-theirs");}}
     if root.outside==1 : YButton{label:"Compare";variant:1;size:0;clicked=>{root.action("compare");}}
     YButton{label:"Not now";variant:1;size:0;clicked=>{root.action("not-now");}}
+    // A file gone: the person deleted it, so letting the text go too is theirs to say.
+    if root.outside==2 : YButton{label:root.outside-edited?"Discard":"Let it go";variant:3;size:0;clicked=>{root.action("let-go");}}
    }
   }
   HorizontalLayout {spacing:0px;
@@ -302,7 +308,7 @@ export component NotesApp inherits AppWindow {
     HorizontalLayout{alignment:end;spacing:Theme.sp-2;
      YButton{label:"Cancel";variant:2;clicked=>{root.action("close-cancel");}}
      YButton{label:"Don't save";variant:1;clicked=>{root.action("close-discard");}}
-     if root.close-saves : YButton{label:"Save";variant:0;clicked=>{root.action("close-save");}}
+     if root.close-saves : YButton{label:root.close-save-label;variant:0;clicked=>{root.action("close-save");}}
     }
    }
   }

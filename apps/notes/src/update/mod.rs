@@ -30,6 +30,7 @@ pub mod closing;
 mod drafts;
 mod editing;
 mod follow;
+pub mod leaving;
 mod library;
 mod navigate;
 mod outside;
@@ -106,6 +107,7 @@ fn dispatch(m: &mut Model, fx: &mut Effects<Notes>, command: Command) {
             }
             // Escape on the close prompt is its Cancel, in the window that shows the prompt.
             if asked_here && dialog != closing::CLOSE_DIALOG {
+                leaving::put_away(m, fx);
                 closing::put_away(m, fx);
             }
             fx.changed(MODEL_ONLY);

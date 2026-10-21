@@ -19,7 +19,7 @@ use crate::update::said;
 use crate::Notes;
 
 /// A saved note, open and untouched, whose file another program then deleted, as the watch saw it.
-fn deleted_untouched() -> (TestApp<Notes>, PathBuf) {
+pub(super) fn deleted_untouched() -> (TestApp<Notes>, PathBuf) {
     let (app, path) = with_note("Gone");
     std::fs::remove_file(&path).unwrap();
     app.look_at_files();
@@ -55,7 +55,8 @@ fn closing_a_note_whose_file_is_gone_asks_and_dont_save_lets_it_go() {
     let (app, path) = deleted_untouched();
     app.close_requested(WindowId::PRIMARY);
     let heading = app.ui(|ui| (ui.get_dialog(), ui.get_close_heading().to_string()));
-    assert_eq!(heading, (CLOSE_DIALOG, "Save \"Gone\" before closing?".to_string()));
+    assert_eq!(heading, (CLOSE_DIALOG, "Save \"Gone\" as a new note before closing?".to_string()));
+    assert_eq!(app.ui(|ui| ui.get_close_save_label().to_string()), said::SAVE_AS_NEW);
     app.ui(|ui| ui.invoke_action("close-discard".into()));
     assert_eq!(app.exit_reason(), Some(ExitReason::LastWindowClosed));
     app.run_writes();

@@ -30,7 +30,8 @@ use yantrik_app::effects::Effects;
 
 use super::navigate::show_note;
 use super::saving::{self, How};
-use super::{drafts, show, windows};
+use super::{drafts, leaving, outside, show, windows};
+use crate::command::Resolution;
 use crate::model::Model;
 use crate::update::said;
 use crate::view::render::{CHROME, STATUS};
@@ -39,8 +40,19 @@ use crate::Notes;
 /// The dialog number of the close prompt.
 pub const CLOSE_DIALOG: i32 = 4;
 
+/// The close prompt's words: its heading, its sentence, whether it offers its save button (there
+/// is something to save, in a library that may be written), and that button's label.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Prompt {
+    pub heading: String,
+    pub sentence: String,
+    pub saves: bool,
+    pub save: &'static str,
+}
+
 /// The person asked a window to close.
 pub fn requested(m: &mut Model, fx: &mut Effects<Notes>, window: WindowId) {
+    leaving::put_away(m, fx);
     m.keep_unsaved_dirty();
     let closing = m.documents.closing_window(window);
     ask(m, fx, Some(window), closing);
@@ -48,6 +60,7 @@ pub fn requested(m: &mut Model, fx: &mut Effects<Notes>, window: WindowId) {
 
 /// The app was asked to end: every note with edits not on disk, asked about once.
 pub fn quit(m: &mut Model, fx: &mut Effects<Notes>) {
+    leaving::put_away(m, fx);
     m.keep_unsaved_dirty();
     let closing = m.documents.quitting();
     ask(m, fx, None, closing);
@@ -197,8 +210,20 @@ fn save_then_close(m: &mut Model, fx: &mut Effects<Notes>, documents: &[Document
         let window = m.closing.take().and_then(|f| f.window);
         return close(m, fx, window);
     };
-    // Retried even after a failure: a close must not wait on an autosave that will not come.
-    saving::save_document(m, fx, next, How::Asked);
+    let gone = m.documents.get(next).is_some_and(|d| d.outside == OutsideState::Deleted);
+    if gone {
+        // Saved as new, in a window that shows it: the window moves to the kept note, which is on
+        // disk, and the close goes on once that lands. While the store is busy, it waits.
+        if m.busy.is_some() {
+            return;
+        }
+        if let Some(window) = m.windows_showing(next).first().copied() {
+            m.within(window, |m| outside::resolve(m, fx, Resolution::KeepMine));
+        }
+    } else {
+        // Retried even after a failure: a close must not wait on an autosave that will not come.
+        saving::save_document(m, fx, next, How::Asked);
+    }
     let waiting = m.closing.as_ref().is_some_and(|f| f.stage == Stage::SavingThenClose);
     if waiting && m.busy.is_none() {
         // Nothing started and nothing refused it (the library is not open): the window stays.
@@ -256,21 +281,33 @@ fn unstored_at_close(m: &Model, window: Option<WindowId>) -> usize {
     }
 }
 
-/// The prompt's words for the notes asked about, and whether it offers *Save* (there is something
-/// to save, and a library that may be written).
-pub fn prompt(m: &Model) -> Option<(String, String, bool)> {
+/// The prompt's words for the notes asked about. One note whose file is gone is asked about as
+/// what it is: *Save as new* keeps it, *Don't save* lets it go.
+pub fn prompt(m: &Model) -> Option<Prompt> {
     let flow = m.closing.as_ref().filter(|f| f.stage == Stage::Asking)?;
     // Only the notes still not on disk: one the autosave saved under the prompt is not asked about.
-    let titles: Vec<String> = flow
-        .asked
-        .iter()
-        .filter(|id| m.unsaved_doc(**id))
-        .filter_map(|id| m.note_of(*id).map(|c| c.title()))
-        .collect();
+    let notes: Vec<_> = flow.asked.iter().filter(|id| m.unsaved_doc(**id)).filter_map(|id| m.note_of(*id)).collect();
+    let titles: Vec<String> = notes.iter().map(|c| c.title()).collect();
+    let gone: Vec<String> =
+        notes.iter().filter(|c| *c.outside() == OutsideState::Deleted).map(|c| c.title()).collect();
     let read_only = m.vault.read_only().is_some();
     let unstored = unstored_at_close(m, flow.window);
-    let (heading, sentence) = said::close_prompt(&titles, flow.window.is_none(), read_only, unstored);
-    Some((heading, sentence, !titles.is_empty() && !read_only))
+    let saves = !titles.is_empty() && !read_only;
+    let leaving = if flow.window.is_none() { said::Leaving::Notes } else { said::Leaving::Window };
+    let (heading, sentence, save) = match notes.as_slice() {
+        [one] if !read_only && unstored == 0 && *one.outside() == OutsideState::Deleted => {
+            let (heading, sentence) = said::gone_prompt(&one.title(), leaving, one.edited_since_gone());
+            (heading, sentence, said::SAVE_AS_NEW)
+        }
+        _ => {
+            let (heading, mut sentence) = said::close_prompt(&titles, flow.window.is_none(), read_only, unstored);
+            if !gone.is_empty() && saves {
+                sentence = format!("{sentence} {}", said::gone_among(&gone));
+            }
+            (heading, sentence, said::SAVE)
+        }
+    };
+    Some(Prompt { heading, sentence, saves, save })
 }
 
 /// Escape, or the dialog put away by the window: the person cancelled the prompt.

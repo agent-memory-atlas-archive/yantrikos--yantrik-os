@@ -99,6 +99,9 @@ pub enum WindowAction {
     ShowDraft,
     /// The open note, in a window of its own as well: one note, two views.
     NewWindow,
+    /// The deleted bar's *Let it go* (*Discard*, when the note was edited): the note whose file is
+    /// gone, and its draft, let go at the person's word.
+    LetGo,
     /// Ctrl+Q: the person asks Notes to quit. The framework raises it back as a person's
     /// `ExitRequested`, which is `Command::Quit`: one prompt over every unsaved note in every window.
     Quit,
@@ -156,6 +159,7 @@ impl WindowAction {
             "show-draft" => WindowAction::ShowDraft,
             "new-window" => WindowAction::NewWindow,
             "quit" => WindowAction::Quit,
+            "let-go" => WindowAction::LetGo,
             other => {
                 if let Some(title) = other.strip_prefix("new:") {
                     WindowAction::New(Some(title.into()))

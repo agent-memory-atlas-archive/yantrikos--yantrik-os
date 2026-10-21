@@ -115,7 +115,7 @@ pub fn resolved(
     m.busy = None;
     let resolved = match result {
         Ok(resolved) => *resolved,
-        Err(e) => return failed(m, fx, None, said::not_kept(&e)),
+        Err(e) => return failed(m, fx, Some(doc), said::not_kept(&e)),
     };
     m.library.push(resolved.kept.clone());
     if let Some(asked) = m.asked.as_mut() {

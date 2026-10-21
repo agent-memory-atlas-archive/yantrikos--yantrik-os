@@ -53,6 +53,9 @@ pub struct Model {
     pub pending: Option<Pending>,
     /// A close or a quit asking about unsaved notes, or waiting on their saves.
     pub closing: Option<CloseFlow>,
+    /// An action that would leave a note whose file is gone, waiting on the person's answer
+    /// (update/leaving.rs).
+    pub leaving: Option<Pending>,
     /// Text kept from a run that ended before it was saved, offered back note by note.
     pub recovery: Recovery,
     /// This run's last landed write to each note, by file name: the fingerprint of its text. A
@@ -195,6 +198,12 @@ impl Current<'_> {
             || disk.map(|d| d.meta.as_str()).unwrap_or("") != self.content().meta
     }
 
+    /// Whether the person changed the note since its file was found gone, or before (its edits were
+    /// unsaved then): what letting it go would drop is their changes, not only its text.
+    pub fn edited_since_gone(&self) -> bool {
+        self.file.gone_at != Some(self.doc.seq)
+    }
+
     /// The note as the library lists it, with this view's unsaved content.
     pub fn as_note(&self) -> Note {
         Note {
@@ -229,6 +238,7 @@ impl Model {
             notice_in: None,
             pending: None,
             closing: None,
+            leaving: None,
             recovery,
             written: BTreeMap::new(),
             draft_failed_at: None,

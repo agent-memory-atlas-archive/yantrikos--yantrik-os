@@ -9,7 +9,7 @@ use crate::model::Model;
 use crate::note::NoteText;
 use crate::pane::{Cue, Pane};
 use crate::update::recovery::Showing;
-use crate::update::{closing, recovery, said};
+use crate::update::{closing, leaving, recovery, said};
 use crate::{BookRow, NoteRow, NotesApp, PreviewBlock};
 
 /// The busy flag, the footer's save state, the notice line, and whether the library takes edits.
@@ -61,6 +61,8 @@ pub fn render(ui: &NotesApp, window: WindowId, m: &Model, changed: &Changed) {
         ui.set_trashed(current.as_ref().is_some_and(|c| c.trash()));
         ui.set_pinned(shown.is_some_and(|c| c.pinned()));
         ui.set_modified(unsaved_in(m, pane));
+        // An edit turns the deleted bar's Let it go into Discard.
+        ui.set_outside_edited(current.as_ref().is_some_and(|c| c.edited_since_gone()));
         ui.set_words(shown.map_or(0, |c| c.words()) as i32);
     }
     // Set only where it differs: the window it was typed in already shows it, and its caret stays.
@@ -79,10 +81,11 @@ pub fn render(ui: &NotesApp, window: WindowId, m: &Model, changed: &Changed) {
         }
     }
     if changed.has(CHROME) {
-        let (heading, sentence, saves) = closing::prompt(m).unwrap_or_default();
-        ui.set_close_heading(heading.into());
-        ui.set_close_said(sentence.into());
-        ui.set_close_saves(saves);
+        let prompt = leaving::prompt(m).or_else(|| closing::prompt(m)).unwrap_or_default();
+        ui.set_close_heading(prompt.heading.into());
+        ui.set_close_said(prompt.sentence.into());
+        ui.set_close_saves(prompt.saves);
+        ui.set_close_save_label(prompt.save.into());
         ui.set_folder(pane.folder.clone().into());
         ui.set_query(pane.query.clone().into());
         ui.set_preview(pane.preview);
@@ -163,6 +166,7 @@ fn outside(ui: &NotesApp, m: &Model, pane: &Pane) {
         None => 0,
     });
     ui.set_outside_said(offered.map(|(_, sentence)| sentence).unwrap_or_default().into());
+    ui.set_outside_edited(current.as_ref().is_some_and(|c| c.edited_since_gone()));
     ui.set_theirs(pane.theirs.as_ref().map(|t| t.text.clone()).unwrap_or_default().into());
     ui.set_theirs_gone(pane.theirs.is_none());
     ui.set_mine_fields(current.as_ref().map(|c| fields_line(c.content())).unwrap_or_default().into());
