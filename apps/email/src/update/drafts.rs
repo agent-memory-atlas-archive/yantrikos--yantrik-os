@@ -9,7 +9,7 @@
 use yantrik_app::effects::Effects;
 
 use super::{clear_notice, say};
-use crate::command::{Command, Work};
+use crate::command::{Command, Ending, Work};
 use crate::files;
 use crate::model::{part, FileOp, Keep, Model, COMPOSING, SENDING};
 use crate::state;
@@ -131,14 +131,24 @@ pub fn write_unsent(m: &mut Model, fx: &mut Effects<Email>) {
     file_op(m, FileOp::Save { draft: unsent, keep: Keep::Quietly, unsure, release_lane: true }, fx);
 }
 
-/// The session is ending the app: no one is there to ask, so the open composer's text goes to the
-/// draft lane in this command (the lane is written before the process ends; a job would not be),
-/// and the app ends. A send in flight left its own copy there when Send was pressed.
-pub fn logging_out(m: &mut Model, fx: &mut Effects<Email>) {
-    if m.composer.open && !m.composer.text.is_empty() {
-        fx.checkpoint_draft(COMPOSING, serde_json::to_vec(&m.composer.text).unwrap_or_default());
+/// The app is ending: the session, a person's quit, or the window closing. Nothing is asked: the
+/// newest text there is goes to the draft lane in this command (the lane is written before the
+/// process ends; a job would not be), and the app ends. That is the open composer's text, or else
+/// a draft save still queued behind the write in flight, which the end would otherwise drop. A
+/// send in flight left its own copy there when Send was pressed. Nothing is sent.
+pub fn ending(m: &mut Model, how: Ending, fx: &mut Effects<Email>) {
+    let open = (m.composer.open && !m.composer.text.is_empty()).then(|| m.composer.text.clone());
+    let queued = match &m.composer.queued {
+        Some(FileOp::Save { draft, .. }) => Some(draft.clone()),
+        _ => None,
+    };
+    if let Some(text) = open.or(queued) {
+        fx.checkpoint_draft(COMPOSING, serde_json::to_vec(&text).unwrap_or_default());
     }
-    fx.exit();
+    match how {
+        Ending::Window(window) => fx.close(window),
+        Ending::Logout | Ending::Quit => fx.exit(),
+    }
 }
 
 /// The sentence about it, once the first look has landed or failed, so the look's own notice

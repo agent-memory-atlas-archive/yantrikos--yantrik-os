@@ -109,13 +109,14 @@ impl App for Email {
         intents::table(table);
     }
 
-    /// The session ending the app (a logout, SIGTERM or SIGHUP, the display going): no one is there
-    /// to ask, so the composer's text is handed to the draft lane and the app ends. A send in
-    /// flight already left its text there when Send was pressed. A person's quit, and a closed
-    /// window, take the default: the app ends.
+    /// The app ending, whoever ends it (the session, a person's quit, the window closing): the
+    /// composer's text is handed to the draft lane without asking, and the app ends. A send in
+    /// flight already left its text there when Send was pressed. Nothing is sent.
     fn event(event: Event<()>, _: &Model) -> Option<Command> {
         match event {
-            Event::ExitRequested(ExitReason::Logout) => Some(Command::LoggingOut),
+            Event::ExitRequested(ExitReason::Logout) => Some(Command::Ending(command::Ending::Logout)),
+            Event::ExitRequested(ExitReason::Person) => Some(Command::Ending(command::Ending::Quit)),
+            Event::CloseRequested(window) => Some(Command::Ending(command::Ending::Window(window))),
             _ => None,
         }
     }

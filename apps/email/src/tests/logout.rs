@@ -1,9 +1,9 @@
-//! The session ending the app (#923): a logout, a signal, or the display going. No one is there to
-//! ask, so the composer's text is kept without asking, and a send in flight leaves its text with
-//! the warning that whether it went is not known, exactly as a closed window does.
+//! The app ending (#923): a logout, a signal, the display going, a person's quit, or the window
+//! closing. The composer's text is kept without asking, a send in flight leaves its text with the
+//! warning that whether it went is not known, and nothing is sent.
 
 use serde_json::json;
-use yantrik_app::app::{Event, ExitReason};
+use yantrik_app::app::{Event, ExitReason, WindowId};
 use yantrik_app::mind::fake::FakeMind;
 use yantrik_app::{App, Paths};
 use yantrik_testing::TestApp;
@@ -19,12 +19,18 @@ enum Ending {
     Signal,
     /// The compositor went: the runner's loop ended with no one having asked.
     DisplayGone,
+    /// The person closed the window.
+    WindowClosed,
+    /// The person quit (`fx.request_quit()`).
+    Quit,
 }
 
 fn end(app: TestApp<Email>, how: Ending) {
     match how {
         Ending::Signal => app.event(Event::ExitRequested(ExitReason::Logout)),
         Ending::DisplayGone => app.display_gone(),
+        Ending::WindowClosed => app.close_requested(WindowId::PRIMARY),
+        Ending::Quit => app.event(Event::ExitRequested(ExitReason::Person)),
     }
     let _ = app.shutdown();
     drop(app);
@@ -95,4 +101,32 @@ fn a_logout_with_the_composer_closed_keeps_nothing() {
     end(started_at(&paths), Ending::Signal);
     let (body, status, _app) = compose_after_restart(&paths);
     assert_eq!((body.as_str(), status.as_str()), ("", ""));
+}
+
+/// Review M5 (#920): closing the window with a half-written message keeps it, as a logout does,
+/// and so does a person's quit. Nothing is sent.
+#[test]
+fn closing_the_window_or_quitting_keeps_the_composer() {
+    unsaved_composer_is_kept(Ending::WindowClosed);
+    unsaved_composer_is_kept(Ending::Quit);
+    send_in_flight_is_offered_with_the_warning(Ending::WindowClosed);
+}
+
+/// Review L11 (#920): a draft save still queued behind a write in flight when the app ends is
+/// kept, though the composer is closed.
+#[test]
+fn a_draft_save_still_queued_at_the_end_is_kept() {
+    for how in [Ending::Signal, Ending::WindowClosed] {
+        let paths = Paths::temporary(Email::ID);
+        let app = started_at(&paths);
+        app.ui(|ui| ui.invoke_compose_new());
+        type_into_composer(&app, &draft("a@example.com", "v1 saved"));
+        app.ui(|ui| ui.invoke_save_draft());
+        type_into_composer(&app, &draft("a@example.com", "v2 queued behind it"));
+        app.ui(|ui| ui.invoke_cancel_compose());
+        assert!(app.model(|m| m.composer.queued.is_some()), "the edit waits behind the first write");
+        end(app, how);
+        let (body, _, _app) = compose_after_restart(&paths);
+        assert_eq!(body, "v2 queued behind it");
+    }
 }

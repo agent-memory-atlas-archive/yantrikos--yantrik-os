@@ -3,6 +3,8 @@
 
 use yantrik_ipc_contracts::email::{EmailAccountSummary, EmailDetail, EmailSummary, OAuthBeginResult, TestAccountResult};
 
+use yantrik_app::app::WindowId;
+
 use crate::backend::look::Loaded;
 use crate::model::FileOp;
 use crate::state::{Draft, GoogleOutcome};
@@ -76,6 +78,17 @@ pub enum Ask {
     /// The composer's body rewritten in this tone.
     Enhance(String),
     Classify,
+}
+
+/// What is ending the app.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ending {
+    /// The session: a logout, SIGTERM or SIGHUP, the display going.
+    Logout,
+    /// A person's quit.
+    Quit,
+    /// The window was closed.
+    Window(WindowId),
 }
 
 /// A job that ended without its result: it panicked, or the pool was full.
@@ -183,8 +196,9 @@ pub enum Command {
     SaveDraft(Draft),
     /// At start, before any press: text the lanes held at the last close becomes the draft file.
     OfferUnsent,
-    /// The session is ending the app: keep the composer's text, and end.
-    LoggingOut,
+    /// The app is ending: by the session, by a person's quit, or by its window closing. The
+    /// composer's text is kept, and the app ends.
+    Ending(Ending),
     /// A write or a removal of the draft file landed, or did not.
     DraftDone { op: FileOp, outcome: Result<(), String> },
     // ── The companion ──

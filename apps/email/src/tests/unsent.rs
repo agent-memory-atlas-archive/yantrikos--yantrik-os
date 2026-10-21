@@ -148,3 +148,19 @@ fn compose_over_a_draft_of_unknown_outcome_is_new_text() {
     assert_eq!(state::load_draft(&draft_file(&paths)).unwrap().map(|d| d.body), Some("Lunch?".to_string()));
     assert!(!files::is_unsure(&draft_file(&paths)), "new text is not marked");
 }
+
+/// The writer builds `.part` from the path's own bytes, so a folder whose name is not UTF-8 is
+/// written to like any other.
+#[cfg(unix)]
+#[test]
+fn a_draft_is_written_into_a_folder_whose_name_is_not_utf8() {
+    use std::os::unix::ffi::OsStrExt as _;
+    let dir = std::env::temp_dir()
+        .join(format!("email-osstr-{}", std::process::id()))
+        .join(std::ffi::OsStr::from_bytes(b"caf\xe9"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join(files::DRAFT);
+    state::save_draft(&file, &draft("a@example.com", "bytes")).unwrap();
+    assert_eq!(state::load_draft(&file).unwrap().map(|d| d.body), Some("bytes".to_string()));
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}

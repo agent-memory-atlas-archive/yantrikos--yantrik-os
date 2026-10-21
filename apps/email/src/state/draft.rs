@@ -46,7 +46,10 @@ pub fn save_draft(path: &Path, draft: &Draft) -> Result<(), String> {
 /// followed) with mode 0600, synced, renamed over `path` (which replaces a link rather than
 /// following it), and the folder synced, so the rename itself survives a power cut.
 pub fn write_whole(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let beside = std::path::PathBuf::from(format!("{}.part", path.display()));
+    // From the path's own bytes: a folder whose name is not UTF-8 is still a folder.
+    let mut beside = path.as_os_str().to_owned();
+    beside.push(".part");
+    let beside = std::path::PathBuf::from(beside);
     let written = write_private(&beside, bytes)
         .and_then(|()| std::fs::rename(&beside, path))
         .and_then(|()| sync_folder(path));
