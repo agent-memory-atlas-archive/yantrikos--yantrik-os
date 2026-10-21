@@ -3,7 +3,6 @@
 # rule subject [lines]
 build-path apps/arcade/build.rs
 build-path apps/calendar/build.rs
-build-path apps/container-manager/build.rs
 build-path apps/document-editor/build.rs
 build-path apps/download-manager/build.rs
 build-path apps/email/build.rs
