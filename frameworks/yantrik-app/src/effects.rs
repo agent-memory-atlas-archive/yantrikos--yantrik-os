@@ -81,6 +81,8 @@ pub enum Request<A: App> {
     OpenWindow(WindowId),
     Close(WindowId),
     Exit,
+    /// A person asked the app to quit: raised as `Event::ExitRequested(ExitReason::Person)`.
+    RequestQuit,
 }
 
 /// The effects one command requests.
@@ -349,6 +351,15 @@ impl<A: App> Effects<A> {
         self.requests.push(Request::Exit);
     }
 
+    /// A person asked the app to quit (Ctrl+Q, a Quit menu): raises
+    /// `Event::ExitRequested(ExitReason::Person)` once this command's effects are applied, so the
+    /// app's own close flow runs over every window. It ends the process only when that flow
+    /// does (`fx.exit()`), or at once for an app that takes the default; the person cancelling
+    /// keeps it running. See `crate::quit`.
+    pub fn request_quit(&mut self) {
+        self.requests.push(Request::RequestQuit);
+    }
+
     /// What was asked, in order. For tests and the runtime.
     pub fn requests(&self) -> &[Request<A>] {
         &self.requests
@@ -385,6 +396,7 @@ impl<A: App> Request<A> {
             Request::OpenWindow(_) => "open_window",
             Request::Close(_) => "close",
             Request::Exit => "exit",
+            Request::RequestQuit => "request_quit",
         }
     }
 }
