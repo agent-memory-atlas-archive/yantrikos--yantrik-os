@@ -63,11 +63,26 @@ pub trait Disk: Send + Sync {
     /// [`Disk::write_atomically`], handing back what the new bytes replaced, taken at the same
     /// instant they went in. A store that checked the file before writing learns whether
     /// another program wrote it between that check and this replace, and can keep what that
-    /// program wrote instead of losing it. A disk that cannot tell answers
-    /// [`Displaced::Unknown`].
-    fn exchange(&self, path: &Path, bytes: &[u8]) -> Result<Displaced, DiskError> {
-        self.write_atomically(path, bytes).map(|()| Displaced::Unknown)
+    /// program wrote instead of losing it. `Err` means nothing was replaced; `Ok` with
+    /// `unsure` set means the new bytes are in place but their durability is not known
+    /// (`Step::SyncDir`), and what they replaced is still handed back. A disk that cannot tell
+    /// what it replaced answers [`Displaced::Unknown`].
+    fn exchange(&self, path: &Path, bytes: &[u8]) -> Result<Exchanged, DiskError> {
+        match self.write_atomically(path, bytes) {
+            Ok(()) => Ok(Exchanged { displaced: Displaced::Unknown, unsure: None }),
+            Err(e) if e.step == Step::SyncDir => Ok(Exchanged { displaced: Displaced::Unknown, unsure: Some(e) }),
+            Err(e) => Err(e),
+        }
     }
+}
+
+/// A replace that put the new bytes in place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Exchanged {
+    /// What the new bytes took the place of.
+    pub displaced: Displaced,
+    /// Set when the directory could not be synced after: the new bytes' durability is unknown.
+    pub unsure: Option<DiskError>,
 }
 
 /// What a replace took the place of.
@@ -77,6 +92,9 @@ pub enum Displaced {
     Nothing,
     /// These bytes were at the path at the instant the new ones replaced them.
     Bytes(Vec<u8>),
+    /// A file was replaced, and is kept unread at this path (beside the original, under a
+    /// hidden temp name), because it could not be read back safely: too large, or unreadable.
+    Unread(PathBuf),
     /// The disk cannot tell (a filesystem without an atomic exchange).
     Unknown,
 }
@@ -92,7 +110,7 @@ impl RealDisk {
     /// A temp file beside `path`, made by this call and by nothing else (`create_new`), private.
     /// For a replace (`wear_mode`) it then carries the destination's own mode; a create has no
     /// destination to take one from, and stays private.
-    fn create_temp(path: &Path, wear_mode: bool) -> std::io::Result<(PathBuf, std::fs::File)> {
+    pub(super) fn create_temp(path: &Path, wear_mode: bool) -> std::io::Result<(PathBuf, std::fs::File)> {
         let parent = path.parent().ok_or_else(|| std::io::Error::other("no parent directory"))?;
         let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         let n = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
@@ -173,96 +191,8 @@ impl Disk for RealDisk {
         }
     }
 
-    fn exchange(&self, path: &Path, bytes: &[u8]) -> Result<Displaced, DiskError> {
-        let fail = |step: Step| move |e: std::io::Error| DiskError { step, error: e.to_string() };
-        if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
-            return Err(DiskError { step: Step::Check, error: "the file is a link, and is not replaced".into() });
-        }
-        let (temp, mut file) = RealDisk::create_temp(path, true).map_err(fail(Step::CreateTemp))?;
-        let swapped = (|| {
-            file.write_all(bytes).map_err(fail(Step::Write))?;
-            file.sync_all().map_err(fail(Step::SyncFile))?;
-            exchange::swap(&temp, path).map_err(fail(Step::Rename))
-        })();
-        let displaced = match swapped {
-            // The two names traded places: the temp name now holds what the path held then.
-            Ok(exchange::Swapped::Exchanged) => {
-                let old = std::fs::read(&temp);
-                let _ = std::fs::remove_file(&temp);
-                // The new bytes are in place whether or not the old ones could be read back.
-                old.map_or(Displaced::Unknown, Displaced::Bytes)
-            }
-            Ok(exchange::Swapped::Created) => Displaced::Nothing,
-            Ok(exchange::Swapped::Renamed) => Displaced::Unknown,
-            Err(e) => {
-                let _ = std::fs::remove_file(&temp);
-                return Err(e);
-            }
-        };
-        let parent = path.parent().unwrap_or(Path::new("."));
-        std::fs::File::open(parent).and_then(|d| d.sync_all()).map_err(fail(Step::SyncDir))?;
-        Ok(displaced)
-    }
-}
-
-/// The atomic exchange of two names, where the kernel has one.
-mod exchange {
-    use std::path::Path;
-
-    /// How the new file took its place.
-    pub(super) enum Swapped {
-        /// Exchanged with the file that was there, which is now at the temp name.
-        Exchanged,
-        /// Nothing was there: renamed into place.
-        Created,
-        /// Renamed over whatever was there, which is gone (no exchange on this filesystem).
-        Renamed,
-    }
-
-    /// Puts `temp` at `path`. On Linux by `renameat2(RENAME_EXCHANGE)`, which swaps the two in
-    /// one step, so what was at `path` is kept at `temp` instead of being unlinked unseen.
-    pub(super) fn swap(temp: &Path, path: &Path) -> std::io::Result<Swapped> {
-        #[cfg(target_os = "linux")]
-        {
-            match exchange_names(temp, path) {
-                Ok(()) => return Ok(Swapped::Exchanged),
-                Err(e) if e.raw_os_error() == Some(libc::ENOENT) => {
-                    // Nothing at the path (or the temp vanished, which the rename then reports).
-                    std::fs::rename(temp, path)?;
-                    return Ok(Swapped::Created);
-                }
-                // A filesystem or kernel without the exchange: a plain rename below.
-                Err(e) if matches!(e.raw_os_error(), Some(libc::EINVAL) | Some(libc::ENOSYS)) => {}
-                Err(e) => return Err(e),
-            }
-        }
-        std::fs::rename(temp, path)?;
-        Ok(Swapped::Renamed)
-    }
-
-    #[cfg(target_os = "linux")]
-    fn exchange_names(a: &Path, b: &Path) -> std::io::Result<()> {
-        use std::ffi::CString;
-        use std::os::unix::ffi::OsStrExt as _;
-        let a = CString::new(a.as_os_str().as_bytes())?;
-        let b = CString::new(b.as_os_str().as_bytes())?;
-        // SAFETY: both strings are valid and NUL-terminated for the call, which only reads them.
-        // The raw syscall is used because not every libc this OS runs on wraps renameat2.
-        let r = unsafe {
-            libc::syscall(
-                libc::SYS_renameat2,
-                libc::AT_FDCWD,
-                a.as_ptr(),
-                libc::AT_FDCWD,
-                b.as_ptr(),
-                libc::RENAME_EXCHANGE,
-            )
-        };
-        if r == 0 {
-            Ok(())
-        } else {
-            Err(std::io::Error::last_os_error())
-        }
+    fn exchange(&self, path: &Path, bytes: &[u8]) -> Result<Exchanged, DiskError> {
+        super::exchange::exchange(path, bytes)
     }
 }
 
@@ -359,14 +289,16 @@ mod faulty {
             RealDisk.remove(path)
         }
 
-        fn exchange(&self, path: &Path, bytes: &[u8]) -> Result<super::Displaced, DiskError> {
+        fn exchange(&self, path: &Path, bytes: &[u8]) -> Result<super::Exchanged, DiskError> {
             match self.fault_for(path) {
                 Some(step @ (Step::Check | Step::CreateTemp | Step::Write | Step::SyncFile | Step::Rename)) => {
                     Err(DiskError { step, error: format!("injected failure at {step:?}") })
                 }
+                // In place, and what it replaced handed back, but the directory sync failed.
                 Some(Step::SyncDir) => {
-                    RealDisk.exchange(path, bytes)?;
-                    Err(DiskError { step: Step::SyncDir, error: "injected failure at SyncDir".into() })
+                    let done = RealDisk.exchange(path, bytes)?;
+                    let injected = DiskError { step: Step::SyncDir, error: "injected failure at SyncDir".into() };
+                    Ok(super::Exchanged { displaced: done.displaced, unsure: Some(injected) })
                 }
                 None => RealDisk.exchange(path, bytes),
             }

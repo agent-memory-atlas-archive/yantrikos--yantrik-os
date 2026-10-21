@@ -85,7 +85,8 @@ impl<C> SaveTicket<C> {
     pub fn judge(&self, displaced: &super::disk::Displaced) -> Witnessed {
         use super::disk::Displaced;
         match displaced {
-            Displaced::Unknown => Witnessed::Unknown,
+            // Kept unread: it may have been theirs, and the app keeps the file it is left in.
+            Displaced::Unknown | Displaced::Unread(_) => Witnessed::Unknown,
             Displaced::Nothing if self.baseline.is_some() => Witnessed::Replaced(Replaced::Deletion),
             Displaced::Nothing => Witnessed::Same,
             Displaced::Bytes(bytes) => {
