@@ -11,6 +11,9 @@ pub struct Member {
     pub dir: String,
     /// The other members it depends on, of any kind (normal, build or dev).
     pub uses: Vec<String>,
+    /// The other members whose `testing` feature its own default build turns on (see
+    /// [`ships_testing`]).
+    pub ships_testing: Vec<String>,
 }
 
 /// The workspace root: two folders above this crate.
@@ -78,10 +81,52 @@ pub fn parse(json: &str) -> Result<Vec<Member>, String> {
             name: name.to_string(),
             dir,
             uses,
+            ships_testing: ships_testing(p, name, &names),
         });
     }
     out.sort_by(|a, b| a.dir.cmp(&b.dir));
     Ok(out)
+}
+
+/// The members whose `testing` feature `package` turns on in a build that is not a test: a normal
+/// or build dependency that asks for it, or the default features reaching `<member>/testing`
+/// (through other features of its own, too). Dev-dependencies are a test's own and do not count.
+/// `cargo build --workspace` merges every member's features into one build, so one such member
+/// puts the test-only API into every binary built beside it.
+fn ships_testing(package: &serde_json::Value, name: &str, names: &[&str]) -> Vec<String> {
+    let deps = package["dependencies"].as_array().map(Vec::as_slice).unwrap_or_default();
+    let member = |d: &str| names.contains(&d) && d != name;
+    let mut out: Vec<String> = deps
+        .iter()
+        .filter(|d| d["kind"].as_str() != Some("dev") && d["optional"].as_bool() != Some(true))
+        .filter(|d| d["features"].as_array().is_some_and(|f| f.iter().any(|f| f == "testing")))
+        .filter_map(|d| d["name"].as_str())
+        .filter(|d| member(d))
+        .map(str::to_string)
+        .collect();
+    // The default features, followed through the package's own features.
+    let features = &package["features"];
+    let mut seen: Vec<&str> = Vec::new();
+    let mut todo = vec!["default"];
+    while let Some(feature) = todo.pop() {
+        if seen.contains(&feature) {
+            continue;
+        }
+        seen.push(feature);
+        for entry in features[feature].as_array().into_iter().flatten().filter_map(|e| e.as_str()) {
+            match entry.split_once('/') {
+                Some((dep, "testing")) if member(dep.trim_end_matches('?')) => {
+                    out.push(dep.trim_end_matches('?').to_string());
+                }
+                Some(_) => {}
+                None if features.get(entry).is_some() => todo.push(entry),
+                None => {}
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 fn slashed(path: &str) -> String {
@@ -127,10 +172,36 @@ mod tests {
             Member {
                 name: "app".into(),
                 dir: "apps/app".into(),
-                uses: vec!["kit".into()]
+                uses: vec!["kit".into()],
+                ships_testing: Vec::new(),
             }
         );
         assert_eq!(m[1].dir, "crates/kit");
         assert!(m[1].uses.is_empty());
+    }
+
+    #[test]
+    fn a_testing_feature_turned_on_outside_the_tests_is_seen() {
+        let json = r#"{"workspace_root":"/w","packages":[
+            {"name":"harness","manifest_path":"/w/f/harness/Cargo.toml","dependencies":[
+                {"name":"core","kind":null,"features":["testing"]}],"features":{}},
+            {"name":"app","manifest_path":"/w/apps/app/Cargo.toml","dependencies":[
+                {"name":"core","kind":"dev","features":["testing"]},
+                {"name":"harness","kind":"dev","features":["testing"]},
+                {"name":"kit","kind":"build","features":["testing"]},
+                {"name":"serde","kind":null,"features":["testing"]}],"features":{}},
+            {"name":"tool","manifest_path":"/w/tools/tool/Cargo.toml","dependencies":[
+                {"name":"core","kind":null,"features":[]},
+                {"name":"kit","kind":null,"features":[],"optional":true}],
+             "features":{"default":["extra"],"extra":["core?/testing","kit/other"],"fakes":["kit/testing"]}},
+            {"name":"core","manifest_path":"/w/f/core/Cargo.toml","dependencies":[],
+             "features":{"testing":[]}},
+            {"name":"kit","manifest_path":"/w/f/kit/Cargo.toml","dependencies":[],"features":{}}]}"#;
+        let m = parse(json).unwrap();
+        let ships = |name: &str| m.iter().find(|m| m.name == name).unwrap().ships_testing.clone();
+        assert_eq!(ships("harness"), vec!["core"], "a normal dependency that asks for it");
+        assert_eq!(ships("app"), vec!["kit"], "a build dependency counts; a dev one and a non-member do not");
+        assert_eq!(ships("tool"), vec!["core"], "the default features, followed; `fakes` is not default");
+        assert!(ships("core").is_empty());
     }
 }
