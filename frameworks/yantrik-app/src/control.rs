@@ -89,6 +89,14 @@
 //! Every door meets the same question; `yos act` and the bridge ask for the card on the caller's
 //! behalf. `describe` needs nothing, and the ceiling stays above every mode and every grant.
 //!
+//! # Private mode
+//!
+//! While the person has Private mode on, no agent acts (`ActCall::require_not_private`), and no
+//! caller reads what the app holds: `describe`, and the view an `act` replies with, are the
+//! private view — the app's id, `"private": true`, a neutral summary, its windows, and only the
+//! keys it listed as not personal ([`private_mode`], #924). This door reads the file per call,
+//! on the RPC thread, so turning it on holds from the next call.
+//!
 //! The rule itself is `yantrik_ipc_transport::gate`, re-exported below. Three services answer
 //! `app.act` without a window — System Monitor, whose `kill_process` is `dangerous`,
 //! Notifications and Weather — and until #153 they met none of it. They dispatch through the same
@@ -158,11 +166,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use yantrik_ipc_contracts::email::ServiceError;
+use yantrik_ipc_transport::privacy;
 use yantrik_ipc_transport::server::{PeerCred, RpcServer, ServiceHandler};
 use yantrik_surface::{
-    finish_later, next_action_id, refusal, ActCall, Later, LaterScope, LocalRegistry,
+    finish_later_published, next_action_id, recheck_private, recheck_refusal, refusal, ActCall, Hold, Later,
+    LaterScope, LocalRegistry, ReplyTo,
     NO_SUCH_METHOD, UNANSWERED,
 };
+
+pub mod private_mode;
 
 /// How long the RPC thread waits for the UI thread to answer.
 ///
@@ -593,12 +605,13 @@ impl ServiceHandler for ControlRpc {
         let later = LATER_HANDED.with(|cell| cell.borrow_mut().take());
         match (answer, later) {
             // The work runs here, off the UI thread, and the view beside its result is read
-            // again on the UI thread once it has.
+            // again on the UI thread once it has — under Private mode as it is then.
             (Ok(envelope), Some(later)) if method == "app.act" => {
-                finish_later(envelope, later, move || {
+                let to = ReplyTo { pid: who.map(|c| c.pid), surface: &self.app_id };
+                finish_later_published(envelope, later, to, move |private| {
                     on_ui_thread(who, move |reg| {
                         let _agent = AgentTokenScope::enter(token);
-                        reg.snapshot()
+                        reg.published(private)
                     })
                     .ok()
                 })
@@ -616,7 +629,15 @@ impl ControlRpc {
         who: Option<Caller>,
     ) -> Result<serde_json::Value, ServiceError> {
         match method {
-            "app.describe" => on_ui_thread(who, |reg| reg.describe()).map_err(unanswered),
+            // Private mode read here, for this call, where file IO belongs, and again once the
+            // answer is back from the UI thread (`private_mode`).
+            "app.describe" => {
+                let private = privacy::is_private();
+                let mut answer = on_ui_thread(who, move |reg| reg.describe_in(private)).map_err(unanswered)?;
+                let to = ReplyTo { pid: who.map(|c| c.pid), surface: &self.app_id };
+                recheck_private(private, to, &mut answer, || on_ui_thread(who, |reg| reg.published(true)).ok());
+                Ok(answer)
+            }
 
             "app.act" => {
                 let call = ActCall::parse(&params)?;
@@ -664,6 +685,12 @@ impl ControlRpc {
                     expect_revision,
                     ..
                 } = call;
+                // What the guard and the reply may say of the app: the private view while the
+                // person is private, for the person's own calls too; and the action's own answer
+                // and refusal only for a caller the kernel vouches for (`Hold`, #926 review M1).
+                let private = privacy::is_private();
+                let to = ReplyTo { pid: who.map(|c| c.pid), surface: &self.app_id };
+                let hold = Hold::for_caller(private, to);
                 on_ui_thread(who, move |reg| {
                     let _agent = AgentTokenScope::enter(agent_token);
                     // So a handler can tell the act a person just allowed from any other: see
@@ -672,19 +699,24 @@ impl ControlRpc {
                     // The reach, on the grade this surface publishes now — the one `act` decides on.
                     reg.within_reach(reach.as_ref(), &action, &args)
                         .and_then(|()| {
-                            reg.act(
+                            reg.act_in(
                                 &action,
                                 &args,
                                 expect_revision.as_deref(),
                                 &action_id,
                                 &authority,
+                                hold,
                             )
                         })
                 })
                 .map_err(unanswered)?
                 // An action that legitimately refuses is an application error, not a transport
                 // failure: -32602 keeps it out of the client's circuit breaker.
-                .map_err(refusal)
+                .map_err(|why| refusal(recheck_refusal(private, to, why)))
+                .map(|mut reply| {
+                    recheck_private(private, to, &mut reply, || on_ui_thread(who, |reg| reg.published(true)).ok());
+                    reply
+                })
             }
 
             // The sentence about ONE call, in the app's own words (#137). The shell asks this
@@ -748,6 +780,16 @@ impl App {
     /// What this app reports when asked. Runs on the UI thread; keep it cheap.
     pub fn describe(mut self, f: impl Fn() -> View + 'static) -> Self {
         self.registry.set_describe(Box::new(f));
+        self
+    }
+
+    /// Keys of this surface's `describe` state kept while the person is in Private mode (#924,
+    /// [`private_mode`]): default-deny, each listed by name, and only a key whose whole value says
+    /// nothing about the person. A framework app lists its keys in `Intents::shown_in_private`.
+    pub fn shown_in_private(mut self, keys: &[&str]) -> Self {
+        for key in keys {
+            self.registry.show_in_private(key);
+        }
         self
     }
 

@@ -189,6 +189,8 @@ impl<A: App> Intent<A> {
 pub struct Intents<A: App> {
     intents: Vec<Intent<A>>,
     state_rule: Option<StateRule<A>>,
+    /// The `describe` keys kept in Private mode (`shown_in_private`). None unless listed.
+    shown_in_private: Vec<&'static str>,
 }
 
 impl<A: App> Default for Intents<A> {
@@ -196,6 +198,7 @@ impl<A: App> Default for Intents<A> {
         Intents {
             intents: Vec::new(),
             state_rule: None,
+            shown_in_private: Vec::new(),
         }
     }
 }
@@ -224,6 +227,24 @@ impl<A: App> Intents<A> {
     /// app's own words (the shell's is the locked desktop).
     pub fn state_rule(&mut self, rule: impl Fn(&A::Model) -> Result<(), Refused> + 'static) {
         self.state_rule = Some(Rc::new(rule));
+    }
+
+    /// Keys of this app's `describe` state that say nothing about the person, kept in its answer
+    /// while they are in Private mode (#924, `control::private_mode`). Everything else of the
+    /// app's state is left out, so the default is nothing: list a key only when its whole value
+    /// is not personal (a unit, a CPU figure), never a title, a name, a path or a place. A key
+    /// the private view writes itself (`open`, `windows_open`, `private`) is logged and not kept.
+    pub fn shown_in_private(&mut self, keys: &[&'static str]) {
+        for key in keys {
+            if !self.shown_in_private.contains(key) {
+                self.shown_in_private.push(key);
+            }
+        }
+    }
+
+    /// The keys [`Intents::shown_in_private`] listed, in that order.
+    pub fn shown_in_private_keys(&self) -> &[&'static str] {
+        &self.shown_in_private
     }
 
     pub fn len(&self) -> usize {
@@ -305,6 +326,8 @@ pub fn registry<A: App>(core: &Rc<Core<A>>, table: Intents<A>) -> LocalRegistry 
         Some(core) => core.read(A::describe),
         None => View::new(format!("{} (closing)", A::ID)),
     }));
+    let shown = &table.shown_in_private;
+    crate::control::private_mode::wire(&mut registry, weak.clone(), shown, core.paths());
     for intent in table.intents {
         let Intent {
             action,

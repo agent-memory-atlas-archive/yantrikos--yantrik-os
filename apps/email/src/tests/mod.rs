@@ -121,6 +121,7 @@ mod mailbox;
 mod markup;
 mod message;
 mod parity;
+mod private_mode;
 mod robust;
 mod setup;
 mod unsent;
