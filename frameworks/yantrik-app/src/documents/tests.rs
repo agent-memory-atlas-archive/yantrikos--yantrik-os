@@ -120,7 +120,7 @@ fn a_failed_save_is_not_retried_by_autosave_until_something_changes() {
     let d = docs.get_mut(id).unwrap();
     d.edit(|c| *c = "v1".into());
     let t = ticket(d.begin_save());
-    let failed = SaveError::new(Durability::NotWritten, "The disk is read-only.");
+    let failed = SaveError::new("The disk is read-only.");
     assert!(matches!(d.save_landed(t.seq, Err(failed.clone())), SaveOutcome::Failed));
     assert!(d.dirty(), "nothing was saved");
     assert!(matches!(d.begin_save(), BeginSave::Failed), "an autosave tick does not spam");
@@ -140,7 +140,7 @@ fn a_failure_after_the_rename_is_not_called_saved() {
     let d = docs.get_mut(id).unwrap();
     d.edit(|c| *c = "v1".into());
     let t = ticket(d.begin_save());
-    let unknown = SaveError::new(Step::SyncDir.durability(), "Saved, but the disk did not confirm it.");
+    let unknown = SaveError::after_writing(Step::SyncDir.durability(), fp("v1"), "Saved, but the disk did not confirm it.");
     d.save_landed(t.seq, Err(unknown));
     assert!(d.dirty(), "Unknown durability is treated as not saved");
     match &d.save {
@@ -380,7 +380,7 @@ fn during_a_save_that_fails_an_outside_write_is_judged_against_the_old_file() {
     d.edit(|c| *c = "v1".into());
     let t = ticket(d.begin_save());
     d.observe(Observed::File(fp("theirs")));
-    d.save_landed(t.seq, Err(SaveError::new(Durability::NotWritten, "Disk full.")));
+    d.save_landed(t.seq, Err(SaveError::new("Disk full.")));
     assert_eq!(d.outside, OutsideState::Conflict { now: Some(fp("theirs")) });
 }
 

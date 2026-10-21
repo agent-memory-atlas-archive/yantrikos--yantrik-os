@@ -5,10 +5,15 @@
 //! last seen, so only a change is reported, and an entry added with the document's baseline does
 //! not report the file it was just read from.
 //!
-//! A look is a `stat` first, and the bytes are read and hashed only when the length or the
-//! modification time moved since the last look, so an unchanged file costs a `stat` a tick at
-//! any size. The trade: an edit that keeps both the length and the time is missed, as it is by
-//! every editor that watches this way. A newly added (or re-armed) entry is always read once.
+//! A look is a `stat` first, and the bytes are read and hashed only when the stamp moved since
+//! the last look (length, modification time, and on Unix the inode and change time), so an
+//! unchanged file costs a `stat` a tick at any size. The trade: an edit that keeps every part of
+//! the stamp is missed, as it is by every editor that watches this way. A newly added (or
+//! re-armed) entry is always read once.
+//!
+//! Each sighting carries the arming it was taken under. The core drops one whose arming is no
+//! longer current: a look queued behind a save's outcome, taken before the app re-armed. The
+//! re-armed look reads the file afresh, so an outside edit still on disk is reported then.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -18,8 +23,29 @@ use std::time::SystemTime;
 
 use super::{Fingerprint, Observed};
 
-/// A file's length and modification time: whether it may have changed since the last look.
-type Stamp = (u64, Option<SystemTime>);
+/// What says a file may have changed since the last look: its length and modification time, and
+/// on Unix its inode and change time too, so a same-length write within one coarse clock tick
+/// and an atomic replace that keeps the old mtime are still seen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Stamp {
+    len: u64,
+    modified: Option<SystemTime>,
+    inode: u64,
+    changed: (i64, i64),
+}
+
+impl Stamp {
+    fn of(meta: &std::fs::Metadata) -> Stamp {
+        #[cfg(unix)]
+        let (inode, changed) = {
+            use std::os::unix::fs::MetadataExt as _;
+            (meta.ino(), (meta.ctime(), meta.ctime_nsec()))
+        };
+        #[cfg(not(unix))]
+        let (inode, changed) = (0, (0, 0));
+        Stamp { len: meta.len(), modified: meta.modified().ok(), inode, changed }
+    }
+}
 
 /// What a look found.
 enum Look {
@@ -39,7 +65,7 @@ fn look(path: &Path, last: Option<Stamp>) -> Look {
     if !meta.is_file() {
         return Look::Seen(Observed::Gone, None);
     }
-    let stamp = (meta.len(), meta.modified().ok());
+    let stamp = Stamp::of(&meta);
     if last == Some(stamp) {
         return Look::Unchanged;
     }
@@ -93,10 +119,16 @@ impl Watched {
         self.table().iter().map(|(k, e)| (k.clone(), e.path.clone())).collect()
     }
 
-    /// Looks at every file once and returns what changed. The files are looked at outside the
+    /// Whether `arming` is the one `key` is watched under now.
+    pub fn is_current(&self, key: &str, arming: u64) -> bool {
+        self.table().get(key).is_some_and(|e| e.arming == arming)
+    }
+
+    /// Looks at every file once and returns what changed, with the arming each look was taken
+    /// under. The files are looked at outside the
     /// lock, so the UI thread never waits on a disk; an entry removed or re-armed meanwhile is
     /// left as the core set it.
-    pub fn poll(&self) -> Vec<(String, Observed)> {
+    pub fn poll(&self) -> Vec<(String, Observed, u64)> {
         let snapshot: Vec<(String, PathBuf, Option<Stamp>, u64)> =
             self.table().iter().map(|(k, e)| (k.clone(), e.path.clone(), e.stamp, e.arming)).collect();
         let looks: Vec<(String, u64, Look)> = snapshot
@@ -120,7 +152,7 @@ impl Watched {
                 continue;
             }
             entry.seen = Some(seen.clone());
-            changed.push((key, seen));
+            changed.push((key, seen, arming));
         }
         changed
     }

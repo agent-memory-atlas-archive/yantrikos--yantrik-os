@@ -80,7 +80,11 @@ impl RealDisk {
         let file = options.open(&temp)?;
         // A note made private stays private: the replacement wears the original's mode.
         if let Ok(meta) = std::fs::metadata(path) {
-            file.set_permissions(meta.permissions())?;
+            if let Err(e) = file.set_permissions(meta.permissions()) {
+                drop(file);
+                let _ = std::fs::remove_file(&temp);
+                return Err(e);
+            }
         }
         Ok((temp, file))
     }
