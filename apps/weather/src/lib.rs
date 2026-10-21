@@ -292,6 +292,61 @@ mod tests {
         assert!(paths.config_file().with_file_name("weather.json.legacy.json").exists());
     }
 
+    /// The step-6 gate (design §7, row 6): a worker that panics, a shutdown mid-refresh, and an
+    /// agent raising a sensitive intent without authority.
+    #[test]
+    fn a_panicking_worker_a_shutdown_mid_refresh_and_an_unauthorised_agent_are_each_held() {
+        struct Panics;
+        impl yantrik_services::weather::WeatherApi for Panics {
+            fn forecast(
+                &self,
+                _: &yantrik_services::weather::Place,
+                _: yantrik_services::weather::Units,
+                _: u32,
+            ) -> Result<yantrik_ipc_contracts::weather::Forecast, ServiceError> {
+                panic!("the provider's document had no current block")
+            }
+            fn geocode(&self, _: &str) -> Result<Location, ServiceError> {
+                Err(ServiceError::Unreachable { service: "weather" })
+            }
+            fn suggest(&self, _: &str) -> Result<Vec<yantrik_ipc_contracts::weather::LocationSuggestion>, ServiceError> {
+                Ok(Vec::new())
+            }
+        }
+        let mind = Arc::new(FakeMind::new());
+        let app = TestApp::<Weather>::start_at_with(
+            Paths::temporary(Weather::ID),
+            Vec::new(),
+            mind,
+            Services::fakes().with_weather(Arc::new(Panics)),
+        );
+        app.run_jobs();
+        assert!(!app.model(|m| m.loading), "a panicked fetch is not left loading");
+        assert_eq!(app.describe()["summary"], json!("Weather — The fetch did not finish; try again."));
+
+        // An agent may not save a place without authority: the grade is sensitive (#48).
+        let (app, _, _) = start(FakeWeather::new().forecasting(Ok(forecast_at(3.0))));
+        app.run_jobs();
+        let refused = app
+            .act_as(yantrik_testing::Call::new("add_location", json!({ "name": "Oslo" })).as_agent("mind").in_mode("ask"))
+            .is_err();
+        assert!(refused, "a sensitive intent needs a person's grant in ask mode");
+        assert_eq!(app.model(|m| m.prefs.locations.len()), 1);
+        assert!(app.act_as(yantrik_testing::Call::new("refresh", json!({})).as_agent("mind").in_mode("ask")).is_ok());
+
+        // A shutdown while a refresh and a lookup are in flight: the owed answer is refused as a
+        // closing, the jobs are cancelled, and the end comes within the grace period. (Under the
+        // test's manual executor the cancelled jobs never run, so the core reports them as left
+        // behind — the runner's thread pool would have stopped them.)
+        app.run(Command::Refresh);
+        let owed = app.act("add_location", json!({ "name": "Oslo" })).unwrap();
+        assert!(owed.is_owed());
+        let began = std::time::Instant::now();
+        let _clean = app.shutdown();
+        assert!(began.elapsed() < Duration::from_secs(2), "shutdown must not hang on the jobs");
+        assert_eq!(owed.settle().unwrap_err(), "the app is closing");
+    }
+
     #[test]
     fn the_rail_offers_the_one_question_once_there_is_a_reading() {
         let (app, _, mind) = start(FakeWeather::new().forecasting(Ok(forecast_at(12.0))));
