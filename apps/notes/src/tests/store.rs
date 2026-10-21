@@ -11,7 +11,7 @@ use yantrik_app::documents::{DocumentId, Durability, Fingerprint, SaveTicket};
 use crate::note::{Note, NoteText};
 use crate::store::{read, validate, SaveFailed, SaveJob, Saved, Vault, LIMIT};
 
-fn fixture(name: &str) -> PathBuf {
+pub fn fixture(name: &str) -> PathBuf {
     let p = std::env::temp_dir().join(format!(
         "yantrik-notes-{name}-{}-{}",
         std::process::id(),

@@ -13,6 +13,7 @@ use crate::command::Command;
 use crate::update::AUTOSAVE_AFTER;
 use crate::Notes;
 
+mod kept;
 mod parity;
 mod read_notes;
 mod saving;
