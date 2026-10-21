@@ -60,16 +60,31 @@ pub(crate) fn call<T: DeserializeOwned>(
 }
 
 /// The transport's error, told apart: a service that is not there, one that was slow, one that
-/// said no.
+/// said no. The transport says all of its own in English with the code -32000, which services
+/// also answer with, so the sentences are matched; the ones below are what `SyncRpcClient`
+/// writes for a missing socket (`Connection failed (…): No such file or directory`), its breaker
+/// (`Service at … is unreachable (retrying in up to 5s)`), a read timeout on a Unix socket
+/// (`Read error (…): Resource temporarily unavailable (os error 11)`: EAGAIN, not TimedOut),
+/// a write that failed, and a peer that closed mid-call. None of those sentences, which carry
+/// the socket's path, is shown to a person: a transport failure is `Timeout` or `Unreachable`.
 fn classify(service: &'static str, deadline: Duration, e: RpcError) -> ServiceError {
     let text = e.message.to_ascii_lowercase();
-    if text.contains("timed out") || text.contains("timeout") {
-        ServiceError::Timeout { service, seconds: deadline.as_secs() }
-    } else if text.contains("connection refused")
+    let timed_out = text.contains("timed out")
+        || text.contains("timeout")
+        || text.contains("temporarily unavailable")
+        || text.contains("read error");
+    let unreachable = text.contains("connection refused")
         || text.contains("no such file")
         || text.contains("not running")
         || text.contains("could not connect")
-    {
+        || text.contains("connection failed")
+        || text.contains("is unreachable")
+        || text.contains("closed before response")
+        || text.contains("write error")
+        || text.contains("broken pipe");
+    if timed_out {
+        ServiceError::Timeout { service, seconds: deadline.as_secs() }
+    } else if unreachable {
         ServiceError::Unreachable { service }
     } else {
         ServiceError::Refused { code: e.code, sentence: e.message }
@@ -99,6 +114,53 @@ mod tests {
 
     fn rpc(code: i32, message: &str) -> RpcError {
         RpcError { code, message: message.into(), data: None }
+    }
+
+    /// The sentences the transport writes, taken from a run of `SyncRpcClient` against a
+    /// missing socket, its breaker and a socket that accepts and never answers.
+    #[test]
+    fn the_transports_real_sentences_are_told_apart() {
+        let d = Duration::from_secs(5);
+        let real = [
+            ("[-32000] Connection failed (/run/user/1000/yantrik/nosuch.sock): No such file or directory (os error 2)", "unreachable"),
+            ("Service at /run/user/1000/yantrik/nosuch.sock is unreachable (retrying in up to 5s)", "unreachable"),
+            ("Read error (/run/user/1000/yantrik/silent.sock): Resource temporarily unavailable (os error 11)", "timeout"),
+            ("Connection closed before response", "unreachable"),
+            ("Write error (/run/user/1000/yantrik/weather.sock): Broken pipe (os error 32)", "unreachable"),
+        ];
+        for (sentence, expect) in real {
+            let got = classify("weather", d, rpc(-32000, sentence));
+            match expect {
+                "timeout" => assert_eq!(got, ServiceError::Timeout { service: "weather", seconds: 5 }, "{sentence}"),
+                _ => assert_eq!(got, ServiceError::Unreachable { service: "weather" }, "{sentence}"),
+            }
+            assert!(!got.to_string().contains(".sock"), "no socket path reaches a person: {got}");
+        }
+    }
+
+    /// A socket that accepts and never answers is a timeout, through the real client.
+    #[cfg(unix)]
+    #[test]
+    fn a_silent_socket_is_a_timeout_through_the_real_client() {
+        let dir = std::env::temp_dir().join(format!("yantrik-services-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("silent.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let keep = std::thread::spawn(move || {
+            // Accept and hold the connection without answering, until the test is over.
+            let held: Vec<_> = listener.incoming().take(1).filter_map(|c| c.ok()).collect();
+            std::thread::sleep(Duration::from_millis(1500));
+            drop(held);
+        });
+        let deadline = Duration::from_millis(300);
+        let e = SyncRpcClient::new(&path.to_string_lossy())
+            .with_timeout(deadline)
+            .call("weather.forecast", serde_json::json!({}))
+            .unwrap_err();
+        assert_eq!(classify("weather", deadline, e), ServiceError::Timeout { service: "weather", seconds: 0 });
+        keep.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

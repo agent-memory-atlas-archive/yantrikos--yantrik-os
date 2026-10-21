@@ -53,7 +53,22 @@ fn open_url(url: &str) -> DesktopOutcome {
     if url.chars().any(|c| c.is_control() || c.is_whitespace()) {
         return DesktopOutcome::Failed("That is not a web address.".into());
     }
+    // A mail link may name a file to attach (`?attach=`, `?attachment=`), which mail clients
+    // have honoured with local paths. A draft that carries a file the app named is not opened
+    // from here.
+    if lower.starts_with("mailto:") && mailto_attaches(&lower) {
+        return DesktopOutcome::Failed("A mail link that attaches a file is not opened from here.".into());
+    }
     launch("xdg-open", url)
+}
+
+/// Whether a `mailto:` link's query names an attachment, under any of the keys clients read.
+fn mailto_attaches(lower: &str) -> bool {
+    let Some((_, query)) = lower.split_once('?') else { return false };
+    query
+        .split('&')
+        .filter_map(|pair| pair.split_once('=').map(|(k, _)| k).or(Some(pair)))
+        .any(|key| matches!(key.trim(), "attach" | "attachment" | "attachments"))
 }
 
 fn open_path(path: &std::path::Path) -> DesktopOutcome {
@@ -66,20 +81,59 @@ fn open_path(path: &std::path::Path) -> DesktopOutcome {
             yantrik_foundation::home::shown(path)
         ));
     }
+    // The desktop's handler for a `.desktop` file or an executable is to run it (§8: a picked
+    // file is a capability handle, not a program). Until pickers land, such a file is refused.
+    if runs_as_a_program(path) {
+        return DesktopOutcome::Failed(format!(
+            "{} is a program, not a document; it is not opened from here.",
+            yantrik_foundation::home::shown(path)
+        ));
+    }
     launch("xdg-open", &path.to_string_lossy())
 }
 
+/// A `.desktop` launcher, or a regular file with an execute bit.
+fn runs_as_a_program(path: &std::path::Path) -> bool {
+    if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("desktop")) {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if let Ok(meta) = std::fs::metadata(path) {
+            return meta.is_file() && meta.permissions().mode() & 0o111 != 0;
+        }
+    }
+    false
+}
+
 /// Starts the opener and lets it go: a browser may run for an hour, and the app does not wait
-/// for it. Failing to start it is the one failure there is to report.
+/// for it. Failing to start it is the one failure there is to report. The opener is reaped on a
+/// thread of its own when it exits (`xdg-open` returns once it has handed off), so no defunct
+/// entry sits under the app for every open; it runs in its own process group, so a signal to
+/// the app's does not reach what it opened.
 fn launch(program: &str, argument: &str) -> DesktopOutcome {
-    match Command::new(program)
+    let mut command = Command::new(program);
+    command
         .arg(argument)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
+        .stderr(Stdio::null());
+    #[cfg(unix)]
     {
-        Ok(_) => DesktopOutcome::Done,
+        use std::os::unix::process::CommandExt as _;
+        command.process_group(0);
+    }
+    match command.spawn() {
+        Ok(mut child) => {
+            std::thread::Builder::new()
+                .name("desktop-reap".into())
+                .spawn(move || {
+                    let _ = child.wait();
+                })
+                .ok();
+            DesktopOutcome::Done
+        }
         Err(e) => DesktopOutcome::Failed(format!("Nothing on this machine opens that ({e}).")),
     }
 }
@@ -113,6 +167,36 @@ fn copy_text(text: &str) -> DesktopOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mail_link_that_attaches_a_file_is_refused() {
+        assert!(mailto_attaches("mailto:x@y?subject=hi&attach=/home/u/.ssh/id_ed25519"));
+        assert!(mailto_attaches("mailto:x@y?attachment=/etc/passwd"));
+        assert!(!mailto_attaches("mailto:x@y?subject=attach%20this"));
+        assert!(matches!(open_url("mailto:x@y?attach=/x"), DesktopOutcome::Failed(_)));
+    }
+
+    #[test]
+    fn a_program_is_not_opened_as_a_document() {
+        let dir = std::env::temp_dir().join(format!("yantrik-desktop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let launcher = dir.join("evil.desktop");
+        std::fs::write(&launcher, "[Desktop Entry]\nExec=rm -rf ~\n").unwrap();
+        assert!(runs_as_a_program(&launcher));
+        let note = dir.join("note.txt");
+        std::fs::write(&note, "hello").unwrap();
+        assert!(!runs_as_a_program(&note));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let script = dir.join("run.sh");
+            std::fs::write(&script, "#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(runs_as_a_program(&script));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// Refused before any process is started: nothing here opens a browser on the test machine.
     #[test]
