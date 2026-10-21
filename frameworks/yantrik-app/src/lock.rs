@@ -8,12 +8,18 @@
 //!
 //! The file is opened without following a link and created private (0600), because it sits in a
 //! directory whose contents decide whether a process runs.
+//!
+//! On a local filesystem a second `hold` of the same file is refused even within one process. On
+//! NFS (and CIFS with some mount options) Linux turns `flock` into a POSIX lock, which never
+//! conflicts within a process and is released when any descriptor of the file is closed: there it
+//! excludes other processes only, so a caller must not rely on an in-process refusal.
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
 /// Held while it lives; the lock goes with it (and with the process).
 #[derive(Debug)]
+#[must_use = "the lock is released when this is dropped; bind it for as long as it must be held"]
 pub struct FileLock {
     _file: File,
     path: PathBuf,
@@ -39,6 +45,15 @@ impl std::fmt::Display for LockError {
         match self {
             LockError::Held => write!(f, "held by another copy"),
             LockError::Io(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for LockError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            LockError::Held => None,
+            LockError::Io(e) => Some(e),
         }
     }
 }
@@ -70,7 +85,8 @@ pub fn hold(path: &Path) -> Result<FileLock, LockError> {
     Ok(FileLock { _file: file, path: path.to_path_buf() })
 }
 
-/// Windows development builds: no `flock`, and one person's desktop; the open file stands in.
+/// Windows development builds: no lock at all (the file is opened shared, so a second `hold`
+/// succeeds and `Held` is never returned). The instance's pid file is what guards there.
 #[cfg(not(unix))]
 pub fn hold(path: &Path) -> Result<FileLock, LockError> {
     let file = std::fs::OpenOptions::new()
@@ -81,6 +97,23 @@ pub fn hold(path: &Path) -> Result<FileLock, LockError> {
         .open(path)
         .map_err(LockError::Io)?;
     Ok(FileLock { _file: file, path: path.to_path_buf() })
+}
+
+/// For tests: whether `f` holds within a second. A lock dropped in a test can stay held for a
+/// moment by a child another test forked just then: the child shares the open file until it
+/// starts its program, when `O_CLOEXEC` closes it. A real app is not affected; a test must wait.
+#[cfg(all(test, unix))]
+pub(crate) fn soon(mut f: impl FnMut() -> bool) -> bool {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    loop {
+        if f() {
+            return true;
+        }
+        if std::time::Instant::now() > until {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -102,7 +135,7 @@ mod tests {
         let first = hold(&path).expect("free");
         assert!(matches!(hold(&path), Err(LockError::Held)), "atomic: no gap between check and take");
         drop(first);
-        assert!(hold(&path).is_ok(), "released with its guard");
+        assert!(soon(|| hold(&path).is_ok()), "released with its guard");
         let _ = std::fs::remove_dir_all(&d);
     }
 
