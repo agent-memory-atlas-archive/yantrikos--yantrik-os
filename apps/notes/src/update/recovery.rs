@@ -19,7 +19,7 @@ use super::saving::{self, How};
 use super::{refreshed, show};
 use crate::command::{Act, Command, WindowAction};
 use crate::model::Model;
-use crate::note::Note;
+use crate::note::{Kept, Note};
 use crate::pane::Pane;
 use crate::recovery::{base_of, Found, Offer};
 use crate::store::Interrupted;
@@ -31,18 +31,14 @@ use crate::Notes;
 /// its note's file and the interrupted save the journal held, if it was the same note's. The
 /// newer of draft and journal wins; one equal to the file is not offered. A draft that loses is
 /// removed: the file already holds it, or the interrupted save, newer, came back as a note of
-/// its own (`Vault::load`). A draft whose text another note, or a newer offer, already holds is
-/// removed too: it moved to that note, and Notes stopped before its old draft was. Returns the
-/// sentence that says how many are offered, when the bar's one is not all of them.
+/// its own (`Vault::load`). A draft whose text moved to another note that holds it safely is
+/// removed too (`held_elsewhere`): Notes stopped before its old draft was. Returns the sentence
+/// that says how many are offered, when the bar's one is not all of them.
 pub fn weigh(m: &mut Model, fx: &mut Effects<Notes>, interrupted: Option<&Interrupted>) -> Option<String> {
     let found = m.recovery.found.take()?;
+    let with_drafts: Vec<String> = found.iter().map(|f| f.offer.id.clone()).collect();
     for Found { offer, at_ms, seq } in found {
-        // Already safe: another note holds exactly this text (its copy landed, and Notes stopped
-        // before the old draft was removed), or a newer offer does (the old draft and the one that
-        // took it over are both on disk). Offering it would let Restore make it twice.
-        let held = !m.alike(&offer.content, &offer.id).is_empty()
-            || m.recovery.offers.iter().any(|o| o.content == offer.content);
-        if held {
+        if held_elsewhere(m, &offer, &with_drafts) {
             fx.discard_draft(&offer.draft);
             continue;
         }
@@ -70,6 +66,24 @@ pub fn weigh(m: &mut Model, fx: &mut Effects<Notes>, interrupted: Option<&Interr
     let more = (m.recovery.offers.len() > 1).then(|| said::offered(m.recovery.offers.len()));
     let parts: Vec<String> = kept_aside.into_iter().flatten().chain(more).collect();
     (!parts.is_empty()).then(|| parts.join(" "))
+}
+
+/// Whether a draft's text is safe without it, so offering it would only let *Restore* make it twice.
+/// A draft is never dropped when its text would then exist nowhere that survives:
+///
+/// - Another note's file holds exactly this text, and that note has no draft of its own in this
+///   start. One that has could be restored over its file, and the text would be on no disk at all.
+/// - A newer offer holds exactly this text, and the two are one moved text (`drafts::moved`): one
+///   of them is a copy or recovered note (`note::Kept`) never saved, so the text was handed over
+///   from the other's note, and a crash came before the old draft was removed. The hand-over is
+///   kept only in memory (the framework's draft envelope has no room for it), so this is how a
+///   start knows it. Two notes' drafts that merely match are both offered: discarding one must
+///   never discard the other's edit.
+fn held_elsewhere(m: &Model, offer: &Offer, with_drafts: &[String]) -> bool {
+    let on_disk = m.alike(&offer.content, &offer.id).iter().any(|(id, _)| !with_drafts.contains(id));
+    let never_saved_kept = |id: &str| Kept::of(id).is_some() && !m.library.iter().any(|n| n.id == id);
+    let moved_with = |other: &Offer| never_saved_kept(&other.id) || never_saved_kept(&offer.id);
+    on_disk || m.recovery.offers.iter().any(|o| o.content == offer.content && moved_with(o))
 }
 
 /// Opens the note of the offer the bar shows, if it is in the library: its text is drawn

@@ -275,3 +275,47 @@ fn an_old_draft_stays_until_the_new_one_is_on_disk_or_the_copy_is_saved() {
     app.run_writes();
     assert!(!draft_file(&app, &path).exists(), "and only then the old draft goes");
 }
+
+/// The 925 delta review, B (P11): one text typed into two notes. Left's file holds it, but Left
+/// has its own offer too, of a later edit. Right's draft is the text's only copy that survives
+/// Left's Restore, so it is offered, not dropped.
+#[test]
+fn a_draft_whose_twin_file_has_its_own_offer_is_still_offered() {
+    let (app, first, left, second, right) = super::windows::two_notes_two_windows();
+    let shared = "# Same\n\nshared text only typed twice";
+    super::windows::type_in(&app, second, shared);
+    app.run_writes();
+    super::windows::type_in(&app, first, shared);
+    app.run(Command::From { window: first, command: Box::new(Command::Window(WindowAction::Save)) });
+    settle(&app);
+    assert_eq!((file(&left), file(&right)), (shared.to_string(), "# Right\n\n".to_string()));
+    super::windows::type_in(&app, first, "# Same\n\nshared text, then rewritten");
+    app.run_writes();
+    let again = killed_and_started_again(app);
+    let offers: Vec<String> =
+        state(&again)["recovery"].as_array().unwrap().iter().map(|o| o["filename"].as_str().unwrap().to_string()).collect();
+    let name = |p: &PathBuf| p.file_name().unwrap().to_str().unwrap().to_string();
+    assert!(offers.contains(&name(&right)), "Right's edit is offered: {offers:?}");
+    assert!(offers.contains(&name(&left)), "and so is Left's: {offers:?}");
+    again.run_writes();
+    assert!(draft_file(&again, &right).exists(), "and its draft is kept");
+}
+
+/// Two notes' drafts of one text, not one moved text: both are offered, and discarding one keeps
+/// the other's.
+#[test]
+fn two_notes_drafts_of_one_text_are_both_offered_and_discarded_one_at_a_time() {
+    let (app, first, left, second, right) = super::windows::two_notes_two_windows();
+    let shared = "# Same\n\nthe same words in two notes";
+    super::windows::type_in(&app, first, shared);
+    super::windows::type_in(&app, second, shared);
+    app.run_writes();
+    let again = killed_and_started_again(app);
+    assert_eq!(state(&again)["recovery"].as_array().unwrap().len(), 2, "both offered");
+    act(&again, "discard_draft", json!({})).expect("discarded");
+    let left_over = state(&again)["recovery"].as_array().unwrap().clone();
+    assert_eq!(left_over.len(), 1, "the other is still offered: {left_over:?}");
+    again.run_writes();
+    let drafts = [draft_file(&again, &left).exists(), draft_file(&again, &right).exists()];
+    assert_eq!(drafts.iter().filter(|kept| **kept).count(), 1, "one draft discarded, one kept: {drafts:?}");
+}
