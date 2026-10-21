@@ -48,11 +48,18 @@ pub struct Write {
 pub struct Written {
     pub key: PersistKey,
     pub revision: u64,
+    /// The write was a removal (a draft discarded), not a file put.
+    pub removed: bool,
     pub result: Result<(), String>,
 }
 
 /// The sentence a skipped write is reported with.
 pub const SUPERSEDED: &str = "superseded";
+
+/// A delayed write is held at most this long past the first revision of its key that waited: a
+/// burst of changes that never pauses for its debounce is still written, so what is kept never
+/// depends on the burst ending (design §6, "recovery never depends on a shutdown hook").
+pub const MAX_HOLD: Duration = Duration::from_secs(5);
 
 /// Where outcomes go: the core's queue in the runner, a channel in a test.
 pub trait Report: Send + Sync {
@@ -79,12 +86,15 @@ struct Queued {
 struct Queue {
     writes: Vec<Queued>,
     newest: HashMap<PersistKey, u64>,
+    /// When a key's first still-waiting delayed write arrived: later ones of the key may not
+    /// push its due past `held + MAX_HOLD`. Cleared when a write of the key is done.
+    held: HashMap<PersistKey, Instant>,
 }
 
 /// What the queue has for the thread.
 enum Next {
     Empty,
-    /// The oldest worth doing is not due yet.
+    /// The earliest due is not due yet.
     Wait(Duration),
     Ready(Write),
 }
@@ -95,35 +105,49 @@ impl Queue {
         if write.revision > *newest {
             *newest = write.revision;
         }
-        let due = Instant::now() + write.delay;
+        let now = Instant::now();
+        let mut due = now + write.delay;
+        if write.delay > Duration::ZERO {
+            let held = *self.held.entry(write.key.clone()).or_insert(now);
+            due = due.min(held + MAX_HOLD);
+        }
         self.writes.push(Queued { write, due });
     }
 
-    /// The oldest write still worth doing; stale ones are skipped, reported as superseded. With
+    /// The earliest due write still worth doing, whatever its key: a settings save never waits
+    /// behind a draft's debounce. Stale ones are skipped first, each reported as superseded. With
     /// `now_regardless`, a delay is not waited for.
     fn next(&mut self, now_regardless: bool, report: &dyn Report) -> Next {
-        while !self.writes.is_empty() {
-            let newest = self.newest.get(&self.writes[0].write.key).copied().unwrap_or(0);
-            if self.writes[0].write.revision < newest {
-                let stale = self.writes.remove(0).write;
+        let mut i = 0;
+        while i < self.writes.len() {
+            let newest = self.newest.get(&self.writes[i].write.key).copied().unwrap_or(0);
+            if self.writes[i].write.revision < newest {
+                let stale = self.writes.remove(i).write;
                 report.written(Written {
                     key: stale.key,
                     revision: stale.revision,
+                    removed: matches!(stale.op, Op::Remove),
                     result: Err(SUPERSEDED.into()),
                 });
-                continue;
+            } else {
+                i += 1;
             }
-            let now = Instant::now();
-            if !now_regardless && self.writes[0].due > now {
-                return Next::Wait(self.writes[0].due - now);
-            }
-            return Next::Ready(self.writes.remove(0).write);
         }
-        Next::Empty
+        let Some(idx) = (0..self.writes.len()).min_by_key(|&i| self.writes[i].due) else {
+            return Next::Empty;
+        };
+        let now = Instant::now();
+        if !now_regardless && self.writes[idx].due > now {
+            return Next::Wait(self.writes[idx].due - now);
+        }
+        let write = self.writes.remove(idx).write;
+        self.held.remove(&write.key);
+        Next::Ready(write)
     }
 }
 
 fn perform(write: Write, report: &dyn Report) {
+    let removed = matches!(write.op, Op::Remove);
     let result = match write.op {
         Op::Put(bytes) => write_atomically(&write.path, &bytes),
         Op::Remove => match std::fs::remove_file(&write.path) {
@@ -135,6 +159,7 @@ fn perform(write: Write, report: &dyn Report) {
     report.written(Written {
         key: write.key,
         revision: write.revision,
+        removed,
         result,
     });
 }
@@ -145,7 +170,8 @@ pub struct Threaded {
     sender: mpsc::Sender<()>,
     /// Writes taken from the queue and not yet finished.
     in_flight: Arc<AtomicUsize>,
-    /// Set by `drain`: delays are over, everything owed goes now.
+    /// Set by `drain`: delays are over, everything owed goes now. Never cleared: a drain happens
+    /// once, at shutdown.
     flushing: Arc<AtomicBool>,
 }
 
@@ -159,13 +185,19 @@ impl Threaded {
         std::thread::Builder::new()
             .name(format!("{name}-persist"))
             .spawn(move || loop {
-                let next = q
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .next(f.load(Ordering::Acquire), report.as_ref());
+                let next = {
+                    let mut queue = q.lock().unwrap_or_else(|p| p.into_inner());
+                    let next = queue.next(f.load(Ordering::Acquire), report.as_ref());
+                    // Counted as in flight before the lock drops, so `waiting` never sees a
+                    // write that is neither queued nor in flight and lets a drain return before
+                    // it ran.
+                    if matches!(next, Next::Ready(_)) {
+                        busy.fetch_add(1, Ordering::AcqRel);
+                    }
+                    next
+                };
                 match next {
                     Next::Ready(write) => {
-                        busy.fetch_add(1, Ordering::AcqRel);
                         // A panic in a write is this thread's end; the lane reports it as a
                         // failure rather than dying silently.
                         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -320,6 +352,33 @@ mod tests {
             op: Op::Put(bytes.to_vec()),
             delay,
         }
+    }
+
+    /// A settings save (no delay) goes before a draft that is still debouncing, whichever was
+    /// queued first; and a key whose debounce keeps restarting is still written once its hold is up.
+    #[test]
+    fn the_earliest_due_goes_first_and_a_restless_key_is_written_within_the_hold() {
+        let log = Arc::new(Log(Mutex::new(Vec::new())));
+        let d = dir("due");
+        let mut queue = Queue::default();
+        queue.push(put(PersistKey::Draft("t".into()), 1, &d.join("t"), b"a", Duration::from_millis(600)));
+        queue.push(put(PersistKey::Settings, 1, &d.join("s.json"), b"s", Duration::ZERO));
+        match queue.next(false, log.as_ref()) {
+            Next::Ready(w) => assert_eq!(w.key, PersistKey::Settings),
+            _ => panic!("the settings save was due now"),
+        }
+        assert!(matches!(queue.next(false, log.as_ref()), Next::Wait(_)), "the draft still waits");
+        // The draft's debounce has been restarting for longer than the hold: the next revision
+        // is due now, not 600 ms from now.
+        *queue.held.get_mut(&PersistKey::Draft("t".into())).unwrap() = Instant::now() - MAX_HOLD;
+        queue.push(put(PersistKey::Draft("t".into()), 2, &d.join("t"), b"ab", Duration::from_millis(600)));
+        match queue.next(false, log.as_ref()) {
+            Next::Ready(w) => assert_eq!((w.key, w.revision), (PersistKey::Draft("t".into()), 2)),
+            _ => panic!("the hold was up"),
+        }
+        assert!(queue.held.is_empty(), "a done key holds nothing");
+        let superseded: Vec<u64> = log.0.lock().unwrap().iter().map(|w| w.revision).collect();
+        assert_eq!(superseded, vec![1]);
     }
 
     #[test]

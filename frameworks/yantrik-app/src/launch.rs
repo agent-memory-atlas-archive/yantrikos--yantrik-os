@@ -39,6 +39,8 @@ pub const REMEMBERED: usize = 64;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LaunchIntent {
     pub name: String,
+    /// From a link, every value is text; the intent's declared parameters type them when it is
+    /// admitted (`intents::admit`).
     pub args: Value,
 }
 
@@ -207,25 +209,14 @@ fn parse_link(app_id: &str, link: &str) -> Result<LaunchIntent, Startup> {
         if args.contains_key(&key) {
             return Err(Startup::new(format!("The link gives `{key}` twice.")));
         }
-        args.insert(key, typed(&decode(value)?));
+        // Kept as text: the declared parameter types it when the intent is raised
+        // (`Param` integer, number, boolean). Guessing here turned `02134` into 2134.
+        args.insert(key, Value::String(decode(value)?));
     }
     Ok(LaunchIntent {
         name: name.into(),
         args: Value::Object(args),
     })
-}
-
-/// A query value as the intent's argument check wants it: a number, a bool, or the text.
-fn typed(text: &str) -> Value {
-    match text {
-        "true" => Value::Bool(true),
-        "false" => Value::Bool(false),
-        _ => text
-            .parse::<i64>()
-            .map(Value::from)
-            .or_else(|_| text.parse::<f64>().map(Value::from))
-            .unwrap_or_else(|_| Value::String(text.into())),
-    }
 }
 
 /// Percent-decoding, with `+` as a space; bytes that are not UTF-8 are refused.
@@ -277,7 +268,7 @@ pub fn hand_over(instance: &str, launch: &Launch) -> Presented {
     let args = serde_json::json!({ "launch": launch, "display": here });
     match present::call(instance, ACTION, args) {
         // A copy from a build before this action: it can still show its window.
-        Presented::Refused(why) if why.contains("no action named") || why.contains("unknown") => {
+        Presented::Refused(why) if why.starts_with("unknown action `launch`") => {
             present::ask(instance)
         }
         answered => answered,
@@ -302,8 +293,25 @@ mod tests {
         let l = Launch::parse("notes", "default", cwd, &os(&["yantrik://notes/new_note?title=Hello+there&pinned=true&n=3"])).unwrap();
         let i = l.intent.unwrap();
         assert_eq!(i.name, "new_note");
-        assert_eq!(i.args, serde_json::json!({"title": "Hello there", "pinned": true, "n": 3}));
+        assert_eq!(i.args, serde_json::json!({"title": "Hello there", "pinned": "true", "n": "3"}));
         assert!(Launch::parse("notes", "default", cwd, &[]).unwrap().is_empty());
+    }
+
+    /// Query values are text until the intent's declared parameters type them: a guess here lost
+    /// a leading zero and turned `nan` into null.
+    #[test]
+    fn query_values_stay_text_until_the_intent_types_them() {
+        let l = Launch::parse(
+            "notes",
+            "default",
+            Path::new("/"),
+            &os(&["yantrik://notes/find?zip=02134&q=nan&n=007&on=true&big=18446744073709551615"]),
+        )
+        .unwrap();
+        assert_eq!(
+            l.intent.unwrap().args,
+            serde_json::json!({"zip": "02134", "q": "nan", "n": "007", "on": "true", "big": "18446744073709551615"})
+        );
     }
 
     #[test]
