@@ -40,8 +40,18 @@ export component NotesApp inherits AppWindow {
  in-out property <string> folder:"all";
  in-out property <bool> focus-mode;
  in-out property <bool> preview;
+ // 0 none, 1 import, 2 export, 3 compare (the window's text beside the file's, read-only).
  in-out property <int> dialog;
  in-out property <string> path;
+ // An outside change the person chooses about: 0 none, 1 changed under unsaved edits, 2 file gone.
+ in property <int> outside;
+ in property <string> outside-said;
+ // The file's side of the comparison, or that it is gone.
+ in property <string> theirs;
+ in property <bool> theirs-gone;
+ // Each side's notebook, tags and pin, in one line: a sidecar can differ where the text does not.
+ in property <string> mine-fields;
+ in property <string> theirs-fields;
  callback action(string);
  callback choose(string);
  callback filter();
@@ -67,12 +77,22 @@ export component NotesApp inherits AppWindow {
   if(event.text==Key.Escape){root.dialog=0;root.focus-mode=false;root.view-changed();root.focus-content();return accept;}
   return reject;
  }
- changed dialog=>{if(root.dialog!=0){path-field.focus();}}
+ // The path dialogs take keys in their field; the comparison has none, so the window's keys do.
+ changed dialog=>{if(root.dialog==1||root.dialog==2){path-field.focus();}else if(root.dialog==3){keys.focus();}}
  keys:=FocusScope {key-pressed(event)=>{return root.shortcut(event);}
  Flickable { width:parent.width;height:parent.height;interactive:false;viewport-width:self.width;viewport-height:self.height;
  VerticalLayout {spacing:0px;
   if root.notice!="" : Rectangle {height:message.preferred-height+20px;background:Theme.bg-elevated;
    message:=Text{x:20px;y:10px;width:parent.width - 40px;text:root.notice;color:Theme.amber;font-size:13px;wrap:word-wrap;}
+  }
+  if root.outside!=0 : Rectangle {height:choices.preferred-height;background:Theme.notice-surface;border-width:1px;border-color:Theme.notice-line;
+   choices:=HorizontalLayout{padding-left:20px;padding-right:14px;padding-top:8px;padding-bottom:8px;spacing:8px;
+    Text{text:root.outside-said;color:Theme.text-primary;font-size:Theme.fs-caption;wrap:word-wrap;vertical-alignment:center;horizontal-stretch:1;}
+    YButton{label:root.outside==1?"Keep mine as a copy":"Save as new";variant:1;size:0;clicked=>{root.action("keep-mine");}}
+    if root.outside==1 : YButton{label:"Take theirs";variant:1;size:0;clicked=>{root.action("take-theirs");}}
+    if root.outside==1 : YButton{label:"Compare";variant:1;size:0;clicked=>{root.action("compare");}}
+    YButton{label:"Not now";variant:1;size:0;clicked=>{root.action("not-now");}}
+   }
   }
   HorizontalLayout {spacing:0px;
    Rectangle {width:root.focus-mode?0px:268px;clip:true;background:Theme.bg-surface;
@@ -188,7 +208,7 @@ export component NotesApp inherits AppWindow {
   }
  }
  }
- Rectangle{visible:root.dialog!=0;background:#00000066;TouchArea{}
+ Rectangle{visible:root.dialog==1||root.dialog==2;background:#00000066;TouchArea{}
   Rectangle{x:(parent.width - self.width)/2;y:(parent.height - self.height)/2;width:min(510px,root.width - 48px);height:modal.preferred-height;background:Theme.bg-elevated;border-radius:14px;
    modal:=VerticalLayout{padding:24px;spacing:16px;
     Text{text:root.dialog==1?"Import Markdown":"Export Markdown";color:Theme.text-primary;font-size:22px;font-weight:600;}
@@ -196,6 +216,35 @@ export component NotesApp inherits AppWindow {
     path-field:=YInput{value<=>root.path;placeholder:"/home/yantrik/Documents/note.md";accepted(_)=>{root.action("confirm");}}
     if root.notice!="" : Text{text:root.notice;color:Theme.amber;font-size:13px;wrap:word-wrap;}
     HorizontalLayout{alignment:end;spacing:8px;YButton{label:"Cancel";variant:2;clicked=>{root.dialog=0;root.view-changed();}}YButton{label:root.busy?"Working…":"Continue";variant:0;clicked=>{root.action("confirm");}}}
+   }
+  }
+ }
+ Rectangle{visible:root.dialog==3;background:Theme.overlay-backdrop;TouchArea{}
+  Rectangle{x:24px;y:24px;width:parent.width - 48px;height:parent.height - 48px;background:Theme.bg-elevated;border-radius:14px;
+   VerticalLayout{padding:24px;spacing:16px;
+    Text{text:"Compare";color:Theme.text-primary;font-size:Theme.fs-title-1;font-weight:Theme.fw-title-1;}
+    HorizontalLayout{spacing:16px;vertical-stretch:1;
+     VerticalLayout{spacing:8px;horizontal-stretch:1;
+      Text{text:"Your version";color:Theme.text-secondary;font-size:Theme.fs-caption;}
+      Text{text:root.mine-fields;color:Theme.text-dim;font-size:Theme.fs-caption;overflow:elide;}
+      ScrollView{vertical-stretch:1;viewport-width:self.visible-width;
+       VerticalLayout{alignment:start;Text{text:root.content;color:Theme.text-primary;font-size:Theme.fs-body;wrap:word-wrap;}}
+      }
+     }
+     Rectangle{width:1px;background:Theme.separator;}
+     VerticalLayout{spacing:8px;horizontal-stretch:1;
+      Text{text:"On disk";color:Theme.text-secondary;font-size:Theme.fs-caption;}
+      if !root.theirs-gone : Text{text:root.theirs-fields;color:Theme.text-dim;font-size:Theme.fs-caption;overflow:elide;}
+      ScrollView{vertical-stretch:1;viewport-width:self.visible-width;
+       VerticalLayout{alignment:start;Text{text:root.theirs-gone?"The file is not there any more.":root.theirs;color:root.theirs-gone?Theme.text-dim:Theme.text-primary;font-size:Theme.fs-body;wrap:word-wrap;}}
+      }
+     }
+    }
+    HorizontalLayout{alignment:end;spacing:8px;
+     YButton{label:"Close";variant:1;clicked=>{root.dialog=0;root.view-changed();root.focus-content();}}
+     YButton{label:root.theirs-gone?"Save as new":"Keep mine as a copy";variant:1;clicked=>{root.action("keep-mine");}}
+     if !root.theirs-gone : YButton{label:"Take theirs";variant:1;clicked=>{root.action("take-theirs");}}
+    }
    }
   }
  }

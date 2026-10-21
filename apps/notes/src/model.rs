@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 use yantrik_app::app::WindowId;
-use yantrik_app::documents::{Document, DocumentId, Documents, ViewId};
+use yantrik_app::documents::{Document, DocumentId, Documents, OutsideState, ViewId};
 use yantrik_app::intents::InvocationId;
 
 use crate::claim::Claim;
@@ -34,6 +34,9 @@ pub struct Model {
     pub busy: Option<Work>,
     /// What could not be done, in one line; also `describe.notice`.
     pub notice: String,
+    /// The notice says something a person may not see while typing on (a save replaced another
+    /// program's write): the next save that lands leaves it, and the next action takes it back.
+    pub lasting_notice: bool,
     /// The footer's save state, as the last thing that set it said it.
     pub status: String,
     /// An action waiting for the open note to be saved first.
@@ -71,6 +74,10 @@ pub enum Work {
     Restore,
     Import,
     Export,
+    /// An outside change resolved: the window's text kept as a note, the other version read.
+    Resolve,
+    /// The other version read, for a comparison.
+    Compare,
 }
 
 /// An action held until the open note is saved.
@@ -88,8 +95,10 @@ pub struct Asked {
     pub expect: Expect,
     /// The save it waited on failed: the refusal.
     pub refused: Option<String>,
-    /// The import or export it started landed.
+    /// The import, export or comparison it started landed.
     pub landed: bool,
+    /// The note the window's text was kept as, when the call resolved an outside change.
+    pub kept: Option<String>,
 }
 
 /// What the answer to a call from the surface is, once its work is done.
@@ -105,6 +114,10 @@ pub enum Expect {
     Reloaded,
     Imported { from: PathBuf },
     Exported { to: PathBuf, text: String },
+    /// The file's version, taken into the window in place of the text that was there.
+    TookTheirs { id: String },
+    /// The window's text beside the file's.
+    Compared,
 }
 
 /// The window's view of the library and the open note: everything that is the view's, not the
@@ -118,8 +131,13 @@ pub struct Pane {
     pub query: String,
     pub preview: bool,
     pub focus_mode: bool,
-    /// 0 none, 1 import, 2 export.
+    /// 0 none, 1 import, 2 export, 3 compare.
     pub dialog: i32,
+    /// The file's version beside the window's text in the comparison; `None` when its file is gone.
+    pub theirs: Option<NoteText>,
+    /// *Not now*: the outside bar is put away until a save is refused or the file changes again.
+    /// Saving stays refused all the while.
+    pub outside_later: bool,
     pub path: String,
     /// The notebook and tags fields as typed (the sidecar keeps them cut to length).
     pub notebook: String,
@@ -168,6 +186,11 @@ impl Current<'_> {
         self.file.trash
     }
 
+    /// What is known of changes made to the note's file outside Notes.
+    pub fn outside(&self) -> &OutsideState {
+        &self.doc.outside
+    }
+
     /// Edits not on disk: the content is not what the files hold.
     pub fn unsaved(&self) -> bool {
         let disk = self.file.on_disk.as_ref();
@@ -203,6 +226,8 @@ impl Model {
                 preview: false,
                 focus_mode: false,
                 dialog: 0,
+                theirs: None,
+                outside_later: false,
                 path: String::new(),
                 notebook: String::new(),
                 tags: String::new(),
@@ -213,6 +238,7 @@ impl Model {
             ready: false,
             busy: None,
             notice: String::new(),
+            lasting_notice: false,
             // The window's own first words, until the library is asked for.
             status: "Opening your library…".into(),
             pending: None,

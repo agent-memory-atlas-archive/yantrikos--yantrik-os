@@ -2,8 +2,11 @@
 
 use slint::{ModelRc, VecModel};
 use yantrik_app::app::Changed;
+use yantrik_app::documents::OutsideState;
 
 use crate::model::{Cue, Model};
+use crate::note::NoteText;
+use crate::update::said;
 use crate::{BookRow, NoteRow, NotesApp, PreviewBlock};
 
 /// The busy flag, the footer's save state and the notice line.
@@ -21,6 +24,8 @@ pub const FIELDS: &str = "fields";
 pub const CHROME: &str = "chrome";
 pub const LIBRARY: &str = "library";
 pub const PREVIEW: &str = "preview";
+/// What an outside change asks of the person: the bar, and the file's side of the comparison.
+pub const OUTSIDE: &str = "outside";
 /// Focus, caret and scroll, once.
 pub const CUES: &str = "cues";
 /// Only the model changed (what `describe` reads); nothing on screen does.
@@ -56,6 +61,23 @@ pub fn render(ui: &NotesApp, m: &Model, changed: &Changed) {
         ui.set_dialog(m.pane.dialog);
         ui.set_path(m.pane.path.clone().into());
     }
+    if changed.has(NOTE) || changed.has(OUTSIDE) {
+        // The bar, unless the person put it away with Not now: 1 a conflict, 2 a deleted file.
+        let offered = current
+            .as_ref()
+            .filter(|_| !m.pane.outside_later)
+            .and_then(|c| said::outside(c.outside()).map(|sentence| (c.outside(), sentence)));
+        ui.set_outside(match offered {
+            Some((OutsideState::Deleted, _)) => 2,
+            Some(_) => 1,
+            None => 0,
+        });
+        ui.set_outside_said(offered.map(|(_, sentence)| sentence).unwrap_or_default().into());
+        ui.set_theirs(m.pane.theirs.as_ref().map(|t| t.text.clone()).unwrap_or_default().into());
+        ui.set_theirs_gone(m.pane.theirs.is_none());
+        ui.set_mine_fields(current.as_ref().map(|c| fields_line(c.content())).unwrap_or_default().into());
+        ui.set_theirs_fields(m.pane.theirs.as_ref().map(fields_line).unwrap_or_default().into());
+    }
     if changed.has(LIBRARY) {
         library(ui, m);
     }
@@ -78,6 +100,26 @@ pub fn render(ui: &NotesApp, m: &Model, changed: &Changed) {
                 Cue::FocusContent => ui.invoke_focus_content(),
             }
         }
+    }
+}
+
+/// A note's sidecar in one line, for the comparison: two versions can differ there and nowhere
+/// else.
+fn fields_line(note: &NoteText) -> String {
+    let mut parts = Vec::new();
+    for (key, label) in [("notebook", "Notebook"), ("tags", "Tags")] {
+        let value = note.field(key);
+        if !value.is_empty() {
+            parts.push(format!("{label}: {value}"));
+        }
+    }
+    if note.pinned() {
+        parts.push("Pinned".into());
+    }
+    if parts.is_empty() {
+        "No notebook, tags or pin".into()
+    } else {
+        parts.join(" · ")
     }
 }
 

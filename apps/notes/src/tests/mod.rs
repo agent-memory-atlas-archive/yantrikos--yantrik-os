@@ -2,15 +2,16 @@
 //! temporary root, jobs run when the test says, the autosave's clock moved by hand, and the disk
 //! made to fail where a test asks.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::Value;
 use yantrik_app::documents::disk::FaultyDisk;
+use yantrik_app::documents::OutsideState;
 use yantrik_testing::TestApp;
 
 use crate::command::Command;
-use crate::update::AUTOSAVE_AFTER;
+use crate::update::{said, AUTOSAVE_AFTER};
 use crate::Notes;
 
 mod parity;
@@ -72,4 +73,39 @@ pub fn state(app: &TestApp<Notes>) -> Value {
 /// A note made through the surface, with `body` under the title, saved.
 pub fn note(app: &TestApp<Notes>, title: &str, body: &str) -> Value {
     act(app, "new_note", serde_json::json!({ "title": title, "text": body })).expect("new_note")
+}
+
+/// A saved note, open, and where its file is.
+pub fn with_note(title: &str) -> (TestApp<Notes>, PathBuf) {
+    let app = started();
+    let answer = note(&app, title, "");
+    let path = PathBuf::from(answer["path"].as_str().unwrap());
+    (app, path)
+}
+
+pub fn file(path: &Path) -> String {
+    std::fs::read_to_string(path).unwrap()
+}
+
+pub fn unsaved(app: &TestApp<Notes>) -> bool {
+    app.model(|m| m.unsaved())
+}
+
+pub fn notice(app: &TestApp<Notes>) -> String {
+    app.model(|m| m.notice.clone())
+}
+
+/// What the open note's document knows of changes made outside.
+pub fn outside(app: &TestApp<Notes>) -> OutsideState {
+    app.model(|m| m.current().unwrap().doc.outside.clone())
+}
+
+/// The outside bar as the window shows it: 0 none, 1 a conflict, 2 a deleted file.
+pub fn bar(app: &TestApp<Notes>) -> i32 {
+    app.ui(|ui| ui.get_outside())
+}
+
+/// What a save refused over a file another program changed says.
+pub fn not_saved_over() -> String {
+    said::blocked(&OutsideState::Conflict { now: None }).to_string()
 }

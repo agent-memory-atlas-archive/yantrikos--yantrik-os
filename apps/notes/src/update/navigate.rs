@@ -14,9 +14,19 @@ use crate::Notes;
 /// What a new note may be given before its body: room for its heading.
 const HEADING_ROOM: usize = 1024;
 
+/// Said when a copy of the open note would pass the library's limits.
+pub const LIBRARY_FULL: &str = "Library reached its note or text limit (2,000 notes / 32 MiB).";
+
 /// The pane shows `note` (or nothing), as a document of its own; the document it showed is
 /// closed, and its file no longer watched, once no view shows it.
 pub fn show_note(m: &mut Model, fx: &mut Effects<Notes>, note: Option<Note>) {
+    // What the pane held about the last note's outside change is not about this one.
+    m.pane.outside_later = false;
+    m.pane.theirs = None;
+    if m.pane.dialog == super::outside::COMPARE_DIALOG {
+        m.pane.dialog = 0;
+        fx.changed(CHROME);
+    }
     if let Some(view) = m.pane.view.take() {
         if let Some(doc) = m.documents.forget_view(view) {
             if let Some(closed) = m.documents.close_document(doc) {
@@ -103,7 +113,7 @@ pub fn new_note(m: &mut Model, fx: &mut Effects<Notes>, title: &str, body: &str)
 pub fn copy(m: &mut Model, fx: &mut Effects<Notes>) {
     let Some(mut note) = m.current().map(|c| c.as_note()) else { return };
     if m.library.len() >= MAX_NOTES || m.library_text() + note.content.text.len() > VAULT_LIMIT {
-        m.notice = "Library reached its note or text limit (2,000 notes / 32 MiB).".into();
+        m.notice = LIBRARY_FULL.into();
         fx.changed(STATUS);
         return;
     }

@@ -14,12 +14,14 @@ use yantrik_app::documents::disk::{Disk, RealDisk};
 mod load;
 mod read;
 mod records;
+mod resolve;
 mod save;
 mod trash;
 mod write;
 
 pub use load::Loaded;
 pub use read::read;
+pub use resolve::Resolved;
 pub use save::{SaveFailed, SaveJob, Saved};
 
 /// The most text one note may hold.

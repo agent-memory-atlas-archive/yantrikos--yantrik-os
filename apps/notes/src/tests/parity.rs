@@ -2,6 +2,10 @@
 //! before the framework. The table below was extracted mechanically from the old
 //! `apps/notes/src/main.rs` (`surface`, `act`, `arg`), not copied by hand from the new one, so a
 //! word changed in `intents.rs` fails here.
+//!
+//! Step 8d added to the surface and to nothing else: the three choices about an outside change
+//! ([`ADDED_IN_8D`]) after the old table, and two `describe` keys ([`KEYS_ADDED_IN_8D`]). The old
+//! table and the old keys are unchanged.
 
 use serde_json::{json, Value};
 use yantrik_app::app::App as _;
@@ -174,15 +178,47 @@ const BEFORE: &[Golden] = &[
     },
 ];
 
+/// The choices about an outside change (step 8d, gate row "Conflicting outside edit"), after the
+/// old table. Written from the design, not extracted: there was no old version of them.
+const ADDED_IN_8D: &[Golden] = &[
+    Golden {
+        name: "keep_mine_as_copy",
+        risk: "sensitive",
+        description: r#"When the open note's file was changed outside Notes while it had unsaved edits, or was moved or deleted (`describe.outside` is `conflict` or `deleted`), save the text in the window as a new note and open it. The file on disk is left exactly as it is."#,
+        params: &[],
+    },
+    Golden {
+        name: "take_theirs",
+        risk: "sensitive",
+        description: r#"When the open note's file was changed outside Notes while it had unsaved edits (`describe.outside` is `conflict`), replace the text in the window with the file's. The window's text is first saved as a separate note, and the undo history is cleared."#,
+        params: &[],
+    },
+    Golden {
+        name: "compare",
+        risk: "safe",
+        description: r#"When the open note's file was changed outside Notes while it had unsaved edits, show the window's text beside the file's, read-only, and answer with both and the first line where they differ. Nothing is changed or saved."#,
+        params: &[],
+    },
+];
+
+/// `describe` keys step 8d added: what is known of outside changes, and how much of a failed
+/// save reached the disk.
+const KEYS_ADDED_IN_8D: &[&str] = &["outside", "save_failure"];
+
+/// Every action, the old table first.
+fn golden() -> impl Iterator<Item = &'static Golden> {
+    BEFORE.iter().chain(ADDED_IN_8D)
+}
+
 #[test]
 fn the_action_table_is_the_one_notes_always_published() {
     let mut table = Intents::<Notes>::new();
     Notes::intents(&mut table);
     let specs = table.specs();
     let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
-    let before: Vec<&str> = BEFORE.iter().map(|g| g.name).collect();
-    assert_eq!(names, before, "the same actions, in the same order");
-    for (spec, old) in specs.iter().zip(BEFORE) {
+    let before: Vec<&str> = golden().map(|g| g.name).collect();
+    assert_eq!(names, before, "the same actions, in the same order, and 8d's after them");
+    for (spec, old) in specs.iter().zip(golden()) {
         assert_eq!(spec.description, old.description, "`{}`'s description", old.name);
         assert_eq!(spec.permission, old.risk, "`{}` is graded as it was", old.name);
         assert!(!spec.deferred, "`{}` answers when its work is done, as it did", old.name);
@@ -206,7 +242,7 @@ fn describe_publishes_those_actions_and_the_frameworks_launch() {
         .iter()
         .map(|a| a["name"].as_str().unwrap().to_string())
         .collect();
-    let mut expected: Vec<String> = BEFORE.iter().map(|g| g.name.to_string()).collect();
+    let mut expected: Vec<String> = golden().map(|g| g.name.to_string()).collect();
     // The framework's own hand-over between two launches; refused to agents, graded safe.
     expected.push("launch".into());
     assert_eq!(published, expected);
@@ -223,6 +259,7 @@ fn describe_has_the_same_keys_and_values() {
         "metadata", "notes_directory", "library_ready", "busy", "notice", "status", "folder", "preview",
         "focus", "note_count", "trash_count", "search_query", "matches", "notes",
     ];
+    want.extend(KEYS_ADDED_IN_8D);
     want.sort_unstable();
     let mut keys = keys;
     keys.sort_unstable();
@@ -235,6 +272,7 @@ fn describe_has_the_same_keys_and_values() {
             "notes_directory": vault(&app).display().to_string(), "library_ready": true, "busy": false,
             "notice": "", "status": "All changes saved", "folder": "all", "preview": false, "focus": false,
             "note_count": 0, "trash_count": 0, "search_query": "", "matches": 0, "notes": [],
+            "outside": null, "save_failure": null,
         })
     );
     assert_eq!(app.describe()["summary"], "Notes — nothing open, 0 notes");

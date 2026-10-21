@@ -164,7 +164,8 @@ fn real_notes_autosave_navigation_conflict_trash_preview_and_idle() {
     });
     settle(&app);
     assert!(ui(&app, |ui| ui.get_modified()));
-    assert!(ui(&app, |ui| ui.get_notice().to_string()).contains("changed on disk"));
+    assert!(ui(&app, |ui| ui.get_notice().to_string()).contains("another program changed this note"));
+    assert_eq!(ui(&app, |ui| ui.get_outside()), 1, "the choices are offered");
     ui(&app, |ui| ui.invoke_action("new".into()));
     settle(&app);
     assert_eq!(ui(&app, |ui| ui.get_note_title().to_string()), "Draft kept");
@@ -210,4 +211,5 @@ fn escape_and_cancel_close_the_dialog_and_the_model_hears_of_it() {
     assert!(!ui(&app, |ui| ui.get_focus_mode()));
     assert_eq!(super::state(&app)["focus"], false, "describe says what the window shows");
 }
+
 

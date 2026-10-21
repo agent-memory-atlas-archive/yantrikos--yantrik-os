@@ -1,17 +1,18 @@
 //! Saving the open note through its document: one save in flight, the edits made meanwhile in
-//! one follow-up, a failed save not retried by the autosave until something changes, and a file
-//! changed outside never written over.
+//! one follow-up, a failed save not retried by the autosave until something changes and said with
+//! how much of it reached the disk, and a file changed outside never written over: the person
+//! chooses what happens to the two versions first (outside.rs).
 
 use yantrik_app::app::WindowId;
-use yantrik_app::documents::{BeginSave, DocumentId, Durability, Fingerprint, Observed, SaveError, SaveOutcome, SaveTicket};
+use yantrik_app::documents::{BeginSave, DocumentId, Durability, Fingerprint, SaveError, SaveOutcome, SaveTicket};
 use yantrik_app::effects::Effects;
 
-use super::{after_store, begin, failed, refreshed, relist, AUTOSAVE, WORKER_STOPPED};
+use super::{after_store, begin, failed, refreshed, relist, said, save_state, AUTOSAVE};
 use crate::command::Command;
 use crate::model::{Model, Work};
 use crate::note::{Note, NoteText};
-use crate::store::{SaveFailed, SaveJob, Saved, CHANGED_ON_DISK};
-use crate::view::render::{MODEL_ONLY, STATUS};
+use crate::store::{SaveFailed, SaveJob, Saved};
+use crate::view::render::{OUTSIDE, STATUS};
 use crate::Notes;
 
 /// Who asked for a save.
@@ -55,8 +56,25 @@ pub fn save(m: &mut Model, fx: &mut Effects<Notes>, how: How) {
         BeginSave::Ticket(ticket) => spawn(m, fx, doc, ticket),
         // In flight: one follow-up is owed. Clean or failed: nothing to do until a change.
         BeginSave::InFlight | BeginSave::Clean | BeginSave::Failed => {}
-        // The file changed or went outside: the store's own refusal, said as it always was.
-        BeginSave::Blocked => failed(m, fx, CHANGED_ON_DISK.into()),
+        BeginSave::Blocked => blocked(m, fx, how),
+    }
+}
+
+/// The file changed or went outside, and the person has not chosen yet. The autosave says so in
+/// the footer only: the bar already asks, or the person put it away with *Not now*. A save the
+/// person (or a close, or an action) asked for is refused in words and brings the bar back.
+fn blocked(m: &mut Model, fx: &mut Effects<Notes>, how: How) {
+    let Some(sentence) = m.current().map(|c| said::blocked(c.outside())) else { return };
+    match how {
+        How::Autosave => {
+            m.status = save_state(m).into();
+            fx.changed(STATUS);
+        }
+        How::Asked => {
+            m.pane.outside_later = false;
+            fx.changed(OUTSIDE);
+            failed(m, fx, sentence.into());
+        }
     }
 }
 
@@ -76,7 +94,7 @@ fn spawn(m: &mut Model, fx: &mut Effects<Notes>, doc: DocumentId, ticket: SaveTi
         doc,
         seq,
         result: Err(SaveFailed {
-            error: SaveError::after_writing(Durability::Unknown, written, WORKER_STOPPED),
+            error: SaveError::after_writing(Durability::Unknown, written, said::JOB_LOST),
             meta_unsure: None,
         }),
     };
@@ -91,9 +109,7 @@ pub fn landed(m: &mut Model, fx: &mut Effects<Notes>, doc: DocumentId, seq: u64,
     let Some(d) = m.documents.get_mut(doc) else { return };
     match result {
         Ok(saved) => {
-            // Who else wrote the file while ours was in flight is the document's to know; telling
-            // the person is the conflict UI's (step 8d). Today's behaviour is kept: nothing said.
-            let SaveOutcome::Saved { follow_up, replaced: _ } = d.save_landed(seq, Ok(saved.written.clone())) else {
+            let SaveOutcome::Saved { follow_up, replaced } = d.save_landed(seq, Ok(saved.written.clone())) else {
                 return;
             };
             // From the new baseline: a look the watch took before the save is dropped, and our
@@ -110,7 +126,14 @@ pub fn landed(m: &mut Model, fx: &mut Effects<Notes>, doc: DocumentId, seq: u64,
                 Some(n) => *n = entry,
                 None => m.library.push(entry),
             }
-            m.notice.clear();
+            // Another program's write that this save replaced is said, and stays said while the
+            // person types on; a failure's notice is answered by this landing.
+            if let Some(what) = replaced {
+                m.notice = said::replaced(what).into();
+                m.lasting_notice = true;
+            } else if !m.lasting_notice {
+                m.notice.clear();
+            }
             refreshed(m, fx);
             relist(m, fx);
             if let Some(ticket) = follow_up {
@@ -119,13 +142,21 @@ pub fn landed(m: &mut Model, fx: &mut Effects<Notes>, doc: DocumentId, seq: u64,
             after_store(m, fx);
         }
         Err(failure) => {
-            let sentence = failure.error.sentence.clone();
+            let conflict = failure.error.conflict;
+            let mut sentence = said::save_failed(&failure.error);
             if matches!(d.save_landed(seq, Err(failure.error)), SaveOutcome::Stale) {
                 return;
+            }
+            if conflict {
+                // The store's check found the file changed: the person chooses, as for the watch.
+                sentence = said::blocked(&d.outside).into();
+                m.pane.outside_later = false;
             }
             if let (Some(file), Some(meta)) = (m.files.get_mut(&doc), failure.meta_unsure) {
                 file.meta_unsure = Some(meta);
             }
+            // A sighting the save was holding is judged now, and may be the bar's news.
+            fx.changed(OUTSIDE);
             failed(m, fx, sentence);
         }
     }
@@ -142,15 +173,4 @@ pub fn close(m: &mut Model, fx: &mut Effects<Notes>, window: WindowId) {
     } else {
         fx.close(window);
     }
-}
-
-/// The watch saw an open note's file change. The document classifies it (an outside edit, a
-/// conflict, a deletion, or our own write); nothing is said until a save meets it, as before.
-pub fn seen(m: &mut Model, fx: &mut Effects<Notes>, key: &str, seen: Observed) {
-    let Some(d) = m.documents.by_key(key).and_then(|id| m.documents.get_mut(id)) else { return };
-    d.observe(seen);
-    if let Some((key, path, seen)) = d.rewatch() {
-        fx.watch(&key, path, seen);
-    }
-    fx.changed(MODEL_ONLY);
 }
