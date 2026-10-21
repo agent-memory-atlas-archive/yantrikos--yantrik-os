@@ -1013,6 +1013,10 @@ def cmd_describe(argv):
         print(json.dumps(view))
         return
     print(one_line(view.get("summary", "(no summary)")))
+    if view.get("private") is True:
+        # The private view (#924): the app is there, and nothing of what it holds is shown to
+        # anyone while the person has Private mode on. Said once, so a reader stops asking.
+        print(PRIVATE_NOTE)
     if "revision" in view:
         print("revision: %s" % view["revision"])
     fold = "--fold" in argv
@@ -1038,8 +1042,12 @@ def cmd_describe(argv):
 # small, high-value fields first, the large lists last, the rest in the wire's alphabetical order
 # between them. Keys and values are untouched; only the order they are printed in changes. A key
 # that is not present is simply not printed, so this is safe for every app, not only the shell.
-STATE_FIRST = ("summary", "screen", "locked", "clock", "desktop_in_front", "in_front", "windows",
-               "companion_online")
+STATE_FIRST = ("summary", "private", "screen", "locked", "clock", "desktop_in_front", "in_front",
+               "windows", "companion_online")
+
+# What `describe` adds under the summary of an app in Private mode (#924).
+PRIVATE_NOTE = ("private: the person has Private mode on. Only what this app marks as not "
+                "personal is shown; describing it again shows no more until they turn it off.")
 STATE_LAST = ("agents", "catalog", "services")
 
 
@@ -2014,6 +2022,11 @@ DESCRIBE_SCHEMA = {
                      "const": 1},
         "app": {"description": "The id the surface publishes under: the <id> of app-<id>.sock.",
                 "type": "string", "minLength": 1},
+        "private": {"description": "Present and true while the person has Private mode on: the "
+                               "summary is the neutral line and the state holds only what the app "
+                               "listed as not personal (docs/surface-protocol.md, section 4, In "
+                               "Private mode).",
+                    "const": True},
         "summary": {"description": "One line a person could read.", "type": "string"},
         "state": {"description": "The view-model, in the app's own vocabulary.", "type": "object"},
         "revision": {"description": "FNV-1a 64 over summary, a zero byte, and state rendered "

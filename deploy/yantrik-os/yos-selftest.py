@@ -1006,6 +1006,19 @@ def main():
             check("`describe greeter --json` is one JSON document and nothing else",
                   code is None and answer.get("app") == "howdy"
                   and out.strip() == json.dumps(answer), (out, err))
+            diary = FakeService(sockets / "app-diary.sock", lambda _s, asked: (
+                {"app": "diary", "private": True, "actions": [],
+                 "summary": "Private mode is on; this app's contents are hidden.",
+                 "state": {"windows_open": 1, "open": True, "private": True}}
+                if asked["method"] == "app.describe" else {}))
+            diary.start()
+            services.append(diary)
+            out, err, code = run(lambda: yos.cmd_describe(["diary"]))
+            lines = out.splitlines()
+            check("an app in Private mode is described as that, and the reader told to stop asking",
+                  code is None and lines[:2] == ["Private mode is on; this app's contents are hidden.",
+                                                yos.PRIVATE_NOTE]
+                  and lines[2:4] == ["{", '  "private": true,'], (out, err))
             out, err, code = run(lambda: yos.cmd_describe(["sysmonitor"]))
             check("an alias of a closed window reaches the service that answers for it",
                   code is None and "System — CPU" in out, (out, err))

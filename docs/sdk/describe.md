@@ -82,6 +82,15 @@ Keep very small and very large floats out of it (their JSON renderings are where
 disagree about the revision), and never put a secret in it: the state is shown, logged and handed
 to models.
 
+**In Private mode none of it is shown.** While the person has Private mode on, every surface
+answers `describe` with the private view: your id, `"private": true`, the line
+`Private mode is on; this app's contents are hidden.` as the summary, and of your state only the
+keys you listed as not personal — `table.shown_in_private(&["units"])` in an app's `intents`, or
+`surface.show_in_private("units")` in Python. The default is none. List a key only when its whole
+value says nothing about the person (a unit, a CPU figure), never a title, a name, a path, a place
+or a count of their things. The rule is in
+[surface-protocol.md](../surface-protocol.md#in-private-mode).
+
 ## Actions
 
 **Names** are a verb and what it acts on — `add_event`, `export_pdf`, `read_cells` — and there is

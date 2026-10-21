@@ -11,9 +11,10 @@ from unittest import mock
 import support
 import test_mind_door
 from test_mind_door import notes_surface, shell_says
-from yantrik_surface import mind_door, privacy
+from yantrik_surface import Surface, mind_door, privacy, wire
 
 PRIVACY_RS = "crates/yantrik-ipc-transport/src/privacy.rs"
+SURFACE_PRIVATE_RS = "crates/yantrik-surface/src/private.rs"
 
 
 class TestTheFile(support.MachineCase):
@@ -29,6 +30,12 @@ class TestTheFile(support.MachineCase):
                         json.dumps({"private": True})):
             self.write(unclear)
             self.assertTrue(privacy.is_private(), unclear)
+
+    def test_the_private_view_is_the_crates(self):
+        support.quoted(self, SURFACE_PRIVATE_RS,
+                       'pub const PRIVATE_SUMMARY: &str = "%s";' % privacy.PRIVATE_SUMMARY)
+        support.quoted(self, SURFACE_PRIVATE_RS, "pub const RESERVED_KEYS: &[&str] = &[%s];"
+                       % ", ".join('"%s"' % k for k in privacy.RESERVED_KEYS))
 
     def test_the_file_and_the_refusal_are_the_transports(self):
         support.quoted(self, PRIVACY_RS, 'pub const PRIVACY_FILE: &str = "privacy.json";')
@@ -68,6 +75,43 @@ class TestPrivateSurface(test_mind_door.TestTheDoor):
             self.private()
             held.sendall(b'{"jsonrpc":"2.0","id":2,"method":"app.describe","params":{}}\n')
             self.assertIn(b"PRIVATE:", held.recv(65536))
+
+    def test_the_persons_socket_describes_the_private_view_and_acts_reply_with_it(self):
+        sentinel = "Call Priya SENTINEL-924"
+        s = notes_surface(shell_says(None, known=True), [])
+
+        @s.view
+        def state():
+            return {"title": sentinel, "units": "lines"}
+
+        s.show_in_private("units")
+        server = s.serve_in_thread()
+        self.addCleanup(s.stop)
+        before = self.call(server.path, "app.describe")["result"]
+        self.assertEqual(before["state"]["title"], sentinel)
+        self.private()
+        hidden = self.call(server.path, "app.describe")["result"]
+        self.assertIs(hidden["private"], True)
+        self.assertEqual(hidden["summary"], privacy.PRIVATE_SUMMARY)
+        self.assertEqual(hidden["state"], {"private": True, "units": "lines"})
+        self.assertNotIn("SENTINEL-924", json.dumps(hidden))
+        # The Rust view, byte for byte: the same state hashes to the same revision.
+        self.assertEqual(hidden["revision"], wire.revision(privacy.PRIVATE_SUMMARY, hidden["state"]))
+        done = self.call(server.path, "app.act", {"action": "new_note", "args": {"title": "mine"}})
+        self.assertIs(done["result"]["private"], True)
+        self.assertNotIn("SENTINEL-924", json.dumps(done))
+        stale = self.call(server.path, "app.act", {"action": "list_notes", "args": {},
+                                                   "expect_revision": before["revision"]})
+        self.assertTrue(stale["error"]["message"].startswith("STALE:"), stale)
+        self.assertNotIn("SENTINEL-924", json.dumps(stale))
+        self.private(False)
+        self.assertEqual(self.call(server.path, "app.describe")["result"]["state"]["title"], sentinel)
+
+    def test_an_app_cannot_show_the_private_views_own_keys(self):
+        s = Surface("notes")
+        for key in privacy.RESERVED_KEYS + ("", "  "):
+            with self.assertRaises(ValueError):
+                s.show_in_private(key)
 
     def test_an_agent_token_on_the_persons_socket_is_refused_and_the_person_is_not(self):
         ran = []
