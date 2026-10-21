@@ -174,3 +174,46 @@ fn opening_by_title_saves_the_open_note_first_or_does_nothing() {
     assert_eq!(state(&app)["title"], "First");
     assert_eq!(app.ui(|ui| ui.get_notice().to_string()), e, "said in the window too");
 }
+
+/// What the library holds: its entries, and the `.md` files in the vault.
+fn held(app: &TestApp<Notes>) -> (usize, usize) {
+    let files = std::fs::read_dir(vault(app))
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".md"))
+        .count();
+    (app.model(|m| m.library.len()), files)
+}
+
+/// A note that cannot be made refuses the call with the reason, and the window's notice keeps it,
+/// with another note open, whose answer must not stand in for the note that was not made.
+#[test]
+fn a_new_note_with_a_body_no_note_may_hold_is_refused_and_nothing_is_made() {
+    let app = started();
+    act(&app, "new_note", json!({ "title": "Open already" })).unwrap();
+    let before = held(&app);
+    let e = act(&app, "new_note", json!({ "title": "Bell", "text": "ring \u{7} ring" })).unwrap_err();
+    assert_eq!(e, "Notes require UTF-8 text without control characters.");
+    assert_eq!(app.ui(|ui| ui.get_notice().to_string()), e, "the notice keeps the real reason");
+    assert_eq!(held(&app), before, "nothing was created");
+    assert_eq!(state(&app)["title"], "Open already", "the open note stays open");
+}
+
+#[test]
+fn a_new_note_past_the_library_limit_is_refused_and_nothing_is_made() {
+    let paths = yantrik_app::paths::Paths::temporary(Notes::ID);
+    std::fs::create_dir_all(paths.data_dir()).unwrap();
+    for i in 0..crate::store::MAX_NOTES {
+        std::fs::write(paths.data_dir().join(format!("n{i:04}.md")), format!("# Note {i}\n")).unwrap();
+    }
+    let app = TestApp::<Notes>::start_at(paths, Vec::new());
+    settle(&app);
+    act(&app, "open_note", json!({ "title": "Note 7" })).unwrap();
+    let before = held(&app);
+    assert_eq!(before, (crate::store::MAX_NOTES, crate::store::MAX_NOTES));
+    let e = act(&app, "new_note", json!({ "title": "One more" })).unwrap_err();
+    assert_eq!(e, "The library supports up to 2,000 notes and 32 MiB of text. Nothing was created.");
+    assert_eq!(app.ui(|ui| ui.get_notice().to_string()), e);
+    assert_eq!(held(&app), before, "nothing was created");
+    assert_eq!(state(&app)["title"], "Note 7");
+}

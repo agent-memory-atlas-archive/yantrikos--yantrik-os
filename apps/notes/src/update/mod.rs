@@ -186,8 +186,14 @@ fn after_store(m: &mut Model, fx: &mut Effects<Notes>) {
 fn run(m: &mut Model, fx: &mut Effects<Notes>, step: Step) {
     match step {
         Step::Window(action) => window::act(m, fx, action),
+        // Only the surface asks for a note with a body; a note that cannot be made refuses the
+        // call with the reason (the notice says it too), never answers with another note.
         Step::NewNote { title, body } => {
-            let _ = navigate::new_note(m, fx, &title, &body);
+            if let Err(sentence) = navigate::new_note(m, fx, &title, &body) {
+                if let Some(asked) = m.asked.as_mut() {
+                    asked.refused = Some(sentence);
+                }
+            }
         }
         Step::Import { path } => window::confirm(m, fx, window::Dialog::Import, &path),
         Step::Export { path } => window::confirm(m, fx, window::Dialog::Export, &path),
