@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use super::close::{Next, Stage};
-use super::disk::{Disk, FaultyDisk, RealDisk, Step};
+use super::disk::Step;
 use super::draft::recover;
 use super::*;
 
@@ -27,6 +27,19 @@ fn ticket(begin: BeginSave<String>) -> SaveTicket<String> {
         BeginSave::Ticket(t) => t,
         other => panic!("expected a ticket, got {other:?}"),
     }
+}
+
+/// A save that landed with a follow-up owed: the follow-up's ticket.
+fn follow_up(outcome: SaveOutcome<String>) -> SaveTicket<String> {
+    match outcome {
+        SaveOutcome::Saved { follow_up: Some(t), .. } => t,
+        other => panic!("expected a follow-up, got {other:?}"),
+    }
+}
+
+/// A save that landed with nothing owed and nothing replaced.
+fn plainly_saved(outcome: &SaveOutcome<String>) -> bool {
+    matches!(outcome, SaveOutcome::Saved { follow_up: None, replaced: None })
 }
 
 // ---- the table: one document per file, views share it ----
@@ -82,13 +95,10 @@ fn edits_during_a_save_owe_exactly_one_follow_up() {
     assert!(matches!(d.begin_save(), BeginSave::InFlight));
     d.edit(|c| *c = "v3".into());
     assert!(matches!(d.begin_save(), BeginSave::InFlight), "still one in flight, not a queue");
-    let follow = match d.save_landed(first.seq, Ok(fp("v1"))) {
-        SaveOutcome::FollowUp(t) => t,
-        other => panic!("expected a follow-up, got {other:?}"),
-    };
+    let follow = follow_up(d.save_landed(first.seq, Ok(fp("v1"))));
     assert_eq!(follow.content, "v3", "the follow-up saves the newest edits, once");
     assert_eq!(follow.baseline, Some(fp("v1")), "and expects our own write on disk");
-    assert!(matches!(d.save_landed(follow.seq, Ok(fp("v3"))), SaveOutcome::Saved));
+    assert!(plainly_saved(&d.save_landed(follow.seq, Ok(fp("v3")))));
     assert!(!d.dirty());
     assert!(matches!(d.begin_save(), BeginSave::Clean));
 }
@@ -140,6 +150,41 @@ fn a_failure_after_the_rename_is_not_called_saved() {
 }
 
 #[test]
+fn after_an_unknown_failure_our_own_bytes_are_ours_and_the_retry_lands() {
+    let (mut docs, id) = opened("a", "v0");
+    let d = docs.get_mut(id).unwrap();
+    d.edit(|c| *c = "v1".into());
+    let t = ticket(d.begin_save());
+    let unknown = SaveError::after_writing(Durability::Unknown, fp("v1"), "The disk did not confirm the save.");
+    d.save_landed(t.seq, Err(unknown));
+    assert!(d.dirty());
+    assert_eq!(d.observe(Observed::File(fp("v1"))), &OutsideState::Clean, "not a conflict with ourselves");
+    let retry = ticket(d.retry_save());
+    assert!(retry.may_replace(Some(&fp("v1"))), "the store accepts our unsure bytes");
+    assert!(retry.may_replace(Some(&fp("v0"))), "and the baseline");
+    assert!(!retry.may_replace(Some(&fp("theirs"))));
+    assert!(plainly_saved(&d.save_landed(retry.seq, Ok(fp("v1")))));
+    assert!(!d.dirty());
+}
+
+#[test]
+fn a_failure_that_wrote_nothing_leaves_nothing_unsure() {
+    let e = SaveError::after_writing(Durability::NotWritten, fp("v1"), "Disk full.");
+    assert_eq!(e.landed, None);
+}
+
+#[test]
+fn a_new_file_may_be_created_only_where_there_is_none() {
+    let mut docs: Documents<String> = Documents::new();
+    let id = docs.open(Source::New("1".into()), String::new(), None);
+    let d = docs.get_mut(id).unwrap();
+    d.edit(|c| c.push('x'));
+    let t = ticket(d.begin_save());
+    assert!(t.may_replace(None));
+    assert!(!t.may_replace(Some(&fp("someone else's"))));
+}
+
+#[test]
 fn a_save_that_finds_the_file_changed_becomes_a_conflict_and_blocks_saves() {
     let (mut docs, id) = opened("a", "v0");
     let d = docs.get_mut(id).unwrap();
@@ -154,18 +199,62 @@ fn a_save_that_finds_the_file_changed_becomes_a_conflict_and_blocks_saves() {
 // ---- outside changes: classified, our own writes recognised ----
 
 #[test]
-fn our_own_write_seen_by_the_watch_is_not_an_outside_edit() {
+fn the_watch_seeing_the_baseline_we_wrote_is_clean() {
     let (mut docs, id) = opened("a", "v0");
     let d = docs.get_mut(id).unwrap();
     d.edit(|c| *c = "v1".into());
     let t = ticket(d.begin_save());
     d.save_landed(t.seq, Ok(fp("v1")));
     assert_eq!(d.observe(Observed::File(fp("v1"))), &OutsideState::Clean);
-    // A watch tick late enough to see the write before ours landed again: still ours.
+    assert!(d.rewatch().is_none());
+}
+
+#[test]
+fn our_own_write_seen_by_the_watch_is_not_an_outside_edit() {
+    let (mut docs, id) = opened("a", "v0");
+    let d = docs.get_mut(id).unwrap();
+    d.edit(|c| *c = "v1".into());
+    let t = ticket(d.begin_save());
+    d.save_landed(t.seq, Ok(fp("v1")));
+    // A look taken before our newer write landed, by a watch that never reported v1:
+    // suppressed once, and the watch re-armed.
     d.edit(|c| *c = "v2".into());
     let t = ticket(d.begin_save());
     d.save_landed(t.seq, Ok(fp("v2")));
     assert_eq!(d.observe(Observed::File(fp("v1"))), &OutsideState::Clean);
+    let (_, _, from) = d.rewatch().expect("the watch is re-armed");
+    assert_eq!(from, Some(Observed::File(fp("v2"))), "from the baseline");
+    assert!(d.rewatch().is_none(), "once");
+}
+
+#[test]
+fn an_outside_revert_to_an_older_write_of_ours_is_an_outside_edit() {
+    let (mut docs, id) = opened("a", "v0");
+    let d = docs.get_mut(id).unwrap();
+    for text in ["v1", "v2"] {
+        d.edit(|c| *c = text.into());
+        let t = ticket(d.begin_save());
+        d.save_landed(t.seq, Ok(fp(text)));
+    }
+    // The watch caught up with v2; a sync client then puts v1 back.
+    d.observe(Observed::File(fp("v2")));
+    assert_eq!(d.observe(Observed::File(fp("v1"))), &OutsideState::Changed { now: fp("v1") });
+}
+
+#[test]
+fn a_revert_before_the_watch_caught_up_is_seen_on_the_second_look() {
+    let (mut docs, id) = opened("a", "v0");
+    let d = docs.get_mut(id).unwrap();
+    for text in ["v1", "v2"] {
+        d.edit(|c| *c = text.into());
+        let t = ticket(d.begin_save());
+        d.save_landed(t.seq, Ok(fp(text)));
+    }
+    // Late look or revert: not trusted yet.
+    assert_eq!(d.observe(Observed::File(fp("v1"))), &OutsideState::Clean);
+    assert!(d.rewatch().is_some());
+    // The re-armed watch looks again and still finds v1: it was a revert.
+    assert_eq!(d.observe(Observed::File(fp("v1"))), &OutsideState::Changed { now: fp("v1") });
 }
 
 #[test]
@@ -225,7 +314,7 @@ fn during_a_save_the_watch_seeing_our_write_is_ours() {
     let t = ticket(d.begin_save());
     d.observe(Observed::File(fp("v1")));
     assert_eq!(d.outside, OutsideState::Clean, "judged when the save lands, not now");
-    assert!(matches!(d.save_landed(t.seq, Ok(fp("v1"))), SaveOutcome::Saved));
+    assert!(plainly_saved(&d.save_landed(t.seq, Ok(fp("v1")))));
     assert_eq!(d.outside, OutsideState::Clean);
 }
 
@@ -236,7 +325,52 @@ fn during_a_save_an_outside_write_that_ours_replaced_is_said() {
     d.edit(|c| *c = "v1".into());
     let t = ticket(d.begin_save());
     d.observe(Observed::File(fp("theirs")));
-    assert!(matches!(d.save_landed(t.seq, Ok(fp("v1"))), SaveOutcome::OverwroteOutsideEdit));
+    assert!(matches!(
+        d.save_landed(t.seq, Ok(fp("v1"))),
+        SaveOutcome::Saved { replaced: Some(Replaced::OutsideEdit), follow_up: None }
+    ));
+}
+
+#[test]
+fn an_outside_write_ours_replaced_is_said_even_with_a_follow_up_owed() {
+    let (mut docs, id) = opened("a", "v0");
+    let d = docs.get_mut(id).unwrap();
+    d.edit(|c| *c = "v1".into());
+    let t = ticket(d.begin_save());
+    d.observe(Observed::File(fp("theirs")));
+    d.edit(|c| *c = "v2".into());
+    assert!(matches!(d.begin_save(), BeginSave::InFlight));
+    match d.save_landed(t.seq, Ok(fp("v1"))) {
+        SaveOutcome::Saved { follow_up: Some(f), replaced: Some(Replaced::OutsideEdit) } => assert_eq!(f.content, "v2"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_deletion_seen_during_a_save_that_lands_is_said() {
+    let (mut docs, id) = opened("a", "v0");
+    let d = docs.get_mut(id).unwrap();
+    d.edit(|c| *c = "v1".into());
+    let t = ticket(d.begin_save());
+    d.observe(Observed::Gone);
+    assert!(matches!(
+        d.save_landed(t.seq, Ok(fp("v1"))),
+        SaveOutcome::Saved { replaced: Some(Replaced::Deletion), .. }
+    ));
+}
+
+#[test]
+fn taking_theirs_forgets_a_sighting_made_during_a_save() {
+    let (mut docs, id) = opened("a", "v0");
+    let d = docs.get_mut(id).unwrap();
+    d.edit(|c| *c = "v1".into());
+    let _ = ticket(d.begin_save());
+    d.observe(Observed::File(fp("theirs")));
+    d.take_theirs("theirs".into(), fp("theirs"));
+    // Nothing stale is judged at the next landing.
+    d.edit(|c| *c = "v2".into());
+    let t = ticket(d.begin_save());
+    assert!(plainly_saved(&d.save_landed(t.seq, Ok(fp("v2")))));
 }
 
 #[test]
@@ -279,33 +413,49 @@ fn a_draft_is_superseded_once_a_save_of_its_edits_commits() {
     d.edit(|c| *c = "v2".into());
     d.draft_asked();
     assert!(matches!(d.begin_save(), BeginSave::InFlight), "the autosave tick asks again");
-    let follow = match d.save_landed(t.seq, Ok(fp("v1"))) {
-        SaveOutcome::FollowUp(f) => f,
-        other => panic!("{other:?}"),
-    };
+    let follow = follow_up(d.save_landed(t.seq, Ok(fp("v1"))));
     assert!(!d.draft_superseded(), "the draft holds v2, which is not saved yet");
     d.save_landed(follow.seq, Ok(fp("v2")));
     assert!(d.draft_superseded());
 }
 
+fn candidate(content: &str, at_ms: u64, seq: Option<u64>) -> Option<Candidate<String>> {
+    Some(Candidate { content: content.into(), at_ms, seq })
+}
+
 #[test]
 fn recovery_offers_only_what_differs_from_the_file_and_the_newest_wins() {
     let on_disk = "saved".to_string();
-    let file = Some((&on_disk, 10));
+    let file = Some(&on_disk);
     assert_eq!(recover(file, None, None), Recovered::File);
-    assert_eq!(recover(file, Some(("saved".into(), 20)), Some(("saved".into(), 30))), Recovered::File);
-    assert_eq!(recover(file, Some(("journal".into(), 20)), None), Recovered::Journal("journal".into()));
-    assert_eq!(recover(file, None, Some(("draft".into(), 20))), Recovered::Draft("draft".into()));
+    assert_eq!(recover(file, candidate("saved", 20, None), candidate("saved", 30, None)), Recovered::File);
+    assert_eq!(recover(file, candidate("journal", 20, None), None), Recovered::Journal("journal".into()));
+    assert_eq!(recover(file, None, candidate("draft", 20, None)), Recovered::Draft("draft".into()));
     assert_eq!(
-        recover(file, Some(("journal".into(), 40)), Some(("draft".into(), 30))),
+        recover(file, candidate("journal", 40, None), candidate("draft", 30, None)),
         Recovered::Journal("journal".into())
     );
+    assert_eq!(recover::<String>(None, None, candidate("new", 1, None)), Recovered::Draft("new".into()));
+}
+
+#[test]
+fn at_the_same_millisecond_the_later_edit_wins_and_otherwise_the_draft() {
+    let on_disk = "saved".to_string();
+    let file = Some(&on_disk);
     assert_eq!(
-        recover(file, Some(("journal".into(), 30)), Some(("draft".into(), 30))),
-        Recovered::Draft("draft".into()),
-        "a tie goes to the draft"
+        recover(file, candidate("journal", 30, Some(6)), candidate("draft", 30, Some(5))),
+        Recovered::Journal("journal".into()),
+        "the journal holds the later edit"
     );
-    assert_eq!(recover::<String>(None, None, Some(("new".into(), 1))), Recovered::Draft("new".into()));
+    assert_eq!(
+        recover(file, candidate("journal", 30, Some(5)), candidate("draft", 30, Some(6))),
+        Recovered::Draft("draft".into())
+    );
+    assert_eq!(
+        recover(file, candidate("journal", 30, None), candidate("draft", 30, Some(6))),
+        Recovered::Draft("draft".into()),
+        "without both seqs, the draft"
+    );
 }
 
 // ---- close as a document flow ----
@@ -349,7 +499,7 @@ fn save_then_close_waits_for_edits_made_meanwhile() {
     assert_eq!(flow.answer(Choice::Save), Next::Wait, "a second close while saving changes nothing");
     let t = ticket(docs.get_mut(id).unwrap().begin_save());
     docs.get_mut(id).unwrap().edit(|c| *c = "v2".into());
-    assert!(matches!(docs.get_mut(id).unwrap().save_landed(t.seq, Ok(fp("v1"))), SaveOutcome::Saved));
+    assert!(plainly_saved(&docs.get_mut(id).unwrap().save_landed(t.seq, Ok(fp("v1")))));
     assert_eq!(flow.progress(&docs, None), Next::Save(vec![id]), "v2 is not saved yet");
     let again = ticket(docs.get_mut(id).unwrap().begin_save());
     assert_eq!(again.content, "v2");
@@ -372,82 +522,4 @@ fn dont_save_discards_and_cancel_stays() {
     let mut flow = CloseFlow::new(None, vec![id]);
     assert_eq!(flow.answer(Choice::Cancel), Next::Stay);
     assert_eq!(flow.answer(Choice::DontSave), Next::Close { discard: vec![id] });
-}
-
-// ---- the disk seam ----
-
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("yantrik-documents-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
-#[test]
-fn a_failure_before_the_rename_leaves_the_file_as_it_was() {
-    let dir = scratch("before-rename");
-    let path = dir.join("note.md");
-    RealDisk.write_atomically(&path, b"old").unwrap();
-    let disk = FaultyDisk::new();
-    for step in [Step::CreateTemp, Step::Write, Step::SyncFile, Step::Rename] {
-        disk.fail(step, "note.md", Some(1));
-        let err = disk.write_atomically(&path, b"new").unwrap_err();
-        assert_eq!(err.step, step);
-        assert_eq!(step.durability(), Durability::NotWritten);
-        assert_eq!(std::fs::read(&path).unwrap(), b"old");
-    }
-    let leftovers: Vec<_> = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).collect();
-    assert_eq!(leftovers.len(), 1, "no temp file is left behind");
-    disk.write_atomically(&path, b"new").unwrap();
-    assert_eq!(std::fs::read(&path).unwrap(), b"new", "a fault used up, the disk behaves");
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn a_failure_after_the_rename_has_the_bytes_but_not_their_durability() {
-    let dir = scratch("after-rename");
-    let path = dir.join("note.md");
-    let disk = FaultyDisk::new();
-    disk.fail(Step::SyncDir, ".md", None);
-    let err = disk.write_atomically(&path, b"new").unwrap_err();
-    assert_eq!(err.step.durability(), Durability::Unknown);
-    assert_eq!(std::fs::read(&path).unwrap(), b"new");
-    // A fault scoped to one suffix spares the rest: metadata and content fail apart.
-    RealDisk.write_atomically(&dir.join("note.meta"), b"m").unwrap();
-    assert!(disk.write_atomically(&dir.join("note.meta"), b"m2").is_ok());
-    assert_eq!(disk.hits.lock().unwrap().len(), 1);
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-// ---- the watched files ----
-
-#[test]
-fn the_watch_reports_a_change_from_the_baseline_once_and_a_deletion() {
-    let dir = scratch("watched");
-    let path = dir.join("note.md");
-    std::fs::write(&path, "v0").unwrap();
-    let watched = Watched::new();
-    watched.add("doc-1", path.clone(), Some(Observed::File(fp("v0"))));
-    assert!(watched.poll().is_empty(), "the file it was read from is not a change");
-    std::fs::write(&path, "theirs").unwrap();
-    assert_eq!(watched.poll(), vec![("doc-1".to_string(), Observed::File(fp("theirs")))]);
-    assert!(watched.poll().is_empty(), "reported once");
-    std::fs::remove_file(&path).unwrap();
-    assert_eq!(watched.poll(), vec![("doc-1".to_string(), Observed::Gone)]);
-    watched.remove("doc-1");
-    std::fs::write(&path, "back").unwrap();
-    assert!(watched.poll().is_empty(), "an unwatched file is not reported");
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[cfg(unix)]
-#[test]
-fn a_file_that_cannot_be_looked_at_is_not_a_change() {
-    let dir = scratch("unreadable");
-    // A path under a plain file cannot be looked at (not a directory): skipped, not "gone".
-    std::fs::write(dir.join("plain"), "a file, not a directory").unwrap();
-    let watched = Watched::new();
-    watched.add("doc-1", dir.join("plain").join("note.md"), Some(Observed::File(fp("v0"))));
-    assert!(watched.poll().is_empty());
-    let _ = std::fs::remove_dir_all(&dir);
 }

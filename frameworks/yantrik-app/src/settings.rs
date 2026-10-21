@@ -83,7 +83,7 @@ pub struct Store<T: Settings> {
 /// What the file's content is: its length and a hash of its bytes. Content, not the modification
 /// time: an edit that keeps the size and the time (an editor that preserves mtime, a coarse
 /// filesystem clock) is still an edit, and a rewrite with the same bytes is not one.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fingerprint {
     len: u64,
     hash: u64,
@@ -99,19 +99,6 @@ impl Fingerprint {
     /// The fingerprint the file will have once these bytes are in it.
     pub fn of_bytes(bytes: &[u8]) -> Fingerprint {
         Fingerprint { len: bytes.len() as u64, hash: hash(bytes) }
-    }
-
-    /// For a file too large to hash on every look: its length and modification stamp. Weaker
-    /// than content (an edit that keeps both is missed), so only the watch uses it, and only
-    /// past its read limit.
-    pub(crate) fn of_metadata(len: u64, stamp: u64) -> Fingerprint {
-        Fingerprint { len, hash: stamp ^ 0x9e37_79b9_7f4a_7c15 }
-    }
-
-    /// The fingerprint as sixteen hex digits of its hash and the length, for a name that must
-    /// not carry the bytes it was made from (a draft's file name from a path).
-    pub fn hex(&self) -> String {
-        format!("{:016x}{:x}", self.hash, self.len)
     }
 }
 

@@ -10,7 +10,7 @@ use yantrik_app::cx::Cx;
 use yantrik_app::documents::disk::{Disk, RealDisk};
 use yantrik_app::documents::{
     BeginSave, DocumentId, Documents, Durability, Fingerprint, Observed, OutsideState, SaveError,
-    SaveOutcome, Source,
+    SaveOutcome, SaveTicket, Source,
 };
 use yantrik_app::effects::Effects;
 use yantrik_app::refused::Refused;
@@ -47,16 +47,24 @@ enum Command {
 
 struct Pad;
 
-/// The save job: the file must still be what the document was read from, then the bytes go in
-/// whole or not at all.
-fn write(path: PathBuf, content: String, baseline: Option<Fingerprint>) -> Result<Fingerprint, SaveError> {
-    if baseline.is_some() && Fingerprint::of(&path) != baseline {
+/// The save job: the file must still be what the document knows is there, then the bytes go
+/// in whole or not at all.
+fn write(path: PathBuf, ticket: SaveTicket<String>) -> Result<Fingerprint, SaveError> {
+    if !ticket.may_replace(Fingerprint::of(&path).as_ref()) {
         return Err(SaveError::conflict("The file changed on disk."));
     }
+    let written = Fingerprint::of_bytes(ticket.content.as_bytes());
     RealDisk
-        .write_atomically(&path, content.as_bytes())
-        .map_err(|e| SaveError::new(e.step.durability(), e.to_string()))?;
-    Ok(Fingerprint::of_bytes(content.as_bytes()))
+        .write_atomically(&path, ticket.content.as_bytes())
+        .map_err(|e| SaveError::after_writing(e.step.durability(), written.clone(), e.to_string()))?;
+    Ok(written)
+}
+
+/// The document's watch, armed again from its baseline.
+fn rearm(fx: &mut Effects<Pad>, entry: Option<(String, PathBuf, Option<Observed>)>) {
+    if let Some((key, path, seen)) = entry {
+        fx.watch(&key, path, seen);
+    }
 }
 
 impl App for Pad {
@@ -93,7 +101,7 @@ impl App for Pad {
                 match d.begin_save() {
                     BeginSave::Ticket(t) => {
                         let seq = t.seq;
-                        fx.spawn(move |_| Command::Landed { seq, result: write(path, t.content, t.baseline) });
+                        fx.spawn(move |_| Command::Landed { seq, result: write(path, t) });
                     }
                     BeginSave::Blocked => {
                         return Err(Refused::new("conflict", "The file changed; choose first."))
@@ -105,11 +113,18 @@ impl App for Pad {
                 let d = m.open.and_then(|id| m.docs.get_mut(id)).expect("open");
                 let outcome = d.save_landed(seq, result);
                 m.log.push(format!("landed: {}", outcome_label(&outcome)));
+                // From the new baseline: a look taken before the save is dropped, and our own
+                // write is never reported.
+                if matches!(outcome, SaveOutcome::Saved { .. }) {
+                    rearm(fx, d.watch_entry());
+                }
             }
             Command::Seen { key, seen } => {
                 let Some(id) = m.docs.by_key(&key) else { return Ok(()) };
-                let state = m.docs.get_mut(id).expect("open").observe(seen).clone();
+                let d = m.docs.get_mut(id).expect("open");
+                let state = d.observe(seen).clone();
                 m.log.push(format!("outside: {}", outside_label(&state)));
+                rearm(fx, d.rewatch());
             }
             Command::Close => {
                 if let Some(id) = m.open.take() {
@@ -143,10 +158,10 @@ fn label(b: &BeginSave<String>) -> &'static str {
 
 fn outcome_label(o: &SaveOutcome<String>) -> &'static str {
     match o {
-        SaveOutcome::Saved => "saved",
-        SaveOutcome::FollowUp(_) => "follow-up",
+        SaveOutcome::Saved { replaced: Some(_), .. } => "replaced",
+        SaveOutcome::Saved { follow_up: Some(_), .. } => "follow-up",
+        SaveOutcome::Saved { .. } => "saved",
         SaveOutcome::Failed => "failed",
-        SaveOutcome::OverwroteOutsideEdit => "overwrote",
         SaveOutcome::Stale => "stale",
     }
 }
@@ -197,7 +212,7 @@ fn our_own_save_seen_by_the_watch_is_not_an_outside_edit() {
     app.run_jobs();
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello world");
     app.look_at_files();
-    assert_eq!(log(&app), vec!["landed: saved", "outside: clean"]);
+    assert_eq!(log(&app), vec!["landed: saved"], "the watch, re-armed, does not report our write");
     assert!(!app.model(|m| m.docs.get(m.open.unwrap()).unwrap().dirty()));
 }
 
@@ -254,4 +269,20 @@ fn closing_the_document_unwatches_its_file() {
     std::fs::write(&path, "changed after close").unwrap();
     app.look_at_files();
     assert!(log(&app).is_empty());
+}
+
+#[test]
+fn an_outside_revert_to_an_older_save_of_ours_is_caught_on_the_second_look() {
+    let (app, path) = pad_with("v0");
+    for more in [" a", " b"] {
+        app.run(Command::Type(more.into()));
+        app.run(Command::Save);
+        app.run_jobs();
+    }
+    // A sync client puts our first save back.
+    std::fs::write(&path, "v0 a").unwrap();
+    app.look_at_files();
+    assert_eq!(outside(&app), "clean", "a late look or a revert: not trusted yet");
+    app.look_at_files();
+    assert_eq!(outside(&app), "changed", "still there on the re-armed look: a revert");
 }
