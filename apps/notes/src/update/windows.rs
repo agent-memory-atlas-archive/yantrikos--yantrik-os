@@ -5,8 +5,11 @@
 //!   note in a window of its own. A note two windows show is one document: what is typed in one is
 //!   drawn in the other, and they share its unsaved state, its conflict and its draft. Each window
 //!   keeps its own view of it: caret, scroll, search, dialog and undo history.
-//! - A command from a window acts there ([`arrive`]); a store job's outcome, or a file seen
-//!   changed, is applied in the window it is about ([`applies_in`]).
+//! - A command from a window acts there, and that window is the one the person is in
+//!   ([`arrive`]). A store job's outcome, a file seen changed, or a window's close asked for from
+//!   the taskbar or the window manager is applied in the window it is about ([`applies_in`]), and
+//!   the focus goes back to the person's window after: a window closed in the background never
+//!   moves the person's focus.
 //! - A window closing takes only its view with it ([`forget`]): a note no other window shows is
 //!   closed then, and its file no longer watched.
 
@@ -24,31 +27,29 @@ use crate::view::preview;
 use crate::view::render::{FIELDS, PREVIEW, STATUS};
 use crate::Notes;
 
-/// A command as it arrives: one from a window focuses that window, and so does a close request,
-/// whose prompt shows there. `None` for a command from a window already closed.
+/// A command as it arrives: one from a window focuses that window, the one the person is in now.
+/// `None` for a command from a window already closed.
 pub fn arrive(m: &mut Model, command: Command) -> Option<Command> {
     match command {
         Command::From { window, command } => {
-            if m.focus(window) {
+            if m.enter(window) {
                 arrive(m, *command)
             } else {
                 None
             }
         }
-        Command::CloseRequested(window) => {
-            m.focus(window);
-            Some(Command::CloseRequested(window))
-        }
         other => Some(other),
     }
 }
 
-/// The window a store job's outcome, or a file seen changed, is applied in: for a note's job, the
-/// window that started it while it still shows the note, else the first that shows it (the
-/// focused one first); for a library job, the window that started it. `None` for any other
-/// command, which acts in the focused window.
+/// The window a store job's outcome, a file seen changed, or a close is applied in: for a note's
+/// job, the window that started it while it still shows the note, else the first that shows it
+/// (the focused one first); for a library job, the window that started it; for a close, the
+/// window asked to close, where its prompt shows (the prompt's buttons come from that window, so
+/// they act there too). `None` for any other command, which acts in the focused window.
 pub fn applies_in(m: &Model, command: &Command) -> Option<WindowId> {
     let (doc, started_in) = match command {
+        Command::CloseRequested(window) => return Some(*window),
         Command::SaveLanded { doc, .. }
         | Command::Resolved { doc, .. }
         | Command::Compared { doc, .. }

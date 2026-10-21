@@ -31,6 +31,9 @@ pub struct Model {
     pub pane: Pane,
     /// The other windows' panes, by window, until one is focused.
     pub parked: BTreeMap<WindowId, Pane>,
+    /// The windows open, in the order the person was last in them, the one they are in first
+    /// (pane.rs). Work done in another window for a moment does not move it.
+    pub visited: Vec<WindowId>,
     /// The library has been read; until then nothing but `reload` touches it.
     pub ready: bool,
     /// The one store job in flight. The store does one thing at a time, as it always has.
@@ -206,6 +209,7 @@ impl Model {
                 ..Pane::new(WindowId::PRIMARY)
             },
             parked: BTreeMap::new(),
+            visited: vec![WindowId::PRIMARY],
             ready: false,
             busy: None,
             job_window: WindowId::PRIMARY,

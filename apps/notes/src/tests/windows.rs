@@ -360,3 +360,51 @@ fn a_note_typed_back_to_its_file_in_another_window_is_saved_to_every_reader() {
     assert_eq!(app.exit_reason(), Some(ExitReason::LastWindowClosed), "and nothing to ask");
     assert_eq!(file(&path), saved);
 }
+
+
+/// #918's review, 1: a window closed from the taskbar or the window manager while the person types
+/// in another leaves the focus, `describe` and the surface's calls in the person's window.
+#[test]
+fn a_window_closed_in_the_background_leaves_the_focus_where_the_person_is() {
+    let (app, first, _, second, _) = two_notes_two_windows();
+    let third = opened_beside(&app);
+    type_in(&app, third, "# Right\n\ntyped in the third");
+    app.close_requested(second);
+    assert_eq!(app.windows(), vec![first, third], "it closed, with nothing to ask");
+    assert_eq!(app.model(|m| m.pane.window), third, "the focus stays where the person types");
+    assert_eq!(state(&app)["focused_window"], third.0);
+}
+
+/// The same with a close that asks: its prompt shows in its own window, and what the surface
+/// asks for meanwhile is done to the note the person is in.
+#[test]
+fn a_close_prompt_raised_in_the_background_leaves_the_surfaces_calls_on_the_persons_note() {
+    let (app, first, _, second, _) = two_notes_two_windows();
+    type_in(&app, second, "# Right\n\nonly here");
+    app.event(Event::Activated(first));
+    app.close_requested(second);
+    assert_eq!(app.window(second, |ui| ui.get_dialog()), Some(CLOSE_DIALOG), "asked in its own window");
+    assert_eq!(app.window(first, |ui| ui.get_dialog()), Some(0), "and not in the person's");
+    assert_eq!(state(&app)["focused_window"], first.0, "where the focus stays");
+    let answer = act(&app, "append", json!({ "text": "\nadded" })).expect("appended");
+    assert_eq!(answer["title"], "Left", "to the note the person is in");
+    assert_eq!(editor(&app, first), "# Left\n\n\nadded");
+    assert_eq!(editor(&app, second), "# Right\n\nonly here");
+    // The prompt's own buttons act in its window.
+    app.window(second, |ui| ui.invoke_action("close-cancel".into()));
+    assert_eq!(app.window(second, |ui| ui.get_dialog()), Some(0));
+    assert_eq!(app.windows(), vec![first, second], "Cancel kept it open");
+}
+
+/// Closing the focused window gives the focus back to the window the person was in before it, not
+/// to the lowest numbered one; and when that one closes too, to the one before that.
+#[test]
+fn closing_the_focused_window_gives_the_focus_back_to_the_window_the_person_was_in_before() {
+    let (app, first, _, second, _) = two_notes_two_windows();
+    let third = opened_beside(&app);
+    app.event(Event::Activated(second));
+    app.close_requested(second);
+    assert_eq!((app.windows(), app.model(|m| m.pane.window)), (vec![first, third], third));
+    app.close_requested(third);
+    assert_eq!((app.windows(), app.model(|m| m.pane.window)), (vec![first], first));
+}

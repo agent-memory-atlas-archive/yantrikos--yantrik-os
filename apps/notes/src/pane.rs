@@ -4,10 +4,15 @@
 //! each window keeps its own pane, with its undo history, search, dialog, scroll and footer line.
 //!
 //! The focused window's pane is `Model::pane`, and every command acts there: a command from a
-//! window focuses that window first, and a job's landing is applied in the window it is about,
-//! with the focus put back afterwards (update/windows.rs). The other windows' panes wait in
-//! `Model::parked`. So the code that acts on "the open note" has one pane to act on, and it is
+//! window focuses that window first, and a job's landing, or a close, is applied in the window it
+//! is about, with the focus put back afterwards (update/windows.rs). The other windows' panes wait
+//! in `Model::parked`. So the code that acts on "the open note" has one pane to act on, and it is
 //! always the right one.
+//!
+//! The focus moves for a moment wherever work is done in another window ([`Model::within`]); the
+//! person moves only by acting in a window or opening one ([`Model::enter`]). `Model::visited`
+//! keeps the windows in the order the person was last in them, so when the focused window closes,
+//! the focus goes back to the window the person was in before it.
 
 use yantrik_app::app::WindowId;
 use yantrik_app::documents::{DocumentId, ViewId};
@@ -126,6 +131,17 @@ impl Model {
         true
     }
 
+    /// The person is in `window` now: a command came from it, or it was just opened. It is focused,
+    /// and first in the order the person was in the windows. `false` when it is not open.
+    pub fn enter(&mut self, window: WindowId) -> bool {
+        if !self.focus(window) {
+            return false;
+        }
+        self.visited.retain(|w| *w != window);
+        self.visited.insert(0, window);
+        true
+    }
+
     /// Runs `f` with `window` focused, then puts the focus back. If the window `f` started from
     /// closed meanwhile, the focus stays where `f` left it. `None`, and `f` not run, when `window`
     /// is not open.
@@ -143,16 +159,19 @@ impl Model {
     pub fn add_pane(&mut self, pane: Pane) {
         let window = pane.window;
         self.parked.insert(window, pane);
-        self.focus(window);
+        self.enter(window);
     }
 
-    /// A window's pane is gone with its window; when it was the focused one, the focus moves to
-    /// another window. The last window's pane is never removed: the app ends with it.
+    /// A window's pane is gone with its window; when it was the focused one, the focus goes back
+    /// to the window the person was in before it, or, if that closed too, the one before that.
+    /// The last window's pane is never removed: the app ends with it.
     pub fn remove_pane(&mut self, window: WindowId) {
         if self.pane.window == window {
-            let Some(next) = self.parked.keys().next().copied() else { return };
-            self.focus(next);
+            let before = self.visited.iter().copied().find(|w| *w != window && self.parked.contains_key(w));
+            let Some(next) = before.or_else(|| self.parked.keys().next().copied()) else { return };
+            self.enter(next);
         }
+        self.visited.retain(|w| *w != window);
         self.parked.remove(&window);
     }
 

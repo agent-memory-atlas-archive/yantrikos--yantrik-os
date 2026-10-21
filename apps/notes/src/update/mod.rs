@@ -52,8 +52,8 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Effects<Notes>) -> Resul
     m.panes_mut().for_each(|p| p.cues.clear());
     // A command from a window acts there; one from a window already closed does nothing.
     let Some(command) = windows::arrive(m, command) else { return Ok(()) };
-    // A job's outcome, or a file seen changed, is applied in the window it is about, and the
-    // focus goes back to the person's window after.
+    // A job's outcome, a file seen changed, or a close is applied in the window it is about, and
+    // the focus goes back to the person's window after.
     let back = windows::applies_in(m, &command).map(|there| {
         let here = m.pane.window;
         m.focus(there);
