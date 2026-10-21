@@ -426,19 +426,24 @@ export component WeatherDashboard inherits Rectangle {
                                 y: (parent.height - self.height) / 2;
                             }
                         }
-                        Text {
-                            text: root.current.is-loading && root.reading-number == "--" ? "…" : root.reading-number;
-                            color: Theme.text-primary;
-                            font-size: Theme.fs-greeting;
-                            font-weight: Theme.fw-body;
-                            vertical-alignment: center;
-                        }
-                        Text {
-                            text: root.reading-unit;
-                            color: Theme.text-secondary;
-                            font-size: Theme.fs-display;
-                            font-weight: Theme.fw-body;
-                            vertical-alignment: center;
+                        // The number and its unit sit together (4px), not a gutter apart.
+                        HorizontalLayout {
+                            spacing: Theme.sp-1;
+                            alignment: start;
+                            Text {
+                                text: root.current.is-loading && root.reading-number == "--" ? "…" : root.reading-number;
+                                color: Theme.text-primary;
+                                font-size: Theme.fs-greeting;
+                                font-weight: Theme.fw-body;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: root.reading-unit;
+                                color: Theme.text-secondary;
+                                font-size: Theme.fs-display;
+                                font-weight: Theme.fw-body;
+                                vertical-alignment: center;
+                            }
                         }
                     }
                     Rectangle { height: Theme.sp-3; }
