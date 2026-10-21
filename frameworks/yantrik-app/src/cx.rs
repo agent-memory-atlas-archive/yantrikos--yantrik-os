@@ -458,7 +458,8 @@ impl<A: App> Core<A> {
                 Request::DiscardDraft(name) => self.discard_draft(name),
                 // Never blocks: the send is a thread of its own, bounded by the crate.
                 Request::Notify(notification) => {
-                    yantrik_notifications::send(notification.from_app(self.id));
+                    // Always this app's: the name comes from the framework, not the caller (§5).
+                    yantrik_notifications::send(notification.as_app(self.id));
                 }
                 Request::ApplyAsAgent { apply, authority } => {
                     // The surface queues the intent's command (a command is being applied);

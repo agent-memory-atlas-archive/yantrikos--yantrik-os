@@ -496,6 +496,7 @@ calls `a11y.act`.
 | a11y | `a11y.status` | read | — | whether AT-SPI is answering |
 | a11y | `a11y.act` | change | none | clicks and types in somebody else's window. The graded door is the companion's `window_action` tool (standard), not an action |
 | weather | `weather.current` | read | — | the forecast; the Weather app fetches these seven. `current`, `hourly` and `daily` remember the asked-for place in memory for this run — the same remembering the surface's `set_location` (standard) does |
+| weather | `weather.forecast` | read | — | everything about a place in one answer (current, hours, days, alerts, air quality), from one provider call; what the Weather app on the framework fetches. Remembers the asked-for place in memory for this run, as `current` does |
 | weather | `weather.hourly` | read | — | |
 | weather | `weather.daily` | read | — | |
 | weather | `weather.alerts` | read | — | |
