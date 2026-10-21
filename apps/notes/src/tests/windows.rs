@@ -347,7 +347,7 @@ fn a_note_typed_back_to_its_file_in_another_window_is_saved_to_every_reader() {
     let second = opened_beside(&app);
     let saved = file(&path);
     type_in(&app, WindowId::PRIMARY, "# Shared\n\nfor a moment");
-    assert_eq!(footer(&app, second).1, true, "unsaved, in the window that did not type it");
+    assert!(footer(&app, second).1, "unsaved, in the window that did not type it");
     type_in(&app, second, &saved);
     for window in [WindowId::PRIMARY, second] {
         assert_eq!(footer(&app, window), ("All changes saved".to_string(), false), "{window:?}");
