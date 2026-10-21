@@ -30,7 +30,13 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Effects<Weather>) -> Res
             if place != m.active() || fahrenheit != m.prefs.fahrenheit {
                 return Ok(());
             }
+            // A fetch that failed keeps the last good numbers under its error, as the screen
+            // keeps them: the rail and the AI button still have conditions to speak about.
+            let last_good = m.reading.current.take();
             m.reading = fetched.reading;
+            if m.reading.error.is_some() && m.reading.current.is_none() {
+                m.reading.current = last_good;
+            }
             m.source = fetched.source;
             m.loading = false;
             m.last_fetch = Some(Instant::now());
@@ -50,7 +56,13 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Effects<Weather>) -> Res
             fx.changed(PART_READING);
         }
         Command::SelectLocation(idx) => {
-            places::select(&mut m.prefs, idx)?;
+            // A button's refusal is said where the person is looking: a refused command's
+            // effects are dropped, so the notice is set and the command is not refused.
+            if let Err(refused) = places::select(&mut m.prefs, idx) {
+                m.notice = format!("Could not switch location: {}", refused.sentence);
+                fx.changed(PART_NOTICE);
+                return Ok(());
+            }
             kept(m, fx);
             start_fetch(m, fx);
         }

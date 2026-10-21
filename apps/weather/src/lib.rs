@@ -267,7 +267,7 @@ mod tests {
         let reply = app.act("show_location", json!({ "name": "lon" })).unwrap();
         assert_eq!(reply.envelope()["result"]["showing"], json!("London"));
         assert!(app.act("show_location", json!({ "name": "berlin" })).unwrap_err().contains("there is: London, Paris, France"));
-        // The last place cannot be removed.
+        // The last place cannot be removed: the button's refusal is the notice, drawn.
         app.run(Command::RemoveLocation(1));
         app.run(Command::RemoveLocation(0));
         assert_eq!(app.model(|m| m.prefs.locations.len()), 1);
@@ -367,5 +367,8 @@ mod tests {
         assert!(card.applies.is_none(), "an answer to read, nothing to apply");
         assert!(mind.prompts()[0].starts_with("It is Overcast at 12°C"));
         assert_eq!(mind.prompts().len(), 1, "the rail is the one entry point; no app panel asks twice");
+        // A failed fetch keeps the last good numbers under its error.
+        app.run(Command::FetchFailed("gone".into()));
+        assert!(app.model(|m| m.reading.current.is_some() && m.reading.error.is_some()));
     }
 }

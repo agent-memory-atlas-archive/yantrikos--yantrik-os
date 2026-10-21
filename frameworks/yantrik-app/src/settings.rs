@@ -201,16 +201,22 @@ pub fn read_file<T: Settings>(path: &Path) -> Opened<T> {
 
 /// Keeps the file from before the framework beside the new one, once: `<file>.legacy.json`,
 /// never overwritten, never deleted (design §6: imported once, backed up).
-fn back_up_legacy(path: &Path) {
+fn back_up_legacy(path: &Path) -> bool {
     let mut name = path.file_name().map(|n| n.to_os_string()).unwrap_or_default();
     name.push(".legacy.json");
     let backup = path.with_file_name(name);
     if backup.exists() {
-        return;
+        return true;
     }
     match std::fs::copy(path, &backup) {
-        Ok(_) => tracing::info!(file = %path.display(), backup = %backup.display(), "settings from before the framework imported; the original is kept beside them"),
-        Err(e) => tracing::warn!(file = %path.display(), error = %e, "the settings from before the framework could not be backed up; importing them anyway"),
+        Ok(_) => {
+            tracing::info!(file = %path.display(), backup = %backup.display(), "settings from before the framework imported; the original is kept beside them");
+            true
+        }
+        Err(e) => {
+            tracing::warn!(file = %path.display(), error = %e, "the settings from before the framework could not be backed up; they are read, and the file is left as it is");
+            false
+        }
     }
 }
 
@@ -229,8 +235,10 @@ impl<T: Settings> Store<T> {
         let (committed, health, rewrite) = match read_file::<T>(&path) {
             Opened::Read { value, rewrite } => (value, Health::Fine, rewrite),
             Opened::Imported { value } => {
-                back_up_legacy(&path);
-                (value, Health::Fine, true)
+                // The rewrite in the envelope is owed only once the original is kept beside it
+                // (design §6: imported once, backed up); without the backup the bare file stays.
+                let backed_up = back_up_legacy(&path);
+                (value, Health::Fine, backed_up)
             }
             Opened::Missing => (T::default(), Health::Fine, false),
             Opened::Recovery(e) => (T::default(), Health::Recovery(e), false),
