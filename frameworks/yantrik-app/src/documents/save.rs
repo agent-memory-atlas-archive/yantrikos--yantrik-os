@@ -31,9 +31,10 @@ pub struct SaveError {
 }
 
 impl SaveError {
-    /// A failure that wrote nothing.
-    pub fn new(durability: Durability, sentence: impl Into<String>) -> SaveError {
-        SaveError { durability, sentence: sentence.into(), conflict: false, landed: None }
+    /// A failure that wrote nothing. Any other durability goes through
+    /// [`SaveError::after_writing`], so the bytes that may have landed are never forgotten.
+    pub fn new(sentence: impl Into<String>) -> SaveError {
+        SaveError { durability: Durability::NotWritten, sentence: sentence.into(), conflict: false, landed: None }
     }
 
     /// A failure after which these bytes may be on disk (nothing, for `NotWritten`).

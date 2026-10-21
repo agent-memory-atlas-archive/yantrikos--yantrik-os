@@ -527,8 +527,8 @@ impl<A: App> TestApp<A> {
     /// changed reaches the app as `Event::FileChanged`, as the housekeeping thread would post it.
     pub fn look_at_files(&self) {
         let changed = self.with(|u| u.core.watched()).poll();
-        for (key, seen) in changed {
-            self.seen(Seen::File { key, seen });
+        for (key, seen, arming) in changed {
+            self.seen(Seen::File { key, seen, arming });
         }
     }
 

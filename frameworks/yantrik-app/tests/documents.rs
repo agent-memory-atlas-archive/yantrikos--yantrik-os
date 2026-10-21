@@ -286,3 +286,13 @@ fn an_outside_revert_to_an_older_save_of_ours_is_caught_on_the_second_look() {
     app.look_at_files();
     assert_eq!(outside(&app), "changed", "still there on the re-armed look: a revert");
 }
+
+#[test]
+fn a_look_taken_before_the_watch_was_re_armed_is_dropped() {
+    let (app, _path) = pad_with("hello");
+    let (key, _) = app.watched().pop().expect("watched");
+    // A sighting under an arming that is not the current one: queued behind a save's outcome.
+    app.seen(yantrik_app::watch::Seen::File { key, seen: Observed::File(Fingerprint::of_bytes(b"x")), arming: 0 });
+    assert!(log(&app).is_empty(), "{:?}", log(&app));
+    assert_eq!(outside(&app), "clean");
+}
