@@ -119,6 +119,9 @@ pub enum Command {
     Refresh,
     /// The window became the active one again.
     Activated,
+    /// The process is asked to end (`Event::ExitRequested`): a logout, a signal, the display
+    /// going, or a person's quit.
+    Ending,
 
     // ── The surface ──
     SelectDay(i32),

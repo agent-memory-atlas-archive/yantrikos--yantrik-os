@@ -7,6 +7,7 @@
 //! - `window.rs`: the buttons, the form, the agenda's trash icon, the rail and the card.
 //! - `reading.rs` and `writing.rs`: each intent through the real dispatch.
 //! - `store.rs`: following the store and the clock, the order reads land in, and jobs that fail.
+//! - `ending.rs`: a logout or the display going, with and without a write in flight.
 
 use std::sync::Arc;
 
@@ -20,6 +21,7 @@ use crate::today::FakeClock;
 use crate::Calendar;
 
 mod describe;
+mod ending;
 mod parity;
 mod reading;
 mod store;

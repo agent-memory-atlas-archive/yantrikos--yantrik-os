@@ -145,6 +145,11 @@ pub struct Model {
     pub notice: Notice,
     /// The events a trash icon is taking off, so a second press of it waits for the first.
     pub removing: Vec<String>,
+    /// Creates, deletes and updates sent to the store and not yet landed.
+    pub writes: u32,
+    /// The session or a person asked the app to end: it ends once `writes` is zero, and starts
+    /// no new write meanwhile.
+    pub ending: bool,
     pub ai: Ai,
     pub rail: Rail,
     pub mind: Arc<dyn Mind>,
@@ -179,6 +184,8 @@ impl Model {
             form: Form::default(),
             notice: Notice::default(),
             removing: Vec::new(),
+            writes: 0,
+            ending: false,
             ai: Ai::default(),
             rail: Rail::new(mind.clone()),
             mind,

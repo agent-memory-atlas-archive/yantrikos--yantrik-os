@@ -122,6 +122,10 @@ impl App for Calendar {
         match event {
             // Brought back to the front: the date may have turned while the person was elsewhere.
             Event::Activated(_) => Some(Command::Activated),
+            // A logout (a signal, the display going) or a person's quit: a write already sent to
+            // the store is let land first (`update`). The framework still ends the process at its
+            // own deadline after a signal, whatever is in flight.
+            Event::ExitRequested(_) => Some(Command::Ending),
             _ => None,
         }
     }

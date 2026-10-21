@@ -176,6 +176,7 @@ fn plan(m: &Model, draft: &Draft<'_>, creator: Option<String>) -> Result<NewEven
 fn create(m: &mut Model, fx: &mut Fx, door: Door, new: NewEvent, date: &str, time: &str) {
     let api = m.machine.api.clone();
     let (date, time, form) = (date.to_string(), time.to_string(), m.form.generation);
+    m.writes += 1;
     fx.spawn_or(Command::WorkFailed(Work::Save(door)), move |_| {
         let result = work::create(api.as_ref(), &new);
         Command::Saved(Box::new(Saved { door, title: new.title, date, time, all_day: new.all_day, result, form }))

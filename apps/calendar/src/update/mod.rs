@@ -9,7 +9,7 @@
 use yantrik_app::effects::Effects;
 use yantrik_app::Refused;
 
-use crate::command::Command;
+use crate::command::{Command, Work};
 use crate::events;
 use crate::model::{Model, NOTHING, PART_CALENDAR, PART_CLOCK};
 use crate::work::{self, Listing, Read, Start};
@@ -33,6 +33,44 @@ pub use navigate::arm_midnight;
 type Fx = Effects<Calendar>;
 
 pub fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refused> {
+    if m.ending && starts_a_write(&command) {
+        return Err(Refused::new("closing", "Calendar is closing, so nothing more is written."));
+    }
+    if write_landed(&command) {
+        m.writes = m.writes.saturating_sub(1);
+    }
+    let result = dispatch(m, command, fx);
+    // The end waits for the writes already sent, so none is lost to a logout: it is the store's
+    // answer to each that says whether it happened, and the window is gone after it.
+    if m.ending && m.writes == 0 {
+        fx.exit();
+    }
+    result
+}
+
+/// A command that sends something to the store to be written.
+fn starts_a_write(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::SaveForm { .. } | Command::Add(_) | Command::DeleteRow(_) | Command::Delete { .. } | Command::Update { .. }
+    )
+}
+
+/// A command that carries a write's outcome back: the store's answer, a refusal from its job, or
+/// the job ending without a result.
+fn write_landed(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Saved(_)
+            | Command::Removed(_)
+            | Command::Moved(_)
+            | Command::Kept(_)
+            | Command::Declined(_)
+            | Command::WorkFailed(Work::Save(_) | Work::Remove(_) | Work::Change)
+    )
+}
+
+fn dispatch(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refused> {
     match command {
         Command::PrevMonth
         | Command::NextMonth
@@ -90,6 +128,14 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refuse
         }
         Command::Attach(inbox) => {
             m.inbox = Some(inbox);
+            fx.changed(NOTHING);
+            Ok(())
+        }
+        Command::Ending => {
+            // Nothing asks first: a logout has nobody there to answer, and a draft the person
+            // has typed but not saved is not kept, as it never was. A write already sent is
+            // waited for; `update` ends the app once none is left.
+            m.ending = true;
             fx.changed(NOTHING);
             Ok(())
         }

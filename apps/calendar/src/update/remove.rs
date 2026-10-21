@@ -34,6 +34,7 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refuse
             m.removing.push(event.id.clone());
             let named = format!("“{}”", event.title);
             let api = m.machine.api.clone();
+            m.writes += 1;
             fx.spawn_or(Command::WorkFailed(Work::Remove(Some(event.id.clone()))), move |_| {
                 let result = work::delete_through(api.as_ref(), &event.id);
                 Command::Removed(Box::new(Removed { id: event.id, named, result }))
@@ -45,6 +46,7 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refuse
             // asks: `delete_event` reaches any event, and the person sees a card for it.
             let me = if own { m.machine.who.identify(&caller) } else { None };
             let api = m.machine.api.clone();
+            m.writes += 1;
             fx.spawn_or(Command::WorkFailed(Work::Remove(None)), move |_| {
                 let (id, named) = match work::named_event(api.as_ref(), &ask) {
                     Ok(found) => found,

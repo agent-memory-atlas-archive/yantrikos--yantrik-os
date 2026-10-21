@@ -20,6 +20,7 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refuse
             fx.changed(NOTHING);
             let me = if own { m.machine.who.identify(&caller) } else { None };
             let api = m.machine.api.clone();
+            m.writes += 1;
             fx.spawn_or(Command::WorkFailed(Work::Change), move |_| {
                 if own {
                     // The record the service kept at creation, read back from the event's own
