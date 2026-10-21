@@ -122,6 +122,11 @@ pub enum Command {
     /// The process is asked to end (`Event::ExitRequested`): a logout, a signal, the display
     /// going, or a person's quit.
     Ending,
+    /// The person closed the window while writes were still in flight: it is put away, and the
+    /// app ends once they have landed.
+    Closing,
+    /// The writes a close waited on have not landed within `update::CLOSE_BACKSTOP`.
+    CloseOverdue,
 
     // ── The surface ──
     SelectDay(i32),

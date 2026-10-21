@@ -118,7 +118,7 @@ impl App for Calendar {
         intents::table(table);
     }
 
-    fn event(event: Event<()>, _: &Model) -> Option<Command> {
+    fn event(event: Event<()>, m: &Model) -> Option<Command> {
         match event {
             // Brought back to the front: the date may have turned while the person was elsewhere.
             Event::Activated(_) => Some(Command::Activated),
@@ -126,6 +126,10 @@ impl App for Calendar {
             // the store is let land first (`update`). The framework still ends the process at its
             // own deadline after a signal, whatever is in flight.
             Event::ExitRequested(_) => Some(Command::Ending),
+            // The last window closed while creates, deletes or updates are still in flight: put it
+            // away and end once they land (`Command::Closing`). With none, the framework closes it
+            // and ends, as before.
+            Event::CloseRequested(_) if m.writes > 0 => Some(Command::Closing),
             _ => None,
         }
     }

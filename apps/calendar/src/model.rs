@@ -38,6 +38,8 @@ pub const PART_FORM: &str = "form";
 pub const PART_FORM_FIELDS: &str = "form.fields";
 /// The header's AI button, and the card it puts up when the rail cannot ask.
 pub const PART_AI: &str = "ai";
+/// The window itself: hidden once the person has closed it while writes are in flight.
+pub const PART_WINDOW: &str = "window";
 /// What a command names when nothing on screen changed.
 pub const NOTHING: &str = "nothing";
 
@@ -147,9 +149,11 @@ pub struct Model {
     pub removing: Vec<String>,
     /// Creates, deletes and updates sent to the store and not yet landed.
     pub writes: u32,
-    /// The session or a person asked the app to end: it ends once `writes` is zero, and starts
-    /// no new write meanwhile.
+    /// The session or a person asked the app to end, or the person closed the window: it ends
+    /// once `writes` is zero, and starts no new write meanwhile.
     pub ending: bool,
+    /// The window was closed while writes were in flight, and is hidden until they land.
+    pub hidden: bool,
     pub ai: Ai,
     pub rail: Rail,
     pub mind: Arc<dyn Mind>,
@@ -186,6 +190,7 @@ impl Model {
             removing: Vec::new(),
             writes: 0,
             ending: false,
+            hidden: false,
             ai: Ai::default(),
             rail: Rail::new(mind.clone()),
             mind,

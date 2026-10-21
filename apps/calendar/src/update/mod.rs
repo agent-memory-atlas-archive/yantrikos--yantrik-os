@@ -11,7 +11,7 @@ use yantrik_app::Refused;
 
 use crate::command::{Command, Work};
 use crate::events;
-use crate::model::{Model, NOTHING, PART_CALENDAR, PART_CLOCK};
+use crate::model::{Model, NOTHING, PART_CALENDAR, PART_CLOCK, PART_WINDOW};
 use crate::work::{self, Listing, Read, Start};
 use crate::Calendar;
 
@@ -31,6 +31,11 @@ pub use ai::answer_card;
 pub use navigate::arm_midnight;
 
 type Fx = Effects<Calendar>;
+
+/// How long a close waits for the writes in flight before it ends anyway. Each call is bounded by
+/// the client's own timeout, so this is reached only by a service that stopped answering.
+pub const CLOSE_BACKSTOP: std::time::Duration = std::time::Duration::from_secs(10);
+const CLOSE_TIMER: yantrik_app::timers::TimerId = yantrik_app::timers::TimerId("calendar.close");
 
 pub fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refused> {
     if m.ending && starts_a_write(&command) {
@@ -137,6 +142,27 @@ fn dispatch(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refused>
             // waited for; `update` ends the app once none is left.
             m.ending = true;
             fx.changed(NOTHING);
+            Ok(())
+        }
+        Command::Closing => {
+            // The window goes at once, as the person asked; the process stays until the writes
+            // already sent have landed, as it did when they ran on the UI thread and the close
+            // could not be handled before them. Then `update` ends the app.
+            m.ending = true;
+            m.hidden = true;
+            fx.changed(PART_WINDOW);
+            fx.after(CLOSE_TIMER, CLOSE_BACKSTOP, Command::CloseOverdue);
+            Ok(())
+        }
+        Command::CloseOverdue => {
+            if m.writes > 0 {
+                tracing::warn!(
+                    writes = m.writes,
+                    "the window closed and the calendar service has not answered every write \
+                     sent before it; ending without knowing whether the store kept them"
+                );
+            }
+            fx.exit();
             Ok(())
         }
     }
