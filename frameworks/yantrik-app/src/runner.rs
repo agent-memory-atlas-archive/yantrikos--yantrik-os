@@ -43,14 +43,20 @@ pub(crate) fn drain_on_ui_thread() {
 /// Runs the app to its end. The exit code says how it ended: 0 for a close or a display that
 /// went away, 1 for a failure, with a problem record.
 pub fn run<A: App>() -> ExitCode {
-    boot::init_tracing(A::ID);
+    boot::init_tracing_for(A::ID, Some(boot::crate_of::<A>()));
     boot::choose_backend();
     let paths = Paths::for_app(A::ID);
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     // The launch is parsed before the claim: a command line this app does not take is said and
     // refused here, whichever copy would have run it. Opening the settings and drafts writes
-    // nothing, so a copy that hands over and exits leaves no trace.
-    let (mut boot, store) = match Boot::<A::Settings>::open(paths.clone(), args, yantrik_mind::live()) {
+    // nothing a copy that hands over would regret: the one write, a pre-framework file's backup
+    // (`<file>.legacy.json`), is made once and never overwritten, so two copies make the same.
+    let (mut boot, store) = match Boot::<A::Settings>::open(
+        paths.clone(),
+        args,
+        yantrik_mind::live(),
+        crate::services::Services::live(),
+    ) {
         Ok(opened) => opened,
         Err(e) => return startup_failed(A::ID, "launch", &e.sentence),
     };
@@ -157,7 +163,10 @@ pub fn run<A: App>() -> ExitCode {
     let registry = crate::control::App::from_registry(registry).serve_as(&instance);
     core.attach_registry(registry);
 
-    let ending = crate::event_loop::run_until_ending(core.ui(), A::ID);
+    // A second launch's `present` goes through the core, which knows which windows are open.
+    let presenting = Rc::downgrade(&core);
+    crate::present::install(move || presenting.upgrade().ok_or("the app is closing")?.present());
+    let ending = crate::event_loop::run_loop(core.ui(), A::ID);
     core.shutdown(GRACE);
     DRAIN.with(|cell| *cell.borrow_mut() = None);
     // A close, an `fx.exit()` and a logout are all 0; only a loop that failed with the display

@@ -3,7 +3,6 @@
 # rule subject [lines]
 build-path apps/arcade/build.rs
 build-path apps/calendar/build.rs
-build-path apps/container-manager/build.rs
 build-path apps/document-editor/build.rs
 build-path apps/download-manager/build.rs
 build-path apps/email/build.rs
@@ -18,7 +17,6 @@ build-path apps/studio/build.rs
 build-path apps/system-monitor/build.rs
 build-path apps/terminal/build.rs
 build-path apps/text-editor/build.rs
-build-path apps/weather/build.rs
 layer sdk-guide-samples->my-surface
 layer sdk-guide-samples->yantrik-shell-core
 layer yantrik-gateway->yantrik-ml
@@ -37,7 +35,6 @@ size apps/snippet-manager/src/main.rs 1336
 size apps/studio/src/engine.rs 1712
 size apps/studio/src/tests.rs 1986
 size apps/text-editor/src/main.rs 1988
-size apps/weather/src/main.rs 1458
 size crates/yantrik-companion-core/src/config.rs 1839
 size crates/yantrik-companion-tools/src/browser.rs 2860
 size crates/yantrik-companion-tools/src/coder.rs 1593
@@ -72,7 +69,6 @@ size crates/yantrik-ui-slint/ui/permission_dashboard.slint 1781
 size crates/yantrik-ui-slint/ui/presentation.slint 1290
 size crates/yantrik-ui-slint/ui/settings.slint 3955
 size crates/yantrik-ui-slint/ui/system_monitor.slint 1392
-size crates/yantrik-ui-slint/ui/weather.slint 1521
 size crates/yantrik-ui/src/agents/model.rs 1322
 size crates/yantrik-ui/src/agents/store.rs 2785
 size crates/yantrik-ui/src/approvals.rs 2613

@@ -5,6 +5,13 @@ use crate::problems;
 
 /// Initialize tracing-subscriber with an env filter for the app, after answering `--version`.
 pub fn init_tracing(app_name: &str) {
+    init_tracing_for(app_name, None);
+}
+
+/// [`init_tracing`] for an app whose crate is not named after its id: the runner passes the
+/// crate the app's type lives in (`yantrik_container_manager` for the app `containers`), so
+/// its own lines are shown whatever the two are called.
+pub fn init_tracing_for(app_name: &str, crate_target: Option<&str>) {
     // `--version`, answered here because this is the one line every app binary runs first.
     //
     // A machine used to give three answers about what it was, one of them a hardcoded
@@ -27,21 +34,28 @@ pub fn init_tracing(app_name: &str) {
     // nothing: no app in this OS ever wants to start fullscreen.
     std::env::remove_var("SLINT_FULLSCREEN");
 
-    let crate_name = app_name.replace('-', "_");
-    let directive = format!("{crate_name}=info");
-
     // A panic becomes a problem record before it becomes a stack trace on stderr. The record
     // is local and scrubbed; nothing sends it. See `problems`.
     problems::install_panic_hook(app_name);
 
     use tracing_subscriber::layer::SubscriberExt as _;
     use tracing_subscriber::util::SubscriberInitExt as _;
-    let filter = tracing_subscriber::EnvFilter::from_default_env()
-        .add_directive(directive.parse().expect("valid tracing directive"))
-        // The framework's own lines (instance guard, theme) must be visible too, or an app that
-        // exits at once because another instance holds the slot says nothing.
-        .add_directive("yantrik_app_runtime=info".parse().expect("valid directive"))
-        .add_directive("yantrik_app=info".parse().expect("valid directive"));
+    let mut filter = tracing_subscriber::EnvFilter::from_default_env();
+    // The framework's own lines (instance guard, theme) must be visible too, or an app that
+    // exits at once because another instance holds the slot says nothing.
+    let mut defaults = app_directives(app_name, crate_target);
+    defaults.extend([
+        "yantrik_app_runtime=info".to_string(),
+        "yantrik_app=info".to_string(),
+    ]);
+    let asked = std::env::var("RUST_LOG").unwrap_or_default();
+    for directive in unless_asked(defaults, &asked) {
+        // The crate's target comes from `type_name`, whose format is not promised: a target that
+        // does not parse costs a hidden line, never a start.
+        if let Ok(directive) = directive.parse() {
+            filter = filter.add_directive(directive);
+        }
+    }
     // A second init (a test harness after the app) is not an error worth stopping for.
     let _ = tracing_subscriber::registry()
         .with(filter)
@@ -49,6 +63,147 @@ pub fn init_tracing(app_name: &str) {
         // The same lines, kept in a small ring so a problem record can carry the last forty.
         .with(RecentLines)
         .try_init();
+}
+
+/// The log targets that are the app's own, at `info`.
+///
+/// An app on the old runtime names itself by its crate (`yantrik-notes`, whose lines are
+/// tagged `yantrik_notes`); an app on the framework is named by its id (`weather`), while its
+/// crate is `yantrik-weather` and its lines are tagged `yantrik_weather`. A filter built from the
+/// id alone matched nothing the app wrote, so its own lines (a kill that failed, a fetch that
+/// fell back) were hidden unless `RUST_LOG` was set. The id's spellings are enabled, and the
+/// crate the runner names, which is the only one that is right when the id is not the crate's
+/// suffix (`containers` in `yantrik_container_manager`).
+fn app_directives(app_name: &str, crate_target: Option<&str>) -> Vec<String> {
+    let target = app_name.replace('-', "_");
+    let mut targets = vec![target.clone()];
+    if !target.starts_with("yantrik_") {
+        targets.push(format!("yantrik_{target}"));
+    }
+    if let Some(own) = crate_target {
+        if !targets.iter().any(|t| t == own) {
+            targets.push(own.to_string());
+        }
+    }
+    targets.into_iter().map(|t| format!("{t}=info")).collect()
+}
+
+/// The crate a type is defined in, as its log target: `yantrik_container_manager` for
+/// `yantrik_container_manager::Containers`.
+pub(crate) fn crate_of<T>() -> &'static str {
+    let name = std::any::type_name::<T>();
+    name.split("::").next().unwrap_or(name)
+}
+
+/// The defaults whose target `RUST_LOG` does not name. A later directive for the same target
+/// replaces an earlier one, so a default added after the environment's would undo
+/// `RUST_LOG=yantrik_weather=debug`; the person's own setting wins.
+fn unless_asked(defaults: Vec<String>, rust_log: &str) -> Vec<String> {
+    let named = named_targets(rust_log);
+    defaults
+        .into_iter()
+        .filter(|d| {
+            d.split_once('=')
+                .is_some_and(|(target, _)| !named.contains(&target))
+        })
+        .collect()
+}
+
+/// The targets `RUST_LOG` sets a level for, read as the filter reads it (tracing-subscriber's
+/// `parse_lossy`): split on commas, nothing trimmed, and a piece that does not parse ignored, as
+/// the filter ignores it. A bare target means its trace level, so it names the target; a bare
+/// level names none. A span-scoped piece (`target[span]=level`) is kept by the filter apart
+/// from the target's own level, so it does not name the target either.
+fn named_targets(rust_log: &str) -> Vec<&str> {
+    use tracing_subscriber::filter::{Directive, LevelFilter};
+    rust_log
+        .split(',')
+        .filter(|piece| !piece.is_empty() && !piece.contains('['))
+        .filter(|piece| piece.parse::<Directive>().is_ok())
+        .filter(|piece| piece.parse::<LevelFilter>().is_err())
+        .map(|piece| piece.split_once('=').map_or(piece, |(target, _)| target))
+        .collect()
+}
+
+#[cfg(test)]
+mod directive_tests {
+    use super::{app_directives, unless_asked};
+
+    #[test]
+    fn an_apps_own_lines_are_shown_whether_it_is_named_by_crate_or_by_id() {
+        assert_eq!(
+            app_directives("yantrik-notes", None),
+            vec!["yantrik_notes=info"]
+        );
+        assert_eq!(
+            app_directives("weather", Some("yantrik_weather")),
+            vec!["weather=info", "yantrik_weather=info"]
+        );
+        assert_eq!(
+            app_directives("system-monitor", Some("yantrik_system_monitor")),
+            vec!["system_monitor=info", "yantrik_system_monitor=info"]
+        );
+        // An id that is not the crate's suffix: only the crate the runner names matches.
+        let containers = app_directives("containers", Some("yantrik_container_manager"));
+        assert!(containers.contains(&"yantrik_container_manager=info".to_string()));
+        for d in containers {
+            assert!(
+                d.parse::<tracing_subscriber::filter::Directive>().is_ok(),
+                "{d}"
+            );
+        }
+    }
+
+    #[test]
+    fn rust_log_wins_for_a_target_it_names() {
+        let defaults = vec![
+            "yantrik_weather=info".to_string(),
+            "yantrik_app=info".to_string(),
+        ];
+        assert_eq!(unless_asked(defaults.clone(), ""), defaults);
+        assert_eq!(
+            unless_asked(defaults.clone(), "yantrik_weather=debug,hyper=warn"),
+            vec!["yantrik_app=info"]
+        );
+        assert_eq!(
+            unless_asked(defaults.clone(), "yantrik_weather"),
+            vec!["yantrik_app=info"],
+            "a bare target is its trace level"
+        );
+        assert_eq!(
+            unless_asked(defaults.clone(), "debug"),
+            defaults,
+            "a bare level names no target"
+        );
+    }
+
+    #[test]
+    fn a_piece_the_filter_ignores_names_nothing() {
+        let defaults = vec!["yantrik_weather=info".to_string()];
+        // The filter ignores each of these, so the default must stand.
+        for ignored in [
+            "hyper=warn, yantrik_weather=debug",
+            "yantrik_weather=debug ",
+            "yantrik_weather=bogus",
+        ] {
+            assert_eq!(
+                unless_asked(defaults.clone(), ignored),
+                defaults,
+                "{ignored:?}"
+            );
+        }
+        // A span-scoped directive is kept apart from the target's own level.
+        assert_eq!(
+            unless_asked(defaults.clone(), "yantrik_weather[fetch]=debug"),
+            defaults
+        );
+    }
+
+    #[test]
+    fn the_crate_of_an_app_is_where_its_type_lives() {
+        struct Here;
+        assert_eq!(super::crate_of::<Here>(), "yantrik_app");
+    }
 }
 
 /// A tracing layer that remembers the most recent log lines of this process, for the

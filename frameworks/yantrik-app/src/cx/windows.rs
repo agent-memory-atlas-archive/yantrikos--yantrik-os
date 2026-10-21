@@ -4,10 +4,16 @@
 //! The runner makes the first window; `fx.open_window()` makes more, each themed, given its
 //! chrome, wired by `App::wire_window`, rendered whole and shown. Every render reaches every
 //! open window, which draws itself from the one model. No window is privileged: closing any of
-//! them, the first included, closes only it, and the app ends when none is left.
+//! them, the first included, closes only it, and the app ends when none is left, judged once a
+//! command's effects have all been applied (a close and an open in one command replace a window).
+//!
+//! A second launch's `present` goes through the core ([`Core::present`]): it brings forward a
+//! window that is open, and never re-shows a closed one behind the core's back, so what the core
+//! counts as open is what is on screen.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
 
 use slint::ComponentHandle as _;
 
@@ -27,8 +33,7 @@ pub(crate) fn next_window_id() -> WindowId {
 
 /// The windows beyond the first, and what every new one is made with.
 pub(crate) struct Windows<U> {
-    /// The first window is open. It is kept, hidden, once closed: the event loop and a second
-    /// launch's `present` hold it.
+    /// The first window is open. It is kept, hidden, once closed: the event loop holds it.
     first_open: bool,
     more: BTreeMap<WindowId, U>,
     /// The theme the windows wear now, so a window opened later wears it too.
@@ -66,14 +71,15 @@ impl<A: App> Core<A> {
     /// Every open window draws what changed.
     pub(super) fn render_windows(&self, changed: &Changed) {
         // A snapshot: a window drawing may fire a callback, and nothing may hold the table then.
-        let more: Vec<(WindowId, A::Ui)> = {
+        let (first_open, more): (bool, Vec<(WindowId, A::Ui)>) = {
             let windows = self.windows.borrow();
-            windows.more.iter().map(|(id, ui)| (*id, ui.clone_strong())).collect()
+            let more = windows.more.iter().map(|(id, ui)| (*id, ui.clone_strong())).collect();
+            (windows.first_open, more)
         };
         let model = self.model.borrow();
-        // The first window is drawn even once closed: a second launch's `present` may show it
-        // again, and it must show the app as it is, not as it was.
-        A::render(&self.ui, WindowId::PRIMARY, &model, changed);
+        if first_open {
+            A::render(&self.ui, WindowId::PRIMARY, &model, changed);
+        }
         for (id, ui) in more {
             A::render(&ui, id, &model, changed);
         }
@@ -89,14 +95,21 @@ impl<A: App> Core<A> {
         }
     }
 
-    /// `fx.open_window()`: the window made, themed, wired, drawn whole and shown.
+    /// `fx.open_window()`: the window made, themed, wired, drawn whole and shown. One that cannot
+    /// be made is said to the app (`Event::WindowNotOpened`), so it can drop what it attached to
+    /// the id; none is made once the process is ending.
     pub(super) fn open_window(&self, id: WindowId) {
+        if self.exit.get().is_some() {
+            tracing::debug!(app = self.id, "a window asked for while ending; not made");
+            return;
+        }
         let ui = match A::Ui::make() {
             Ok(ui) => ui,
             Err(e) => {
                 let why = format!("a window could not be made: {e}");
                 tracing::warn!(app = self.id, "{why}");
                 problems::record_failure(self.id, "window", &why);
+                self.event(Event::WindowNotOpened { window: id, why });
                 return;
             }
         };
@@ -120,20 +133,37 @@ impl<A: App> Core<A> {
         }
     }
 
-    /// A window closed: only it. The last one closing ends the process.
+    /// A window closed: only it. Whether that was the last is judged by
+    /// [`Core::exit_if_no_window`], once the command's effects are all applied.
     pub(super) fn close_window(&self, window: WindowId) {
-        let closed = if window == WindowId::PRIMARY {
-            // Hidden, and counted closed, whether or not it was open: a second launch may have
-            // shown it again since.
+        if window == WindowId::PRIMARY {
             let _ = self.ui.hide();
             self.windows.borrow_mut().first_open = false;
-            true
-        } else {
-            let removed = self.windows.borrow_mut().more.remove(&window);
-            removed.map(|ui| ui.hide()).is_some()
-        };
-        if closed && self.windows_open().is_empty() {
+            return;
+        }
+        let removed = self.windows.borrow_mut().more.remove(&window);
+        if let Some(ui) = removed {
+            let _ = ui.hide();
+            // The close may come from inside this window's own callback: the component is
+            // dropped from the event loop, after that callback has returned.
+            slint::Timer::single_shot(Duration::ZERO, move || drop(ui));
+        }
+    }
+
+    /// The process ends when no window is open.
+    pub(super) fn exit_if_no_window(&self) {
+        if self.windows_open().is_empty() {
             self.request_exit(ExitReason::LastWindowClosed);
         }
+    }
+
+    /// A second launch asked for this app (`present`): an open window is brought forward, the
+    /// first open one first.
+    pub fn present(&self) -> Result<(), String> {
+        let first = self.windows_open().into_iter().next().ok_or("the app's windows are closing")?;
+        let ui = self.window(first).ok_or("the window is closing")?;
+        ui.show().map_err(|e| format!("the window could not be shown: {e}"))?;
+        crate::chrome::bring_back(ui.window());
+        Ok(())
     }
 }

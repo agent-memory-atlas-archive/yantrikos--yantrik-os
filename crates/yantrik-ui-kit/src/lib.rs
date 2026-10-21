@@ -58,6 +58,17 @@ mod app_header_is_mandatory {
             .expect("the shell's ui directory sits beside the kit")
     }
 
+    /// Where an app's screen is: in the app once it is on YantrikApp (`apps/<app>/ui/`), in the
+    /// shell's folder until then.
+    fn screen_path(app: &str, screen: &str) -> PathBuf {
+        let own = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps").join(app).join("ui").join(screen);
+        if own.is_file() {
+            own
+        } else {
+            ui_dir().join(screen)
+        }
+    }
+
     /// The check that makes the header consistent by construction rather than by agreement.
     ///
     /// Sixteen apps once drew their own top bar and the heights came out 28, 32, 36, 44, 48, 56
@@ -69,11 +80,10 @@ mod app_header_is_mandatory {
     /// went through the frame at all.
     #[test]
     fn every_app_we_ship_draws_its_header_with_the_shared_component() {
-        let dir = ui_dir();
         let mut missing = Vec::new();
 
         for (app, screen) in APP_SCREENS {
-            let path = dir.join(screen);
+            let path = screen_path(app, screen);
             let src = std::fs::read_to_string(&path)
                 .unwrap_or_else(|e| panic!("{app}: cannot read {}: {e}", path.display()));
 
@@ -225,6 +235,13 @@ mod an_idle_window_stops_drawing {
                 if spec == "std-widgets.slint" {
                     continue;
                 }
+                // The tokens and the kit are libraries too (`@yantrik-design/…`, `@yantrik-kit/…`),
+                // as an app on the framework imports them (frameworks/yantrik-app-build).
+                let spec = spec
+                    .strip_prefix("@yantrik-design/")
+                    .or_else(|| spec.strip_prefix("@yantrik-kit/"))
+                    .map(|rest| rest.to_string())
+                    .unwrap_or(spec);
                 let own = file.parent().expect("a file has a directory").to_path_buf();
                 let resolved = std::iter::once(own)
                     .chain(includes.iter().cloned())

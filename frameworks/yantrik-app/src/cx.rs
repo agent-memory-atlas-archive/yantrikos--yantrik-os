@@ -422,6 +422,7 @@ impl<A: App> Core<A> {
     /// under. Always under `applying`, so a command an effect raises is queued.
     fn commit(&self, requests: Vec<Request<A>>) {
         let invocation = self.current.get();
+        let mut closed = false;
         for request in requests {
             match request {
                 Request::Then(command) => self.queue(invocation, command),
@@ -490,9 +491,16 @@ impl<A: App> Core<A> {
                     }
                 }
                 Request::OpenWindow(window) => self.open_window(window),
-                Request::Close(window) => self.close_window(window),
+                Request::Close(window) => {
+                    self.close_window(window);
+                    closed = true;
+                }
                 Request::Exit => self.request_exit(ExitReason::App),
             }
+        }
+        // Once every effect is applied: a close and an open in one command replace a window.
+        if closed {
+            self.exit_if_no_window();
         }
     }
 
@@ -530,7 +538,10 @@ impl<A: App> Core<A> {
         match (command, event) {
             (Some(command), _) => self.run(command),
             (None, Event::Launch(_)) => {}
-            (None, Event::CloseRequested(window)) => self.close_window(window),
+            (None, Event::CloseRequested(window)) => {
+                self.close_window(window);
+                self.exit_if_no_window();
+            }
             (None, Event::ExitRequested(reason)) => self.request_exit(reason),
             (None, Event::Activated(_)) => {}
             (None, Event::SettingsSaved) => {}
@@ -553,6 +564,8 @@ impl<A: App> Core<A> {
             }
             (None, Event::ReachChanged(_)) => {}
             (None, Event::FileChanged { .. }) => {}
+            // Already logged and filed by the window table.
+            (None, Event::WindowNotOpened { .. }) => {}
         }
     }
 

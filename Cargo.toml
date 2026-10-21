@@ -89,7 +89,6 @@ members = [
     # Members now, so `cargo test --workspace` is enough to run everything; the guard test
     # `a_test_crate_runs_when_ci_runs` in crates/yantrik-ui-kit keeps new ones from drifting.
     "tests/calendar-core",
-    "tests/container-core",
     "tests/document-core",
     "tests/email-core",
     "tests/files-core",
@@ -100,7 +99,6 @@ members = [
     "tests/settings-core",
     "tests/snippets-core",
     "tests/sysmon-core",
-    "tests/weather-core",
     "tests/windows-core",
     # How an app's UI is compiled: the style, YantrikUI's tokens and kit as libraries (step 2).
     "frameworks/yantrik-app-build",
