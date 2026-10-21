@@ -35,7 +35,10 @@ pub fn drag(window: &slint::Window) {
 /// Found on VM 520 with a protocol trace: the first Minimise sent `xdg_toplevel.set_minimized`,
 /// the second sent nothing, and Restore after it did nothing either.
 pub fn minimize(window: &slint::Window) {
-    if window.with_winit_window(|w| w.set_minimized(true)).is_none() {
+    if window
+        .with_winit_window(|w| w.set_minimized(true))
+        .is_none()
+    {
         window.set_minimized(true);
     }
 }
@@ -126,7 +129,8 @@ macro_rules! window_chrome {
         let weak = ui.as_weak();
         chrome.on_resized(move || {
             if let Some(ui) = weak.upgrade() {
-                ui.global::<WindowChrome>().set_maximized(ui.window().is_maximized());
+                ui.global::<WindowChrome>()
+                    .set_maximized(ui.window().is_maximized());
             }
         });
     }};

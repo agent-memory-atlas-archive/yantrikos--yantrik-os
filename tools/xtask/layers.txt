@@ -22,6 +22,7 @@ L1  crates/yantrik-ui-kit
 # L2 Platform: what an app or a service is built on.
 L2  frameworks/yantrik-app-build
 L2  frameworks/yantrik-app
+L2  frameworks/yantrik-testing
 L2  crates/yantrik-app-runtime
 L2  crates/yantrik-surface
 L2  crates/yantrik-service-sdk

@@ -3461,6 +3461,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
+name = "hello-app"
+version = "0.1.0"
+dependencies = [
+ "slint",
+ "yantrik-app",
+ "yantrik-app-build",
+ "yantrik-design-tokens",
+ "yantrik-testing",
+ "yantrik-ui-kit",
+]
+
+[[package]]
 name = "hello-surface"
 version = "0.1.0"
 dependencies = [
@@ -11112,12 +11124,16 @@ dependencies = [
  "serde",
  "serde_json",
  "slint",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "yantrik-foundation",
  "yantrik-ipc-contracts",
  "yantrik-ipc-transport",
  "yantrik-surface",
+ "yantrik-testing",
+ "yantrik-version",
 ]
 
 [[package]]
@@ -11135,12 +11151,10 @@ dependencies = [
  "serde_json",
  "slint",
  "tracing",
- "tracing-subscriber",
  "yantrik-app",
  "yantrik-foundation",
  "yantrik-ipc-contracts",
  "yantrik-ipc-transport",
- "yantrik-version",
 ]
 
 [[package]]
@@ -11944,6 +11958,14 @@ dependencies = [
  "yantrik-ipc-contracts",
  "yantrik-ipc-transport",
  "yantrik-ui-kit",
+]
+
+[[package]]
+name = "yantrik-testing"
+version = "0.1.0"
+dependencies = [
+ "slint",
+ "yantrik-app",
 ]
 
 [[package]]

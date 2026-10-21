@@ -76,7 +76,9 @@ fn pid_alive(pid: u32) -> bool {
     let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) else {
         return false;
     };
-    let Some(close) = stat.rfind(')') else { return false };
+    let Some(close) = stat.rfind(')') else {
+        return false;
+    };
     let state = stat[close + 1..].trim_start().chars().next().unwrap_or('Z');
     !matches!(state, 'Z' | 'X')
 }
@@ -96,7 +98,10 @@ pub fn claim(app_name: &str) -> Option<InstanceGuard> {
 pub fn present_running(app_name: &str) {
     let answered = crate::present::ask(app_name);
     match answered.sentence(app_name) {
-        None => tracing::info!(app = app_name, "Already running; asked it to show its window, and it did"),
+        None => tracing::info!(
+            app = app_name,
+            "Already running; asked it to show its window, and it did"
+        ),
         Some(said) => {
             tracing::warn!(app = app_name, answer = ?answered, "{said}");
             // Also on stderr, for a person who started it from a terminal and reads no log.
@@ -107,21 +112,31 @@ pub fn present_running(app_name: &str) {
 
 /// [`claim`] in `dir`, with `held` run when another live instance has the slot. Split out so a
 /// test can hold the slot in a directory of its own and see who was asked.
-fn claim_in(dir: &std::path::Path, app_name: &str, held: impl FnOnce(&str)) -> Option<InstanceGuard> {
+fn claim_in(
+    dir: &std::path::Path,
+    app_name: &str,
+    held: impl FnOnce(&str),
+) -> Option<InstanceGuard> {
     let dir = dir.to_path_buf();
     if !private_to_us(&dir) {
         // `socket_dir` hands back its last candidate unchecked when it could prepare none, and a
         // directory that may be someone else's is no place to keep a file whose contents decide
         // whether we run. Running unguarded risks a second window; trusting it risks worse.
         tracing::warn!(app = app_name, dir = %dir.display(), "Pid directory is not private to us; running unguarded");
-        return Some(InstanceGuard { path: PathBuf::new() });
+        return Some(InstanceGuard {
+            path: PathBuf::new(),
+        });
     }
     let path = dir.join(format!("{app_name}.pid"));
 
     if let Ok(existing) = fs::read_to_string(&path) {
         if let Ok(pid) = existing.trim().parse::<u32>() {
             if pid != std::process::id() && pid_alive(pid) {
-                tracing::info!(app = app_name, pid, "Already running; handing this launch to it");
+                tracing::info!(
+                    app = app_name,
+                    pid,
+                    "Already running; handing this launch to it"
+                );
                 held(app_name);
                 return None;
             }
@@ -133,13 +148,18 @@ fn claim_in(dir: &std::path::Path, app_name: &str, held: impl FnOnce(&str)) -> O
     // `notes.pid` pointing at ~/.ssh/authorized_keys would have been emptied by the next launch.
     // `create_new` (O_EXCL) never follows one. If another launch wins the gap, we run unguarded.
     let _ = fs::remove_file(&path);
-    let created = fs::OpenOptions::new().write(true).create_new(true).open(&path);
+    let created = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path);
     match created.and_then(|mut f| write!(f, "{}", std::process::id())) {
         Ok(()) => Some(InstanceGuard { path }),
         Err(e) => {
             // Not being able to write the pid file is not a reason to refuse to run.
             tracing::warn!(app = app_name, error = %e, "Could not write pid file; running unguarded");
-            Some(InstanceGuard { path: PathBuf::new() })
+            Some(InstanceGuard {
+                path: PathBuf::new(),
+            })
         }
     }
 }
@@ -157,7 +177,8 @@ mod tests {
 
     /// A runtime directory of this test's own, as private as `socket_dir` makes the real one.
     fn private_dir(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("yantrik-instance-{}-{name}", std::process::id()));
+        let d =
+            std::env::temp_dir().join(format!("yantrik-instance-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(d.join("yantrik")).unwrap();
         fs::set_permissions(d.join("yantrik"), fs::Permissions::from_mode(0o700)).unwrap();
@@ -167,7 +188,10 @@ mod tests {
     /// A live process that is not this one, to hold the slot: `claim` takes its own pid in the
     /// file as no holder at all.
     fn holder() -> std::process::Child {
-        std::process::Command::new("sleep").arg("30").spawn().expect("sleep")
+        std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("sleep")
     }
 
     #[test]
@@ -179,9 +203,19 @@ mod tests {
         let mut asked = Vec::new();
         let guard = claim_in(&dir, "calendar", |app| asked.push(app.to_string()));
 
-        assert!(guard.is_none(), "a second copy was let run beside the first");
-        assert_eq!(asked, ["calendar"], "the running copy was not asked to show its window");
-        assert_eq!(fs::read_to_string(dir.join("calendar.pid")).unwrap(), first.id().to_string());
+        assert!(
+            guard.is_none(),
+            "a second copy was let run beside the first"
+        );
+        assert_eq!(
+            asked,
+            ["calendar"],
+            "the running copy was not asked to show its window"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join("calendar.pid")).unwrap(),
+            first.id().to_string()
+        );
         let _ = first.kill();
         let _ = first.wait();
     }
@@ -192,7 +226,10 @@ mod tests {
         let mut asked = false;
         let guard = claim_in(&dir, "calendar", |_| asked = true);
         assert!(guard.is_some() && !asked);
-        assert_eq!(fs::read_to_string(dir.join("calendar.pid")).unwrap(), std::process::id().to_string());
+        assert_eq!(
+            fs::read_to_string(dir.join("calendar.pid")).unwrap(),
+            std::process::id().to_string()
+        );
     }
 
     /// The launch itself, as a process: `claim` as an app's `main` calls it, and the exit status
@@ -242,7 +279,12 @@ mod tests {
         });
 
         let status = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "instance::tests::second_launch", "--nocapture", "--test-threads=1"])
+            .args([
+                "--exact",
+                "instance::tests::second_launch",
+                "--nocapture",
+                "--test-threads=1",
+            ])
             .env(CHILD, "1")
             .env("XDG_RUNTIME_DIR", &runtime)
             .env("WAYLAND_DISPLAY", "wayland-test")
@@ -250,8 +292,14 @@ mod tests {
             .status()
             .expect("start the second launch");
 
-        assert_eq!(status.code(), Some(0), "the second launch did not exit 0 (3 is a second copy running)");
-        let request = requests.recv_timeout(std::time::Duration::from_secs(5)).expect("the first copy was never asked");
+        assert_eq!(
+            status.code(),
+            Some(0),
+            "the second launch did not exit 0 (3 is a second copy running)"
+        );
+        let request = requests
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the first copy was never asked");
         assert_eq!(request["method"], "app.act");
         assert_eq!(request["params"]["action"], crate::present::ACTION);
         assert_eq!(request["params"]["args"]["display"], "wayland-test");

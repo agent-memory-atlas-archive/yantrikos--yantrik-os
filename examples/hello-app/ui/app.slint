@@ -1,0 +1,44 @@
+// The toy app's window: a count, a button, and what the last job said. Drawn from the kit and
+// the theme only; the design lint holds every screen to that.
+import { Theme, ThemeMode, AccentPreset } from "@yantrik-design/theme.slint";
+import { AppWindow } from "@yantrik-kit/app_window.slint";
+import { YButton } from "@yantrik-kit/y_button.slint";
+export { WindowChrome } from "@yantrik-kit/app_window.slint";
+export { ThemeMode, AccentPreset }
+
+export component HelloApp inherits AppWindow {
+    title: "Hello";
+    preferred-width: 360px;
+    preferred-height: 240px;
+
+    in-out property <int> count: 0;
+    in-out property <string> fetched: "";
+    in-out property <string> notice: "";
+    callback add-one();
+    callback fetch();
+
+    VerticalLayout {
+        padding: Theme.sp-6;
+        spacing: Theme.sp-4;
+        Text {
+            text: "Count: " + root.count;
+            font-size: Theme.fs-greeting;
+            color: Theme.text-primary;
+        }
+        HorizontalLayout {
+            spacing: Theme.sp-2;
+            YButton { label: "Add one"; clicked => { root.add-one(); } }
+            YButton { label: "Fetch"; variant: 1; clicked => { root.fetch(); } }
+        }
+        Text {
+            text: root.fetched;
+            font-size: Theme.fs-body;
+            color: Theme.text-secondary;
+        }
+        Text {
+            text: root.notice;
+            font-size: Theme.fs-caption;
+            color: Theme.text-dim;
+        }
+    }
+}

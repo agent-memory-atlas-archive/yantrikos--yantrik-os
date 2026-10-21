@@ -228,9 +228,9 @@ fn fold(name: &str) -> String {
 /// app that is closed.
 pub fn surface_id(name: &str) -> Option<&'static str> {
     let key = fold(name);
-    SURFACES.iter().find_map(|(id, others)| {
-        (*id == key || others.contains(&key.as_str())).then_some(*id)
-    })
+    SURFACES
+        .iter()
+        .find_map(|(id, others)| (*id == key || others.contains(&key.as_str())).then_some(*id))
 }
 
 /// The other names `app_id`'s surface answers to. Empty for an app with one name, and for a name
@@ -258,14 +258,14 @@ pub fn other_names(app_id: &str) -> &'static [&'static str] {
 // socket IO does not, so the RPC thread reads the files and spends any grant (see
 // `ControlRpc::dispatch`), and the registry decides with `gate::decide` inside the same turn of
 // the event loop as the handler.
-pub use yantrik_ipc_transport::gate::{
-    boot_id, configured_ceiling, configured_mode, decide, grant_of, mode_from, mode_path, open_ended,
-    permit, proc_start_ticks, spend_grants_with, unrecoverable, Authority, CallingAgent, Mode,
-    AGENT_TOKEN, DEFAULT_MODE, LADDER, MODES, MODE_FILE, OPEN_ENDED, SOCKET_FLOOR,
-    UNRECOVERABLE_PHRASES,
-};
 #[cfg(test)]
 use yantrik_ipc_transport::gate::{agent_token_of, ceiling_from, DEFAULT_CEILING};
+pub use yantrik_ipc_transport::gate::{
+    boot_id, configured_ceiling, configured_mode, decide, grant_of, mode_from, mode_path,
+    open_ended, permit, proc_start_ticks, spend_grants_with, unrecoverable, Authority,
+    CallingAgent, Mode, AGENT_TOKEN, DEFAULT_MODE, LADDER, MODES, MODE_FILE, OPEN_ENDED,
+    SOCKET_FLOOR, UNRECOVERABLE_PHRASES,
+};
 
 // ── What an app reports ─────────────────────────────────────────────
 //
@@ -302,7 +302,9 @@ thread_local! {
 // The handler signature is untouched: fourteen apps build `|args| { ... }` closures and none of
 // them has to change. A handler that cares reads `control::caller()`; every other one never
 // learns this exists.
-pub use yantrik_surface::{agent_token, answer_later, caller, AgentTokenScope, Caller, CallerScope};
+pub use yantrik_surface::{
+    agent_token, answer_later, caller, AgentTokenScope, Caller, CallerScope,
+};
 
 /// Whether the call being dispatched on this thread is an agent's rather than the person's: the
 /// mind's own account by the kernel's word, or any caller that presented an agent token, believed
@@ -314,7 +316,8 @@ pub use yantrik_surface::{agent_token, answer_later, caller, AgentTokenScope, Ca
 /// (`mind_view::requester_now`). A `describe` carries no token, so there only the mind account
 /// is seen.
 pub fn agent_is_calling() -> bool {
-    agent_token().is_some() || caller().is_some_and(|c| yantrik_ipc_transport::mind_door::is_mind(c.uid))
+    agent_token().is_some()
+        || caller().is_some_and(|c| yantrik_ipc_transport::mind_door::is_mind(c.uid))
 }
 
 // ── Whether a person allowed this call ──────────────────────────────
@@ -373,7 +376,11 @@ impl Drop for GrantedScope {
 /// harmless": an unknown action has no grade, and the honest answer to a question about one is
 /// a refusal, not a default.
 pub fn published_grade(action: &str) -> Option<&'static str> {
-    REGISTRY.with(|cell| cell.borrow().as_ref().and_then(|reg| reg.published_grade(action)))
+    REGISTRY.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|reg| reg.published_grade(action))
+    })
 }
 
 /// The description THIS app publishes for one of its own actions, beside [`published_grade`] and
@@ -382,7 +389,11 @@ pub fn published_grade(action: &str) -> Option<&'static str> {
 /// that it cannot be undone, or that it runs whatever it is given — is read on the card's path
 /// too, and the card and the dispatch cannot disagree about the shell's own actions.
 pub fn published_description(action: &str) -> Option<String> {
-    REGISTRY.with(|cell| cell.borrow().as_ref().and_then(|reg| reg.published_description(action)))
+    REGISTRY.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|reg| reg.published_description(action))
+    })
 }
 
 /// Re-declare the grade THIS app publishes for one of its own actions, while it is running.
@@ -404,7 +415,9 @@ pub fn published_description(action: &str) -> Option<String> {
 pub fn regrade(action: &str, permission: &'static str) -> Result<&'static str, String> {
     yantrik_surface::check_grade(action, permission)?;
     REGISTRY.with(|cell| match cell.borrow().as_ref() {
-        None => Err("this app published no control surface, so there is no grade to change".to_string()),
+        None => {
+            Err("this app published no control surface, so there is no grade to change".to_string())
+        }
         Some(registry) => registry.regrade(action, permission),
     })
 }
@@ -471,7 +484,9 @@ mod test_ui_thread {
                 }
             })
             .expect("stand-in UI thread");
-        is_ready.recv().expect("the stand-in installed its registry");
+        is_ready
+            .recv()
+            .expect("the stand-in installed its registry");
         STANDIN
             .set(Mutex::new(tx))
             .map_err(|_| ())
@@ -482,7 +497,9 @@ mod test_ui_thread {
     /// test but the socket ones, so nothing else in this module changes behaviour under
     /// `cfg(test)`.
     pub(super) fn post(job: Job) -> Result<(), Job> {
-        let Some(tx) = STANDIN.get() else { return Err(job) };
+        let Some(tx) = STANDIN.get() else {
+            return Err(job);
+        };
         let tx = tx.lock().unwrap_or_else(|e| e.into_inner());
         tx.send(job).map_err(|e| e.0)
     }
@@ -523,7 +540,10 @@ where
 
 /// The UI thread did not answer in time, or there is no window to answer.
 fn unanswered(message: String) -> ServiceError {
-    ServiceError { code: UNANSWERED, message }
+    ServiceError {
+        code: UNANSWERED,
+        message,
+    }
 }
 
 // ── The RPC surface ─────────────────────────────────────────────────
@@ -573,13 +593,15 @@ impl ServiceHandler for ControlRpc {
         match (answer, later) {
             // The work runs here, off the UI thread, and the view beside its result is read
             // again on the UI thread once it has.
-            (Ok(envelope), Some(later)) if method == "app.act" => finish_later(envelope, later, move || {
-                on_ui_thread(who, move |reg| {
-                    let _agent = AgentTokenScope::enter(token);
-                    reg.snapshot()
+            (Ok(envelope), Some(later)) if method == "app.act" => {
+                finish_later(envelope, later, move || {
+                    on_ui_thread(who, move |reg| {
+                        let _agent = AgentTokenScope::enter(token);
+                        reg.snapshot()
+                    })
+                    .ok()
                 })
-                .ok()
-            }),
+            }
             (answer, _) => answer,
         }
     }
@@ -623,25 +645,40 @@ impl ControlRpc {
                 // regrade the action between this read and the dispatch, the dispatch still
                 // decides on the grade it publishes then; the most that race can cost is the grant.
                 call.spend_grant(&mut authority, &self.app_id, who, || {
-                    let (name, args, reach) = (call.action.clone(), call.args.clone(), reach.clone());
+                    let (name, args, reach) =
+                        (call.action.clone(), call.args.clone(), reach.clone());
                     on_ui_thread(who, move |reg| {
-                        reg.within_reach(reach.as_ref(), &name, &args).and_then(|()| reg.check_call(&name, &args))
+                        reg.within_reach(reach.as_ref(), &name, &args)
+                            .and_then(|()| reg.check_call(&name, &args))
                     })
                     .map_err(unanswered)?
                     .map_err(refusal)
                 })?;
                 call.log(&action_id, &authority, who);
 
-                let ActCall { action, args, agent_token, expect_revision, .. } = call;
+                let ActCall {
+                    action,
+                    args,
+                    agent_token,
+                    expect_revision,
+                    ..
+                } = call;
                 on_ui_thread(who, move |reg| {
                     let _agent = AgentTokenScope::enter(agent_token);
                     // So a handler can tell the act a person just allowed from any other: see
                     // `call_was_granted`.
                     let _granted = GrantedScope::enter(authority.granted);
                     // The reach, on the grade this surface publishes now — the one `act` decides on.
-                    reg.within_reach(reach.as_ref(), &action, &args).and_then(|()| {
-                        reg.act(&action, &args, expect_revision.as_deref(), &action_id, &authority)
-                    })
+                    reg.within_reach(reach.as_ref(), &action, &args)
+                        .and_then(|()| {
+                            reg.act(
+                                &action,
+                                &args,
+                                expect_revision.as_deref(),
+                                &action_id,
+                                &authority,
+                            )
+                        })
                 })
                 .map_err(unanswered)?
                 // An action that legitimately refuses is an application error, not a transport
@@ -659,7 +696,10 @@ impl ControlRpc {
                 if action.is_empty() {
                     return Err(refusal("app.explain needs a non-empty `action`".into()));
                 }
-                let args = params.get("args").cloned().unwrap_or_else(|| serde_json::json!({}));
+                let args = params
+                    .get("args")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}));
                 on_ui_thread(who, move |reg| {
                     reg.explain(&action, &args).map(|explanation| {
                         serde_json::json!({
@@ -694,7 +734,9 @@ pub struct App {
 
 impl App {
     pub fn new(app_id: &str) -> Self {
-        Self { registry: Registry::new(app_id) }
+        Self {
+            registry: Registry::new(app_id),
+        }
     }
 
     /// What this app reports when asked. Runs on the UI thread; keep it cheap.
@@ -709,7 +751,10 @@ impl App {
     /// spent, so a rule belongs here rather than in each handler: an action added tomorrow is
     /// held to it without its author having to remember. The shell's rule is the locked desktop
     /// (#203). Runs on the UI thread.
-    pub fn state_rule(mut self, f: impl Fn(&str) -> Result<(), String> + Send + Sync + 'static) -> Self {
+    pub fn state_rule(
+        mut self,
+        f: impl Fn(&str) -> Result<(), String> + Send + Sync + 'static,
+    ) -> Self {
         self.registry.set_state_rule(Box::new(f));
         self
     }
@@ -734,8 +779,14 @@ impl App {
         // single-instance slot to show its window (`present`). An app that declared its own keeps
         // it. Not the desktop's own surface: nothing launches the shell a second time, and it has
         // its own way to the front (`windows::raise_shell`).
-        if self.registry.app_id() != "shell" && self.registry.published_grade(crate::present::ACTION).is_none() {
-            self.registry.add(crate::present::action(), Box::new(crate::present::handle));
+        if self.registry.app_id() != "shell"
+            && self
+                .registry
+                .published_grade(crate::present::ACTION)
+                .is_none()
+        {
+            self.registry
+                .add(crate::present::action(), Box::new(crate::present::handle));
         }
         let app_id = self.registry.app_id().to_string();
         let action_count = self.registry.action_count();
@@ -777,7 +828,10 @@ fn serve_rpc(app_id: &str, action_count: usize) {
                         "Control surface listening (app.describe / app.act)"
                     );
                     if let Err(e) = RpcServer::new(&address)
-                        .serve(Arc::new(ControlRpc { service_id: service_id.clone(), app_id }))
+                        .serve(Arc::new(ControlRpc {
+                            service_id: service_id.clone(),
+                            app_id,
+                        }))
                         .await
                     {
                         tracing::warn!(error = %e, "Control surface stopped");
@@ -870,7 +924,9 @@ fn link_names(dir: &std::path::Path, app_id: &str, others: &[&str]) -> Vec<Strin
 #[cfg(unix)]
 pub fn running_apps() -> Vec<String> {
     let dir = yantrik_ipc_transport::server::socket_dir();
-    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
     let mut ids: Vec<String> = entries
         .filter_map(|e| e.ok())
         .filter(|e| !e.file_type().is_ok_and(|kind| kind.is_symlink()))
@@ -907,17 +963,32 @@ mod tests {
     /// Authority that binds nothing: the ceiling and the mode both at the top of the ladder —
     /// full bypass, which asks about nothing, not even what cannot be undone.
     fn open() -> Authority {
-        Authority { ceiling: OPEN.into(), mode: Mode::named("bypass_all"), granted: false, asks_above: None }
+        Authority {
+            ceiling: OPEN.into(),
+            mode: Mode::named("bypass_all"),
+            granted: false,
+            asks_above: None,
+        }
     }
 
     /// A machine at `ceiling`, in a mode that asks about nothing under it: the ceiling tests.
     fn under(ceiling: &str) -> Authority {
-        Authority { ceiling: ceiling.into(), mode: Mode::named("bypass_all"), granted: false, asks_above: None }
+        Authority {
+            ceiling: ceiling.into(),
+            mode: Mode::named("bypass_all"),
+            granted: false,
+            asks_above: None,
+        }
     }
 
     /// An open ceiling and the mode under test, with or without a grant spent for the call.
     fn in_mode(mode: &str, granted: bool) -> Authority {
-        Authority { ceiling: OPEN.into(), mode: Mode::named(mode), granted, asks_above: None }
+        Authority {
+            ceiling: OPEN.into(),
+            mode: Mode::named(mode),
+            granted,
+            asks_above: None,
+        }
     }
 
     type Act = Box<dyn Fn(&serde_json::Value) -> Result<serde_json::Value, String>>;
@@ -972,7 +1043,11 @@ mod tests {
         for (id, others) in SURFACES {
             for name in std::iter::once(id).chain(others.iter()) {
                 assert!(seen.insert(*name), "`{name}` is claimed by two apps");
-                assert_eq!(fold(name), *name, "`{name}` is not folded, so nothing can match it");
+                assert_eq!(
+                    fold(name),
+                    *name,
+                    "`{name}` is not folded, so nothing can match it"
+                );
             }
         }
     }
@@ -990,8 +1065,14 @@ mod tests {
         let linked = link_names(&dir, "containers", others);
         assert_eq!(linked, vec!["container-manager".to_string()]);
         let link = dir.join("app-container-manager.sock");
-        assert_eq!(std::fs::read_link(&link).unwrap().to_str(), Some("app-containers.sock"));
-        assert_eq!(std::fs::read(&link).unwrap(), std::fs::read(&socket).unwrap());
+        assert_eq!(
+            std::fs::read_link(&link).unwrap().to_str(),
+            Some("app-containers.sock")
+        );
+        assert_eq!(
+            std::fs::read(&link).unwrap(),
+            std::fs::read(&socket).unwrap()
+        );
 
         // Run twice, as a reopened app does: the second link is the same link, not an error.
         assert_eq!(link_names(&dir, "containers", others).len(), 1);
@@ -1008,7 +1089,9 @@ mod tests {
 
     #[test]
     fn a_view_builds_an_object() {
-        let v = View::new("Notes — 3 open").with("count", 3).with("unsaved", true);
+        let v = View::new("Notes — 3 open")
+            .with("count", 3)
+            .with("unsaved", true);
         assert_eq!(v.summary, "Notes — 3 open");
         assert_eq!(v.state["count"], 3);
         assert_eq!(v.state["unsaved"], true);
@@ -1026,22 +1109,53 @@ mod tests {
                 Box::new(|args| Ok(serde_json::json!({ "renamed_to": args["to"].clone() }))),
             )],
         );
-        let answer = reg.act("rename", &serde_json::json!({"to": "x"}), None, "app-notes#1", &open()).unwrap();
+        let answer = reg
+            .act(
+                "rename",
+                &serde_json::json!({"to": "x"}),
+                None,
+                "app-notes#1",
+                &open(),
+            )
+            .unwrap();
         assert_eq!(answer["accepted"], true);
         assert_eq!(answer["result"]["renamed_to"], "x");
         assert_eq!(
-            reg.act("rename", &serde_json::json!({}), None, "app-notes#2", &open()).unwrap_err(),
+            reg.act(
+                "rename",
+                &serde_json::json!({}),
+                None,
+                "app-notes#2",
+                &open()
+            )
+            .unwrap_err(),
             "`rename` needs argument `to`"
         );
         assert_eq!(
-            reg.act("rename", &serde_json::json!({"to": true}), None, "app-notes#3", &open()).unwrap_err(),
+            reg.act(
+                "rename",
+                &serde_json::json!({"to": true}),
+                None,
+                "app-notes#3",
+                &open()
+            )
+            .unwrap_err(),
             "`rename` argument `to` must be a string, and a boolean arrived"
         );
         // An integer for text is its digits: the handler reads the type it declared.
-        let answer = reg.act("rename", &serde_json::json!({"to": 7}), None, "app-notes#5", &open()).unwrap();
+        let answer = reg
+            .act(
+                "rename",
+                &serde_json::json!({"to": 7}),
+                None,
+                "app-notes#5",
+                &open(),
+            )
+            .unwrap();
         assert_eq!(answer["result"]["renamed_to"], "7");
         assert_eq!(
-            reg.act("nope", &serde_json::json!({}), None, "app-notes#4", &open()).unwrap_err(),
+            reg.act("nope", &serde_json::json!({}), None, "app-notes#4", &open())
+                .unwrap_err(),
             "unknown action `nope`; this app offers: rename"
         );
     }
@@ -1051,11 +1165,21 @@ mod tests {
         // Same file, same key, same default as the shell's Settings screen — a boundary that
         // reads a different source than the one a person can see is a boundary nobody can
         // predict. Missing or unrecognised falls back to the shipped default, never open.
-        assert_eq!(ceiling_from("dark_mode: true\ntool_permission: standard\n"), "standard");
+        assert_eq!(
+            ceiling_from("dark_mode: true\ntool_permission: standard\n"),
+            "standard"
+        );
         assert_eq!(ceiling_from("tool_permission: \"safe\"\n"), "safe");
-        assert_eq!(ceiling_from("dark_mode: true\n"), DEFAULT_CEILING, "absent key");
+        assert_eq!(
+            ceiling_from("dark_mode: true\n"),
+            DEFAULT_CEILING,
+            "absent key"
+        );
         assert_eq!(ceiling_from(""), DEFAULT_CEILING, "empty file");
-        assert_eq!(ceiling_from("tool_permission: whenever-i-feel_like_it\n"), DEFAULT_CEILING);
+        assert_eq!(
+            ceiling_from("tool_permission: whenever-i-feel_like_it\n"),
+            DEFAULT_CEILING
+        );
     }
 
     #[test]
@@ -1069,18 +1193,32 @@ mod tests {
                 "shell",
                 None,
                 vec![
-                    (Action::new("files_delete", "Delete a file").risk("dangerous"), Box::new(|_| Ok(serde_json::Value::Null))),
-                    (Action::new("open_app", "Open an app"), Box::new(|_| Ok(serde_json::Value::Null))),
+                    (
+                        Action::new("files_delete", "Delete a file").risk("dangerous"),
+                        Box::new(|_| Ok(serde_json::Value::Null)),
+                    ),
+                    (
+                        Action::new("open_app", "Open an app"),
+                        Box::new(|_| Ok(serde_json::Value::Null)),
+                    ),
                 ],
             ))
         });
 
         assert_eq!(published_grade("files_delete"), Some("dangerous"));
-        assert_eq!(published_grade("open_app"), Some("standard"), "unstated risk is standard");
+        assert_eq!(
+            published_grade("open_app"),
+            Some("standard"),
+            "unstated risk is standard"
+        );
         assert_eq!(published_grade("no_such_action"), None);
 
         REGISTRY.with(|cell| *cell.borrow_mut() = None);
-        assert_eq!(published_grade("files_delete"), None, "and nothing is served here now");
+        assert_eq!(
+            published_grade("files_delete"),
+            None,
+            "and nothing is served here now"
+        );
     }
 
     #[test]
@@ -1101,21 +1239,37 @@ mod tests {
         });
         let act_under = |ceiling: &str, id: &str| {
             REGISTRY.with(|cell| {
-                cell.borrow().as_ref().unwrap().act("generate", &serde_json::json!({}), None, id, &under(ceiling))
+                cell.borrow().as_ref().unwrap().act(
+                    "generate",
+                    &serde_json::json!({}),
+                    None,
+                    id,
+                    &under(ceiling),
+                )
             })
         };
 
         assert!(act_under("standard", "studio#1").is_ok());
         assert_eq!(regrade("generate", "sensitive").unwrap(), "sensitive");
-        assert_eq!(published_grade("generate"), Some("sensitive"), "the two readers disagree");
+        assert_eq!(
+            published_grade("generate"),
+            Some("sensitive"),
+            "the two readers disagree"
+        );
         let err = act_under("standard", "studio#2").unwrap_err();
-        assert!(err.starts_with("CEILING:") && err.contains("graded `sensitive`"), "{err}");
+        assert!(
+            err.starts_with("CEILING:") && err.contains("graded `sensitive`"),
+            "{err}"
+        );
         assert!(act_under("sensitive", "studio#3").is_ok());
         // And `describe` — what a caller reads before deciding — reports the new grade, so the
         // card a person is shown is the card the dispatch will enforce.
         REGISTRY.with(|cell| {
             let described = cell.borrow().as_ref().unwrap().describe();
-            assert_eq!(described["actions"][0]["permission"], serde_json::json!("sensitive"));
+            assert_eq!(
+                described["actions"][0]["permission"],
+                serde_json::json!("sensitive")
+            );
         });
 
         // Down again, because the backend can be pointed back at a machine the person owns.
@@ -1131,8 +1285,14 @@ mod tests {
                 "studio",
                 None,
                 vec![
-                    (Action::new("generate", "Make a picture").risk("standard"), Box::new(|_| Ok(serde_json::Value::Null))),
-                    (Action::new("refresh", "Read the gallery again"), Box::new(|_| Ok(serde_json::Value::Null))),
+                    (
+                        Action::new("generate", "Make a picture").risk("standard"),
+                        Box::new(|_| Ok(serde_json::Value::Null)),
+                    ),
+                    (
+                        Action::new("refresh", "Read the gallery again"),
+                        Box::new(|_| Ok(serde_json::Value::Null)),
+                    ),
                 ],
             ))
         });
@@ -1141,14 +1301,28 @@ mod tests {
         // without checking it would do.
         let err = regrade("generate", "catastrophic").unwrap_err();
         assert!(err.contains("not a level this OS defines"), "{err}");
-        assert!(err.contains(LADDER[0]) && err.contains(LADDER[3]), "{err} does not name the ladder");
-        assert_eq!(published_grade("generate"), Some("standard"), "the grade moved anyway");
+        assert!(
+            err.contains(LADDER[0]) && err.contains(LADDER[3]),
+            "{err} does not name the ladder"
+        );
+        assert_eq!(
+            published_grade("generate"),
+            Some("standard"),
+            "the grade moved anyway"
+        );
 
         // Nor may one action's regrade touch another, or an action that does not exist.
         let err = regrade("no_such_action", "sensitive").unwrap_err();
         assert!(err.contains("no action `no_such_action`"), "{err}");
-        assert!(err.contains("generate") && err.contains("refresh"), "{err} does not name what is there");
-        assert_eq!(published_grade("refresh"), Some("standard"), "an unknown action regraded a known one");
+        assert!(
+            err.contains("generate") && err.contains("refresh"),
+            "{err} does not name what is there"
+        );
+        assert_eq!(
+            published_grade("refresh"),
+            Some("standard"),
+            "an unknown action regraded a known one"
+        );
 
         REGISTRY.with(|cell| *cell.borrow_mut() = None);
         let err = regrade("generate", "sensitive").unwrap_err();
@@ -1180,7 +1354,8 @@ mod tests {
                         Box::new(|_| Ok(serde_json::json!({"queued": 1}))),
                     ),
                     (
-                        Action::new("set_backend", "Choose where pictures are made").risk("sensitive"),
+                        Action::new("set_backend", "Choose where pictures are made")
+                            .risk("sensitive"),
                         Box::new(|_| {
                             // A handler, doing the one thing this function is for.
                             let now = regrade("generate", "sensitive")?;
@@ -1195,22 +1370,43 @@ mod tests {
             let installed = cell.borrow();
             let registry = installed.as_ref().unwrap();
             registry
-                .act("set_backend", &serde_json::json!({}), None, "studio#1", &under("sensitive"))
+                .act(
+                    "set_backend",
+                    &serde_json::json!({}),
+                    None,
+                    "studio#1",
+                    &under("sensitive"),
+                )
                 .expect("set_backend must not take the app down")
         });
         assert_eq!(answered["accepted"], serde_json::json!(true));
-        assert_eq!(answered["result"]["generate_is_graded"], serde_json::json!("sensitive"));
+        assert_eq!(
+            answered["result"]["generate_is_graded"],
+            serde_json::json!("sensitive")
+        );
 
         // And the move took effect for every reader, still from inside the same kind of borrow.
         REGISTRY.with(|cell| {
             let installed = cell.borrow();
             let registry = installed.as_ref().unwrap();
             let err = registry
-                .act("generate", &serde_json::json!({}), None, "studio#2", &under("standard"))
+                .act(
+                    "generate",
+                    &serde_json::json!({}),
+                    None,
+                    "studio#2",
+                    &under("standard"),
+                )
                 .unwrap_err();
-            assert!(err.starts_with("CEILING:") && err.contains("graded `sensitive`"), "{err}");
+            assert!(
+                err.starts_with("CEILING:") && err.contains("graded `sensitive`"),
+                "{err}"
+            );
             let described = registry.describe();
-            assert_eq!(described["actions"][0]["permission"], serde_json::json!("sensitive"));
+            assert_eq!(
+                described["actions"][0]["permission"],
+                serde_json::json!("sensitive")
+            );
         });
         assert_eq!(published_grade("generate"), Some("sensitive"));
 
@@ -1229,9 +1425,12 @@ mod tests {
                 "calendar",
                 Some(Box::new(|| View::new("Calendar"))),
                 vec![(
-                    Action::new("delete_event", "Take an event off the calendar. It is not recoverable")
-                        .risk("sensitive")
-                        .arg(Param::text("id")),
+                    Action::new(
+                        "delete_event",
+                        "Take an event off the calendar. It is not recoverable",
+                    )
+                    .risk("sensitive")
+                    .arg(Param::text("id")),
                     Box::new(move |_: &serde_json::Value| {
                         ran.set(true);
                         Ok(serde_json::json!({ "deleted": true }))
@@ -1241,21 +1440,45 @@ mod tests {
         };
         let ran = Rc::new(Cell::new(false));
         let err = delete(ran.clone())
-            .act("delete_event", &serde_json::json!({"id": "e1"}), None, "calendar#1", &in_mode("auto", false))
+            .act(
+                "delete_event",
+                &serde_json::json!({"id": "e1"}),
+                None,
+                "calendar#1",
+                &in_mode("auto", false),
+            )
             .unwrap_err();
-        assert!(err.starts_with("GRANT:") && err.contains("cannot be undone"), "{err}");
+        assert!(
+            err.starts_with("GRANT:") && err.contains("cannot be undone"),
+            "{err}"
+        );
         assert!(!ran.get(), "the handler must not have run");
 
         let ran = Rc::new(Cell::new(false));
         let err = delete(ran.clone())
-            .act("delete_event", &serde_json::json!({"id": "e1"}), None, "calendar#2", &in_mode("bypass", false))
+            .act(
+                "delete_event",
+                &serde_json::json!({"id": "e1"}),
+                None,
+                "calendar#2",
+                &in_mode("bypass", false),
+            )
             .unwrap_err();
-        assert!(err.contains("bypass mode, which asks before anything that cannot be undone"), "{err}");
+        assert!(
+            err.contains("bypass mode, which asks before anything that cannot be undone"),
+            "{err}"
+        );
         assert!(!ran.get(), "bypass still asks before a delete");
 
         let ran = Rc::new(Cell::new(false));
         delete(ran.clone())
-            .act("delete_event", &serde_json::json!({"id": "e1"}), None, "calendar#3", &in_mode("bypass_all", false))
+            .act(
+                "delete_event",
+                &serde_json::json!({"id": "e1"}),
+                None,
+                "calendar#3",
+                &in_mode("bypass_all", false),
+            )
             .expect("full bypass asks nobody");
         assert!(ran.get());
     }
@@ -1268,7 +1491,9 @@ mod tests {
             "blender",
             Some(Box::new(|| View::new("Blender \u{2014} cube.blend"))),
             vec![(
-                Action::new("render", "Render the scene").risk("sensitive").arg(Param::text("out")),
+                Action::new("render", "Render the scene")
+                    .risk("sensitive")
+                    .arg(Param::text("out")),
                 Box::new(move |args| {
                     ran.set(true);
                     Ok(serde_json::json!({ "rendered_to": args["out"].clone() }))
@@ -1343,7 +1568,12 @@ mod tests {
         std::sync::Mutex::new(Vec::new());
 
     fn allow(id: &str, app: &str, action: &str, args: serde_json::Value) {
-        ALLOWED.lock().unwrap_or_else(|e| e.into_inner()).push((id.into(), app.into(), action.into(), args));
+        ALLOWED.lock().unwrap_or_else(|e| e.into_inner()).push((
+            id.into(),
+            app.into(),
+            action.into(),
+            args,
+        ));
     }
 
     fn allowed(id: &str) -> Option<(String, String, serde_json::Value)> {
@@ -1356,7 +1586,11 @@ mod tests {
     }
 
     fn spent(id: &str) -> bool {
-        SPENT_GRANTS.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|g| g == id)
+        SPENT_GRANTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|g| g == id)
     }
 
     /// Who the stand-in was told is spending `id` (#182); `None` when it never saw the spend.
@@ -1371,8 +1605,14 @@ mod tests {
 
     /// Spend `id` for `blender.render`, graded `sensitive`, under `authority`, the way the RPC
     /// thread does before anything reaches the UI thread.
-    fn spend_for_render(mut authority: Authority, id: &str, args: &serde_json::Value) -> Result<Authority, String> {
-        authority.spend(id, "blender", "render", "sensitive", args, None).map(|()| authority)
+    fn spend_for_render(
+        mut authority: Authority,
+        id: &str,
+        args: &serde_json::Value,
+    ) -> Result<Authority, String> {
+        authority
+            .spend(id, "blender", "render", "sensitive", args, None)
+            .map(|()| authority)
     }
 
     /// A grant is spent on the RPC thread, before anything reaches the UI thread: a spent one,
@@ -1388,13 +1628,23 @@ mod tests {
         assert!(first.granted);
 
         let err = spend_for_render(open(), "fresh-1", &args).unwrap_err();
-        assert!(err.starts_with("GRANT:") && err.contains("already used"), "replayed: {err}");
+        assert!(
+            err.starts_with("GRANT:") && err.contains("already used"),
+            "replayed: {err}"
+        );
 
-        let err = spend_for_render(open(), "fresh-2", &serde_json::json!({"out": "y.png"})).unwrap_err();
-        assert!(err.starts_with("GRANT:") && err.contains("this call carries"), "swapped: {err}");
+        let err =
+            spend_for_render(open(), "fresh-2", &serde_json::json!({"out": "y.png"})).unwrap_err();
+        assert!(
+            err.starts_with("GRANT:") && err.contains("this call carries"),
+            "swapped: {err}"
+        );
 
         let err = spend_for_render(open(), "made-up", &args).unwrap_err();
-        assert!(err.starts_with("GRANT:") && err.contains("no approval request"), "invented: {err}");
+        assert!(
+            err.starts_with("GRANT:") && err.contains("no approval request"),
+            "invented: {err}"
+        );
     }
 
     /// #154, item 2: a grant spent before the grade was looked at, then refused by the ceiling,
@@ -1405,21 +1655,32 @@ mod tests {
         let args = serde_json::json!({"out": "x.png"});
 
         let err = spend_for_render(under("standard"), "fresh-154", &args).unwrap_err();
-        assert!(err.starts_with("CEILING:"), "the ceiling's refusal, not the grant's: {err}");
-        assert!(err.contains("graded `sensitive`") && err.contains("`standard` ceiling"), "{err}");
+        assert!(
+            err.starts_with("CEILING:"),
+            "the ceiling's refusal, not the grant's: {err}"
+        );
+        assert!(
+            err.contains("graded `sensitive`") && err.contains("`standard` ceiling"),
+            "{err}"
+        );
 
         let raised = spend_for_render(under("sensitive"), "fresh-154", &args)
             .expect("the refusal above the ceiling left the grant unspent");
         assert!(raised.granted);
         let err = spend_for_render(open(), "fresh-154", &args).unwrap_err();
-        assert!(err.contains("already used"), "and it still holds only once: {err}");
+        assert!(
+            err.contains("already used"),
+            "and it still holds only once: {err}"
+        );
 
         // And the dispatch reaches the same answer on the UI thread, whatever was spent: the
         // ceiling is decided again there, on the grade `describe` is showing at that moment.
         let mut granted = under("standard");
         granted.granted = true;
         let ran = Rc::new(Cell::new(false));
-        let err = render_surface(ran.clone()).act("render", &args, None, "blender#1", &granted).unwrap_err();
+        let err = render_surface(ran.clone())
+            .act("render", &args, None, "blender#1", &granted)
+            .unwrap_err();
         assert!(err.starts_with("CEILING:"), "{err}");
         assert!(!ran.get());
     }
@@ -1430,46 +1691,89 @@ mod tests {
     #[test]
     fn the_mode_comes_from_the_file_the_shell_writes() {
         let now = 1_800_000_000;
-        assert_eq!(mode_from(r#"{"mode":"auto","session_rules":[]}"#, now).name, "auto");
+        assert_eq!(
+            mode_from(r#"{"mode":"auto","session_rules":[]}"#, now).name,
+            "auto"
+        );
         let with_rule = mode_from(
             r#"{"mode":"ask","session_rules":[{"app":"calendar","action":"move_event"}]}"#,
             now,
         );
         assert_eq!(with_rule.name, "ask");
-        assert_eq!(with_rule.session_rules, vec![("calendar".to_string(), "move_event".to_string())]);
+        assert_eq!(
+            with_rule.session_rules,
+            vec![("calendar".to_string(), "move_event".to_string())]
+        );
 
         // Missing, empty, not JSON, or a mode this OS does not define: `ask`.
-        for text in ["", "{}", "mode: auto", r#"{"mode":"yolo"}"#, r#"{"mode":"BYPASS"}"#] {
+        for text in [
+            "",
+            "{}",
+            "mode: auto",
+            r#"{"mode":"yolo"}"#,
+            r#"{"mode":"BYPASS"}"#,
+        ] {
             assert_eq!(mode_from(text, now).name, DEFAULT_MODE, "{text:?}");
         }
 
         // A bypass with an end honours it: live before, back to what it was after — and a
         // "previous" of bypass, which the shell never writes, comes back as `ask`.
-        let bypass = format!(r#"{{"mode":"bypass","previous":"auto","bypass_expires_unix":{}}}"#, now + 60);
+        let bypass = format!(
+            r#"{{"mode":"bypass","previous":"auto","bypass_expires_unix":{}}}"#,
+            now + 60
+        );
         assert_eq!(mode_from(&bypass, now).name, "bypass");
         assert_eq!(mode_from(&bypass, now + 60).name, "auto");
-        let odd = format!(r#"{{"mode":"bypass","previous":"bypass","bypass_expires_unix":{}}}"#, now);
+        let odd = format!(
+            r#"{{"mode":"bypass","previous":"bypass","bypass_expires_unix":{}}}"#,
+            now
+        );
         assert_eq!(mode_from(&odd, now).name, DEFAULT_MODE);
-        assert_eq!(mode_from(r#"{"mode":"bypass","previous":"ask","bypass_expires_unix":null}"#, now).name, "bypass");
-        let full = format!(r#"{{"mode":"bypass_all","previous":"auto","bypass_expires_unix":{}}}"#, now + 60);
+        assert_eq!(
+            mode_from(
+                r#"{"mode":"bypass","previous":"ask","bypass_expires_unix":null}"#,
+                now
+            )
+            .name,
+            "bypass"
+        );
+        let full = format!(
+            r#"{{"mode":"bypass_all","previous":"auto","bypass_expires_unix":{}}}"#,
+            now + 60
+        );
         assert_eq!(mode_from(&full, now).name, "bypass_all");
-        assert_eq!(mode_from(&full, now + 60).name, "auto", "full bypass ends on time too");
+        assert_eq!(
+            mode_from(&full, now + 60).name,
+            "auto",
+            "full bypass ends on time too"
+        );
 
         // And each mode's column of the table: what it runs unasked.
         for (mode, top) in MODES {
             assert_eq!(LADDER[Mode::named(mode).allows()], top, "{mode}");
         }
-        assert_eq!(LADDER[Mode::named("yolo").allows()], "standard", "an unknown mode reads as ask");
+        assert_eq!(
+            LADDER[Mode::named("yolo").allows()],
+            "standard",
+            "an unknown mode reads as ask"
+        );
     }
 
     #[test]
     fn a_call_with_a_token_is_an_agent_and_the_persons_own_is_not() {
         let me = unsafe { libc::getuid() };
-        let _person = CallerScope::enter(Some(Caller { pid: 4242, uid: me, gid: me }));
+        let _person = CallerScope::enter(Some(Caller {
+            pid: 4242,
+            uid: me,
+            gid: me,
+        }));
         assert!(!agent_is_calling(), "the person's own account, no token");
         {
             let _agent = AgentTokenScope::enter(Some("tok-anything".into()));
-            assert!(agent_is_calling(), "a token, believed or not, is not the person");
+            assert!(
+                agent_is_calling(),
+                "a token, believed or not, is not the person"
+            );
         }
         assert!(!agent_is_calling(), "and the token goes with its call");
     }
@@ -1481,7 +1785,11 @@ mod tests {
         assert_eq!(agent_token_of(&params, &mut args).as_deref(), Some("tok-b"));
         assert_eq!(args, serde_json::json!({"command": "ls"}));
         let mut args = serde_json::json!({});
-        assert_eq!(agent_token_of(&serde_json::json!({"agent_token": " "}), &mut args), None, "blank is none");
+        assert_eq!(
+            agent_token_of(&serde_json::json!({"agent_token": " "}), &mut args),
+            None,
+            "blank is none"
+        );
     }
 
     // ── Across the hop, over a real socket ──
@@ -1601,9 +1909,13 @@ mod tests {
         use std::os::unix::net::UnixStream;
 
         let mut socket = UnixStream::connect(served_test_surface()).expect("connect");
-        socket.write_all(format!("{request}\n").as_bytes()).expect("write the request");
+        socket
+            .write_all(format!("{request}\n").as_bytes())
+            .expect("write the request");
         let mut line = String::new();
-        BufReader::new(socket).read_line(&mut line).expect("read the reply");
+        BufReader::new(socket)
+            .read_line(&mut line)
+            .expect("read the reply");
         serde_json::from_str(&line).expect(&line)
     }
 
@@ -1617,18 +1929,31 @@ mod tests {
     #[test]
     fn yos_check_reads_this_dispatch_as_the_protocol() {
         let address = served_test_surface();
-        let yos = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/yantrik-os/yos");
-        let run = std::process::Command::new("python3").arg(&yos).args(["check", address, "--json"]).output();
+        let yos =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/yantrik-os/yos");
+        let run = std::process::Command::new("python3")
+            .arg(&yos)
+            .args(["check", address, "--json"])
+            .output();
         let Ok(run) = run else {
             eprintln!("skipped: no python3 to run yos check with");
             return;
         };
         let text = String::from_utf8_lossy(&run.stdout);
-        let report: serde_json::Value = serde_json::from_str(&text)
-            .unwrap_or_else(|e| panic!("yos check --json said {text} ({e}); stderr: {}", String::from_utf8_lossy(&run.stderr)));
-        let rows = report["surfaces"][0]["checks"].as_array().cloned().unwrap_or_default();
+        let report: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|e| {
+            panic!(
+                "yos check --json said {text} ({e}); stderr: {}",
+                String::from_utf8_lossy(&run.stderr)
+            )
+        });
+        let rows = report["surfaces"][0]["checks"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
         let status = |name: &str| {
-            rows.iter().find(|r| r["check"] == name).map(|r| r["status"].as_str().unwrap_or("").to_string())
+            rows.iter()
+                .find(|r| r["check"] == name)
+                .map(|r| r["status"].as_str().unwrap_or("").to_string())
         };
         let failed: Vec<String> = rows
             .iter()
@@ -1636,17 +1961,35 @@ mod tests {
             .map(|r| format!("{}: {}", r["check"], r["saw"]))
             .collect();
         assert_eq!(
-            rows.iter().filter(|r| r["status"] == "fail").map(|r| r["check"].as_str().unwrap_or("")).collect::<Vec<_>>(),
+            rows.iter()
+                .filter(|r| r["status"] == "fail")
+                .map(|r| r["check"].as_str().unwrap_or(""))
+                .collect::<Vec<_>>(),
             vec!["schema", "grades"],
             "only the deliberately off-ladder `nuke` fails: {failed:#?}"
         );
         for check in [
-            "ping", "describe", "protocol", "params", "secrets", "revision", "method", "empty", "unknown",
-            "missing", "undeclared", "types", "stale",
+            "ping",
+            "describe",
+            "protocol",
+            "params",
+            "secrets",
+            "revision",
+            "method",
+            "empty",
+            "unknown",
+            "missing",
+            "undeclared",
+            "types",
+            "stale",
         ] {
             assert_eq!(status(check).as_deref(), Some("pass"), "{check}: {text}");
         }
-        assert_eq!(run.status.code(), Some(1), "a failed check is a non-zero exit");
+        assert_eq!(
+            run.status.code(),
+            Some(1),
+            "a failed check is a non-zero exit"
+        );
     }
 
     /// #137, over the wire: `describe` says which actions can speak about one call of
@@ -1668,8 +2011,16 @@ mod tests {
                 .get("explains")
                 .cloned()
         };
-        assert_eq!(explains("echo"), Some(serde_json::json!(true)), "the fact rides describe");
-        assert_eq!(explains("who"), None, "an action that declared none publishes what it always did");
+        assert_eq!(
+            explains("echo"),
+            Some(serde_json::json!(true)),
+            "the fact rides describe"
+        );
+        assert_eq!(
+            explains("who"),
+            None,
+            "an action that declared none publishes what it always did"
+        );
 
         let asked = |action: &str, args: serde_json::Value| {
             call(
@@ -1683,19 +2034,28 @@ mod tests {
         let reply = asked("echo", serde_json::json!({ "command": "ls" }));
         assert_eq!(reply["result"]["app"], "caller-test");
         assert_eq!(reply["result"]["action"], "echo");
-        assert_eq!(reply["result"]["explanation"], "this call echoes {\"command\":\"ls\"}");
+        assert_eq!(
+            reply["result"]["explanation"],
+            "this call echoes {\"command\":\"ls\"}"
+        );
 
         let reply = asked("who", serde_json::json!({}));
         assert_eq!(reply["error"]["code"], -32602, "{reply}");
         assert!(
-            reply["error"]["message"].as_str().unwrap().contains("`who` says nothing about one call"),
+            reply["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("`who` says nothing about one call"),
             "{reply}"
         );
 
         // An action the surface does not have is refused the way `act` refuses one.
         let reply = asked("nope", serde_json::json!({}));
         assert!(
-            reply["error"]["message"].as_str().unwrap().starts_with("unknown action `nope`"),
+            reply["error"]["message"]
+                .as_str()
+                .unwrap()
+                .starts_with("unknown action `nope`"),
             "{reply}"
         );
 
@@ -1717,31 +2077,53 @@ mod tests {
     #[test]
     fn a_malformed_call_is_refused_before_its_grant_is_spent_on_the_window_door() {
         spend_through_a_stand_in_shell();
-        allow("window-slow", "caller-test", "slow", serde_json::json!({"ms": 10}));
+        allow(
+            "window-slow",
+            "caller-test",
+            "slow",
+            serde_json::json!({"ms": 10}),
+        );
         let act = |args: serde_json::Value, grant: &str| {
-            call(&serde_json::json!({
-                "jsonrpc": "2.0", "id": 1, "method": "app.act",
-                "params": { "action": "slow", "args": args, "grant": grant },
-            })
-            .to_string())
+            call(
+                &serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1, "method": "app.act",
+                    "params": { "action": "slow", "args": args, "grant": grant },
+                })
+                .to_string(),
+            )
         };
 
         let reply = act(serde_json::json!({"ms": "ten"}), "window-slow");
         assert_eq!(
-            reply["error"]["message"], "`slow` argument `ms` must be an integer, and a string arrived",
+            reply["error"]["message"],
+            "`slow` argument `ms` must be an integer, and a string arrived",
             "{reply}"
         );
         let reply = act(serde_json::json!({"ms": 10, "loud": true}), "window-slow");
-        assert_eq!(reply["error"]["message"], "`slow` has no argument `loud`; it takes: ms, refuse", "{reply}");
-        assert!(!spent("window-slow"), "refused for its arguments, and the Allow was used up anyway");
+        assert_eq!(
+            reply["error"]["message"], "`slow` has no argument `loud`; it takes: ms, refuse",
+            "{reply}"
+        );
+        assert!(
+            !spent("window-slow"),
+            "refused for its arguments, and the Allow was used up anyway"
+        );
 
         let reply = act(serde_json::json!({"ms": 10}), "window-slow");
-        assert_eq!(reply["result"]["result"]["slept_ms"], 10, "the same grant, the arguments right: {reply}");
+        assert_eq!(
+            reply["result"]["result"]["slept_ms"], 10,
+            "the same grant, the arguments right: {reply}"
+        );
         assert!(spent("window-slow"));
 
         // Bound to the arguments as sent: `"10"` on the card is `"10"` on the call, and the
         // handler reads 10.
-        allow("window-slow-text", "caller-test", "slow", serde_json::json!({"ms": "10"}));
+        allow(
+            "window-slow-text",
+            "caller-test",
+            "slow",
+            serde_json::json!({"ms": "10"}),
+        );
         let reply = act(serde_json::json!({"ms": "10"}), "window-slow-text");
         assert_eq!(reply["result"]["result"]["slept_ms"], 10, "{reply}");
         assert!(spent("window-slow-text"));
@@ -1757,7 +2139,8 @@ mod tests {
         // The stand-in shell's reader holds `tok-reach-reviewer` to the reviewer's reach.
         spend_through_a_stand_in_shell();
         let act = |action: &str, token: &str, grant: Option<&str>| {
-            let mut params = serde_json::json!({ "action": action, "args": {}, "agent_token": token });
+            let mut params =
+                serde_json::json!({ "action": action, "args": {}, "agent_token": token });
             if let Some(grant) = grant {
                 params["grant"] = grant.into();
             }
@@ -1765,28 +2148,51 @@ mod tests {
         };
 
         let reply = act("echo", "tok-reach-reviewer", None);
-        assert_eq!(reply["result"]["result"]["agent_token"], "tok-reach-reviewer", "on its surfaces it runs: {reply}");
+        assert_eq!(
+            reply["result"]["result"]["agent_token"], "tok-reach-reviewer",
+            "on its surfaces it runs: {reply}"
+        );
 
         let reply = act("who", "tok-reach-reviewer", None);
         let err = reply["error"]["message"].as_str().unwrap_or_default();
-        assert!(err.starts_with("REACH: caller-test.who is outside the Reviewer's reach"), "{reply}");
+        assert!(
+            err.starts_with("REACH: caller-test.who is outside the Reviewer's reach"),
+            "{reply}"
+        );
         assert!(err.contains("`deepseek:c-reach1` is the Reviewer"), "{err}");
-        assert_eq!(reply["error"]["code"], -32602, "a policy answer, not a transport fault");
+        assert_eq!(
+            reply["error"]["code"], -32602,
+            "a policy answer, not a transport fault"
+        );
 
         // A grade off the ladder is refused by the reach before the machine's ceiling is asked.
         let reply = act("nuke", "tok-reach-reviewer", None);
-        assert!(reply["error"]["message"].as_str().unwrap_or_default().starts_with("REACH: caller-test.nuke is graded"), "{reply}");
+        assert!(
+            reply["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("REACH: caller-test.nuke is graded"),
+            "{reply}"
+        );
 
         // Refused by the reach, a person's Allow is not used up on it.
         let reply = act("who", "tok-reach-reviewer", Some("fresh-reach"));
-        assert!(reply["error"]["message"].as_str().unwrap_or_default().starts_with("REACH:"), "{reply}");
+        assert!(
+            reply["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("REACH:"),
+            "{reply}"
+        );
         spend_for_render(open(), "fresh-reach", &serde_json::json!({"out": "x.png"}))
             .expect("the reach's refusal spent nothing");
 
         // Another agent's token, with no reach, is not held; and the person's call has none.
         let reply = act("who", "tok-no-reach", None);
         assert!(reply["error"].is_null(), "{reply}");
-        let reply = call(r#"{"jsonrpc":"2.0","id":9,"method":"app.act","params":{"action":"who","args":{}}}"#);
+        let reply = call(
+            r#"{"jsonrpc":"2.0","id":9,"method":"app.act","params":{"action":"who","args":{}}}"#,
+        );
         assert!(reply["error"].is_null(), "{reply}");
     }
 
@@ -1796,7 +2202,9 @@ mod tests {
     fn the_caller_reaches_the_handler_across_the_ui_hop() {
         use std::os::unix::fs::MetadataExt;
 
-        let reply = call(r#"{"jsonrpc":"2.0","id":1,"method":"app.act","params":{"action":"who","args":{}}}"#);
+        let reply = call(
+            r#"{"jsonrpc":"2.0","id":1,"method":"app.act","params":{"action":"who","args":{}}}"#,
+        );
         let seen = &reply["result"]["result"];
         assert!(
             !seen.is_null(),
@@ -1809,9 +2217,17 @@ mod tests {
         );
         // The uid the kernel reported has to be the uid that owns the socket — this test is both
         // ends of the connection, so anything else means the field is not the peer's.
-        let owner = std::fs::metadata(served_test_surface()).expect("the socket exists").uid();
+        let owner = std::fs::metadata(served_test_surface())
+            .expect("the socket exists")
+            .uid();
         assert_eq!(seen["uid"].as_u64(), Some(u64::from(owner)), "{reply}");
-        assert!(reply["result"]["action_id"].as_str().unwrap().starts_with("app-caller-test#"), "{reply}");
+        assert!(
+            reply["result"]["action_id"]
+                .as_str()
+                .unwrap()
+                .starts_with("app-caller-test#"),
+            "{reply}"
+        );
     }
 
     /// The shell's `agent_run` owes its caller an exit code that may be minutes away. The handler
@@ -1825,7 +2241,9 @@ mod tests {
         served_test_surface();
         let asked = Instant::now();
         let slow = std::thread::spawn(|| {
-            call(r#"{"jsonrpc":"2.0","id":1,"method":"app.act","params":{"action":"slow","args":{"ms":1500}}}"#)
+            call(
+                r#"{"jsonrpc":"2.0","id":1,"method":"app.act","params":{"action":"slow","args":{"ms":1500}}}"#,
+            )
         });
 
         // While that one waits: another caller, another connection, served at once. `describe`
@@ -1841,22 +2259,37 @@ mod tests {
         );
 
         let reply = slow.join().expect("the slow call");
-        assert!(asked.elapsed() >= Duration::from_millis(1500), "the reply is the finished work");
+        assert!(
+            asked.elapsed() >= Duration::from_millis(1500),
+            "the reply is the finished work"
+        );
         assert_eq!(reply["result"]["accepted"], true, "{reply}");
-        assert_eq!(reply["result"]["result"]["slept_ms"], 1500, "the work's result, not the handler's: {reply}");
+        assert_eq!(
+            reply["result"]["result"]["slept_ms"], 1500,
+            "the work's result, not the handler's: {reply}"
+        );
         assert_eq!(
             reply["result"]["result"]["pid"].as_u64(),
             Some(u64::from(std::process::id())),
             "the caller read in the handler reached the work: {reply}"
         );
-        assert!(reply["result"]["revision"].as_str().is_some(), "the envelope keeps its view: {reply}");
+        assert!(
+            reply["result"]["revision"].as_str().is_some(),
+            "the envelope keeps its view: {reply}"
+        );
 
         // Work that refuses is refused to the caller, as a handler's refusal would be.
         let refused = call(
             r#"{"jsonrpc":"2.0","id":3,"method":"app.act","params":{"action":"slow","args":{"ms":10,"refuse":true}}}"#,
         );
-        assert_eq!(refused["error"]["message"], "refused after 10 ms", "{refused}");
-        assert_eq!(refused["error"]["code"], -32602, "an application refusal, not a transport fault");
+        assert_eq!(
+            refused["error"]["message"], "refused after 10 ms",
+            "{refused}"
+        );
+        assert_eq!(
+            refused["error"]["code"], -32602,
+            "an application refusal, not a transport fault"
+        );
 
         // And a wrong type is refused on the socket as it is in the dispatch, before the handler.
         let mistyped = call(
@@ -1923,28 +2356,57 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":1,"method":"app.act","params":{"action":"echo","args":{"command":"ls"},"agent_token":"tok-7f3a"}}"#,
         );
         let seen = &reply["result"]["result"];
-        assert_eq!(seen["agent_token"], "tok-7f3a", "the handler reads the token: {reply}");
-        assert_eq!(seen["args"], serde_json::json!({"command": "ls"}), "and its args are only args: {reply}");
+        assert_eq!(
+            seen["agent_token"], "tok-7f3a",
+            "the handler reads the token: {reply}"
+        );
+        assert_eq!(
+            seen["args"],
+            serde_json::json!({"command": "ls"}),
+            "and its args are only args: {reply}"
+        );
 
         // Smuggled inside `args` as well: taken out, not used, and not refused as an undeclared
         // argument either — the call goes on as if it had never been there.
         let reply = call(
             r#"{"jsonrpc":"2.0","id":2,"method":"app.act","params":{"action":"echo","args":{"command":"ls","agent_token":"smuggled"},"agent_token":"tok-7f3a"}}"#,
         );
-        assert_eq!(reply["result"]["result"]["args"], serde_json::json!({"command": "ls"}), "{reply}");
-        assert_eq!(reply["result"]["result"]["agent_token"], "tok-7f3a", "the one beside args wins: {reply}");
-        assert!(!reply.to_string().contains("smuggled"), "nothing in the reply carries it: {reply}");
+        assert_eq!(
+            reply["result"]["result"]["args"],
+            serde_json::json!({"command": "ls"}),
+            "{reply}"
+        );
+        assert_eq!(
+            reply["result"]["result"]["agent_token"], "tok-7f3a",
+            "the one beside args wins: {reply}"
+        );
+        assert!(
+            !reply.to_string().contains("smuggled"),
+            "nothing in the reply carries it: {reply}"
+        );
 
         // Only inside `args`: stripped, and the handler sees no token at all.
         let reply = call(
             r#"{"jsonrpc":"2.0","id":3,"method":"app.act","params":{"action":"echo","args":{"agent_token":"smuggled"}}}"#,
         );
-        assert_eq!(reply["result"]["result"]["args"], serde_json::json!({}), "{reply}");
-        assert!(reply["result"]["result"]["agent_token"].is_null(), "{reply}");
+        assert_eq!(
+            reply["result"]["result"]["args"],
+            serde_json::json!({}),
+            "{reply}"
+        );
+        assert!(
+            reply["result"]["result"]["agent_token"].is_null(),
+            "{reply}"
+        );
 
         // No token, no token.
-        let reply = call(r#"{"jsonrpc":"2.0","id":4,"method":"app.act","params":{"action":"echo","args":{}}}"#);
-        assert!(reply["result"]["result"]["agent_token"].is_null(), "{reply}");
+        let reply = call(
+            r#"{"jsonrpc":"2.0","id":4,"method":"app.act","params":{"action":"echo","args":{}}}"#,
+        );
+        assert!(
+            reply["result"]["result"]["agent_token"].is_null(),
+            "{reply}"
+        );
     }
 
     /// #154 through the real dispatch: the RPC thread asks the UI thread for the grade before it
@@ -1961,27 +2423,49 @@ mod tests {
                 "params": { "action": action, "args": args, "grant": grant },
             });
             let reply = call(&request.to_string());
-            reply["error"]["message"].as_str().unwrap_or_default().to_string()
+            reply["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
         };
 
         let err = act("nuke", serde_json::json!({}), "fresh-socket");
-        assert!(err.starts_with("CEILING:"), "the ceiling's answer, not the shell's: {err}");
+        assert!(
+            err.starts_with("CEILING:"),
+            "the ceiling's answer, not the shell's: {err}"
+        );
 
         let err = act("nope", serde_json::json!({}), "fresh-socket");
-        assert!(err.starts_with("unknown action `nope`"), "the app's answer, not the shell's: {err}");
+        assert!(
+            err.starts_with("unknown action `nope`"),
+            "the app's answer, not the shell's: {err}"
+        );
 
         // Past the ceiling the grant does go to the shell, and one that does not hold ends the
         // call in the shell's words.
         let err = act("who", serde_json::json!({}), "made-up");
-        assert!(err.starts_with("GRANT:") && err.contains("no approval request"), "{err}");
+        assert!(
+            err.starts_with("GRANT:") && err.contains("no approval request"),
+            "{err}"
+        );
 
         // What a grant is spent against is the arguments with any agent token a caller put among
         // them already lifted off (see `agent_token`): the shell is shown `{"command":"ls"}` and
         // the grant is bound to that, never to a token. The stand-in shell names what it was
         // handed, which is how this can be seen from here.
-        let err = act("echo", serde_json::json!({"command": "ls", "agent_token": "smuggled"}), "fresh-echo");
-        assert!(err.starts_with("GRANT:") && err.contains(r#"this call carries {"command":"ls"}"#), "{err}");
-        assert!(!err.contains("smuggled"), "the token reached the shell as an argument: {err}");
+        let err = act(
+            "echo",
+            serde_json::json!({"command": "ls", "agent_token": "smuggled"}),
+            "fresh-echo",
+        );
+        assert!(
+            err.starts_with("GRANT:") && err.contains(r#"this call carries {"command":"ls"}"#),
+            "{err}"
+        );
+        assert!(
+            !err.contains("smuggled"),
+            "the token reached the shell as an argument: {err}"
+        );
 
         // And the grant the two refusals carried was never spent.
         spend_for_render(open(), "fresh-socket", &serde_json::json!({"out": "x.png"}))
@@ -2011,7 +2495,10 @@ mod tests {
         };
 
         let reply = act("spend-182-agent", Some("tok-182"));
-        assert_eq!(reply["result"]["result"]["agent_token"], "tok-182", "the act itself ran: {reply}");
+        assert_eq!(
+            reply["result"]["result"]["agent_token"], "tok-182",
+            "the act itself ran: {reply}"
+        );
         assert_eq!(
             spend_caller("spend-182-agent"),
             Some(Some(("tok-182".to_string(), Some(std::process::id())))),
@@ -2019,8 +2506,15 @@ mod tests {
         );
 
         let reply = act("spend-182-person", None);
-        assert!(reply["result"].is_object(), "the same act with no token still runs: {reply}");
-        assert_eq!(spend_caller("spend-182-person"), Some(None), "no token, no agent claimed");
+        assert!(
+            reply["result"].is_object(),
+            "the same act with no token still runs: {reply}"
+        );
+        assert_eq!(
+            spend_caller("spend-182-person"),
+            Some(None),
+            "no token, no agent claimed"
+        );
     }
 
     /// Final review of the card fix: the shell refused an act a person had just allowed, because
@@ -2042,16 +2536,25 @@ mod tests {
         };
 
         let reply = act(Some("granted-seen"));
-        assert_eq!(reply["result"]["result"]["granted"], true, "the allowed act knows it: {reply}");
+        assert_eq!(
+            reply["result"]["result"]["granted"], true,
+            "the allowed act knows it: {reply}"
+        );
         let reply = act(None);
-        assert_eq!(reply["result"]["result"]["granted"], false, "nothing left over for the next call: {reply}");
+        assert_eq!(
+            reply["result"]["result"]["granted"], false,
+            "nothing left over for the next call: {reply}"
+        );
     }
 
     /// The guard puts back what was there, so a nested or panicking dispatch cannot leave the
     /// next call on this thread reading as allowed.
     #[test]
     fn a_grant_is_seen_for_its_own_call_only() {
-        assert!(!call_was_granted(), "outside a dispatch nothing was allowed");
+        assert!(
+            !call_was_granted(),
+            "outside a dispatch nothing was allowed"
+        );
         {
             let _allowed = GrantedScope::enter(true);
             assert!(call_was_granted());
@@ -2059,7 +2562,10 @@ mod tests {
                 let _inner = GrantedScope::enter(false);
                 assert!(!call_was_granted());
             }
-            assert!(call_was_granted(), "the inner call's end restores the outer one's");
+            assert!(
+                call_was_granted(),
+                "the inner call's end restores the outer one's"
+            );
         }
         assert!(!call_was_granted(), "and the grant goes with its call");
     }

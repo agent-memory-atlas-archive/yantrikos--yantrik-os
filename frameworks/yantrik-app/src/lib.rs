@@ -1,22 +1,39 @@
 //! YantrikApp: what every app's process is made of (design/app-framework-2026-10-21.md).
 //!
-//! Step 1 of that design: `yantrik-app-runtime`'s modules, moved here unchanged, so the `App`
-//! trait and the runner (step 2) are built beside them and not around them. Apps still reach
-//! these through `yantrik_app_runtime`, which re-exports every one, until each moves in its
-//! own framework pass.
+//! Step 1 of that design moved `yantrik-app-runtime`'s modules here unchanged; step 2 adds the
+//! `App` trait, the runner, the bridge, effects, jobs and timers beside them. Apps still reach
+//! the old modules through `yantrik_app_runtime`, which re-exports every one, until each moves
+//! in its own framework pass.
 
 pub use slint;
 
+pub mod app;
+pub mod boot;
 pub mod chrome;
 pub mod companion;
 pub mod control;
+pub mod cx;
+pub mod effects;
 pub mod event_loop;
 pub mod instance;
+pub mod jobs;
 pub mod present;
+pub mod queue;
+pub mod refused;
+pub mod runner;
 pub mod theme;
+pub mod timers;
 pub mod window;
 
+pub use app::{App, Boot, Changed, Event, ExitReason, Startup, WindowId};
+pub use boot::init_tracing;
+pub use cx::Cx;
+pub use effects::Effects;
 pub use event_loop::run_until_closed;
+pub use jobs::{Cancel, Concurrency, JobId, JobKey, Scope};
+pub use refused::{Explain, Refused};
+pub use runner::run;
+pub use timers::TimerId;
 pub use window::Window;
 // Moved to Foundation (L0): the one rule for an address, and the problem records every process
 // writes. Named here so the modules above keep their `crate::problems` paths.
@@ -33,5 +50,7 @@ pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-    ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
