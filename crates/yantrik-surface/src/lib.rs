@@ -90,6 +90,9 @@
 mod args;
 mod call;
 mod context;
+mod private;
+#[cfg(test)]
+mod private_tests;
 mod registry;
 mod surface;
 #[cfg(test)]
@@ -106,6 +109,9 @@ pub use call::{
 pub use context::{
     agent_token, answer_later, caller, off_the_reactor, AgentTokenScope, Caller, CallerScope, Later,
     LaterScope,
+};
+pub use private::{
+    finish_later_published, private_view, show_problem, PrivacySource, PRIVATE_SUMMARY, RESERVED_KEYS,
 };
 pub use registry::{
     check_grade, Describer, Handler, LocalRegistry, Registry, SharedDescriber, SharedHandler,

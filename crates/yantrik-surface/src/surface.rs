@@ -8,8 +8,9 @@ use yantrik_ipc_contracts::email::ServiceError;
 use yantrik_ipc_transport::gate::Authority;
 use yantrik_ipc_transport::server::{PeerCred, RpcServer, ServiceHandler};
 
-use crate::call::{finish_later, next_action_id, refusal, service_id_for, ActCall, NO_SUCH_METHOD};
+use crate::call::{next_action_id, refusal, service_id_for, ActCall, NO_SUCH_METHOD};
 use crate::context::{AgentTokenScope, Caller, CallerScope, LaterScope};
+use crate::private::finish_later_published;
 use crate::registry::{Registry, SharedDescriber, SharedHandler};
 
 /// One surface — what it reports, what it can be asked to do — answering `app.describe`,
@@ -103,7 +104,8 @@ impl Surface {
             "app.describe" => {
                 // Handlers that care who is asking read `caller()` inside describe as well.
                 let _scope = CallerScope::enter(peer.map(Caller::from));
-                Some(Ok(self.registry.describe()))
+                // Private mode read for this call, here on the worker (`crate::private`).
+                Some(Ok(self.registry.describe_in(yantrik_ipc_transport::privacy::is_private())))
             }
             "app.act" => Some(self.act(params, peer, Authority::now())),
             "app.explain" => Some(self.explain(params)),
@@ -171,18 +173,23 @@ impl Surface {
         call.log(&action_id, &authority, who);
 
         let ActCall { action, args, agent_token, expect_revision, .. } = call;
+        // What the reply may carry of the app: the private view while the person is private.
+        let private = yantrik_ipc_transport::privacy::is_private();
         let (answer, later) = {
             let _caller = CallerScope::enter(who);
             let _token = AgentTokenScope::enter(agent_token);
             let later = LaterScope::enter();
             let answer = self.registry.within_reach(reach.as_ref(), &action, &args).and_then(|()| {
-                self.registry.act(&action, &args, expect_revision.as_deref(), &action_id, &authority)
+                let expect = expect_revision.as_deref();
+                self.registry.act_in(&action, &args, expect, &action_id, &authority, private)
             });
             (answer, later.take())
         };
         let envelope = answer.map_err(refusal)?;
         match later {
-            Some(work) => finish_later(envelope, work, || Some(self.registry.snapshot())),
+            Some(work) => {
+                finish_later_published(envelope, work, |private| Some(self.registry.published(private)))
+            }
             None => Ok(envelope),
         }
     }

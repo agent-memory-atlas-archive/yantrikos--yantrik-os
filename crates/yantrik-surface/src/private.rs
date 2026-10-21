@@ -1,0 +1,176 @@
+//! Private mode, as a surface answers it (#924).
+//!
+//! While the person has Private mode on (`yantrik_ipc_transport::privacy`), no agent sees what an
+//! app holds. The mind door refuses every request outright, but the person's own socket cannot
+//! tell an agent from the person: a harness running as the person sends `describe` with no token,
+//! and so does `yos`. So every surface answers `app.describe` in Private mode with what it is and
+//! nothing of what it holds:
+//!
+//! - its id, its actions and their grades, as always: the shell builds approval cards from them,
+//!   and an action's declaration is the author's, not the person's;
+//! - `"private": true`, beside `app` and inside `state`;
+//! - [`PRIVATE_SUMMARY`] in place of the app's own line;
+//! - what the framework knows about its windows (`open`, `windows_open`), for a surface that has
+//!   them, so the shell and a Mind deciding whether to wait still know the app is there;
+//! - and of the app's own state, only the keys it listed as not personal
+//!   ([`Registry::show_in_private`]), each by name. None by default.
+//!
+//! The call is answered, not refused: a refusal would read as "the app is gone". The revision is
+//! the private view's, so it moves only when what is shown moves, and an `act`'s reply carries the
+//! same view, so no method reads around it. Nothing is cached: whoever serves the call reads
+//! Private mode for that call (the window's RPC thread, a service's worker), and an in-process
+//! read asks the registry's privacy source each time.
+
+use serde_json::{Map, Value};
+use yantrik_ipc_contracts::control_surface::View;
+use yantrik_ipc_contracts::email::ServiceError;
+
+use crate::call::finish_later;
+use crate::context::Later;
+use crate::registry::Registry;
+
+/// The line every surface's `summary` is while the person is in Private mode.
+pub const PRIVATE_SUMMARY: &str = "Private mode is on; this app's contents are hidden.";
+
+/// The keys the private view writes itself. An app cannot list one of these as a key of its own
+/// to show: the private view's word for them is the only one.
+pub const RESERVED_KEYS: &[&str] = &["private", "open", "windows_open"];
+
+/// The keys of [`RESERVED_KEYS`] a surface's presence supplies: what is known of its windows.
+const WINDOW_KEYS: [&str; 2] = ["open", "windows_open"];
+
+/// Where a registry's in-process reads learn whether the person is in Private mode. Not consulted
+/// by a door that read the file itself and said so ([`Registry::describe_in`]).
+pub type PrivacySource = dyn Fn() -> bool + Send + Sync;
+
+/// The view a surface publishes while the person is in Private mode: the neutral line, the
+/// marker, what `presence` says of its windows, and the app's own `shown` keys, nothing else.
+///
+/// `own` is the app's live view, read only when it listed keys to show; `presence` is the
+/// framework's, and only its window keys are taken from it.
+pub fn private_view(own: Option<&View>, shown: &[String], presence: Option<&View>) -> View {
+    let mut state = Map::new();
+    if let Some(own) = own.and_then(|v| v.state.as_object()) {
+        for key in shown {
+            if let Some(value) = own.get(key) {
+                state.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    if let Some(presence) = presence.and_then(|v| v.state.as_object()) {
+        for key in WINDOW_KEYS {
+            if let Some(value) = presence.get(key) {
+                state.insert(key.to_string(), value.clone());
+            }
+        }
+    }
+    state.insert("private".to_string(), Value::Bool(true));
+    View::new(PRIVATE_SUMMARY).state(Value::Object(state))
+}
+
+/// What is wrong with listing `key` as one to show in Private mode, or `None`.
+pub fn show_problem(key: &str) -> Option<String> {
+    if key.trim().is_empty() {
+        return Some("an empty key cannot be shown in Private mode".into());
+    }
+    RESERVED_KEYS.contains(&key).then(|| {
+        format!("`{key}` is written by the private view itself; an app cannot show its own under that name")
+    })
+}
+
+impl<D: ?Sized, H: ?Sized> Registry<D, H> {
+    /// Keep `key` of this surface's own `describe` state in the answer while the person is in
+    /// Private mode. Default-deny: a key not listed here is left out. List a key only when its
+    /// whole value says nothing about the person — a unit, a CPU figure — never a title, a name,
+    /// a path or a count of their things. A reserved or empty key is logged and not listed.
+    pub fn show_in_private(&mut self, key: &str) {
+        if let Some(problem) = show_problem(key) {
+            tracing::warn!(app = %self.app_id(), "{problem}");
+            return;
+        }
+        if !self.shown_in_private.iter().any(|k| k == key) {
+            self.shown_in_private.push(key.to_string());
+        }
+    }
+
+    /// What this surface says of its windows in Private mode: a view whose state carries `open`
+    /// and `windows_open`, read on every private answer. Every other key of it is dropped. A
+    /// window app's framework sets this; a service has no window and sets nothing.
+    pub fn set_presence(&mut self, f: Box<D>) {
+        self.presence = Some(f);
+    }
+
+    /// The keys this surface shows in Private mode, in the order they were listed.
+    pub fn shown_in_private(&self) -> &[String] {
+        &self.shown_in_private
+    }
+
+    /// What this surface's in-process reads ([`Registry::describe`], [`Registry::act`]) ask to
+    /// learn whether the person is in Private mode. Unset, they read the file the shell
+    /// publishes. A test pins its own app here; a door reads the file itself and passes the
+    /// answer to [`Registry::describe_in`] and [`Registry::act_in`].
+    pub fn set_privacy_source(&mut self, source: Box<PrivacySource>) {
+        self.privacy = Some(source);
+    }
+
+    /// Whether the person is in Private mode, as this surface's in-process reads see it now.
+    pub fn private_now(&self) -> bool {
+        match &self.privacy {
+            Some(source) => source(),
+            None => yantrik_ipc_transport::privacy::is_private(),
+        }
+    }
+}
+
+impl<D, H> Registry<D, H>
+where
+    D: ?Sized + Fn() -> View,
+    H: ?Sized + Fn(&Value) -> Result<Value, String>,
+{
+    /// What this surface publishes now: its live view, or in Private mode the private one. In
+    /// Private mode the app's own `describe` runs only when it listed keys to show.
+    pub fn published(&self, private: bool) -> View {
+        if !private {
+            return self.snapshot();
+        }
+        let own = (!self.shown_in_private.is_empty()).then(|| self.snapshot());
+        let presence = self.presence.as_ref().map(|f| f());
+        private_view(own.as_ref(), &self.shown_in_private, presence.as_ref())
+    }
+
+    /// The reply to `app.describe`, with Private mode as the door read it for this call.
+    pub fn describe_in(&self, private: bool) -> Value {
+        let view = self.published(private);
+        let mut answer = yantrik_ipc_contracts::control_surface::describe_json(self.app_id(), &view, &self.specs());
+        if private {
+            mark(&mut answer);
+        }
+        answer
+    }
+}
+
+/// [`finish_later`], with the view read again under Private mode as it is once the work is done:
+/// a deferred act can run for minutes, and the person may have turned Private mode on meanwhile.
+/// `read` is handed that answer and returns the view as published under it.
+pub fn finish_later_published(
+    envelope: Value,
+    later: Later,
+    read: impl FnOnce(bool) -> Option<View>,
+) -> Result<Value, ServiceError> {
+    let mut private = false;
+    let mut reply = finish_later(envelope, later, || {
+        private = yantrik_ipc_transport::privacy::is_private();
+        read(private)
+    })?;
+    if private {
+        mark(&mut reply);
+    }
+    Ok(reply)
+}
+
+/// `"private": true` beside `app` in a reply.
+pub fn mark(answer: &mut Value) {
+    if let Some(map) = answer.as_object_mut() {
+        map.insert("private".to_string(), Value::Bool(true));
+    }
+}
