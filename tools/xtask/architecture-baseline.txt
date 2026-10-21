@@ -36,7 +36,6 @@ size apps/snippet-manager/src/main.rs 1336
 size apps/studio/src/engine.rs 1712
 size apps/studio/src/tests.rs 1986
 size apps/text-editor/src/main.rs 1988
-size apps/weather/ui/weather.slint 1521
 size crates/yantrik-companion-core/src/config.rs 1839
 size crates/yantrik-companion-tools/src/browser.rs 2860
 size crates/yantrik-companion-tools/src/coder.rs 1593
