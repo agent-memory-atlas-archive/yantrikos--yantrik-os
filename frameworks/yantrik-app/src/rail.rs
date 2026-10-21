@@ -278,7 +278,8 @@ where
                 move |_| {
                     // While the person has Private mode on, no agent sees anything of this
                     // desktop: the app's context is not sent to the Mind (design §3.2). The
-                    // file is read here, off the UI thread; a missing file reads as private.
+                    // file is read here, off the UI thread, as the transport reads it: absent
+                    // is not private, unreadable or without a home is.
                     let answer = if privacy::is_private() {
                         Err(AskError::Failed(privacy::REFUSAL.into()))
                     } else {
@@ -323,20 +324,35 @@ where
             // Private mode, the ceiling and the mode are files: read off the UI thread, as the
             // surface's own RPC thread reads them, then applied on it. Private mode is the
             // person's switch over every agent act, and the rail's apply is one (design §3.2).
-            fx.spawn(move |_| {
-                if privacy::is_private() {
-                    return routed::<A>(RailCommand::Applied(Err(privacy::REFUSAL.into())));
-                }
-                routed::<A>(RailCommand::Authorised {
-                    apply,
-                    authority: Authority::now(),
-                })
-            });
+            // Keyed: a press replaces the read of an earlier press, whose late result is
+            // dropped, so a card dismissed since is never applied on a read made for it; a job
+            // the pool could not run reports, so no card is left applying.
+            fx.spawn_keyed_or(
+                JobKey {
+                    feature: "rail.apply",
+                    scope: Scope::App,
+                },
+                Concurrency::ReplacePrevious,
+                routed::<A>(RailCommand::Applied(Err(
+                    "The machine's authority could not be read; nothing was applied.".into(),
+                ))),
+                move |_| {
+                    if privacy::is_private() {
+                        return routed::<A>(RailCommand::Applied(Err(privacy::REFUSAL.into())));
+                    }
+                    routed::<A>(RailCommand::Authorised {
+                        apply,
+                        authority: Authority::now(),
+                    })
+                },
+            );
         }
         RailCommand::Authorised { apply, authority } => {
-            // Only the card the person pressed Apply on: one dismissed or replaced since is
-            // not applied on an authority that was read for it.
-            if !m.rail().is_applying() {
+            // Only the card the person pressed Apply on: an authority read for a card dismissed
+            // or replaced since is dropped — the apply must be the card shown, and a press must
+            // be in flight.
+            let shown = m.rail().proposal.as_ref().and_then(|p| p.applies.as_ref());
+            if !m.rail().is_applying() || shown != Some(&apply) {
                 return Ok(());
             }
             fx.apply_as_agent(apply, authority);

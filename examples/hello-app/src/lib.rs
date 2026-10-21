@@ -453,21 +453,10 @@ mod tests {
     fn the_rails_apply_holds_to_the_ceiling_the_card_shown_and_private_mode() {
         use yantrik_app::gate::{Authority, Mode};
         use yantrik_app::mind::fake::FakeMind;
-        let _env = RAIL_ENV.lock().unwrap_or_else(|p| p.into_inner());
-        // Private mode is a file under `$HOME`; this test owns a home of its own.
-        let home = std::env::temp_dir().join(format!("yantrik-hello-home-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&home);
-        std::fs::create_dir_all(home.join(".config/yantrik")).unwrap();
-        let privacy = home.join(".config/yantrik/privacy.json");
-        let old_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", &home);
-        let restore = |old: Option<std::ffi::OsString>| match old {
-            Some(h) => std::env::set_var("HOME", h),
-            None => std::env::remove_var("HOME"),
-        };
+        let home = RailHome::take("switches");
 
         let permissive = || Authority { ceiling: "dangerous".into(), mode: Mode::named("bypass_all"), granted: false, asks_above: None };
-        let mind = std::sync::Arc::new(FakeMind::new().answers((0..4).map(|_| Ok("ok".to_string()))));
+        let mind = std::sync::Arc::new(FakeMind::new().answers((0..6).map(|_| Ok("ok".to_string()))));
         let app = TestApp::<Hello>::start_at_with(Paths::temporary(Hello::ID), Vec::new(), mind.clone());
         app.run(Command::Add(4));
         app.advance(Duration::from_millis(300));
@@ -475,7 +464,8 @@ mod tests {
         let card_applies = |app: &TestApp<Hello>| app.model(|m| m.rail.proposal().unwrap().applies.clone().unwrap());
 
         // 1. A ceiling of `safe` refuses `add` (standard): the refusal lands in the card, the
-        //    count does not move, and the authority read later for this press is dropped.
+        //    count does not move, and the read the press started (it lands as `Authorised`
+        //    under this home's default authority) is dropped: nothing is applying by then.
         app.ui(|ui| ui.invoke_agent_suggestion_activated("double".into()));
         app.run_jobs();
         let apply = card_applies(&app);
@@ -513,26 +503,40 @@ mod tests {
         assert_eq!(app.model(|m| m.count), 8, "the one press applied, through the machine's own authority");
         assert!(app.model(|m| m.rail.proposal().is_none()));
 
-        // 4. Private mode: the ask is not sent, and an apply pressed while private is refused.
-        std::fs::write(&privacy, r#"{"private": true}"#).unwrap();
+        // 4. A read made for one press never applies another card: Apply on card 1, Dismiss,
+        //    a new card, Apply on card 2 — the stale `Authorised` for card 1 is dropped (the
+        //    keyed job replaced it), and card 2 applies through its own read.
         app.ui(|ui| ui.invoke_agent_suggestion_activated("double".into()));
         app.run_jobs();
-        assert_eq!(mind.prompts().len(), 3, "nothing of the desktop went to the Mind");
+        let stale = card_applies(&app);
+        app.run(Command::Rail(RailCommand::Apply));
+        app.ui(|ui| ui.invoke_proposal_dismissed());
+        app.ui(|ui| ui.invoke_agent_suggestion_activated("wipe".into()));
+        app.run_jobs();
+        app.run(Command::Rail(RailCommand::Apply));
+        app.run(Command::Rail(RailCommand::Authorised { apply: stale, authority: permissive() }));
+        assert_eq!(app.model(|m| m.count), 8, "card 1's intent was not applied on card 2's press");
+        app.run_jobs();
+        assert_eq!(app.ui(|ui| ui.get_proposal().body), "An agent may count but not reset.", "card 2 applied through its own read");
+        app.ui(|ui| ui.invoke_proposal_dismissed());
+
+        // 5. Private mode: the ask is not sent, and an apply pressed while private is refused.
+        home.privacy(true);
+        app.ui(|ui| ui.invoke_agent_suggestion_activated("double".into()));
+        app.run_jobs();
+        assert_eq!(mind.prompts().len(), 5, "nothing of the desktop went to the Mind");
         assert!(app.ui(|ui| ui.get_proposal().body).contains("Private mode"));
         app.ui(|ui| ui.invoke_proposal_dismissed());
-        std::fs::write(&privacy, r#"{"private": false}"#).unwrap();
+        home.privacy(false);
         app.ui(|ui| ui.invoke_agent_suggestion_activated("double".into()));
         app.run_jobs();
-        assert_eq!(mind.prompts().len(), 4);
-        std::fs::write(&privacy, r#"{"private": true}"#).unwrap();
+        assert_eq!(mind.prompts().len(), 6);
+        home.privacy(true);
         app.run(Command::Rail(RailCommand::Apply));
         app.run_jobs();
         assert_eq!(app.model(|m| m.count), 8, "not applied while private");
         assert!(app.ui(|ui| ui.get_proposal().body).contains("Private mode"));
         assert_eq!(app.ui(|ui| ui.get_proposal().verb), "Close");
-
-        restore(old_home);
-        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
@@ -681,8 +685,47 @@ mod tests {
         assert_eq!(app.ui(|ui| ui.get_notice()), "");
     }
 
-    /// The rail's jobs read Private mode from `$HOME`; the tests that touch it take turns.
+    /// The rail's jobs read Private mode and the machine's authority from `$HOME`. Each rail
+    /// test runs in a home of its own, one at a time, and the home it came from is put back
+    /// however the test ends (a panic included), so a desktop with Private mode on cannot fail
+    /// the tests and one failing test cannot poison the next.
     static RAIL_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct RailHome {
+        _turn: std::sync::MutexGuard<'static, ()>,
+        dir: std::path::PathBuf,
+        before: Option<std::ffi::OsString>,
+    }
+
+    impl RailHome {
+        fn take(name: &str) -> RailHome {
+            let turn = RAIL_ENV.lock().unwrap_or_else(|p| p.into_inner());
+            let dir = std::env::temp_dir().join(format!("yantrik-hello-home-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(dir.join(".config/yantrik")).unwrap();
+            let before = std::env::var_os("HOME");
+            std::env::set_var("HOME", &dir);
+            RailHome { _turn: turn, dir, before }
+        }
+
+        fn privacy(&self, private: bool) {
+            std::fs::write(
+                self.dir.join(".config/yantrik/privacy.json"),
+                format!(r#"{{"private": {private}}}"#),
+            )
+            .unwrap();
+        }
+    }
+
+    impl Drop for RailHome {
+        fn drop(&mut self) {
+            match self.before.take() {
+                Some(h) => std::env::set_var("HOME", h),
+                None => std::env::remove_var("HOME"),
+            }
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
 
     /// The rail: fed by the model, refreshed on a change (debounced) and when the Mind's reach
     /// changes; a suggestion asks the Mind from a job; the answer is a card; applying it runs
@@ -692,7 +735,7 @@ mod tests {
         use yantrik_app::gate::{Authority, Mode};
         use yantrik_app::mind::fake::FakeMind;
         use yantrik_app::slint::Model as _;
-        let _env = RAIL_ENV.lock().unwrap_or_else(|p| p.into_inner());
+        let _home = RailHome::take("follows");
         // Three asks below: "double", "wipe", "double" again.
         let mind = std::sync::Arc::new(FakeMind::new().answers((0..3).map(|_| Ok("ok".to_string()))));
         let app = TestApp::<Hello>::start_at_with(Paths::temporary(Hello::ID), Vec::new(), mind.clone());
