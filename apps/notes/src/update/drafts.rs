@@ -11,7 +11,7 @@
 use std::path::Path;
 
 use yantrik_app::documents::draft::ENVELOPE_VERSION;
-use yantrik_app::documents::{Document, DraftState, Envelope, Source};
+use yantrik_app::documents::{Document, DraftState, Envelope, Fingerprint, OutsideState, Source};
 use yantrik_app::effects::Effects;
 
 use crate::model::{Model, NoteFile};
@@ -42,13 +42,25 @@ pub fn sync(m: &mut Model, fx: &mut Effects<Notes>) {
     }
 }
 
-/// The draft owed for this document now, if one is (the framework's rule, `draft_owed`), in an
-/// envelope whose baseline is the note's text and sidecar together (`recovery::base_of`), not
-/// the document's text-only one.
+/// The draft owed for this document now, if one is (the framework's rule, `draft_owed`).
+///
+/// Its baseline says what the draft was written over, and a start puts the draft back cleanly
+/// only when the files still match it. While the document is in step with what `on_disk` says
+/// (nothing outside it, and its own baseline is `on_disk`'s text), that is the note's text and
+/// sidecar together (`recovery::base_of`), so the person's own sidecar change restores cleanly.
+/// Otherwise `on_disk` is not what the edits were written over: a conflict held by
+/// `follow::hold` records the other program's version there, and a file gone records none.
+/// Then the document's own text-only baseline is kept, which never equals a `base_of` value, so
+/// the draft comes back as the conflict (or the deletion) it was, never as a clean replace. A
+/// save that left our sidecar unsure (`meta_unsure`) errs the same way: the file's sidecar is
+/// not `on_disk`'s, so the two cannot match.
 pub(super) fn owed(d: &Document<NoteText>, file: &NoteFile) -> Option<(String, Vec<u8>)> {
     let (name, bytes) = d.draft_owed(now_ms())?;
     let Some(path) = d.source.path() else { return Some((name, bytes)) };
-    envelope(path, &d.content, d.seq, base_of(file.on_disk.as_ref()))
+    let text_of = |t: &NoteText| Fingerprint::of_bytes(t.text.as_bytes());
+    let in_step = d.outside == OutsideState::Clean && d.baseline == file.on_disk.as_ref().map(text_of);
+    let baseline = if in_step { base_of(file.on_disk.as_ref()) } else { d.baseline.clone() };
+    envelope(path, &d.content, d.seq, baseline)
 }
 
 /// A document is closing: a draft it kept is removed when nothing in it is unsaved. A document
@@ -98,7 +110,7 @@ pub(super) fn envelope(
     path: &Path,
     content: &NoteText,
     seq: u64,
-    baseline: Option<yantrik_app::documents::Fingerprint>,
+    baseline: Option<Fingerprint>,
 ) -> Option<(String, Vec<u8>)> {
     let source = Source::File(path.to_path_buf());
     let envelope = Envelope {

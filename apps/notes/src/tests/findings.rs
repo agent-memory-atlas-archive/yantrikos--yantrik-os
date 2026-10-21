@@ -396,3 +396,54 @@ fn a_kept_version_is_said_even_on_a_stale_landing() {
     assert!(app.model(|m| m.library.iter().any(|n| n.id == "recovered-late.md")));
 }
 
+/// #917 delta review E: a conflict held because our last version could not be kept (finding 5)
+/// survives a crash as a conflict. Its draft records what the edits were written over, not the
+/// other program's version that `on_disk` holds while the conflict is held, so Restore after the
+/// start never replaces theirs.
+#[test]
+fn a_held_conflict_comes_back_as_a_conflict_after_a_crash() {
+    let (app, path, stale) = saved_twice();
+    let disk = failing(&app);
+    disk.fail(Step::Write, "pending.json", None);
+    written_back(&app, &path, &stale);
+    assert!(matches!(outside(&app), OutsideState::Conflict { .. }), "held");
+    disk.heal();
+    app.run_writes();
+    let app = super::killed_and_started_again(app);
+    super::act(&app, "restore_draft", serde_json::json!({})).expect("restored");
+    assert!(matches!(outside(&app), OutsideState::Conflict { .. }), "{:?}", outside(&app));
+    assert_eq!(file(&path), stale, "the other program's version is untouched");
+    assert_eq!(text(&app), MINE);
+    app.ui(|ui| ui.invoke_action("keep-mine".into()));
+    settle(&app);
+    assert_eq!(kept_as(&app, "copy-"), vec![MINE.to_string()], "Keep mine keeps my version");
+    assert_eq!(file(&path), stale);
+}
+
+/// The same when the file was gone by the time it was read: the draft comes back as the
+/// deletion it was, offering Save as new, and never makes the file again unasked.
+#[test]
+fn a_held_deletion_comes_back_as_a_deletion_after_a_crash() {
+    let (app, path, stale) = saved_twice();
+    let disk = failing(&app);
+    disk.fail(Step::Write, "pending.json", None);
+    std::fs::write(&path, &stale).unwrap();
+    app.look_at_files();
+    app.look_at_files();
+    assert_eq!(app.jobs_waiting(), 1, "the note is read again");
+    std::fs::remove_file(&path).unwrap();
+    settle(&app);
+    assert_eq!(outside(&app), OutsideState::Deleted, "held as the deletion it is");
+    disk.heal();
+    app.run_writes();
+    let app = super::killed_and_started_again(app);
+    super::act(&app, "restore_draft", serde_json::json!({})).expect("restored");
+    assert_eq!(outside(&app), OutsideState::Deleted, "{:?}", outside(&app));
+    assert!(!path.exists(), "the file is not made again");
+    assert_eq!(bar(&app), 2, "Save as new is offered");
+    app.ui(|ui| ui.invoke_action("keep-mine".into()));
+    settle(&app);
+    assert_eq!(kept_as(&app, "copy-"), vec![MINE.to_string()], "and keeps my version as a new note");
+    assert!(!path.exists());
+}
+
