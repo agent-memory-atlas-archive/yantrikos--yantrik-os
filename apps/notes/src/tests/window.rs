@@ -239,3 +239,32 @@ fn the_outside_bar_and_the_comparison_are_drawn_and_answer_the_keys() {
     assert_eq!(app.model(|m| (m.pane.dialog, m.pane.theirs.is_none())), (0, true), "closed, and forgotten");
     assert_eq!(ui(&app, |ui| ui.get_outside()), 1, "the choice is still to be made");
 }
+
+/// The recovery bar and the close prompt, drawn: kit buttons the person can press, and Escape is
+/// the prompt's Cancel.
+#[test]
+fn the_recovery_bar_and_the_close_prompt_are_drawn_and_answer() {
+    let (app, path) = super::with_note("Kept for later");
+    app.run(crate::command::Command::Edit("# Kept for later\n\ntyped before the crash".into()));
+    app.run_writes();
+    let app = super::killed_and_started_again(app);
+    ui(&app, |ui| {
+        ui.show().unwrap();
+        ui.window().set_size(slint::PhysicalSize::new(1120, 760));
+    });
+    assert!(ui(&app, |ui| ui.get_recovery_said().to_string()).contains("Kept for later"));
+    screenshot(&app, "notes-recovery-bar.png");
+    ui(&app, |ui| ui.invoke_action("restore-draft".into()));
+    settle(&app);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Kept for later\n\ntyped before the crash");
+    ui(&app, |ui| {
+        ui.set_content("# Kept for later\n\nand more".into());
+        ui.invoke_edited("# Kept for later\n\nand more".into());
+    });
+    app.close_requested(yantrik_app::app::WindowId::PRIMARY);
+    assert_eq!(ui(&app, |ui| ui.get_dialog()), crate::update::closing::CLOSE_DIALOG);
+    screenshot(&app, "notes-close-prompt.png");
+    app.ui(|ui| tap(ui, &SharedString::from(Key::Escape)));
+    assert_eq!(ui(&app, |ui| ui.get_dialog()), 0, "Escape is Cancel");
+    assert!(app.model(|m| m.closing.is_none()) && app.exit_reason().is_none());
+}

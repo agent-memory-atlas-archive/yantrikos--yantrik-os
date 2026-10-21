@@ -2,7 +2,7 @@
 
 use yantrik_app::effects::Effects;
 
-use super::{editing, library, navigate, outside, reblock, saving};
+use super::{closing, editing, library, navigate, outside, reblock, recovery, saving};
 use crate::command::{Resolution, Step, WindowAction};
 use crate::model::{Cue, Model, Pending};
 use crate::store::expand_home;
@@ -39,6 +39,10 @@ pub fn act(m: &mut Model, fx: &mut Effects<Notes>, action: WindowAction) {
         WindowAction::Undo => editing::undo(m, fx, false),
         WindowAction::Redo => editing::undo(m, fx, true),
         WindowAction::NotNow => outside::not_now(m, fx),
+        // The close prompt answers while a save it asked for is in flight.
+        WindowAction::Close(choice) => closing::answer(m, fx, choice),
+        // Drops a draft, which is not the store's: nothing to wait for.
+        WindowAction::DiscardDraft => recovery::discard(m, fx),
         other => {
             if may_go_on(m, fx, &other) {
                 guarded(m, fx, other);
@@ -99,6 +103,7 @@ fn guarded(m: &mut Model, fx: &mut Effects<Notes>, action: WindowAction) {
         WindowAction::KeepMine => outside::resolve(m, fx, Resolution::KeepMine),
         WindowAction::TakeTheirs => outside::resolve(m, fx, Resolution::TakeTheirs),
         WindowAction::Compare => outside::compare(m, fx),
+        WindowAction::RestoreDraft => recovery::restore(m, fx),
         WindowAction::Import => open_dialog(m, fx, Dialog::Import),
         WindowAction::Export => {
             if m.current().is_some() {
@@ -118,7 +123,9 @@ fn guarded(m: &mut Model, fx: &mut Effects<Notes>, action: WindowAction) {
         | WindowAction::Preview
         | WindowAction::Undo
         | WindowAction::Redo
-        | WindowAction::NotNow => {}
+        | WindowAction::NotNow
+        | WindowAction::Close(_)
+        | WindowAction::DiscardDraft => {}
     }
 }
 

@@ -1,6 +1,6 @@
 //! What a mind may ask Notes by name: the twenty-one actions worded, argued and graded as they
-//! always were, and the three choices about an outside change (step 8d), each the command its
-//! window action runs.
+//! always were, the three choices about an outside change (step 8d) and the two about unsaved
+//! text kept from before Notes closed (8d-3), each the command its window action runs.
 //!
 //! A description is written at the definition site of every action, and [`act`] and [`arg`]
 //! refuse to build one that is a placeholder: every description used to be `"Notes: {name}"`
@@ -478,5 +478,36 @@ pub fn table(table: &mut Intents<Notes>) {
         )
         .risk("safe"),
         |_| Ok(Act::Compare),
+    );
+
+    // The recovery bar's choices (step 8d-3), the same commands its buttons run, about the text a
+    // run of Notes kept and did not save. `describe.recovery` lists what is offered, the first
+    // being the one these act on.
+    add(
+        table,
+        // Sensitive: the text in the note is replaced by the text kept from before Notes closed,
+        // and saved. When the note's file changed since, nothing is replaced: the outside choices
+        // are offered instead.
+        act(
+            "restore_draft",
+            "Put back the unsaved text Notes kept from before it closed (`describe.recovery`, the \
+             first one) into its note, open it, and save it. If the note's file changed since, \
+             nothing is replaced: `describe.outside` becomes `conflict` and the outside choices apply.",
+        )
+        .risk("sensitive"),
+        |_| Ok(Act::RestoreDraft),
+    );
+
+    add(
+        table,
+        // Dangerous: the kept text is the only copy of what was typed before Notes closed, and it
+        // is removed for good. The note itself stays as its file holds it.
+        act(
+            "discard_draft",
+            "Throw away the unsaved text Notes kept from before it closed (`describe.recovery`, the \
+             first one). The note stays as its file holds it; the text cannot be got back.",
+        )
+        .risk("dangerous"),
+        |_| Ok(Act::DiscardDraft),
     );
 }

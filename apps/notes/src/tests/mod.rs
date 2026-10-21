@@ -8,20 +8,23 @@ use std::sync::Arc;
 
 use serde_json::Value;
 use yantrik_app::documents::disk::FaultyDisk;
-use yantrik_app::documents::OutsideState;
+use yantrik_app::documents::{OutsideState, Source};
 use yantrik_testing::TestApp;
 
 use crate::command::Command;
 use crate::update::{said, AUTOSAVE_AFTER};
 use crate::Notes;
 
+mod closing;
 mod failures;
+mod findings;
 mod follow;
 mod kept;
 mod outside;
 mod parity;
 mod read_notes;
 mod read_only;
+mod recovery;
 mod resolve;
 mod saving;
 mod startup;
@@ -136,4 +139,20 @@ pub fn bar(app: &TestApp<Notes>) -> i32 {
 /// What a save refused over a file another program changed says.
 pub fn not_saved_over() -> String {
     said::blocked(&OutsideState::Conflict { now: None }).to_string()
+}
+
+/// Where the draft of the note at `path` is kept.
+pub fn draft_file(app: &TestApp<Notes>, path: &Path) -> PathBuf {
+    let key = Source::File(path.to_path_buf()).key();
+    yantrik_app::drafts::path_in(app.paths().state_dir(), &key)
+}
+
+/// The same app, started again at its files after it was dropped with no shutdown: a crash, a
+/// `kill -9`. Nothing it had not handed the disk survives.
+pub fn killed_and_started_again(app: TestApp<Notes>) -> TestApp<Notes> {
+    let paths = app.paths();
+    drop(app);
+    let again = TestApp::<Notes>::start_at(paths, Vec::new());
+    settle(&again);
+    again
 }

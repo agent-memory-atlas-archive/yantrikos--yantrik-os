@@ -6,7 +6,7 @@ use yantrik_app::documents::OutsideState;
 
 use crate::model::{Cue, Model};
 use crate::note::NoteText;
-use crate::update::said;
+use crate::update::{closing, recovery, said};
 use crate::{BookRow, NoteRow, NotesApp, PreviewBlock};
 
 /// The busy flag, the footer's save state, the notice line, and whether the library takes edits.
@@ -24,7 +24,8 @@ pub const FIELDS: &str = "fields";
 pub const CHROME: &str = "chrome";
 pub const LIBRARY: &str = "library";
 pub const PREVIEW: &str = "preview";
-/// What an outside change asks of the person: the bar, and the file's side of the comparison.
+/// What an outside change asks of the person (the bar, and the file's side of the comparison),
+/// and what the recovery bar offers back.
 pub const OUTSIDE: &str = "outside";
 /// Focus, caret and scroll, once.
 pub const CUES: &str = "cues";
@@ -56,6 +57,9 @@ pub fn render(ui: &NotesApp, m: &Model, changed: &Changed) {
         ui.set_tags(m.pane.tags.clone().into());
     }
     if changed.has(CHROME) {
+        let (heading, sentence) = closing::prompt(m).unwrap_or_default();
+        ui.set_close_heading(heading.into());
+        ui.set_close_said(sentence.into());
         ui.set_folder(m.pane.folder.clone().into());
         ui.set_query(m.pane.query.clone().into());
         ui.set_preview(m.pane.preview);
@@ -79,6 +83,11 @@ pub fn render(ui: &NotesApp, m: &Model, changed: &Changed) {
         ui.set_theirs_gone(m.pane.theirs.is_none());
         ui.set_mine_fields(current.as_ref().map(|c| fields_line(c.content())).unwrap_or_default().into());
         ui.set_theirs_fields(m.pane.theirs.as_ref().map(fields_line).unwrap_or_default().into());
+        let offered = recovery::shown(m).map(|o| said::offer(&o.content.title()));
+        ui.set_recovery_said(offered.unwrap_or_default().into());
+        // The note an offer is for takes no keys until the person chooses.
+        let waiting = current.as_ref().is_some_and(|c| m.recovery.offer_for(c.id()).is_some());
+        ui.set_recovering(waiting);
     }
     if changed.has(LIBRARY) {
         library(ui, m);

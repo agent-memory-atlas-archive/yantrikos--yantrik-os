@@ -18,10 +18,12 @@ pub struct Resolved {
 /// A note with nothing unsaved, read again after another program changed it.
 #[derive(Debug, Clone)]
 pub struct Reread {
-    /// Our own last write, kept as a note of its own before anything replaces it; `None` when
-    /// the window held no write of ours.
-    pub kept: Option<Note>,
-    /// What the note's files hold now, as in [`Resolved::theirs`].
+    /// Our own last write, kept as a note of its own before anything replaces it: `Ok(None)` when
+    /// there was nothing of ours to keep, `Err` when it could not be kept (the caller must not
+    /// replace it then).
+    pub kept: Result<Option<Note>, String>,
+    /// What the note's files hold now, as in [`Resolved::theirs`]: read whether or not ours was
+    /// kept, so a version that could not be kept can be held against it as a conflict.
     pub theirs: Result<Option<NoteText>, String>,
 }
 
@@ -35,10 +37,10 @@ impl Vault {
     }
 
     /// Reads note `id` again, keeping `ours` (a new note's name and our last write) first when
-    /// given. If ours cannot be kept, nothing is read: the caller must not replace it.
-    pub fn reread(&self, id: &str, ours: Option<(&str, &NoteText)>) -> Result<Reread, String> {
-        let kept = ours.map(|(kept_id, text)| self.keep_as(kept_id, text)).transpose()?;
-        Ok(Reread { kept, theirs: self.read_note(id) })
+    /// given.
+    pub fn reread(&self, id: &str, ours: Option<(&str, &NoteText)>) -> Reread {
+        let kept = ours.map(|(kept_id, text)| self.keep_as(kept_id, text)).transpose();
+        Reread { kept, theirs: self.read_note(id) }
     }
 
     /// Note `id` as its files hold it now, held to the limits a loaded note is: `None` when its

@@ -4,7 +4,7 @@
 use yantrik_app::documents::{Fingerprint, Source};
 use yantrik_app::effects::Effects;
 
-use super::{saving, show};
+use super::{drafts, saving, show};
 use crate::model::{Cue, Model, NoteFile};
 use crate::note::Note;
 use crate::store::{validate, MAX_NOTES, VAULT_LIMIT};
@@ -34,6 +34,7 @@ pub fn show_note(m: &mut Model, fx: &mut Effects<Notes>, note: Option<Note>) {
                 if closed.source.path().is_some() {
                     fx.unwatch(&closed.source.key());
                 }
+                drafts::closing(&closed, fx);
             }
             m.files.remove(&doc);
         }
@@ -62,7 +63,7 @@ pub fn show_note(m: &mut Model, fx: &mut Effects<Notes>, note: Option<Note>) {
     }
     m.files.insert(
         doc,
-        NoteFile { id: note.id, trash: note.trash, on_disk, meta_unsure: None, ours: false, modified: note.modified },
+        NoteFile { id: note.id, trash: note.trash, on_disk, meta_unsure: None, modified: note.modified },
     );
     m.pane.view = Some(m.documents.show(doc, m.pane.window));
 }

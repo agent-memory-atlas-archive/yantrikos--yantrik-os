@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 
-use yantrik_app::app::{App, Boot, Changed, Event, Startup, WindowId};
+use yantrik_app::app::{App, Boot, Changed, Event, ExitReason, Startup, WindowId};
 use yantrik_app::control::View;
 use yantrik_app::cx::Cx;
 use yantrik_app::effects::Effects;
@@ -25,6 +25,7 @@ mod describe;
 mod intents;
 mod model;
 mod note;
+mod recovery;
 mod store;
 mod undo;
 mod update;
@@ -87,7 +88,8 @@ impl App for Notes {
             }
             Startup::handed_over(claim::ALREADY_RUNNING)
         })?;
-        Ok(Model::new(vault, claim))
+        let recovery = recovery::Recovery::read(&boot.drafts, vault.dir());
+        Ok(Model::new(vault, claim, recovery))
     }
 
     fn wire(cx: &Cx<Self>) {
@@ -118,6 +120,10 @@ impl App for Notes {
     fn event(event: Event<()>, _: &Model) -> Option<Command> {
         match event {
             Event::CloseRequested(window) => Some(Command::CloseRequested(window)),
+            Event::ExitRequested(ExitReason::Logout) => Some(Command::LoggingOut),
+            Event::ExitRequested(_) => Some(Command::Quit),
+            Event::DraftSaved(name) => Some(Command::DraftSaved(name)),
+            Event::DraftNotSaved { name, why } => Some(Command::DraftNotSaved { name, why }),
             Event::FileChanged { key, seen } => Some(Command::FileChanged { key, seen }),
             _ => None,
         }

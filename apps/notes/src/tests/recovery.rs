@@ -1,0 +1,237 @@
+//! Gate row "Recovery after a forced kill" (design/notes-gate-2026-10-21.md §3): a draft per note,
+//! kept through the framework's drafts lane, and at the next start the newest of the file, the
+//! journal and the draft, offered back only where it differs from the file, and never put back
+//! until the person chooses. One note in two views giving one draft is 3b's.
+
+use std::path::{Path, PathBuf};
+
+use serde_json::json;
+use yantrik_app::documents::disk::Step;
+use yantrik_app::documents::{Envelope, Fingerprint, OutsideState, Source};
+use yantrik_testing::TestApp;
+
+use super::{
+    act, autosave, draft_file, failing, file, killed_and_started_again, note, notice, outside, settle, started,
+    state, unsaved, with_note,
+};
+use crate::command::{Command, WindowAction};
+use crate::note::NoteText;
+use crate::update::said;
+use crate::Notes;
+
+fn envelope(path: &Path) -> Envelope<NoteText> {
+    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+}
+
+/// What the recovery bar offers, as the window says it.
+fn bar(app: &TestApp<Notes>) -> String {
+    app.ui(|ui| ui.get_recovery_said().to_string())
+}
+
+fn offered(app: &TestApp<Notes>) -> Vec<String> {
+    state(app)["recovery"].as_array().unwrap().iter().map(|o| o["title"].as_str().unwrap().to_string()).collect()
+}
+
+fn open_text(app: &TestApp<Notes>) -> String {
+    app.model(|m| m.current().unwrap().text().to_string())
+}
+
+fn press(app: &TestApp<Notes>, id: &'static str) {
+    app.ui(move |ui| ui.invoke_action(id.into()));
+    settle(app);
+}
+
+/// A saved note titled `title`, with `typed` typed and its draft written, then the app killed.
+fn typed_then_killed(title: &str, typed: &str) -> (TestApp<Notes>, PathBuf) {
+    let (app, path) = with_note(title);
+    app.run(Command::Edit(typed.into()));
+    app.run_writes();
+    (killed_and_started_again(app), path)
+}
+
+#[test]
+fn a_draft_is_kept_after_the_debounce_and_the_latest_edit_takes_its_place() {
+    let (app, path) = with_note("Kept");
+    let saved = file(&path);
+    app.run(Command::Edit("# Kept\n\none".into()));
+    assert!(!draft_file(&app, &path).exists(), "nothing is written per key");
+    app.run(Command::Edit("# Kept\n\none two".into()));
+    app.run_writes();
+    let kept = envelope(&draft_file(&app, &path));
+    assert_eq!(kept.content.text, "# Kept\n\none two", "the latest edit");
+    assert_eq!(kept.seq, app.model(|m| m.current().unwrap().doc.seq));
+    assert_eq!(kept.baseline, Some(Fingerprint::of_bytes(saved.as_bytes())), "and the file it was written over");
+    assert_eq!(state(&app)["draft"], "kept");
+}
+
+#[test]
+fn a_note_typed_in_and_killed_is_offered_back_at_the_next_start_and_restored() {
+    let typed = "# Lost\n\nwords typed before the crash";
+    let (app, path) = typed_then_killed("Lost", typed);
+    assert_eq!(file(&path), "# Lost\n\n", "nothing was put back unasked");
+    assert_eq!(offered(&app), vec!["Lost".to_string()]);
+    assert_eq!(bar(&app), said::offer("Lost"));
+    assert_eq!(notice(&app), "", "the bar says it; the notice is for when there are more");
+    // The note an offer is for takes no edits until the person chooses.
+    app.run(Command::Window(WindowAction::Open { id: path.file_name().unwrap().to_str().unwrap().into(), trash: false }));
+    app.run(Command::Edit("# Lost\n\nsomething else".into()));
+    assert_eq!((notice(&app), open_text(&app)), (said::CHOOSE_FIRST.to_string(), "# Lost\n\n".to_string()));
+    assert!(app.ui(|ui| ui.get_recovering()), "and the editor says so by taking no keys");
+    press(&app, "restore-draft");
+    assert_eq!(open_text(&app), typed, "the text is back");
+    assert_eq!(file(&path), typed, "and saved");
+    assert!(offered(&app).is_empty() && bar(&app).is_empty());
+    app.run_writes();
+    assert!(!draft_file(&app, &path).exists(), "the draft goes once its text is saved");
+    let again = killed_and_started_again(app);
+    assert!(offered(&again).is_empty(), "and nothing is offered twice");
+}
+
+#[test]
+fn discard_keeps_the_note_as_its_file_holds_it_and_drops_the_draft() {
+    let (app, path) = typed_then_killed("Dropped", "# Dropped\n\nnot wanted");
+    let answer = act(&app, "discard_draft", json!({})).expect("discarded");
+    assert_eq!(answer["still_offered"], 0);
+    assert_eq!(file(&path), "# Dropped\n\n");
+    assert!(offered(&app).is_empty());
+    app.run_writes();
+    assert!(!draft_file(&app, &path).exists());
+    assert_eq!(act(&app, "discard_draft", json!({})).unwrap_err(), said::NOTHING_OFFERED);
+}
+
+/// The text a draft holds goes back into its note only when the file is still the one it was
+/// written over; otherwise it is a conflict the person resolves, and the file is left as it is.
+#[test]
+fn a_restore_over_a_file_changed_since_is_a_conflict_and_replaces_nothing() {
+    let (app, path) = with_note("Moved on");
+    app.run(Command::Edit("# Moved on\n\nmine".into()));
+    app.run_writes();
+    let paths = app.paths();
+    drop(app);
+    std::fs::write(&path, "# Moved on\n\ntheirs, written while Notes was not running").unwrap();
+    let app = TestApp::<Notes>::start_at(paths, Vec::new());
+    settle(&app);
+    let restored = act(&app, "restore_draft", json!({})).expect("restored");
+    assert_eq!(restored["saved"], false, "not saved over theirs");
+    assert_eq!(open_text(&app), "# Moved on\n\nmine");
+    assert!(matches!(outside(&app), OutsideState::Conflict { .. }), "{:?}", outside(&app));
+    assert_eq!(super::bar(&app), 1, "the outside choices are offered");
+    assert_eq!(file(&path), "# Moved on\n\ntheirs, written while Notes was not running");
+    assert_eq!(notice(&app), said::RESTORED_BESIDE);
+}
+
+/// An interrupted save (its journal) and a draft of the same note: the newer is offered, and the
+/// older is never lost silently either.
+#[test]
+fn a_draft_newer_than_an_interrupted_save_is_the_one_offered() {
+    let (app, path) = with_note("Race");
+    let disk = failing(&app);
+    disk.fail(Step::Write, ".md", None);
+    app.run(Command::Edit("# Race\n\nsaved halfway".into()));
+    autosave(&app);
+    assert!(unsaved(&app), "the save stopped after its journal");
+    app.run(Command::Edit("# Race\n\nsaved halfway, then typed on".into()));
+    app.run_writes();
+    let app = killed_and_started_again(app);
+    assert_eq!(offered(&app), vec!["Race".to_string()]);
+    let offer = app.model(|m| m.recovery.offers[0].content.text.clone());
+    assert_eq!(offer, "# Race\n\nsaved halfway, then typed on", "the draft, which is newer");
+    let journal = app.model(|m| m.library.iter().find(|n| n.id.starts_with("recovered-")).map(|n| n.content.text.clone()));
+    assert_eq!(journal.as_deref(), Some("# Race\n\nsaved halfway"), "the older text came back as a note of its own");
+    assert_eq!(file(&path), "# Race\n\n");
+}
+
+#[test]
+fn an_interrupted_save_newer_than_the_draft_wins_and_the_draft_is_dropped() {
+    let (app, path) = with_note("Race");
+    app.run(Command::Edit("# Race\n\nfirst".into()));
+    app.run_writes();
+    let disk = failing(&app);
+    disk.fail(Step::Write, ".md", None);
+    // Typed on, and saved halfway, before that edit's own draft reached the disk.
+    app.run(Command::Edit("# Race\n\nfirst, second".into()));
+    autosave(&app);
+    let app = killed_and_started_again(app);
+    assert!(offered(&app).is_empty(), "the older draft is not offered");
+    let journal = app.model(|m| m.library.iter().find(|n| n.id.starts_with("recovered-")).map(|n| n.content.text.clone()));
+    assert_eq!(journal.as_deref(), Some("# Race\n\nfirst, second"), "the newer text, the interrupted save, is kept");
+    app.run_writes();
+    assert!(!draft_file(&app, &path).exists(), "and the draft it superseded is removed");
+}
+
+#[test]
+fn a_save_that_lands_removes_the_draft_and_a_stale_draft_is_not_offered() {
+    let (app, path) = with_note("Saved");
+    app.run(Command::Edit("# Saved\n\ndone".into()));
+    app.run_writes();
+    assert!(draft_file(&app, &path).exists());
+    autosave(&app);
+    app.run_writes();
+    assert!(!draft_file(&app, &path).exists(), "removed once the save of its edits landed");
+    // A draft left by a crash between a save and its draft's removal says what the file says.
+    let stale = Envelope {
+        version: 1,
+        key: Source::File(path.clone()).key(),
+        path: Some(path.display().to_string()),
+        seq: 9,
+        at: 1,
+        content: NoteText { text: file(&path), meta: String::new() },
+        baseline: None,
+    };
+    std::fs::write(draft_file(&app, &path), serde_json::to_vec(&stale).unwrap()).unwrap();
+    let app = killed_and_started_again(app);
+    assert!(offered(&app).is_empty() && bar(&app).is_empty(), "nothing differs from the file");
+    app.run_writes();
+    assert!(!draft_file(&app, &path).exists(), "and the stale draft is removed");
+}
+
+#[test]
+fn three_notes_with_drafts_are_each_offered_and_restored() {
+    // Three runs, each killed while typing in a note of its own.
+    let (app, first) = typed_then_killed("One", "# One\n\nfirst run");
+    let second = std::path::PathBuf::from(note(&app, "Two", "")["path"].as_str().unwrap());
+    app.run(Command::Edit("# Two\n\nsecond run".into()));
+    app.run_writes();
+    let app = killed_and_started_again(app);
+    let third = std::path::PathBuf::from(note(&app, "Three", "")["path"].as_str().unwrap());
+    app.run(Command::Edit("# Three\n\nthird run".into()));
+    app.run_writes();
+    let app = killed_and_started_again(app);
+    assert_eq!(offered(&app), vec!["Three", "Two", "One"], "every one, newest first");
+    assert!(notice(&app).contains(&said::offered(3)));
+    for _ in 0..3 {
+        act(&app, "restore_draft", json!({})).expect("restored");
+    }
+    assert_eq!(
+        [file(&first), file(&second), file(&third)],
+        ["# One\n\nfirst run", "# Two\n\nsecond run", "# Three\n\nthird run"]
+    );
+    assert!(offered(&app).is_empty());
+}
+
+#[test]
+fn a_draft_that_cannot_be_written_is_said() {
+    let (app, _) = with_note("Unprotected");
+    // The drafts folder cannot be made: a file has its name.
+    let drafts = app.paths().state_dir().join(yantrik_app::drafts::DIR);
+    let _ = std::fs::remove_dir_all(&drafts);
+    std::fs::write(&drafts, "").unwrap();
+    app.run(Command::Edit("# Unprotected\n\ntyped".into()));
+    app.run_writes();
+    assert!(notice(&app).starts_with(said::DRAFT_NOT_KEPT_START), "{}", notice(&app));
+    assert_eq!(state(&app)["draft"], "failed");
+    // Not tried again until the next edit: the failure is not a loop of writes.
+    app.run(Command::Filter { folder: "all".into(), query: String::new() });
+    assert_eq!(app.writes_waiting(), 0);
+    // A save makes the text safe, and the notice goes with it.
+    autosave(&app);
+    assert_eq!((notice(&app), state(&app)["unsaved"].clone()), (String::new(), json!(false)));
+}
+
+/// A start with nothing kept offers nothing, and the bar is not drawn.
+#[test]
+fn nothing_kept_offers_nothing() {
+    let app = started();
+    assert!(offered(&app).is_empty() && bar(&app).is_empty());
+    assert_eq!(act(&app, "restore_draft", json!({})).unwrap_err(), said::NOTHING_OFFERED);
+}

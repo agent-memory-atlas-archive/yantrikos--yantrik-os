@@ -17,14 +17,16 @@ mod read;
 mod records;
 mod resolve;
 mod save;
+mod theirs;
 mod trash;
 pub mod version;
 mod write;
 
-pub use load::Loaded;
+pub use load::{Interrupted, Loaded};
 pub use read::read;
 pub use resolve::{Reread, Resolved};
 pub use save::{SaveFailed, SaveJob, Saved};
+pub use theirs::Theirs;
 
 /// The most text one note may hold.
 pub const LIMIT: usize = 256 * 1024;

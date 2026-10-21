@@ -1,7 +1,7 @@
 //! Every way the model changes: what the window, the surface, the timers and the store's jobs ask.
 
 use yantrik_app::app::WindowId;
-use yantrik_app::documents::{DocumentId, Observed};
+use yantrik_app::documents::{Choice, DocumentId, Observed};
 
 use crate::note::{Note, NoteText};
 use crate::store::{Loaded, Reread, Resolved, SaveFailed, Saved};
@@ -25,6 +25,14 @@ pub enum Command {
     /// The autosave's debounce ran out.
     Autosave,
     CloseRequested(WindowId),
+    /// The app was asked to end: the close flow over every note with edits not on disk.
+    Quit,
+    /// The session is ending, with no one to ask: drafts written, then the end.
+    LoggingOut,
+    /// The open note's latest draft reached the disk.
+    DraftSaved(String),
+    /// A draft could not be written.
+    DraftNotSaved { name: String, why: String },
     /// The watch saw an open note's file change.
     FileChanged { key: String, seen: Observed },
     // What the store's jobs found.
@@ -74,6 +82,11 @@ pub enum WindowAction {
     TakeTheirs,
     Compare,
     NotNow,
+    /// The close prompt's *Save*, *Don't save* and *Cancel*.
+    Close(Choice),
+    /// The recovery bar's *Restore* and *Discard*: text kept from a run that ended unsaved.
+    RestoreDraft,
+    DiscardDraft,
 }
 
 /// How an outside change to the open note is resolved. Either way the window's text is kept as a
@@ -120,6 +133,11 @@ impl WindowAction {
             "take-theirs" => WindowAction::TakeTheirs,
             "compare" => WindowAction::Compare,
             "not-now" => WindowAction::NotNow,
+            "close-save" => WindowAction::Close(Choice::Save),
+            "close-discard" => WindowAction::Close(Choice::DontSave),
+            "close-cancel" => WindowAction::Close(Choice::Cancel),
+            "restore-draft" => WindowAction::RestoreDraft,
+            "discard-draft" => WindowAction::DiscardDraft,
             other => {
                 if let Some(title) = other.strip_prefix("new:") {
                     WindowAction::New(Some(title.into()))
@@ -155,6 +173,8 @@ impl WindowAction {
                 // Each writes the window's text as a note of its own; Compare only reads.
                 | WindowAction::KeepMine
                 | WindowAction::TakeTheirs
+                // Puts text back into a note, which its autosave writes.
+                | WindowAction::RestoreDraft
         )
     }
 
@@ -167,6 +187,7 @@ impl WindowAction {
                 | WindowAction::Reload
                 | WindowAction::Trash
                 | WindowAction::Import
+                | WindowAction::RestoreDraft
         )
     }
 }
@@ -208,6 +229,8 @@ pub enum Act {
     KeepMineAsCopy,
     TakeTheirs,
     Compare,
+    RestoreDraft,
+    DiscardDraft,
     /// A required argument given empty: refused, in the window's notice too.
     Refuse(String),
 }
@@ -233,6 +256,7 @@ impl Act {
                 | Act::Import { .. }
                 | Act::KeepMineAsCopy
                 | Act::TakeTheirs
+                | Act::RestoreDraft
         )
     }
 }

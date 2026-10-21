@@ -1,9 +1,9 @@
 //! Saving the open note through its document: one save in flight, the edits made meanwhile in
 //! one follow-up, a failed save not retried by the autosave until something changes and said with
 //! how much of it reached the disk, and a file changed outside never written over: the person
-//! chooses what happens to the two versions first (outside.rs).
+//! chooses what happens to the two versions first (outside.rs). Another program's version a save
+//! replaced is kept by the store and said here.
 
-use yantrik_app::app::WindowId;
 use yantrik_app::documents::{BeginSave, DocumentId, Durability, Fingerprint, SaveError, SaveOutcome, SaveTicket};
 use yantrik_app::effects::Effects;
 
@@ -11,7 +11,7 @@ use super::{after_store, begin, failed, refreshed, relist, said, save_state, AUT
 use crate::command::Command;
 use crate::model::{Model, Work};
 use crate::note::{Note, NoteText};
-use crate::store::{SaveFailed, SaveJob, Saved};
+use crate::store::{SaveFailed, SaveJob, Saved, Theirs};
 use crate::view::render::{OUTSIDE, STATUS};
 use crate::Notes;
 
@@ -81,12 +81,14 @@ fn blocked(m: &mut Model, fx: &mut Effects<Notes>, how: How) {
 fn spawn(m: &mut Model, fx: &mut Effects<Notes>, doc: DocumentId, ticket: SaveTicket<NoteText>) {
     let Some(file) = m.files.get(&doc) else { return };
     let seq = ticket.seq;
+    let alike = m.library.iter().filter(|n| !n.trash).map(|n| (n.id.clone(), n.content.text.len())).collect();
     let job = SaveJob {
         id: file.id.clone(),
         on_disk: file.on_disk.clone(),
         meta_unsure: file.meta_unsure.clone(),
         modified: file.modified,
         ticket,
+        alike,
     };
     // A save that ended without an answer may have written anything: not called saved.
     let written = Fingerprint::of_bytes(job.ticket.content.text.as_bytes());
@@ -95,8 +97,7 @@ fn spawn(m: &mut Model, fx: &mut Effects<Notes>, doc: DocumentId, ticket: SaveTi
         seq,
         result: Err(SaveFailed {
             error: SaveError::after_writing(Durability::Unknown, written, said::JOB_LOST),
-            meta_unsure: None,
-            read_only: false,
+            ..SaveFailed::wrote_nothing("")
         }),
     };
     begin(m, fx, Work::Save, lost, move |vault| Command::SaveLanded { doc, seq, result: vault.save(&job) });
@@ -110,9 +111,8 @@ pub fn landed(m: &mut Model, fx: &mut Effects<Notes>, doc: DocumentId, seq: u64,
     let Some(d) = m.documents.get_mut(doc) else { return };
     match result {
         Ok(saved) => {
-            let SaveOutcome::Saved { follow_up, replaced } = d.save_landed(seq, Ok(saved.written.clone())) else {
-                return;
-            };
+            let outcome = d.save_landed_witnessed(seq, Ok(saved.written.clone()), saved.witnessed);
+            let SaveOutcome::Saved { follow_up, replaced } = outcome else { return };
             // From the new baseline: a look the watch took before the save is dropped, and our
             // own write is never reported as an outside edit.
             if let Some((key, path, seen)) = d.watch_entry() {
@@ -121,8 +121,8 @@ pub fn landed(m: &mut Model, fx: &mut Effects<Notes>, doc: DocumentId, seq: u64,
             let Some(file) = m.files.get_mut(&doc) else { return };
             file.on_disk = Some(saved.content.clone());
             file.meta_unsure = None;
-            file.ours = true;
             file.modified = saved.modified;
+            m.written.insert(file.id.clone(), saved.written.clone());
             let entry = Note { id: file.id.clone(), content: saved.content, modified: saved.modified, trash: false, stored: true };
             match m.library.iter_mut().find(|n| n.id == entry.id && !n.trash) {
                 Some(n) => *n = entry,
@@ -130,7 +130,10 @@ pub fn landed(m: &mut Model, fx: &mut Effects<Notes>, doc: DocumentId, seq: u64,
             }
             // Another program's write that this save replaced is said, and stays said while the
             // person types on; a failure's notice is answered by this landing.
-            if let Some(what) = replaced {
+            if let Some(sentence) = saved.theirs.map(|theirs| kept(m, *theirs)) {
+                m.notice = sentence;
+                m.lasting_notice = true;
+            } else if let Some(what) = replaced {
                 m.notice = said::replaced(what).into();
                 m.lasting_notice = true;
             } else if !m.lasting_notice {
@@ -150,6 +153,12 @@ pub fn landed(m: &mut Model, fx: &mut Effects<Notes>, doc: DocumentId, seq: u64,
             } else {
                 said::save_failed(&failure.error)
             };
+            // The replace went in before a later step failed, and took the place of another
+            // program's version: where that is kept comes first.
+            if let Some(theirs) = failure.theirs {
+                sentence = format!("{} {sentence}", kept(m, *theirs));
+            }
+            let Some(d) = m.documents.get_mut(doc) else { return };
             if matches!(d.save_landed(seq, Err(failure.error)), SaveOutcome::Stale) {
                 return;
             }
@@ -168,15 +177,25 @@ pub fn landed(m: &mut Model, fx: &mut Effects<Notes>, doc: DocumentId, seq: u64,
     }
 }
 
-/// The person asked the window to close: now, or once the open note is saved.
-pub fn close(m: &mut Model, fx: &mut Effects<Notes>, window: WindowId) {
-    if m.busy.is_some() {
-        m.notice = "Please wait for the current operation before closing.".into();
-        fx.changed(STATUS);
-    } else if m.unsaved() {
-        m.quitting = Some(window);
-        save(m, fx, How::Asked);
-    } else {
-        fx.close(window);
+/// Another program's version a save replaced, now in the library or beside it, and the sentence
+/// that says where.
+fn kept(m: &mut Model, theirs: Theirs) -> String {
+    match theirs {
+        Theirs::Kept(note) => {
+            let title = note.title();
+            m.library.push(note);
+            said::theirs_kept(&title)
+        }
+        Theirs::Same(id) => {
+            let title = m.library.iter().find(|n| n.id == id).map(|n| n.title()).unwrap_or_default();
+            said::theirs_held(&title)
+        }
+        Theirs::Aside(path) => said::theirs_aside(&path),
+        Theirs::Unwritten { note, why } => {
+            let title = note.title();
+            m.library.push(note);
+            said::theirs_unwritten(&title, &why)
+        }
+        Theirs::Lost(why) => said::theirs_lost(&why),
     }
 }

@@ -42,7 +42,7 @@ fn read_only_library() -> (TestApp<Notes>, Arc<FaultyDisk>) {
 
 /// A read-only library holding text typed during the reload that found it so, whose owed save
 /// the vault has refused: the note's file, what it holds, and the text kept.
-fn holding_unsaved_text() -> (TestApp<Notes>, Arc<FaultyDisk>, PathBuf, String, String) {
+pub(super) fn holding_unsaved_text() -> (TestApp<Notes>, Arc<FaultyDisk>, PathBuf, String, String) {
     let app = started();
     let path = PathBuf::from(note(&app, "Draft", "")["path"].as_str().unwrap());
     let saved = std::fs::read_to_string(&path).unwrap();

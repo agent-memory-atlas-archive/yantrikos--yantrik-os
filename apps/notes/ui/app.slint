@@ -42,8 +42,16 @@ export component NotesApp inherits AppWindow {
  in-out property <string> folder:"all";
  in-out property <bool> focus-mode;
  in-out property <bool> preview;
- // 0 none, 1 import, 2 export, 3 compare (the window's text beside the file's, read-only).
+ // 0 none, 1 import, 2 export, 3 compare (the window's text beside the file's, read-only),
+ // 4 the close prompt.
  in-out property <int> dialog;
+ // The close prompt's heading and sentence.
+ in property <string> close-heading;
+ in property <string> close-said;
+ // Unsaved text from before Notes closed, offered back: the bar's sentence, empty when none.
+ in property <string> recovery-said;
+ // The open note's offer waits on the person: it takes no keys until then.
+ in property <bool> recovering;
  in-out property <string> path;
  // An outside change the person chooses about: 0 none, 1 changed under unsaved edits, 2 file gone.
  in property <int> outside;
@@ -80,12 +88,19 @@ export component NotesApp inherits AppWindow {
   return reject;
  }
  // The path dialogs take keys in their field; the comparison has none, so the window's keys do.
- changed dialog=>{if(root.dialog==1||root.dialog==2){path-field.focus();}else if(root.dialog==3){keys.focus();}}
+ changed dialog=>{if(root.dialog==1||root.dialog==2){path-field.focus();}else if(root.dialog==3||root.dialog==4){keys.focus();}}
  keys:=FocusScope {key-pressed(event)=>{return root.shortcut(event);}
  Flickable { width:parent.width;height:parent.height;interactive:false;viewport-width:self.width;viewport-height:self.height;
  VerticalLayout {spacing:0px;
   if root.notice!="" : Rectangle {height:message.preferred-height+20px;background:Theme.bg-elevated;
    message:=Text{x:20px;y:10px;width:parent.width - 40px;text:root.notice;color:Theme.amber;font-size:13px;wrap:word-wrap;}
+  }
+  if root.recovery-said!="" : Rectangle {height:offer.preferred-height;background:Theme.notice-surface;border-width:1px;border-color:Theme.notice-line;
+   offer:=HorizontalLayout{padding-left:20px;padding-right:14px;padding-top:8px;padding-bottom:8px;spacing:8px;
+    Text{text:root.recovery-said;color:Theme.text-primary;font-size:Theme.fs-caption;wrap:word-wrap;vertical-alignment:center;horizontal-stretch:1;}
+    YButton{label:"Restore";variant:1;size:0;disabled:root.read-only;clicked=>{root.action("restore-draft");}}
+    YButton{label:"Discard";variant:1;size:0;clicked=>{root.action("discard-draft");}}
+   }
   }
   if root.outside!=0 : Rectangle {height:choices.preferred-height;background:Theme.notice-surface;border-width:1px;border-color:Theme.notice-line;
    choices:=HorizontalLayout{padding-left:20px;padding-right:14px;padding-top:8px;padding-bottom:8px;spacing:8px;
@@ -158,9 +173,9 @@ export component NotesApp inherits AppWindow {
     if root.opened && !root.trashed : Rectangle {height:44px;
      HorizontalLayout{padding-left:24px;padding-right:24px;spacing:10px;
       Text{text:"Notebook";color:Theme.text-dim;font-size:11px;vertical-alignment:center;}
-      YInput{value<=>root.notebook;placeholder:"Unfiled";min-width:100px;disabled:root.read-only;edited(_)=>{root.metadata();}cleared=>{root.metadata();}}
+      YInput{value<=>root.notebook;placeholder:"Unfiled";min-width:100px;disabled:root.read-only||root.recovering;edited(_)=>{root.metadata();}cleared=>{root.metadata();}}
       if root.width>850px : Text{text:"Tags";color:Theme.text-dim;font-size:11px;vertical-alignment:center;}
-      if root.width>850px : YInput{value<=>root.tags;placeholder:"Comma separated";min-width:100px;disabled:root.read-only;edited(_)=>{root.metadata();}cleared=>{root.metadata();}}
+      if root.width>850px : YInput{value<=>root.tags;placeholder:"Comma separated";min-width:100px;disabled:root.read-only||root.recovering;edited(_)=>{root.metadata();}cleared=>{root.metadata();}}
      }
     }
     Rectangle {vertical-stretch:1;clip:true;
@@ -177,7 +192,7 @@ export component NotesApp inherits AppWindow {
        editor:=TextInput {
         x:max(28px,(writing.visible-width - 720px)/2);y:30px;width:min(720px,writing.visible-width - 56px);height:max(self.preferred-height,writing.visible-height - 60px);
         text<=>root.content;single-line:false;wrap:word-wrap;font-size:16px;color:Theme.text-primary;
-        read-only:!root.opened||root.trashed||root.dialog!=0||root.read-only;
+        read-only:!root.opened||root.trashed||root.dialog!=0||root.read-only||root.recovering;
         selection-background-color:Theme.accent;selection-foreground-color:Theme.bg-deep;page-height:writing.visible-height;
         edited=>{root.edited(self.text);}key-pressed(event)=>{return root.shortcut(event);}
         cursor-position-changed(pos)=>{
@@ -246,6 +261,19 @@ export component NotesApp inherits AppWindow {
      YButton{label:"Close";variant:1;clicked=>{root.dialog=0;root.view-changed();root.focus-content();}}
      YButton{label:root.theirs-gone?"Save as new":"Keep mine as a copy";variant:1;clicked=>{root.action("keep-mine");}}
      if !root.theirs-gone : YButton{label:"Take theirs";variant:1;clicked=>{root.action("take-theirs");}}
+    }
+   }
+  }
+ }
+ Rectangle{visible:root.dialog==4;background:Theme.overlay-backdrop;TouchArea{}
+  Rectangle{x:(parent.width - self.width)/2;y:(parent.height - self.height)/2;width:min(480px,root.width - 48px);height:asking.preferred-height;background:Theme.bg-elevated;border-radius:14px;
+   asking:=VerticalLayout{padding:24px;spacing:16px;
+    Text{text:root.close-heading;color:Theme.text-primary;font-size:Theme.fs-title-1;font-weight:Theme.fw-title-1;wrap:word-wrap;}
+    Text{text:root.close-said;color:Theme.text-secondary;font-size:Theme.fs-body;wrap:word-wrap;}
+    HorizontalLayout{alignment:end;spacing:8px;
+     YButton{label:"Cancel";variant:2;clicked=>{root.action("close-cancel");}}
+     YButton{label:"Don't save";variant:1;clicked=>{root.action("close-discard");}}
+     if !root.read-only : YButton{label:"Save";variant:0;clicked=>{root.action("close-save");}}
     }
    }
   }

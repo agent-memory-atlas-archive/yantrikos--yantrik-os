@@ -20,12 +20,15 @@ use crate::view::preview;
 use crate::view::render::{CUES, EDIT, LIBRARY, MODEL_ONLY, NOTE, PREVIEW, STATUS};
 use crate::Notes;
 
+pub mod closing;
+mod drafts;
 mod editing;
 mod follow;
 mod library;
 mod navigate;
 mod outside;
 mod read_only;
+pub mod recovery;
 pub mod said;
 pub mod saving;
 mod surface;
@@ -41,7 +44,7 @@ const WORKER_STOPPED: &str = "Storage worker stopped. Keep this window open to p
 pub fn update(m: &mut Model, command: Command, fx: &mut Effects<Notes>) -> Result<(), Refused> {
     // A cue is for the render of the command that set it, and for no later one.
     m.pane.cues.clear();
-    if read_only::refused(m, fx, &command) {
+    if read_only::refused(m, fx, &command) || recovery::refused(m, fx, &command) {
         return Ok(());
     }
     match command {
@@ -60,11 +63,19 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Effects<Notes>) -> Resul
             if dialog != outside::COMPARE_DIALOG {
                 m.pane.theirs = None;
             }
+            // Escape on the close prompt is its Cancel.
+            if dialog != closing::CLOSE_DIALOG {
+                closing::put_away(m, fx);
+            }
             fx.changed(MODEL_ONLY);
         }
         Command::Surface(act) => surface::act(m, fx, act),
         Command::Autosave => saving::save(m, fx, saving::How::Autosave),
-        Command::CloseRequested(window) => saving::close(m, fx, window),
+        Command::CloseRequested(window) => closing::requested(m, fx, window),
+        Command::Quit => closing::quit(m, fx),
+        Command::LoggingOut => closing::logging_out(m, fx),
+        Command::DraftSaved(name) => drafts::saved(m, fx, &name),
+        Command::DraftNotSaved { name, why } => drafts::not_saved(m, fx, &name, &why),
         Command::FileChanged { key, seen } => outside::seen(m, fx, &key, seen),
         Command::Loaded(result) => library::loaded(m, fx, result),
         Command::SaveLanded { doc, seq, result } => saving::landed(m, fx, doc, seq, result),
@@ -80,6 +91,7 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Effects<Notes>) -> Resul
             fx.changed(MODEL_ONLY);
         }
     }
+    drafts::sync(m, fx);
     surface::finish(m, fx);
     Ok(())
 }
@@ -174,7 +186,7 @@ fn failed(m: &mut Model, fx: &mut Effects<Notes>, sentence: String) {
             }
         }
     }
-    m.quitting = None;
+    closing::failed(m, &sentence);
     m.notice = sentence;
     m.lasting_notice = false;
     m.status = "Needs attention · draft kept".into();
@@ -192,12 +204,10 @@ fn after_store(m: &mut Model, fx: &mut Effects<Notes>) {
         if let Some(pending) = m.pending.take() {
             run(m, fx, pending.step);
         }
-        if let Some(window) = m.quitting.take() {
-            fx.close(window);
-        }
-    } else if m.quitting.is_some() || m.pending.is_some() {
+    } else if m.pending.is_some() {
         saving::save(m, fx, saving::How::Asked);
     }
+    closing::progress(m, fx);
     // A change to the open note seen while the store was busy is followed now that it is not.
     if m.busy.is_none() && std::mem::take(&mut m.pane.reread_owed) {
         follow::follow(m, fx);
