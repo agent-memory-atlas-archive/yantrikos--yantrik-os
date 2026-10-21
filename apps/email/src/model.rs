@@ -166,8 +166,9 @@ pub struct Composer {
     /// What is being sent, while a send is in flight: the window says so, a second press cannot
     /// send the message twice, and an edit made meanwhile is told apart from what went.
     pub sending: Option<Draft>,
-    /// A message that was being sent when the app last closed, read back at start: whether it went
-    /// is not known, so it is offered again as the draft.
+    /// Text the lanes held at start, written as the draft file before any press: what the
+    /// composer held at a logout, or else a message that was being sent when the app last closed
+    /// (whether that went is not known, so it is offered with the warning).
     pub unsent_at_start: Option<Draft>,
     /// The kept draft's message may already have gone: a send of it never came back. Kept beside
     /// the draft file, and said whenever Compose opens it, until it is sent or discarded.
@@ -176,9 +177,9 @@ pub struct Composer {
     pub unsure: bool,
     /// Cancel was pressed while a send was out: the send's own sentence says where the edit went.
     pub closed_during_send: bool,
-    /// The sentence about a message unsent at the last close is owed, once the first look has
-    /// landed. Dropped when the person keeps or discards the draft first: they have chosen.
-    pub announce_unsent: bool,
+    /// The sentence about the text offered at start is owed, once the first look has landed.
+    /// Dropped when the person keeps or discards the draft first: they have chosen.
+    pub announce_unsent: Option<&'static str>,
     /// True while the draft file is being written or removed.
     pub writing: bool,
     /// What to do to the draft file once the write in flight lands: only the latest.
@@ -224,6 +225,10 @@ pub enum Keep {
 /// persistence lane, which is written before the process ends, so a send still waiting for a
 /// worker when the window closes is not lost with it.
 pub const SENDING: &str = "sending";
+
+/// The framework draft that holds the open composer's text when the session ends the app (a
+/// logout, SIGTERM, the display going): handed to the lane in the command that answers it.
+pub const COMPOSING: &str = "composing";
 
 /// What the setup form's fields are cleared to when `part::SETUP_FIELDS` is drawn.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -340,7 +345,7 @@ impl Model {
                 kept_unsure: false,
                 unsure: false,
                 closed_during_send: false,
-                announce_unsent: false,
+                announce_unsent: None,
                 writing: false,
                 queued: None,
             },

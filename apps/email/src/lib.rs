@@ -10,7 +10,7 @@
 //! What this app never holds: a mail password beyond the one command that carries it from the
 //! setup form to the service, or any token at all. The service keeps the credentials.
 
-use yantrik_app::app::{App, Boot, Changed, Startup, WindowId};
+use yantrik_app::app::{App, Boot, Changed, Event, ExitReason, Startup, WindowId};
 use yantrik_app::control::View;
 use yantrik_app::cx::Cx;
 use yantrik_app::effects::Effects;
@@ -52,14 +52,22 @@ impl App for Email {
         let files = files::Files::for_app(&boot.paths);
         files::import_legacy_draft(&boot.paths, &files, files::legacy_draft().as_deref());
         let mut kept = state::load_draft(&files.draft);
-        // A message that was being sent when Email last closed is the newest text there is.
-        let unsent = boot.drafts.json::<state::Draft>(model::SENDING).filter(|d| !d.is_empty());
-        if let Some(unsent) = &unsent {
-            kept = Ok(Some(unsent.clone()));
+        // What the lanes held when Email last closed is the newest text there is: the composer at
+        // a logout first (an edit made after Send included), else a message being sent then.
+        let lane = |name: &str| boot.drafts.json::<state::Draft>(name).filter(|d| !d.is_empty());
+        let (sending, composing) = (lane(model::SENDING), lane(model::COMPOSING));
+        let from_lanes = composing.or_else(|| sending.clone());
+        if let Some(text) = &from_lanes {
+            kept = Ok(Some(text.clone()));
         }
         let mut model = Model::new(backend::for_app(&boot.paths), boot.mind.clone(), files, kept);
-        model.composer.kept_unsure = unsent.is_some() || files::is_unsure(&model.files.draft);
-        model.composer.unsent_at_start = unsent;
+        model.composer.kept_unsure = sending.is_some() || files::is_unsure(&model.files.draft);
+        // Said once the first look lands, unless the person has chosen about the draft first.
+        model.composer.announce_unsent = from_lanes.as_ref().map(|_| match sending {
+            Some(_) => update::drafts::UNSENT_AT_START,
+            None => update::drafts::WRITING_AT_START,
+        });
+        model.composer.unsent_at_start = from_lanes;
         if demo::asked() {
             demo::populate(&mut model);
         }
@@ -99,5 +107,16 @@ impl App for Email {
 
     fn intents(table: &mut Intents<Self>) {
         intents::table(table);
+    }
+
+    /// The session ending the app (a logout, SIGTERM or SIGHUP, the display going): no one is there
+    /// to ask, so the composer's text is handed to the draft lane and the app ends. A send in
+    /// flight already left its text there when Send was pressed. A person's quit, and a closed
+    /// window, take the default: the app ends.
+    fn event(event: Event<()>, _: &Model) -> Option<Command> {
+        match event {
+            Event::ExitRequested(ExitReason::Logout) => Some(Command::LoggingOut),
+            _ => None,
+        }
     }
 }

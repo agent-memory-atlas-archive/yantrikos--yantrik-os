@@ -181,8 +181,10 @@ pub enum Command {
     Sent(Result<(), String>),
     CancelCompose(Draft),
     SaveDraft(Draft),
-    /// At start, before any press: a message unsent at the last close becomes the draft file.
+    /// At start, before any press: text the lanes held at the last close becomes the draft file.
     OfferUnsent,
+    /// The session is ending the app: keep the composer's text, and end.
+    LoggingOut,
     /// A write or a removal of the draft file landed, or did not.
     DraftDone { op: FileOp, outcome: Result<(), String> },
     // ── The companion ──

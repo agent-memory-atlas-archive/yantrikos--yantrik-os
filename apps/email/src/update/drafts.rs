@@ -11,12 +11,15 @@ use yantrik_app::effects::Effects;
 use super::{clear_notice, say};
 use crate::command::{Command, Work};
 use crate::files;
-use crate::model::{part, FileOp, Keep, Model, SENDING};
+use crate::model::{part, FileOp, Keep, Model, COMPOSING, SENDING};
 use crate::state;
 use crate::Email;
 
 /// What the notice says when a message is offered again at start.
 pub const UNSENT_AT_START: &str = "A message was being sent when Email closed, and whether it went is not known. It is kept as a draft: look in Sent before sending it again.";
+
+/// What the notice says when the text the composer held at a logout is offered again.
+pub const WRITING_AT_START: &str = "The message you were writing when Email closed is kept as a draft; Compose reopens it.";
 
 /// What Compose says, every time it opens a draft whose message may already have gone.
 pub const UNSURE: &str = "Whether this message was already sent is not known. Look in Sent before sending it again.";
@@ -58,6 +61,7 @@ pub fn next_file_op(m: &mut Model, fx: &mut Effects<Email>) {
 fn release_lane(m: &Model, release: bool, fx: &mut Effects<Email>) {
     if release && m.composer.sending.is_none() {
         fx.discard_draft(SENDING);
+        fx.discard_draft(COMPOSING);
     }
 }
 
@@ -123,16 +127,24 @@ fn closing_sentence(m: &Model) -> Option<&'static str> {
 /// afterwards is written after it. Its lane copy goes when the file has landed.
 pub fn write_unsent(m: &mut Model, fx: &mut Effects<Email>) {
     let Some(unsent) = m.composer.unsent_at_start.take() else { return };
-    m.composer.announce_unsent = true;
-    file_op(m, FileOp::Save { draft: unsent, keep: Keep::Quietly, unsure: true, release_lane: true }, fx);
+    let unsure = m.composer.kept_unsure;
+    file_op(m, FileOp::Save { draft: unsent, keep: Keep::Quietly, unsure, release_lane: true }, fx);
+}
+
+/// The session is ending the app: no one is there to ask, so the open composer's text goes to the
+/// draft lane in this command (the lane is written before the process ends; a job would not be),
+/// and the app ends. A send in flight left its own copy there when Send was pressed.
+pub fn logging_out(m: &mut Model, fx: &mut Effects<Email>) {
+    if m.composer.open && !m.composer.text.is_empty() {
+        fx.checkpoint_draft(COMPOSING, serde_json::to_vec(&m.composer.text).unwrap_or_default());
+    }
+    fx.exit();
 }
 
 /// The sentence about it, once the first look has landed or failed, so the look's own notice
 /// cannot clear it; unless the person has already kept or discarded the draft.
 pub fn offer_unsent(m: &mut Model, fx: &mut Effects<Email>) {
-    if !std::mem::take(&mut m.composer.announce_unsent) {
-        return;
-    }
-    let sentence = if m.notice.is_empty() { UNSENT_AT_START.to_string() } else { format!("{} {UNSENT_AT_START}", m.notice) };
+    let Some(said) = m.composer.announce_unsent.take() else { return };
+    let sentence = if m.notice.is_empty() { said.to_string() } else { format!("{} {said}", m.notice) };
     say(m, fx, sentence);
 }

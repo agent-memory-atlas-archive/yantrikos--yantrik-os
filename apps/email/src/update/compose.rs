@@ -176,7 +176,7 @@ pub fn keep_after_send(m: &mut Model, unsure: bool, went: Option<Draft>, fx: &mu
 /// Close the composer and keep what was typed. Closing it used to discard it silently, which is
 /// the worst thing a mail client can do to a message that is not finished.
 pub fn cancel(m: &mut Model, draft: Draft, fx: &mut Effects<Email>) {
-    m.composer.announce_unsent = false;
+    m.composer.announce_unsent = None;
     m.composer.open = false;
     m.composer.closed_during_send = m.composer.sending.is_some();
     fx.changed(part::STATUS);
@@ -195,7 +195,7 @@ pub fn save_draft(m: &mut Model, draft: Draft, fx: &mut Effects<Email>) {
         m.composer.status.clear();
         return say(m, fx, "There is nothing in the composer to save.");
     }
-    m.composer.announce_unsent = false;
+    m.composer.announce_unsent = None;
     m.composer.text = draft.clone();
     let unsure = m.composer.unsure;
     file_op(m, FileOp::Save { draft, keep: Keep::Saved, unsure, release_lane: false }, fx);

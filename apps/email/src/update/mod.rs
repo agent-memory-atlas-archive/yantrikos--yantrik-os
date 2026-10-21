@@ -11,7 +11,7 @@ use crate::Email;
 
 mod ai;
 mod compose;
-mod drafts;
+pub(crate) mod drafts;
 pub(crate) mod google;
 mod mailbox;
 mod message;
@@ -58,6 +58,7 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Effects<Email>) -> Resul
         Command::CancelCompose(draft) => compose::cancel(m, draft, fx),
         Command::SaveDraft(draft) => compose::save_draft(m, draft, fx),
         Command::OfferUnsent => drafts::write_unsent(m, fx),
+        Command::LoggingOut => drafts::logging_out(m, fx),
         Command::DraftDone { op, outcome } => drafts::done(m, op, outcome, fx),
         Command::Ask(ask) => ai::ask(m, ask, fx),
         Command::Answered { ask, about, outcome } => ai::answered(m, ask, about, outcome, fx),
