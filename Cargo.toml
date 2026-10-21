@@ -182,6 +182,8 @@ slint = { version = "1.17", features = ["renderer-femtovg", "renderer-software",
 # System
 sysinfo = "0.33"
 libc = "0.2"
+# Signals heard async-signal-safely (a self-pipe); already in the lock through crossterm.
+signal-hook = "0.3"
 
 # Internal crates
 yantrik-harness = { path = "crates/yantrik-harness" }
