@@ -68,7 +68,8 @@ impl App for Notes {
     const ID: &'static str = "notes";
 
     /// The model, once this copy holds the library (`claim`). A copy that does not is the second
-    /// one: the first is asked to show its window, as the old build did, and this one stops.
+    /// one: the first is asked to show its window, as the old build did, and this one stops as a
+    /// hand-over, not a failure.
     fn model(boot: &Boot) -> Result<Model, Startup> {
         let dir = vault_dir(&boot.paths);
         let claim = claim::hold(legacy_lock(&boot.paths).as_deref(), &dir).map_err(|claim::Held| {
@@ -76,7 +77,7 @@ impl App for Notes {
             if !cfg!(test) {
                 yantrik_app::instance::present_running(Self::ID);
             }
-            Startup::new(claim::ALREADY_RUNNING)
+            Startup::handed_over(claim::ALREADY_RUNNING)
         })?;
         Ok(Model::new(store::Vault::real(dir), claim))
     }
