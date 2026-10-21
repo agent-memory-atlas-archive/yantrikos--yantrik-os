@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::Document;
+use super::{Document, Fingerprint};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DraftState {
@@ -28,6 +28,13 @@ pub struct Envelope<C> {
     /// Milliseconds since the epoch, when it was made.
     pub at: u64,
     pub content: C,
+    /// The file as the document last read or wrote it when the draft was made (`None` for a
+    /// document never saved). A start compares it with the file: equal, and the draft's edits
+    /// can go back into the document as they were; different, and the file moved on since, so
+    /// putting the draft back is a conflict the person resolves, never a silent replace. Absent
+    /// in a draft written before it was kept, which reads as not known.
+    #[serde(default)]
+    pub baseline: Option<Fingerprint>,
 }
 
 /// The draft envelope's version.
@@ -53,6 +60,7 @@ impl<C: Clone + Serialize> Document<C> {
             seq: self.seq,
             at: now_ms,
             content: self.content.clone(),
+            baseline: self.baseline.clone(),
         };
         let bytes = serde_json::to_vec(&envelope).ok()?;
         Some((self.source.key(), bytes))
