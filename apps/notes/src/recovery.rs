@@ -54,6 +54,15 @@ pub struct Offer {
     pub base: Option<Fingerprint>,
 }
 
+/// A note's files, text and sidecar, as the one fingerprint a Notes draft records as its
+/// baseline (`Envelope::baseline`, "the file it was written over"). Both, because a draft holds
+/// both: a start then tells another program's change to either from the person's own unsaved
+/// change, which leaves the files as they were. A text never holds a NUL (`store::validate`),
+/// so the two cannot run together. `None` for a note with no file.
+pub fn base_of(on_disk: Option<&NoteText>) -> Option<Fingerprint> {
+    on_disk.map(|d| Fingerprint::of_bytes(format!("{}\0{}", d.text, d.meta).as_bytes()))
+}
+
 impl Recovery {
     /// The drafts in `drafts` (under `state_dir`) that are drafts of notes in the vault at
     /// `vault`. A draft of another library (the vault was moved, `YANTRIK_NOTES_DIR` changed), or

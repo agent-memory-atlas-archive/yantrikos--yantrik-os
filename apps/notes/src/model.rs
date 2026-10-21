@@ -289,6 +289,29 @@ impl Model {
         self.current().is_some_and(|c| c.unsaved())
     }
 
+    /// The open note's unsaved text from before Notes closed, while its offer waits: what the
+    /// window shows of the note (text, title, fields, list card, preview), and what Copy and
+    /// Export take, until the person chooses.
+    pub fn offered(&self) -> Option<&NoteText> {
+        let c = self.current()?;
+        self.recovery.offer_for(c.id()).map(|o| &o.content)
+    }
+
+    /// What the window shows of the open note: its offered text while that waits, its content
+    /// otherwise.
+    pub fn shown(&self) -> Option<&NoteText> {
+        self.offered().or_else(|| self.current().map(|c| &c.doc.content))
+    }
+
+    /// The open note as the library lists it, as the window shows it.
+    pub fn shown_note(&self) -> Option<Note> {
+        let mut note = self.current()?.as_note();
+        if let Some(offered) = self.offered() {
+            note.content = offered.clone();
+        }
+        Some(note)
+    }
+
     /// Whether what a note's files hold is this run's last landed write to it.
     pub fn ours(&self, file: &NoteFile) -> bool {
         let held = file.on_disk.as_ref().map(|d| Fingerprint::of_bytes(d.text.as_bytes()));

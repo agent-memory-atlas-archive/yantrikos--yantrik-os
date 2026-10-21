@@ -130,7 +130,10 @@ pub fn act(m: &mut Model, fx: &mut Effects<Notes>, act: Act) {
             if !to.is_absolute() {
                 return refuse(m, fx, format!("`export` needs an absolute path; `{path}` is not one."));
             }
-            let Some(text) = open_text(m, fx) else { return };
+            if open_text(m, fx).is_none() {
+                return;
+            }
+            let text = m.shown().map(|c| c.text.clone()).unwrap_or_default();
             if library_open(m, fx) {
                 ask(m, fx, Expect::Exported { to, text });
                 // A read-only library would refuse the save first; the export writes the text as

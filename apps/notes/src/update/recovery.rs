@@ -20,10 +20,10 @@ use super::{refreshed, show};
 use crate::command::{Act, Command, WindowAction};
 use crate::model::Model;
 use crate::note::Note;
-use crate::recovery::{Found, Offer};
+use crate::recovery::{base_of, Found, Offer};
 use crate::store::Interrupted;
 use crate::update::said;
-use crate::view::render::{CONTENT, EDIT, FIELDS, OUTSIDE, STATUS};
+use crate::view::render::{CONTENT, FIELDS, OUTSIDE, STATUS};
 use crate::Notes;
 
 /// The library has been read for the first time: each draft found at start is weighed against
@@ -124,11 +124,10 @@ pub fn restore(m: &mut Model, fx: &mut Effects<Notes>) {
     m.recovery.offers.retain(|o| o.id != offer.id);
     let on_disk = m.library.iter().find(|n| !n.trash && n.id == offer.id).cloned();
     let file = on_disk.as_ref().map(|n| Fingerprint::of_bytes(n.content.text.as_bytes()));
-    // The draft's baseline is of the text alone. A sidecar that differs (notebook, tags, pin)
-    // may be the person's own change before Notes closed or another program's since; which one
-    // cannot be told, so it is not put back silently either: the person chooses.
-    let sidecar_differs = on_disk.as_ref().is_some_and(|n| n.content.meta != offer.content.meta);
-    let moved_on = file != offer.base || sidecar_differs;
+    // The draft's baseline is the note's text and sidecar as they were when it was written
+    // (`recovery::base_of`): equal, and the person's own edits, the sidecar's included, go back
+    // as they were; different, and another program changed the note since.
+    let moved_on = base_of(on_disk.as_ref().map(|n| &n.content)) != offer.base;
     match on_disk {
         Some(note) => show_note(m, fx, Some(note)),
         // Gone: a note of its own again, not on disk until saved, as a note made here is.
@@ -164,9 +163,8 @@ pub fn discard(m: &mut Model, fx: &mut Effects<Notes>) {
     m.recovery.offers.retain(|o| o.id != offer.id);
     fx.discard_draft(&offer.draft);
     fx.changed(OUTSIDE);
-    // The editor drew the offered text; it draws the note as its file holds it again.
-    fx.changed(CONTENT);
-    fx.changed(EDIT);
+    // The window drew the offered text; it draws the note as its file holds it again.
+    show(m, fx);
     say(m, fx, &left(m, said::DISCARDED));
 }
 

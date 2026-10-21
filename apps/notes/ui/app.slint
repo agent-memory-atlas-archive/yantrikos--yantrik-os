@@ -110,10 +110,10 @@ export component NotesApp inherits AppWindow {
    offer:=HorizontalLayout{padding-left:20px;padding-right:14px;padding-top:8px;padding-bottom:8px;spacing:8px;
     Text{text:root.recovery-said;color:Theme.text-primary;font-size:Theme.fs-caption;wrap:word-wrap;vertical-alignment:center;horizontal-stretch:1;}
     if root.recovery==2 : YButton{label:"Show";variant:1;size:0;clicked=>{root.action("show-draft");}}
-    YButton{label:"Restore";variant:1;size:0;disabled:root.read-only;clicked=>{root.action("restore-draft");}}
+    YButton{label:"Restore";variant:0;size:0;disabled:root.read-only;clicked=>{root.action("restore-draft");}}
     // Discard drops the only copy, so it is offered once the text can be seen (or, its file
     // gone, once the bar has said what it holds).
-    if root.recovery!=2 : YButton{label:"Discard";variant:1;size:0;clicked=>{root.action("discard-draft");}}
+    if root.recovery!=2 : YButton{label:"Discard";variant:3;size:0;clicked=>{root.action("discard-draft");}}
    }
   }
   if root.outside!=0 : Rectangle {height:choices.preferred-height;background:Theme.notice-surface;border-width:1px;border-color:Theme.notice-line;

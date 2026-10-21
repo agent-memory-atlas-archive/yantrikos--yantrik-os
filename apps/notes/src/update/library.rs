@@ -149,7 +149,8 @@ pub fn import(m: &mut Model, fx: &mut Effects<Notes>, path: PathBuf) {
 }
 
 pub fn export(m: &mut Model, fx: &mut Effects<Notes>, path: PathBuf) {
-    let text = m.current().map(|c| c.text().to_string()).unwrap_or_default();
+    // What the window shows: an offered text while it waits.
+    let text = m.shown().map(|c| c.text.clone()).unwrap_or_default();
     begin(m, fx, Work::Export, Command::Exported(Err(WORKER_STOPPED.into())), move |vault| {
         Command::Exported(vault.export(&path, &text))
     });

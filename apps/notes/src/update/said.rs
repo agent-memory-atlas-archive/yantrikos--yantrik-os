@@ -7,6 +7,8 @@ use yantrik_app::documents::{Durability, OutsideState, Replaced, SaveError};
 
 /// The footer while saving waits on the person's choice about an outside change.
 pub const WAITING_ON_CHOICE: &str = "Not saved · changed outside Notes";
+/// The footer while the open note's unsaved text from before Notes closed waits on the person.
+pub const WAITING_ON_RECOVERY: &str = "Not saved · unsaved text from before Notes closed: Restore or Discard";
 
 /// Why a store job ended without an answer (it panicked, or the pool refused it), as the reason
 /// in a sentence below.
@@ -217,8 +219,8 @@ pub const NOTHING_OFFERED: &str = "There is no unsaved text from before Notes cl
 pub const RESTORED: &str = "Your text is back in this note.";
 /// Restored over a note that is not the one the text was written over (its text, or its
 /// notebook, tags or pin), or whose file is gone: the outside bar decides.
-pub const RESTORED_BESIDE: &str = "Your text is back. The note on disk is not the one it was written over, so \
-     choose what happens to the two versions.";
+pub const RESTORED_BESIDE: &str = "Your text is back. The note on disk changed after it was written (its text, \
+     or its notebook, tags or pin), so choose what happens to the two versions.";
 pub const DISCARDED: &str = "The unsaved text was discarded; the note is as it is on disk.";
 /// An edit refused on a note whose offer waits.
 pub const CHOOSE_FIRST: &str =

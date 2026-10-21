@@ -43,10 +43,12 @@ pub fn quit(m: &mut Model, fx: &mut Effects<Notes>) {
 /// The session is ending: there is no one to ask. The open note's draft is written now rather
 /// than after its debounce, so the next start offers back whatever was not saved.
 pub fn logging_out(m: &mut Model, fx: &mut Effects<Notes>) {
-    if let Some(d) = m.current_id().and_then(|id| m.documents.get_mut(id)) {
-        if let Some((name, bytes)) = d.draft_owed(drafts::now_ms()) {
-            fx.checkpoint_draft(&name, bytes);
-            d.draft_asked();
+    if let Some(id) = m.current_id() {
+        if let (Some(d), Some(file)) = (m.documents.get_mut(id), m.files.get(&id)) {
+            if let Some((name, bytes)) = drafts::owed(d, file) {
+                fx.checkpoint_draft(&name, bytes);
+                d.draft_asked();
+            }
         }
     }
     fx.exit();

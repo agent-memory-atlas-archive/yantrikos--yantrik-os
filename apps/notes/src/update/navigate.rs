@@ -113,7 +113,8 @@ pub fn new_note(m: &mut Model, fx: &mut Effects<Notes>, title: &str, body: &str)
 /// The open note, unsaved edits and all, as a new note under its own file name; the original
 /// file is left as it is. The way out of "this note changed on disk".
 pub fn copy(m: &mut Model, fx: &mut Effects<Notes>) {
-    let Some(mut note) = m.current().map(|c| c.as_note()) else { return };
+    // As the window shows it: an offered text waiting on the person is copied, offer and all.
+    let Some(mut note) = m.shown_note() else { return };
     if m.library.len() >= MAX_NOTES || m.library_text() + note.content.text.len() > VAULT_LIMIT {
         m.notice = LIBRARY_FULL.into();
         fx.changed(STATUS);

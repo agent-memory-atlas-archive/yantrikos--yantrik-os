@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 use yantrik_app::documents::disk::Step;
-use yantrik_app::documents::{Envelope, Fingerprint, OutsideState, Source};
+use yantrik_app::documents::{Envelope, OutsideState, Source};
 use yantrik_testing::TestApp;
 
 use super::{
@@ -60,7 +60,8 @@ fn a_draft_is_kept_after_the_debounce_and_the_latest_edit_takes_its_place() {
     let kept = envelope(&draft_file(&app, &path));
     assert_eq!(kept.content.text, "# Kept\n\none two", "the latest edit");
     assert_eq!(kept.seq, app.model(|m| m.current().unwrap().doc.seq));
-    assert_eq!(kept.baseline, Some(Fingerprint::of_bytes(saved.as_bytes())), "and the file it was written over");
+    let files = NoteText { text: saved, meta: String::new() };
+    assert_eq!(kept.baseline, crate::recovery::base_of(Some(&files)), "and the files it was written over");
     assert_eq!(state(&app)["draft"], "kept");
 }
 
@@ -80,6 +81,9 @@ fn a_note_typed_in_and_killed_is_offered_back_at_the_next_start_and_restored() {
     assert_eq!((notice(&app), open_text(&app)), (said::CHOOSE_FIRST.to_string(), "# Lost\n\n".to_string()));
     assert_eq!(app.ui(|ui| ui.get_content().to_string()), typed, "the editor is put back to the offered text");
     assert!(app.ui(|ui| ui.get_recovering()), "and the editor says so by taking no keys");
+    // The footer does not call it saved: it is on no disk but its recovery copy.
+    let footer = app.ui(|ui| (ui.get_status().to_string(), ui.get_modified()));
+    assert_eq!(footer, (said::WAITING_ON_RECOVERY.to_string(), true), "said, in amber");
     press(&app, "restore-draft");
     assert_eq!(open_text(&app), typed, "the text is back");
     assert_eq!(file(&path), typed, "and saved");
@@ -97,6 +101,8 @@ fn discard_keeps_the_note_as_its_file_holds_it_and_drops_the_draft() {
     assert_eq!(answer["still_offered"], 0);
     assert_eq!(file(&path), "# Dropped\n\n");
     assert_eq!(app.ui(|ui| ui.get_content().to_string()), "# Dropped\n\n", "the editor shows the file again");
+    let footer = app.ui(|ui| (ui.get_status().to_string(), ui.get_modified()));
+    assert_eq!(footer, ("All changes saved".to_string(), false), "and the footer says it is saved, as it is");
     assert!(offered(&app).is_empty());
     app.run_writes();
     assert!(!draft_file(&app, &path).exists());
@@ -310,3 +316,40 @@ fn the_bar_offers_the_first_listed_and_shows_a_note_before_discard() {
     assert_eq!(app.ui(|ui| ui.get_recovery()), 1);
     assert_eq!(offered(&app)[0], app.model(|m| m.current().unwrap().title()), "the open one is first");
 }
+
+/// The #917 delta review, B and C: while an offer waits, the window draws all of the offered
+/// note (title, fields, list card) from it, and Copy and Export take what is shown. And a sidecar
+/// changed by the person before Notes closed is theirs to restore, not a conflict: the draft's
+/// baseline covers the note's text and sidecar together.
+#[test]
+fn an_offer_is_drawn_whole_copied_and_exported_as_shown_and_restores_its_own_sidecar() {
+    let (app, path) = with_note("Tagged");
+    app.run(Command::Edit("# Renamed\n\nmine".into()));
+    app.run(Command::Metadata { notebook: String::new(), tags: "mine".into() });
+    app.run_writes();
+    let app = killed_and_started_again(app);
+    assert_eq!(app.ui(|ui| ui.get_recovery()), 1);
+    let drawn = app.ui(|ui| {
+        use slint::Model as _;
+        let row = ui.get_notes().row_data(0).unwrap();
+        (ui.get_note_title().to_string(), ui.get_tags().to_string(), row.title.to_string())
+    });
+    assert_eq!(drawn, ("Renamed".to_string(), "mine".to_string(), "Renamed".to_string()), "title, fields and card");
+    // Export and Copy take what the window shows.
+    let out = path.parent().unwrap().parent().unwrap().join(format!("offer-export-{}.md", std::process::id()));
+    let _ = std::fs::remove_file(&out);
+    let exported = act(&app, "export", json!({ "path": out.display().to_string() })).expect("exported");
+    assert_eq!((file(&out), exported["matches_note"].clone()), ("# Renamed\n\nmine".to_string(), json!(true)));
+    let copied = act(&app, "copy", json!({})).expect("copied");
+    let copy = super::vault(&app).join(copied["filename"].as_str().unwrap());
+    assert_eq!(file(&copy), "# Renamed\n\nmine", "the copy holds the offered text");
+    assert_eq!(offered(&app), vec!["Renamed".to_string()], "and the offer still waits");
+    // The person's own tag change restores cleanly: the note on disk is the one it was written over.
+    let id = path.file_name().unwrap().to_str().unwrap().to_string();
+    app.run(Command::Window(WindowAction::Open { id, trash: false }));
+    act(&app, "restore_draft", json!({})).expect("restored");
+    assert_eq!(outside(&app), OutsideState::Clean);
+    assert_eq!(file(&path), "# Renamed\n\nmine");
+    assert!(std::fs::read_to_string(path.with_extension("meta")).unwrap().contains("tags:mine"));
+}
+

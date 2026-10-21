@@ -14,8 +14,9 @@ use yantrik_app::documents::draft::ENVELOPE_VERSION;
 use yantrik_app::documents::{Document, DraftState, Envelope, Source};
 use yantrik_app::effects::Effects;
 
-use crate::model::Model;
+use crate::model::{Model, NoteFile};
 use crate::note::NoteText;
+use crate::recovery::base_of;
 use crate::update::said;
 use crate::view::render::STATUS;
 use crate::Notes;
@@ -34,10 +35,20 @@ pub fn sync(m: &mut Model, fx: &mut Effects<Notes>) {
     if m.draft_failed_at == Some((id, d.seq)) {
         return;
     }
-    if let Some((name, bytes)) = d.draft_owed(now_ms()) {
+    let Some(file) = m.files.get(&id) else { return };
+    if let Some((name, bytes)) = owed(d, file) {
         fx.save_draft(&name, bytes);
         d.draft_asked();
     }
+}
+
+/// The draft owed for this document now, if one is (the framework's rule, `draft_owed`), in an
+/// envelope whose baseline is the note's text and sidecar together (`recovery::base_of`), not
+/// the document's text-only one.
+pub(super) fn owed(d: &Document<NoteText>, file: &NoteFile) -> Option<(String, Vec<u8>)> {
+    let (name, bytes) = d.draft_owed(now_ms())?;
+    let Some(path) = d.source.path() else { return Some((name, bytes)) };
+    envelope(path, &d.content, d.seq, base_of(file.on_disk.as_ref()))
 }
 
 /// A document is closing: a draft it kept is removed when nothing in it is unsaved. A document
@@ -79,19 +90,25 @@ pub fn not_saved(m: &mut Model, fx: &mut Effects<Notes>, name: &str, why: &str) 
     fx.changed(STATUS);
 }
 
-/// A draft of a note that is no open document (another program's version that could not be
-/// written as a note): its name and bytes, in the envelope a start reads. It was never on disk,
-/// so it has no baseline, and putting it back creates its file.
-pub(super) fn envelope(path: &Path, content: &NoteText) -> Option<(String, Vec<u8>)> {
+/// A draft of the note at `path`, of edit `seq`, written over the files `baseline` names
+/// (`None`: none, so putting it back creates the file): its name and bytes, in the envelope a
+/// start reads. Also for a note that is no open document (another program's version that could
+/// not be written as a note).
+pub(super) fn envelope(
+    path: &Path,
+    content: &NoteText,
+    seq: u64,
+    baseline: Option<yantrik_app::documents::Fingerprint>,
+) -> Option<(String, Vec<u8>)> {
     let source = Source::File(path.to_path_buf());
     let envelope = Envelope {
         version: ENVELOPE_VERSION,
         key: source.key(),
         path: Some(path.display().to_string()),
-        seq: 1,
+        seq,
         at: now_ms(),
         content: content.clone(),
-        baseline: None,
+        baseline,
     };
     Some((source.key(), serde_json::to_vec(&envelope).ok()?))
 }

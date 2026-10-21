@@ -208,7 +208,7 @@ fn kept(m: &mut Model, fx: &mut Effects<Notes>, theirs: Theirs) -> String {
         Theirs::Aside(path) => said::theirs_aside(&path),
         Theirs::Unwritten { note, why } => {
             let title = note.title();
-            if let Some((name, bytes)) = drafts::envelope(&m.vault.dir().join(&note.id), &note.content) {
+            if let Some((name, bytes)) = drafts::envelope(&m.vault.dir().join(&note.id), &note.content, 1, None) {
                 fx.checkpoint_draft(&name, bytes);
             }
             m.library.push(note);

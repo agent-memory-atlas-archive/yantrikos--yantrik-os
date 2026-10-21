@@ -103,6 +103,8 @@ fn save_state(m: &Model) -> &'static str {
         // No autosave is pending while the person's choice is: saving is refused until then.
         Some(c) if c.unsaved() && c.doc.blocked() => said::WAITING_ON_CHOICE,
         Some(c) if c.unsaved() => "Unsaved · autosave pending",
+        // The window shows text that is on no disk but in its recovery copy.
+        Some(c) if m.recovery.offer_for(c.id()).is_some() => said::WAITING_ON_RECOVERY,
         _ => "All changes saved",
     }
 }
@@ -123,11 +125,7 @@ fn refreshed(m: &mut Model, fx: &mut Effects<Notes>) {
 /// the list is redrawn, and the view scrolls to the top and takes the keys.
 fn show(m: &mut Model, fx: &mut Effects<Notes>) {
     m.pane.history.clear();
-    let current = m.current();
-    let (notebook, tags) = current
-        .as_ref()
-        .map(|c| (c.content().field("notebook"), c.content().field("tags")))
-        .unwrap_or_default();
+    let (notebook, tags) = m.shown().map(|c| (c.field("notebook"), c.field("tags"))).unwrap_or_default();
     m.status = save_state(m).into();
     m.pane.notebook = notebook;
     m.pane.tags = tags;
@@ -143,15 +141,15 @@ fn show(m: &mut Model, fx: &mut Effects<Notes>) {
 
 /// The library list, worked out again for the pane's section and search.
 fn relist(m: &mut Model, fx: &mut Effects<Notes>) {
-    let open = m.current().map(|c| c.as_note());
+    let open = m.shown_note();
     m.pane.listing = listing::list(&m.library, open.as_ref(), &m.pane.folder, &m.pane.query, now());
     fx.changed(LIBRARY);
 }
 
 /// The preview's blocks, from the open note as it is now. Nothing open leaves them as they were.
 fn reblock(m: &mut Model, fx: &mut Effects<Notes>) {
-    if let Some(current) = m.current() {
-        m.pane.blocks = preview::blocks(current.text());
+    if let Some(shown) = m.shown() {
+        m.pane.blocks = preview::blocks(&shown.text);
         fx.changed(PREVIEW);
     }
 }

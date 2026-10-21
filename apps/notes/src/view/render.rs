@@ -43,22 +43,19 @@ pub fn render(ui: &NotesApp, m: &Model, changed: &Changed) {
         ui.set_read_only(m.vault.read_only().is_some());
     }
     if changed.has(NOTE) || changed.has(EDIT) {
+        // A note whose unsaved text from before Notes closed is offered is drawn from that text,
+        // read-only, so the person sees what Restore keeps and what Discard drops; and it is
+        // unsaved until then, so the footer says so in amber.
+        let shown = m.shown();
         ui.set_opened(current.is_some());
-        ui.set_note_title(current.as_ref().map(|c| c.title()).unwrap_or_default().into());
+        ui.set_note_title(shown.map(|c| c.title()).unwrap_or_default().into());
         ui.set_trashed(current.as_ref().is_some_and(|c| c.trash()));
-        ui.set_pinned(current.as_ref().is_some_and(|c| c.content().pinned()));
-        ui.set_modified(current.as_ref().is_some_and(|c| c.unsaved()));
-        // Counted in what the editor draws: an offered text while its offer waits.
-        let offered = current.as_ref().and_then(|c| m.recovery.offer_for(c.id())).map(|o| o.content.words());
-        let words = offered.or_else(|| current.as_ref().map(|c| c.content().words()));
-        ui.set_words(words.unwrap_or(0) as i32);
+        ui.set_pinned(shown.is_some_and(|c| c.pinned()));
+        ui.set_modified(current.as_ref().is_some_and(|c| c.unsaved()) || m.offered().is_some());
+        ui.set_words(shown.map_or(0, |c| c.words()) as i32);
     }
     if changed.has(NOTE) || changed.has(CONTENT) {
-        // A note whose unsaved text from before Notes closed is offered shows that text, read-only,
-        // so the person sees what Restore keeps and what Discard drops.
-        let offered = current.as_ref().and_then(|c| m.recovery.offer_for(c.id())).map(|o| o.content.text.clone());
-        let text = offered.or_else(|| current.as_ref().map(|c| c.text().to_string()));
-        ui.set_content(text.unwrap_or_default().into());
+        ui.set_content(m.shown().map(|c| c.text.clone()).unwrap_or_default().into());
     }
     if changed.has(NOTE) || changed.has(FIELDS) {
         ui.set_notebook(m.pane.notebook.clone().into());
