@@ -206,7 +206,18 @@ impl<A: App> Intents<A> {
     }
 
     pub fn add(&mut self, intent: Intent<A>) {
+        // The framework's own actions: an app's intent of that name would hide the hand-over.
+        assert!(
+            !RESERVED.contains(&intent.action.name.as_str()),
+            "`{}` is the framework's action; an app cannot declare an intent of that name",
+            intent.action.name
+        );
         self.intents.push(intent);
+    }
+
+    /// The declarations, as the surface publishes them.
+    pub fn specs(&self) -> Vec<Action> {
+        self.intents.iter().map(|i| i.action.clone()).collect()
     }
 
     /// A rule about the app's own state that every call is held to before it is parsed, in the
@@ -233,8 +244,32 @@ impl<A: App> Intents<A> {
 /// The most an intent may keep the Mind waiting for an explicit settlement, whatever it declares.
 pub const MAX_SETTLE_WAIT: Duration = Duration::from_secs(30);
 
+/// Action names an app may not declare: the framework registers these itself.
+pub const RESERVED: [&str; 2] = ["launch", "present"];
+
+/// Whether a deep link's intent may be raised: its name is one the app declares, its arguments
+/// pass the declared parameters' check (and are typed by it), and, when the launch came by
+/// hand-over, it is graded standard or below. Any process of the uid may call `launch`, which is
+/// graded safe, so an intent that writes something lasting (#48) cannot come in that way; the
+/// person's own command line may name any intent, it is their input.
+pub fn admit(specs: &[Action], intent: &crate::launch::LaunchIntent, handed_over: bool) -> Result<(), String> {
+    let spec = specs
+        .iter()
+        .find(|s| s.name == intent.name)
+        .ok_or_else(|| format!("this app has no intent `{}`", intent.name))?;
+    yantrik_surface::check_arguments(spec, &intent.args)?;
+    if handed_over && yantrik_ipc_transport::gate::grade(spec.permission) > yantrik_ipc_transport::gate::grade("standard") {
+        return Err(format!(
+            "a launch handed over may raise an intent graded safe or standard; `{}` is {}",
+            spec.name, spec.permission
+        ));
+    }
+    Ok(())
+}
+
 pub fn registry<A: App>(core: &Rc<Core<A>>, table: Intents<A>) -> LocalRegistry {
     let mut registry = LocalRegistry::new(A::ID);
+    let specs = table.specs();
     // An intent an agent may never raise is refused by the dispatch before it decides anything,
     // so a call that cannot run is never shown as an approval card and spends no grant. The
     // model-reading rules (`Agents::Rule`, the app's state rule) cannot run there: they are the
@@ -317,7 +352,7 @@ pub fn registry<A: App>(core: &Rc<Core<A>>, table: Intents<A>) -> LocalRegistry 
         };
         registry.add(action, Box::new(handler));
     }
-    registry.add(crate::launch::action(), Box::new(launch_handler(weak)));
+    registry.add(crate::launch::action(), Box::new(launch_handler(weak, specs)));
     registry
 }
 
@@ -329,6 +364,7 @@ pub fn registry<A: App>(core: &Rc<Core<A>>, table: Intents<A>) -> LocalRegistry 
 /// as `present`'s is: the desktop's hand-over is not a way to open files past the intents.
 fn launch_handler<A: App>(
     core: std::rc::Weak<Core<A>>,
+    specs: Vec<Action>,
 ) -> impl Fn(&Value) -> Result<Value, String> + 'static {
     let seen: std::cell::RefCell<std::collections::VecDeque<String>> =
         std::cell::RefCell::new(std::collections::VecDeque::new());
@@ -346,6 +382,9 @@ fn launch_handler<A: App>(
                 "that launch is for profile `{}`; this instance runs profile `{profile}`",
                 launch.profile
             ));
+        }
+        if let Some(intent) = &launch.intent {
+            admit(&specs, intent, true)?;
         }
         let fresh = {
             let mut seen = seen.borrow_mut();
@@ -371,6 +410,26 @@ fn launch_handler<A: App>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::control::Param;
+    use serde_json::json;
+
+    /// A deep link's intent is admitted by the table: the name must be declared, the arguments
+    /// are typed by the declared parameters, and by hand-over only safe and standard pass.
+    #[test]
+    fn a_deep_links_intent_is_admitted_by_the_table() {
+        let specs = vec![
+            Action::new("find", "Find a note").risk("safe").arg(Param::integer("n")),
+            Action::new("set_step", "Set the step").risk("sensitive").arg(Param::integer("step")),
+        ];
+        let intent = |name: &str, args: Value| crate::launch::LaunchIntent { name: name.into(), args };
+        assert!(admit(&specs, &intent("nope", json!({})), true).unwrap_err().contains("no intent `nope`"));
+        assert!(admit(&specs, &intent("find", json!({ "n": "3" })), true).is_ok(), "text typed as the integer it is");
+        assert!(admit(&specs, &intent("find", json!({ "n": "three" })), true).is_err());
+        let e = admit(&specs, &intent("set_step", json!({ "step": "5" })), true).unwrap_err();
+        assert!(e.contains("safe or standard") && e.contains("sensitive"), "{e}");
+        assert!(admit(&specs, &intent("set_step", json!({ "step": "5" })), false).is_ok(), "the person's own command line");
+    }
+
 
     #[test]
     fn args_read_what_the_dispatch_filled_and_refuse_an_empty_text() {

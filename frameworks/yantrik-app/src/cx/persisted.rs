@@ -135,8 +135,9 @@ impl<A: App> Core<A> {
                 )));
             }
             (PersistKey::Draft(name), Ok(())) => {
+                // A discard that landed says nothing: `DraftSaved` means a draft on disk.
                 let latest = self.drafts.borrow().get(&name).copied() == Some(written.revision);
-                if latest {
+                if latest && !written.removed {
                     self.event(Event::DraftSaved(name));
                 }
             }

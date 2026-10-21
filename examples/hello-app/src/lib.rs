@@ -311,6 +311,14 @@ mod tests {
         assert_eq!(app.ui(|ui| ui.get_fetched()), "the weather is fine");
     }
 
+    /// `launch` and `present` are the framework's: an app's intent of that name would hide them.
+    #[test]
+    #[should_panic(expected = "framework's action")]
+    fn an_app_cannot_declare_the_frameworks_actions() {
+        let mut table = Intents::<Hello>::new();
+        table.add(Intent::new(Action::new("launch", "mine"), |_| Ok(Command::Add(1))));
+    }
+
     #[test]
     fn an_agent_may_not_reset_but_the_person_may() {
         let app = TestApp::<Hello>::start();
