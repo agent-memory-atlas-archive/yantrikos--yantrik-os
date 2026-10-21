@@ -97,6 +97,8 @@ pub fn loaded(m: &mut Model, fx: &mut Effects<Notes>, result: Result<Loaded, Str
                     // Kept while the vault refused writes: its save may have been refused already,
                     // and the autosave does not try a failed save again until something changes.
                     // Saved now, as the person's own save would be, so no further key is needed.
+                    // The store does one thing at a time, so this starts the first window's; the
+                    // others' failed saves follow as each lands (saving::retry_failed).
                     if writable_again {
                         saving::save(m, fx, How::Asked);
                     }

@@ -3,11 +3,19 @@
 //! with how much of it reached the disk, and a file changed outside never written over: the person
 //! chooses what happens to the two versions first (outside.rs). Another program's version a save
 //! replaced is kept by the store and said here.
+//!
+//! A save that lands shows the disk takes writes again, so a note whose save failed before is then
+//! saved again, one at a time, with no key pressed in it ([`retry_failed`]); its failure stays said
+//! until it is on disk.
 
-use yantrik_app::documents::{BeginSave, DocumentId, Durability, Fingerprint, SaveError, SaveOutcome, SaveTicket};
+use yantrik_app::documents::{
+    BeginSave, DocumentId, Durability, Fingerprint, SaveError, SaveOutcome, SaveState, SaveTicket,
+};
 use yantrik_app::effects::Effects;
 
-use super::{after_store, begin, drafts, failed, refreshed, relist, said, save_state, set_status, AUTOSAVE};
+use super::{
+    after_store, begin, drafts, failed, refreshed, relist, said, save_state, set_status, AUTOSAVE, AUTOSAVE_AFTER,
+};
 use crate::command::Command;
 use crate::model::{Model, Work};
 use crate::note::{Note, NoteText};
@@ -156,14 +164,15 @@ pub fn landed(m: &mut Model, fx: &mut Effects<Notes>, doc: DocumentId, seq: u64,
             }
             // Another program's write that this save replaced is said, and stays said while the
             // person types on (one kept by the store was said above, with where it is kept); a
-            // failure's notice is answered by this landing.
+            // failure's notice is answered by this landing, unless another note's save still
+            // stands failed.
             match replaced {
                 _ if theirs.is_some() => {}
                 Some(what) => {
                     m.notice = said::replaced(what).into();
                     m.lasting_notice = true;
                 }
-                None if !m.lasting_notice => m.notice.clear(),
+                None if !m.lasting_notice && still_failed(m, doc).is_empty() => m.notice.clear(),
                 None => {}
             }
             refreshed(m, fx);
@@ -172,6 +181,7 @@ pub fn landed(m: &mut Model, fx: &mut Effects<Notes>, doc: DocumentId, seq: u64,
                 spawn(m, fx, doc, ticket);
             }
             after_store(m, fx);
+            retry_failed(m, fx, doc);
         }
         Err(failure) => {
             let conflict = failure.error.conflict;
@@ -200,7 +210,38 @@ pub fn landed(m: &mut Model, fx: &mut Effects<Notes>, doc: DocumentId, seq: u64,
             // A sighting the save was holding is judged now, and may be the bar's news.
             fx.changed(OUTSIDE);
             failed(m, fx, Some(doc), sentence);
+            // Another note's edits that waited behind this save are still saved at the next tick;
+            // this one is not tried again by the autosave until it changes.
+            if m.documents.iter().any(|d| d.id != doc && m.unsaved_doc(d.id)) {
+                fx.after(AUTOSAVE, AUTOSAVE_AFTER, Command::Autosave);
+            }
         }
+    }
+}
+
+/// The notes other than `except` whose last save failed and whose edits are still not on disk.
+fn still_failed(m: &Model, except: DocumentId) -> Vec<DocumentId> {
+    m.documents
+        .iter()
+        .filter(|d| d.id != except && matches!(d.save, SaveState::Failed { .. }))
+        .map(|d| d.id)
+        .filter(|id| m.unsaved_doc(*id))
+        .collect()
+}
+
+/// A save of `saved` just landed, so the disk takes writes again: the next note whose save failed
+/// is saved again, in a window that shows it, as the person's own Save would be, rather than left
+/// off disk until it is edited. One at a time, and only on a success: a retry that fails ends the
+/// retries, so none is tried over and over. Not while a close or an action waits on the store
+/// (each saves what it needs first), nor for a note whose file changed outside (the person
+/// chooses first).
+fn retry_failed(m: &mut Model, fx: &mut Effects<Notes>, saved: DocumentId) {
+    if m.busy.is_some() || m.closing.is_some() || m.pending.is_some() {
+        return;
+    }
+    let next = still_failed(m, saved).into_iter().find(|id| m.documents.get(*id).is_some_and(|d| !d.blocked()));
+    if let Some(next) = next {
+        save_document(m, fx, next, How::Asked);
     }
 }
 
