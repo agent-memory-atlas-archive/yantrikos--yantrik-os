@@ -338,19 +338,25 @@ impl<A: App> TestApp<A> {
     /// are staged: jobs wait for [`TestApp::run_jobs`], timers for [`TestApp::advance`], writes
     /// for [`TestApp::run_writes`]. Starting twice at the same `paths` is a restart.
     pub fn start_at(paths: Paths, args: Vec<std::ffi::OsString>) -> TestApp<A> {
-        TestApp::start_at_with(paths, args, Arc::new(yantrik_mind::fake::FakeMind::new()))
+        TestApp::start_at_with(
+            paths,
+            args,
+            Arc::new(yantrik_mind::fake::FakeMind::new()),
+            yantrik_app::services::Services::fakes(),
+        )
     }
 
-    /// [`TestApp::start_at`] with the Mind the app is given: a `FakeMind` the test keeps a
-    /// handle to, so it can set the reach and read the prompts.
+    /// [`TestApp::start_at`] with the Mind and the services the app is given: fakes the test
+    /// keeps handles to, so it can set what they answer and read what they were asked.
     pub fn start_at_with(
         paths: Paths,
         args: Vec<std::ffi::OsString>,
         mind: Arc<dyn yantrik_mind::Mind>,
+        services: yantrik_app::services::Services,
     ) -> TestApp<A> {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         on_ui(move || {
-            let (boot, store) = Boot::<A::Settings>::open(paths.clone(), args, mind)
+            let (boot, store) = Boot::<A::Settings>::open(paths.clone(), args, mind, services)
                 .unwrap_or_else(|e| panic!("{}: the launch was refused: {e}", A::ID));
             let model = A::model(&boot)
                 .unwrap_or_else(|e| panic!("{}: the model did not start: {e}", A::ID));

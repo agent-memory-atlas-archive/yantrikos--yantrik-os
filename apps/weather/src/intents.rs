@@ -1,0 +1,115 @@
+//! What the Mind, keys and menus may ask Weather by name: the same four actions, graded as they
+//! were (#48: what writes a setting that outlives the turn asks first; showing does not), each
+//! the same command a button runs.
+
+use std::time::Duration;
+
+use serde_json::json;
+use yantrik_app::control::{Action, Param};
+use yantrik_app::intents::{Intent, Intents, Settle};
+use yantrik_app::Refused;
+
+use crate::model::{Command, Model};
+use crate::Weather;
+
+/// How long a place lookup may take before the Mind is told it did not finish.
+const ADD_WITHIN: Duration = Duration::from_secs(15);
+
+pub fn table(table: &mut Intents<Weather>) {
+    table.add(
+        Intent::new(
+            Action::new("refresh", "Fetch the current conditions again"),
+            |_| Ok(Command::Refresh),
+        )
+        .reply(|m: &Model| json!({ "refreshing": m.active().name })),
+    );
+    table.add(
+        Intent::new(
+            Action::new("show_location", "Switch to one of the saved locations")
+                .risk("standard")
+                .arg(Param::text("name")),
+            |a| Ok(Command::ShowLocationNamed(a.text("name")?.to_string())),
+        )
+        .reply(|m: &Model| {
+            let loc = m.active();
+            json!({ "showing": loc.name, "lat": loc.lat, "lon": loc.lon })
+        }),
+    );
+    table.add(
+        Intent::new(
+            Action::new("add_location", "Look a place up and save it")
+                .risk("sensitive")
+                .arg(Param::text("name")),
+            |a| Ok(Command::AddLocation(a.text("name")?.to_string())),
+        )
+        .settles(Settle::Explicit { within: ADD_WITHIN })
+        .reply(|m: &Model| {
+            let loc = m.active();
+            json!({
+                "added": loc.name,
+                "lat": loc.lat,
+                "lon": loc.lon,
+                "saved_to": m.config_file,
+                "saved_locations": m.prefs.locations.len(),
+            })
+        }),
+    );
+    table.add(
+        Intent::new(
+            Action::new("set_units", "Show temperatures in Celsius or Fahrenheit")
+                .risk("sensitive")
+                .arg(Param::text("units").describe("celsius | fahrenheit")),
+            |a| match a.text("units")?.to_lowercase().as_str() {
+                "fahrenheit" | "f" | "imperial" => Ok(Command::SetUnits(true)),
+                "celsius" | "c" | "metric" => Ok(Command::SetUnits(false)),
+                other => Err(Refused::new(
+                    "bad_units",
+                    format!("units are celsius or fahrenheit, not `{other}`"),
+                )),
+            },
+        )
+        .reply(|m: &Model| {
+            json!({
+                "units": if m.prefs.fahrenheit { "fahrenheit" } else { "celsius" },
+                "saved_to": m.config_file,
+            })
+        }),
+    );
+}
+
+#[cfg(test)]
+mod grade_tests {
+    //! The grades, read from this file's text: a test that would otherwise need the registry.
+
+    fn declaration(name: &str) -> String {
+        let src = include_str!("intents.rs");
+        let src = src.split("#[cfg(test)]").next().unwrap_or_default();
+        let quoted = format!("\"{name}\"");
+        let from = src
+            .find(&quoted)
+            .unwrap_or_else(|| panic!("weather no longer publishes {name}"));
+        let rest = &src[from..];
+        let end = rest.find("table.add(").unwrap_or(rest.len());
+        rest[..end].to_string()
+    }
+
+    #[test]
+    fn what_outlives_the_turn_asks_first() {
+        for name in ["add_location", "set_units"] {
+            let declaration = declaration(name);
+            assert!(
+                declaration.contains(".risk(\"sensitive\")"),
+                "`weather.{name}` must be graded sensitive: it writes a choice into this app's \
+                 prefs file that outlives the turn and survives a restart (#48). Declaration as \
+                 written:\n{declaration}"
+            );
+        }
+        for name in ["refresh", "show_location"] {
+            assert!(
+                !declaration(name).contains(".risk(\"sensitive\")"),
+                "`weather.{name}` shows or reads and stores no new setting (#48)"
+            );
+        }
+        assert!(declaration("show_location").contains(".risk(\"standard\")"));
+    }
+}
