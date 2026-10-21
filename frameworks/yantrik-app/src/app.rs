@@ -57,7 +57,13 @@ pub enum Event<S> {
     /// The process is asked to end. `None` ends it now; a command may save first and then
     /// `fx.exit()`.
     ExitRequested(ExitReason),
-    /// A window became the active one.
+    /// A window became the active one: the window manager gave it the keyboard (winit's
+    /// `Focused(true)`), because the person clicked into it, switched to it or brought it back,
+    /// or because it was just shown. Raised once per activation: a window that is already active
+    /// raises nothing more, so it fires again only after the window lost the activation to
+    /// another window, this app's or another's. Never raised when a window loses the activation,
+    /// for a window that is closed, or where there is no window manager (the headless platform;
+    /// a test raises it with `TestApp::activate`). `None` does nothing.
     Activated(WindowId),
     /// The last `fx.save_settings` reached the disk. `None` does nothing.
     SettingsSaved,

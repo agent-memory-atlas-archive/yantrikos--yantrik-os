@@ -1,9 +1,10 @@
 //! More than one window (design/notes-gate-2026-10-21.md §2, "Views and windows"), headless:
 //! a window opened by a command is wired with its own id, drawn whole, and drawn again on every
 //! change; closing one leaves the app running; the first window is not privileged; the last
-//! window closing ends the process.
+//! window closing ends the process. A window the window manager activates raises one
+//! `Event::Activated`, and only an open window that was not already active raises it.
 
-use yantrik_app::app::{App, Boot, Changed, ExitReason, Startup, WindowId};
+use yantrik_app::app::{App, Boot, Changed, Event, ExitReason, Startup, WindowId};
 use yantrik_app::cx::Cx;
 use yantrik_app::effects::Effects;
 use yantrik_app::refused::Refused;
@@ -31,6 +32,8 @@ struct Model {
     opened: Vec<WindowId>,
     /// Which window each bump came from.
     bumps: Vec<WindowId>,
+    /// Each `Event::Activated`, in the order it was raised.
+    activated: Vec<WindowId>,
 }
 
 #[derive(Debug, Clone)]
@@ -41,6 +44,7 @@ enum Command {
     Replace(WindowId),
     /// Asks the process to end, then for a window.
     ExitThenOpen,
+    Activated(WindowId),
 }
 
 struct Pair;
@@ -79,8 +83,16 @@ impl App for Pair {
                 fx.exit();
                 m.opened.push(fx.open_window());
             }
+            Command::Activated(window) => m.activated.push(window),
         }
         Ok(())
+    }
+
+    fn event(event: Event<()>, _: &Model) -> Option<Command> {
+        match event {
+            Event::Activated(window) => Some(Command::Activated(window)),
+            _ => None,
+        }
     }
 
     fn render(ui: &PairWin, window: WindowId, m: &Model, _: &Changed) {
@@ -217,4 +229,98 @@ fn no_window_is_made_once_the_process_is_ending() {
     app.run(Command::ExitThenOpen);
     assert_eq!(app.exit_reason(), Some(ExitReason::App));
     assert_eq!(app.windows(), vec![WindowId::PRIMARY], "nothing flashes up while ending");
+}
+
+fn activated(app: &TestApp<Pair>) -> Vec<WindowId> {
+    app.model(|m| m.activated.clone())
+}
+
+#[test]
+fn a_window_gaining_activation_raises_one_activated_and_a_repeat_raises_none() {
+    let app = TestApp::<Pair>::start();
+    assert!(activated(&app).is_empty(), "nothing is raised before the window manager speaks");
+    app.activate(WindowId::PRIMARY);
+    assert_eq!(activated(&app), vec![WindowId::PRIMARY]);
+    // The window manager saying it again, of the window already active, is not a new activation.
+    app.activate(WindowId::PRIMARY);
+    assert_eq!(activated(&app), vec![WindowId::PRIMARY]);
+}
+
+#[test]
+fn a_second_windows_activation_raises_one_for_it() {
+    let app = TestApp::<Pair>::start();
+    let second = opened(&app);
+    app.activate(WindowId::PRIMARY);
+    // Wayland may tell the new window before the old one hears it lost the keyboard.
+    app.activate(second);
+    app.deactivate(WindowId::PRIMARY);
+    assert_eq!(activated(&app), vec![WindowId::PRIMARY, second]);
+    app.activate(WindowId::PRIMARY);
+    app.deactivate(second);
+    assert_eq!(activated(&app), vec![WindowId::PRIMARY, second, WindowId::PRIMARY]);
+}
+
+#[test]
+fn losing_the_activation_raises_nothing_and_coming_back_raises_again() {
+    let app = TestApp::<Pair>::start();
+    app.activate(WindowId::PRIMARY);
+    // The person switched to another app's window.
+    app.deactivate(WindowId::PRIMARY);
+    app.deactivate(WindowId::PRIMARY);
+    assert_eq!(activated(&app), vec![WindowId::PRIMARY], "a loss is not an activation");
+    app.activate(WindowId::PRIMARY);
+    assert_eq!(activated(&app), vec![WindowId::PRIMARY, WindowId::PRIMARY]);
+}
+
+#[test]
+fn a_closed_window_raises_none() {
+    let app = TestApp::<Pair>::start();
+    let second = opened(&app);
+    app.activate(second);
+    app.close_requested(second);
+    // A late word from the window manager about the window that closed.
+    app.activate(second);
+    app.close_requested(WindowId::PRIMARY);
+    app.activate(WindowId::PRIMARY);
+    assert_eq!(activated(&app), vec![second]);
+}
+
+#[test]
+fn the_window_left_when_the_active_one_closes_raises_when_activated() {
+    let app = TestApp::<Pair>::start();
+    let second = opened(&app);
+    app.activate(WindowId::PRIMARY);
+    app.activate(second);
+    app.close_requested(second);
+    app.activate(WindowId::PRIMARY);
+    assert_eq!(activated(&app), vec![WindowId::PRIMARY, second, WindowId::PRIMARY]);
+}
+
+#[test]
+fn an_app_that_ignores_activation_is_unaffected() {
+    struct Ignoring;
+    impl App for Ignoring {
+        type Ui = PairWin;
+        type Model = u32;
+        type Command = ();
+        type Settings = ();
+        const ID: &'static str = "pair-ignoring-test";
+        fn model(_: &Boot) -> Result<u32, Startup> {
+            Ok(0)
+        }
+        fn wire(_: &Cx<Self>) {}
+        fn update(applied: &mut u32, _: (), _: &mut Effects<Self>) -> Result<(), Refused> {
+            *applied += 1;
+            Ok(())
+        }
+        fn render(_: &PairWin, _: WindowId, _: &u32, _: &Changed) {}
+    }
+    let app = TestApp::<Ignoring>::start();
+    app.activate(WindowId::PRIMARY);
+    app.deactivate(WindowId::PRIMARY);
+    app.activate(WindowId::PRIMARY);
+    assert_eq!(app.model(|applied| *applied), 0, "no command ran");
+    assert!(app.last_refusal().is_none());
+    assert_eq!(app.windows(), vec![WindowId::PRIMARY]);
+    assert_eq!(app.exit_reason(), None);
 }

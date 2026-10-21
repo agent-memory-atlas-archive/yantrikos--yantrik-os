@@ -10,6 +10,10 @@
 //! A second launch's `present` goes through the core ([`Core::present`]): it brings forward a
 //! window that is open, and never re-shows a closed one behind the core's back, so what the core
 //! counts as open is what is on screen.
+//!
+//! Activation: every window, the first included, tells the core when the window manager gives it
+//! the keyboard or takes it away ([`Core::hear_activation`]). The core keeps which window is
+//! active and raises `Event::Activated` when that changes to an open window, and only then.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -38,11 +42,20 @@ pub(crate) struct Windows<U> {
     more: BTreeMap<WindowId, U>,
     /// The theme the windows wear now, so a window opened later wears it too.
     theme: Option<ThemeSettings>,
+    /// The window the window manager last gave the keyboard to, while it has it.
+    active: Option<WindowId>,
 }
 
 impl<U> Windows<U> {
     pub(crate) fn new() -> Windows<U> {
-        Windows { first_open: true, more: BTreeMap::new(), theme: None }
+        Windows { first_open: true, more: BTreeMap::new(), theme: None, active: None }
+    }
+
+    /// `window` is not the active one any more: it lost the keyboard, or it closed.
+    fn not_active(&mut self, window: WindowId) {
+        if self.active == Some(window) {
+            self.active = None;
+        }
     }
 }
 
@@ -116,6 +129,7 @@ impl<A: App> Core<A> {
         let theme = self.windows.borrow().theme.unwrap_or_else(theme::load);
         ui.apply_theme(&theme);
         ui.connect_chrome();
+        self.hear_activation(id, &ui);
         let post = self.post();
         ui.window().on_close_requested(move || {
             // As the first window's: the app decides, a close now or a flow ending in `fx.close`.
@@ -142,6 +156,7 @@ impl<A: App> Core<A> {
     /// A window closed: only it. Whether that was the last is judged by
     /// [`Core::exit_if_no_window`], once the command's effects are all applied.
     pub(super) fn close_window(&self, window: WindowId) {
+        self.windows.borrow_mut().not_active(window);
         if window == WindowId::PRIMARY {
             let _ = self.ui.hide();
             self.windows.borrow_mut().first_open = false;
@@ -154,6 +169,43 @@ impl<A: App> Core<A> {
             // dropped from the event loop, after that callback has returned.
             slint::Timer::single_shot(Duration::ZERO, move || drop(ui));
         }
+    }
+
+    /// `ui`, as `window`, tells the core when the window manager gives it the keyboard or takes
+    /// it away (winit's `Focused`). The runner installs the first window's; `open_window` every
+    /// later one's. The hook holds the core weakly: the window it lives in is the core's.
+    pub(crate) fn hear_activation(&self, window: WindowId, ui: &A::Ui) {
+        let core = self.me.clone();
+        crate::chrome::on_focus_changed(ui.window(), move |focused| {
+            if let Some(core) = core.upgrade() {
+                core.focus_changed(window, focused);
+            }
+        });
+    }
+
+    /// The window manager's word on `window`: it has the keyboard now, or it lost it. Gaining it
+    /// raises `Event::Activated` when the window is open and was not already the active one; a
+    /// loss only forgets it, so the next gain raises again.
+    fn focus_changed(&self, window: WindowId, focused: bool) {
+        if !focused {
+            self.windows.borrow_mut().not_active(window);
+            return;
+        }
+        if !self.windows_open().contains(&window) {
+            return;
+        }
+        let was = self.windows.borrow_mut().active.replace(window);
+        if was != Some(window) {
+            self.event(Event::Activated(window));
+        }
+    }
+
+    /// What the window manager would say, for a test (the headless platform has none): `window`
+    /// gained the keyboard (`true`) or lost it (`false`), exactly as winit's `Focused` reaches
+    /// [`Core::hear_activation`]'s hook. Behind the `testing` feature, as `TestApp` reaches it.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn focus_for_test(&self, window: WindowId, focused: bool) {
+        self.focus_changed(window, focused);
     }
 
     /// The process ends when no window is open.

@@ -10,7 +10,8 @@ description = "How a Yantrik app is tested without a display: a headless Slint p
 [dependencies]
 slint = { workspace = true }
 serde_json = { workspace = true }
-yantrik-app = { workspace = true }
+# `testing`: the window manager's word on activation, which the headless platform cannot give.
+yantrik-app = { workspace = true, features = ["testing"] }
 # The fake Mind every app under test is given unless the test says otherwise.
 yantrik-mind = { workspace = true }
 # The real dispatch a test acts through, and the authority it pins.
