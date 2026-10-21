@@ -18,6 +18,8 @@ pub mod draft;
 pub mod outside;
 pub mod save;
 #[cfg(test)]
+mod disk_tests;
+#[cfg(test)]
 mod tests;
 pub mod watched;
 
@@ -27,9 +29,9 @@ use std::path::{Path, PathBuf};
 use crate::app::WindowId;
 pub use crate::settings::Fingerprint;
 pub use close::{Choice, CloseFlow, Closing};
-pub use draft::{DraftState, Envelope, Recovered};
+pub use draft::{Candidate, DraftState, Envelope, Recovered};
 pub use outside::{Observed, OutsideState};
-pub use save::{BeginSave, Durability, SaveError, SaveOutcome, SaveState, SaveTicket};
+pub use save::{BeginSave, Durability, Replaced, SaveError, SaveOutcome, SaveState, SaveTicket};
 pub use watched::Watched;
 
 /// A document, for the life of this run.
@@ -58,12 +60,16 @@ impl Source {
     }
 
     /// A name stable across restarts, for the document's draft and its watch: the file's path
-    /// hashed (so no path ends up in a file name), or the new document's own key.
+    /// hashed (so no path ends up in a file name), or the new document's own key. SHA-256, cut
+    /// to 128 bits: two open documents sharing a key would share a draft, and file names in a
+    /// synced vault may be chosen by someone else, so the hash must resist a chosen collision.
     pub fn key(&self) -> String {
         match self {
             Source::File(p) => {
-                let fp = Fingerprint::of_bytes(p.to_string_lossy().as_bytes());
-                format!("doc-{}", fp.hex())
+                use sha2::Digest as _;
+                let digest = sha2::Sha256::digest(p.as_os_str().as_encoded_bytes());
+                let hex: String = digest[..16].iter().map(|b| format!("{b:02x}")).collect();
+                format!("doc-{hex}")
             }
             Source::New(key) => format!("new-{key}"),
         }
@@ -89,11 +95,16 @@ pub struct Document<C> {
     pub(crate) follow_up: bool,
     /// What the watch saw while a save was in flight, judged when the save's outcome lands.
     pub(crate) seen_while_saving: Option<Observed>,
-    /// Fingerprints this process committed recently: seeing one of them is not an outside edit.
+    /// Our writes the watch may not have seen yet: a sighting of one is suppressed once
+    /// (outside.rs). Cleared when the watch catches up with the baseline.
     pub(crate) ours: Vec<Fingerprint>,
+    /// Bytes of ours a failed save may have left on disk (`Durability::ContentOnly`, `Unknown`).
+    pub(crate) unsure: Option<Fingerprint>,
+    /// An older write of ours was seen: the watch is to look again from the baseline.
+    pub(crate) recheck: bool,
 }
 
-/// How many of our own committed fingerprints are remembered for self-write suppression.
+/// How many of our writes the watch may not have seen yet are remembered.
 const REMEMBERED_WRITES: usize = 4;
 
 impl<C> Document<C> {
@@ -182,6 +193,8 @@ impl<C> Documents<C> {
                 follow_up: false,
                 seen_while_saving: None,
                 ours: Vec::new(),
+                unsure: None,
+                recheck: false,
             },
         );
         id

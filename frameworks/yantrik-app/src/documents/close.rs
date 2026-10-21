@@ -85,7 +85,12 @@ pub enum Stage {
 /// What the app does after an answer or a save outcome.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Next {
-    /// Start these saves (the latest `seq` of each).
+    /// Start these saves (the latest `seq` of each) with [`Document::retry_save`], not
+    /// `begin_save`: a document whose last autosave failed would answer `Failed` and the close
+    /// would wait for ever. A save that answers `Blocked`, or lands `Failed`, is fed back to
+    /// [`CloseFlow::progress`] as `failed`, with its sentence.
+    ///
+    /// [`Document::retry_save`]: super::Document::retry_save
     Save(Vec<DocumentId>),
     /// Close now. With *Don't save*, discard these documents' edits and drafts.
     Close { discard: Vec<DocumentId> },
@@ -113,8 +118,8 @@ impl CloseFlow {
         }
     }
 
-    /// A save outcome landed (or an edit was made) while closing. `clean` says, for a
-    /// document, whether it is now saved; `failed` carries a failure's sentence.
+    /// A save outcome landed (or an edit was made) while closing. `failed` carries a failed or
+    /// blocked save's sentence; otherwise each asked document's dirtiness decides.
     pub fn progress<C>(&mut self, documents: &Documents<C>, failed: Option<String>) -> Next {
         if self.stage != Stage::SavingThenClose {
             return Next::Wait;

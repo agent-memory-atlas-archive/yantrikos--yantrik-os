@@ -9,7 +9,7 @@ pub enum Durability {
     /// Nothing changed on disk: the file is as it was before the save began.
     NotWritten,
     /// The content landed and its companion data (metadata) did not; the app's journal holds
-    /// the rest.
+    /// the rest. Treated as not saved.
     ContentOnly,
     /// A step after the rename failed (a directory sync): the new content may or may not
     /// survive a power loss. Treated as not saved.
@@ -24,15 +24,26 @@ pub struct SaveError {
     pub sentence: String,
     /// The file on disk no longer matches the baseline: an outside edit got there first.
     pub conflict: bool,
+    /// The fingerprint of the bytes this save wrote, when they may be on disk (`ContentOnly`,
+    /// `Unknown`): seeing them is our own write, not an outside edit, and a retry may replace
+    /// them.
+    pub landed: Option<Fingerprint>,
 }
 
 impl SaveError {
+    /// A failure that wrote nothing.
     pub fn new(durability: Durability, sentence: impl Into<String>) -> SaveError {
-        SaveError { durability, sentence: sentence.into(), conflict: false }
+        SaveError { durability, sentence: sentence.into(), conflict: false, landed: None }
+    }
+
+    /// A failure after which these bytes may be on disk (nothing, for `NotWritten`).
+    pub fn after_writing(durability: Durability, written: Fingerprint, sentence: impl Into<String>) -> SaveError {
+        let landed = (durability != Durability::NotWritten).then_some(written);
+        SaveError { durability, sentence: sentence.into(), conflict: false, landed }
     }
 
     pub fn conflict(sentence: impl Into<String>) -> SaveError {
-        SaveError { durability: Durability::NotWritten, sentence: sentence.into(), conflict: true }
+        SaveError { durability: Durability::NotWritten, sentence: sentence.into(), conflict: true, landed: None }
     }
 }
 
@@ -43,13 +54,28 @@ pub enum SaveState {
     Failed { seq: u64, error: SaveError },
 }
 
-/// What a save job is given: the content as it was at `seq`, and the baseline it must find.
+/// What a save job is given: the content as it was at `seq`, and what it may find on disk.
 #[derive(Debug, Clone)]
 pub struct SaveTicket<C> {
     pub document: DocumentId,
     pub seq: u64,
     pub content: C,
+    /// The file as this document last read or wrote it; `None` when it creates a new file.
     pub baseline: Option<Fingerprint>,
+    /// Bytes of ours from a save whose durability was not known, which may be on disk instead.
+    pub unsure: Option<Fingerprint>,
+}
+
+impl<C> SaveTicket<C> {
+    /// The store's check before it replaces the file: what is on disk now (`None`: no file) is
+    /// what this document knows is there, its baseline or its own unsure write. Anything else is
+    /// an outside edit, and the save must fail as a conflict.
+    pub fn may_replace(&self, on_disk: Option<&Fingerprint>) -> bool {
+        match on_disk {
+            None => self.baseline.is_none(),
+            Some(now) => Some(now) == self.baseline.as_ref() || Some(now) == self.unsure.as_ref(),
+        }
+    }
 }
 
 /// What `begin_save` decided.
@@ -67,15 +93,25 @@ pub enum BeginSave<C> {
     Blocked,
 }
 
+/// What a save that landed replaced, which the person must hear about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Replaced {
+    /// Another program wrote the file while ours was in flight, and ours replaced it.
+    OutsideEdit,
+    /// The file was deleted or moved while ours was in flight, and ours made it again.
+    Deletion,
+}
+
 /// What a save's outcome did.
 #[derive(Debug, Clone)]
 pub enum SaveOutcome<C> {
-    Saved,
-    /// Saved, and the edits made meanwhile need the follow-up save this ticket is for.
-    FollowUp(SaveTicket<C>),
+    /// Saved. `follow_up` is the save the edits made meanwhile need; `replaced`, when set, is
+    /// said to the person.
+    Saved {
+        follow_up: Option<SaveTicket<C>>,
+        replaced: Option<Replaced>,
+    },
     Failed,
-    /// Saved, but another program wrote the file while ours was in flight and ours replaced it.
-    OverwroteOutsideEdit,
     /// For a save this document no longer expects (an older one, after a newer outcome).
     Stale,
 }
@@ -95,7 +131,7 @@ impl<C: Clone> Document<C> {
         self.start()
     }
 
-    /// The person asked to save: a failure is retried.
+    /// The person asked to save, or a close flow did: a failure is retried.
     pub fn retry_save(&mut self) -> BeginSave<C> {
         self.start()
     }
@@ -124,10 +160,13 @@ impl<C: Clone> Document<C> {
             seq: self.seq,
             content: self.content.clone(),
             baseline: self.baseline.clone(),
+            unsure: self.unsure.clone(),
         })
     }
 
-    /// The save of `seq` ended. `Ok` carries the fingerprint of what is now on disk.
+    /// The save of `seq` ended. `Ok` carries the fingerprint of what is now on disk. After a
+    /// save lands, the app re-arms the document's watch from its new baseline (`fx.watch` with
+    /// [`Document::watch_entry`]), so a look the watch took before the save is dropped.
     pub fn save_landed(&mut self, seq: u64, result: Result<Fingerprint, SaveError>) -> SaveOutcome<C> {
         match self.save {
             SaveState::Saving { seq: in_flight } if in_flight == seq => {}
@@ -137,35 +176,46 @@ impl<C: Clone> Document<C> {
         match result {
             Ok(written) => {
                 let before = self.baseline.replace(written.clone());
+                let unsure = self.unsure.take();
                 self.saved_seq = self.saved_seq.max(seq);
                 self.remember_write(written.clone());
                 self.save = SaveState::Idle;
-                // A file seen during the save that was neither the old file nor ours existed
-                // between our check and our rename: ours replaced it, and the person hears so.
-                let overwrote = matches!(&seen, Some(Observed::File(f)) if *f != written && Some(f) != before.as_ref());
                 if matches!(self.outside, OutsideState::Changed { .. }) {
                     self.outside = OutsideState::Clean;
                 }
-                if self.follow_up && self.dirty() {
-                    self.follow_up = false;
-                    if let BeginSave::Ticket(t) = self.start() {
-                        return SaveOutcome::FollowUp(t);
+                // Seen during the save: neither the old file, nor ours, nor an unsure write of
+                // ours, so it existed between our check and our rename, and ours replaced it.
+                let replaced = match &seen {
+                    Some(Observed::File(f))
+                        if *f != written && Some(f) != before.as_ref() && Some(f) != unsure.as_ref() =>
+                    {
+                        Some(Replaced::OutsideEdit)
                     }
-                }
-                self.follow_up = false;
-                if overwrote {
-                    SaveOutcome::OverwroteOutsideEdit
+                    Some(Observed::Gone) if before.is_some() => Some(Replaced::Deletion),
+                    _ => None,
+                };
+                let follow_up = if std::mem::take(&mut self.follow_up) && self.dirty() {
+                    match self.start() {
+                        BeginSave::Ticket(t) => Some(t),
+                        _ => None,
+                    }
                 } else {
-                    SaveOutcome::Saved
-                }
+                    None
+                };
+                SaveOutcome::Saved { follow_up, replaced }
             }
             Err(error) => {
                 self.follow_up = false;
+                if let Some(landed) = &error.landed {
+                    // Our bytes may be on disk: seeing them is not an outside edit, and the
+                    // retry may replace them. Nothing is called saved.
+                    self.unsure = Some(landed.clone());
+                }
                 if error.conflict {
                     self.outside = OutsideState::Conflict { now: None };
                 }
                 self.save = SaveState::Failed { seq, error };
-                // A sighting during a save that failed is judged now, against the old baseline.
+                // A sighting during a save that failed is judged now, against what we know.
                 if let Some(seen) = seen {
                     self.observe(seen);
                 }

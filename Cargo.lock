@@ -11125,6 +11125,7 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "sha2",
  "slint",
  "thiserror 2.0.18",
  "tokio",

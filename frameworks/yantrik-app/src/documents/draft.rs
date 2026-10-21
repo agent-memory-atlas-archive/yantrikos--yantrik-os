@@ -25,7 +25,7 @@ pub struct Envelope<C> {
     /// The file it is a draft of, if any, so a recovered draft can be shown beside it.
     pub path: Option<String>,
     pub seq: u64,
-    /// Seconds since the epoch, when it was made.
+    /// Milliseconds since the epoch, when it was made.
     pub at: u64,
     pub content: C,
 }
@@ -35,9 +35,9 @@ pub const ENVELOPE_VERSION: u32 = 1;
 
 impl<C: Clone + Serialize> Document<C> {
     /// The draft to keep for this document now, if one is owed (it is dirty and the draft is
-    /// older than the edits). The app passes the bytes to `fx.save_draft(name, bytes)` and then
-    /// calls [`Document::draft_asked`].
-    pub fn draft_owed(&self, now: u64) -> Option<(String, Vec<u8>)> {
+    /// older than the edits). `now_ms` is milliseconds since the epoch. The app passes the
+    /// bytes to `fx.save_draft(name, bytes)` and then calls [`Document::draft_asked`].
+    pub fn draft_owed(&self, now_ms: u64) -> Option<(String, Vec<u8>)> {
         if !self.dirty() {
             return None;
         }
@@ -51,7 +51,7 @@ impl<C: Clone + Serialize> Document<C> {
             key: self.source.key(),
             path: self.source.path().map(|p| p.display().to_string()),
             seq: self.seq,
-            at: now,
+            at: now_ms,
             content: self.content.clone(),
         };
         let bytes = serde_json::to_vec(&envelope).ok()?;
@@ -91,26 +91,44 @@ pub enum Recovered<C> {
     Journal(C),
 }
 
-/// The precedence at a start. Each candidate is `(content, seconds since the epoch)`. A
-/// candidate equal to the file's content is not offered; of the rest, the newest wins, and a
-/// draft wins a tie (it is the later of the two writes an edit makes).
-pub fn recover<C: PartialEq + Clone>(
-    file: Option<(&C, u64)>,
-    journal: Option<(C, u64)>,
-    draft: Option<(C, u64)>,
+/// A text a start may offer back: from a draft or an interrupted save's journal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Candidate<C> {
+    pub content: C,
+    /// Milliseconds since the epoch, when it was written.
+    pub at_ms: u64,
+    /// The edit it holds (`Envelope::seq`), when it records one.
+    pub seq: Option<u64>,
+}
+
+/// The precedence at a start. A candidate equal to the file's content is not offered. Of the
+/// rest, the newer wins. At the same millisecond the later edit wins when both record their
+/// `seq`, and otherwise the draft, which is the later of the two writes one edit makes.
+///
+/// A wall clock stepped backwards between the two writes (NTP) can make the older text look
+/// newer. Both texts are kept until the person's choice, so the other is still recoverable.
+pub fn recover<C: PartialEq>(
+    file: Option<&C>,
+    journal: Option<Candidate<C>>,
+    draft: Option<Candidate<C>>,
 ) -> Recovered<C> {
-    let differs = |c: &C| file.map_or(true, |(f, _)| f != c);
-    let journal = journal.filter(|(c, _)| differs(c));
-    let draft = draft.filter(|(c, _)| differs(c));
+    let differs = |c: &Candidate<C>| file.is_none_or(|f| *f != c.content);
+    let journal = journal.filter(differs);
+    let draft = draft.filter(differs);
     match (journal, draft) {
         (None, None) => Recovered::File,
-        (Some((j, _)), None) => Recovered::Journal(j),
-        (None, Some((d, _))) => Recovered::Draft(d),
-        (Some((j, jt)), Some((d, dt))) => {
-            if jt > dt {
-                Recovered::Journal(j)
+        (Some(j), None) => Recovered::Journal(j.content),
+        (None, Some(d)) => Recovered::Draft(d.content),
+        (Some(j), Some(d)) => {
+            let journal_later = match j.at_ms.cmp(&d.at_ms) {
+                std::cmp::Ordering::Greater => true,
+                std::cmp::Ordering::Less => false,
+                std::cmp::Ordering::Equal => matches!((j.seq, d.seq), (Some(js), Some(ds)) if js > ds),
+            };
+            if journal_later {
+                Recovered::Journal(j.content)
             } else {
-                Recovered::Draft(d)
+                Recovered::Draft(d.content)
             }
         }
     }
