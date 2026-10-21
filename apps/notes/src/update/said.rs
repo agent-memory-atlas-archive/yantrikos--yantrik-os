@@ -5,8 +5,12 @@
 
 use yantrik_app::documents::{Durability, OutsideState, Replaced, SaveError};
 
+use crate::note::Kept;
+
 /// The footer while saving waits on the person's choice about an outside change.
 pub const WAITING_ON_CHOICE: &str = "Not saved · changed outside Notes";
+/// The footer while the note's file is gone: its text is on no disk until it is saved as new.
+pub const FILE_GONE: &str = "Not saved · its file was moved or deleted";
 /// The footer while the open note's unsaved text from before Notes closed waits on the person.
 pub const WAITING_ON_RECOVERY: &str = "Not saved · unsaved text from before Notes closed: Restore or Discard";
 
@@ -224,9 +228,20 @@ pub const RESTORED_BESIDE: &str = "Your text is back. The note on disk changed a
 /// Restored for a note whose file is gone: there is one version, and the bar offers Save as new.
 pub const RESTORED_GONE: &str = "Your text is back. The note's file is gone; Save as new keeps your text.";
 pub const DISCARDED: &str = "The unsaved text was discarded; the note is as it is on disk.";
+/// The same, for a note whose file is gone: there is no note on disk to be as it was.
+pub const DISCARDED_GONE: &str = "The unsaved text was discarded. Its note's file was already gone, so nothing of it is kept.";
 /// An edit refused on a note whose offer waits.
 pub const CHOOSE_FIRST: &str =
     "This note has unsaved text from before Notes closed. Restore or Discard it first, then edit.";
+
+/// The word on a library card for a note Notes made to keep text aside, so it is told apart from
+/// the note it was kept from, whose title it has.
+pub fn kept_marker(kept: Kept) -> &'static str {
+    match kept {
+        Kept::Copy => "Copy",
+        Kept::Recovered => "Recovered",
+    }
+}
 
 /// Typed while the note was moved to the Trash: kept, as a note of its own.
 pub const TYPED_DURING_TRASH: &str = "Moved to Trash. What you typed meanwhile is kept as a new note.";

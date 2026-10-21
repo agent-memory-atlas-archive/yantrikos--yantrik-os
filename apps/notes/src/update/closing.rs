@@ -15,12 +15,17 @@
 //! - *Don't save* drops the edits and their draft, and closes.
 //!
 //! A second close while one waits asks nothing and saves nothing more; another window's close
-//! that would ask says to answer the first, or to wait for its save. A library open read-only
-//! cannot save, so the prompt offers only *Don't save* and *Cancel*, and says Export keeps a copy.
+//! that would ask says, in that window only, to answer the first or to wait for its save. A
+//! library open read-only cannot save, so the prompt offers only *Don't save* and *Cancel*, and
+//! says Export keeps a copy.
+//!
+//! The autosave goes on under the prompt. The prompt names only the notes still not on disk, and
+//! once none is left, it answers itself and the close goes ahead: the person asked to close, and
+//! the prompt was only there because of text that is now saved.
 
 use yantrik_app::app::WindowId;
 use yantrik_app::documents::close::Stage;
-use yantrik_app::documents::{Choice, CloseFlow, Closing, DocumentId};
+use yantrik_app::documents::{Choice, CloseFlow, Closing, DocumentId, OutsideState};
 use yantrik_app::effects::Effects;
 
 use super::navigate::show_note;
@@ -48,9 +53,11 @@ pub fn quit(m: &mut Model, fx: &mut Effects<Notes>) {
     ask(m, fx, None, closing);
 }
 
-/// The session is ending: there is no one to ask. Every open note's draft is written now rather
-/// than after its debounce, so the next start offers back whatever was not saved.
+/// The session or the system is ending Notes (SIGTERM, SIGHUP): there is no one to ask. Every open
+/// note's draft is written now rather than after its debounce, so the next start offers back
+/// whatever was not saved, and Notes ends in this one command, without waiting on the store.
 pub fn logging_out(m: &mut Model, fx: &mut Effects<Notes>) {
+    m.keep_unsaved_dirty();
     let open: Vec<DocumentId> = m.documents.iter().map(|d| d.id).collect();
     for id in open {
         if let (Some(d), Some(file)) = (m.documents.get_mut(id), m.files.get(&id)) {
@@ -82,8 +89,14 @@ fn ask(m: &mut Model, fx: &mut Effects<Notes>, window: Option<WindowId>, closing
                     Stage::Asking => said::ANSWER_THE_OTHER_FIRST,
                     _ => said::WAIT_BEFORE_CLOSING,
                 };
-                m.notice = sentence.into();
-                m.lasting_notice = false;
+                // In the window whose close waits, not in the one asking its question.
+                match window {
+                    Some(window) => m.say_in(window, sentence),
+                    None => {
+                        m.notice = sentence.into();
+                        m.lasting_notice = false;
+                    }
+                }
                 fx.changed(STATUS);
             }
             return;
@@ -92,8 +105,8 @@ fn ask(m: &mut Model, fx: &mut Effects<Notes>, window: Option<WindowId>, closing
     if nothing_to_ask {
         // A store job in flight would land on a closed window: the window waits for it, in words.
         // Quitting does not; the framework's shutdown waits for the job within its grace.
-        if m.busy.is_some() && window.is_some() {
-            m.notice = said::WAIT_BEFORE_CLOSING.into();
+        if let Some(window) = window.filter(|_| m.busy.is_some()) {
+            m.say_in(window, said::WAIT_BEFORE_CLOSING);
             fx.changed(STATUS);
             return;
         }
@@ -117,12 +130,30 @@ pub fn answer(m: &mut Model, fx: &mut Effects<Notes>, choice: Choice) {
     apply(m, fx, next);
 }
 
-/// A save the close waits on landed, and the store is idle: closed if everything asked about is
-/// on disk, the next one saved if not (or the same one again, if it was edited meanwhile).
+/// A store job landed, and the store is idle. A close waiting on its saves closes if everything
+/// asked about is on disk, and saves the next one if not (or the same one again, if it was edited
+/// meanwhile). A prompt still asking is said again for the notes still unsaved, and, when the
+/// autosave has saved them all under it, answers itself: there is nothing left to ask, so the
+/// close the person asked for goes ahead.
 pub fn progress(m: &mut Model, fx: &mut Effects<Notes>) {
-    let Some(flow) = m.closing.as_mut().filter(|f| f.stage == Stage::SavingThenClose) else { return };
-    let next = flow.progress(&m.documents, None);
-    apply(m, fx, next);
+    let Some(stage) = m.closing.as_ref().map(|f| f.stage.clone()) else { return };
+    match stage {
+        Stage::SavingThenClose => {
+            let Some(flow) = m.closing.as_mut() else { return };
+            let next = flow.progress(&m.documents, None);
+            apply(m, fx, next);
+        }
+        Stage::Asking => {
+            let Some(flow) = m.closing.as_ref() else { return };
+            let saved = flow.asked.iter().all(|d| !m.unsaved_doc(*d));
+            let nothing_left = saved && unstored_at_close(m, flow.window) == 0;
+            fx.changed(CHROME);
+            if nothing_left && m.busy.is_none() {
+                answer(m, fx, Choice::Save);
+            }
+        }
+        Stage::Blocked(_) => {}
+    }
 }
 
 /// A save of `doc` failed, or could not start; `None` for another store job that failed. When a
@@ -178,11 +209,16 @@ fn save_then_close(m: &mut Model, fx: &mut Effects<Notes>, documents: &[Document
     }
 }
 
-/// *Don't save*: the edits and their draft dropped; the note is shown as its file holds it.
+/// *Don't save*: the edits and their draft dropped; the note is shown as its file holds it. A note
+/// whose file is gone has nothing left on disk, so it leaves the library with its edits.
 fn drop_edits(m: &mut Model, fx: &mut Effects<Notes>, documents: &[DocumentId]) {
     for id in documents {
-        if let Some(d) = m.documents.get_mut(*id) {
-            drafts::discard(d, fx);
+        let Some(d) = m.documents.get_mut(*id) else { continue };
+        drafts::discard(d, fx);
+        if d.outside == OutsideState::Deleted {
+            if let Some(gone) = m.files.get(id).map(|f| f.id.clone()) {
+                m.library.retain(|n| n.trash || n.id != gone);
+            }
         }
     }
     let again = m.current().and_then(|c| m.library.iter().find(|n| n.id == c.id() && n.trash == c.trash()).cloned());
@@ -224,9 +260,11 @@ fn unstored_at_close(m: &Model, window: Option<WindowId>) -> usize {
 /// to save, and a library that may be written).
 pub fn prompt(m: &Model) -> Option<(String, String, bool)> {
     let flow = m.closing.as_ref().filter(|f| f.stage == Stage::Asking)?;
+    // Only the notes still not on disk: one the autosave saved under the prompt is not asked about.
     let titles: Vec<String> = flow
         .asked
         .iter()
+        .filter(|id| m.unsaved_doc(**id))
         .filter_map(|id| m.note_of(*id).map(|c| c.title()))
         .collect();
     let read_only = m.vault.read_only().is_some();

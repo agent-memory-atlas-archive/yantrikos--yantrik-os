@@ -49,6 +49,9 @@ pub fn act(m: &mut Model, fx: &mut Effects<Notes>, action: WindowAction) {
         WindowAction::Close(choice) => closing::answer(m, fx, choice),
         // Drops a draft, which is not the store's: nothing to wait for.
         WindowAction::DiscardDraft => recovery::discard(m, fx),
+        // Asked of the framework, which answers with `Command::Quit`: its close flow waits for the
+        // store itself, and asks before anything unsaved is left.
+        WindowAction::Quit => fx.request_quit(),
         other => {
             if may_go_on(m, fx, &other) {
                 guarded(m, fx, other);
@@ -139,7 +142,8 @@ fn guarded(m: &mut Model, fx: &mut Effects<Notes>, action: WindowAction) {
         | WindowAction::Redo
         | WindowAction::NotNow
         | WindowAction::Close(_)
-        | WindowAction::DiscardDraft => {}
+        | WindowAction::DiscardDraft
+        | WindowAction::Quit => {}
     }
 }
 

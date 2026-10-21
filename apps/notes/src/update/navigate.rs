@@ -6,7 +6,7 @@ use yantrik_app::effects::Effects;
 
 use super::{drafts, saving, show};
 use crate::model::{Model, NoteFile};
-use crate::note::Note;
+use crate::note::{Kept, Note};
 use crate::pane::Cue;
 use crate::store::{validate, MAX_NOTES, VAULT_LIMIT};
 use crate::view::render::{CHROME, CUES, STATUS};
@@ -71,7 +71,7 @@ pub fn show_note(m: &mut Model, fx: &mut Effects<Notes>, note: Option<Note>) {
     }
     m.files.insert(
         doc,
-        NoteFile { id: note.id, trash: note.trash, on_disk, meta_unsure: None, modified: note.modified },
+        NoteFile { id: note.id, trash: note.trash, on_disk, meta_unsure: None, modified: note.modified, gone_at: None },
     );
     m.pane.view = Some(m.documents.show(doc, m.pane.window));
 }
@@ -119,7 +119,8 @@ pub fn new_note(m: &mut Model, fx: &mut Effects<Notes>, title: &str, body: &str)
 }
 
 /// The open note, unsaved edits and all, as a new note under its own file name; the original
-/// file is left as it is. The way out of "this note changed on disk".
+/// file is left as it is. The way out of "this note changed on disk". The unsaved text is the
+/// copy's now, so the original's draft goes with it (`drafts::moved`).
 pub fn copy(m: &mut Model, fx: &mut Effects<Notes>) {
     // As the window shows it: an offered text waiting on the person is copied, offer and all.
     let Some(mut note) = m.shown_note() else { return };
@@ -128,11 +129,13 @@ pub fn copy(m: &mut Model, fx: &mut Effects<Notes>) {
         fx.changed(STATUS);
         return;
     }
-    note.id = format!("copy-{}.md", uuid7::uuid7());
+    note.id = Kept::Copy.new_id();
     note.stored = false;
     note.trash = false;
+    let from = m.current_id().and_then(|id| m.documents.get(id)).and_then(drafts::kept_name);
     m.library.push(note.clone());
     show_note(m, fx, Some(note));
+    drafts::moved(m, fx, from);
     show(m, fx);
     saving::save(m, fx, saving::How::Asked);
 }

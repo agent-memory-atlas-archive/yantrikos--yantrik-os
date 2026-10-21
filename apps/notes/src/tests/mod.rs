@@ -15,11 +15,15 @@ use crate::command::Command;
 use crate::update::{said, AUTOSAVE_AFTER};
 use crate::Notes;
 
+mod asking;
 mod closing;
+mod drawn;
 mod failures;
 mod findings;
 mod follow;
+mod gone;
 mod kept;
+mod moved;
 mod outside;
 mod parity;
 mod read_notes;

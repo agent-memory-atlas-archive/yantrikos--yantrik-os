@@ -185,7 +185,8 @@ pub fn restore(m: &mut Model, fx: &mut Effects<Notes>) {
     }
 }
 
-/// *Discard*: the offered text is dropped and its draft removed; the note is as its file holds it.
+/// *Discard*: the offered text is dropped and its draft removed; the note is as its file holds it,
+/// or, its file gone, there is nothing left of it.
 pub fn discard(m: &mut Model, fx: &mut Effects<Notes>) {
     let Some(offer) = shown(m).cloned() else { return say(m, fx, said::NOTHING_OFFERED) };
     m.recovery.offers.retain(|o| o.id != offer.id);
@@ -193,7 +194,8 @@ pub fn discard(m: &mut Model, fx: &mut Effects<Notes>) {
     fx.changed(OUTSIDE);
     // The window drew the offered text; it draws the note as its file holds it again.
     show(m, fx);
-    say(m, fx, &left(m, said::DISCARDED));
+    let on_disk = m.library.iter().any(|n| !n.trash && n.id == offer.id);
+    say(m, fx, &left(m, if on_disk { said::DISCARDED } else { said::DISCARDED_GONE }));
 }
 
 /// Whether `command` would change a note whose offer the person has not chosen about; if so, it

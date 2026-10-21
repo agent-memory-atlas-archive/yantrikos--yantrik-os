@@ -11,7 +11,7 @@
 use std::time::Duration;
 
 use yantrik_app::app::WindowId;
-use yantrik_app::documents::DocumentId;
+use yantrik_app::documents::{DocumentId, OutsideState};
 use yantrik_app::effects::Effects;
 use yantrik_app::timers::TimerId;
 use yantrik_app::Refused;
@@ -139,6 +139,7 @@ fn dispatch(m: &mut Model, fx: &mut Effects<Notes>, command: Command) {
 fn save_state(m: &Model) -> &'static str {
     match m.current() {
         Some(c) if c.trash() => "Recoverable deletion",
+        Some(c) if *c.outside() == OutsideState::Deleted => said::FILE_GONE,
         // No autosave is pending while the person's choice is: saving is refused until then.
         Some(c) if c.unsaved() && c.doc.blocked() => said::WAITING_ON_CHOICE,
         Some(c) if c.unsaved() => "Unsaved · autosave pending",
@@ -248,7 +249,11 @@ fn failed(m: &mut Model, fx: &mut Effects<Notes>, doc: Option<DocumentId>, sente
     let sentence = closing::failed(m, doc, &sentence).unwrap_or_else(|| named(m, doc, sentence));
     m.notice = sentence;
     m.lasting_notice = false;
-    set_status(m, "Needs attention · draft kept");
+    // Held back by an outside change, the note waits on the person's choice, which the footer
+    // names in two words (the bar says it in full); any other failure needs the disk seen to.
+    let held = doc.and_then(|d| m.documents.get(d)).is_some_and(|d| d.blocked());
+    let status = if held && doc == m.current_id() { save_state(m) } else { "Needs attention · draft kept" };
+    set_status(m, status);
     fx.changed(STATUS);
     if m.busy.is_none() {
         closing::progress(m, fx);

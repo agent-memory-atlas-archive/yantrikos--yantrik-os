@@ -42,9 +42,14 @@ pub fn render(ui: &NotesApp, window: WindowId, m: &Model, changed: &Changed) {
     if changed.has(STATUS) {
         ui.set_busy(m.busy.is_some());
         ui.set_status(pane.status.clone().into());
-        ui.set_notice(m.notice.clone().into());
+        // The footer's amber goes with its words: a file found gone is unsaved with nothing typed.
+        ui.set_modified(unsaved_in(m, pane));
         // Said with the notice, which every load that finds the library read-only sets.
         ui.set_read_only(m.vault.read_only().is_some());
+    }
+    // The notice gives way to the outside bar, so it is drawn again whenever the bar may be.
+    if changed.has(STATUS) || changed.has(OUTSIDE) || changed.has(NOTE) {
+        ui.set_notice(notice(m, pane).into());
     }
     if changed.has(NOTE) || changed.has(EDIT) {
         // A note whose unsaved text from before Notes closed is offered is drawn from that text,
@@ -55,7 +60,7 @@ pub fn render(ui: &NotesApp, window: WindowId, m: &Model, changed: &Changed) {
         ui.set_note_title(shown.map(|c| c.title()).unwrap_or_default().into());
         ui.set_trashed(current.as_ref().is_some_and(|c| c.trash()));
         ui.set_pinned(shown.is_some_and(|c| c.pinned()));
-        ui.set_modified(current.as_ref().is_some_and(|c| c.unsaved()) || m.offered_in(pane).is_some());
+        ui.set_modified(unsaved_in(m, pane));
         ui.set_words(shown.map_or(0, |c| c.words()) as i32);
     }
     // Set only where it differs: the window it was typed in already shows it, and its caret stays.
@@ -119,15 +124,39 @@ pub fn render(ui: &NotesApp, window: WindowId, m: &Model, changed: &Changed) {
     }
 }
 
+/// Whether the footer is amber: the window's note is not on disk as shown (its edits, its file gone,
+/// or its unsaved text from before Notes closed, offered and waiting).
+fn unsaved_in(m: &Model, pane: &Pane) -> bool {
+    m.current_in(pane).is_some_and(|c| c.unsaved()) || m.offered_in(pane).is_some()
+}
+
+/// The notice line as a window draws it. Nothing when the notice is about another window alone (a
+/// close refused there), or when it only repeats what this window's outside bar already says (a
+/// save refused over a change outside): the bar says that once, in full, and the footer says it
+/// in two words.
+fn notice<'a>(m: &'a Model, pane: &Pane) -> &'a str {
+    let repeats_bar = bar(m, pane).is_some_and(|(state, _)| m.notice == said::blocked(state));
+    if repeats_bar || m.notice_elsewhere(pane.window) {
+        ""
+    } else {
+        &m.notice
+    }
+}
+
+/// What a window's outside bar asks about, and says: its note's conflict or deleted file, unless
+/// the person put the bar away with *Not now*.
+fn bar<'a>(m: &'a Model, pane: &Pane) -> Option<(&'a OutsideState, &'static str)> {
+    let doc = m.documents.get(m.document_in(pane)?)?;
+    let sentence = said::outside(&doc.outside).filter(|_| !pane.outside_later)?;
+    Some((&doc.outside, sentence))
+}
+
 /// The outside bar and the comparison, and the recovery bar: what this window's note asks of the
 /// person. Two windows on one note show the same bar, and either's answer is the note's.
 fn outside(ui: &NotesApp, m: &Model, pane: &Pane) {
     let current = m.current_in(pane);
-    // The bar, unless the person put it away with Not now: 1 a conflict, 2 a deleted file.
-    let offered = current
-        .as_ref()
-        .filter(|_| !pane.outside_later)
-        .and_then(|c| said::outside(c.outside()).map(|sentence| (c.outside(), sentence)));
+    // The bar: 1 a conflict, 2 a deleted file.
+    let offered = bar(m, pane);
     ui.set_outside(match offered {
         Some((OutsideState::Deleted, _)) => 2,
         Some(_) => 1,
@@ -194,6 +223,7 @@ fn library(ui: &NotesApp, pane: &Pane) {
             title: r.title.clone().into(),
             preview: r.preview.clone().into(),
             date: r.date.clone().into(),
+            marker: r.marker.into(),
             pinned: r.pinned,
             selected: r.selected,
         })

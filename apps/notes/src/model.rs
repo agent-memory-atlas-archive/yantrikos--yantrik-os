@@ -45,6 +45,10 @@ pub struct Model {
     /// The notice says something a person may not see while typing on (a save replaced another
     /// program's write): the next save that lands leaves it, and the next action takes it back.
     pub lasting_notice: bool,
+    /// The window the notice is about, when it is about one window only (its close was refused
+    /// while another window's prompt waits): drawn there and nowhere else. Kept with the sentence
+    /// it was said with, so any later notice, which replaces the sentence, is every window's again.
+    pub notice_in: Option<(WindowId, String)>,
     /// An action waiting for the open note to be saved first.
     pub pending: Option<Pending>,
     /// A close or a quit asking about unsaved notes, or waiting on their saves.
@@ -77,6 +81,9 @@ pub struct NoteFile {
     /// A sidecar of ours a failed save may have left on disk.
     pub meta_unsure: Option<String>,
     pub modified: u64,
+    /// The edit `Model::keep_unsaved_dirty` made when the note's file was found gone, while no
+    /// other edit has followed it: the file coming back undoes it (update/outside.rs).
+    pub gone_at: Option<u64>,
 }
 
 /// One store job, by what it does.
@@ -177,8 +184,12 @@ impl Current<'_> {
         &self.doc.outside
     }
 
-    /// Edits not on disk: the content is not what the files hold.
+    /// Edits not on disk: the content is not what the files hold, or the files are gone (moved or
+    /// deleted outside Notes), so the text is on no disk at all until the person keeps it.
     pub fn unsaved(&self) -> bool {
+        if self.doc.outside == OutsideState::Deleted {
+            return true;
+        }
         let disk = self.file.on_disk.as_ref();
         disk.map(|d| d.text.as_str()) != Some(self.text())
             || disk.map(|d| d.meta.as_str()).unwrap_or("") != self.content().meta
@@ -215,6 +226,7 @@ impl Model {
             job_window: WindowId::PRIMARY,
             notice: String::new(),
             lasting_notice: false,
+            notice_in: None,
             pending: None,
             closing: None,
             recovery,
@@ -260,21 +272,43 @@ impl Model {
 
     /// Makes every document with edits not on disk (`unsaved_doc`) dirty to the framework as well:
     /// a save starts only for a dirty document, a draft is kept only for one, and a close asks only
-    /// about one. Every change is an edit of its document, so the two never part; if they ever did,
-    /// a test fails here, and a running Notes says so in its log and makes the document dirty, so
-    /// the text is saved, kept and asked about rather than closed away as if it were on disk.
+    /// about one.
+    ///
+    /// A note whose file was found gone is the one way the two part on their own: nothing was
+    /// typed, and yet its text is on no disk. It is made dirty here, so its draft is kept, a close
+    /// asks about it, and nothing calls it saved (`gone_at` remembers the edit, undone if the file
+    /// comes back). Every other change is an edit of its document, so the two never part; if they
+    /// ever did, a test fails here, and a running Notes says so in its log and makes the document
+    /// dirty, so the text is saved, kept and asked about rather than closed away as if on disk.
     pub fn keep_unsaved_dirty(&mut self) {
         let parted: Vec<DocumentId> =
             self.documents.iter().filter(|d| !d.dirty() && self.unsaved_doc(d.id)).map(|d| d.id).collect();
         for id in parted {
-            if cfg!(test) {
-                panic!("Notes' unsaved note must be a dirty document");
+            let Some(d) = self.documents.get_mut(id) else { continue };
+            let gone = d.outside == OutsideState::Deleted;
+            if !gone {
+                if cfg!(test) {
+                    panic!("Notes' unsaved note must be a dirty document");
+                }
+                tracing::error!("an unsaved note was not a dirty document; it is made one, so it is saved and asked about");
             }
-            tracing::error!("an unsaved note was not a dirty document; it is made one, so it is saved and asked about");
-            if let Some(d) = self.documents.get_mut(id) {
-                d.edit(|_| ());
+            let seq = d.edit(|_| ());
+            if let Some(file) = self.files.get_mut(&id).filter(|_| gone) {
+                file.gone_at = Some(seq);
             }
         }
+    }
+
+    /// `sentence` in the notice, about `window` alone: only that window draws it (`notice_in`).
+    pub fn say_in(&mut self, window: WindowId, sentence: &str) {
+        self.notice = sentence.into();
+        self.lasting_notice = false;
+        self.notice_in = Some((window, sentence.into()));
+    }
+
+    /// Whether the notice is about a window other than `window` alone, so `window` does not draw it.
+    pub fn notice_elsewhere(&self, window: WindowId) -> bool {
+        self.notice_in.as_ref().is_some_and(|(w, sentence)| *w != window && *sentence == self.notice)
     }
 
     /// The focused window's note's offered text, while its offer waits (`offered_in`).

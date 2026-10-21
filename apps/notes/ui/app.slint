@@ -7,7 +7,7 @@ import { YInput } from "y_input.slint";
 import { Icon, Icons } from "icon.slint";
 import { ScrollView } from "std-widgets.slint";
 export { ThemeMode, AccentPreset }
-export struct NoteRow { id:string, title:string, preview:string, date:string, pinned:bool, selected:bool }
+export struct NoteRow { id:string, title:string, preview:string, date:string, marker:string, pinned:bool, selected:bool }
 export struct BookRow { name:string, count:int, selected:bool }
 export struct PreviewBlock { text:string, kind:int }
 export component NotesApp inherits AppWindow {
@@ -97,6 +97,8 @@ export component NotesApp inherits AppWindow {
    if(event.text=="f"){root.focus-mode=false;root.view-changed();search.focus();return accept;}
    if(event.text=="p"){root.action("preview");return accept;}
    if(event.text=="e"){root.action("focus");return accept;}
+   // Ctrl+Q: quit Notes, asking once about every unsaved note in every window.
+   if(event.text=="q"){root.action("quit");return accept;}
   }
   if(event.text==Key.F5){root.action("reload");return accept;}
   if(event.text==Key.Escape){root.dialog=0;root.focus-mode=false;root.view-changed();root.focus-content();return accept;}
@@ -169,7 +171,11 @@ export component NotesApp inherits AppWindow {
            Text{text:note.title;color:Theme.text-primary;font-size:14px;font-weight:600;overflow:elide;}
           }
           Text{text:note.preview;color:Theme.text-secondary;font-size:12px;overflow:elide;}
-          Text{text:note.date;color:Theme.text-dim;font-size:10px;overflow:elide;}
+          // A copy or a recovered note has the title of the note it was kept from: its card says which it is.
+          HorizontalLayout{spacing:6px;
+           if note.marker!="" : Text{text:note.marker;color:Theme.amber;font-size:10px;font-weight:600;}
+           Text{text:note.date;color:Theme.text-dim;font-size:10px;overflow:elide;horizontal-stretch:1;}
+          }
          }
         }
        }

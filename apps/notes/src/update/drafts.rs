@@ -83,6 +83,33 @@ pub fn discard(document: &mut Document<NoteText>, fx: &mut Effects<Notes>) {
     document.draft_discarded();
 }
 
+/// The name of the draft a document has kept, if it has kept one: the draft to remove once its
+/// text has moved to another note ([`moved`]).
+pub fn kept_name(document: &Document<NoteText>) -> Option<String> {
+    (document.draft != DraftState::None).then(|| document.source.key())
+}
+
+/// The text of the note whose draft is `from` now lives in the note the focused window shows (a
+/// copy, *Save as new*, a recovered note): one copy of it is kept for a start to offer back, never
+/// two and never none. The focused note's draft is written at once when it has edits not on disk
+/// (the old draft is, in effect, renamed to it), and then the old draft is removed, the lane
+/// doing the two in that order. A start would otherwise offer the moved text again under the old
+/// note, and *Restore* would make it twice. While another window still shows the old note, its
+/// document keeps its own draft for the edits it holds.
+pub fn moved(m: &mut Model, fx: &mut Effects<Notes>, from: Option<String>) {
+    if let Some(id) = m.current_id() {
+        if let (Some(d), Some(file)) = (m.documents.get_mut(id), m.files.get(&id)) {
+            if let Some((name, bytes)) = owed(d, file) {
+                fx.checkpoint_draft(&name, bytes);
+                d.draft_asked();
+            }
+        }
+    }
+    if let Some(from) = from.filter(|key| m.documents.by_key(key).is_none()) {
+        fx.discard_draft(&from);
+    }
+}
+
 /// The latest draft of `name` reached the disk: a notice that said it could not is answered.
 pub fn saved(m: &mut Model, fx: &mut Effects<Notes>, name: &str) {
     let open = m.documents.by_key(name).is_some();
