@@ -86,6 +86,20 @@ export component ImageViewerApp inherits AppWindow {
     callback viewer-slideshow-toggle <=> viewer.viewer-slideshow-toggle;
     callback viewer-slideshow-stop <=> viewer.viewer-slideshow-stop;
 
+    // ── The view's own state, said to the app ──
+    //
+    // The screen keeps how the picture is being looked at itself: the zoom, fit or fill, the
+    // info panel, the slideshow. Most of those change with no callback at all (a scroll, the
+    // zoom buttons, 1:1, a double-click, the panel's own close button), so the app is told
+    // whenever any of them changes, and `describe` reads what the window shows rather than what
+    // the app last asked for.
+    callback view-changed();
+    changed zoomed => { root.view-changed(); }
+    changed fit-contain => { root.view-changed(); }
+    changed viewer-info-open => { root.view-changed(); }
+    changed viewer-slideshow-active => { root.view-changed(); }
+    changed viewer-slideshow-paused => { root.view-changed(); }
+
     viewer := ImageViewer {
         window-bar: true;
         // Fills the window (no explicit size: Slint forbids width/height next to max-*).
