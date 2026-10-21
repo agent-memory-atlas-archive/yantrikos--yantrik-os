@@ -14,7 +14,7 @@ use yantrik_app::documents::draft::recover;
 use yantrik_app::documents::{Candidate, Fingerprint, OutsideState, Recovered};
 use yantrik_app::effects::Effects;
 
-use super::navigate::show_note;
+use super::navigate::{self, show_note};
 use super::saving::{self, How};
 use super::{refreshed, show};
 use crate::command::{Act, Command, WindowAction};
@@ -23,7 +23,7 @@ use crate::note::Note;
 use crate::recovery::{Found, Offer};
 use crate::store::Interrupted;
 use crate::update::said;
-use crate::view::render::{CONTENT, FIELDS, OUTSIDE, STATUS};
+use crate::view::render::{CONTENT, EDIT, FIELDS, OUTSIDE, STATUS};
 use crate::Notes;
 
 /// The library has been read for the first time: each draft found at start is weighed against
@@ -46,8 +46,69 @@ pub fn weigh(m: &mut Model, fx: &mut Effects<Notes>, interrupted: Option<&Interr
         }
     }
     fx.changed(OUTSIDE);
+    // The note the bar offers is opened, so the person sees the text before choosing; one whose
+    // file is gone is described on the bar instead.
+    if m.current().is_none() {
+        show_first(m, fx);
+    }
+    let kept_aside = [
+        said::drafts_unreadable(&std::mem::take(&mut m.recovery.unreadable)),
+        said::drafts_elsewhere(&std::mem::take(&mut m.recovery.elsewhere)),
+    ];
     // The bar names one note; the notice says when there are more.
-    (m.recovery.offers.len() > 1).then(|| said::offered(m.recovery.offers.len()))
+    let more = (m.recovery.offers.len() > 1).then(|| said::offered(m.recovery.offers.len()));
+    let parts: Vec<String> = kept_aside.into_iter().flatten().chain(more).collect();
+    (!parts.is_empty()).then(|| parts.join(" "))
+}
+
+/// Opens the note of the offer the bar shows, if it is in the library: its text is drawn
+/// read-only in the editor until the person chooses.
+fn show_first(m: &mut Model, fx: &mut Effects<Notes>) {
+    let Some(id) = shown(m).map(|o| o.id.clone()) else { return };
+    let listed = m.library.iter().find(|n| n.id == id).map(|n| n.trash);
+    if let Some(trash) = listed {
+        navigate::open(m, fx, &id, trash);
+    }
+}
+
+/// *Show*: the note of the offer the bar shows, opened so the unsaved text can be seen. Reached
+/// through the guards, so the note that was open is saved first.
+pub fn show_offer(m: &mut Model, fx: &mut Effects<Notes>) {
+    if shown(m).is_none() {
+        return say(m, fx, said::NOTHING_OFFERED);
+    }
+    show_first(m, fx);
+}
+
+/// Where the offer the bar shows stands: its note open (the text is drawn), its note in the
+/// library and not open (it can be shown), or its note's file gone (it is described).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Showing {
+    Open = 1,
+    Listed = 2,
+    Gone = 3,
+}
+
+pub fn showing(m: &Model) -> Option<(Showing, &Offer)> {
+    let offer = shown(m)?;
+    let state = if m.current().is_some_and(|c| c.id() == offer.id) {
+        Showing::Open
+    } else if m.library.iter().any(|n| n.id == offer.id) {
+        Showing::Listed
+    } else {
+        Showing::Gone
+    };
+    Some((state, offer))
+}
+
+/// The offers, the one the bar shows first: the order `describe.recovery` lists them in.
+pub fn in_order(m: &Model) -> Vec<&Offer> {
+    let first = shown(m).map(|o| o.id.as_str());
+    first
+        .and_then(|id| m.recovery.offer_for(id))
+        .into_iter()
+        .chain(m.recovery.offers.iter().filter(|o| Some(o.id.as_str()) != first))
+        .collect()
 }
 
 /// The offer the bar shows: the open note's, or else the newest.
@@ -63,7 +124,11 @@ pub fn restore(m: &mut Model, fx: &mut Effects<Notes>) {
     m.recovery.offers.retain(|o| o.id != offer.id);
     let on_disk = m.library.iter().find(|n| !n.trash && n.id == offer.id).cloned();
     let file = on_disk.as_ref().map(|n| Fingerprint::of_bytes(n.content.text.as_bytes()));
-    let moved_on = file != offer.base;
+    // The draft's baseline is of the text alone. A sidecar that differs (notebook, tags, pin)
+    // may be the person's own change before Notes closed or another program's since; which one
+    // cannot be told, so it is not put back silently either: the person chooses.
+    let sidecar_differs = on_disk.as_ref().is_some_and(|n| n.content.meta != offer.content.meta);
+    let moved_on = file != offer.base || sidecar_differs;
     match on_disk {
         Some(note) => show_note(m, fx, Some(note)),
         // Gone: a note of its own again, not on disk until saved, as a note made here is.
@@ -99,6 +164,9 @@ pub fn discard(m: &mut Model, fx: &mut Effects<Notes>) {
     m.recovery.offers.retain(|o| o.id != offer.id);
     fx.discard_draft(&offer.draft);
     fx.changed(OUTSIDE);
+    // The editor drew the offered text; it draws the note as its file holds it again.
+    fx.changed(CONTENT);
+    fx.changed(EDIT);
     say(m, fx, &left(m, said::DISCARDED));
 }
 

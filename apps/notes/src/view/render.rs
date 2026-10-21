@@ -6,6 +6,7 @@ use yantrik_app::documents::OutsideState;
 
 use crate::model::{Cue, Model};
 use crate::note::NoteText;
+use crate::update::recovery::Showing;
 use crate::update::{closing, recovery, said};
 use crate::{BookRow, NoteRow, NotesApp, PreviewBlock};
 
@@ -47,19 +48,27 @@ pub fn render(ui: &NotesApp, m: &Model, changed: &Changed) {
         ui.set_trashed(current.as_ref().is_some_and(|c| c.trash()));
         ui.set_pinned(current.as_ref().is_some_and(|c| c.content().pinned()));
         ui.set_modified(current.as_ref().is_some_and(|c| c.unsaved()));
-        ui.set_words(current.as_ref().map(|c| c.content().words()).unwrap_or(0) as i32);
+        // Counted in what the editor draws: an offered text while its offer waits.
+        let offered = current.as_ref().and_then(|c| m.recovery.offer_for(c.id())).map(|o| o.content.words());
+        let words = offered.or_else(|| current.as_ref().map(|c| c.content().words()));
+        ui.set_words(words.unwrap_or(0) as i32);
     }
     if changed.has(NOTE) || changed.has(CONTENT) {
-        ui.set_content(current.as_ref().map(|c| c.text().to_string()).unwrap_or_default().into());
+        // A note whose unsaved text from before Notes closed is offered shows that text, read-only,
+        // so the person sees what Restore keeps and what Discard drops.
+        let offered = current.as_ref().and_then(|c| m.recovery.offer_for(c.id())).map(|o| o.content.text.clone());
+        let text = offered.or_else(|| current.as_ref().map(|c| c.text().to_string()));
+        ui.set_content(text.unwrap_or_default().into());
     }
     if changed.has(NOTE) || changed.has(FIELDS) {
         ui.set_notebook(m.pane.notebook.clone().into());
         ui.set_tags(m.pane.tags.clone().into());
     }
     if changed.has(CHROME) {
-        let (heading, sentence) = closing::prompt(m).unwrap_or_default();
+        let (heading, sentence, saves) = closing::prompt(m).unwrap_or_default();
         ui.set_close_heading(heading.into());
         ui.set_close_said(sentence.into());
+        ui.set_close_saves(saves);
         ui.set_folder(m.pane.folder.clone().into());
         ui.set_query(m.pane.query.clone().into());
         ui.set_preview(m.pane.preview);
@@ -83,8 +92,18 @@ pub fn render(ui: &NotesApp, m: &Model, changed: &Changed) {
         ui.set_theirs_gone(m.pane.theirs.is_none());
         ui.set_mine_fields(current.as_ref().map(|c| fields_line(c.content())).unwrap_or_default().into());
         ui.set_theirs_fields(m.pane.theirs.as_ref().map(fields_line).unwrap_or_default().into());
-        let offered = recovery::shown(m).map(|o| said::offer(&o.content.title()));
-        ui.set_recovery_said(offered.unwrap_or_default().into());
+        let offered = recovery::showing(m);
+        ui.set_recovery(offered.map_or(0, |(state, _)| state as i32));
+        ui.set_recovery_said(
+            offered
+                .map(|(state, o)| match state {
+                    Showing::Open => said::offer_open(&o.content.title()),
+                    Showing::Listed => said::offer_listed(&o.content.title()),
+                    Showing::Gone => said::offer_gone(&o.content.title(), o.content.text.chars().count()),
+                })
+                .unwrap_or_default()
+                .into(),
+        );
         // The note an offer is for takes no keys until the person chooses.
         let waiting = current.as_ref().is_some_and(|c| m.recovery.offer_for(c.id()).is_some());
         ui.set_recovering(waiting);

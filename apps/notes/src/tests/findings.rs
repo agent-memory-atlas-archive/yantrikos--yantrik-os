@@ -117,6 +117,23 @@ fn a_version_the_library_already_holds_is_not_kept_twice() {
     assert_eq!(notice(&app), said::UPDATED_FROM_DISK);
 }
 
+/// #917 review finding 1: the guard reads the copy's file, not the library as last loaded. A copy
+/// another program deleted since holds nothing, so my last version is kept.
+#[test]
+fn a_copy_deleted_outside_notes_does_not_count_and_my_last_version_is_kept() {
+    let (app, path, stale) = saved_twice();
+    let id = app.model(|m| m.current().unwrap().id().to_string());
+    app.run(Command::Window(WindowAction::Copy));
+    settle(&app);
+    let copy = app.model(|m| m.current().unwrap().id().to_string());
+    app.run(Command::Window(WindowAction::Open { id, trash: false }));
+    std::fs::remove_file(vault(&app).join(&copy)).unwrap();
+    written_back(&app, &path, &stale);
+    assert_eq!(text(&app), stale, "the file is followed");
+    assert_eq!(kept_as(&app, "recovered-"), vec![MINE.to_string()], "and my version kept, the copy being gone");
+    assert_eq!(notice(&app), said::UPDATED_KEEPING_OURS);
+}
+
 /// #915 finding 7: at the limit, a note a resolution or a recovery wrote is listed first, and the
 /// sentence names the limit and the way out.
 #[test]
@@ -288,3 +305,94 @@ fn a_replaced_version_the_library_already_holds_is_not_kept_twice() {
     assert!(kept_as(&app, "recovered-").is_empty(), "no second copy");
     assert_eq!(notice(&app), said::theirs_held("Elsewhere"));
 }
+
+/// A disk on which another program writes the note in the instant before the exchange, and on
+/// which no new note can be made: the other program's version cannot be written anywhere.
+struct WrittenAndFull {
+    inner: WrittenBeforeTheExchange,
+}
+
+impl Disk for WrittenAndFull {
+    fn write_atomically(&self, path: &Path, bytes: &[u8]) -> Result<(), DiskError> {
+        self.inner.write_atomically(path, bytes)
+    }
+
+    fn create_new(&self, path: &Path, bytes: &[u8]) -> Result<(), DiskError> {
+        if path.file_name().is_some_and(|n| n.to_string_lossy().starts_with("recovered-")) {
+            return Err(DiskError { step: Step::CreateTemp, error: "No space left on device".into() });
+        }
+        self.inner.create_new(path, bytes)
+    }
+
+    fn read(&self, path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+        self.inner.read(path)
+    }
+
+    fn remove(&self, path: &Path) -> std::io::Result<()> {
+        self.inner.remove(path)
+    }
+
+    fn exchange(&self, path: &Path, bytes: &[u8]) -> Result<Exchanged, DiskError> {
+        self.inner.exchange(path, bytes)
+    }
+}
+
+/// #917 review finding 2: a version that could not be written is kept as a draft of its own, so
+/// the next start offers it, and the close prompt counts it while it is on no disk.
+#[test]
+fn a_replaced_version_that_cannot_be_written_is_kept_as_a_draft_and_counted_at_close() {
+    let (app, path) = with_note("Race");
+    if !exchanges_in(&vault(&app)) {
+        eprintln!("skipped: this filesystem has no atomic exchange, so what a replace displaces is not known");
+        return;
+    }
+    let theirs = "# Race\n\ntheirs, with nowhere to go";
+    let inner = WrittenBeforeTheExchange { note: path.clone(), theirs };
+    app.run(Command::UseDisk(Arc::new(WrittenAndFull { inner })));
+    app.run(Command::Edit("# Race\n\nmine".into()));
+    autosave(&app);
+    assert_eq!(file(&path), "# Race\n\nmine");
+    assert!(notice(&app).contains("its version could not be written (no space left on device)"), "{}", notice(&app));
+    app.run_writes();
+    let kept = app.model(|m| m.library.iter().find(|n| !n.stored).map(|n| n.id.clone())).expect("listed");
+    assert!(super::draft_file(&app, &vault(&app).join(&kept)).exists(), "kept as a draft of its own");
+    // Nothing unsaved in the open note, but the close prompt says what is on no disk.
+    app.close_requested(yantrik_app::app::WindowId::PRIMARY);
+    assert_eq!(app.ui(|ui| ui.get_dialog()), crate::update::closing::CLOSE_DIALOG);
+    let said_now = app.ui(|ui| ui.get_close_said().to_string());
+    assert!(said_now.starts_with("1 note in the list is not on disk yet."), "{said_now}");
+    assert!(!app.ui(|ui| ui.get_close_saves()), "there is nothing for Save to save");
+    app.ui(|ui| ui.invoke_action("close-discard".into()));
+    let again = super::killed_and_started_again(app);
+    let offered = again.model(|m| m.recovery.offers.iter().map(|o| o.content.text.clone()).collect::<Vec<_>>());
+    assert_eq!(offered, vec![theirs.to_string()], "the next start offers it back");
+    super::act(&again, "restore_draft", serde_json::json!({})).expect("restored");
+    assert_eq!(file(&vault(&again).join(&kept)), theirs, "and Restore writes it");
+}
+
+/// #917 review finding 6: a version a save kept is said even when the landing itself is one the
+/// document no longer expects.
+#[test]
+fn a_kept_version_is_said_even_on_a_stale_landing() {
+    use yantrik_app::documents::{Fingerprint, Witnessed};
+    let (app, _) = with_note("Late");
+    let doc = app.model(|m| m.current_id().unwrap());
+    let kept = crate::note::Note {
+        id: "recovered-late.md".into(),
+        content: crate::note::NoteText { text: "# Late\n\ntheirs".into(), meta: String::new() },
+        modified: 1,
+        trash: false,
+        stored: true,
+    };
+    let saved = crate::store::Saved {
+        content: crate::note::NoteText { text: "# Late\n\n".into(), meta: String::new() },
+        written: Fingerprint::of_bytes(b"# Late\n\n"),
+        modified: 1,
+        witnessed: Witnessed::Same,
+        theirs: Some(Box::new(crate::store::Theirs::Kept(kept))),
+    };
+    app.run(Command::SaveLanded { doc, seq: 999, result: Ok(saved) });
+    assert_eq!(notice(&app), said::theirs_kept("Late"));
+    assert!(app.model(|m| m.library.iter().any(|n| n.id == "recovered-late.md")));
+}
+

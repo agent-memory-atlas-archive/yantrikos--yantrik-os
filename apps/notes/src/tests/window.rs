@@ -264,7 +264,20 @@ fn the_recovery_bar_and_the_close_prompt_are_drawn_and_answer() {
     app.close_requested(yantrik_app::app::WindowId::PRIMARY);
     assert_eq!(ui(&app, |ui| ui.get_dialog()), crate::update::closing::CLOSE_DIALOG);
     screenshot(&app, "notes-close-prompt.png");
+    // The prompt is modal: the window's shortcuts do not reach the app behind it.
+    let notes = app.model(|m| m.library.len());
+    key(&app, true, "n");
+    app.ui(|ui| tap(ui, &SharedString::from(Key::F5)));
+    settle(&app);
+    assert_eq!((app.model(|m| m.library.len()), app.jobs_waiting()), (notes, 0), "no new note, no Refresh");
+    assert_eq!(ui(&app, |ui| ui.get_dialog()), crate::update::closing::CLOSE_DIALOG, "still asking");
     app.ui(|ui| tap(ui, &SharedString::from(Key::Escape)));
     assert_eq!(ui(&app, |ui| ui.get_dialog()), 0, "Escape is Cancel");
     assert!(app.model(|m| m.closing.is_none()) && app.exit_reason().is_none());
+    // Return is Save.
+    app.close_requested(yantrik_app::app::WindowId::PRIMARY);
+    app.ui(|ui| tap(ui, &SharedString::from(Key::Return)));
+    settle(&app);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Kept for later\n\nand more");
+    assert_eq!(app.exit_reason(), Some(yantrik_app::app::ExitReason::LastWindowClosed));
 }

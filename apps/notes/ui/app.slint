@@ -48,8 +48,13 @@ export component NotesApp inherits AppWindow {
  // The close prompt's heading and sentence.
  in property <string> close-heading;
  in property <string> close-said;
+ // The prompt offers Save: there is something to save, in a library that may be written.
+ in property <bool> close-saves;
  // Unsaved text from before Notes closed, offered back: the bar's sentence, empty when none.
  in property <string> recovery-said;
+ // Where the bar's offer stands: 0 none, 1 its note open (its text drawn), 2 its note listed
+ // and not open (Show opens it), 3 its note's file gone (described on the bar).
+ in property <int> recovery;
  // The open note's offer waits on the person: it takes no keys until then.
  in property <bool> recovering;
  in-out property <string> path;
@@ -75,6 +80,12 @@ export component NotesApp inherits AppWindow {
  public function focus-editor(){editor.focus();}
  public function reset-position(){writing.viewport-y=0px;editor.set-selection-offsets(0,0);}
  public function shortcut(event:KeyEvent)->EventResult {
+  // The close prompt is modal: only its own keys reach the app, Escape (Cancel) and Return (Save).
+  if(root.dialog==4){
+   if(event.text==Key.Escape){root.action("close-cancel");}
+   else if(event.text==Key.Return&&root.close-saves){root.action("close-save");}
+   return accept;
+  }
   if(event.modifiers.control){
    if(event.text=="z"||event.text=="Z"||event.text=="y"){root.action(event.modifiers.shift||event.text=="y"?"redo":"undo");return accept;}
    if(event.text=="s"){root.action("save");return accept;}
@@ -98,8 +109,11 @@ export component NotesApp inherits AppWindow {
   if root.recovery-said!="" : Rectangle {height:offer.preferred-height;background:Theme.notice-surface;border-width:1px;border-color:Theme.notice-line;
    offer:=HorizontalLayout{padding-left:20px;padding-right:14px;padding-top:8px;padding-bottom:8px;spacing:8px;
     Text{text:root.recovery-said;color:Theme.text-primary;font-size:Theme.fs-caption;wrap:word-wrap;vertical-alignment:center;horizontal-stretch:1;}
+    if root.recovery==2 : YButton{label:"Show";variant:1;size:0;clicked=>{root.action("show-draft");}}
     YButton{label:"Restore";variant:1;size:0;disabled:root.read-only;clicked=>{root.action("restore-draft");}}
-    YButton{label:"Discard";variant:1;size:0;clicked=>{root.action("discard-draft");}}
+    // Discard drops the only copy, so it is offered once the text can be seen (or, its file
+    // gone, once the bar has said what it holds).
+    if root.recovery!=2 : YButton{label:"Discard";variant:1;size:0;clicked=>{root.action("discard-draft");}}
    }
   }
   if root.outside!=0 : Rectangle {height:choices.preferred-height;background:Theme.notice-surface;border-width:1px;border-color:Theme.notice-line;
@@ -265,15 +279,18 @@ export component NotesApp inherits AppWindow {
    }
   }
  }
+ // The close prompt, on the kit's dialog card (YDialog's tokens; it has three answers, which
+ // YDialog's two buttons do not).
  Rectangle{visible:root.dialog==4;background:Theme.overlay-backdrop;TouchArea{}
-  Rectangle{x:(parent.width - self.width)/2;y:(parent.height - self.height)/2;width:min(480px,root.width - 48px);height:asking.preferred-height;background:Theme.bg-elevated;border-radius:14px;
-   asking:=VerticalLayout{padding:24px;spacing:16px;
-    Text{text:root.close-heading;color:Theme.text-primary;font-size:Theme.fs-title-1;font-weight:Theme.fw-title-1;wrap:word-wrap;}
+  Rectangle{x:(parent.width - self.width)/2;y:(parent.height - self.height)/2;width:min(480px,root.width - 48px);height:asking.preferred-height;
+   background:Theme.bg-card;border-radius:Theme.r-lg;border-width:1px;border-color:Theme.border-card;drop-shadow-blur:30px;drop-shadow-color:Theme.overlay-shadow;
+   asking:=VerticalLayout{padding:Theme.sp-6;spacing:Theme.sp-4;
+    Text{text:root.close-heading;color:Theme.text-primary;font-size:Theme.fs-title-2;font-weight:Theme.fw-title-2;wrap:word-wrap;}
     Text{text:root.close-said;color:Theme.text-secondary;font-size:Theme.fs-body;wrap:word-wrap;}
-    HorizontalLayout{alignment:end;spacing:8px;
+    HorizontalLayout{alignment:end;spacing:Theme.sp-2;
      YButton{label:"Cancel";variant:2;clicked=>{root.action("close-cancel");}}
      YButton{label:"Don't save";variant:1;clicked=>{root.action("close-discard");}}
-     if !root.read-only : YButton{label:"Save";variant:0;clicked=>{root.action("close-save");}}
+     if root.close-saves : YButton{label:"Save";variant:0;clicked=>{root.action("close-save");}}
     }
    }
   }

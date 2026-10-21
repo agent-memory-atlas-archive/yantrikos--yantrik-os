@@ -211,13 +211,13 @@ const ADDED_IN_8D3: &[Golden] = &[
     Golden {
         name: "restore_draft",
         risk: "sensitive",
-        description: r#"Put back the unsaved text Notes kept from before it closed (`describe.recovery`, the first one) into its note, open it, and save it. If the note's file changed since, nothing is replaced: `describe.outside` becomes `conflict` and the outside choices apply."#,
+        description: r#"Put back the unsaved text Notes kept from before it closed (the one the recovery bar shows, first in `describe.recovery`) into its note, open it, and save it. If the note's file changed since, nothing is replaced: `describe.outside` becomes `conflict` and the outside choices apply."#,
         params: &[],
     },
     Golden {
         name: "discard_draft",
         risk: "dangerous",
-        description: r#"Throw away the unsaved text Notes kept from before it closed (`describe.recovery`, the first one). The note stays as its file holds it; the text cannot be got back."#,
+        description: r#"Throw away the unsaved text Notes kept from before it closed (the one the recovery bar shows, first in `describe.recovery`). The note stays as its file holds it; the text cannot be got back."#,
         params: &[],
     },
 ];

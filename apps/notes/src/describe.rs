@@ -69,9 +69,8 @@ pub fn view(m: &Model) -> View {
         .with("draft", open.as_ref().map(|n| draft(&n.doc.draft)))
         .with(
             "recovery",
-            m.recovery
-                .offers
-                .iter()
+            crate::update::recovery::in_order(m)
+                .into_iter()
                 .map(|o| json!({ "filename": o.id, "title": o.content.title(), "characters": o.content.text.chars().count() }))
                 .collect::<Vec<_>>(),
         )

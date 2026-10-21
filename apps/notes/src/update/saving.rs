@@ -7,7 +7,7 @@
 use yantrik_app::documents::{BeginSave, DocumentId, Durability, Fingerprint, SaveError, SaveOutcome, SaveTicket};
 use yantrik_app::effects::Effects;
 
-use super::{after_store, begin, failed, refreshed, relist, said, save_state, AUTOSAVE};
+use super::{after_store, begin, drafts, failed, refreshed, relist, said, save_state, AUTOSAVE};
 use crate::command::Command;
 use crate::model::{Model, Work};
 use crate::note::{Note, NoteText};
@@ -108,6 +108,18 @@ pub fn landed(m: &mut Model, fx: &mut Effects<Notes>, doc: DocumentId, seq: u64,
     if m.busy == Some(Work::Save) {
         m.busy = None;
     }
+    // Another program's version the replace took the place of is in the library, or beside it,
+    // and said, whatever else this landing turns out to be: never kept and left unsaid.
+    let theirs = match &result {
+        Ok(saved) => saved.theirs.clone(),
+        Err(failure) => failure.theirs.clone(),
+    };
+    let theirs = theirs.map(|theirs| kept(m, fx, *theirs));
+    if let Some(sentence) = &theirs {
+        m.notice = sentence.clone();
+        m.lasting_notice = true;
+        fx.changed(STATUS);
+    }
     let Some(d) = m.documents.get_mut(doc) else { return };
     match result {
         Ok(saved) => {
@@ -129,15 +141,16 @@ pub fn landed(m: &mut Model, fx: &mut Effects<Notes>, doc: DocumentId, seq: u64,
                 None => m.library.push(entry),
             }
             // Another program's write that this save replaced is said, and stays said while the
-            // person types on; a failure's notice is answered by this landing.
-            if let Some(sentence) = saved.theirs.map(|theirs| kept(m, *theirs)) {
-                m.notice = sentence;
-                m.lasting_notice = true;
-            } else if let Some(what) = replaced {
-                m.notice = said::replaced(what).into();
-                m.lasting_notice = true;
-            } else if !m.lasting_notice {
-                m.notice.clear();
+            // person types on (one kept by the store was said above, with where it is kept); a
+            // failure's notice is answered by this landing.
+            match replaced {
+                _ if theirs.is_some() => {}
+                Some(what) => {
+                    m.notice = said::replaced(what).into();
+                    m.lasting_notice = true;
+                }
+                None if !m.lasting_notice => m.notice.clear(),
+                None => {}
             }
             refreshed(m, fx);
             relist(m, fx);
@@ -155,8 +168,8 @@ pub fn landed(m: &mut Model, fx: &mut Effects<Notes>, doc: DocumentId, seq: u64,
             };
             // The replace went in before a later step failed, and took the place of another
             // program's version: where that is kept comes first.
-            if let Some(theirs) = failure.theirs {
-                sentence = format!("{} {sentence}", kept(m, *theirs));
+            if let Some(kept) = &theirs {
+                sentence = format!("{kept} {sentence}");
             }
             let Some(d) = m.documents.get_mut(doc) else { return };
             if matches!(d.save_landed(seq, Err(failure.error)), SaveOutcome::Stale) {
@@ -178,8 +191,10 @@ pub fn landed(m: &mut Model, fx: &mut Effects<Notes>, doc: DocumentId, seq: u64,
 }
 
 /// Another program's version a save replaced, now in the library or beside it, and the sentence
-/// that says where.
-fn kept(m: &mut Model, theirs: Theirs) -> String {
+/// that says where. One that could not be written is kept as a draft under its own note's name,
+/// so a start offers it back even if Notes stops before it is saved, and the close prompt counts
+/// it while it is not on disk.
+fn kept(m: &mut Model, fx: &mut Effects<Notes>, theirs: Theirs) -> String {
     match theirs {
         Theirs::Kept(note) => {
             let title = note.title();
@@ -193,6 +208,9 @@ fn kept(m: &mut Model, theirs: Theirs) -> String {
         Theirs::Aside(path) => said::theirs_aside(&path),
         Theirs::Unwritten { note, why } => {
             let title = note.title();
+            if let Some((name, bytes)) = drafts::envelope(&m.vault.dir().join(&note.id), &note.content) {
+                fx.checkpoint_draft(&name, bytes);
+            }
             m.library.push(note);
             said::theirs_unwritten(&title, &why)
         }

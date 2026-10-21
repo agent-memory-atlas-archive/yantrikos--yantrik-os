@@ -481,8 +481,8 @@ pub fn table(table: &mut Intents<Notes>) {
     );
 
     // The recovery bar's choices (step 8d-3), the same commands its buttons run, about the text a
-    // run of Notes kept and did not save. `describe.recovery` lists what is offered, the first
-    // being the one these act on.
+    // run of Notes kept and did not save. `describe.recovery` lists what is offered, the bar's
+    // first: the one these act on.
     add(
         table,
         // Sensitive: the text in the note is replaced by the text kept from before Notes closed,
@@ -490,9 +490,10 @@ pub fn table(table: &mut Intents<Notes>) {
         // are offered instead.
         act(
             "restore_draft",
-            "Put back the unsaved text Notes kept from before it closed (`describe.recovery`, the \
-             first one) into its note, open it, and save it. If the note's file changed since, \
-             nothing is replaced: `describe.outside` becomes `conflict` and the outside choices apply.",
+            "Put back the unsaved text Notes kept from before it closed (the one the recovery bar \
+             shows, first in `describe.recovery`) into its note, open it, and save it. If the note's \
+             file changed since, nothing is replaced: `describe.outside` becomes `conflict` and the \
+             outside choices apply.",
         )
         .risk("sensitive"),
         |_| Ok(Act::RestoreDraft),
@@ -504,8 +505,9 @@ pub fn table(table: &mut Intents<Notes>) {
         // is removed for good. The note itself stays as its file holds it.
         act(
             "discard_draft",
-            "Throw away the unsaved text Notes kept from before it closed (`describe.recovery`, the \
-             first one). The note stays as its file holds it; the text cannot be got back.",
+            "Throw away the unsaved text Notes kept from before it closed (the one the recovery bar \
+             shows, first in `describe.recovery`). The note stays as its file holds it; the text cannot \
+             be got back.",
         )
         .risk("dangerous"),
         |_| Ok(Act::DiscardDraft),

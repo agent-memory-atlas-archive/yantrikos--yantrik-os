@@ -70,12 +70,15 @@ fn a_note_typed_in_and_killed_is_offered_back_at_the_next_start_and_restored() {
     let (app, path) = typed_then_killed("Lost", typed);
     assert_eq!(file(&path), "# Lost\n\n", "nothing was put back unasked");
     assert_eq!(offered(&app), vec!["Lost".to_string()]);
-    assert_eq!(bar(&app), said::offer("Lost"));
     assert_eq!(notice(&app), "", "the bar says it; the notice is for when there are more");
+    // Its note is opened, and the editor shows the text the choice is about, read-only.
+    assert_eq!(bar(&app), said::offer_open("Lost"));
+    assert_eq!(app.ui(|ui| (ui.get_recovery(), ui.get_content().to_string())), (1, typed.to_string()));
+    assert_eq!(open_text(&app), "# Lost\n\n", "the note itself is still as its file holds it");
     // The note an offer is for takes no edits until the person chooses.
-    app.run(Command::Window(WindowAction::Open { id: path.file_name().unwrap().to_str().unwrap().into(), trash: false }));
     app.run(Command::Edit("# Lost\n\nsomething else".into()));
     assert_eq!((notice(&app), open_text(&app)), (said::CHOOSE_FIRST.to_string(), "# Lost\n\n".to_string()));
+    assert_eq!(app.ui(|ui| ui.get_content().to_string()), typed, "the editor is put back to the offered text");
     assert!(app.ui(|ui| ui.get_recovering()), "and the editor says so by taking no keys");
     press(&app, "restore-draft");
     assert_eq!(open_text(&app), typed, "the text is back");
@@ -93,6 +96,7 @@ fn discard_keeps_the_note_as_its_file_holds_it_and_drops_the_draft() {
     let answer = act(&app, "discard_draft", json!({})).expect("discarded");
     assert_eq!(answer["still_offered"], 0);
     assert_eq!(file(&path), "# Dropped\n\n");
+    assert_eq!(app.ui(|ui| ui.get_content().to_string()), "# Dropped\n\n", "the editor shows the file again");
     assert!(offered(&app).is_empty());
     app.run_writes();
     assert!(!draft_file(&app, &path).exists());
@@ -234,4 +238,75 @@ fn nothing_kept_offers_nothing() {
     let app = started();
     assert!(offered(&app).is_empty() && bar(&app).is_empty());
     assert_eq!(act(&app, "restore_draft", json!({})).unwrap_err(), said::NOTHING_OFFERED);
+}
+
+/// #917 review finding 3: the draft's baseline is of the text alone, so a sidecar another program
+/// changed since (tags, notebook, pin) is not put back over silently either.
+#[test]
+fn a_restore_over_a_sidecar_changed_since_is_a_conflict_too() {
+    let (app, path) = with_note("Tagged");
+    app.run(Command::Edit("# Tagged\n\nmine".into()));
+    app.run_writes();
+    let paths = app.paths();
+    drop(app);
+    std::fs::write(path.with_extension("meta"), "tags:theirs\n").unwrap();
+    let app = TestApp::<Notes>::start_at(paths, Vec::new());
+    settle(&app);
+    act(&app, "restore_draft", json!({})).expect("restored");
+    assert!(matches!(outside(&app), OutsideState::Conflict { .. }), "{:?}", outside(&app));
+    assert_eq!(std::fs::read_to_string(path.with_extension("meta")).unwrap(), "tags:theirs\n", "theirs kept");
+    assert_eq!(file(&path), "# Tagged\n\n", "and nothing saved over the note");
+}
+
+/// #917 review finding 4: a recovery copy that cannot be read, or is of another library, is left
+/// where it is, and its place is said.
+#[test]
+fn a_draft_that_cannot_be_read_or_is_of_another_library_is_said_and_left() {
+    let app = started();
+    let dir = app.paths().state_dir().join(yantrik_app::drafts::DIR);
+    std::fs::create_dir_all(&dir).unwrap();
+    let torn = dir.join("doc-torn.json");
+    std::fs::write(&torn, br#"{"version":1,"key":"doc-torn","pa"#).unwrap();
+    let elsewhere_path = PathBuf::from("/elsewhere/library/a.md");
+    let key = Source::File(elsewhere_path.clone()).key();
+    let other = Envelope {
+        version: 1,
+        key: key.clone(),
+        path: Some(elsewhere_path.display().to_string()),
+        seq: 1,
+        at: 1,
+        content: NoteText { text: "# Elsewhere\n".into(), meta: String::new() },
+        baseline: None,
+    };
+    let other_file = dir.join(format!("{key}.json"));
+    std::fs::write(&other_file, serde_json::to_vec(&other).unwrap()).unwrap();
+    let app = killed_and_started_again(app);
+    let said_now = notice(&app);
+    assert!(said_now.contains(&format!("A recovery copy could not be read; it is kept at {}.", torn.display())), "{said_now}");
+    assert!(said_now.contains(&format!("A recovery copy of a note in another library is kept at {}.", other_file.display())), "{said_now}");
+    assert!(offered(&app).is_empty());
+    app.run_writes();
+    assert!(torn.exists() && other_file.exists(), "both are left where they are");
+}
+
+/// The bar's offer is the first in `describe.recovery`, and a note not open is shown before it can
+/// be discarded from the window.
+#[test]
+fn the_bar_offers_the_first_listed_and_shows_a_note_before_discard() {
+    let (app, first) = typed_then_killed("One", "# One\n\nfirst run");
+    let second = std::path::PathBuf::from(note(&app, "Two", "")["path"].as_str().unwrap());
+    app.run(Command::Edit("# Two\n\nsecond run".into()));
+    app.run_writes();
+    let app = killed_and_started_again(app);
+    assert_eq!(offered(&app), vec!["Two", "One"], "the open one, Two, first");
+    // Another note open: the bar offers the first listed, which is not open, and shows it first.
+    let id = first.file_name().unwrap().to_str().unwrap().to_string();
+    app.run(Command::Window(WindowAction::New(Some("Elsewhere".into()))));
+    settle(&app);
+    assert_eq!(app.ui(|ui| ui.get_recovery()), 2, "Show, then the choice");
+    press(&app, "show-draft");
+    let open = app.model(|m| m.current().unwrap().id().to_string());
+    assert!(open == id || second.ends_with(&open), "a note with an offer is open: {open}");
+    assert_eq!(app.ui(|ui| ui.get_recovery()), 1);
+    assert_eq!(offered(&app)[0], app.model(|m| m.current().unwrap().title()), "the open one is first");
 }

@@ -62,7 +62,7 @@ fn ask(m: &mut Model, fx: &mut Effects<Notes>, window: Option<WindowId>, closing
         Closing::Now => Vec::new(),
         Closing::Ask(documents) => documents.into_iter().filter(|d| unsaved(m, *d)).collect(),
     };
-    if asked.is_empty() {
+    if asked.is_empty() && unstored(m) == 0 {
         // A store job in flight would land on a closed window: the window waits for it, in words.
         // Quitting does not; the framework's shutdown waits for the job within its grace.
         if m.busy.is_some() && window.is_some() {
@@ -160,6 +160,13 @@ fn close(m: &mut Model, fx: &mut Effects<Notes>, window: Option<WindowId>) {
     }
 }
 
+/// Notes listed in the library that are on no disk and in no open document: another program's
+/// version that could not be written. Each is kept as a draft, and the prompt says so.
+fn unstored(m: &Model) -> usize {
+    let open = m.current().map(|c| c.id().to_string());
+    m.library.iter().filter(|n| !n.stored && !n.trash && open.as_deref() != Some(n.id.as_str())).count()
+}
+
 fn unsaved(m: &Model, id: DocumentId) -> bool {
     match (m.documents.get(id), m.files.get(&id)) {
         (Some(doc), Some(file)) => Current { doc, file }.unsaved(),
@@ -167,15 +174,18 @@ fn unsaved(m: &Model, id: DocumentId) -> bool {
     }
 }
 
-/// The prompt's words for the notes asked about.
-pub fn prompt(m: &Model) -> Option<(String, String)> {
+/// The prompt's words for the notes asked about, and whether it offers *Save* (there is something
+/// to save, and a library that may be written).
+pub fn prompt(m: &Model) -> Option<(String, String, bool)> {
     let flow = m.closing.as_ref().filter(|f| f.stage == Stage::Asking)?;
     let titles: Vec<String> = flow
         .asked
         .iter()
         .filter_map(|id| Some(Current { doc: m.documents.get(*id)?, file: m.files.get(id)? }.title()))
         .collect();
-    Some(said::close_prompt(&titles, flow.window.is_none(), m.vault.read_only().is_some()))
+    let read_only = m.vault.read_only().is_some();
+    let (heading, sentence) = said::close_prompt(&titles, flow.window.is_none(), read_only, unstored(m));
+    Some((heading, sentence, !titles.is_empty() && !read_only))
 }
 
 /// Escape, or the dialog put away by the window: the person cancelled the prompt.

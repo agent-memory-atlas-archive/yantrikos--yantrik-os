@@ -9,7 +9,7 @@
 //! journal held, if it was of the same note: the newer wins, and only text that differs from the
 //! file is offered (update/recovery.rs). Nothing is put back until the person chooses.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use yantrik_app::documents::draft::ENVELOPE_VERSION;
 use yantrik_app::documents::{Envelope, Fingerprint, Source};
@@ -22,8 +22,13 @@ use crate::note::NoteText;
 pub struct Recovery {
     /// The drafts read at start, until the library is first read and they can be weighed.
     pub found: Option<Vec<Found>>,
-    /// The texts offered back, newest first: the bar offers the first.
+    /// The texts offered back, newest first.
     pub offers: Vec<Offer>,
+    /// Drafts found at start that could not be read (cut short, or another build's), kept where
+    /// they are and said once.
+    pub unreadable: Vec<PathBuf>,
+    /// Drafts of a note in another library, kept where they are and said once.
+    pub elsewhere: Vec<PathBuf>,
 }
 
 /// A draft read at start, of a note in this library.
@@ -50,13 +55,26 @@ pub struct Offer {
 }
 
 impl Recovery {
-    /// The drafts in `drafts` that are drafts of notes in the vault at `vault`. A draft of
-    /// another library (the vault was moved, `YANTRIK_NOTES_DIR` changed), or one this build
-    /// cannot read, is left on disk as it is: it is not this library's to offer or to remove.
-    pub fn read(drafts: &Drafts, vault: &Path) -> Recovery {
-        let mut found: Vec<Found> = drafts.names().filter_map(|name| of_this_library(drafts, name, vault)).collect();
+    /// The drafts in `drafts` (under `state_dir`) that are drafts of notes in the vault at
+    /// `vault`. A draft of another library (the vault was moved, `YANTRIK_NOTES_DIR` changed), or
+    /// one this build cannot read, is left on disk as it is, and its place is said: it is not
+    /// this library's to offer or to remove, and it may be someone's only copy.
+    pub fn read(drafts: &Drafts, vault: &Path, state_dir: &Path) -> Recovery {
+        let mut recovery = Recovery::default();
+        let mut found = Vec::new();
+        for name in drafts.names() {
+            let at = || yantrik_app::drafts::path_in(state_dir, name);
+            match drafts.json::<Envelope<NoteText>>(name) {
+                None => recovery.unreadable.push(at()),
+                Some(envelope) => match of_this_library(envelope, name, vault) {
+                    Some(f) => found.push(f),
+                    None => recovery.elsewhere.push(at()),
+                },
+            }
+        }
         found.sort_by(|a, b| b.at_ms.cmp(&a.at_ms));
-        Recovery { found: Some(found), offers: Vec::new() }
+        recovery.found = Some(found);
+        recovery
     }
 
     /// The offer for note `id`, if there is one.
@@ -65,8 +83,7 @@ impl Recovery {
     }
 }
 
-fn of_this_library(drafts: &Drafts, name: &str, vault: &Path) -> Option<Found> {
-    let envelope: Envelope<NoteText> = drafts.json(name)?;
+fn of_this_library(envelope: Envelope<NoteText>, name: &str, vault: &Path) -> Option<Found> {
     let path = Path::new(envelope.path.as_deref()?);
     let id = path.file_name()?.to_str()?.to_string();
     let ours = envelope.version == ENVELOPE_VERSION
@@ -75,7 +92,6 @@ fn of_this_library(drafts: &Drafts, name: &str, vault: &Path) -> Option<Found> {
         && envelope.key == name
         && Source::File(vault.join(&id)).key() == name;
     if !ours {
-        tracing::info!(draft = name, "a draft that is not of a note in this library is left as it is");
         return None;
     }
     Some(Found {

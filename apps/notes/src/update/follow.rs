@@ -8,8 +8,9 @@
 //! - When what the window holds is our own last write from this run (`Model::written`, kept
 //!   across a Refresh and a reopening), it is kept as a recovered note before it is replaced.
 //!   Another program writing from a stale copy would otherwise leave no copy of the person's last
-//!   version anywhere, since the undo history is cleared too. Not when a live note already holds
-//!   exactly that text: a second copy would add nothing.
+//!   version anywhere, since the undo history is cleared too. Not when a live note's file holds
+//!   exactly that text now (read by the job, not taken from the library as last loaded): a
+//!   second copy would add nothing.
 //! - When that version cannot be kept, it is not replaced, and it is held as a conflict against
 //!   the file (#915 review finding 5): the bar offers the choices, and every way out of the note
 //!   saves first, which the conflict refuses, so a Refresh or an Open cannot drop it unsaid.
@@ -33,8 +34,9 @@ pub fn follow(m: &mut Model, fx: &mut Effects<Notes>) {
     let Some(c) = m.current() else { return };
     let OutsideState::Changed { now } = c.outside().clone() else { return };
     let (doc, id, unsaved) = (c.doc.id, c.id().to_string(), c.unsaved());
-    let keep = m.ours(c.file) && m.holding(c.content(), c.id()).is_none();
-    let ours = keep.then(|| {
+    // Notes that held the text when last read; the job reads their files to know if one still does.
+    let alike = m.alike(c.content(), c.id());
+    let ours = m.ours(c.file).then(|| {
         let kept_id = format!("{}-{}.md", Resolution::TakeTheirs.kept_prefix(), uuid7::uuid7());
         (kept_id, c.content().clone())
     });
@@ -54,7 +56,7 @@ pub fn follow(m: &mut Model, fx: &mut Effects<Notes>) {
     let lost = Command::Reread { doc, result: Err(said::JOB_LOST.into()) };
     begin(m, fx, Work::Reread, lost, move |vault| {
         let ours = ours.as_ref().map(|(kept_id, text)| (kept_id.as_str(), text));
-        Command::Reread { doc, result: Ok(Box::new(vault.reread(&id, ours))) }
+        Command::Reread { doc, result: Ok(Box::new(vault.reread(&id, ours, &alike))) }
     });
 }
 

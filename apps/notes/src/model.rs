@@ -295,10 +295,14 @@ impl Model {
         held.is_some() && self.written.get(&file.id) == held.as_ref()
     }
 
-    /// A live note, other than `except`, that already holds exactly `content`: a copy of it would
-    /// add nothing the library does not have.
-    pub fn holding(&self, content: &NoteText, except: &str) -> Option<&Note> {
-        self.library.iter().find(|n| !n.trash && n.id != except && n.content == *content)
+    /// The live notes, other than `except`, that held exactly `content` when last read: the ones
+    /// whose files a job reads to learn whether one still holds it, as file name and length.
+    pub fn alike(&self, content: &NoteText, except: &str) -> Vec<(String, usize)> {
+        self.library
+            .iter()
+            .filter(|n| !n.trash && n.id != except && n.content == *content)
+            .map(|n| (n.id.clone(), n.content.text.len()))
+            .collect()
     }
 
     /// The library's text, leaving out the open note's own entry.

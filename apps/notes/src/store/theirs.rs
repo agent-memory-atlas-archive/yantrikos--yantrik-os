@@ -79,8 +79,10 @@ impl Vault {
         }
     }
 
-    /// The live note whose file holds exactly `bytes`, if any.
-    fn holding(&self, bytes: &[u8], alike: &[Alike]) -> Option<String> {
+    /// The live note whose file holds exactly `bytes` now, if any: read from disk and compared
+    /// byte for byte, never taken from the library as last loaded, since another program may
+    /// have changed or removed that file since.
+    pub(super) fn holding(&self, bytes: &[u8], alike: &[Alike]) -> Option<String> {
         alike.iter().filter(|(_, len)| *len == bytes.len()).find_map(|(id, _)| {
             let (path, _) = self.files(id).ok()?;
             let text = read(&path, LIMIT).ok().flatten()?;

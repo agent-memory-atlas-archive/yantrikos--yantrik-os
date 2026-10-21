@@ -88,7 +88,7 @@ impl App for Notes {
             }
             Startup::handed_over(claim::ALREADY_RUNNING)
         })?;
-        let recovery = recovery::Recovery::read(&boot.drafts, vault.dir());
+        let recovery = recovery::Recovery::read(&boot.drafts, vault.dir(), boot.paths.state_dir());
         Ok(Model::new(vault, claim, recovery))
     }
 

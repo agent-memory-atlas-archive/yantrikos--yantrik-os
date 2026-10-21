@@ -8,7 +8,10 @@
 //! landed. A draft that could not be written is said, because recovery after a crash is then not
 //! protected.
 
-use yantrik_app::documents::{Document, DraftState};
+use std::path::Path;
+
+use yantrik_app::documents::draft::ENVELOPE_VERSION;
+use yantrik_app::documents::{Document, DraftState, Envelope, Source};
 use yantrik_app::effects::Effects;
 
 use crate::model::Model;
@@ -74,6 +77,23 @@ pub fn not_saved(m: &mut Model, fx: &mut Effects<Notes>, name: &str, why: &str) 
     m.notice = sentence;
     m.lasting_notice = false;
     fx.changed(STATUS);
+}
+
+/// A draft of a note that is no open document (another program's version that could not be
+/// written as a note): its name and bytes, in the envelope a start reads. It was never on disk,
+/// so it has no baseline, and putting it back creates its file.
+pub(super) fn envelope(path: &Path, content: &NoteText) -> Option<(String, Vec<u8>)> {
+    let source = Source::File(path.to_path_buf());
+    let envelope = Envelope {
+        version: ENVELOPE_VERSION,
+        key: source.key(),
+        path: Some(path.display().to_string()),
+        seq: 1,
+        at: now_ms(),
+        content: content.clone(),
+        baseline: None,
+    };
+    Some((source.key(), serde_json::to_vec(&envelope).ok()?))
 }
 
 /// Milliseconds since the epoch, as a draft's envelope counts them.

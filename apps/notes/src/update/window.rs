@@ -104,6 +104,7 @@ fn guarded(m: &mut Model, fx: &mut Effects<Notes>, action: WindowAction) {
         WindowAction::TakeTheirs => outside::resolve(m, fx, Resolution::TakeTheirs),
         WindowAction::Compare => outside::compare(m, fx),
         WindowAction::RestoreDraft => recovery::restore(m, fx),
+        WindowAction::ShowDraft => recovery::show_offer(m, fx),
         WindowAction::Import => open_dialog(m, fx, Dialog::Import),
         WindowAction::Export => {
             if m.current().is_some() {

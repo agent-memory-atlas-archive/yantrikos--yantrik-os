@@ -26,7 +26,7 @@ pub use load::{Interrupted, Loaded};
 pub use read::read;
 pub use resolve::{Reread, Resolved};
 pub use save::{SaveFailed, SaveJob, Saved};
-pub use theirs::Theirs;
+pub use theirs::{Alike, Theirs};
 
 /// The most text one note may hold.
 pub const LIMIT: usize = 256 * 1024;

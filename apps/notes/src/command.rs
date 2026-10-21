@@ -87,6 +87,8 @@ pub enum WindowAction {
     /// The recovery bar's *Restore* and *Discard*: text kept from a run that ended unsaved.
     RestoreDraft,
     DiscardDraft,
+    /// The recovery bar's *Show*: the note it offers, opened to see the unsaved text.
+    ShowDraft,
 }
 
 /// How an outside change to the open note is resolved. Either way the window's text is kept as a
@@ -138,6 +140,7 @@ impl WindowAction {
             "close-cancel" => WindowAction::Close(Choice::Cancel),
             "restore-draft" => WindowAction::RestoreDraft,
             "discard-draft" => WindowAction::DiscardDraft,
+            "show-draft" => WindowAction::ShowDraft,
             other => {
                 if let Some(title) = other.strip_prefix("new:") {
                     WindowAction::New(Some(title.into()))
@@ -188,6 +191,7 @@ impl WindowAction {
                 | WindowAction::Trash
                 | WindowAction::Import
                 | WindowAction::RestoreDraft
+                | WindowAction::ShowDraft
         )
     }
 }
