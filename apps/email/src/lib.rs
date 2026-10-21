@@ -30,6 +30,8 @@ pub mod state;
 mod update;
 mod view;
 mod words;
+#[cfg(test)]
+mod tests;
 
 pub use command::Command;
 pub use model::Model;
