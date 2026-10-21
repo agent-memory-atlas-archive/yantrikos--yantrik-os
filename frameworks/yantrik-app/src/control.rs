@@ -152,6 +152,7 @@
 //! ```
 
 use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -288,7 +289,7 @@ type Registry = LocalRegistry;
 
 thread_local! {
     /// Installed by [`App::serve`] on the thread that owns the window.
-    static REGISTRY: RefCell<Option<Registry>> = const { RefCell::new(None) };
+    static REGISTRY: RefCell<Option<Rc<Registry>>> = const { RefCell::new(None) };
 }
 
 // ── Who is calling, which agent it is for, and answers that take time ──
@@ -477,7 +478,7 @@ mod test_ui_thread {
         std::thread::Builder::new()
             .name("control-test-ui".into())
             .spawn(move || {
-                super::REGISTRY.with(|cell| *cell.borrow_mut() = Some(build()));
+                super::REGISTRY.with(|cell| *cell.borrow_mut() = Some(std::rc::Rc::new(build())));
                 let _ = ready.send(());
                 while let Ok(job) = rx.recv() {
                     job();
@@ -779,15 +780,15 @@ impl App {
     /// Must be called from the thread that owns the window, before `run()`. Failing to serve is
     /// not fatal: an app whose socket cannot be bound is still a working app, it is only invisible
     /// to the mind, and taking the window down over that would be the worse outcome.
-    pub fn serve(self) {
+    pub fn serve(self) -> Rc<Registry> {
         let name = self.registry.app_id().to_string();
-        self.serve_as(&name);
+        self.serve_as(&name)
     }
 
     /// [`App::serve`] on the socket named `instance` (`app-<instance>.sock`): the app's id for
     /// the default profile, `<id>-<profile>` for another, so a second profile is a second
     /// instance with a surface of its own (design §2.2 step 3).
-    pub fn serve_as(mut self, instance: &str) {
+    pub fn serve_as(mut self, instance: &str) -> Rc<Registry> {
         // Every surface answers `present`, so a second launch can ask the copy that holds the
         // single-instance slot to show its window (`present`). An app that declared its own keeps
         // it. Not the desktop's own surface: nothing launches the shell a second time, and it has
@@ -803,8 +804,12 @@ impl App {
         }
         let app_id = self.registry.app_id().to_string();
         let action_count = self.registry.action_count();
-        REGISTRY.with(|cell| *cell.borrow_mut() = Some(self.registry));
+        // Shared with the core, which raises the rail's proposals through it; the RPC thread's
+        // hops reach it through this thread-local, as before.
+        let registry = Rc::new(self.registry);
+        REGISTRY.with(|cell| *cell.borrow_mut() = Some(registry.clone()));
         serve_rpc(&app_id, instance, action_count);
+        registry
     }
 }
 
@@ -1206,7 +1211,7 @@ mod tests {
         // from the UI thread that is making the call. `None` for an action that does not exist,
         // because an unknown action has no grade and defaulting one would invent a permission.
         REGISTRY.with(|cell| {
-            *cell.borrow_mut() = Some(registry(
+            *cell.borrow_mut() = Some(Rc::new(registry(
                 "shell",
                 None,
                 vec![
@@ -1219,7 +1224,7 @@ mod tests {
                         Box::new(|_| Ok(serde_json::Value::Null)),
                     ),
                 ],
-            ))
+            )))
         });
 
         assert_eq!(published_grade("files_delete"), Some("dangerous"));
@@ -1245,14 +1250,14 @@ mod tests {
         // grade has to move with it, or a caller under a `standard` ceiling can be talked into
         // sending a prompt off the machine by an action that never asked for anything.
         REGISTRY.with(|cell| {
-            *cell.borrow_mut() = Some(registry(
+            *cell.borrow_mut() = Some(Rc::new(registry(
                 "studio",
                 None,
                 vec![(
                     Action::new("generate", "Make a picture from a sentence"),
                     Box::new(|_| Ok(serde_json::json!({"queued": 1}))),
                 )],
-            ))
+            )))
         });
         let act_under = |ceiling: &str, id: &str| {
             REGISTRY.with(|cell| {
@@ -1298,7 +1303,7 @@ mod tests {
     #[test]
     fn a_grade_this_os_does_not_define_leaves_the_action_at_the_one_it_had() {
         REGISTRY.with(|cell| {
-            *cell.borrow_mut() = Some(registry(
+            *cell.borrow_mut() = Some(Rc::new(registry(
                 "studio",
                 None,
                 vec![
@@ -1311,7 +1316,7 @@ mod tests {
                         Box::new(|_| Ok(serde_json::Value::Null)),
                     ),
                 ],
-            ))
+            )))
         });
 
         // A typo must not quietly un-grade an action, which is what writing the string through
@@ -1362,7 +1367,7 @@ mod tests {
         // This mirrors the dispatch: the borrow is held across `act`, exactly as it is in
         // `on_ui_thread`.
         REGISTRY.with(|cell| {
-            *cell.borrow_mut() = Some(registry(
+            *cell.borrow_mut() = Some(Rc::new(registry(
                 "studio",
                 None,
                 vec![
@@ -1380,7 +1385,7 @@ mod tests {
                         }),
                     ),
                 ],
-            ))
+            )))
         });
 
         let answered = REGISTRY.with(|cell| {

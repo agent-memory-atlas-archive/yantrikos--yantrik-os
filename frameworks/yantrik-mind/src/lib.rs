@@ -14,7 +14,7 @@ pub use live::*;
 pub mod fake;
 
 /// What a Mind answers. The live one is [`Live`]; a test's is [`fake::FakeMind`].
-pub trait Mind: Send + Sync {
+pub trait Mind: Send + Sync + std::fmt::Debug {
     /// Ask and wait for the finished answer. From a job, never the UI thread.
     fn ask(&self, prompt: &str) -> Result<String, AskError>;
     /// The memories relevant to `query`, at most `want`, none under `floor`.

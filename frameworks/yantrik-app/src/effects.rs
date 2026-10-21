@@ -63,6 +63,12 @@ pub enum Request<A: App> {
     DiscardDraft(String),
     /// One line to the person through the notifications service, from this app.
     Notify(yantrik_notifications::Notification),
+    /// The agent rail applying a proposal: one of the app's intents, run as an agent through
+    /// the admitted path with the authority already read.
+    ApplyAsAgent {
+        apply: crate::rail::Apply,
+        authority: yantrik_ipc_transport::gate::Authority,
+    },
     Close(WindowId),
     Exit,
 }
@@ -280,6 +286,16 @@ impl<A: App> Effects<A> {
         self.requests.push(Request::Notify(notification));
     }
 
+    /// The rail's: apply a proposal through the app's own intents, as an agent. What came of it
+    /// returns as `RailCommand::Applied`.
+    pub(crate) fn apply_as_agent(
+        &mut self,
+        apply: crate::rail::Apply,
+        authority: yantrik_ipc_transport::gate::Authority,
+    ) {
+        self.requests.push(Request::ApplyAsAgent { apply, authority });
+    }
+
     /// Ask the desktop for something (open a web address or a file, copy text) off the UI
     /// thread; `then` turns what came of it into the command that carries it back.
     pub fn desktop(
@@ -330,6 +346,7 @@ impl<A: App> Request<A> {
             Request::SaveDraft { .. } => "save_draft",
             Request::DiscardDraft(_) => "discard_draft",
             Request::Notify(_) => "notify",
+            Request::ApplyAsAgent { .. } => "apply_as_agent",
             Request::Close(_) => "close",
             Request::Exit => "exit",
         }

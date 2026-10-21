@@ -50,7 +50,7 @@ pub fn run<A: App>() -> ExitCode {
     // The launch is parsed before the claim: a command line this app does not take is said and
     // refused here, whichever copy would have run it. Opening the settings and drafts writes
     // nothing, so a copy that hands over and exits leaves no trace.
-    let (boot, store) = match Boot::<A::Settings>::open(paths.clone(), args) {
+    let (boot, store) = match Boot::<A::Settings>::open(paths.clone(), args, yantrik_mind::live()) {
         Ok(opened) => opened,
         Err(e) => return startup_failed(A::ID, "launch", &e.sentence),
     };
@@ -135,7 +135,8 @@ pub fn run<A: App>() -> ExitCode {
     let mut table = Intents::new();
     A::intents(&mut table);
     let registry = intents::registry(&core, table);
-    crate::control::App::from_registry(registry).serve_as(&instance);
+    let registry = crate::control::App::from_registry(registry).serve_as(&instance);
+    core.attach_registry(registry);
 
     let ending = crate::event_loop::run_until_ending(core.ui(), A::ID);
     core.shutdown(GRACE);

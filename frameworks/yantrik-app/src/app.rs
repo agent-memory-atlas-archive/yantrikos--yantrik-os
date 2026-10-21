@@ -100,13 +100,20 @@ pub struct Boot<S = ()> {
     /// defaults, and a save is held in memory until the person chooses to replace the file
     /// (`fx.replace_settings_file`).
     pub settings_health: Health,
+    /// The Mind, as this process reaches it: the live one under the runner, a fake under a
+    /// test. An app with an agent rail hands it to its `Rail`.
+    pub mind: std::sync::Arc<dyn yantrik_mind::Mind>,
 }
 
 impl<S: Settings> Boot<S> {
     /// Parses the launch, opens the settings and reads the drafts at `paths`, and makes the boot
     /// the app's `model` is given. An unusable settings file is `settings_health`, not an error;
     /// a command line the app does not take is.
-    pub fn open(paths: Paths, args: Vec<OsString>) -> Result<(Boot<S>, Store<S>), Startup> {
+    pub fn open(
+        paths: Paths,
+        args: Vec<OsString>,
+        mind: std::sync::Arc<dyn yantrik_mind::Mind>,
+    ) -> Result<(Boot<S>, Store<S>), Startup> {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
         let launch = Launch::parse(paths.id(), paths.profile(), &cwd, &args)?;
         let store = Store::<S>::open(paths.config_file().to_path_buf());
@@ -118,6 +125,7 @@ impl<S: Settings> Boot<S> {
             paths,
             settings: store.get().clone(),
             settings_health: store.health().clone(),
+            mind,
         };
         Ok((boot, store))
     }
@@ -236,6 +244,14 @@ pub trait App: Sized + 'static {
     /// A framework event the app may turn into a command. `None` takes the default.
     fn event(event: Event<Self::Settings>, model: &Self::Model) -> Option<Self::Command> {
         let _ = (event, model);
+        None
+    }
+
+    /// The agent rail's commands as this app's own (`Some(Command::Rail(command))` for an app
+    /// with a rail, see `rail`). `None` means the app has no rail: the framework arms no refresh
+    /// for it and routes nothing to it.
+    fn rail(command: crate::rail::RailCommand) -> Option<Self::Command> {
+        let _ = command;
         None
     }
 }

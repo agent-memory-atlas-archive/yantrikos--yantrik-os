@@ -23,7 +23,6 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
-use std::ops::Deref;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -33,17 +32,23 @@ use slint::ComponentHandle as _;
 use crate::app::{App, Changed, Event, ExitReason, WindowId};
 use crate::effects::{Effects, Request};
 use crate::intents::{Invocation, InvocationId, Origin};
-use crate::jobs::{Cancel, Concurrency, Deliver, Executor, Finished, JobId, JobKey};
+use crate::jobs::{Cancel, Deliver, Executor, Finished, JobId, JobKey};
 use crate::persist::{Lane, Report, Written};
 use crate::problems;
 use crate::queue::{self, Inbox, Post, Wake};
 use crate::refused::Refused;
 use crate::settings::Store;
 use crate::timers::Timers;
+use crate::rail::{self, RailCommand};
 use crate::watch::Seen;
+use yantrik_surface::LocalRegistry;
 
+mod handle;
+mod jobs_table;
 mod persisted;
+mod rail_hooks;
 mod settlement;
+pub use handle::{Cx, UiRef};
 use settlement::Open;
 
 /// How many queued (`then`) commands one drain applies before the rest wait for the next wake.
@@ -107,6 +112,8 @@ pub struct Core<A: App> {
     last_refusal: RefCell<Option<Refused>>,
     exit: Cell<Option<ExitReason>>,
     window_shown: Cell<bool>,
+    /// The app's served surface, once it is: the rail applies a proposal through it.
+    registry: RefCell<Option<Rc<LocalRegistry>>>,
 }
 
 /// Delivers a finished job to the core's queue.
@@ -177,6 +184,7 @@ impl<A: App> Core<A> {
                 last_refusal: RefCell::new(None),
                 exit: Cell::new(None),
                 window_shown: Cell::new(true),
+                registry: RefCell::new(None),
             }
         })
     }
@@ -242,6 +250,14 @@ impl<A: App> Core<A> {
         self.commit(requests);
         if !changed.is_empty() {
             A::render(&self.ui, WindowId::PRIMARY, &self.model.borrow(), &changed);
+        }
+        // An app with a rail: the first refresh now, and the fallback tick from here on.
+        if let Some(refresh) = A::rail(RailCommand::Refresh) {
+            let tick = refresh.clone();
+            self.timers
+                .borrow_mut()
+                .every(rail::TICK, rail::TICK_EVERY, Box::new(move || tick.clone()));
+            self.queue(None, refresh);
         }
         self.applying.set(false);
         self.drain_pending();
@@ -361,6 +377,7 @@ impl<A: App> Core<A> {
                 if !changed.is_empty() {
                     A::render(&self.ui, WindowId::PRIMARY, &self.model.borrow(), &changed);
                 }
+                self.rail_changed(&changed);
             }
             Err(refused) => {
                 // Nothing it asked for runs; the sentence is the person's and the Mind's.
@@ -425,160 +442,14 @@ impl<A: App> Core<A> {
                 Request::Notify(notification) => {
                     yantrik_notifications::send(notification.from_app(self.id));
                 }
+                Request::ApplyAsAgent { apply, authority } => {
+                    let admitted = self.act_as_agent(apply, authority);
+                    if let Some(applied) = A::rail(RailCommand::Applied(admitted)) {
+                        self.queue(None, applied);
+                    }
+                }
                 Request::Close(window) => self.close_window(window),
                 Request::Exit => self.request_exit(ExitReason::App),
-            }
-        }
-    }
-
-    fn spawn(
-        &self,
-        id: JobId,
-        key: Option<JobKey>,
-        mode: Concurrency,
-        failed: Option<A::Command>,
-        job: crate::jobs::Job<A::Command>,
-        invocation: Option<Invocation>,
-    ) {
-        let mut replaces = None;
-        if let Some(key) = &key {
-            let running = self.by_key.borrow().get(key).copied();
-            match (running, mode) {
-                (Some(_), Concurrency::RejectIfRunning) => {
-                    tracing::debug!(
-                        app = self.id,
-                        ?key,
-                        "a job of this kind is running; this one is not started"
-                    );
-                    // The work was refused: an invocation waiting on it is told so, not told
-                    // "done" from a model the job never touched; and the app hears of it through
-                    // its `failed` command, as it would of a panic.
-                    if let Some(invocation) = invocation {
-                        self.settle(
-                            invocation.id,
-                            Err("a job of this kind is already running".into()),
-                        );
-                    }
-                    if let Some(failed) = failed {
-                        self.queue(invocation, failed);
-                    }
-                    return;
-                }
-                (Some(old), Concurrency::ReplacePrevious) => replaces = Some(old),
-                _ => {}
-            }
-            self.by_key.borrow_mut().insert(key.clone(), id);
-        }
-        let cancel = Cancel::new();
-        self.jobs.borrow_mut().insert(
-            id,
-            Waiting {
-                cancel: cancel.clone(),
-                key,
-                invocation,
-                failed,
-            },
-        );
-        if let Some(invocation) = invocation {
-            if let Some(open) = self.open.borrow_mut().get_mut(&invocation.id) {
-                open.jobs += 1;
-            }
-        }
-        // The new job is counted before the old one is cancelled, so a replacement within one
-        // invocation never leaves it with nothing running for an instant and settles it.
-        if let Some(old) = replaces {
-            self.cancel(old);
-        }
-        let deliver: Arc<dyn Deliver<A::Command>> = Arc::new(PostDeliver(self.post.clone()));
-        self.executor.borrow_mut().spawn(id, cancel, job, deliver);
-    }
-
-    /// Forgets a job's key, if it still names this job.
-    fn forget_key(&self, id: JobId, key: Option<JobKey>) {
-        if let Some(key) = key {
-            let mut by_key = self.by_key.borrow_mut();
-            if by_key.get(&key) == Some(&id) {
-                by_key.remove(&key);
-            }
-        }
-    }
-
-    /// Stops waiting on a job: its cancel flag is set and its late result is dropped. An
-    /// invocation whose last job this was is settled as replaced.
-    fn cancel(&self, id: JobId) {
-        let Some(waiting) = self.jobs.borrow_mut().remove(&id) else {
-            return;
-        };
-        waiting.cancel.set();
-        self.forget_key(id, waiting.key);
-        if let Some(invocation) = waiting.invocation {
-            if self.job_landed(invocation.id) {
-                self.settle(
-                    invocation.id,
-                    Err("the work was replaced by a newer request".into()),
-                );
-            }
-        }
-    }
-
-    /// A finished job: its result is applied only if the core is still waiting on it, under the
-    /// invocation it started from. A job that ended without a result (a panic, a refusal) runs
-    /// the `failed` command it was spawned with, and an invocation waiting on it is told.
-    fn finished(&self, finished: Finished<A::Command>) {
-        match finished {
-            Finished::Done { id, command } => {
-                let waited = self.jobs.borrow_mut().remove(&id);
-                let Some(waiting) = waited else {
-                    tracing::debug!(app = self.id, job = id.0, "a late result, dropped");
-                    return;
-                };
-                self.forget_key(id, waiting.key);
-                if let Some(invocation) = waiting.invocation {
-                    self.job_landed(invocation.id);
-                }
-                if self.applying.get() {
-                    self.queue(waiting.invocation, command);
-                } else {
-                    let result = self.apply(waiting.invocation, command);
-                    self.drain_pending();
-                    if let Some(invocation) = waiting.invocation {
-                        match result {
-                            Ok(()) => self.settle_if_idle(invocation.id),
-                            Err(refused) => self.settle(invocation.id, Err(refused.sentence)),
-                        }
-                    }
-                }
-            }
-            Finished::Panicked { id, what } => {
-                tracing::error!(app = self.id, job = id.0, what, "a job panicked");
-                problems::record_failure(self.id, "job", &what);
-                self.ended_without_result(id, format!("the work failed: {what}"));
-            }
-            Finished::Refused { id, why } => {
-                tracing::warn!(app = self.id, job = id.0, why, "a job was not started");
-                problems::record_failure(self.id, "job_refused", &why);
-                self.ended_without_result(id, format!("the work could not start: {why}"));
-            }
-        }
-    }
-
-    fn ended_without_result(&self, id: JobId, outcome: String) {
-        let waited = self.jobs.borrow_mut().remove(&id);
-        let Some(waiting) = waited else {
-            return;
-        };
-        self.forget_key(id, waiting.key);
-        if let Some(invocation) = waiting.invocation {
-            if self.job_landed(invocation.id) {
-                self.settle(invocation.id, Err(outcome));
-            }
-        }
-        if let Some(failed) = waiting.failed {
-            if self.applying.get() {
-                self.queue(waiting.invocation, failed);
-            } else {
-                let _ = self.apply(waiting.invocation, failed);
-                self.drain_pending();
             }
         }
     }
@@ -607,6 +478,12 @@ impl<A: App> Core<A> {
     /// An event: the app's command for it, or the default. The runner raises the first
     /// `Event::Launch` through this; a test may raise any.
     pub fn event(&self, event: Event<A::Settings>) {
+        // An app with a rail: the rail hears of the Mind's reach whatever the app makes of it.
+        if let Event::ReachChanged(reach) = &event {
+            if let Some(command) = A::rail(RailCommand::Reach(*reach)) {
+                self.run(command);
+            }
+        }
         let command = A::event(event.clone(), &self.model.borrow());
         match (command, event) {
             (Some(command), _) => self.run(command),
@@ -709,102 +586,5 @@ impl<A: App> Core<A> {
     fn refuse(&self, refused: Refused) {
         tracing::warn!(app = self.id, kind = refused.kind, "{}", refused.sentence);
         *self.last_refusal.borrow_mut() = Some(refused);
-    }
-}
-
-/// The handle a view binds callbacks with. It holds the core weakly: the callbacks live in the
-/// window, the window lives in the core, and a strong handle there would keep the core alive
-/// for ever. Cloning shares it; it never leaves the UI thread.
-pub struct Cx<A: App>(pub(crate) Weak<Core<A>>);
-
-impl<A: App> Clone for Cx<A> {
-    fn clone(&self) -> Self {
-        Cx(self.0.clone())
-    }
-}
-
-/// The window, borrowed through a [`Cx`] for as long as the guard lives.
-pub struct UiRef<A: App>(Rc<Core<A>>);
-
-impl<A: App> Deref for UiRef<A> {
-    type Target = A::Ui;
-
-    fn deref(&self) -> &A::Ui {
-        &self.0.ui
-    }
-}
-
-impl<A: App> Cx<A> {
-    pub fn new(core: Rc<Core<A>>) -> Cx<A> {
-        Cx(Rc::downgrade(&core))
-    }
-
-    pub fn id(&self) -> &'static str {
-        A::ID
-    }
-
-    /// The core, while it lives. At wire time it always does; a callback fired as the window is
-    /// torn down may find it gone, and then does nothing.
-    fn core(&self) -> Option<Rc<Core<A>>> {
-        self.0.upgrade()
-    }
-
-    fn core_or_panic(&self) -> Rc<Core<A>> {
-        self.core().expect("the core outlives the window bound to it")
-    }
-
-    pub fn run(&self, command: impl Into<A::Command>) {
-        match self.core() {
-            Some(core) => core.run(command.into()),
-            None => tracing::debug!(app = A::ID, "a command after the core was dropped; ignored"),
-        }
-    }
-
-    pub fn read<R>(&self, f: impl FnOnce(&A::Model) -> R) -> R {
-        self.core_or_panic().read(f)
-    }
-
-    /// The window, for a view that binds a list model at wire time. Not for `update`.
-    pub fn ui(&self) -> UiRef<A> {
-        UiRef(self.core_or_panic())
-    }
-
-    /// The `Send` endpoint, for tests and for anything off the UI thread.
-    pub fn post(&self) -> Post<Inbound<A>> {
-        self.core_or_panic().post()
-    }
-
-    /// A Slint callback of no arguments that runs the command `f` makes.
-    pub fn cmd(&self, f: impl Fn() -> A::Command + 'static) -> impl Fn() + 'static {
-        let cx = self.clone();
-        move || cx.run(f())
-    }
-
-    /// A Slint callback of one argument that runs the command `f` makes.
-    pub fn cmd1<T>(&self, f: impl Fn(T) -> A::Command + 'static) -> impl Fn(T) + 'static {
-        let cx = self.clone();
-        move |t| cx.run(f(t))
-    }
-
-    pub fn cmd2<T, U>(&self, f: impl Fn(T, U) -> A::Command + 'static) -> impl Fn(T, U) + 'static {
-        let cx = self.clone();
-        move |t, u| cx.run(f(t, u))
-    }
-
-    /// A Slint callback of one argument whose converter may refuse (a list id that does not
-    /// parse): the refusal is the person's and the Mind's, as a command's would be.
-    pub fn try_cmd1<T>(
-        &self,
-        f: impl Fn(T) -> Result<A::Command, Refused> + 'static,
-    ) -> impl Fn(T) + 'static {
-        let cx = self.clone();
-        move |t| match f(t) {
-            Ok(command) => cx.run(command),
-            Err(refused) => {
-                if let Some(core) = cx.core() {
-                    core.refuse(refused);
-                }
-            }
-        }
     }
 }
