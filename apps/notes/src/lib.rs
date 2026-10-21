@@ -1,0 +1,93 @@
+//! Yantrik Notes, on YantrikApp (design/notes-gate-2026-10-21.md, step 8c: behaviour unchanged).
+//!
+//! A Markdown vault at `Paths::data_dir` for the id `notes`, which is where Notes has always kept
+//! it (`~/.local/share/yantrik/notes`). The store keeps its bounded reads, its journal and its
+//! Trash, and writes through the framework's disk seam; the open note is a document, saved by
+//! jobs one at a time with the edits made meanwhile as one follow-up, its file watched while it
+//! is open; the autosave is a framework timer; the twenty-one actions are intents, worded and
+//! graded as they were; and `main.rs` is three lines.
+
+use std::path::PathBuf;
+
+use yantrik_app::app::{App, Boot, Changed, Event, Startup, WindowId};
+use yantrik_app::control::View;
+use yantrik_app::cx::Cx;
+use yantrik_app::effects::Effects;
+use yantrik_app::intents::Intents;
+use yantrik_app::paths::Paths;
+use yantrik_app::Refused;
+
+mod command;
+mod describe;
+mod intents;
+mod model;
+mod note;
+mod store;
+mod undo;
+mod update;
+mod view;
+#[cfg(test)]
+mod tests;
+
+pub use command::Command;
+pub use model::Model;
+
+slint::include_modules!();
+yantrik_app::window!(NotesApp);
+
+pub struct Notes;
+
+/// Where the vault is: `$YANTRIK_NOTES_DIR` when it is set (a test machine's probe, a second
+/// library), the app's data folder otherwise. Never the variable under `cargo test`, so no test
+/// can touch the library of the person running it.
+fn vault_dir(paths: &Paths) -> PathBuf {
+    match std::env::var_os("YANTRIK_NOTES_DIR") {
+        Some(dir) if !cfg!(test) => PathBuf::from(dir),
+        _ => paths.data_dir().to_path_buf(),
+    }
+}
+
+impl App for Notes {
+    type Ui = NotesApp;
+    type Model = Model;
+    type Command = Command;
+    type Settings = ();
+    const ID: &'static str = "notes";
+
+    fn model(boot: &Boot) -> Result<Model, Startup> {
+        Ok(Model::new(store::Vault::real(vault_dir(&boot.paths))))
+    }
+
+    fn wire(cx: &Cx<Self>) {
+        let ui = cx.ui();
+        view::wire(cx, &ui);
+    }
+
+    fn start(_: &Model, fx: &mut Effects<Self>) {
+        fx.then(Command::Load);
+    }
+
+    fn update(m: &mut Model, command: Command, fx: &mut Effects<Self>) -> Result<(), Refused> {
+        update::update(m, command, fx)
+    }
+
+    fn render(ui: &NotesApp, _: WindowId, m: &Model, changed: &Changed) {
+        view::render::render(ui, m, changed);
+    }
+
+    fn describe(m: &Model) -> View {
+        describe::view(m)
+    }
+
+    fn intents(table: &mut Intents<Self>) {
+        intents::table(table);
+    }
+
+    fn event(event: Event<()>, _: &Model) -> Option<Command> {
+        match event {
+            Event::CloseRequested(window) => Some(Command::CloseRequested(window)),
+            Event::FileChanged { key, seen } => Some(Command::FileChanged { key, seen }),
+            _ => None,
+        }
+    }
+}

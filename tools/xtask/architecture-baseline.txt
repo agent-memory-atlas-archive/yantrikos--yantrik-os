@@ -32,7 +32,6 @@ size apps/download-manager/src/engine.rs 2039
 size apps/email/src/main.rs 2689
 size apps/music-player/src/main.rs 1233
 size apps/network-manager/src/main.rs 1261
-size apps/notes/src/main.rs 1904
 size apps/presentation/src/main.rs 1610
 size apps/snippet-manager/src/main.rs 1336
 size apps/studio/src/engine.rs 1712

@@ -47,7 +47,8 @@ export component NotesApp inherits AppWindow {
  callback filter();
  callback edited(string);
  callback metadata();
- callback refresh();
+ // The window changed its own focus mode or dialog (Escape, Ctrl+F, Cancel): the app reads them.
+ callback view-changed();
  public function caret(offset:int){editor.set-selection-offsets(offset,offset);}
  public function focus-shortcuts(){keys.focus();}
  public function focus-content(){if(root.preview||!root.opened){keys.focus();}else{editor.focus();}}
@@ -58,12 +59,12 @@ export component NotesApp inherits AppWindow {
    if(event.text=="z"||event.text=="Z"||event.text=="y"){root.action(event.modifiers.shift||event.text=="y"?"redo":"undo");return accept;}
    if(event.text=="s"){root.action("save");return accept;}
    if(event.text=="n"){root.action("new");return accept;}
-   if(event.text=="f"){root.focus-mode=false;search.focus();return accept;}
+   if(event.text=="f"){root.focus-mode=false;root.view-changed();search.focus();return accept;}
    if(event.text=="p"){root.action("preview");return accept;}
    if(event.text=="e"){root.action("focus");return accept;}
   }
   if(event.text==Key.F5){root.action("reload");return accept;}
-  if(event.text==Key.Escape){root.dialog=0;root.focus-mode=false;root.focus-content();return accept;}
+  if(event.text==Key.Escape){root.dialog=0;root.focus-mode=false;root.view-changed();root.focus-content();return accept;}
   return reject;
  }
  changed dialog=>{if(root.dialog!=0){path-field.focus();}}
@@ -194,7 +195,7 @@ export component NotesApp inherits AppWindow {
     Text{text:root.dialog==1?"Choose a local Markdown file to copy into your library.":"Save a new file. Existing files are never overwritten.";color:Theme.text-secondary;wrap:word-wrap;font-size:13px;}
     path-field:=YInput{value<=>root.path;placeholder:"/home/yantrik/Documents/note.md";accepted(_)=>{root.action("confirm");}}
     if root.notice!="" : Text{text:root.notice;color:Theme.amber;font-size:13px;wrap:word-wrap;}
-    HorizontalLayout{alignment:end;spacing:8px;YButton{label:"Cancel";variant:2;clicked=>{root.dialog=0;}}YButton{label:root.busy?"Working…":"Continue";variant:0;clicked=>{root.action("confirm");}}}
+    HorizontalLayout{alignment:end;spacing:8px;YButton{label:"Cancel";variant:2;clicked=>{root.dialog=0;root.view-changed();}}YButton{label:root.busy?"Working…":"Continue";variant:0;clicked=>{root.action("confirm");}}}
    }
   }
  }
