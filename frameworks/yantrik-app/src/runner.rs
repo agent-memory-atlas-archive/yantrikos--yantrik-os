@@ -132,11 +132,13 @@ pub fn run<A: App>() -> ExitCode {
     install(&core);
     // A file of an older schema is rewritten at this one, once.
     core.flush_settings();
-    // The settings file (an outside edit) and the shell's theme, watched until the end.
+    // The settings file (an outside edit), the shell's theme and the documents' files, watched
+    // until the end.
     let _watch = Watch::start(
         A::ID,
         boot.paths.config_file().to_path_buf(),
         theme_now,
+        core.watched(),
         core.notice(),
     );
 

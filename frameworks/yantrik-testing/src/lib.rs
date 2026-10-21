@@ -512,6 +512,20 @@ impl<A: App> TestApp<A> {
         });
     }
 
+    /// The documents' files the app watches (`fx.watch`), by key.
+    pub fn watched(&self) -> Vec<(String, std::path::PathBuf)> {
+        self.with(|u| u.core.watched().entries())
+    }
+
+    /// One tick of the watch over the documents' files: each real file is looked at, and what
+    /// changed reaches the app as `Event::FileChanged`, as the housekeeping thread would post it.
+    pub fn look_at_files(&self) {
+        let changed = self.with(|u| u.core.watched()).poll();
+        for (key, seen) in changed {
+            self.seen(Seen::File { key, seen });
+        }
+    }
+
     /// The settings as committed to disk, by the store's account.
     pub fn committed_settings(&self) -> A::Settings {
         self.with(|u| u.core.committed_settings())

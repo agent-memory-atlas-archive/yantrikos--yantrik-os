@@ -84,6 +84,13 @@ pub enum Event<S> {
     /// as the housekeeping thread heard it. An app with an AI control shows `reach.hint()` in its
     /// place, or offers it again. `None` does nothing.
     ReachChanged(yantrik_mind::Reach),
+    /// A watched document's file changed from what was last seen: another program wrote it,
+    /// or it was moved or deleted (`fx.watch`). Our own saves are seen too; the document's
+    /// [`observe`](crate::documents::Document::observe) tells them apart. `None` does nothing.
+    FileChanged {
+        key: String,
+        seen: crate::documents::Observed,
+    },
 }
 
 /// What the runner knows before any window exists.
