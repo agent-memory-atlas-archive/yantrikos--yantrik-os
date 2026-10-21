@@ -168,6 +168,10 @@ fn an_agent_in_ask_mode_is_refused_what_changes_the_machine() {
     ] {
         assert!(app.act_as(agent(name, args)).is_err(), "{name} needs a person's word in ask mode");
     }
+    // Nothing was started, and running what is queued reaches nothing: without the run, a change
+    // that had been accepted would still be sitting unrun, and the asserts below could not fail.
+    assert_eq!(app.jobs_waiting(), 0, "no change was started");
+    app.run_jobs();
     assert!(net.asked_for("network.wifi_forget").is_empty());
     assert!(net.asked_for("network.wifi_connect").is_empty());
     assert!(net.asked_for("network.wifi_disconnect").is_empty());

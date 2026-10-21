@@ -5,7 +5,8 @@
 //! of the same name, so a person and a mind cannot be told different things about it. Its job
 //! asks the service, then re-reads the machine, and the command that carries both back puts the
 //! reading on screen first and the change's own verdict over it: the verdict is the more specific
-//! of the two. The service verifies each change against a re-read before answering.
+//! of the two. The service verifies each change against a re-read before answering. Changes go
+//! to the service one at a time, in the order they were asked for (`lane.rs`).
 
 use std::sync::atomic::Ordering;
 
@@ -19,6 +20,7 @@ use yantrik_ipc_transport::privacy;
 
 use crate::backend::{self, call, to_params, Joiner, NetworkApi};
 use crate::connect;
+use crate::lane::{Admit, Next, Work, MAX_WAITING};
 use crate::model::*;
 use crate::opening;
 use crate::reading::read;
@@ -32,6 +34,9 @@ const NOTHING: &str = "nothing";
 
 /// The rail suggestion and the header button ask the same question.
 pub const EXPLAIN: &str = "explain";
+
+/// Said when something needs a reading and none has landed yet.
+const NOT_READ: &str = "the network has not been read yet; try again in a moment";
 
 pub fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refused> {
     match command {
@@ -57,23 +62,26 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refuse
             fx.changed(NOTHING);
         }
         Command::SetRadio(enabled) => {
-            start_change(m, fx, Change::Radio, move |api| {
+            fx.changed(NOTHING);
+            let work: Work = Box::new(move |api| {
                 Outcome::Radio(call(api, method::WIFI_RADIO, to_params(WifiRadioParams { enabled })))
             });
-            fx.changed(NOTHING);
+            change_or_refuse(m, fx, Change::Radio, work);
         }
         Command::Disconnect => {
-            start_change(m, fx, Change::Disconnect, |api| {
+            fx.changed(NOTHING);
+            let work: Work = Box::new(|api| {
                 Outcome::Disconnect(call(api, method::WIFI_DISCONNECT, serde_json::json!({})))
             });
-            fx.changed(NOTHING);
+            change_or_refuse(m, fx, Change::Disconnect, work);
         }
         Command::Forget(ssid) => {
+            fx.changed(NOTHING);
             // The service refuses the one that is currently in use.
-            start_change(m, fx, Change::Forget, move |api| {
+            let work: Work = Box::new(move |api| {
                 Outcome::Forget(call(api, method::WIFI_FORGET, to_params(WifiForgetParams { ssid })))
             });
-            fx.changed(NOTHING);
+            change_or_refuse(m, fx, Change::Forget, work);
         }
         Command::Scan => start_scan(m, fx),
         Command::ScanAsked => {
@@ -86,7 +94,16 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refuse
             start_scan(m, fx);
             fx.settle(Ok(()));
         }
-        Command::Connect(request) => start_connect(m, fx, request),
+        Command::Connect(request) => {
+            if let Err(refused) = start_connect(m, fx, request) {
+                // Said in the prompt, where the person is looking, and the box is cleared: the
+                // secret it held went nowhere, and a password left in a field gets tried again.
+                m.prompt_status = refused.sentence.clone();
+                fx.changed(PART_PROMPT_STATUS);
+                fx.changed(PART_PROMPT_CLEAR);
+                refuse_on_screen(m, fx, refused.kind, refused.sentence);
+            }
+        }
         Command::Join(ssid) => {
             if let Some((kind, reason)) = no_radio(m) {
                 refuse_on_screen(m, fx, kind, reason);
@@ -95,9 +112,14 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refuse
             match connect::plan(&ssid, &m.reading.known) {
                 connect::Plan::Join => {
                     // Saved on this machine: NetworkManager holds the credential, so no secret
-                    // is needed and none is asked for.
+                    // is needed and none is asked for. The intent is answered once the join is
+                    // accepted (it defers), so the join may wait behind a change in flight; how
+                    // it went arrives in `describe`, as it always has.
+                    if let Err(refused) = start_connect(m, fx, connect::join_request(&ssid, "")) {
+                        refuse_on_screen(m, fx, refused.kind, refused.sentence);
+                        return Ok(());
+                    }
                     m.answers.connect = connect::joining_answer(&ssid);
-                    start_connect(m, fx, connect::join_request(&ssid, ""));
                 }
                 connect::Plan::AskPerson => {
                     // Nothing is saved here and a password is not an argument this intent can
@@ -115,7 +137,11 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refuse
             }
             fx.settle(Ok(()));
         }
-        Command::Changed(outcome, taken) => changed(m, *outcome, *taken, fx),
+        Command::Changed(outcome, taken) => {
+            let change = outcome.change();
+            changed(m, *outcome, *taken, fx);
+            next_change(m, fx, change);
+        }
         Command::ChangeFailed(change) => {
             let sentence = match change {
                 Change::Radio => "The radio change did not finish; try again.",
@@ -138,6 +164,9 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refuse
             }
             m.notice = sentence.into();
             fx.changed(PART_NOTICE);
+            // A change whose job ended without a result is still finished with the service, so
+            // the lane moves on; otherwise one panic would hold every later change for good.
+            next_change(m, fx, change);
         }
         Command::OpenSection(id) => {
             // A rail row goes to the section it is about: the smallest real thing it can do, and
@@ -156,6 +185,15 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refuse
             fx.changed(PART_SECTION);
         }
         Command::Explain => {
+            // Nothing read yet: the question would hand the companion an empty reading as if it
+            // were this machine's. The rail's suggestion waits for the first reading too
+            // (`rail.rs`), so the button says why instead of asking.
+            if !m.read_once {
+                m.ai.working = false;
+                m.ai.response = NOT_READ.into();
+                fx.changed(PART_AI);
+                return Ok(());
+            }
             // The header's button and the rail's suggestion are one question. While the rail can
             // ask, it asks (its card shows the answer, the panel here too); when it cannot, the
             // question still goes to the companion, and the panel says what came back.
@@ -251,13 +289,80 @@ fn take(api: &dyn NetworkApi, sequence: &std::sync::atomic::AtomicU64, route: bo
     }
 }
 
-/// One change to the machine, off the UI thread: the call, then the reading after it.
-fn start_change(
-    m: &mut Model,
-    fx: &mut Fx,
-    change: Change,
-    work: impl FnOnce(&dyn NetworkApi) -> Outcome + Send + 'static,
-) {
+/// Whether the command's caller is waiting on this change's own answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Caller {
+    /// An intent answered when its change lands: `wifi_radio`, `wifi_disconnect`,
+    /// `wifi_forget`.
+    WaitsForIt,
+    /// A button, or an intent answered as soon as it is accepted (`wifi_connect` defers).
+    NotWaiting,
+}
+
+/// A radio, disconnect or forget through the lane, or, when the lane cannot take it, why not:
+/// said on screen and to the intent that asked, if one did. Their intents wait on the change's
+/// own answer; their buttons do not.
+fn change_or_refuse(m: &mut Model, fx: &mut Fx, change: Change, work: Work) {
+    let caller = if fx.invocation().is_some() {
+        Caller::WaitsForIt
+    } else {
+        Caller::NotWaiting
+    };
+    if let Err(refused) = submit(m, fx, change, caller, work) {
+        refuse_on_screen(m, fx, refused.kind, refused.sentence);
+    }
+}
+
+/// A change to the machine, through the lane (`lane.rs`): started now if nothing is in flight,
+/// otherwise waiting its turn. A caller waiting on this change's own answer is refused instead
+/// of waiting: the framework would answer it the moment its command returned, with nothing of
+/// it running, from a machine the change had not touched yet.
+fn submit(m: &mut Model, fx: &mut Fx, change: Change, caller: Caller, work: Work) -> Result<(), Refused> {
+    if caller == Caller::WaitsForIt {
+        if let Some(busy) = m.lane.in_flight() {
+            return Err(Refused::new(
+                "busy",
+                format!(
+                    "{} is still being made, so nothing was changed; ask again once it has finished.",
+                    busy.named()
+                ),
+            ));
+        }
+    }
+    match m.lane.admit(Next { change, work }) {
+        Admit::Now(next) => {
+            start_change(m, fx, next);
+            Ok(())
+        }
+        Admit::Waits => Ok(()),
+        Admit::Full => Err(Refused::new(
+            "busy",
+            format!(
+                "{MAX_WAITING} changes are already waiting, so this one was not made; \
+                 try again once they have finished."
+            ),
+        )),
+    }
+}
+
+/// A change has landed: start the one waiting behind it, if any.
+///
+/// Called after the landing's own verdict is settled, so the job started here is not counted
+/// against the intent that just got its answer. The waiting change's caller is a button or an
+/// intent already answered (see `submit`), so no answer is owed under it.
+fn next_change(m: &mut Model, fx: &mut Fx, landed: Change) {
+    if !landed.uses_lane() {
+        return;
+    }
+    if let Some(next) = m.lane.landed(landed) {
+        start_change(m, fx, next);
+    }
+}
+
+/// One change off the UI thread: the call, then the reading after it. A job that ends without
+/// a result applies `ChangeFailed`, which moves the lane on as a result would.
+fn start_change(m: &mut Model, fx: &mut Fx, next: Next) {
+    let Next { change, work } = next;
     let api = m.net.clone();
     let sequence = m.sequence.clone();
     let route = !m.opened;
@@ -268,27 +373,33 @@ fn start_change(
     });
 }
 
-/// Ask the adapter to sweep the band, then read the list back.
+/// Ask the adapter to sweep the band, then read the list back. Not through the lane: a scan
+/// changes nothing on the machine.
 fn start_scan(m: &mut Model, fx: &mut Fx) {
     m.scanning = true;
     fx.changed(PART_SCAN);
-    start_change(m, fx, Change::Scan, |api| Outcome::Scan(backend::scan_now(api)));
+    let work: Work = Box::new(|api| Outcome::Scan(backend::scan_now(api)));
+    start_change(m, fx, Next { change: Change::Scan, work });
 }
 
-/// Join a network. The request is moved into the worker and its password is never copied
+/// Join a network, through the lane. The request is moved into the worker (while it waits, into
+/// the lane's closure, which nothing formats or describes) and its password is never copied
 /// anywhere else — not into the notice, not into the prompt's status, not into a log line —
 /// and the prompt's box is cleared when the attempt lands, so it does not sit in the window
 /// either.
-fn start_connect(m: &mut Model, fx: &mut Fx, request: WifiConnectParams) {
-    m.prompt_status = format!("Connecting to {}\u{2026}", request.ssid);
-    fx.changed(PART_PROMPT_STATUS);
-    let named = request.ssid.clone();
-    start_change(m, fx, Change::Connect, move |api| {
+fn start_connect(m: &mut Model, fx: &mut Fx, request: WifiConnectParams) -> Result<(), Refused> {
+    let ssid = request.ssid.clone();
+    let named = ssid.clone();
+    let work: Work = Box::new(move |api| {
         // The same `submit` the tests drive with a recorder: one path from a typed password to
         // the backend, whether a person typed it or the intent raised the prompt for one.
         let result = connect::submit(&Joiner(api), &request.ssid, request.password.as_deref().unwrap_or(""));
         Outcome::Connect { ssid: named, result }
     });
+    submit(m, fx, Change::Connect, Caller::NotWaiting, work)?;
+    m.prompt_status = format!("Connecting to {ssid}\u{2026}");
+    fx.changed(PART_PROMPT_STATUS);
+    Ok(())
 }
 
 /// A change landed: the reading after it first, then its own verdict over the notice, then its
@@ -378,7 +489,7 @@ fn apply_reading(m: &mut Model, taken: Taken, fx: &mut Fx) -> bool {
 /// or nothing read yet to say whether there is one.
 fn no_radio(m: &Model) -> Option<(&'static str, String)> {
     if !m.read_once {
-        return Some(("not_read", "the network has not been read yet; try again in a moment".into()));
+        return Some(("not_read", NOT_READ.into()));
     }
     (!m.reading.wifi.adapter_present).then(|| ("no_adapter", m.reading.no_adapter()))
 }

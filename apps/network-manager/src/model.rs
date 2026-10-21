@@ -9,6 +9,7 @@ use yantrik_app::rail::{Rail, RailCommand};
 use yantrik_ipc_contracts::network::{ScannedNetwork, WifiConnectParams, WifiForgetResult, WifiState};
 
 use crate::backend::NetworkApi;
+use crate::lane::Lane;
 use crate::reading::Reading;
 
 /// The parts of the model `render` redraws by name.
@@ -98,6 +99,8 @@ pub struct Model {
     pub rail: Rail,
     pub mind: Arc<dyn Mind>,
     pub net: Arc<dyn NetworkApi>,
+    /// The change to the machine in flight, and the ones waiting behind it (`lane.rs`).
+    pub lane: Lane,
 }
 
 /// A reading, numbered in the order it was taken.
@@ -120,6 +123,19 @@ pub enum Outcome {
     },
 }
 
+impl Outcome {
+    /// The change this is the outcome of.
+    pub fn change(&self) -> Change {
+        match self {
+            Outcome::Radio(_) => Change::Radio,
+            Outcome::Disconnect(_) => Change::Disconnect,
+            Outcome::Forget(_) => Change::Forget,
+            Outcome::Scan(_) => Change::Scan,
+            Outcome::Connect { .. } => Change::Connect,
+        }
+    }
+}
+
 /// Which change a job that ended without a result was making.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Change {
@@ -128,6 +144,25 @@ pub enum Change {
     Forget,
     Scan,
     Connect,
+}
+
+impl Change {
+    /// Whether it changes the machine, and so goes through the lane one at a time. A scan only
+    /// looks (`lane.rs`).
+    pub fn uses_lane(self) -> bool {
+        self != Change::Scan
+    }
+
+    /// What it is called in a sentence that starts with it.
+    pub fn named(self) -> &'static str {
+        match self {
+            Change::Radio => "The radio change",
+            Change::Disconnect => "The disconnect",
+            Change::Forget => "Forgetting a network",
+            Change::Scan => "The scan",
+            Change::Connect => "The connect",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

@@ -22,7 +22,8 @@
 //! `services/network-service` build and parse. Every change is one command, raised by the button
 //! and by the intent of the same name (`update.rs`), so a person and a mind cannot be told
 //! different things about it. Every read and every change runs in a job, never on the UI thread
-//! (`backend.rs`, `reading.rs`), and a reading taken before the one on screen is dropped. Every
+//! (`backend.rs`, `reading.rs`), changes one at a time (`lane.rs`), and a reading taken before
+//! the one on screen is dropped. Every
 //! failure lands in the `notice` strip and in `describe.notice`. The agent rail is the
 //! framework's; `main.rs` is three lines.
 
@@ -45,6 +46,8 @@ mod backend;
 mod connect;
 mod describe;
 mod intents;
+/// One change to the machine at a time: the one in flight, and the ones waiting behind it.
+mod lane;
 mod model;
 /// Which section the window opens on: the interface the default route leaves by.
 mod opening;
@@ -54,6 +57,8 @@ mod update;
 mod view;
 #[cfg(test)]
 mod intent_tests;
+#[cfg(test)]
+mod lane_tests;
 #[cfg(test)]
 mod secret_tests;
 #[cfg(test)]
@@ -101,6 +106,7 @@ impl App for NetworkManager {
             rail: Rail::new(boot.mind.clone()),
             mind: boot.mind.clone(),
             net: backend::for_app(&boot.paths),
+            lane: Default::default(),
         })
     }
 

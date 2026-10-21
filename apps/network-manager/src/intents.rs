@@ -44,6 +44,10 @@
 //! (`Settle::Explicit`): `refresh` and the three changes when the service has answered and the
 //! machine has been read again, as before; `wifi_scan` and `wifi_connect`, which declare
 //! `defers`, at once, as before, with the result arriving in `describe` and the notice.
+//!
+//! Changes reach the service one at a time (`lane.rs`). While one is in flight, the three
+//! changes an intent waits on are refused with `busy`, and nothing is changed. `wifi_connect`,
+//! answered once accepted, waits its turn instead.
 
 use std::time::Duration;
 
@@ -56,10 +60,22 @@ use crate::connect;
 use crate::model::{Command, Model};
 use crate::NetworkManager;
 
-/// A refresh is six calls, each bounded by the client's own timeout.
-const REFRESH_WITHIN: Duration = Duration::from_secs(15);
-/// A change is one call and a refresh.
-const CHANGE_WITHIN: Duration = Duration::from_secs(20);
+/// How long `refresh` and the three changes may take to answer: 14 s.
+///
+/// The ceiling is the Mind's. Its `app_action` client gives up after `ACT_TIMEOUT`, 15 s
+/// (`crates/yantrik-companion-tools/src/app_ui.rs`). An answer later than that reaches nobody,
+/// and the Mind sees a transport timeout for a change that may well have gone through, and may
+/// try a `dangerous` one again. Settling within 14 s means the app always answers first, with
+/// the outcome or with its own "did not settle" refusal, and leaves a second for the hop back.
+///
+/// The floor is the work. Every call to network-service is bounded by the client's 2 s default
+/// timeout. A refresh is six calls, so 12 s at worst. A change is one call and a refresh, so
+/// 14 s at worst. Only a service failing every call at the last moment reaches that, and it
+/// still gets an answer before the Mind stops listening.
+const CHANGE_WITHIN: Duration = Duration::from_secs(14);
+/// A refresh needs 12 s at worst. It is held to the same 14 s, under the Mind's 15 s, for the
+/// same reason.
+const REFRESH_WITHIN: Duration = CHANGE_WITHIN;
 /// The deferred two answer once they have started (or been refused).
 const START_WITHIN: Duration = Duration::from_secs(5);
 

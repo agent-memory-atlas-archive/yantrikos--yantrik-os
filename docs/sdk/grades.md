@@ -81,10 +81,11 @@ deleting a container and its writable layer; leaving the Wi-Fi on a machine reac
             .risk("dangerous")
 ```
 
-<!-- from: apps/network-manager/src/main.rs -->
+<!-- from: apps/network-manager/src/intents.rs -->
 ```rust
-            // Dangerous. See the note above this function: on a machine reached over the network
-            // this takes away the channel the undo would travel on.
+        // Dangerous: on a machine reached over the network this takes away the channel the undo
+        // would travel on.
+        Intent::new(
             Action::new(
                 "wifi_disconnect",
                 "Leave the Wi-Fi network this machine is on. On a machine reached over Wi-Fi \

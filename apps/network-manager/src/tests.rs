@@ -38,6 +38,19 @@ pub(crate) fn read(net: &FakeNetwork) -> TestApp<NetworkManager> {
     app
 }
 
+/// Runs jobs until none is left. A change that waited its turn starts only once the one before
+/// it has landed, so one round does not run them all.
+pub(crate) fn run_until_quiet(app: &TestApp<NetworkManager>) {
+    const ROUNDS: usize = 16;
+    for _ in 0..ROUNDS {
+        if app.jobs_waiting() == 0 {
+            return;
+        }
+        app.run_jobs();
+    }
+    panic!("jobs still waiting after {ROUNDS} rounds");
+}
+
 pub(crate) fn state(app: &TestApp<NetworkManager>) -> Value {
     app.describe()["state"].clone()
 }
@@ -259,7 +272,8 @@ fn every_button_sends_what_it_says_and_reads_the_machine_after() {
     net.set("network.wifi_radio", Ok(json!({ "adapter_present": true, "radio": "on" })));
     net.set("network.wifi_disconnect", Ok(json!({ "adapter_present": true, "radio": "on" })));
     let before = net.asked_for("network.dns").len();
-    app.run_jobs();
+    // One at a time (`lane.rs`): each starts once the one before it has landed.
+    run_until_quiet(&app);
     assert_eq!(net.asked_for("network.wifi_radio"), vec![json!({ "enabled": true })], "the state asked for, not a flip");
     assert_eq!(net.asked_for("network.wifi_disconnect"), vec![json!({})]);
     assert_eq!(net.asked_for("network.wifi_forget"), vec![json!({ "ssid": "HomeNet" })]);
@@ -398,6 +412,20 @@ fn with_no_companion_reachable_the_header_still_asks_and_says_what_came_back() {
     );
     assert!(!app.ui(|ui| ui.get_ai_is_working()));
     assert!(app.model(|m| m.rail.suggestions().is_empty()), "nothing that asks is offered");
+}
+
+#[test]
+fn the_header_explain_before_the_first_reading_says_so_and_asks_nothing() {
+    let (app, mind) = start_with(&FakeNetwork::wired(), FakeMind::new().answers([Ok("Too soon to say.".into())]));
+    app.ui(|ui| ui.invoke_ai_explain_pressed());
+    assert_eq!(
+        app.ui(|ui| ui.get_ai_response().to_string()),
+        "the network has not been read yet; try again in a moment"
+    );
+    assert!(!app.ui(|ui| ui.get_ai_is_working()));
+    assert_eq!(app.jobs_waiting(), 1, "only the first refresh: no question was started");
+    app.run_jobs();
+    assert!(mind.prompts().is_empty(), "the companion was never handed an empty reading");
 }
 
 /// Nothing drawn does nothing: every callback the window declares is bound, by the app or by
