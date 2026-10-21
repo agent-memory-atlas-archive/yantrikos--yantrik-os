@@ -130,6 +130,53 @@ fn ctrl_q_cancelled_keeps_notes_running_with_its_text() {
     assert_eq!(app.exit_reason(), Some(ExitReason::App));
 }
 
+/// Two notes typed in two windows, their drafts not written yet (the debounce has not run out).
+fn typed_in_two_windows() -> (TestApp<Notes>, std::path::PathBuf, std::path::PathBuf) {
+    let (app, first, left, second, right) = two_notes_two_windows();
+    type_in(&app, first, LEFT);
+    type_in(&app, second, RIGHT);
+    assert!(!draft_file(&app, &left).exists() && !draft_file(&app, &right).exists(), "nothing written per key");
+    (app, left, right)
+}
+
+/// The compositor goes, with no signal and no one asking: the framework owes Notes its logout,
+/// and every unsaved text is on disk as a draft once the runner's shutdown has finished.
+#[test]
+fn the_display_going_keeps_every_unsaved_text_as_a_draft() {
+    let (app, left, right) = typed_in_two_windows();
+    app.display_gone();
+    assert_eq!(app.ui(|ui| ui.get_dialog()), 0, "no one was asked");
+    app.shutdown();
+    assert!(draft_file(&app, &left).exists() && draft_file(&app, &right).exists(), "both drafts are on disk");
+    assert_eq!(file(&left), "# Left\n\n", "and nothing was saved unasked");
+    let again = killed_and_started_again(app);
+    assert_eq!(state(&again)["recovery"].as_array().unwrap().len(), 2, "both are offered back");
+}
+
+/// A signal still queued when the display goes: one logout, not two, and the drafts are kept.
+#[test]
+fn a_signal_still_queued_when_the_display_goes_is_one_logout() {
+    let (app, left, right) = typed_in_two_windows();
+    app.post().post(Inbound::Signal(Signal::Terminate)).expect("the app is running");
+    app.display_gone();
+    app.shutdown();
+    assert_eq!(app.ui(|ui| ui.get_dialog()), 0);
+    assert!(draft_file(&app, &left).exists() && draft_file(&app, &right).exists());
+}
+
+/// After a signal, Ctrl+Q asks nothing: no one is there to answer.
+#[test]
+fn ctrl_q_after_a_signal_asks_nothing() {
+    let (app, path) = with_note("Signalled");
+    app.run(Command::Edit("# Signalled\n\nunsaved".into()));
+    app.post().post(Inbound::Signal(Signal::Terminate)).expect("the app is running");
+    app.tick();
+    ctrl_q(&app);
+    assert_eq!(app.ui(|ui| ui.get_dialog()), 0, "no prompt");
+    app.run_writes();
+    assert!(draft_file(&app, &path).exists());
+}
+
 /// SIGTERM (a shutdown, a logout) with two notes unsaved in two windows and a save in flight: no
 /// one is asked, both texts are kept as drafts, and Notes ends in the one command, not at the
 /// framework's deadline. The next start offers both back.
