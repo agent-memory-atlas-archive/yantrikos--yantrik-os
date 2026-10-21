@@ -88,6 +88,13 @@ pub fn reread(
         // Down, or not answering: nothing to list from without starting it.
         return Listing { seq, wanted, read: Read::Unmoved };
     }
+    if now.is_none() && held.range == Some(wanted) {
+        // The question could not be put, and the window already holds this range: keep it, even
+        // for a read that would otherwise list whatever the revision says. Listing now would go
+        // through the door that starts the service and, if that fails, throw a month away because
+        // nothing is there to ask (delta review of #921, P14).
+        return Listing { seq, wanted, read: Read::Unmoved };
+    }
     let moved = match (&now, &held.revision) {
         (Some(now), Some(held)) => now != held,
         // Nothing to compare against: a first read, or one that failed and left no token behind.

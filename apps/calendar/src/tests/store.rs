@@ -211,3 +211,19 @@ fn the_watch_never_starts_a_service_that_is_down() {
     f.quiet();
     assert!(f.app.model(|m| m.range.is_some()), "and reads again once it is up");
 }
+
+/// A reading intent keeps what is in hand when the store cannot be asked: with the service down
+/// while the window holds the month, a day in it is answered from the month in hand, the agenda is
+/// kept, and nothing tries to start the service (delta review of #921, P14).
+#[test]
+fn a_reading_intent_keeps_the_month_in_hand_while_the_service_is_down() {
+    let f = open(a_week());
+    f.store.set_down(true);
+    assert_eq!(f.act("select_day", json!({ "day": 25 })).unwrap(), json!({ "day": 25, "events": ["Dentist"] }));
+    assert_eq!(f.agenda(), ["Dentist"], "the window keeps the month");
+    assert_eq!(f.act("set_view", json!({ "view": "month" })).unwrap()["events"], json!(3));
+    f.app.ui(|ui| ui.invoke_day_clicked(23));
+    f.quiet();
+    assert_eq!(f.agenda(), ["Standup", "Design review"]);
+    assert_eq!(f.store.start_attempts(), 0, "nothing asked the service to start");
+}

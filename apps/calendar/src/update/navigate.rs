@@ -170,7 +170,7 @@ fn landed(m: &mut Model, fx: &mut Fx, listing: crate::work::Listing) {
 
 /// The window moved, or what it shows did: read the store if anything says to, and draw. A
 /// reading intent's read lists whatever the revision says, because its answer is built from what
-/// that read found.
+/// that read found; when the revision cannot be asked it keeps the range in hand (`work::reread`).
 fn moved(m: &mut Model, fx: &mut Fx) {
     let owed = answers::target_now(m, fx);
     read(m, fx, owed);

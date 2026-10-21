@@ -95,8 +95,8 @@ pub fn read_landed(m: &mut Model, fx: &mut Effects<Calendar>, listing: &Listing)
         Read::Listed { events, .. } => events,
         // A failed read shows no events, as the window does after one.
         Read::Failed(_) => &[],
-        // Not reached for an intent's read, which always lists; what is in hand is the same
-        // range's events when the window still holds that range.
+        // The store could not be asked and the window held this range (`work::reread`): what is
+        // in hand is that range's events, as before the read.
         Read::Unmoved if m.range == Some(listing.wanted) => &m.events,
         Read::Unmoved => &[],
     };
