@@ -335,3 +335,28 @@ fn a_window_with_nothing_to_ask_closes_while_another_windows_prompt_waits() {
     assert_eq!(file(&right), "# Right\n\n", "Cancel saved nothing");
     assert_eq!(editor(&app, second), "# Right\n\nonly here", "and kept everything");
 }
+
+/// Unsaved is one rule, whichever window asks (#909's deferred item): a note typed away from its
+/// file in one window and back in the other is saved in both footers, in `describe`, to the
+/// autosave and to the close, which asks nothing. Every test also checks the other direction:
+/// after every command, a note with text not on disk must be a dirty document
+/// (`Model::keep_unsaved_dirty`, which fails a test that breaks it).
+#[test]
+fn a_note_typed_back_to_its_file_in_another_window_is_saved_to_every_reader() {
+    let (app, path) = with_note("Shared");
+    let second = opened_beside(&app);
+    let saved = file(&path);
+    type_in(&app, WindowId::PRIMARY, "# Shared\n\nfor a moment");
+    assert_eq!(footer(&app, second).1, true, "unsaved, in the window that did not type it");
+    type_in(&app, second, &saved);
+    for window in [WindowId::PRIMARY, second] {
+        assert_eq!(footer(&app, window), ("All changes saved".to_string(), false), "{window:?}");
+    }
+    assert_eq!(state(&app)["unsaved"], false);
+    autosave(&app);
+    assert_eq!(app.jobs_waiting(), 0, "nothing to write");
+    app.close_requested(second);
+    app.close_requested(WindowId::PRIMARY);
+    assert_eq!(app.exit_reason(), Some(ExitReason::LastWindowClosed), "and nothing to ask");
+    assert_eq!(file(&path), saved);
+}

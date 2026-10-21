@@ -252,6 +252,25 @@ impl Model {
         }
     }
 
+    /// Makes every document with edits not on disk (`unsaved_doc`) dirty to the framework as well:
+    /// a save starts only for a dirty document, a draft is kept only for one, and a close asks only
+    /// about one. Every change is an edit of its document, so the two never part; if they ever did,
+    /// a test fails here, and a running Notes says so in its log and makes the document dirty, so
+    /// the text is saved, kept and asked about rather than closed away as if it were on disk.
+    pub fn keep_unsaved_dirty(&mut self) {
+        let parted: Vec<DocumentId> =
+            self.documents.iter().filter(|d| !d.dirty() && self.unsaved_doc(d.id)).map(|d| d.id).collect();
+        for id in parted {
+            if cfg!(test) {
+                panic!("Notes' unsaved note must be a dirty document");
+            }
+            tracing::error!("an unsaved note was not a dirty document; it is made one, so it is saved and asked about");
+            if let Some(d) = self.documents.get_mut(id) {
+                d.edit(|_| ());
+            }
+        }
+    }
+
     /// The focused window's note's offered text, while its offer waits (`offered_in`).
     pub fn offered(&self) -> Option<&NoteText> {
         self.offered_in(&self.pane)

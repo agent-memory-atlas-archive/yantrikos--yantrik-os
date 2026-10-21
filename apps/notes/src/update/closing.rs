@@ -34,12 +34,14 @@ pub const CLOSE_DIALOG: i32 = 4;
 
 /// The person asked a window to close.
 pub fn requested(m: &mut Model, fx: &mut Effects<Notes>, window: WindowId) {
+    m.keep_unsaved_dirty();
     let closing = m.documents.closing_window(window);
     ask(m, fx, Some(window), closing);
 }
 
 /// The app was asked to end: every note with edits not on disk, asked about once.
 pub fn quit(m: &mut Model, fx: &mut Effects<Notes>) {
+    m.keep_unsaved_dirty();
     let closing = m.documents.quitting();
     ask(m, fx, None, closing);
 }

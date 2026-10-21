@@ -62,6 +62,8 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Effects<Notes>) -> Resul
     let refused = read_only::refused(m, fx, &command) || recovery::refused(m, fx, &command);
     if !refused {
         dispatch(m, fx, command);
+        // Before the drafts are brought up to date: a draft is kept for a dirty document only.
+        m.keep_unsaved_dirty();
         drafts::sync(m, fx);
     }
     if let Some(here) = back {
