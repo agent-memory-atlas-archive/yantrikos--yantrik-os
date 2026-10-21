@@ -79,13 +79,46 @@ pub fn run_until_ending<C: slint::ComponentHandle + 'static>(ui: &C, program: &s
         crate::chrome::bring_back(ui.window());
         Ok(())
     });
-    run_loop(ui, program)
+    // One window, so Slint's own rule holds: the loop ends when it closes.
+    ended(ui.run(), program)
+}
+
+/// What the framework's runner does once the app has started and its launch is applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BeforeLoop {
+    /// The app already asked to end (in `start`, or for its launch). The quit it posted went to a
+    /// loop not yet running, and Slint drops a quit from before a loop starts, so none is run:
+    /// one would wait for ever, with no window.
+    Skip,
+    /// Run the loop. `show_first`: the first window is still open by the core's count; one the
+    /// app closed before the loop is not shown.
+    Run { show_first: bool },
+}
+
+pub(crate) fn before_loop(exiting: bool, first_open: bool) -> BeforeLoop {
+    if exiting {
+        BeforeLoop::Skip
+    } else {
+        BeforeLoop::Run { show_first: first_open }
+    }
 }
 
 /// The loop alone, for a runner that installed its own presenter (the framework's, through its
-/// core, which knows every window).
-pub(crate) fn run_loop<C: slint::ComponentHandle + 'static>(ui: &C, program: &str) -> Ending {
-    match ui.run() {
+/// core, which knows every window). It runs until the core asks it to end (`quit_event_loop`
+/// from `request_exit`), not until Slint sees no window shown: a command that closes the last
+/// window and opens another hides one before it shows the other, and Slint would end the loop
+/// in between. The runner decides first, with [`before_loop`].
+pub(crate) fn run_loop<C: slint::ComponentHandle + 'static>(ui: &C, program: &str, show_first: bool) -> Ending {
+    let shown = if show_first { ui.show() } else { Ok(()) };
+    let ran = shown
+        .and_then(|()| slint::run_event_loop_until_quit())
+        .and_then(|()| ui.hide());
+    ended(ran, program)
+}
+
+/// How a loop's result reads: closed, or a failure classified by whether the display went away.
+fn ended(ran: Result<(), slint::PlatformError>, program: &str) -> Ending {
+    match ran {
         Ok(()) => Ending::Closed,
         Err(error) => {
             let socket = wayland_socket();
@@ -413,5 +446,22 @@ mod tests {
             }
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+}
+
+#[cfg(test)]
+mod before_loop_tests {
+    use super::{before_loop, BeforeLoop};
+
+    #[test]
+    fn an_app_that_already_asked_to_end_runs_no_loop() {
+        assert_eq!(before_loop(true, true), BeforeLoop::Skip);
+        assert_eq!(before_loop(true, false), BeforeLoop::Skip);
+    }
+
+    #[test]
+    fn the_first_window_is_shown_only_while_the_core_counts_it_open() {
+        assert_eq!(before_loop(false, true), BeforeLoop::Run { show_first: true });
+        assert_eq!(before_loop(false, false), BeforeLoop::Run { show_first: false });
     }
 }

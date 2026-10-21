@@ -129,7 +129,13 @@ impl<A: App> Core<A> {
         }
         A::render(&ui, id, &self.model.borrow(), &Changed::all());
         if let Err(e) = ui.show() {
-            tracing::warn!(app = self.id, "a window could not be shown: {e}");
+            // Not on screen, so not open: the app hears of it as of a window never made.
+            let why = format!("a window could not be shown: {e}");
+            tracing::warn!(app = self.id, "{why}");
+            problems::record_failure(self.id, "window", &why);
+            self.windows.borrow_mut().more.remove(&id);
+            slint::Timer::single_shot(Duration::ZERO, move || drop(ui));
+            self.event(Event::WindowNotOpened { window: id, why });
         }
     }
 

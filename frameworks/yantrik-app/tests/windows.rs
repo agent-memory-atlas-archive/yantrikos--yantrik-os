@@ -182,6 +182,9 @@ fn a_second_launch_brings_forward_an_open_window_and_never_a_closed_one() {
     app.close_requested(WindowId::PRIMARY);
     assert!(app.present().is_ok());
     assert_eq!(app.windows(), vec![second], "the closed first window stays closed");
+    // What is on screen, not only what the core lists.
+    assert!(!app.ui(|ui| ui.window().is_visible()), "the first window is not shown again");
+    assert_eq!(app.window(second, |ui| ui.window().is_visible()), Some(true));
     // So closing what is on screen ends the app, and nothing visible is left behind.
     app.close_requested(second);
     assert_eq!(app.exit_reason(), Some(ExitReason::LastWindowClosed));
@@ -197,6 +200,8 @@ fn a_closed_first_window_is_not_drawn() {
     assert_eq!(app.window(second, |ui| ui.get_count()), Some(1));
 }
 
+/// The core's judgement only: the headless platform runs no event loop. The real loop ends only
+/// when the core asks it to (`event_loop::run_loop`), so the same holds there.
 #[test]
 fn closing_the_last_window_and_opening_one_in_one_command_replaces_it() {
     let app = TestApp::<Pair>::start();

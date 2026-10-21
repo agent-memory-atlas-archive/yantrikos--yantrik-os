@@ -42,8 +42,10 @@ const ANSWER_WAIT: Duration = Duration::from_secs(3);
 type Presenter = Box<dyn Fn() -> Result<(), String>>;
 
 thread_local! {
-    /// Installed on the thread that owns the window, by [`crate::run_until_closed`], before the
-    /// loop starts. A process that never runs a window has none, and says so when asked.
+    /// Installed on the thread that owns the window before the loop starts: by
+    /// [`crate::run_until_closed`] for an app on the old runtime, and by the framework's runner,
+    /// through its core, which knows every window. A process that never runs a window has none,
+    /// and says so when asked.
     static WINDOW: RefCell<Option<Presenter>> = const { RefCell::new(None) };
 }
 
