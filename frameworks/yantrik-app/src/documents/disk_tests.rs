@@ -226,3 +226,171 @@ fn a_replace_that_keeps_the_length_and_the_time_is_still_seen() {
     assert_eq!(polled(&watched), vec![("doc-1".to_string(), Observed::File(fp("bbbb")))]);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Whether this directory's filesystem has the atomic exchange (tmpfs and ext4 do; NFS, 9p and
+/// FUSE do not). A test that needs it says so and passes on one without, where `Unknown` is the
+/// right answer.
+fn exchanges_here(dir: &std::path::Path) -> bool {
+    let probe = dir.join(".probe");
+    std::fs::write(&probe, "a").unwrap();
+    let got = RealDisk.exchange(&probe, b"b").unwrap();
+    let _ = std::fs::remove_file(&probe);
+    !matches!(got.displaced, super::disk::Displaced::Unknown)
+}
+
+#[test]
+fn an_exchange_hands_back_what_it_replaced() {
+    use super::disk::Displaced;
+    let dir = scratch("exchange");
+    let path = dir.join("note.md");
+    let first = RealDisk.exchange(&path, b"first").unwrap();
+    assert!(matches!(first.displaced, Displaced::Nothing | Displaced::Unknown), "{first:?}");
+    assert!(first.unsure.is_none());
+    let second = RealDisk.exchange(&path, b"second").unwrap();
+    if exchanges_here(&dir) {
+        assert_eq!(first.displaced, Displaced::Nothing, "created, nothing replaced");
+        assert_eq!(second.displaced, Displaced::Bytes(b"first".to_vec()));
+    } else {
+        eprintln!("no atomic exchange on this filesystem: Unknown is the answer");
+        assert_eq!(second.displaced, Displaced::Unknown);
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), b"second");
+    let leftovers: Vec<_> = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).collect();
+    assert_eq!(leftovers.len(), 1, "the temp that held the old bytes is gone");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_write_between_the_check_and_the_exchange_is_kept_and_judged() {
+    let dir = scratch("exchange-race");
+    if !exchanges_here(&dir) {
+        eprintln!("no atomic exchange on this filesystem; nothing to show here");
+        return;
+    }
+    let path = dir.join("note.md");
+    std::fs::write(&path, "v0").unwrap();
+    let mut docs: Documents<String> = Documents::new();
+    let id = docs.open(Source::File(path.clone()), "v0".into(), Some(fp("v0")));
+    let d = docs.get_mut(id).unwrap();
+    d.edit(|c| *c = "mine".into());
+    let ticket = match d.begin_save() {
+        BeginSave::Ticket(t) => t,
+        other => panic!("{other:?}"),
+    };
+    // The store's check passes: the file is the baseline.
+    assert!(ticket.may_replace(super::Fingerprint::of(&path).as_ref()));
+    // Another program writes now, after the check and before the replace.
+    std::fs::write(&path, "theirs").unwrap();
+    let done = RealDisk.exchange(&path, b"mine").unwrap();
+    assert_eq!(done.displaced, super::disk::Displaced::Bytes(b"theirs".to_vec()), "their bytes are not lost");
+    let witnessed = ticket.judge(&done.displaced);
+    assert_eq!(witnessed, Witnessed::Replaced(Replaced::OutsideEdit));
+    let outcome = d.save_landed_witnessed(ticket.seq, Ok(fp("mine")), witnessed);
+    assert!(matches!(outcome, SaveOutcome::Saved { replaced: Some(Replaced::OutsideEdit), .. }));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_exchange_refuses_a_link_and_faults_inject_as_for_a_replace() {
+    let dir = scratch("exchange-faults");
+    let path = dir.join("note.md");
+    std::fs::write(&path, "old").unwrap();
+    let disk = FaultyDisk::new();
+    disk.fail(Step::Rename, "note.md", Some(1));
+    assert_eq!(disk.exchange(&path, b"new").unwrap_err().step, Step::Rename);
+    assert_eq!(std::fs::read(&path).unwrap(), b"old", "a failure before the swap changes nothing");
+    #[cfg(unix)]
+    {
+        let link = dir.join("linked.md");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        assert_eq!(RealDisk.exchange(&link, b"x").unwrap_err().step, Step::Check);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_failed_directory_sync_still_hands_back_what_was_replaced() {
+    use super::disk::Displaced;
+    let dir = scratch("exchange-syncdir");
+    let path = dir.join("note.md");
+    std::fs::write(&path, "theirs").unwrap();
+    let disk = FaultyDisk::new();
+    disk.fail(Step::SyncDir, "note.md", Some(1));
+    let done = disk.exchange(&path, b"mine").unwrap();
+    assert_eq!(done.unsure.as_ref().map(|e| e.step), Some(Step::SyncDir), "in place, durability unknown");
+    if exchanges_here(&dir) {
+        assert_eq!(done.displaced, Displaced::Bytes(b"theirs".to_vec()), "their bytes survive the failed sync");
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), b"mine");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_fifo_or_a_directory_at_the_path_is_put_back_and_the_save_fails() {
+    let dir = scratch("exchange-odd");
+    if !exchanges_here(&dir) {
+        eprintln!("no atomic exchange on this filesystem; a plain rename refuses these itself");
+        return;
+    }
+    use std::os::unix::fs::FileTypeExt as _;
+    let fifo = dir.join("fifo.md");
+    let name = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+    // SAFETY: a valid NUL-terminated path; mkfifo only creates the node.
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    let err = RealDisk.exchange(&fifo, b"x").unwrap_err();
+    assert_eq!(err.step, Step::Rename, "{err}");
+    assert!(std::fs::symlink_metadata(&fifo).unwrap().file_type().is_fifo(), "the FIFO is back, nothing hangs");
+    let folder = dir.join("folder.md");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::write(folder.join("inside"), "kept").unwrap();
+    assert_eq!(RealDisk.exchange(&folder, b"x").unwrap_err().step, Step::Rename);
+    assert_eq!(std::fs::read_to_string(folder.join("inside")).unwrap(), "kept", "the folder is back where it was");
+    let names: Vec<String> = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    assert!(!names.iter().any(|n| n.ends_with(".tmp")), "nothing hidden left behind: {names:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_link_swapped_in_after_the_check_is_not_followed() {
+    let dir = scratch("exchange-late-link");
+    if !exchanges_here(&dir) {
+        return;
+    }
+    let elsewhere = dir.join("elsewhere");
+    std::fs::write(&elsewhere, "not ours to read").unwrap();
+    let path = dir.join("note.md");
+    std::os::unix::fs::symlink(&elsewhere, &path).unwrap();
+    // As if the link appeared after `exchange`'s own check: the swap itself.
+    let temp = dir.join(".note.md.test.tmp");
+    std::fs::write(&temp, "mine").unwrap();
+    let err = super::exchange::swap_in(&temp, &path, 1024).unwrap_err();
+    assert_eq!(err.step, Step::Rename);
+    assert!(std::fs::symlink_metadata(&path).unwrap().file_type().is_symlink(), "the link is back");
+    assert_eq!(std::fs::read_to_string(&elsewhere).unwrap(), "not ours to read");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_replaced_file_too_large_to_read_back_is_kept_unread() {
+    use super::disk::Displaced;
+    let dir = scratch("exchange-large");
+    if !exchanges_here(&dir) {
+        return;
+    }
+    let path = dir.join("note.md");
+    std::fs::write(&path, "a long note from another program").unwrap();
+    let temp = dir.join(".note.md.test.tmp");
+    std::fs::write(&temp, "mine").unwrap();
+    match super::exchange::swap_in(&temp, &path, 4).unwrap() {
+        Displaced::Unread(kept) => {
+            assert_eq!(std::fs::read_to_string(&kept).unwrap(), "a long note from another program", "never deleted unread");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "mine");
+    let _ = std::fs::remove_dir_all(&dir);
+}

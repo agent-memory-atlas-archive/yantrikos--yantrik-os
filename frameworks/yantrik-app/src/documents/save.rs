@@ -77,6 +77,38 @@ impl<C> SaveTicket<C> {
             Some(now) => Some(now) == self.baseline.as_ref() || Some(now) == self.unsure.as_ref(),
         }
     }
+
+    /// What the save's replace took the place of ([`super::disk::Disk::exchange`]), judged
+    /// against what this document knew was there: the same file, or another program's write (or
+    /// a deletion) that came between the store's check and the replace. Certain, unlike a
+    /// sighting by the watch, which sees such a write only if it happened to look.
+    pub fn judge(&self, displaced: &super::disk::Displaced) -> Witnessed {
+        use super::disk::Displaced;
+        match displaced {
+            // Kept unread: it may have been theirs, and the app keeps the file it is left in.
+            Displaced::Unknown | Displaced::Unread(_) => Witnessed::Unknown,
+            Displaced::Nothing if self.baseline.is_some() => Witnessed::Replaced(Replaced::Deletion),
+            Displaced::Nothing => Witnessed::Same,
+            Displaced::Bytes(bytes) => {
+                if self.may_replace(Some(&Fingerprint::of_bytes(bytes))) {
+                    Witnessed::Same
+                } else {
+                    Witnessed::Replaced(Replaced::OutsideEdit)
+                }
+            }
+        }
+    }
+}
+
+/// What a save's replace is known to have taken the place of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Witnessed {
+    /// The file this document knew: nothing to say.
+    Same,
+    /// Another program's write, or a deletion, between the check and the replace.
+    Replaced(Replaced),
+    /// The disk could not tell; the watch's sightings are all there is.
+    Unknown,
 }
 
 /// What `begin_save` decided.
@@ -169,6 +201,18 @@ impl<C: Clone> Document<C> {
     /// save lands, the app re-arms the document's watch from its new baseline (`fx.watch` with
     /// [`Document::watch_entry`]), so a look the watch took before the save is dropped.
     pub fn save_landed(&mut self, seq: u64, result: Result<Fingerprint, SaveError>) -> SaveOutcome<C> {
+        self.save_landed_witnessed(seq, result, Witnessed::Unknown)
+    }
+
+    /// [`Document::save_landed`], with what the replace is known to have displaced
+    /// ([`SaveTicket::judge`]). A known answer replaces the guess from the watch's sightings:
+    /// no "replaced" said when theirs was not, and none missed because the watch did not look.
+    pub fn save_landed_witnessed(
+        &mut self,
+        seq: u64,
+        result: Result<Fingerprint, SaveError>,
+        witnessed: Witnessed,
+    ) -> SaveOutcome<C> {
         match self.save {
             SaveState::Saving { seq: in_flight } if in_flight == seq => {}
             _ => return SaveOutcome::Stale,
@@ -186,7 +230,7 @@ impl<C: Clone> Document<C> {
                 }
                 // Seen during the save: neither the old file, nor ours, nor an unsure write of
                 // ours, so it existed between our check and our rename, and ours replaced it.
-                let replaced = match &seen {
+                let guessed = match &seen {
                     Some(Observed::File(f))
                         if *f != written && Some(f) != before.as_ref() && Some(f) != unsure.as_ref() =>
                     {
@@ -194,6 +238,11 @@ impl<C: Clone> Document<C> {
                     }
                     Some(Observed::Gone) if before.is_some() => Some(Replaced::Deletion),
                     _ => None,
+                };
+                let replaced = match witnessed {
+                    Witnessed::Same => None,
+                    Witnessed::Replaced(r) => Some(r),
+                    Witnessed::Unknown => guessed,
                 };
                 let follow_up = if std::mem::take(&mut self.follow_up) && self.dirty() {
                     match self.start() {
