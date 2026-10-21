@@ -32,7 +32,7 @@ thread_local! {
     static DRAIN: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
 }
 
-fn drain_on_ui_thread() {
+pub(crate) fn drain_on_ui_thread() {
     DRAIN.with(|cell| {
         if let Some(drain) = cell.borrow().as_ref() {
             drain();
@@ -136,6 +136,7 @@ pub fn run<A: App>() -> ExitCode {
         },
     );
     install(&core);
+    core.set_theme(theme_now);
     // A file of an older schema is rewritten at this one, once.
     core.flush_settings();
     // The settings file (an outside edit), the shell's theme and the documents' files, watched
@@ -162,7 +163,18 @@ pub fn run<A: App>() -> ExitCode {
     let registry = crate::control::App::from_registry(registry).serve_as(&instance);
     core.attach_registry(registry);
 
-    let ending = crate::event_loop::run_until_ending(core.ui(), A::ID);
+    // A second launch's `present` goes through the core, which knows which windows are open.
+    let presenting = Rc::downgrade(&core);
+    crate::present::install(move || presenting.upgrade().ok_or("the app is closing")?.present());
+    // An exit asked for in `start` or for the launch ends here, with no loop: Slint drops a quit
+    // posted before its loop runs. The first window is shown only if it is still open.
+    let first_open = core.windows_open().contains(&WindowId::PRIMARY);
+    let ending = match crate::event_loop::before_loop(core.exit_reason().is_some(), first_open) {
+        crate::event_loop::BeforeLoop::Skip => crate::event_loop::Ending::Closed,
+        crate::event_loop::BeforeLoop::Run { show_first } => {
+            crate::event_loop::run_loop(core.ui(), A::ID, show_first)
+        }
+    };
     core.shutdown(GRACE);
     DRAIN.with(|cell| *cell.borrow_mut() = None);
     // A close, an `fx.exit()` and a logout are all 0; only a loop that failed with the display

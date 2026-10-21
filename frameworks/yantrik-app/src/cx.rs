@@ -27,9 +27,7 @@ use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use slint::ComponentHandle as _;
-
-use crate::app::{App, Changed, Event, ExitReason, WindowId};
+use crate::app::{App, Changed, Event, ExitReason};
 use crate::effects::{Effects, Request};
 use crate::intents::{Invocation, InvocationId, Origin};
 use crate::jobs::{Cancel, Deliver, Executor, Finished, JobId, JobKey};
@@ -48,7 +46,9 @@ mod jobs_table;
 mod persisted;
 mod rail_hooks;
 mod settlement;
+mod windows;
 pub use handle::{Cx, UiRef};
+pub(crate) use windows::next_window_id;
 use settlement::Open;
 
 /// How many queued (`then`) commands one drain applies before the rest wait for the next wake.
@@ -116,7 +116,10 @@ pub struct Core<A: App> {
     continue_posted: Cell<bool>,
     last_refusal: RefCell<Option<Refused>>,
     exit: Cell<Option<ExitReason>>,
-    window_shown: Cell<bool>,
+    /// The windows beyond the first, and whether the first is open (`cx/windows.rs`).
+    windows: RefCell<windows::Windows<A::Ui>>,
+    /// This core, weakly: a window opened later is wired through a `Cx` made from it.
+    me: Weak<Core<A>>,
     /// The app's served surface, once it is: the rail applies a proposal through it.
     registry: RefCell<Option<Rc<LocalRegistry>>>,
     /// The documents' files the watch thread looks at (`fx.watch`).
@@ -192,7 +195,8 @@ impl<A: App> Core<A> {
                 continue_posted: Cell::new(false),
                 last_refusal: RefCell::new(None),
                 exit: Cell::new(None),
-                window_shown: Cell::new(true),
+                windows: RefCell::new(windows::Windows::new()),
+                me: weak.clone(),
                 registry: RefCell::new(None),
                 watched: crate::documents::Watched::new(),
             }
@@ -242,12 +246,7 @@ impl<A: App> Core<A> {
     pub fn render_all(&self) {
         self.fresh_wake();
         self.applying.set(true);
-        A::render(
-            &self.ui,
-            WindowId::PRIMARY,
-            &self.model.borrow(),
-            &Changed::all(),
-        );
+        self.render_windows(&Changed::all());
         self.applying.set(false);
         self.drain_pending();
     }
@@ -264,7 +263,7 @@ impl<A: App> Core<A> {
         self.current.set(None);
         self.commit(requests);
         if !changed.is_empty() {
-            A::render(&self.ui, WindowId::PRIMARY, &self.model.borrow(), &changed);
+            self.render_windows(&changed);
         }
         // An app with a rail: the first refresh now, and the fallback tick from here on.
         if let Some(refresh) = A::rail(RailCommand::Refresh) {
@@ -401,7 +400,7 @@ impl<A: App> Core<A> {
                 *self.last_refusal.borrow_mut() = None;
                 self.commit(requests);
                 if !changed.is_empty() {
-                    A::render(&self.ui, WindowId::PRIMARY, &self.model.borrow(), &changed);
+                    self.render_windows(&changed);
                 }
                 self.rail_changed(&changed);
             }
@@ -423,6 +422,9 @@ impl<A: App> Core<A> {
     /// under. Always under `applying`, so a command an effect raises is queued.
     fn commit(&self, requests: Vec<Request<A>>) {
         let invocation = self.current.get();
+        // Closed after everything else this command asked for, so a window it replaces is on
+        // screen before the old one goes.
+        let mut closing = Vec::new();
         for request in requests {
             match request {
                 Request::Then(command) => self.queue(invocation, command),
@@ -490,9 +492,17 @@ impl<A: App> Core<A> {
                         }
                     }
                 }
-                Request::Close(window) => self.close_window(window),
+                Request::OpenWindow(window) => self.open_window(window),
+                Request::Close(window) => closing.push(window),
                 Request::Exit => self.request_exit(ExitReason::App),
             }
+        }
+        // Once every effect is applied: a close and an open in one command replace a window.
+        if !closing.is_empty() {
+            for window in closing {
+                self.close_window(window);
+            }
+            self.exit_if_no_window();
         }
     }
 
@@ -530,7 +540,10 @@ impl<A: App> Core<A> {
         match (command, event) {
             (Some(command), _) => self.run(command),
             (None, Event::Launch(_)) => {}
-            (None, Event::CloseRequested(window)) => self.close_window(window),
+            (None, Event::CloseRequested(window)) => {
+                self.close_window(window);
+                self.exit_if_no_window();
+            }
             (None, Event::ExitRequested(reason)) => self.request_exit(reason),
             (None, Event::Activated(_)) => {}
             (None, Event::SettingsSaved) => {}
@@ -553,18 +566,9 @@ impl<A: App> Core<A> {
             }
             (None, Event::ReachChanged(_)) => {}
             (None, Event::FileChanged { .. }) => {}
+            // Already logged and filed by the window table.
+            (None, Event::WindowNotOpened { .. }) => {}
         }
-    }
-
-    fn close_window(&self, window: WindowId) {
-        if window != WindowId::PRIMARY {
-            return;
-        }
-        if self.window_shown.replace(false) {
-            let _ = self.ui.hide();
-        }
-        // One window for now: closing it ends the process (`Lifetime::WhileWindowsOpen`).
-        self.request_exit(ExitReason::LastWindowClosed);
     }
 
     fn request_exit(&self, reason: ExitReason) {

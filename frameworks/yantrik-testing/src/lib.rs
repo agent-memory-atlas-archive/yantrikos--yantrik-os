@@ -25,7 +25,7 @@ use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use serde_json::Value;
-use yantrik_app::app::{App, Boot, Event, ExitReason};
+use yantrik_app::app::{App, Boot, Event, ExitReason, WindowId};
 use yantrik_app::cx::{Core, Cx, Inbound, Parts};
 use yantrik_app::intents::{self, Intents};
 use yantrik_app::jobs::{Cancel, Deliver, Executor, Job, JobId, Manual};
@@ -392,6 +392,8 @@ impl<A: App> TestApp<A> {
                 .unwrap_or_else(|p| p.into_inner())
                 .clone()
                 .expect("the lane was made");
+            // Hermetic: a window opened in a test wears the default theme, not this machine's.
+            core.set_theme(yantrik_app::theme::ThemeSettings::default());
             core.flush_settings();
             A::wire(&Cx::new(core.clone()));
             core.render_all();
@@ -516,6 +518,30 @@ impl<A: App> TestApp<A> {
             let _ = u.core.post().post(Inbound::Seen(seen));
             u.core.drain();
         });
+    }
+
+    /// The windows open, the first one first.
+    pub fn windows(&self) -> Vec<WindowId> {
+        self.with(|u| u.core.windows_open())
+    }
+
+    /// Reads an open window (`None` once it is closed), as `ui` reads the first.
+    pub fn window<R: Send + 'static>(
+        &self,
+        id: WindowId,
+        f: impl FnOnce(&A::Ui) -> R + Send + 'static,
+    ) -> Option<R> {
+        self.with(move |u| u.core.window(id).map(|ui| f(&ui)))
+    }
+
+    /// A second launch asked for the app (`present`).
+    pub fn present(&self) -> Result<(), String> {
+        self.with(|u| u.core.present())
+    }
+
+    /// The person pressed a window's close button: `Event::CloseRequested` for it.
+    pub fn close_requested(&self, id: WindowId) {
+        self.event(Event::CloseRequested(id));
     }
 
     /// The documents' files the app watches (`fx.watch`), by key.
