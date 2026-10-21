@@ -635,6 +635,12 @@ impl<A: App> TestApp<A> {
         self.with(|u| u.core.display_gone());
     }
 
+    /// How long the shutdown's writes may take, given the usual `grace`: longer after a
+    /// signal's logout (`Core::write_window`).
+    pub fn write_window(&self, grace: Duration) -> Duration {
+        self.with(move |u| u.core.write_window(grace))
+    }
+
     /// The end, as the runner does it.
     pub fn shutdown(&self) -> bool {
         self.with(|u| u.core.shutdown(Duration::from_millis(100)))
