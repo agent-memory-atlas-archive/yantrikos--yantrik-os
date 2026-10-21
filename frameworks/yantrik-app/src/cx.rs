@@ -593,7 +593,7 @@ impl<A: App> Core<A> {
     pub fn shutdown(&self, grace: Duration) -> bool {
         self.hear_last_signals();
         let deadline = Instant::now() + grace;
-        let lane_deadline = Instant::now() + self.lane_grace(grace);
+        let lane_deadline = Instant::now() + self.write_window(grace);
         self.inbox.close();
         self.timers.borrow_mut().stop_all();
         // A save asked for is a save made, before the process ends.

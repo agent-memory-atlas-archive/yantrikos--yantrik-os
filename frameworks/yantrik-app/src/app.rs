@@ -43,7 +43,9 @@ pub enum ExitReason {
     /// to answer, and the process is killed after a grace period whatever the app does: save
     /// without asking, then `fx.exit()`. A bounded chance to save, not a completed interactive
     /// save; after a signal the framework ends the process itself if the app has not within
-    /// [`crate::quit::SIGNAL_DEADLINE`].
+    /// [`crate::quit::SIGNAL_DEADLINE`]. Hand the save over in the command that answers (a draft
+    /// checkpointed, the settings saved): at the end, a `then` or a job's result still queued is
+    /// not applied.
     Logout,
     /// A person asked the app to quit: the app's `fx.request_quit()`, from Ctrl+Q or a Quit
     /// menu. Someone is there to answer: the app may ask about unsaved work, once over every
