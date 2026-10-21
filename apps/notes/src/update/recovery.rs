@@ -140,6 +140,7 @@ pub fn restore(m: &mut Model, fx: &mut Effects<Notes>) {
     m.recovery.offers.retain(|o| o.id != offer.id);
     let on_disk = m.library.iter().find(|n| !n.trash && n.id == offer.id).cloned();
     let file = on_disk.as_ref().map(|n| Fingerprint::of_bytes(n.content.text.as_bytes()));
+    let gone = file.is_none();
     // The draft's baseline is the note's text and sidecar as they were when it was written
     // (`recovery::base_of`): equal, and the person's own edits, the sidecar's included, go back
     // as they were; different, and another program changed the note since.
@@ -163,7 +164,12 @@ pub fn restore(m: &mut Model, fx: &mut Effects<Notes>) {
     fx.changed(CONTENT);
     fx.changed(FIELDS);
     fx.changed(OUTSIDE);
-    let sentence = if moved_on { said::RESTORED_BESIDE } else { said::RESTORED };
+    let sentence = match (moved_on, gone) {
+        (false, _) => said::RESTORED,
+        // #917's review, F: no second version to choose between, only Save as new.
+        (true, true) => said::RESTORED_GONE,
+        (true, false) => said::RESTORED_BESIDE,
+    };
     refreshed(m, fx);
     say(m, fx, &left(m, sentence));
     // Saved at once, as the person's own Save would be. One the outside bar holds back is

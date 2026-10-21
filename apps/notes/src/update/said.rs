@@ -218,9 +218,11 @@ pub fn drafts_elsewhere(paths: &[std::path::PathBuf]) -> Option<String> {
 pub const NOTHING_OFFERED: &str = "There is no unsaved text from before Notes closed.";
 pub const RESTORED: &str = "Your text is back in this note.";
 /// Restored over a note that is not the one the text was written over (its text, or its
-/// notebook, tags or pin), or whose file is gone: the outside bar decides.
+/// notebook, tags or pin): the outside bar decides.
 pub const RESTORED_BESIDE: &str = "Your text is back. The note on disk changed after it was written (its text, \
      or its notebook, tags or pin), so choose what happens to the two versions.";
+/// Restored for a note whose file is gone: there is one version, and the bar offers Save as new.
+pub const RESTORED_GONE: &str = "Your text is back. The note's file is gone; Save as new keeps your text.";
 pub const DISCARDED: &str = "The unsaved text was discarded; the note is as it is on disk.";
 /// An edit refused on a note whose offer waits.
 pub const CHOOSE_FIRST: &str =
