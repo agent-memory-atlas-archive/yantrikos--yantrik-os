@@ -108,7 +108,7 @@ pub fn resolved(
     m.busy = None;
     let resolved = match result {
         Ok(resolved) => *resolved,
-        Err(e) => return failed(m, fx, said::not_kept(&e)),
+        Err(e) => return failed(m, fx, None, said::not_kept(&e)),
     };
     m.library.push(resolved.kept.clone());
     if let Some(asked) = m.asked.as_mut() {
@@ -235,7 +235,7 @@ pub fn compared(m: &mut Model, fx: &mut Effects<Notes>, doc: DocumentId, result:
     m.busy = None;
     let theirs = match result {
         Ok(theirs) => theirs,
-        Err(e) => return failed(m, fx, said::compare_unread(&e)),
+        Err(e) => return failed(m, fx, None, said::compare_unread(&e)),
     };
     if theirs.is_none() {
         if let Some(d) = m.documents.get_mut(doc) {

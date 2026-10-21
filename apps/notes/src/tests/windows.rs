@@ -23,7 +23,7 @@ fn from(app: &TestApp<Notes>, window: WindowId, command: Command) {
     app.run(Command::From { window, command: Box::new(command) });
 }
 
-fn type_in(app: &TestApp<Notes>, window: WindowId, text: &str) {
+pub(super) fn type_in(app: &TestApp<Notes>, window: WindowId, text: &str) {
     from(app, window, Command::Edit(text.into()));
 }
 

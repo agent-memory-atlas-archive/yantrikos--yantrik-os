@@ -11,6 +11,7 @@
 use std::time::Duration;
 
 use yantrik_app::app::WindowId;
+use yantrik_app::documents::DocumentId;
 use yantrik_app::effects::Effects;
 use yantrik_app::timers::TimerId;
 use yantrik_app::Refused;
@@ -223,8 +224,10 @@ fn begin(
 }
 
 /// A store job failed: said in the notice, the draft kept, and nothing waits on it any more. A
-/// call from the surface that waited for this save to go on is refused.
-fn failed(m: &mut Model, fx: &mut Effects<Notes>, sentence: String) {
+/// call from the surface that waited for this save to go on is refused. `doc` is the note whose
+/// save failed, `None` for any other job: a note the person's window does not show is named, and
+/// a close waiting on other notes' saves goes on with them.
+fn failed(m: &mut Model, fx: &mut Effects<Notes>, doc: Option<DocumentId>, sentence: String) {
     if let Some(pending) = m.pending.take() {
         if pending.refuse_if_unsaved {
             if let Some(asked) = m.asked.as_mut() {
@@ -237,11 +240,23 @@ fn failed(m: &mut Model, fx: &mut Effects<Notes>, sentence: String) {
             }
         }
     }
-    let sentence = closing::failed(m, sentence);
+    let sentence = closing::failed(m, doc, &sentence).unwrap_or_else(|| named(m, doc, sentence));
     m.notice = sentence;
     m.lasting_notice = false;
     set_status(m, "Needs attention · draft kept");
     fx.changed(STATUS);
+    if m.busy.is_none() {
+        closing::progress(m, fx);
+    }
+}
+
+/// `sentence`, with the title of the note it is about when the person's window does not show it:
+/// a failure in another window is never read as one of the note in front of them.
+fn named(m: &Model, doc: Option<DocumentId>, sentence: String) -> String {
+    match doc.filter(|d| !m.in_view(*d)).and_then(|d| m.note_of(d)) {
+        Some(note) => said::note_failed(&note.title(), &sentence),
+        None => sentence,
+    }
 }
 
 /// A store job landed: once the open note is saved, what waited for it goes ahead (the action,

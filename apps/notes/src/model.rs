@@ -231,6 +231,11 @@ impl Model {
         self.document_in(&self.pane)
     }
 
+    /// An open note by its document: the document and what its files hold.
+    pub fn note_of(&self, id: DocumentId) -> Option<Current<'_>> {
+        Some(Current { doc: self.documents.get(id)?, file: self.files.get(&id)? })
+    }
+
     /// The note the focused window shows.
     pub fn current(&self) -> Option<Current<'_>> {
         self.current_in(&self.pane)
@@ -250,10 +255,7 @@ impl Model {
     /// The one rule for "unsaved", wherever it is asked (the save path, the close flow, the
     /// footer, `describe`), so no window can call a note saved while another holds its edits.
     pub fn unsaved_doc(&self, id: DocumentId) -> bool {
-        match (self.documents.get(id), self.files.get(&id)) {
-            (Some(doc), Some(file)) => Current { doc, file }.unsaved(),
-            _ => false,
-        }
+        self.note_of(id).is_some_and(|c| c.unsaved())
     }
 
     /// Makes every document with edits not on disk (`unsaved_doc`) dirty to the framework as well:

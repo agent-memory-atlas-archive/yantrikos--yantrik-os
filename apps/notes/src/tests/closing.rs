@@ -9,10 +9,11 @@ use yantrik_app::app::{Event, ExitReason, WindowId};
 use yantrik_app::documents::disk::Step;
 use yantrik_testing::TestApp;
 
-use super::windows::two_notes_two_windows;
+use super::windows::{two_notes_two_windows, type_in};
 use super::{draft_file, failing, file, notice, settle, unsaved, with_note};
 use crate::command::{Command, WindowAction};
 use crate::update::closing::CLOSE_DIALOG;
+use crate::update::AUTOSAVE_AFTER;
 use crate::Notes;
 
 const TYPED: &str = "# Closing\n\nlast words";
@@ -254,4 +255,30 @@ fn a_failure_while_quitting_over_two_notes_keeps_everything_and_says_which() {
     let right_text = app.model(move |m| m.pane_of(second).and_then(|p| m.current_in(p)).unwrap().text().to_string());
     assert_eq!(right_text, RIGHT, "its text is kept, unsaved");
     assert!(app.model(|m| m.closing.is_none()), "the close is over; quitting again asks again");
+}
+
+
+/// #918's review, 3: another note's autosave failing while this window's close waits to save does
+/// not end the close. This window's note is still saved and the window closes, and the failure is
+/// said with the title of the note it is about.
+#[test]
+fn another_notes_failed_autosave_does_not_end_this_windows_close() {
+    let (app, first, left, second, right) = two_notes_two_windows();
+    type_in(&app, first, LEFT);
+    type_in(&app, second, RIGHT);
+    failing(&app).fail(Step::Rename, right.file_name().unwrap().to_str().unwrap(), None);
+    app.advance(AUTOSAVE_AFTER);
+    assert_eq!(app.jobs_waiting(), 1, "Right's autosave is in flight");
+    app.close_requested(first);
+    app.window(first, |ui| ui.invoke_action("close-save".into()));
+    assert!(app.run_one_job(), "Right's save lands, failed");
+    assert!(notice(&app).starts_with("\"Right\": "), "named: {}", notice(&app));
+    assert!(notice(&app).contains("injected failure at Rename"), "{}", notice(&app));
+    assert!(app.model(|m| m.closing.is_some()), "the close still waits on Left");
+    settle(&app);
+    assert_eq!(file(&left), LEFT, "Left is saved");
+    assert_eq!(app.windows(), vec![second], "and its window closed");
+    assert_eq!(file(&right), "# Right\n\n");
+    let right_text = app.model(move |m| m.pane_of(second).and_then(|p| m.current_in(p)).unwrap().text().to_string());
+    assert_eq!(right_text, RIGHT, "Right's text is kept, unsaved");
 }

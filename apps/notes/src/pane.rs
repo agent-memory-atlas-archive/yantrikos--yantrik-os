@@ -182,8 +182,14 @@ impl Model {
 
     /// The note a window's pane shows: its document and what its files hold.
     pub fn current_in(&self, pane: &Pane) -> Option<Current<'_>> {
-        let id = self.document_in(pane)?;
-        Some(Current { doc: self.documents.get(id)?, file: self.files.get(&id)? })
+        self.note_of(self.document_in(pane)?)
+    }
+
+    /// Whether the window the person is in shows `doc`. While work is done in another window for a
+    /// moment, that window is focused; the person is still where they were.
+    pub fn in_view(&self, doc: DocumentId) -> bool {
+        let window = self.visited.first().copied().unwrap_or(self.pane.window);
+        self.pane_of(window).is_some_and(|p| self.document_in(p) == Some(doc))
     }
 
     /// The windows showing `doc`, the focused one first.

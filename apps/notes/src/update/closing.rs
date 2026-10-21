@@ -10,7 +10,8 @@
 //!   are on disk: every note asked about, one after another, as the store does one thing at a
 //!   time. While it waits, editing goes on and the save that closes is of the latest edit. A save
 //!   that fails, or cannot start because an outside change waits on the person's choice, keeps
-//!   everything open and says why, and which note.
+//!   everything open and says why, and which note. Another note's save failing meanwhile (its
+//!   autosave, in another window) is said, and the close goes on with the notes it asked about.
 //! - *Don't save* drops the edits and their draft, and closes.
 //!
 //! A second close while one waits asks nothing and saves nothing more. A library open read-only
@@ -24,7 +25,7 @@ use yantrik_app::effects::Effects;
 use super::navigate::show_note;
 use super::saving::{self, How};
 use super::{drafts, show, windows};
-use crate::model::{Current, Model};
+use crate::model::Model;
 use crate::update::said;
 use crate::view::render::{CHROME, STATUS};
 use crate::Notes;
@@ -112,18 +113,22 @@ pub fn progress(m: &mut Model, fx: &mut Effects<Notes>) {
     apply(m, fx, next);
 }
 
-/// A save failed, or could not start. When a close waits on it, the close is over and everything
-/// stays open. Returns what the notice says: `sentence`, with which note it is about when the
-/// close asked about more than one.
-pub fn failed(m: &mut Model, sentence: String) -> String {
-    let Some(flow) = m.closing.as_mut().filter(|f| f.stage == Stage::SavingThenClose) else { return sentence };
+/// A save of `doc` failed, or could not start; `None` for another store job that failed. When a
+/// close waits on the saves of the notes it asked about and `doc` is one of them, the close is
+/// over and everything stays open: returns what the notice says, `sentence` with the note's title
+/// when the close asked about more than one or the person's window does not show it. Any other
+/// failure leaves the close waiting (`None`), and it goes on once the store is idle (`progress`).
+pub fn failed(m: &mut Model, doc: Option<DocumentId>, sentence: &str) -> Option<String> {
+    let flow = m.closing.as_mut().filter(|f| f.stage == Stage::SavingThenClose)?;
+    let doc = doc.filter(|d| flow.asked.contains(d))?;
     let several = flow.asked.len() > 1;
-    flow.progress(&m.documents, Some(sentence.clone()));
+    flow.progress(&m.documents, Some(sentence.to_string()));
     m.closing = None;
-    match m.current().map(|c| c.title()) {
-        Some(title) if several => said::close_failed(&title, &sentence),
-        _ => sentence,
-    }
+    let title = m.note_of(doc).map(|c| c.title()).filter(|_| several || !m.in_view(doc));
+    Some(match title {
+        Some(title) => said::close_failed(&title, sentence),
+        None => sentence.to_string(),
+    })
 }
 
 fn apply(m: &mut Model, fx: &mut Effects<Notes>, next: yantrik_app::documents::close::Next) {
@@ -154,8 +159,10 @@ fn save_then_close(m: &mut Model, fx: &mut Effects<Notes>, documents: &[Document
     let waiting = m.closing.as_ref().is_some_and(|f| f.stage == Stage::SavingThenClose);
     if waiting && m.busy.is_none() {
         // Nothing started and nothing refused it (the library is not open): the window stays.
-        m.notice = failed(m, said::NOT_SAVED_NOW.into());
-        fx.changed(STATUS);
+        if let Some(sentence) = failed(m, Some(next), said::NOT_SAVED_NOW) {
+            m.notice = sentence;
+            fx.changed(STATUS);
+        }
     }
 }
 
@@ -208,7 +215,7 @@ pub fn prompt(m: &Model) -> Option<(String, String, bool)> {
     let titles: Vec<String> = flow
         .asked
         .iter()
-        .filter_map(|id| Some(Current { doc: m.documents.get(*id)?, file: m.files.get(id)? }.title()))
+        .filter_map(|id| m.note_of(*id).map(|c| c.title()))
         .collect();
     let read_only = m.vault.read_only().is_some();
     let unstored = unstored_at_close(m, flow.window);

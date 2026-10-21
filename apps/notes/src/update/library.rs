@@ -104,7 +104,7 @@ pub fn loaded(m: &mut Model, fx: &mut Effects<Notes>, result: Result<Loaded, Str
             }
             after_store(m, fx);
         }
-        Err(e) => failed(m, fx, e),
+        Err(e) => failed(m, fx, None, e),
     }
 }
 
@@ -161,7 +161,7 @@ pub fn trashed(m: &mut Model, fx: &mut Effects<Notes>, id: &str, result: Result<
             }
             after_store(m, fx);
         }
-        Err(e) => failed(m, fx, e),
+        Err(e) => failed(m, fx, None, e),
     }
 }
 
@@ -237,7 +237,7 @@ pub fn opened(m: &mut Model, fx: &mut Effects<Notes>, result: Result<Note, Strin
             }
             after_store(m, fx);
         }
-        Err(e) => failed(m, fx, e),
+        Err(e) => failed(m, fx, None, e),
     }
 }
 
@@ -271,7 +271,7 @@ pub fn exported(m: &mut Model, fx: &mut Effects<Notes>, result: Result<(), Strin
             landed(m);
             after_store(m, fx);
         }
-        Err(e) => failed(m, fx, e),
+        Err(e) => failed(m, fx, None, e),
     }
 }
 

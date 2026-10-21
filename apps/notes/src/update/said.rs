@@ -240,6 +240,11 @@ pub fn close_failed(title: &str, sentence: &str) -> String {
     format!("\"{title}\" was not saved, so Notes stays open. {sentence}")
 }
 
+/// A save failed of a note the person's window does not show: which note, and why.
+pub fn note_failed(title: &str, sentence: &str) -> String {
+    format!("\"{title}\": {sentence}")
+}
+
 /// *Open in new window* with no note open, and none named.
 pub const NOTHING_FOR_A_WINDOW: &str = "No note is open to show in a new window.";
 /// What a mind can do about it.

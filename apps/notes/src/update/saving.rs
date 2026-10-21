@@ -78,7 +78,7 @@ pub fn save(m: &mut Model, fx: &mut Effects<Notes>, how: How) {
 /// the footer only: the bar already asks, or the person put it away with *Not now*. A save the
 /// person (or a close, or an action) asked for is refused in words and brings the bar back.
 fn blocked(m: &mut Model, fx: &mut Effects<Notes>, how: How) {
-    let Some(sentence) = m.current().map(|c| said::blocked(c.outside())) else { return };
+    let Some((doc, sentence)) = m.current().map(|c| (c.doc.id, said::blocked(c.outside()))) else { return };
     match how {
         How::Autosave => {
             set_status(m, save_state(m));
@@ -87,7 +87,7 @@ fn blocked(m: &mut Model, fx: &mut Effects<Notes>, how: How) {
         How::Asked => {
             m.pane.outside_later = false;
             fx.changed(OUTSIDE);
-            failed(m, fx, sentence.into());
+            failed(m, fx, Some(doc), sentence.into());
         }
     }
 }
@@ -199,7 +199,7 @@ pub fn landed(m: &mut Model, fx: &mut Effects<Notes>, doc: DocumentId, seq: u64,
             }
             // A sighting the save was holding is judged now, and may be the bar's news.
             fx.changed(OUTSIDE);
-            failed(m, fx, sentence);
+            failed(m, fx, Some(doc), sentence);
         }
     }
 }
