@@ -152,3 +152,18 @@ pub fn count_phrase(n: usize, one: &str, many: &str) -> String {
 pub fn month_title(year: i32, month: u32) -> String {
     format!("{} {}", views::month_name(month), year)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::ymd;
+
+    #[test]
+    fn a_date_or_an_events_start_names_the_day_to_show() {
+        assert_eq!(ymd("2026-09-30"), Some((2026, 9, 30)));
+        assert_eq!(ymd("2026-10-15T16:30:00-05:00"), Some((2026, 10, 15)), "an event's start");
+        assert_eq!(ymd("2026-13-01"), None, "no month 13");
+        assert_eq!(ymd("2026-09-32"), None);
+        assert_eq!(ymd("30 Sep"), None, "not a date: the window stays where it is");
+        assert_eq!(ymd(""), None);
+    }
+}
