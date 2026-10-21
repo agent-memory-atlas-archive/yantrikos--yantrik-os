@@ -27,6 +27,7 @@ pub mod paths;
 pub mod persist;
 pub mod present;
 pub mod queue;
+pub mod quit;
 pub mod rail;
 pub mod refused;
 pub mod runner;
