@@ -11135,6 +11135,7 @@ dependencies = [
  "yantrik-ipc-transport",
  "yantrik-mind",
  "yantrik-notifications",
+ "yantrik-services",
  "yantrik-surface",
  "yantrik-testing",
  "yantrik-version",
@@ -12111,10 +12112,10 @@ dependencies = [
  "ureq 2.12.1",
  "yantrik-app",
  "yantrik-app-build",
- "yantrik-app-runtime",
  "yantrik-design-tokens",
  "yantrik-ipc-contracts",
- "yantrik-ipc-transport",
+ "yantrik-services",
+ "yantrik-testing",
  "yantrik-ui-kit",
 ]
 

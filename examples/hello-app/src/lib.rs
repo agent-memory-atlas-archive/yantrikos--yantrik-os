@@ -601,7 +601,12 @@ mod tests {
         use yantrik_app::slint::Model as _;
         // Three asks below: "double", "wipe", "double" again.
         let mind = std::sync::Arc::new(FakeMind::new().answers((0..3).map(|_| Ok("ok".to_string()))));
-        let app = TestApp::<Hello>::start_at_with(Paths::temporary(Hello::ID), Vec::new(), mind.clone());
+        let app = TestApp::<Hello>::start_at_with(
+            Paths::temporary(Hello::ID),
+            Vec::new(),
+            mind.clone(),
+            yantrik_app::Services::fakes(),
+        );
         // The first refresh ran at start: the context is there, the suggestions wait for a Mind.
         assert_eq!(app.ui(|ui| ui.get_agent_context().row_count()), 1);
         assert_eq!(app.ui(|ui| ui.get_agent_suggestions().row_count()), 0);

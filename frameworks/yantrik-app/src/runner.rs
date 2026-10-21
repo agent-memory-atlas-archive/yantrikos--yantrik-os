@@ -50,7 +50,12 @@ pub fn run<A: App>() -> ExitCode {
     // The launch is parsed before the claim: a command line this app does not take is said and
     // refused here, whichever copy would have run it. Opening the settings and drafts writes
     // nothing, so a copy that hands over and exits leaves no trace.
-    let (boot, store) = match Boot::<A::Settings>::open(paths.clone(), args, yantrik_mind::live()) {
+    let (boot, store) = match Boot::<A::Settings>::open(
+        paths.clone(),
+        args,
+        yantrik_mind::live(),
+        crate::services::Services::live(),
+    ) {
         Ok(opened) => opened,
         Err(e) => return startup_failed(A::ID, "launch", &e.sentence),
     };
