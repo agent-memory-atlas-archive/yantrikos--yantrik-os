@@ -27,8 +27,6 @@ pub fn init_tracing(app_name: &str) {
     // nothing: no app in this OS ever wants to start fullscreen.
     std::env::remove_var("SLINT_FULLSCREEN");
 
-    let crate_name = app_name.replace('-', "_");
-    let directive = format!("{crate_name}=info");
 
     // A panic becomes a problem record before it becomes a stack trace on stderr. The record
     // is local and scrubbed; nothing sends it. See `problems`.
@@ -36,8 +34,11 @@ pub fn init_tracing(app_name: &str) {
 
     use tracing_subscriber::layer::SubscriberExt as _;
     use tracing_subscriber::util::SubscriberInitExt as _;
-    let filter = tracing_subscriber::EnvFilter::from_default_env()
-        .add_directive(directive.parse().expect("valid tracing directive"))
+    let mut filter = tracing_subscriber::EnvFilter::from_default_env();
+    for directive in app_directives(app_name) {
+        filter = filter.add_directive(directive.parse().expect("valid tracing directive"));
+    }
+    let filter = filter
         // The framework's own lines (instance guard, theme) must be visible too, or an app that
         // exits at once because another instance holds the slot says nothing.
         .add_directive("yantrik_app_runtime=info".parse().expect("valid directive"))
@@ -49,6 +50,40 @@ pub fn init_tracing(app_name: &str) {
         // The same lines, kept in a small ring so a problem record can carry the last forty.
         .with(RecentLines)
         .try_init();
+}
+
+/// The log targets that are the app's own, at `info`.
+///
+/// An app on the old runtime names itself by its crate (`yantrik-notes`, whose lines are
+/// tagged `yantrik_notes`); an app on the framework is named by its id (`weather`), while its
+/// crate is `yantrik-weather` and its lines are tagged `yantrik_weather`. A filter built from the
+/// id alone matched nothing the app wrote, so its own lines (a kill that failed, a fetch that
+/// fell back) were hidden unless `RUST_LOG` was set. Both spellings are enabled.
+fn app_directives(app_name: &str) -> Vec<String> {
+    let target = app_name.replace('-', "_");
+    let mut directives = vec![format!("{target}=info")];
+    if !target.starts_with("yantrik_") {
+        directives.push(format!("yantrik_{target}=info"));
+    }
+    directives
+}
+
+#[cfg(test)]
+mod directive_tests {
+    use super::app_directives;
+
+    #[test]
+    fn an_apps_own_lines_are_shown_whether_it_is_named_by_crate_or_by_id() {
+        assert_eq!(app_directives("yantrik-notes"), vec!["yantrik_notes=info"]);
+        assert_eq!(app_directives("weather"), vec!["weather=info", "yantrik_weather=info"]);
+        assert_eq!(
+            app_directives("system-monitor"),
+            vec!["system_monitor=info", "yantrik_system_monitor=info"]
+        );
+        for d in app_directives("container-manager") {
+            assert!(d.parse::<tracing_subscriber::filter::Directive>().is_ok(), "{d}");
+        }
+    }
 }
 
 /// A tracing layer that remembers the most recent log lines of this process, for the
