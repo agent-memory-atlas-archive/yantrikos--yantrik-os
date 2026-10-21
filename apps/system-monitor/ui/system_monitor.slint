@@ -1,16 +1,16 @@
-// System Monitor — comprehensive real-time resource monitoring.
-// Screen 23. CPU (overall + per-core), Memory, Disk, Network, Processes.
+// System Monitor: the app's own screen (moved here from the shell's folder; it was screen 23).
+// CPU (overall + per-core), Memory, Disk, Network, Processes.
 // 2-column grid layout: CPU+Memory top, Disk+Network middle, Processes bottom.
 
-import { Theme } from "theme.slint";
-import { YIconButton } from "components/y_button.slint";
-import { ModelTierBadge } from "components/model_tier_badge.slint";
-import { Icon, Icons } from "components/icon.slint";
-import { AppHeader } from "components/app_header.slint";
-import { AgentRail, AgentContextItem, AgentSuggestion } from "components/agent_rail.slint";
-import { AgentProposalCard, AgentProposal } from "components/agent_proposal.slint";
-import { AppColor, AppIdentity } from "components/app_color.slint";
-import { MachineStatusRow } from "components/machine_status_row.slint";
+import { Theme } from "@yantrik-design/theme.slint";
+import { YIconButton } from "@yantrik-kit/y_button.slint";
+import { ModelTierBadge } from "@yantrik-kit/model_tier_badge.slint";
+import { Icon, Icons } from "@yantrik-kit/icon.slint";
+import { AppHeader } from "@yantrik-kit/app_header.slint";
+import { AgentRail, AgentContextItem, AgentSuggestion } from "@yantrik-kit/agent_rail.slint";
+import { AgentProposalCard, AgentProposal } from "@yantrik-kit/agent_proposal.slint";
+import { AppColor, AppIdentity } from "@yantrik-kit/app_color.slint";
+import { MachineStatusRow } from "@yantrik-kit/machine_status_row.slint";
 
 // ── Data structs ──
 

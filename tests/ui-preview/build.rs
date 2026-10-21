@@ -15,6 +15,7 @@ fn main() {
             kit,
             root.join("crates/yantrik-ui-slint/ui"),
             root.join("apps/weather/ui"),
+            root.join("apps/system-monitor/ui"),
         ])
         .with_library_paths(libraries);
     slint_build::compile_with_config("preview.slint", config).unwrap();

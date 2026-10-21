@@ -12,8 +12,8 @@ fn read(rel: &str) -> String {
 }
 
 const UI: &str = "crates/yantrik-ui-slint/ui/";
-/// System Monitor's screen.
-const SYSTEM_MONITOR: &str = "crates/yantrik-ui-slint/ui/system_monitor.slint";
+/// System Monitor's screen, in its app since it moved onto YantrikApp.
+const SYSTEM_MONITOR: &str = "apps/system-monitor/ui/system_monitor.slint";
 /// The kit, where the status row and the tier badge live now that two screens share each.
 const KIT: &str = "crates/yantrik-ui-kit/slint/";
 
