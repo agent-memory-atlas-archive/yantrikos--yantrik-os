@@ -61,6 +61,14 @@ pub enum Request<A: App> {
     },
     /// The draft's file removed.
     DiscardDraft(String),
+    /// A document's file watched under `key`, from what is known to be there.
+    Watch {
+        key: String,
+        path: std::path::PathBuf,
+        seen: Option<crate::documents::Observed>,
+    },
+    /// No longer watched.
+    Unwatch(String),
     /// One line to the person through the notifications service, from this app.
     Notify(yantrik_notifications::Notification),
     /// The agent rail applying a proposal: one of the app's intents, run as an agent through
@@ -279,6 +287,17 @@ impl<A: App> Effects<A> {
         self.requests.push(Request::DiscardDraft(name.into()));
     }
 
+    /// Watches a document's file: a change from `seen` arrives as `Event::FileChanged` under
+    /// `key`. Watching the same key again replaces the entry. Pass
+    /// [`Document::watch_entry`](crate::documents::Document::watch_entry).
+    pub fn watch(&mut self, key: &str, path: std::path::PathBuf, seen: Option<crate::documents::Observed>) {
+        self.requests.push(Request::Watch { key: key.into(), path, seen });
+    }
+
+    pub fn unwatch(&mut self, key: &str) {
+        self.requests.push(Request::Unwatch(key.into()));
+    }
+
     /// Tell the person something, in one line, through the notifications service. Never blocks;
     /// a button on it names one of this app's intents, which the shell calls when it is pressed.
     /// `Notification::titled` leaves the app's name for the framework to fill in.
@@ -345,6 +364,8 @@ impl<A: App> Request<A> {
             Request::SaveSettings { .. } => "save_settings",
             Request::SaveDraft { .. } => "save_draft",
             Request::DiscardDraft(_) => "discard_draft",
+            Request::Watch { .. } => "watch",
+            Request::Unwatch(_) => "unwatch",
             Request::Notify(_) => "notify",
             Request::ApplyAsAgent { .. } => "apply_as_agent",
             Request::Close(_) => "close",
