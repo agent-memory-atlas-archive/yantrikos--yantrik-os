@@ -6,9 +6,10 @@ use std::time::Duration;
 
 use serde_json::json;
 use slint::ComponentHandle as _;
-use yantrik_app::app::{ExitReason, WindowId};
+use yantrik_app::app::{Event, ExitReason, WindowId};
 use yantrik_app::cx::Inbound;
 use yantrik_app::quit::Signal;
+use yantrik_app::Launch;
 
 use super::{a_week, open, Fixture};
 
@@ -93,4 +94,57 @@ fn closing_the_window_with_nothing_pending_ends_at_once() {
     let f = open(a_week());
     f.app.close_requested(WindowId::PRIMARY);
     assert_eq!(f.app.exit_reason(), Some(ExitReason::LastWindowClosed));
+}
+
+/// Closed with a save queued, then brought back (the framework's `present`, then the window
+/// activated): the close is cancelled. The person can write again, and the app keeps running after
+/// the first write lands (delta review of #921 at c17eaa7f, Q1).
+#[test]
+fn a_window_brought_back_during_the_close_wait_cancels_the_close() {
+    let f = open(a_week());
+    f.app.ui(|ui| ui.invoke_add_event());
+    f.app.ui(|ui| ui.invoke_save_event("First".into(), "2026-09-24".into(), "09:00".into(), "".into()));
+    f.app.close_requested(WindowId::PRIMARY);
+    assert!(!f.app.ui(|ui| ui.window().is_visible()));
+    f.app.present().unwrap();
+    f.app.deactivate(WindowId::PRIMARY);
+    f.app.activate(WindowId::PRIMARY);
+    let added = f.app.act("add_event", json!({ "title": "Second", "date": "2026-09-24", "time": "10:00" })).unwrap();
+    f.app.run_jobs();
+    assert_eq!(f.app.exit_reason(), None, "the app keeps running after the first write lands");
+    assert!(f.app.ui(|ui| ui.window().is_visible()));
+    assert_eq!(f.settled(added).unwrap()["added"], json!("Second"));
+    f.app.advance(Duration::from_secs(11));
+    assert_eq!(f.app.exit_reason(), None, "the backstop was disarmed");
+    let titles: Vec<String> = f.store.stored().into_iter().map(|e| e.title).collect();
+    assert!(titles.contains(&"First".to_string()) && titles.contains(&"Second".to_string()), "{titles:?}");
+}
+
+/// A second launch handed over during the close wait cancels it too: the framework raises
+/// `Event::Launch` and then shows the window.
+#[test]
+fn a_second_launch_during_the_close_wait_cancels_the_close() {
+    let f = open(a_week());
+    f.app.ui(|ui| ui.invoke_delete_event(0));
+    f.app.close_requested(WindowId::PRIMARY);
+    f.app.event(Event::Launch(Launch::empty("default")));
+    f.app.present().unwrap();
+    f.app.run_jobs();
+    assert_eq!(f.app.exit_reason(), None);
+    assert!(f.act("add_event", json!({ "title": "Back", "date": "2026-09-24", "time": "10:00" })).is_ok());
+}
+
+/// A logout's ending is not a close: the window activated meanwhile does not cancel it.
+#[test]
+fn a_logout_is_not_cancelled_by_the_window_coming_back() {
+    let f = open(a_week());
+    f.app.ui(|ui| ui.invoke_add_event());
+    f.app.ui(|ui| ui.invoke_save_event("Pressed just before".into(), "2026-09-24".into(), "09:00".into(), "".into()));
+    signal(&f, Signal::Terminate);
+    f.app.deactivate(WindowId::PRIMARY);
+    f.app.activate(WindowId::PRIMARY);
+    let e = f.act("add_event", json!({ "title": "Too late", "date": "2026-09-24", "time": "10:00" }));
+    assert!(e.unwrap_err().contains("Calendar is closing"));
+    f.quiet();
+    assert!(f.app.exit_reason().is_some(), "the save landed, and the logout ended the app");
 }

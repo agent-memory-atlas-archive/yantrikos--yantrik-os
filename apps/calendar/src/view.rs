@@ -87,6 +87,9 @@ pub fn render(ui: &CalendarApp, m: &Model, changed: &Changed) {
         // Put away for the person; the framework still counts it open, so the process stays
         // until the writes in flight have landed.
         let _ = ui.window().hide();
+    } else if named(changed, PART_WINDOW) && !ui.window().is_visible() {
+        // A cancelled close: the window is the person's again.
+        let _ = ui.window().show();
     }
     if changed.has(PART_FORM) {
         ui.set_show_event_form(m.form.open);

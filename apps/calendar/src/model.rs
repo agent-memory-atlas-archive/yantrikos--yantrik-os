@@ -149,10 +149,14 @@ pub struct Model {
     pub removing: Vec<String>,
     /// Creates, deletes and updates sent to the store and not yet landed.
     pub writes: u32,
-    /// The session or a person asked the app to end, or the person closed the window: it ends
-    /// once `writes` is zero, and starts no new write meanwhile.
+    /// The session or a person asked the app to end (`Event::ExitRequested`): it ends once
+    /// `writes` is zero, and starts no new write meanwhile. Nothing cancels it.
     pub ending: bool,
-    /// The window was closed while writes were in flight, and is hidden until they land.
+    /// The person closed the window while writes were in flight: the window is hidden, and the
+    /// app ends once they land, unless the window comes back first (a second launch, or the
+    /// window activated), which cancels the close.
+    pub closing: bool,
+    /// The window is hidden for a close that waits on writes.
     pub hidden: bool,
     pub ai: Ai,
     pub rail: Rail,
@@ -190,6 +194,7 @@ impl Model {
             removing: Vec::new(),
             writes: 0,
             ending: false,
+            closing: false,
             hidden: false,
             ai: Ai::default(),
             rail: Rail::new(mind.clone()),

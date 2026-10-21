@@ -80,6 +80,8 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refuse
             arm_midnight(m, fx);
         }
         Command::Activated => {
+            // A window that is activated is on screen, so a close waiting on writes is over.
+            super::reopen(m, fx);
             follow_today(m, fx);
         }
         Command::Watch => {

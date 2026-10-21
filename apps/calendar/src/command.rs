@@ -127,6 +127,9 @@ pub enum Command {
     Closing,
     /// The writes a close waited on have not landed within `update::CLOSE_BACKSTOP`.
     CloseOverdue,
+    /// A second launch was handed to this copy (`Event::Launch`) while a close waited: the window
+    /// is coming back, and the close is cancelled.
+    Reopened,
 
     // ── The surface ──
     SelectDay(i32),

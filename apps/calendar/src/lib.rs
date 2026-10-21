@@ -130,6 +130,10 @@ impl App for Calendar {
             // away and end once they land (`Command::Closing`). With none, the framework closes it
             // and ends, as before.
             Event::CloseRequested(_) if m.writes > 0 => Some(Command::Closing),
+            // A second launch handed over while that close waits: the framework shows the window
+            // again (`present`), so the close is cancelled. The first launch, at start, and any
+            // other, open nothing, as before.
+            Event::Launch(_) if m.closing => Some(Command::Reopened),
             _ => None,
         }
     }

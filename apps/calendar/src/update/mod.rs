@@ -38,7 +38,7 @@ pub const CLOSE_BACKSTOP: std::time::Duration = std::time::Duration::from_secs(1
 const CLOSE_TIMER: yantrik_app::timers::TimerId = yantrik_app::timers::TimerId("calendar.close");
 
 pub fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refused> {
-    if m.ending && starts_a_write(&command) {
+    if (m.ending || m.closing) && starts_a_write(&command) {
         return Err(Refused::new("closing", "Calendar is closing, so nothing more is written."));
     }
     if write_landed(&command) {
@@ -47,7 +47,7 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refuse
     let result = dispatch(m, command, fx);
     // The end waits for the writes already sent, so none is lost to a logout: it is the store's
     // answer to each that says whether it happened, and the window is gone after it.
-    if m.ending && m.writes == 0 {
+    if (m.ending || m.closing) && m.writes == 0 {
         fx.exit();
     }
     result
@@ -148,13 +148,18 @@ fn dispatch(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refused>
             // The window goes at once, as the person asked; the process stays until the writes
             // already sent have landed, as it did when they ran on the UI thread and the close
             // could not be handled before them. Then `update` ends the app.
-            m.ending = true;
+            m.closing = true;
             m.hidden = true;
             fx.changed(PART_WINDOW);
             fx.after(CLOSE_TIMER, CLOSE_BACKSTOP, Command::CloseOverdue);
             Ok(())
         }
         Command::CloseOverdue => {
+            if !m.closing {
+                // The window came back and the close was cancelled.
+                fx.changed(NOTHING);
+                return Ok(());
+            }
             if m.writes > 0 {
                 tracing::warn!(
                     writes = m.writes,
@@ -165,7 +170,24 @@ fn dispatch(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refused>
             fx.exit();
             Ok(())
         }
+        Command::Reopened => {
+            reopen(m, fx);
+            Ok(())
+        }
     }
+}
+
+/// The window is back for the person while a close waited on writes (a second launch brought it,
+/// or it was activated): the close is cancelled. The writes in flight land as any other; new
+/// writes are taken again. A logout's ending is not a close and is not cancelled.
+pub(crate) fn reopen(m: &mut Model, fx: &mut Fx) {
+    if !m.closing {
+        return;
+    }
+    m.closing = false;
+    m.hidden = false;
+    fx.stop_timer(CLOSE_TIMER);
+    fx.changed(PART_WINDOW);
 }
 
 /// Read the store for the range on screen, in a job. Without `force` the job asks the store's
