@@ -126,14 +126,13 @@ impl App for Calendar {
             // the store is let land first (`update`). The framework still ends the process at its
             // own deadline after a signal, whatever is in flight.
             Event::ExitRequested(_) => Some(Command::Ending),
-            // The last window closed while creates, deletes or updates are still in flight: put it
-            // away and end once they land (`Command::Closing`). With none, the framework closes it
-            // and ends, as before.
-            Event::CloseRequested(_) if m.writes > 0 => Some(Command::Closing),
-            // A second launch handed over while that close waits: the framework shows the window
-            // again (`present`), so the close is cancelled. The first launch, at start, and any
-            // other, open nothing, as before.
-            Event::Launch(_) if m.closing => Some(Command::Reopened),
+            // The last window closed while creates, deletes or updates are still in flight: it
+            // closes, and the app lingers until they land (`Command::Closing`). With none, the
+            // framework closes it and ends, as before.
+            Event::CloseRequested(window) if m.writes > 0 => Some(Command::Closing(window)),
+            // A second launch opened the window again while that close waits: the close is
+            // cancelled. Raised once the window is shown, whatever the window manager does next.
+            Event::Presented(_) if m.closing => Some(Command::Reopened),
             _ => None,
         }
     }

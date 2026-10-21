@@ -1,7 +1,7 @@
 //! The window: its callbacks bound to commands, and the model drawn for the parts that changed.
 //! The only code that touches Slint.
 
-use slint::{ComponentHandle as _, ModelRc, SharedString, VecModel};
+use slint::{ModelRc, SharedString, VecModel};
 use yantrik_app::app::Changed;
 use yantrik_app::cx::Cx;
 use yantrik_app::rail::{self, Proposal, RailView as _};
@@ -82,14 +82,6 @@ pub fn render(ui: &CalendarApp, m: &Model, changed: &Changed) {
     if changed.has(PART_NOTICE) {
         ui.set_notice(m.notice.text.as_str().into());
         ui.set_notice_event(m.notice.event.as_str().into());
-    }
-    if changed.has(PART_WINDOW) && m.hidden {
-        // Put away for the person; the framework still counts it open, so the process stays
-        // until the writes in flight have landed.
-        let _ = ui.window().hide();
-    } else if named(changed, PART_WINDOW) && !ui.window().is_visible() {
-        // A cancelled close: the window is the person's again.
-        let _ = ui.window().show();
     }
     if changed.has(PART_FORM) {
         ui.set_show_event_form(m.form.open);

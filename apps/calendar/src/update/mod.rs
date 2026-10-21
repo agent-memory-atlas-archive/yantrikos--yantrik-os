@@ -11,7 +11,7 @@ use yantrik_app::Refused;
 
 use crate::command::{Command, Work};
 use crate::events;
-use crate::model::{Model, NOTHING, PART_CALENDAR, PART_CLOCK, PART_WINDOW};
+use crate::model::{Model, NOTHING, PART_CALENDAR, PART_CLOCK};
 use crate::work::{self, Listing, Read, Start};
 use crate::Calendar;
 
@@ -32,10 +32,10 @@ pub use navigate::arm_midnight;
 
 type Fx = Effects<Calendar>;
 
-/// How long a close waits for the writes in flight before it ends anyway. Each call is bounded by
-/// the client's own timeout, so this is reached only by a service that stopped answering.
+/// How long a close waits for the writes in flight before the framework ends the app anyway
+/// (`fx.linger`'s backstop, which logs that it did). Each call is bounded by the client's own
+/// timeout, so this is reached only by a service that stopped answering.
 pub const CLOSE_BACKSTOP: std::time::Duration = std::time::Duration::from_secs(10);
-const CLOSE_TIMER: yantrik_app::timers::TimerId = yantrik_app::timers::TimerId("calendar.close");
 
 pub fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refused> {
     if (m.ending || m.closing) && starts_a_write(&command) {
@@ -144,30 +144,16 @@ fn dispatch(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refused>
             fx.changed(NOTHING);
             Ok(())
         }
-        Command::Closing => {
-            // The window goes at once, as the person asked; the process stays until the writes
-            // already sent have landed, as it did when they ran on the UI thread and the close
-            // could not be handled before them. Then `update` ends the app.
+        Command::Closing(window) => {
+            // The window closes at once, as the person asked; the process runs on without it
+            // (`fx.linger`) until the writes already sent have landed, as it did when they ran on
+            // the UI thread and the close could not be handled before them. Then `update` ends
+            // the app. A window that is really closed cannot be brought back by a stale
+            // activation; only a second launch opens it again (`Event::Presented`).
             m.closing = true;
-            m.hidden = true;
-            fx.changed(PART_WINDOW);
-            fx.after(CLOSE_TIMER, CLOSE_BACKSTOP, Command::CloseOverdue);
-            Ok(())
-        }
-        Command::CloseOverdue => {
-            if !m.closing {
-                // The window came back and the close was cancelled.
-                fx.changed(NOTHING);
-                return Ok(());
-            }
-            if m.writes > 0 {
-                tracing::warn!(
-                    writes = m.writes,
-                    "the window closed and the calendar service has not answered every write \
-                     sent before it; ending without knowing whether the store kept them"
-                );
-            }
-            fx.exit();
+            fx.changed(NOTHING);
+            fx.close(window);
+            fx.linger(CLOSE_BACKSTOP);
             Ok(())
         }
         Command::Reopened => {
@@ -177,17 +163,15 @@ fn dispatch(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refused>
     }
 }
 
-/// The window is back for the person while a close waited on writes (a second launch brought it,
-/// or it was activated): the close is cancelled. The writes in flight land as any other; new
-/// writes are taken again. A logout's ending is not a close and is not cancelled.
-pub(crate) fn reopen(m: &mut Model, fx: &mut Fx) {
-    if !m.closing {
-        return;
+/// A second launch opened the window again while a close waited on writes (`Event::Presented`):
+/// the linger is over, and so is the close. The writes in flight land as any other; new writes are
+/// taken again. A logout's ending is not a close and is not cancelled. After `fx.exit()` the
+/// framework opens no window, so nothing here can bring an ending app back.
+fn reopen(m: &mut Model, fx: &mut Fx) {
+    fx.changed(NOTHING);
+    if m.closing {
+        m.closing = false;
     }
-    m.closing = false;
-    m.hidden = false;
-    fx.stop_timer(CLOSE_TIMER);
-    fx.changed(PART_WINDOW);
 }
 
 /// Read the store for the range on screen, in a job. Without `force` the job asks the store's

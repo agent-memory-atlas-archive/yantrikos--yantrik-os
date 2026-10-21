@@ -122,13 +122,11 @@ pub enum Command {
     /// The process is asked to end (`Event::ExitRequested`): a logout, a signal, the display
     /// going, or a person's quit.
     Ending,
-    /// The person closed the window while writes were still in flight: it is put away, and the
-    /// app ends once they have landed.
-    Closing,
-    /// The writes a close waited on have not landed within `update::CLOSE_BACKSTOP`.
-    CloseOverdue,
-    /// A second launch was handed to this copy (`Event::Launch`) while a close waited: the window
-    /// is coming back, and the close is cancelled.
+    /// The person closed the window while writes were still in flight: it closes, and the app
+    /// runs on without it until they have landed (`fx.linger`).
+    Closing(yantrik_app::app::WindowId),
+    /// A second launch opened the window again while that close waited (`Event::Presented`): the
+    /// close is cancelled.
     Reopened,
 
     // ── The surface ──

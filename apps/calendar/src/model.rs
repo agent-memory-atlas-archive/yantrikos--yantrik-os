@@ -38,8 +38,6 @@ pub const PART_FORM: &str = "form";
 pub const PART_FORM_FIELDS: &str = "form.fields";
 /// The header's AI button, and the card it puts up when the rail cannot ask.
 pub const PART_AI: &str = "ai";
-/// The window itself: hidden once the person has closed it while writes are in flight.
-pub const PART_WINDOW: &str = "window";
 /// What a command names when nothing on screen changed.
 pub const NOTHING: &str = "nothing";
 
@@ -152,12 +150,10 @@ pub struct Model {
     /// The session or a person asked the app to end (`Event::ExitRequested`): it ends once
     /// `writes` is zero, and starts no new write meanwhile. Nothing cancels it.
     pub ending: bool,
-    /// The person closed the window while writes were in flight: the window is hidden, and the
-    /// app ends once they land, unless the window comes back first (a second launch, or the
-    /// window activated), which cancels the close.
+    /// The person closed the window while writes were in flight: the window is closed and the app
+    /// lingers without one (`fx.linger`), ending once they land, unless a second launch opens the
+    /// window again first (`Event::Presented`), which cancels the close.
     pub closing: bool,
-    /// The window is hidden for a close that waits on writes.
-    pub hidden: bool,
     pub ai: Ai,
     pub rail: Rail,
     pub mind: Arc<dyn Mind>,
@@ -195,7 +191,6 @@ impl Model {
             writes: 0,
             ending: false,
             closing: false,
-            hidden: false,
             ai: Ai::default(),
             rail: Rail::new(mind.clone()),
             mind,
