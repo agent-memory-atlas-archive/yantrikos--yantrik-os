@@ -287,8 +287,13 @@ pub fn write(record: &Problem) -> Option<PathBuf> {
 /// Record that something went wrong without crashing — a `describe` that timed out, a job that
 /// failed, an action the app itself could not complete.
 pub fn record_failure(program: &str, what: &str, detail: &str) -> Option<PathBuf> {
+    record_failure_in(&dir(), program, what, detail)
+}
+
+/// [`record_failure`] into `dir`, so a test can read back what was filed.
+pub fn record_failure_in(dir: &Path, program: &str, what: &str, detail: &str) -> Option<PathBuf> {
     let record = problem("failure", program, &format!("{what}: {detail}"), None, None);
-    write(&record)
+    write_to(dir, &record)
 }
 
 fn safe_name(program: &str) -> String {

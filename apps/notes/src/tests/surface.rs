@@ -6,7 +6,8 @@ use yantrik_app::control::Action;
 use yantrik_app::intents::Intents;
 use yantrik_testing::{Call, TestApp};
 
-use super::{act, settle, started, state, vault};
+use super::{act, failing, note, settle, started, state, vault};
+use crate::command::Command;
 use crate::Notes;
 
 fn published() -> Vec<Action> {
@@ -216,4 +217,22 @@ fn a_new_note_past_the_library_limit_is_refused_and_nothing_is_made() {
     assert_eq!(app.ui(|ui| ui.get_notice().to_string()), e);
     assert_eq!(held(&app), before, "nothing was created");
     assert_eq!(state(&app)["title"], "Note 7");
+}
+
+#[test]
+fn a_reload_call_whose_save_first_fails_is_refused_and_nothing_is_reloaded() {
+    let app = started();
+    note(&app, "Draft", "");
+    failing(&app).fail(yantrik_app::documents::disk::Step::Write, ".md", None);
+    app.run(Command::Edit("# Draft\n\nunsaved".into()));
+    // A note another program added: a reload that ran would list it.
+    std::fs::write(vault(&app).join("outside.md"), "# Outside\n").unwrap();
+    let refused = act(&app, "reload", json!({})).unwrap_err();
+    assert!(
+        refused.starts_with("The open note could not be saved, so nothing else was done: ")
+            && refused.contains("injected failure at Write"),
+        "{refused}"
+    );
+    assert_eq!(state(&app)["note_count"], 1, "nothing was reloaded");
+    assert_eq!(state(&app)["unsaved"], true);
 }

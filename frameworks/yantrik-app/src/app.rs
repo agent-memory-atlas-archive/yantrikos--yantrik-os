@@ -152,17 +152,37 @@ impl<S: Settings> Boot<S> {
     }
 }
 
-/// Why the app could not start. Printed as a sentence, filed as a problem, exit 1.
+/// Why this copy of the app does not go on to run.
+///
+/// Most often it could not start: printed as a sentence, filed as a problem, exit 1. Or another
+/// copy took this launch ([`Startup::handed_over`]): the start worked as meant, so it is logged
+/// and exits 0 with nothing filed, as the framework's own hand-over to a running copy does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Startup {
     pub sentence: String,
+    handed_over: bool,
 }
 
 impl Startup {
+    /// The app could not start, and `sentence` says why.
     pub fn new(sentence: impl Into<String>) -> Startup {
         Startup {
             sentence: sentence.into(),
+            handed_over: false,
         }
+    }
+
+    /// Another copy of the app has taken this launch: an app's own claim beyond the framework's
+    /// (one copy per library, say) found the copy that holds it. Not a failure.
+    pub fn handed_over(sentence: impl Into<String>) -> Startup {
+        Startup {
+            sentence: sentence.into(),
+            handed_over: true,
+        }
+    }
+
+    pub fn is_handed_over(&self) -> bool {
+        self.handed_over
     }
 }
 
@@ -227,6 +247,8 @@ pub trait App: Sized + 'static {
     const ID: &'static str;
 
     /// Build the model before any window exists. No UI. `boot.settings` is what was saved.
+    /// `Err(Startup::new(..))` when the app cannot start; `Err(Startup::handed_over(..))` when
+    /// another copy has taken this launch, which ends the process quietly.
     fn model(boot: &Boot<Self::Settings>) -> Result<Self::Model, Startup>;
 
     /// Bind the window's callbacks to commands. Once, on the UI thread, after the window is made

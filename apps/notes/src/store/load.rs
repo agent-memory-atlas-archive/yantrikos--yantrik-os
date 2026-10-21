@@ -1,5 +1,6 @@
-//! Opening the vault: its folders made, every note and Trash record read within the limits, and an
-//! interrupted save replayed as a note of its own.
+//! Opening the vault: its format checked (and written down, the first time), its folders made,
+//! every note and Trash record read within the limits, and an interrupted save replayed as a note
+//! of its own. A vault this build may not write is still read, and nothing in it is changed.
 
 use std::os::unix::fs::PermissionsExt as _;
 
@@ -12,6 +13,9 @@ use crate::note::Note;
 pub struct Loaded {
     pub notes: Vec<Note>,
     pub notice: String,
+    /// Why nothing in the vault may be changed, when something stops it (`Vault::mark`): the
+    /// model's vault takes it on (`Vault::with_access`).
+    pub read_only: Option<String>,
 }
 
 /// The most directory entries read: the note limit, with room for sidecars and strays.
@@ -34,7 +38,12 @@ impl Vault {
     }
 
     pub fn load(&self) -> Result<Loaded, String> {
-        self.initialize()?;
+        std::fs::create_dir_all(&self.dir).map_err(|e| e.to_string())?;
+        let read_only = self.mark().err();
+        // A vault open read-only is only read: its folders are neither made nor re-permissioned.
+        if read_only.is_none() {
+            self.initialize()?;
+        }
         let mut notes = vec![];
         let mut bytes = 0;
         let mut skipped = 0;
@@ -82,11 +91,15 @@ impl Vault {
                 stored: true,
             });
         }
-        for e in std::fs::read_dir(self.dir.join(".trash-v2"))
-            .map_err(|e| e.to_string())?
-            .filter_map(Result::ok)
-            .take(MAX_NOTES)
-        {
+        let trash = self.dir.join(".trash-v2");
+        // Read-only, the Trash was neither made nor checked above: one that is missing, or is not
+        // a real directory, has nothing to read.
+        let trashed = if read_only.is_none() || std::fs::symlink_metadata(&trash).is_ok_and(|m| m.is_dir()) {
+            Some(std::fs::read_dir(&trash).map_err(|e| e.to_string())?)
+        } else {
+            None
+        };
+        for e in trashed.into_iter().flatten().filter_map(Result::ok).take(MAX_NOTES) {
             if e.path().extension().and_then(|s| s.to_str()) != Some("json") {
                 continue;
             }
@@ -100,11 +113,17 @@ impl Vault {
                 }
             }
         }
-        if let Some(recovered) = self.replay_journal(&mut notes)? {
-            return Ok(Loaded { notes, notice: recovered });
+        // Replaying writes a note and removes the journal: read-only, the journal waits for a
+        // load that may write.
+        if read_only.is_none() {
+            // Through a vault this load found writable, whatever the last one found.
+            if let Some(recovered) = self.with_access(None).replay_journal(&mut notes)? {
+                return Ok(Loaded { notes, notice: recovered, read_only });
+            }
         }
         Ok(Loaded {
             notes,
+            read_only,
             notice: if skipped > 0 {
                 format!("{skipped} files could not be loaded (format or library limits). Originals are untouched.")
             } else {

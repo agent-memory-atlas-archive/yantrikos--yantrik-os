@@ -87,7 +87,14 @@ pub fn act(m: &mut Model, fx: &mut Effects<Notes>, act: Act) {
         }
         Act::Reload => {
             ask(m, fx, Expect::Reloaded);
-            window::act(m, fx, WindowAction::Reload);
+            // Saved first as the window's Refresh is, except that a save that fails refuses the
+            // call: nothing was reloaded. A read-only library reloads with no save first.
+            let reload = Step::Window(WindowAction::Reload);
+            if window::saves_first(m, &WindowAction::Reload) {
+                save_then(m, fx, reload);
+            } else {
+                run(m, fx, reload);
+            }
         }
         Act::Preview => {
             window::act(m, fx, WindowAction::Preview);
@@ -121,7 +128,13 @@ pub fn act(m: &mut Model, fx: &mut Effects<Notes>, act: Act) {
             let Some(text) = open_text(m, fx) else { return };
             if library_open(m, fx) {
                 ask(m, fx, Expect::Exported { to, text });
-                save_then(m, fx, Step::Export { path });
+                // A read-only library would refuse the save first; the export writes the text as
+                // it is in the window, outside the vault, which is how it gets out.
+                if m.vault.read_only().is_some() {
+                    run(m, fx, Step::Export { path });
+                } else {
+                    save_then(m, fx, Step::Export { path });
+                }
             }
         }
     }
@@ -222,7 +235,7 @@ fn answer(m: &Model, expect: Expect, landed: bool) -> Result<Value, String> {
 }
 
 /// A refusal the person at the window sees too: the notice, and the call's error.
-fn refuse(m: &mut Model, fx: &mut Effects<Notes>, sentence: String) {
+pub(super) fn refuse(m: &mut Model, fx: &mut Effects<Notes>, sentence: String) {
     m.notice = sentence.clone();
     fx.changed(STATUS);
     fx.settle(Err(Refused::new("refused", sentence)));

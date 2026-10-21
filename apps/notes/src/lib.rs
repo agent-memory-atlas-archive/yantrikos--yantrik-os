@@ -17,6 +17,8 @@ use yantrik_app::intents::Intents;
 use yantrik_app::paths::Paths;
 use yantrik_app::Refused;
 
+use crate::store::version::Format;
+
 mod claim;
 mod command;
 mod describe;
@@ -68,17 +70,24 @@ impl App for Notes {
     const ID: &'static str = "notes";
 
     /// The model, once this copy holds the library (`claim`). A copy that does not is the second
-    /// one: the first is asked to show its window, as the old build did, and this one stops.
+    /// one: the first is asked to show its window, as the old build did, and this one stops as a
+    /// hand-over, not a failure.
+    ///
+    /// A library a newer Notes wrote is refused first, before the claim makes its lock: nothing
+    /// in that vault is touched by a build that does not know its format.
     fn model(boot: &Boot) -> Result<Model, Startup> {
-        let dir = vault_dir(&boot.paths);
-        let claim = claim::hold(legacy_lock(&boot.paths).as_deref(), &dir).map_err(|claim::Held| {
+        let vault = store::Vault::real(vault_dir(&boot.paths));
+        if let Format::Newer(found) = vault.format() {
+            return Err(Startup::new(store::version::newer_at_start(found)));
+        }
+        let claim = claim::hold(legacy_lock(&boot.paths).as_deref(), vault.dir()).map_err(|claim::Held| {
             // Never from a test: it would ask the person's own Notes to come forward.
             if !cfg!(test) {
                 yantrik_app::instance::present_running(Self::ID);
             }
-            Startup::new(claim::ALREADY_RUNNING)
+            Startup::handed_over(claim::ALREADY_RUNNING)
         })?;
-        Ok(Model::new(store::Vault::real(dir), claim))
+        Ok(Model::new(vault, claim))
     }
 
     fn wire(cx: &Cx<Self>) {

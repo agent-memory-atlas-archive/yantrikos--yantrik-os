@@ -11,7 +11,7 @@ use yantrik_app::documents::{DocumentId, Durability, Fingerprint, SaveTicket};
 use crate::note::{Note, NoteText};
 use crate::store::{read, validate, SaveFailed, SaveJob, Saved, Vault, LIMIT};
 
-fn fixture(name: &str) -> PathBuf {
+pub fn fixture(name: &str) -> PathBuf {
     let p = std::env::temp_dir().join(format!(
         "yantrik-notes-{name}-{}-{}",
         std::process::id(),
@@ -22,7 +22,7 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 /// Saves `content` as note `id`, whose files hold `on_disk`, as the document's save job would.
-fn save(vault: &Vault, id: &str, on_disk: Option<&NoteText>, content: &NoteText) -> Result<Saved, SaveFailed> {
+pub fn save(vault: &Vault, id: &str, on_disk: Option<&NoteText>, content: &NoteText) -> Result<Saved, SaveFailed> {
     vault.save(&SaveJob {
         id: id.into(),
         ticket: SaveTicket {

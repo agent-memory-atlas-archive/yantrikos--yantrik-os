@@ -1,4 +1,5 @@
-//! Every write the vault makes, through the disk seam, with the store's own refusals first.
+//! Every write the vault makes, through the disk seam, with the store's own refusals first. A
+//! vault open read-only refuses each of them here, so no path into the vault writes past it.
 
 use std::path::Path;
 
@@ -10,6 +11,9 @@ impl Vault {
     /// `text` at `path`, whole or not at all. With `replace` the file there is replaced, unless it
     /// is linked or read-only; without it, nothing already at `path` is ever replaced.
     pub(super) fn put(&self, path: &Path, text: &str, replace: bool) -> Result<(), DiskError> {
+        if let Some(why) = &self.read_only {
+            return Err(DiskError { step: Step::Check, error: why.clone() });
+        }
         if replace {
             replaceable(path)?;
             self.disk.write_atomically(path, text.as_bytes())
@@ -20,6 +24,9 @@ impl Vault {
 
     /// Removes a file; one already gone is removed.
     pub(super) fn remove(&self, path: &Path) -> Result<(), String> {
+        if let Some(why) = &self.read_only {
+            return Err(why.clone());
+        }
         self.disk.remove(path).map_err(|e| e.to_string())
     }
 
