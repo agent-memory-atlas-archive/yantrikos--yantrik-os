@@ -5,6 +5,13 @@ use crate::problems;
 
 /// Initialize tracing-subscriber with an env filter for the app, after answering `--version`.
 pub fn init_tracing(app_name: &str) {
+    init_tracing_for(app_name, None);
+}
+
+/// [`init_tracing`] for an app whose crate is not named after its id: the runner passes the
+/// crate the app's type lives in (`yantrik_container_manager` for the app `containers`), so
+/// its own lines are shown whatever the two are called.
+pub fn init_tracing_for(app_name: &str, crate_target: Option<&str>) {
     // `--version`, answered here because this is the one line every app binary runs first.
     //
     // A machine used to give three answers about what it was, one of them a hardcoded
@@ -27,7 +34,6 @@ pub fn init_tracing(app_name: &str) {
     // nothing: no app in this OS ever wants to start fullscreen.
     std::env::remove_var("SLINT_FULLSCREEN");
 
-
     // A panic becomes a problem record before it becomes a stack trace on stderr. The record
     // is local and scrubbed; nothing sends it. See `problems`.
     problems::install_panic_hook(app_name);
@@ -35,14 +41,17 @@ pub fn init_tracing(app_name: &str) {
     use tracing_subscriber::layer::SubscriberExt as _;
     use tracing_subscriber::util::SubscriberInitExt as _;
     let mut filter = tracing_subscriber::EnvFilter::from_default_env();
-    for directive in app_directives(app_name) {
+    // The framework's own lines (instance guard, theme) must be visible too, or an app that
+    // exits at once because another instance holds the slot says nothing.
+    let mut defaults = app_directives(app_name, crate_target);
+    defaults.extend([
+        "yantrik_app_runtime=info".to_string(),
+        "yantrik_app=info".to_string(),
+    ]);
+    let asked = std::env::var("RUST_LOG").unwrap_or_default();
+    for directive in unless_asked(defaults, &asked) {
         filter = filter.add_directive(directive.parse().expect("valid tracing directive"));
     }
-    let filter = filter
-        // The framework's own lines (instance guard, theme) must be visible too, or an app that
-        // exits at once because another instance holds the slot says nothing.
-        .add_directive("yantrik_app_runtime=info".parse().expect("valid directive"))
-        .add_directive("yantrik_app=info".parse().expect("valid directive"));
     // A second init (a test harness after the app) is not an error worth stopping for.
     let _ = tracing_subscriber::registry()
         .with(filter)
@@ -58,31 +67,98 @@ pub fn init_tracing(app_name: &str) {
 /// tagged `yantrik_notes`); an app on the framework is named by its id (`weather`), while its
 /// crate is `yantrik-weather` and its lines are tagged `yantrik_weather`. A filter built from the
 /// id alone matched nothing the app wrote, so its own lines (a kill that failed, a fetch that
-/// fell back) were hidden unless `RUST_LOG` was set. Both spellings are enabled.
-fn app_directives(app_name: &str) -> Vec<String> {
+/// fell back) were hidden unless `RUST_LOG` was set. The id's spellings are enabled, and the
+/// crate the runner names, which is the only one that is right when the id is not the crate's
+/// suffix (`containers` in `yantrik_container_manager`).
+fn app_directives(app_name: &str, crate_target: Option<&str>) -> Vec<String> {
     let target = app_name.replace('-', "_");
-    let mut directives = vec![format!("{target}=info")];
+    let mut targets = vec![target.clone()];
     if !target.starts_with("yantrik_") {
-        directives.push(format!("yantrik_{target}=info"));
+        targets.push(format!("yantrik_{target}"));
     }
-    directives
+    if let Some(own) = crate_target {
+        if !targets.iter().any(|t| t == own) {
+            targets.push(own.to_string());
+        }
+    }
+    targets.into_iter().map(|t| format!("{t}=info")).collect()
+}
+
+/// The crate a type is defined in, as its log target: `yantrik_container_manager` for
+/// `yantrik_container_manager::Containers`.
+pub(crate) fn crate_of<T>() -> &'static str {
+    let name = std::any::type_name::<T>();
+    name.split("::").next().unwrap_or(name)
+}
+
+/// The defaults whose target `RUST_LOG` does not name. A later directive for the same target
+/// replaces an earlier one, so a default added after the environment's would undo
+/// `RUST_LOG=yantrik_weather=debug`; the person's own setting wins.
+fn unless_asked(defaults: Vec<String>, rust_log: &str) -> Vec<String> {
+    let named: Vec<&str> = rust_log
+        .split(',')
+        .filter_map(|d| d.split_once('=').map(|(target, _)| target.trim()))
+        .collect();
+    defaults
+        .into_iter()
+        .filter(|d| {
+            d.split_once('=')
+                .is_some_and(|(target, _)| !named.contains(&target))
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod directive_tests {
-    use super::app_directives;
+    use super::{app_directives, unless_asked};
 
     #[test]
     fn an_apps_own_lines_are_shown_whether_it_is_named_by_crate_or_by_id() {
-        assert_eq!(app_directives("yantrik-notes"), vec!["yantrik_notes=info"]);
-        assert_eq!(app_directives("weather"), vec!["weather=info", "yantrik_weather=info"]);
         assert_eq!(
-            app_directives("system-monitor"),
+            app_directives("yantrik-notes", None),
+            vec!["yantrik_notes=info"]
+        );
+        assert_eq!(
+            app_directives("weather", Some("yantrik_weather")),
+            vec!["weather=info", "yantrik_weather=info"]
+        );
+        assert_eq!(
+            app_directives("system-monitor", Some("yantrik_system_monitor")),
             vec!["system_monitor=info", "yantrik_system_monitor=info"]
         );
-        for d in app_directives("container-manager") {
-            assert!(d.parse::<tracing_subscriber::filter::Directive>().is_ok(), "{d}");
+        // An id that is not the crate's suffix: only the crate the runner names matches.
+        let containers = app_directives("containers", Some("yantrik_container_manager"));
+        assert!(containers.contains(&"yantrik_container_manager=info".to_string()));
+        for d in containers {
+            assert!(
+                d.parse::<tracing_subscriber::filter::Directive>().is_ok(),
+                "{d}"
+            );
         }
+    }
+
+    #[test]
+    fn rust_log_wins_for_a_target_it_names() {
+        let defaults = vec![
+            "yantrik_weather=info".to_string(),
+            "yantrik_app=info".to_string(),
+        ];
+        assert_eq!(unless_asked(defaults.clone(), ""), defaults);
+        assert_eq!(
+            unless_asked(defaults.clone(), "yantrik_weather=debug, hyper=warn"),
+            vec!["yantrik_app=info"]
+        );
+        assert_eq!(
+            unless_asked(defaults.clone(), "debug"),
+            defaults,
+            "a bare level names no target"
+        );
+    }
+
+    #[test]
+    fn the_crate_of_an_app_is_where_its_type_lives() {
+        struct Here;
+        assert_eq!(super::crate_of::<Here>(), "yantrik_app");
     }
 }
 

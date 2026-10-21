@@ -43,7 +43,7 @@ fn drain_on_ui_thread() {
 /// Runs the app to its end. The exit code says how it ended: 0 for a close or a display that
 /// went away, 1 for a failure, with a problem record.
 pub fn run<A: App>() -> ExitCode {
-    boot::init_tracing(A::ID);
+    boot::init_tracing_for(A::ID, Some(boot::crate_of::<A>()));
     boot::choose_backend();
     let paths = Paths::for_app(A::ID);
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
