@@ -29,15 +29,25 @@ impl WindowId {
     pub const PRIMARY: WindowId = WindowId(0);
 }
 
-/// Why the process was asked to end.
+/// Why the process was asked to end. As `Event::ExitRequested`, it says who asked, and so
+/// whether anyone is there to answer a question (`crate::quit`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitReason {
     /// The last window closed.
     LastWindowClosed,
-    /// The app asked (`fx.exit()`).
+    /// The app ended itself (`fx.exit()`): the reason recorded, never raised as an event by the
+    /// framework.
     App,
-    /// The session is ending: a bounded chance to save, not a completed interactive save.
+    /// The session or the system is ending the process: SIGTERM (a shutdown, a logout, a kill)
+    /// or SIGHUP (the session hung up). No one is there to answer, and the process is killed
+    /// after a grace period whatever the app does: save without asking, then `fx.exit()`. A bounded
+    /// chance to save, not a completed interactive save; the framework ends the process itself if
+    /// the app has not within [`crate::quit::SIGNAL_DEADLINE`].
     Logout,
+    /// A person asked the app to quit: the app's `fx.request_quit()`, from Ctrl+Q or a Quit
+    /// menu. Someone is there to answer: the app may ask about unsaved work, once over every
+    /// window, and the person may cancel, which keeps the app running.
+    Person,
 }
 
 /// Something the framework saw that the app may turn into a command. `S` is the app's
@@ -54,8 +64,9 @@ pub enum Event<S> {
     /// The person asked a window to close. `None` from [`App::event`] closes it now; a command
     /// keeps it open until something runs `fx.close(window)`, so "Save changes?" is a flow.
     CloseRequested(WindowId),
-    /// The process is asked to end. `None` ends it now; a command may save first and then
-    /// `fx.exit()`.
+    /// The process is asked to end: by a person (`ExitReason::Person`) or by the session or the
+    /// system (`ExitReason::Logout`). `None` ends it now; a command may save first and then
+    /// `fx.exit()`, or, for a person's quit, ask and keep running when the person cancels.
     ExitRequested(ExitReason),
     /// A window became the active one.
     Activated(WindowId),

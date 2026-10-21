@@ -39,6 +39,8 @@ sha2 = { workspace = true }
 
 # geteuid, for checking the pid-file directory is really ours before trusting it (instance.rs).
 [target.'cfg(unix)'.dependencies]
+# SIGTERM and SIGHUP heard through its self-pipe, so the handler only writes a byte (quit.rs).
+signal-hook = { workspace = true }
 libc = { workspace = true }
 
 [dev-dependencies]

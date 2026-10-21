@@ -44,6 +44,7 @@ use yantrik_surface::LocalRegistry;
 mod handle;
 mod jobs_table;
 mod persisted;
+mod quitting;
 mod rail_hooks;
 mod settlement;
 mod windows;
@@ -63,6 +64,9 @@ pub enum Inbound<A: App> {
     Written(Written),
     /// The housekeeping thread saw a file change.
     Seen(Seen),
+    /// The signal thread heard a signal that asks the process to end, or its deadline passed.
+    Signal(crate::quit::Signal),
+    Overdue(crate::quit::Signal),
     /// The rest of a drain that reached [`PENDING_PER_DRAIN`]: posted by the core to itself, and
     /// by nothing else (the token cannot be made outside this crate).
     Continue(Continuation),
@@ -116,6 +120,8 @@ pub struct Core<A: App> {
     continue_posted: Cell<bool>,
     last_refusal: RefCell<Option<Refused>>,
     exit: Cell<Option<ExitReason>>,
+    /// The signal that first asked the process to end, so a second stacks nothing (`quitting`).
+    signalled: Cell<Option<crate::quit::Signal>>,
     /// The windows beyond the first, and whether the first is open (`cx/windows.rs`).
     windows: RefCell<windows::Windows<A::Ui>>,
     /// This core, weakly: a window opened later is wired through a `Cx` made from it.
@@ -195,6 +201,7 @@ impl<A: App> Core<A> {
                 continue_posted: Cell::new(false),
                 last_refusal: RefCell::new(None),
                 exit: Cell::new(None),
+                signalled: Cell::new(None),
                 windows: RefCell::new(windows::Windows::new()),
                 me: weak.clone(),
                 registry: RefCell::new(None),
@@ -234,11 +241,6 @@ impl<A: App> Core<A> {
     /// The last command's refusal, if it was refused.
     pub fn last_refusal(&self) -> Option<Refused> {
         self.last_refusal.borrow().clone()
-    }
-
-    /// Why the process is ending, once something asked it to.
-    pub fn exit_reason(&self) -> Option<ExitReason> {
-        self.exit.get()
     }
 
     /// Draw everything: the first render. A callback a binding fires during it is queued, as
@@ -425,6 +427,7 @@ impl<A: App> Core<A> {
         // Closed after everything else this command asked for, so a window it replaces is on
         // screen before the old one goes.
         let mut closing = Vec::new();
+        let mut quit = false;
         for request in requests {
             match request {
                 Request::Then(command) => self.queue(invocation, command),
@@ -495,6 +498,7 @@ impl<A: App> Core<A> {
                 Request::OpenWindow(window) => self.open_window(window),
                 Request::Close(window) => closing.push(window),
                 Request::Exit => self.request_exit(ExitReason::App),
+                Request::RequestQuit => quit = true,
             }
         }
         // Once every effect is applied: a close and an open in one command replace a window.
@@ -503,6 +507,9 @@ impl<A: App> Core<A> {
                 self.close_window(window);
             }
             self.exit_if_no_window();
+        }
+        if quit {
+            self.quit_requested();
         }
     }
 
@@ -518,6 +525,8 @@ impl<A: App> Core<A> {
                 Inbound::Event(event) => self.event(event),
                 Inbound::Written(written) => self.written(written),
                 Inbound::Seen(seen) => self.seen(seen),
+                Inbound::Signal(signal) => self.signalled(signal),
+                Inbound::Overdue(signal) => self.overdue(signal),
                 Inbound::Continue(_) => {
                     self.continue_posted.set(false);
                     self.drain_pending();
@@ -568,13 +577,6 @@ impl<A: App> Core<A> {
             (None, Event::FileChanged { .. }) => {}
             // Already logged and filed by the window table.
             (None, Event::WindowNotOpened { .. }) => {}
-        }
-    }
-
-    fn request_exit(&self, reason: ExitReason) {
-        if self.exit.get().is_none() {
-            self.exit.set(Some(reason));
-            let _ = slint::quit_event_loop();
         }
     }
 
