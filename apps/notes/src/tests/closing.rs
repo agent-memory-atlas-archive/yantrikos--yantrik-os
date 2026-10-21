@@ -9,7 +9,6 @@ use yantrik_testing::TestApp;
 use super::{draft_file, failing, file, notice, settle, unsaved, with_note};
 use crate::command::{Command, WindowAction};
 use crate::update::closing::CLOSE_DIALOG;
-use crate::update::said;
 use crate::Notes;
 
 const TYPED: &str = "# Closing\n\nlast words";
@@ -179,7 +178,12 @@ fn closing_a_read_only_library_with_unsaved_text_offers_dont_save() {
     let (heading, sentence) = app.ui(|ui| (ui.get_close_heading().to_string(), ui.get_close_said().to_string()));
     assert_eq!(app.ui(|ui| ui.get_dialog()), CLOSE_DIALOG);
     assert!(heading.starts_with("Save \""), "{heading}");
-    assert_eq!(sentence, said::close_prompt(&["x".into()], false, true).1, "it says Export keeps a copy");
+    assert_eq!(
+        sentence,
+        "This library is open read-only, so your changes cannot be saved here. Cancel, then Export, keeps a copy \
+         of the text; Don't save closes without it.",
+        "it says Export keeps a copy"
+    );
     assert!(app.ui(|ui| ui.get_read_only()), "and the prompt's Save is not shown");
     // Export first, as the sentence says: Cancel, then the window's Export.
     press(&app, "close-cancel");
