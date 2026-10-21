@@ -10,7 +10,8 @@ use serde_json::json;
 use yantrik_app::Refused;
 use yantrik_ipc_contracts::calendar::MAX_REMINDER_MINUTES;
 
-use super::{apply_after_write, range_at, show_date, Fx};
+use super::{read_back, show_date, Fx};
+use crate::answers;
 use crate::command::{Command, Door, Saved, Work};
 use crate::model::{Model, DEFAULT_EVENT_MINUTES, NOTHING, PART_FORM, PART_FORM_FIELDS, PART_NOTICE};
 use crate::views;
@@ -38,7 +39,6 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refuse
         }
         Command::SaveForm { title, date, time, notes } => save_form(m, fx, title, date, time, notes)?,
         Command::Add(ask) => {
-            m.answer = serde_json::Value::Null;
             // Who is asking, verified: the record a later `delete_own_event` is checked against.
             let creator = m.machine.who.identify(&ask.caller);
             let draft = Draft {
@@ -60,8 +60,7 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refuse
                     fx.settle(Err(Refused::new("not_saved", e)));
                 }
                 Ok(new) => {
-                    let after = range_at(m, &ask.date);
-                    create(m, fx, Door::Surface, new, &ask.date, &ask.time, after);
+                    create(m, fx, Door::Surface, new, &ask.date, &ask.time);
                     fx.changed(NOTHING);
                 }
             }
@@ -74,6 +73,7 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refuse
 
 /// The form, opened on the selected day at nine, with `title` and the length a Save will give it.
 fn open(m: &mut Model, fx: &mut Fx, title: String, minutes: i32) {
+    m.form.generation += 1;
     m.form.duration_min = minutes;
     m.form.date = m.selected_date().format("%Y-%m-%d").to_string();
     m.form.time = "09:00".into();
@@ -110,8 +110,7 @@ fn save_form(m: &mut Model, fx: &mut Fx, title: String, date: String, time: Stri
         }
         Ok(new) => {
             m.form.saving = true;
-            let here = m.visible_range();
-            create(m, fx, Door::Form, new, &date, &time, here);
+            create(m, fx, Door::Form, new, &date, &time);
             fx.changed(NOTHING);
         }
     }
@@ -171,24 +170,15 @@ fn plan(m: &Model, draft: &Draft<'_>, creator: Option<String>) -> Result<NewEven
     })
 }
 
-/// Store the event in a job, and read the store back for `after`, the range the window shows once
-/// it lands. A create that failed is not read back: nothing changed.
-fn create(m: &mut Model, fx: &mut Fx, door: Door, new: NewEvent, date: &str, time: &str, after: work::Range) {
+/// Store the event in a job. Its result is the job's whole answer: the store is read back in a job
+/// of its own once the create has landed (`read_back`), so a read that fails cannot make a stored
+/// event look unsaved and invite saving it twice.
+fn create(m: &mut Model, fx: &mut Fx, door: Door, new: NewEvent, date: &str, time: &str) {
     let api = m.machine.api.clone();
-    let sequence = m.reads.sequence.clone();
-    let (date, time) = (date.to_string(), time.to_string());
+    let (date, time, form) = (date.to_string(), time.to_string(), m.form.generation);
     fx.spawn_or(Command::WorkFailed(Work::Save(door)), move |_| {
         let result = work::create(api.as_ref(), &new);
-        let listing = result.is_ok().then(|| work::reload(api.as_ref(), &sequence, after));
-        Command::Saved(Box::new(Saved {
-            door,
-            title: new.title,
-            date,
-            time,
-            all_day: new.all_day,
-            result,
-            listing,
-        }))
+        Command::Saved(Box::new(Saved { door, title: new.title, date, time, all_day: new.all_day, result, form }))
     });
 }
 
@@ -209,15 +199,20 @@ fn landed(m: &mut Model, fx: &mut Fx, saved: Saved) {
             return;
         }
     };
-    m.form.duration_min = DEFAULT_EVENT_MINUTES;
     m.notice.say("");
     fx.changed(PART_NOTICE);
     match saved.door {
+        // The form that was saved closes, and its length goes back to an hour; a form the person
+        // has opened since, perhaps from a template, is theirs and is left alone.
         Door::Form => {
-            m.form.open = false;
-            fx.changed(PART_FORM);
+            if m.form.generation == saved.form {
+                m.form.duration_min = DEFAULT_EVENT_MINUTES;
+                m.form.open = false;
+                fx.changed(PART_FORM);
+            }
         }
         Door::Surface => {
+            m.form.duration_min = DEFAULT_EVENT_MINUTES;
             show_date(m, &saved.date);
             let on = if saved.all_day { saved.date.clone() } else { format!("{} {}", saved.date, saved.time) };
             let mut answer = json!({ "added": saved.title, "on": on, "id": id, "all_day": saved.all_day });
@@ -227,10 +222,8 @@ fn landed(m: &mut Model, fx: &mut Fx, saved: Saved) {
                 // number there would describe a reminder that will not happen.
                 answer["reminder_minutes"] = json!(reminder);
             }
-            m.answer = answer;
+            answers::settle(m, fx, answer);
         }
     }
-    if let Some(listing) = saved.listing {
-        apply_after_write(m, fx, listing);
-    }
+    read_back(m, fx);
 }

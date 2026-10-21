@@ -15,6 +15,14 @@ fn params(value: impl serde::Serialize) -> Result<serde_json::Value, String> {
     serde_json::to_value(value).map_err(|e| e.to_string())
 }
 
+/// The listing request for `from..=to`, both days whole.
+fn range(from: NaiveDate, to: NaiveDate) -> Result<serde_json::Value, String> {
+    params(EventsParams {
+        start_date: format!("{}T00:00:00", from.format("%Y-%m-%d")),
+        end_date: format!("{}T23:59:59", to.format("%Y-%m-%d")),
+    })
+}
+
 fn call<T: DeserializeOwned>(
     api: &dyn CalendarApi,
     method_name: &str,
@@ -31,11 +39,7 @@ pub fn service_events(
     from: NaiveDate,
     to: NaiveDate,
 ) -> Result<Vec<CalendarEvent>, String> {
-    let request = EventsParams {
-        start_date: format!("{}T00:00:00", from.format("%Y-%m-%d")),
-        end_date: format!("{}T23:59:59", to.format("%Y-%m-%d")),
-    };
-    call(api, method::EVENTS, params(request)?)
+    call(api, method::EVENTS, range(from, to)?)
 }
 
 /// Every event overlapping `from..=to`.
@@ -50,6 +54,17 @@ pub fn events_in_range(
     to: NaiveDate,
 ) -> Result<Vec<CalEvent>, String> {
     Ok(events::from_store(&service_events(api, from, to)?))
+}
+
+/// [`events_in_range`] from a service already listening; it is never started for this.
+pub fn events_in_range_running(
+    api: &dyn CalendarApi,
+    from: NaiveDate,
+    to: NaiveDate,
+) -> Result<Vec<CalEvent>, String> {
+    let result = api.call_running(method::EVENTS, range(from, to)?).map_err(|e| e.message)?;
+    let listed: Vec<CalendarEvent> = serde_json::from_value(result).map_err(|e| e.to_string())?;
+    Ok(events::from_store(&listed))
 }
 
 /// What the store is at, or `None` when the question could not be put.

@@ -1,16 +1,19 @@
 //! What Calendar is: the model every command changes and every render and `describe` reads.
 
+use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
 use chrono::{NaiveDate, NaiveDateTime};
 use serde_json::Value;
 use yantrik_app::cx::Inbound;
+use yantrik_app::intents::InvocationId;
 use yantrik_app::mind::Mind;
 use yantrik_app::queue::Post;
 use yantrik_app::rail::{Proposal, Rail};
 use yantrik_ipc_contracts::calendar::CalendarRevision;
 
+use crate::answers::Asked;
 use crate::backend::Machine;
 use crate::events::{self, CalEvent};
 use crate::notice::Notice;
@@ -58,6 +61,9 @@ pub struct Form {
     /// A save of the form is in flight: a second press waits for it rather than storing the
     /// event twice.
     pub saving: bool,
+    /// Which opening of the form this is. A Save that lands closes the form only if it is still
+    /// the one that was saved, not one the person has opened since.
+    pub generation: u64,
 }
 
 impl Default for Form {
@@ -70,6 +76,7 @@ impl Default for Form {
             notes: String::new(),
             duration_min: DEFAULT_EVENT_MINUTES,
             saving: false,
+            generation: 0,
         }
     }
 }
@@ -142,8 +149,11 @@ pub struct Model {
     pub rail: Rail,
     pub mind: Arc<dyn Mind>,
     pub machine: Machine,
-    /// What the surface call being answered says, beside what is read off the model.
+    /// What the surface call being settled is answered with, written in the command that settles
+    /// it (`answers.rs`).
     pub answer: Value,
+    /// What each reading intent still waiting on its read will answer with, by invocation.
+    pub asked: HashMap<InvocationId, Asked>,
     pub inbox: Option<Inbox>,
 }
 
@@ -174,6 +184,7 @@ impl Model {
             mind,
             machine,
             answer: Value::Null,
+            asked: HashMap::new(),
             inbox: None,
         }
     }

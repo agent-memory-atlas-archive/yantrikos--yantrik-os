@@ -1,28 +1,25 @@
 //! Changing an appointment: `update_event` and `update_own_event`, on the same terms as the
 //! delete. What comes back is read from the store afterwards (`work::update_through`), and the
-//! window goes to the day the event is on now.
+//! window goes to the day the event is on now and reads it again.
 
 use serde_json::json;
 use yantrik_app::Refused;
 
-use super::{apply_after_write, show_date, Fx};
+use super::{read_back, show_date, Fx};
+use crate::answers;
 use crate::backend::calls;
 use crate::command::{Command, Kept, Moved, Work};
-use crate::events;
 use crate::model::{Model, NOTHING, PART_NOTICE};
 use crate::notice;
 use crate::ownership;
-use crate::views;
 use crate::work;
 
 pub fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refused> {
     match command {
         Command::Update { ask, own, caller } => {
-            m.answer = serde_json::Value::Null;
             fx.changed(NOTHING);
             let me = if own { m.machine.who.identify(&caller) } else { None };
-            let (api, sequence) = (m.machine.api.clone(), m.reads.sequence.clone());
-            let (here, view, week_start) = (m.visible_range(), m.view, m.week_start);
+            let api = m.machine.api.clone();
             fx.spawn_or(Command::WorkFailed(Work::Change), move |_| {
                 if own {
                     // The record the service kept at creation, read back from the event's own
@@ -44,22 +41,18 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refuse
                     }
                 }
                 let result = work::update_through(api.as_ref(), &ask);
-                // The window goes to the day the event is on now, so that is the range read back.
-                let after = match result.as_ref().ok().and_then(|e| events::ymd(&e.start)) {
-                    Some((year, month, day)) => views::visible_range(year, month, view, day, week_start),
-                    None => here,
-                };
-                let listing = work::reload(api.as_ref(), &sequence, after);
-                Command::Moved(Box::new(Moved { id: ask.id.clone(), result, listing }))
+                Command::Moved(Box::new(Moved { id: ask.id.clone(), result }))
             });
         }
         Command::Moved(moved) => {
-            let Moved { id, result, listing } = *moved;
+            let Moved { id, result } = *moved;
             match result {
+                // Answered here, in the command that carries this update's own result
+                // (`answers.rs`); the window then goes to the day the event is on now.
                 Ok(event) => {
                     m.notice.say("");
                     show_date(m, &event.start);
-                    m.answer = json!({
+                    let answer = json!({
                         "id": event.id,
                         "title": event.title,
                         "start": event.start,
@@ -67,6 +60,7 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refuse
                         "all_day": event.is_all_day,
                         "reminder_minutes": event.reminder_minutes,
                     });
+                    answers::settle(m, fx, answer);
                 }
                 Err(e) => {
                     m.notice.say(format!("Could not change the event {id}: {e}"));
@@ -74,7 +68,7 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refuse
                 }
             }
             fx.changed(PART_NOTICE);
-            apply_after_write(m, fx, listing);
+            read_back(m, fx);
         }
         other => unreachable!("not a change command: {other:?}"),
     }

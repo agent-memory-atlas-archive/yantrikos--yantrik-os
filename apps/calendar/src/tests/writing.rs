@@ -201,3 +201,51 @@ fn an_agent_in_ask_mode_is_refused_the_sensitive_doors() {
     let added = f.app.act_as(Call::new("add_event", json!({ "title": "Ok", "date": "2026-09-24", "time": "09:00" })).as_agent("mind:7").in_mode("ask"));
     assert!(added.is_ok(), "standard needs no card in ask mode");
 }
+
+// ── An answer owed to the Mind is its own (review of #921, finding 1) ──
+//
+// The person is on 7 October. A Mind's write is in flight; meanwhile the person presses the trash
+// icon on a row and moves the window. Whatever lands in between, the Mind is answered about the
+// event it named and nothing else.
+
+/// Seven October holds one thing, which the person's trash icon takes off.
+fn on_the_seventh() -> super::Fixture {
+    let f = open(a_week().holding("ev-oct", "October thing", "2026-10-07T09:00:00", "2026-10-07T10:00:00"));
+    f.act("show_date", json!({ "date": "2026-10-07" })).unwrap();
+    assert_eq!(f.agenda(), ["October thing"]);
+    f
+}
+
+#[test]
+fn a_trash_press_never_becomes_the_answer_to_a_minds_delete() {
+    let f = on_the_seventh();
+    let mind = f.app.act("delete_event", json!({ "id": "ev-dentist" })).unwrap();
+    f.app.ui(|ui| ui.invoke_delete_event(0));
+    f.app.ui(|ui| ui.invoke_prev_month());
+    assert_eq!(f.settled(mind).unwrap(), json!({ "deleted": "Dentist", "id": "ev-dentist" }));
+    let left: Vec<String> = f.store.stored().into_iter().map(|e| e.id).collect();
+    assert_eq!(left, ["ev-standup", "ev-review"], "both deletes happened, each answered as itself");
+}
+
+#[test]
+fn a_trash_press_never_becomes_the_answer_to_a_minds_add() {
+    let f = on_the_seventh();
+    let mind = f.app.act("add_event", json!({ "title": "Planning", "date": "2026-10-01", "time": "09:00" })).unwrap();
+    f.app.ui(|ui| ui.invoke_delete_event(0));
+    f.app.ui(|ui| ui.invoke_switch_view(1));
+    assert_eq!(
+        f.settled(mind).unwrap(),
+        json!({ "added": "Planning", "on": "2026-10-01 09:00", "id": "ev-1", "all_day": false, "reminder_minutes": 10 })
+    );
+}
+
+#[test]
+fn a_trash_press_never_becomes_the_answer_to_a_minds_update() {
+    let f = on_the_seventh();
+    let mind = f.app.act("update_event", json!({ "id": "ev-dentist", "date": "2026-10-01" })).unwrap();
+    f.app.ui(|ui| ui.invoke_delete_event(0));
+    f.app.ui(|ui| ui.invoke_switch_view(1));
+    let answer = f.settled(mind).unwrap();
+    assert_eq!((answer["id"].clone(), answer["title"].clone()), (json!("ev-dentist"), json!("Dentist")));
+    assert_eq!(answer["start"], json!("2026-10-01T13:00:00"));
+}

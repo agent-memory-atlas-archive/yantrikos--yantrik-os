@@ -20,7 +20,14 @@ use crate::work::{self, Listing, Read};
 
 /// The events `describe` should report: the model's, or a fresh read when the store moved.
 pub fn before_describe(m: &Model) -> Option<Vec<CalEvent>> {
-    let listing = work::reread(m.machine.api.as_ref(), &m.reads.sequence, m.visible_range(), &m.held(), false);
+    let listing = work::reread(
+        m.machine.api.as_ref(),
+        &m.reads.sequence,
+        m.visible_range(),
+        &m.held(),
+        false,
+        work::Start::MayStart,
+    );
     let events = match &listing.read {
         Read::Unmoved => return None,
         Read::Listed { events, .. } => events.clone(),

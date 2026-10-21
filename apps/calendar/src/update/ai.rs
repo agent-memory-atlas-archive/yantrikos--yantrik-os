@@ -114,11 +114,13 @@ fn explain(m: &mut Model, fx: &mut Fx) -> Result<(), Refused> {
     Ok(())
 }
 
-/// The card goes away, whichever drew it, and a late answer stays away with it.
+/// The card goes away, whichever drew it, and a late answer stays away with it; so does the
+/// button's spinner.
 fn dismiss(m: &mut Model, fx: &mut Fx) -> Result<(), Refused> {
     rail::update::<Calendar>(m, RailCommand::Dismiss, fx)?;
     m.ai.card = None;
     m.ai.asking = false;
+    m.ai.working = false;
     fx.changed(PART_AI);
     Ok(())
 }

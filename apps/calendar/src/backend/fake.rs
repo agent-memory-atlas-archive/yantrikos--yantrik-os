@@ -25,6 +25,8 @@ struct Store {
     /// Moves on every write, as the newest modification time does.
     writes: u64,
     down: bool,
+    /// Calls made through the door that starts the service, while it was down.
+    start_attempts: usize,
     /// Methods that fail, once each, before they answer.
     failing: HashMap<String, VecDeque<RpcFailure>>,
     /// Methods whose call panics, as a parser bug would.
@@ -88,6 +90,11 @@ impl FakeCalendar {
 
     pub fn panicking(&self, method: &str) {
         self.store().panics.push(method.into());
+    }
+
+    /// How many times the service was asked to start: a call through `call` while it was down.
+    pub fn start_attempts(&self) -> usize {
+        self.store().start_attempts
     }
 
     pub fn stored(&self) -> Vec<CalendarEvent> {
@@ -199,8 +206,12 @@ impl FakeCalendar {
 
 impl CalendarApi for FakeCalendar {
     fn call(&self, method_name: &str, params: Value) -> Result<Value, RpcFailure> {
-        if self.store().down {
-            return Err(refuse(NOT_REACHED, "the calendar service did not come up"));
+        {
+            let mut store = self.store();
+            if store.down {
+                store.start_attempts += 1;
+                return Err(refuse(NOT_REACHED, "the calendar service did not come up"));
+            }
         }
         self.take(method_name, params)
     }
@@ -210,7 +221,10 @@ impl CalendarApi for FakeCalendar {
     }
 
     fn call_running(&self, method_name: &str, params: Value) -> Result<Value, RpcFailure> {
-        self.call(method_name, params)
+        if self.store().down {
+            return Err(refuse(NOT_REACHED, "Service at calendar.sock is unreachable"));
+        }
+        self.take(method_name, params)
     }
 }
 

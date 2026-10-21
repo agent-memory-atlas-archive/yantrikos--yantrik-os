@@ -1,7 +1,7 @@
 //! The intents that move the window and read the store: `select_day`, `show_date`,
-//! `events_between`, `show_month`, `go_to_today` and `set_view`.
+//! `events_between`, `show_month`, `go_to_today` and `set_view`. Each is answered in the command
+//! where its own read lands (`answers.rs`).
 
-use serde_json::json;
 use yantrik_app::control::{Action, Param};
 use yantrik_app::intents::{Intent, Intents};
 
@@ -26,7 +26,7 @@ pub fn days_and_months(table: &mut Intents<Calendar>) {
                 Ok(Command::SelectDay(day))
             },
         )
-        .reply(|m: &Model| json!({ "day": m.selected_day, "events": m.titles_on_selected_day() })),
+        .reply(answer),
     ));
     table.add(explicit(
         // Any day, in any month, in one call. The window could be moved a month at a time
@@ -43,18 +43,7 @@ pub fn days_and_months(table: &mut Intents<Calendar>) {
                 Ok(Command::ShowDate(date))
             },
         )
-        .reply(|m: &Model| {
-            // The week the date is in, on this window's week start: in the week view that is what
-            // is now on screen, and the date is in it.
-            let (week_start, week_end) = m.week_bounds();
-            json!({
-                "showing": m.month_title(),
-                "date": m.answer["date"],
-                "week_start": week_start.to_string(),
-                "week_end": week_end.to_string(),
-                "events": m.titles_on_selected_day(),
-            })
-        }),
+        .reply(answer),
     ));
     table.add(explicit(
         // A read: it asks the store, not the grid, so a mind never has to steer the view
@@ -64,7 +53,7 @@ pub fn days_and_months(table: &mut Intents<Calendar>) {
             let to = a.raw()["to"].as_str().unwrap_or_default();
             Ok(Command::Between(views::parse_range(from, to).map_err(refused)?))
         })
-        .reply(|m: &Model| m.answer.clone()),
+        .reply(answer),
     ));
     table.add(explicit(
         Intent::new(
@@ -76,11 +65,11 @@ pub fn days_and_months(table: &mut Intents<Calendar>) {
                 other => Err(refused(format!("`direction` is next or previous, not `{other}`"))),
             },
         )
-        .reply(|m: &Model| json!({ "showing": m.month_title() })),
+        .reply(answer),
     ));
     table.add(explicit(
         Intent::new(Action::new("go_to_today", "Jump back to the current month and day"), |_| Ok(Command::Today))
-            .reply(|m: &Model| json!({ "showing": m.month_title(), "day": m.selected_day })),
+            .reply(answer),
     ));
 }
 
@@ -110,34 +99,11 @@ pub fn view_switch(table: &mut Intents<Calendar>) {
                 other => Err(refused(format!("unknown view `{other}`; use month, week or day"))),
             },
         )
-        .reply(shown),
+        .reply(answer),
     ));
 }
 
-/// What `set_view` answers: what is on screen now, not the word that was asked for. This answered
-/// `{"view": "week"}` while the week grid was empty of everything -- no events, no column headers,
-/// a "now" line on midnight -- which reads as a view that was shown. It is the same fabrication
-/// `add_event` was making in September, one layer up.
-fn shown(m: &Model) -> serde_json::Value {
-    let source = events::source_events(&m.events);
-    match m.view {
-        ViewMode::Week => {
-            let (start, end) = m.week_bounds();
-            json!({
-                "view": "week",
-                "week_start": start.to_string(),
-                "week_end": end.to_string(),
-                "events": views::week_view(&source, m.selected_date(), m.week_start).events.len(),
-            })
-        }
-        ViewMode::Day => {
-            let day = views::day_view(&source, m.selected_date());
-            json!({ "view": "day", "day": day.title, "events": day.events.len() })
-        }
-        ViewMode::Month => json!({
-            "view": "month",
-            "showing": m.month_title(),
-            "events": events::events_in_month(&m.events, m.year, m.month),
-        }),
-    }
+/// What a reading intent answers: what `answers.rs` wrote when its read landed.
+fn answer(m: &Model) -> serde_json::Value {
+    m.answer.clone()
 }

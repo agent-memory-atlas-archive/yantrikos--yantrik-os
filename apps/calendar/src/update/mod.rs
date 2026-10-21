@@ -12,8 +12,7 @@ use yantrik_app::Refused;
 use crate::command::Command;
 use crate::events;
 use crate::model::{Model, NOTHING, PART_CALENDAR, PART_CLOCK};
-use crate::views;
-use crate::work::{self, Listing, Range, Read};
+use crate::work::{self, Listing, Read, Start};
 use crate::Calendar;
 
 mod ai;
@@ -100,13 +99,29 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refuse
 /// Read the store for the range on screen, in a job. Without `force` the job asks the store's
 /// revision first and lists only when the range or the store moved (`work::reread`).
 pub(crate) fn read(m: &mut Model, fx: &mut Fx, force: bool) {
+    spawn_read(m, fx, force, Start::MayStart);
+}
+
+/// The store read again after a write, for wherever the window is when the write lands: in a job
+/// of its own, after the write's own result, so a read that fails cannot unsay the write.
+pub(crate) fn read_back(m: &mut Model, fx: &mut Fx) {
+    read(m, fx, true);
+    redraw(m, fx);
+}
+
+/// The watch's read: from a service already listening, never one it starts.
+pub(crate) fn watch_read(m: &mut Model, fx: &mut Fx) {
+    spawn_read(m, fx, false, Start::Never);
+}
+
+fn spawn_read(m: &mut Model, fx: &mut Fx, force: bool, start: Start) {
     let wanted = m.visible_range();
     let held = m.held();
     let api = m.machine.api.clone();
     let sequence = m.reads.sequence.clone();
     m.reads.in_flight += 1;
     fx.spawn_or(Command::ReadFailed, move |_| {
-        Command::Listed(Box::new(work::reread(api.as_ref(), &sequence, wanted, &held, force)))
+        Command::Listed(Box::new(work::reread(api.as_ref(), &sequence, wanted, &held, force, start)))
     });
 }
 
@@ -138,15 +153,6 @@ pub(crate) fn apply(m: &mut Model, listing: Listing) -> bool {
     true
 }
 
-/// The store read again after a write: applied, or when the window has moved since the write was
-/// asked for, a read of where it is now.
-pub(crate) fn apply_after_write(m: &mut Model, fx: &mut Fx, listing: Listing) {
-    if !apply(m, listing) {
-        read(m, fx, true);
-    }
-    redraw(m, fx);
-}
-
 /// Everything on screen is drawn again from the model, and the clock read with it: anything that
 /// changes the month, the selected day, the view, or what is stored ends here.
 pub(crate) fn redraw(m: &mut Model, fx: &mut Fx) {
@@ -166,14 +172,5 @@ pub(crate) fn show_date(m: &mut Model, date: &str) {
         m.year = year;
         m.month = month;
         m.selected_day = day;
-    }
-}
-
-/// The range the window will need once it is on `date` (where `show_date` puts it), for a job that
-/// reads the store after a write. The window's own range when `date` is not a date.
-pub(crate) fn range_at(m: &Model, date: &str) -> Range {
-    match events::ymd(date) {
-        Some((year, month, day)) => views::visible_range(year, month, m.view, day, m.week_start),
-        None => m.visible_range(),
     }
 }

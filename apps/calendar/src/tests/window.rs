@@ -232,3 +232,49 @@ fn every_callback_the_window_declares_is_wired() {
         assert!(wired.contains(&setter), "{name} is declared and nothing binds it");
     }
 }
+
+/// A Save that lands closes the form it saved, not one the person has opened since, and leaves the
+/// new form's length alone (review of #921, finding 2).
+#[test]
+fn a_save_that_lands_leaves_a_form_the_person_reopened_alone() {
+    let f = open(a_week());
+    f.app.ui(|ui| ui.invoke_add_event());
+    f.app.ui(|ui| ui.invoke_save_event("First".into(), "2026-09-24".into(), "08:00".into(), "".into()));
+    f.app.ui(|ui| ui.invoke_cancel_event_form());
+    f.app.ui(|ui| ui.invoke_cal_use_template("Deep work".into(), 120));
+    f.app.ui(|ui| ui.set_event_title("Deep work, the draft".into()));
+    f.quiet();
+    assert!(f.app.ui(|ui| ui.get_show_event_form()), "the reopened form stays open");
+    assert_eq!(f.app.ui(|ui| ui.get_event_title().to_string()), "Deep work, the draft");
+    f.app.ui(|ui| ui.invoke_save_event("Deep work".into(), "2026-09-24".into(), "09:00".into(), "".into()));
+    f.quiet();
+    let deep = f.store.stored().into_iter().find(|e| e.title == "Deep work").expect("stored");
+    assert_eq!(deep.end, "2026-09-24T11:00:00", "the template's two hours");
+    assert!(!f.app.ui(|ui| ui.get_show_event_form()));
+}
+
+/// A create the store kept is said as saved even when reading the calendar back afterwards
+/// fails, so nobody is invited to save it twice (review of #921, finding 4).
+#[test]
+fn a_crash_reading_back_a_stored_event_still_says_it_was_saved() {
+    let f = open(a_week());
+    f.store.panicking("calendar.events");
+    f.app.ui(|ui| ui.invoke_add_event());
+    f.app.ui(|ui| ui.invoke_save_event("Once".into(), "2026-09-24".into(), "09:00".into(), "".into()));
+    f.quiet();
+    assert_eq!(f.notice(), "", "nothing says it did not finish");
+    assert!(!f.app.ui(|ui| ui.get_show_event_form()), "closed: the store kept it");
+    assert_eq!(f.store.stored().iter().filter(|e| e.title == "Once").count(), 1);
+}
+
+/// Putting the card away stops the AI button's spinner too.
+#[test]
+fn dismissing_the_card_stops_the_spinner() {
+    let f = open(a_week());
+    f.app.ui(|ui| ui.invoke_ai_explain_pressed());
+    assert!(f.app.ui(|ui| ui.get_ai_is_working()));
+    f.app.ui(|ui| ui.invoke_ai_dismiss());
+    assert!(!f.app.ui(|ui| ui.get_ai_is_working()));
+    f.quiet();
+    assert_eq!(f.app.ui(|ui| ui.get_proposal().title.to_string()), "", "a late answer stays away");
+}

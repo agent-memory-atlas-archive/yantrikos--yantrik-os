@@ -36,7 +36,8 @@ pub enum Work {
     Between,
 }
 
-/// A create landed.
+/// A create landed. The store is read back afterwards in a job of its own, so a read that fails
+/// cannot make a stored event look unsaved.
 #[derive(Debug, Clone)]
 pub struct Saved {
     pub door: Door,
@@ -46,8 +47,8 @@ pub struct Saved {
     pub all_day: bool,
     /// The id the store gave the event and the reminder lead it recorded.
     pub result: Result<(String, u32), String>,
-    /// The store read again after a create that worked: the range the window shows afterwards.
-    pub listing: Option<Listing>,
+    /// The opening of the form that was saved (`Form::generation`); unused for `add_event`.
+    pub form: u64,
 }
 
 /// A delete landed.
@@ -58,9 +59,6 @@ pub struct Removed {
     pub named: String,
     /// The title the store held, or why the event is still there.
     pub result: Result<String, String>,
-    /// Whatever happened, the window is redrawn from the store: a delete that failed may still
-    /// have been preceded by somebody else's successful one.
-    pub listing: Listing,
 }
 
 /// An update landed.
@@ -69,7 +67,6 @@ pub struct Moved {
     pub id: String,
     /// What the store holds after the write, read back.
     pub result: Result<CalendarEvent, String>,
-    pub listing: Listing,
 }
 
 /// The own-creation rule said no: the event is untouched.

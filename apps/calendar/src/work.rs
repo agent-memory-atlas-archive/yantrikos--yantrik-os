@@ -51,6 +51,16 @@ pub enum Read {
     Failed(String),
 }
 
+/// Whether a read may start calendar-service to list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Start {
+    /// A read somebody asked for: a navigation, a write's read-back, `describe`.
+    MayStart,
+    /// The twenty-second watch, which may be ticking in a window nobody is looking at: it lists
+    /// only from a service already listening, and reads nothing from one that is down.
+    Never,
+}
+
 /// Read the store again if the range wanted is not the one held, if the store has moved, or if
 /// `force` says so.
 ///
@@ -64,9 +74,20 @@ pub enum Read {
 /// leaves this holding the older token, so the next check re-reads once more than it had to; the
 /// other order would record a token for events that did not include that write and never look
 /// again. Being wrong in the cheap direction is the point.
-pub fn reread(api: &dyn CalendarApi, sequence: &AtomicU64, wanted: Range, held: &Held, force: bool) -> Listing {
+pub fn reread(
+    api: &dyn CalendarApi,
+    sequence: &AtomicU64,
+    wanted: Range,
+    held: &Held,
+    force: bool,
+    start: Start,
+) -> Listing {
     let seq = sequence.fetch_add(1, Ordering::SeqCst) + 1;
     let now = calls::revision(api);
+    if start == Start::Never && now.is_none() {
+        // Down, or not answering: nothing to list from without starting it.
+        return Listing { seq, wanted, read: Read::Unmoved };
+    }
     let moved = match (&now, &held.revision) {
         (Some(now), Some(held)) => now != held,
         // Nothing to compare against: a first read, or one that failed and left no token behind.
@@ -78,17 +99,15 @@ pub fn reread(api: &dyn CalendarApi, sequence: &AtomicU64, wanted: Range, held: 
     if !force && held.range == Some(wanted) && !moved {
         return Listing { seq, wanted, read: Read::Unmoved };
     }
-    let read = match calls::events_in_range(api, wanted.0, wanted.1) {
+    let listed = match start {
+        Start::MayStart => calls::events_in_range(api, wanted.0, wanted.1),
+        Start::Never => calls::events_in_range_running(api, wanted.0, wanted.1),
+    };
+    let read = match listed {
         Ok(events) => Read::Listed { events, revision: now },
         Err(e) => Read::Failed(e),
     };
     Listing { seq, wanted, read }
-}
-
-/// Read the store again whatever it says: after something has been written.
-pub fn reload(api: &dyn CalendarApi, sequence: &AtomicU64, wanted: Range) -> Listing {
-    let nothing = Held { range: None, revision: None };
-    reread(api, sequence, wanted, &nothing, true)
 }
 
 /// The store's id for the event a delete names, and the name to use in a notice.

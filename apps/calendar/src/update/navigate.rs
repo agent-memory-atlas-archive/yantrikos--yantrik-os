@@ -7,7 +7,8 @@ use serde_json::json;
 use yantrik_app::timers::TimerId;
 use yantrik_app::Refused;
 
-use super::{apply, read, redraw, show_date, Fx};
+use super::{apply, read, redraw, show_date, watch_read, Fx};
+use crate::answers::{self, Asked};
 use crate::backend::calls;
 use crate::command::{Command, Step, Work};
 use crate::model::{Model, NOTHING, PART_CLOCK, PART_NOTICE};
@@ -18,6 +19,15 @@ use crate::views::{self, ViewMode};
 pub const MIDNIGHT: TimerId = TimerId("calendar.midnight");
 
 pub fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refused> {
+    // A reading intent is answered when its own read lands (`answers.rs`).
+    match &command {
+        Command::SelectDay(_) => answers::ask(m, fx, Asked::SelectDay),
+        Command::ShowDate(date) => answers::ask(m, fx, Asked::ShowDate(date.clone())),
+        Command::ShowMonth(_) => answers::ask(m, fx, Asked::ShowMonth),
+        Command::Today => answers::ask(m, fx, Asked::Today),
+        Command::SetView(_) => answers::ask(m, fx, Asked::SetView),
+        _ => {}
+    }
     match command {
         Command::PrevMonth | Command::ShowMonth(Step::Previous) => step_month(m, fx, Step::Previous),
         Command::NextMonth | Command::ShowMonth(Step::Next) => step_month(m, fx, Step::Next),
@@ -49,7 +59,6 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refuse
         }
         Command::ShowDate(date) => {
             show_date(m, &date);
-            m.answer = json!({ "date": date });
             moved(m, fx);
         }
         Command::Refresh => {
@@ -77,17 +86,19 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refuse
             // right day. This also catches a midnight the timer slept through on a suspended
             // machine. Then the store, unless a read is already out.
             if !follow_today(m, fx) && m.reads.in_flight == 0 {
-                read(m, fx, false);
+                watch_read(m, fx);
             }
         }
         Command::Listed(listing) => {
             m.reads.in_flight = m.reads.in_flight.saturating_sub(1);
             landed(m, fx, *listing);
+            answers::read_landed(m, fx);
         }
         Command::Followed(listing) => landed(m, fx, *listing),
         Command::ReadFailed => {
             // The next redraw or tick reads again; what is on screen stays the last read taken.
             m.reads.in_flight = m.reads.in_flight.saturating_sub(1);
+            answers::read_failed(m, fx);
             fx.changed(NOTHING);
         }
         Command::OpenNoticeEvent => {
@@ -119,7 +130,6 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refuse
             // A read: it asks the store, not the grid, so a mind never has to steer the view
             // (`set_view`, `show_date`) to see a range. On 28 Sep - 4 Oct a mind could not get
             // the Monday week out of a Sunday-first view and gave up without writing its plan.
-            m.answer = serde_json::Value::Null;
             fx.changed(NOTHING);
             let api = m.machine.api.clone();
             fx.spawn_or(Command::WorkFailed(Work::Between), move |_| {
@@ -138,7 +148,7 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refuse
         Command::BetweenRead(answer) => {
             fx.changed(NOTHING);
             match answer {
-                Ok(answer) => m.answer = answer,
+                Ok(answer) => answers::settle(m, fx, answer),
                 Err(e) => fx.settle(Err(Refused::new("store", e))),
             }
         }

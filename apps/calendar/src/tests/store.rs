@@ -80,13 +80,19 @@ fn an_older_read_never_replaces_a_newer_one() {
     let f = open(a_week());
     let (older, wanted) = f.app.model(|m| {
         let wanted = m.visible_range();
-        (crate::work::reload(m.machine.api.as_ref(), &m.reads.sequence, wanted), wanted)
+        (listed(m, wanted), wanted)
     });
     f.store.put("ev-new", "Newer", "2026-09-23T20:00:00", "2026-09-23T21:00:00", None);
-    let newest = f.app.model(move |m| crate::work::reload(m.machine.api.as_ref(), &m.reads.sequence, wanted));
+    let newest = f.app.model(move |m| listed(m, wanted));
     f.app.run(Command::Listed(Box::new(newest)));
     f.app.run(Command::Listed(Box::new(older)));
     assert_eq!(f.agenda(), ["Standup", "Design review", "Newer"]);
+}
+
+/// A forced read of `wanted`, taken now, as a job would take it.
+fn listed(m: &crate::Model, wanted: crate::work::Range) -> crate::work::Listing {
+    let nothing = crate::work::Held { range: None, revision: None };
+    crate::work::reread(m.machine.api.as_ref(), &m.reads.sequence, wanted, &nothing, true, crate::work::Start::MayStart)
 }
 
 /// A read that fails shows no events, says nothing false about them, and is asked again.
@@ -185,4 +191,23 @@ fn a_shutdown_with_a_write_in_flight_answers_it() {
     let _ = f.app.shutdown();
     assert!(began.elapsed() < Duration::from_secs(2));
     assert_eq!(pending.settle().unwrap_err(), "the app is closing");
+}
+
+/// The watch never starts calendar-service, not even after a failed read left no range in hand
+/// (review of #921, finding 3).
+#[test]
+fn the_watch_never_starts_a_service_that_is_down() {
+    let f = open(a_week());
+    f.store.fail_once("calendar.events", -32000, "the socket went away");
+    f.app.ui(|ui| ui.invoke_next_month());
+    f.quiet();
+    assert_eq!(f.app.model(|m| m.range), None, "a failed read leaves no range held");
+    f.store.set_down(true);
+    f.app.advance(STORE_WATCH_EVERY);
+    f.quiet();
+    assert_eq!(f.store.start_attempts(), 0, "the watch asked nothing that starts the service");
+    f.store.set_down(false);
+    f.app.advance(STORE_WATCH_EVERY);
+    f.quiet();
+    assert!(f.app.model(|m| m.range.is_some()), "and reads again once it is up");
 }

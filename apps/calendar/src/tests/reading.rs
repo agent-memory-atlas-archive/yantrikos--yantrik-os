@@ -116,3 +116,15 @@ fn a_week_across_a_month_boundary_is_read_from_both_months() {
     let columns: Vec<i32> = f.app.ui(|ui| ui.get_week_events().iter().map(|b| b.day_index).collect());
     assert_eq!(columns, [2, 4]);
 }
+
+/// `show_date` answers with the date it was asked for, whatever other call lands beside it
+/// (review of #921, finding 1).
+#[test]
+fn show_date_answers_with_its_own_date_whatever_lands_beside_it() {
+    let f = open(a_week());
+    let shown = f.app.act("show_date", json!({ "date": "2026-10-25" })).unwrap();
+    let read = f.app.act("events_between", json!({ "from": "2026-09-20", "to": "2026-09-26" })).unwrap();
+    f.quiet();
+    assert_eq!(shown.settle().unwrap()["date"], json!("2026-10-25"));
+    assert_eq!(read.settle().unwrap()["count"], json!(3));
+}

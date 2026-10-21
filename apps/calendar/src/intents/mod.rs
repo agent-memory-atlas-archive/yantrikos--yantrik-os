@@ -8,8 +8,9 @@
 //! # Settling
 //!
 //! Every read of the store and every write runs in a job now, so each intent is answered when
-//! the work it started has landed (`Settle::Explicit`), with what the model then holds: the
-//! answer is the store read back, as it always was, and never the arguments repeated.
+//! its own result lands (`Settle::Explicit`), in the command that carries it (`answers.rs`): the
+//! answer is the store read back, as it always was, and never the arguments repeated. Nothing the
+//! person does meanwhile, and no other call, can change it.
 
 use std::time::Duration;
 
@@ -28,7 +29,7 @@ mod writing;
 /// the Mind sees a transport timeout for a change that may well have gone through, and may try it
 /// again. Settling within 14 s means the app always answers first, with the outcome or with its
 /// own "did not settle" refusal. The floor is the work: a delete by title is a listing, a read, a
-/// delete, a read back and a listing, each bounded by the client's own timeout.
+/// delete and a read back, each bounded by the client's own timeout.
 pub const WITHIN: Duration = Duration::from_secs(14);
 
 pub fn table(table: &mut Intents<Calendar>) {

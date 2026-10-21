@@ -1,15 +1,16 @@
 //! Taking an event off the calendar: the trash icon on a row, `delete_event`, and
 //! `delete_own_event`.
 //!
-//! The one delete path. All three end in [`spawn_delete`], so none can report an outcome the
-//! others would not, and there is only one place where the service's answer is read. Whatever
-//! happened, the window is redrawn from the store: a delete that failed may still have been
-//! preceded by somebody else's successful one.
+//! The one delete path. All three end in `work::delete_through` and land as `Removed`, so none can
+//! report an outcome the others would not, and there is only one place where the service's answer
+//! is read. Whatever happened, the window is read again from the store: a delete that failed may
+//! still have been preceded by somebody else's successful one.
 
 use serde_json::json;
 use yantrik_app::Refused;
 
-use super::{apply_after_write, Fx};
+use super::{read_back, Fx};
+use crate::answers;
 use crate::backend::calls;
 use crate::command::{Command, Door, Kept, Removed, Work};
 use crate::model::{Model, NOTHING, PART_FORM, PART_NOTICE};
@@ -32,20 +33,18 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refuse
             }
             m.removing.push(event.id.clone());
             let named = format!("“{}”", event.title);
-            let (api, sequence, here) = (m.machine.api.clone(), m.reads.sequence.clone(), m.visible_range());
+            let api = m.machine.api.clone();
             fx.spawn_or(Command::WorkFailed(Work::Remove(Some(event.id.clone()))), move |_| {
                 let result = work::delete_through(api.as_ref(), &event.id);
-                let listing = work::reload(api.as_ref(), &sequence, here);
-                Command::Removed(Box::new(Removed { id: event.id, named, result, listing }))
+                Command::Removed(Box::new(Removed { id: event.id, named, result }))
             });
         }
         Command::Delete { ask, own, caller } => {
-            m.answer = serde_json::Value::Null;
             fx.changed(NOTHING);
             // Who this caller was verified to be, for the own-creation rule. Only the own door
             // asks: `delete_event` reaches any event, and the person sees a card for it.
             let me = if own { m.machine.who.identify(&caller) } else { None };
-            let (api, sequence, here) = (m.machine.api.clone(), m.reads.sequence.clone(), m.visible_range());
+            let api = m.machine.api.clone();
             fx.spawn_or(Command::WorkFailed(Work::Remove(None)), move |_| {
                 let (id, named) = match work::named_event(api.as_ref(), &ask) {
                     Ok(found) => found,
@@ -71,17 +70,18 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refuse
                     }
                 }
                 let result = work::delete_through(api.as_ref(), &id);
-                let listing = work::reload(api.as_ref(), &sequence, here);
-                Command::Removed(Box::new(Removed { id, named, result, listing }))
+                Command::Removed(Box::new(Removed { id, named, result }))
             });
         }
         Command::Removed(removed) => {
-            let Removed { id, named, result, listing } = *removed;
+            let Removed { id, named, result } = *removed;
             m.removing.retain(|r| r != &id);
             match result {
+                // Answered here, in the command that carries this delete's own result: a trash
+                // press landing beside a Mind's delete answers nobody (`answers.rs`).
                 Ok(title) => {
                     m.notice.say("");
-                    m.answer = json!({ "deleted": title, "id": id });
+                    answers::settle(m, fx, json!({ "deleted": title, "id": id }));
                 }
                 // On screen as well as in the answer. A delete that did not happen leaves a row
                 // where it was, and a row that stayed put has to say which of the two things it
@@ -92,7 +92,7 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refuse
                 }
             }
             fx.changed(PART_NOTICE);
-            apply_after_write(m, fx, listing);
+            read_back(m, fx);
         }
         other => unreachable!("not a delete command: {other:?}"),
     }
