@@ -226,3 +226,73 @@ fn a_replace_that_keeps_the_length_and_the_time_is_still_seen() {
     assert_eq!(polled(&watched), vec![("doc-1".to_string(), Observed::File(fp("bbbb")))]);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn an_exchange_hands_back_what_it_replaced() {
+    use super::disk::Displaced;
+    let dir = scratch("exchange");
+    let path = dir.join("note.md");
+    assert_eq!(RealDisk.exchange(&path, b"first").unwrap(), Displaced::Nothing, "created");
+    assert_eq!(std::fs::read(&path).unwrap(), b"first");
+    // On Linux the kernel swaps the two names, so the replaced bytes come back; elsewhere the
+    // disk says it cannot tell.
+    let second = RealDisk.exchange(&path, b"second").unwrap();
+    assert!(
+        second == Displaced::Bytes(b"first".to_vec()) || second == Displaced::Unknown,
+        "{second:?}"
+    );
+    if cfg!(target_os = "linux") {
+        assert_eq!(second, Displaced::Bytes(b"first".to_vec()));
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), b"second");
+    let leftovers: Vec<_> = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).collect();
+    assert_eq!(leftovers.len(), 1, "the temp that held the old bytes is gone");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_write_between_the_check_and_the_exchange_is_kept_and_judged() {
+    let dir = scratch("exchange-race");
+    let path = dir.join("note.md");
+    std::fs::write(&path, "v0").unwrap();
+    let mut docs: Documents<String> = Documents::new();
+    let id = docs.open(Source::File(path.clone()), "v0".into(), Some(fp("v0")));
+    let d = docs.get_mut(id).unwrap();
+    d.edit(|c| *c = "mine".into());
+    let ticket = match d.begin_save() {
+        BeginSave::Ticket(t) => t,
+        other => panic!("{other:?}"),
+    };
+    // The store's check passes: the file is the baseline.
+    assert!(ticket.may_replace(super::Fingerprint::of(&path).as_ref()));
+    // Another program writes now, after the check and before the replace.
+    std::fs::write(&path, "theirs").unwrap();
+    let displaced = RealDisk.exchange(&path, b"mine").unwrap();
+    assert_eq!(displaced, super::disk::Displaced::Bytes(b"theirs".to_vec()), "their bytes are not lost");
+    let witnessed = ticket.judge(&displaced);
+    assert_eq!(witnessed, Witnessed::Replaced(Replaced::OutsideEdit));
+    let outcome = d.save_landed_witnessed(ticket.seq, Ok(fp("mine")), witnessed);
+    assert!(matches!(outcome, SaveOutcome::Saved { replaced: Some(Replaced::OutsideEdit), .. }));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_exchange_refuses_a_link_and_faults_inject_as_for_a_replace() {
+    use super::disk::Displaced;
+    let dir = scratch("exchange-faults");
+    let path = dir.join("note.md");
+    std::fs::write(&path, "old").unwrap();
+    let disk = FaultyDisk::new();
+    disk.fail(Step::Rename, "note.md", Some(1));
+    assert_eq!(disk.exchange(&path, b"new").unwrap_err().step, Step::Rename);
+    assert_eq!(std::fs::read(&path).unwrap(), b"old", "a failure before the swap changes nothing");
+    assert!(!matches!(disk.exchange(&path, b"new").unwrap(), Displaced::Nothing));
+    #[cfg(unix)]
+    {
+        let link = dir.join("linked.md");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        assert_eq!(RealDisk.exchange(&link, b"x").unwrap_err().step, Step::Check);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

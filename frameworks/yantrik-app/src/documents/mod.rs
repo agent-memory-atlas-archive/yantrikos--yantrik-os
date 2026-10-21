@@ -31,7 +31,7 @@ pub use crate::settings::Fingerprint;
 pub use close::{Choice, CloseFlow, Closing};
 pub use draft::{Candidate, DraftState, Envelope, Recovered};
 pub use outside::{Observed, OutsideState};
-pub use save::{BeginSave, Durability, Replaced, SaveError, SaveOutcome, SaveState, SaveTicket};
+pub use save::{BeginSave, Durability, Replaced, SaveError, SaveOutcome, SaveState, SaveTicket, Witnessed};
 pub use watched::Watched;
 
 /// A document, for the life of this run.

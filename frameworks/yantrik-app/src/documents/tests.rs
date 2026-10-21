@@ -523,3 +523,48 @@ fn dont_save_discards_and_cancel_stays() {
     assert_eq!(flow.answer(Choice::Cancel), Next::Stay);
     assert_eq!(flow.answer(Choice::DontSave), Next::Close { discard: vec![id] });
 }
+
+// ---- what a replace is known to have displaced ----
+
+#[test]
+fn a_ticket_judges_what_its_replace_displaced() {
+    use super::disk::Displaced;
+    let (mut docs, id) = opened("a", "v0");
+    let d = docs.get_mut(id).unwrap();
+    d.edit(|c| *c = "v1".into());
+    let t = ticket(d.begin_save());
+    assert_eq!(t.judge(&Displaced::Bytes(b"v0".to_vec())), Witnessed::Same);
+    assert_eq!(t.judge(&Displaced::Bytes(b"theirs".to_vec())), Witnessed::Replaced(Replaced::OutsideEdit));
+    assert_eq!(t.judge(&Displaced::Nothing), Witnessed::Replaced(Replaced::Deletion), "it had a file");
+    assert_eq!(t.judge(&Displaced::Unknown), Witnessed::Unknown);
+}
+
+#[test]
+fn a_new_document_creating_its_file_displaced_nothing_to_say() {
+    use super::disk::Displaced;
+    let mut docs: Documents<String> = Documents::new();
+    let id = docs.open(Source::New("1".into()), String::new(), None);
+    let d = docs.get_mut(id).unwrap();
+    d.edit(|c| c.push('x'));
+    let t = ticket(d.begin_save());
+    assert_eq!(t.judge(&Displaced::Nothing), Witnessed::Same);
+}
+
+#[test]
+fn a_known_answer_replaces_the_watchs_guess() {
+    let (mut docs, id) = opened("a", "v0");
+    let d = docs.get_mut(id).unwrap();
+    // The watch saw theirs during the save, but the replace displaced our own baseline: theirs
+    // was written after ours, and is on disk now. Nothing of theirs was replaced.
+    d.edit(|c| *c = "v1".into());
+    let t = ticket(d.begin_save());
+    d.observe(Observed::File(fp("theirs")));
+    assert!(plainly_saved(&d.save_landed_witnessed(t.seq, Ok(fp("v1")), Witnessed::Same)));
+    // No sighting at all, but the replace displaced another program's write: said.
+    d.edit(|c| *c = "v2".into());
+    let t = ticket(d.begin_save());
+    assert!(matches!(
+        d.save_landed_witnessed(t.seq, Ok(fp("v2")), Witnessed::Replaced(Replaced::OutsideEdit)),
+        SaveOutcome::Saved { replaced: Some(Replaced::OutsideEdit), .. }
+    ));
+}
