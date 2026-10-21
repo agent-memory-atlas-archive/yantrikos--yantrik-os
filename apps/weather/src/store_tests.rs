@@ -102,7 +102,8 @@ fn a_missing_or_damaged_file_starts_on_the_defaults_and_is_left_as_it_is() {
 #[test]
 fn a_shown_place_past_the_end_of_the_list_does_not_panic() {
     let paths = Paths::temporary(Weather::ID);
-    let file = paths.config_file().to_path_buf();
+    // Weather's own file from before the framework, brought across at the first start.
+    let file = paths.former_config_file("weather.json").expect("Weather's own former file");
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
     std::fs::write(
         &file,
@@ -156,7 +157,7 @@ fn a_save_leaves_the_prefs_file_and_nothing_else() {
         .map(|e| e.file_name().to_string_lossy().to_string())
         .collect();
     beside.sort();
-    assert_eq!(beside, vec!["weather.json".to_string()]);
+    assert_eq!(beside, vec!["settings.json".to_string()]);
     // And what landed is the whole document, not a truncated one.
     let text = std::fs::read_to_string(paths.config_file()).unwrap();
     let doc: serde_json::Value = serde_json::from_str(&text).unwrap();
