@@ -11,6 +11,7 @@ use crate::Email;
 
 mod ai;
 mod compose;
+mod drafts;
 pub(crate) mod google;
 mod mailbox;
 mod message;
@@ -56,8 +57,7 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Effects<Email>) -> Resul
         Command::Sent(outcome) => compose::sent(m, outcome, fx),
         Command::CancelCompose(draft) => compose::cancel(m, draft, fx),
         Command::SaveDraft(draft) => compose::save_draft(m, draft, fx),
-        Command::DraftWritten { draft, keep, outcome } => compose::draft_written(m, draft, keep, outcome, fx),
-        Command::DraftCleared { after_send, outcome } => compose::draft_cleared(m, after_send, outcome, fx),
+        Command::DraftDone { op, outcome } => drafts::done(m, op, outcome, fx),
         Command::Ask(ask) => ai::ask(m, ask, fx),
         Command::Answered { ask, about, outcome } => ai::answered(m, ask, about, outcome, fx),
         Command::AddAccount => setup::add_account(m, fx),
@@ -111,12 +111,12 @@ fn unfinished(m: &mut Model, work: Work, fx: &mut Effects<Email>) {
             // The job panicked or never started; the framework does not say which, so the
             // sentence is the one that is true of both. The text stays in the composer and the
             // draft.
-            compose::keep_after_send(m, fx);
+            compose::keep_after_send(m, true, fx);
             m.sync_status = "Not sent".into();
             "The send did not finish, so this window cannot say whether the message went. It is kept as a draft; look in Sent before sending it again."
         }
         Work::Draft => {
-            compose::next_file_op(m, fx);
+            drafts::next_file_op(m, fx);
             "The draft could not be kept; try again."
         }
         Work::Ai => {
@@ -141,4 +141,8 @@ fn unfinished(m: &mut Model, work: Work, fx: &mut Effects<Email>) {
     };
     fx.changed(part::LIST);
     say(m, fx, sentence);
+    // The first look did not land: a message left unsent at the last close is offered anyway.
+    if work == Work::Sync {
+        drafts::offer_unsent(m, fx);
+    }
 }

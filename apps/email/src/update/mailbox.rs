@@ -89,7 +89,7 @@ pub fn looked(m: &mut Model, why: Look, folder: &str, loaded: Loaded, fx: &mut E
         m.sync_status = format!("Synced \u{00b7} {count} in {folder}");
     }
     if why == Look::Start {
-        super::compose::offer_unsent(m, fx);
+        super::drafts::offer_unsent(m, fx);
     }
 }
 

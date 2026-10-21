@@ -58,6 +58,7 @@ impl App for Email {
             kept = Ok(Some(unsent.clone()));
         }
         let mut model = Model::new(backend::for_app(&boot.paths), boot.mind.clone(), files, kept);
+        model.composer.kept_unsure = unsent.is_some() || files::is_unsure(&model.files.draft);
         model.composer.unsent_at_start = unsent;
         if demo::asked() {
             demo::populate(&mut model);

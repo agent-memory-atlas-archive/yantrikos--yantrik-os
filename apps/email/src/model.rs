@@ -169,6 +169,13 @@ pub struct Composer {
     /// A message that was being sent when the app last closed, read back at start: whether it went
     /// is not known, so it is offered again as the draft.
     pub unsent_at_start: Option<Draft>,
+    /// The kept draft's message may already have gone: a send of it never came back. Kept beside
+    /// the draft file, and said whenever Compose opens it, until it is sent or discarded.
+    pub kept_unsure: bool,
+    /// The same, of the text in the composer now.
+    pub unsure: bool,
+    /// Cancel was pressed while a send was out: the send's own sentence says where the edit went.
+    pub closed_during_send: bool,
     /// True while the draft file is being written or removed.
     pub writing: bool,
     /// What to do to the draft file once the write in flight lands: only the latest.
@@ -178,8 +185,25 @@ pub struct Composer {
 /// A write or a removal of the draft file.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FileOp {
-    Save { draft: Draft, keep: Keep },
-    Clear { after_send: bool },
+    /// `unsure`: written with the mark that says whether its message went is not known.
+    /// `release_lane`: the send's lane copy goes once this has landed.
+    Save { draft: Draft, keep: Keep, unsure: bool, release_lane: bool },
+    Clear { after_send: bool, release_lane: bool },
+}
+
+impl FileOp {
+    pub fn releases_lane(&self) -> bool {
+        match self {
+            FileOp::Save { release_lane, .. } | FileOp::Clear { release_lane, .. } => *release_lane,
+        }
+    }
+
+    pub fn releasing_lane(mut self, release: bool) -> FileOp {
+        match &mut self {
+            FileOp::Save { release_lane, .. } | FileOp::Clear { release_lane, .. } => *release_lane = release,
+        }
+        self
+    }
 }
 
 /// Why the draft file is written, which decides what is said when it lands.
@@ -310,6 +334,9 @@ impl Model {
                 kept,
                 sending: None,
                 unsent_at_start: None,
+                kept_unsure: false,
+                unsure: false,
+                closed_during_send: false,
                 writing: false,
                 queued: None,
             },

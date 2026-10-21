@@ -1,28 +1,41 @@
-//! Writing: the composer, replies and forwards, sending, and the draft that survives Cancel.
-//!
-//! The draft is one file, written and removed in jobs, one at a time and in the order they were
-//! asked for: a save asked while another is writing waits, and only the latest waits.
+//! Writing: the composer, replies and forwards, sending, and the draft that survives Cancel. The
+//! draft file itself is `drafts.rs`.
 
 use yantrik_app::effects::Effects;
 use yantrik_app::jobs::{Concurrency, JobKey, Scope};
 
-use super::{clear_notice, say};
+use super::drafts::{file_op, UNSURE, UNSURE_STATUS};
+use super::say;
 use crate::backend::calls::{self, Outgoing};
 use crate::command::{Command, Listing, Work};
 use crate::model::{part, FileOp, Keep, Model, SENDING};
-use crate::state::{self, Draft};
+use crate::state::Draft;
 use crate::{rows, Email};
 
-/// Open the composer with whatever was being written when it was last closed. The composer used
-/// to open empty every time and the half-written message was simply gone.
-pub fn compose_new(m: &mut Model, fx: &mut Effects<Email>) {
+/// The composer opened on new text: nothing from an earlier send is pending on it.
+fn opened_on_new_text(m: &mut Model) {
     m.composer.open = true;
+    m.composer.unsure = false;
+    m.composer.closed_during_send = false;
+}
+
+/// Open the composer with whatever was being written when it was last closed. The composer used
+/// to open empty every time and the half-written message was simply gone. A draft whose message
+/// may already have gone says so, every time it is opened, until it is sent or discarded.
+pub fn compose_new(m: &mut Model, fx: &mut Effects<Email>) {
+    opened_on_new_text(m);
     fx.changed(part::STATUS);
     match m.composer.kept.clone() {
         Ok(Some(draft)) => {
             m.composer.text = draft;
-            m.composer.status = "Draft restored".into();
             fx.changed(part::COMPOSE_TEXT);
+            if m.composer.kept_unsure {
+                m.composer.unsure = true;
+                m.composer.status = UNSURE_STATUS.into();
+                say(m, fx, UNSURE);
+            } else {
+                m.composer.status = "Draft restored".into();
+            }
         }
         Ok(None) => {
             m.composer.text = Draft::default();
@@ -52,7 +65,7 @@ pub fn compose(m: &mut Model, to: String, subject: String, body: String, fx: &mu
 pub fn reply(m: &mut Model, all: bool, fx: &mut Effects<Email>) {
     let Some(open) = m.open.as_ref() else { return };
     m.composer.text = rows::reply(&open.detail, all);
-    m.composer.open = true;
+    opened_on_new_text(m);
     fx.changed(part::COMPOSE_TEXT);
     fx.changed(part::STATUS);
 }
@@ -60,13 +73,10 @@ pub fn reply(m: &mut Model, all: bool, fx: &mut Effects<Email>) {
 pub fn forward(m: &mut Model, fx: &mut Effects<Email>) {
     let detail = m.open.as_ref().map(|o| o.detail.clone()).unwrap_or_default();
     m.composer.text = rows::forward(&detail);
-    m.composer.open = true;
+    opened_on_new_text(m);
     fx.changed(part::COMPOSE_TEXT);
     fx.changed(part::STATUS);
 }
-
-/// What the notice says when a message is offered again at start.
-pub const UNSENT_AT_START: &str = "A message was being sent when Email closed, and whether it went is not known. It is kept as a draft: look in Sent before sending it again.";
 
 /// Send what is in the composer. One at a time, and said: Send shows "Sending…" and takes no
 /// press while one is out, and a press that arrives anyway is answered on the notice line.
@@ -104,23 +114,26 @@ pub fn sent(m: &mut Model, outcome: Result<(), String>, fx: &mut Effects<Email>)
     match outcome {
         Ok(()) => {
             let went = m.composer.sending.take();
+            // It went, so its lane copy is not needed: the text is in Sent.
             fx.discard_draft(SENDING);
+            m.composer.unsure = false;
             m.sync_status = "Message sent".into();
             m.composer.status.clear();
             let edited = !m.composer.text.is_empty() && went.as_ref() != Some(&m.composer.text);
             if edited {
-                // What was typed after Send stays where it was typed, and is kept.
+                // What was typed after Send is kept, where it was typed or where Cancel put it.
                 let text = m.composer.text.clone();
-                file_op(m, FileOp::Save { draft: text, keep: Keep::Quietly }, fx);
-                say(
-                    m,
-                    fx,
-                    "The message was sent as it was when Send was pressed. What was changed since is still in the composer, kept as a draft.",
-                );
+                file_op(m, FileOp::Save { draft: text, keep: Keep::Quietly, unsure: false, release_lane: false }, fx);
+                let sentence = if m.composer.open {
+                    "The message was sent as it was when Send was pressed. What was changed since is still in the composer, kept as a draft."
+                } else {
+                    "The message was sent as it was when Send was pressed. What was changed since is kept as a draft; Compose reopens it."
+                };
+                say(m, fx, sentence);
             } else {
                 m.composer.open = false;
                 // The draft was this message; it has gone.
-                file_op(m, FileOp::Clear { after_send: true }, fx);
+                file_op(m, FileOp::Clear { after_send: true, release_lane: false }, fx);
             }
             let folder = m.folder.clone();
             // The folder again, so what was sent shows; a failure there is said by the listing.
@@ -129,47 +142,41 @@ pub fn sent(m: &mut Model, outcome: Result<(), String>, fx: &mut Effects<Email>)
             }
         }
         Err(e) => {
-            // The composer stays open, holding what was typed, and so does the draft.
-            keep_after_send(m, fx);
+            // The composer stays open, holding what was typed, and so does the draft. It did not
+            // go this time; an earlier send of it whose outcome was not known still is not.
+            let unsure = m.composer.unsure;
+            keep_after_send(m, unsure, fx);
             m.sync_status = "Not sent".into();
             say(m, fx, format!("Could not send the message: {e}"));
         }
     }
 }
 
-/// A send that did not go, or whose outcome is not known: the composer's text becomes the draft.
-pub fn keep_after_send(m: &mut Model, fx: &mut Effects<Email>) {
+/// A send that did not go, or whose outcome is not known (`unsure`): the composer's text becomes
+/// the draft, and the lane copy goes once it has landed.
+pub fn keep_after_send(m: &mut Model, unsure: bool, fx: &mut Effects<Email>) {
     m.composer.sending = None;
-    fx.discard_draft(SENDING);
+    m.composer.unsure = unsure;
     let text = m.composer.text.clone();
     if !text.is_empty() {
-        file_op(m, FileOp::Save { draft: text, keep: Keep::Quietly }, fx);
+        file_op(m, FileOp::Save { draft: text, keep: Keep::Quietly, unsure, release_lane: true }, fx);
     }
-}
-
-/// A message that was being sent when the app last closed: written to the draft file, its lane
-/// copy dropped, and said. Called once the first look has landed, so the look's own notice
-/// cannot clear the sentence.
-pub fn offer_unsent(m: &mut Model, fx: &mut Effects<Email>) {
-    let Some(unsent) = m.composer.unsent_at_start.take() else { return };
-    file_op(m, FileOp::Save { draft: unsent, keep: Keep::Quietly }, fx);
-    fx.discard_draft(SENDING);
-    let sentence = if m.notice.is_empty() { UNSENT_AT_START.to_string() } else { format!("{} {UNSENT_AT_START}", m.notice) };
-    say(m, fx, sentence);
 }
 
 /// Close the composer and keep what was typed. Closing it used to discard it silently, which is
 /// the worst thing a mail client can do to a message that is not finished.
 pub fn cancel(m: &mut Model, draft: Draft, fx: &mut Effects<Email>) {
     m.composer.open = false;
+    m.composer.closed_during_send = m.composer.sending.is_some();
     fx.changed(part::STATUS);
     if draft.is_empty() {
         m.composer.status.clear();
-        file_op(m, FileOp::Clear { after_send: false }, fx);
+        file_op(m, FileOp::Clear { after_send: false, release_lane: false }, fx);
         return;
     }
     m.composer.text = draft.clone();
-    file_op(m, FileOp::Save { draft, keep: Keep::Closing }, fx);
+    let unsure = m.composer.unsure;
+    file_op(m, FileOp::Save { draft, keep: Keep::Closing, unsure, release_lane: false }, fx);
 }
 
 pub fn save_draft(m: &mut Model, draft: Draft, fx: &mut Effects<Email>) {
@@ -178,68 +185,6 @@ pub fn save_draft(m: &mut Model, draft: Draft, fx: &mut Effects<Email>) {
         return say(m, fx, "There is nothing in the composer to save.");
     }
     m.composer.text = draft.clone();
-    file_op(m, FileOp::Save { draft, keep: Keep::Saved }, fx);
-}
-
-/// One write or removal of the draft file, in a job; or, while one is running, the next one.
-fn file_op(m: &mut Model, op: FileOp, fx: &mut Effects<Email>) {
-    if m.composer.writing {
-        m.composer.queued = Some(op);
-        return;
-    }
-    m.composer.writing = true;
-    let path = m.files.draft.clone();
-    fx.spawn_or(Command::Unfinished(Work::Draft), move |_| match op {
-        FileOp::Save { draft, keep } => {
-            let outcome = state::save_draft(&path, &draft);
-            Command::DraftWritten { draft, keep, outcome }
-        }
-        FileOp::Clear { after_send } => Command::DraftCleared { after_send, outcome: state::clear_draft(&path) },
-    });
-}
-
-/// The next file operation, once the one before it has landed.
-pub fn next_file_op(m: &mut Model, fx: &mut Effects<Email>) {
-    m.composer.writing = false;
-    if let Some(op) = m.composer.queued.take() {
-        file_op(m, op, fx);
-    }
-}
-
-pub fn draft_written(m: &mut Model, draft: Draft, keep: Keep, outcome: Result<(), String>, fx: &mut Effects<Email>) {
-    fx.changed(part::STATUS);
-    match (outcome, keep) {
-        (Ok(()), Keep::Quietly) => m.composer.kept = Ok(Some(draft)),
-        (Ok(()), Keep::Closing) => {
-            m.composer.kept = Ok(Some(draft));
-            m.composer.status = "Draft saved".into();
-            say(m, fx, "The unsent message was kept as a draft; Compose reopens it.");
-        }
-        (Ok(()), Keep::Saved) => {
-            m.composer.kept = Ok(Some(draft));
-            m.composer.status = "Draft saved".into();
-            clear_notice(m, fx);
-        }
-        (Err(e), Keep::Closing | Keep::Quietly) => say(m, fx, format!("Could not keep the unsent message: {e}")),
-        (Err(e), Keep::Saved) => {
-            m.composer.status.clear();
-            say(m, fx, format!("Could not save the draft: {e}"));
-        }
-    }
-    next_file_op(m, fx);
-}
-
-pub fn draft_cleared(m: &mut Model, after_send: bool, outcome: Result<(), String>, fx: &mut Effects<Email>) {
-    match outcome {
-        Ok(()) => {
-            m.composer.kept = Ok(None);
-            if after_send {
-                clear_notice(m, fx);
-            }
-        }
-        Err(e) if after_send => say(m, fx, format!("The message was sent; the draft is still on disk: {e}")),
-        // Closing an empty composer: a file that could not be removed is reopened by Compose.
-        Err(_) => {}
-    }
-    next_file_op(m, fx);
+    let unsure = m.composer.unsure;
+    file_op(m, FileOp::Save { draft, keep: Keep::Saved, unsure, release_lane: false }, fx);
 }

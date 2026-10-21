@@ -4,7 +4,7 @@
 use yantrik_ipc_contracts::email::{EmailAccountSummary, EmailDetail, EmailSummary, OAuthBeginResult, TestAccountResult};
 
 use crate::backend::look::Loaded;
-use crate::model::Keep;
+use crate::model::FileOp;
 use crate::state::{Draft, GoogleOutcome};
 
 /// Why the mailbox is being read.
@@ -181,9 +181,8 @@ pub enum Command {
     Sent(Result<(), String>),
     CancelCompose(Draft),
     SaveDraft(Draft),
-    /// A draft written, or not, and why it was.
-    DraftWritten { draft: Draft, keep: Keep, outcome: Result<(), String> },
-    DraftCleared { after_send: bool, outcome: Result<(), String> },
+    /// A write or a removal of the draft file landed, or did not.
+    DraftDone { op: FileOp, outcome: Result<(), String> },
     // ── The companion ──
     Ask(Ask),
     /// What the companion said, about the message that was open when it was asked.

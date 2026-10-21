@@ -294,3 +294,109 @@ fn the_draft_is_written_whole_and_only_for_its_owner() {
     assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
     assert!(!file.with_extension("json.part").exists(), "nothing is left beside it");
 }
+
+/// Sends `body` from a fresh composer, as the window does.
+fn send_from_composer(app: &yantrik_testing::TestApp<Email>, body: &str) {
+    app.ui(|ui| ui.invoke_compose_new());
+    type_into_composer(app, &draft("a@example.com", body));
+    let body = body.to_string();
+    app.ui(move |ui| ui.invoke_send_email("a@example.com".into(), "".into(), "".into(), "Plans".into(), body.into()));
+}
+
+/// Review L5 (#920): a draft whose message may already have gone says so every time Compose
+/// opens it, across restarts, until it is sent or discarded; a listing in between does not take
+/// the warning away.
+#[test]
+fn a_draft_whose_send_may_have_gone_says_so_each_time_compose_opens_it() {
+    let unsure = "Whether this message was already sent is not known. Look in Sent before sending it again.";
+    let mail = with_inbox().answering("email.send_message", json!({}));
+    let paths = Paths::temporary(Email::ID);
+    let (app, _) = start_at(paths.clone(), &mail, FakeMind::new());
+    quiet(&app);
+    send_from_composer(&app, "maybe went");
+    let _ = app.shutdown();
+    drop(app);
+
+    let (again, _) = start_at(paths.clone(), &mail, FakeMind::new());
+    quiet(&again);
+    again.ui(|ui| ui.invoke_folder_clicked(1));
+    quiet(&again);
+    again.ui(|ui| ui.invoke_compose_new());
+    assert_eq!(again.ui(|ui| ui.get_email_draft_status()), "Not known whether this was sent");
+    assert_eq!(notice(&again), unsure);
+    again.ui(|ui| ui.invoke_cancel_compose());
+    quiet(&again);
+    let _ = again.shutdown();
+    drop(again);
+
+    let (third, _) = start_at(paths, &mail, FakeMind::new());
+    quiet(&third);
+    third.ui(|ui| ui.invoke_compose_new());
+    assert_eq!(third.ui(|ui| ui.get_compose_body()), "maybe went");
+    assert_eq!(third.ui(|ui| ui.get_email_draft_status()), "Not known whether this was sent", "still, after a restart");
+    // Sent at last: the warning goes with the draft.
+    third.ui(|ui| ui.invoke_send_email("a@example.com".into(), "".into(), "".into(), "Plans".into(), "maybe went".into()));
+    quiet(&third);
+    third.ui(|ui| ui.invoke_compose_new());
+    assert_eq!(third.ui(|ui| ui.get_compose_body()), "");
+    assert_eq!(third.ui(|ui| ui.get_email_draft_status()), "");
+}
+
+/// Review L5 (#920): a first look that does not land still offers the unsent message, and says
+/// what is not known about it.
+#[test]
+fn an_unsent_message_is_offered_even_when_the_first_look_does_not_land() {
+    let mail = with_inbox().answering("email.send_message", json!({}));
+    let paths = Paths::temporary(Email::ID);
+    let (app, _) = start_at(paths.clone(), &mail, FakeMind::new());
+    quiet(&app);
+    send_from_composer(&app, "maybe went");
+    let _ = app.shutdown();
+    drop(app);
+    let (again, _) = start_at(paths, &with_inbox().panicking("email.list_messages"), FakeMind::new());
+    quiet(&again);
+    assert!(notice(&again).ends_with("look in Sent before sending it again."), "{}", notice(&again));
+}
+
+/// Review L6 (#920): Cancel with an edit while a send is out never calls the kept edit "the
+/// unsent message" over a message that went, nor says it is still in a composer that is closed.
+#[test]
+fn cancel_with_an_edit_during_a_send_says_what_went_and_where_the_edit_is() {
+    let mail = with_inbox().answering("email.send_message", json!({}));
+    let app = started(&mail);
+    let file = app.paths().data_dir().join(files::DRAFT);
+    send_from_composer(&app, "v1");
+    type_into_composer(&app, &draft("a@example.com", "v2 edit"));
+    app.ui(|ui| ui.invoke_cancel_compose());
+    quiet(&app);
+    let bodies: Vec<String> =
+        mail.asked_for("email.send_message").iter().map(|p| p["body"].as_str().unwrap_or_default().to_string()).collect();
+    assert_eq!(bodies, ["v1"]);
+    assert!(!app.ui(|ui| ui.get_is_composing()));
+    assert_eq!(state::load_draft(&file).unwrap().map(|d| d.body), Some("v2 edit".to_string()));
+    assert_eq!(
+        notice(&app),
+        "The message was sent as it was when Send was pressed. What was changed since is kept as a draft; Compose reopens it."
+    );
+}
+
+/// Review L7 (#920): when the draft file cannot be written, the lane copy of a send that never
+/// came back stays, so the text is still there at the next start.
+#[test]
+fn the_lane_copy_stays_until_the_draft_file_holding_its_text_has_landed() {
+    let paths = Paths::temporary(Email::ID);
+    let (app, _) = start_at(paths.clone(), &with_inbox().panicking("email.send_message"), FakeMind::new());
+    quiet(&app);
+    // A folder stands where the draft file goes, so it cannot be written.
+    std::fs::create_dir_all(paths.data_dir().join(files::DRAFT).join("in-the-way")).unwrap();
+    send_from_composer(&app, "the only copy");
+    quiet(&app);
+    assert!(notice(&app).starts_with("Could not keep the unsent message: "), "{}", notice(&app));
+    let _ = app.shutdown();
+    drop(app);
+
+    let (again, _) = start_at(paths, &with_inbox(), FakeMind::new());
+    quiet(&again);
+    again.ui(|ui| ui.invoke_compose_new());
+    assert_eq!(again.ui(|ui| ui.get_compose_body()), "the only copy");
+}

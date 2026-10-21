@@ -48,6 +48,30 @@ fn overridden(variable: &str) -> Option<PathBuf> {
     Some(PathBuf::from(value))
 }
 
+/// The mark beside the draft that says whether its message was already sent is not known.
+pub fn unsure_mark(draft: &Path) -> PathBuf {
+    draft.with_extension("json.unsure")
+}
+
+/// Whether the draft at `draft` carries the mark.
+pub fn is_unsure(draft: &Path) -> bool {
+    unsure_mark(draft).is_file()
+}
+
+/// Puts the mark beside the draft, or takes it away. From a job.
+pub fn set_unsure(draft: &Path, unsure: bool) -> Result<(), String> {
+    let mark = unsure_mark(draft);
+    let done = if unsure {
+        std::fs::write(&mark, b"")
+    } else {
+        match std::fs::remove_file(&mark) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            other => other,
+        }
+    };
+    done.map_err(|e| format!("could not write {}: {e}", mark.display()))
+}
+
 /// Where builds before the framework kept the draft, whatever the session's data folder was.
 pub fn legacy_draft() -> Option<PathBuf> {
     let home = std::env::var_os("HOME").filter(|h| !h.is_empty())?;
