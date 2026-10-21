@@ -91,8 +91,7 @@ pub struct Store<T: Settings> {
 
 /// What the file's content is: its length and a hash of its bytes. Content, not the modification
 /// time: an edit that keeps the size and the time (an editor that preserves mtime, a coarse
-/// filesystem clock) is still an edit, and a rewrite with the same bytes is not one. Serialised
-/// in a document's draft, as the file the draft was written over.
+/// filesystem clock) is still an edit, and a rewrite with the same bytes is not one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct Fingerprint {
     len: u64,
