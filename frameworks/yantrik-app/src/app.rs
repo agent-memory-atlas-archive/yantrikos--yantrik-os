@@ -38,11 +38,12 @@ pub enum ExitReason {
     /// The app ended itself (`fx.exit()`): the reason recorded, never raised as an event by the
     /// framework.
     App,
-    /// The session or the system is ending the process: SIGTERM (a shutdown, a logout, a kill)
-    /// or SIGHUP (the session hung up). No one is there to answer, and the process is killed
-    /// after a grace period whatever the app does: save without asking, then `fx.exit()`. A bounded
-    /// chance to save, not a completed interactive save; the framework ends the process itself if
-    /// the app has not within [`crate::quit::SIGNAL_DEADLINE`].
+    /// The session or the system is ending the process: SIGTERM (a shutdown, a logout, a kill),
+    /// SIGHUP (the session hung up), or the display went (the compositor exited). No one is there
+    /// to answer, and the process is killed after a grace period whatever the app does: save
+    /// without asking, then `fx.exit()`. A bounded chance to save, not a completed interactive
+    /// save; after a signal the framework ends the process itself if the app has not within
+    /// [`crate::quit::SIGNAL_DEADLINE`].
     Logout,
     /// A person asked the app to quit: the app's `fx.request_quit()`, from Ctrl+Q or a Quit
     /// menu. Someone is there to answer: the app may ask about unsaved work, once over every
@@ -68,7 +69,15 @@ pub enum Event<S> {
     /// system (`ExitReason::Logout`). `None` ends it now; a command may save first and then
     /// `fx.exit()`, or, for a person's quit, ask and keep running when the person cancels.
     ExitRequested(ExitReason),
-    /// A window became the active one.
+    /// A window became the active one: the window manager gave it the keyboard (winit's
+    /// `Focused(true)`), because the person clicked into it, switched to it or brought it back,
+    /// or because it was just shown. Raised once per activation: a window that is already active
+    /// raises nothing more, so it fires again only after the window lost the activation to
+    /// another window, this app's or another's. Never raised when a window loses the activation,
+    /// for a window that is closed, or where there is no window manager (the headless platform;
+    /// a test raises it with `TestApp::activate`). The window manager's hook only queues it; it
+    /// is applied in the drain right after, and one queued behind a command that closed its
+    /// window is dropped. `None` does nothing.
     Activated(WindowId),
     /// The last `fx.save_settings` reached the disk. `None` does nothing.
     SettingsSaved,

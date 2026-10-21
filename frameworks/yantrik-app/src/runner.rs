@@ -181,6 +181,11 @@ pub fn run<A: App>() -> ExitCode {
             crate::event_loop::run_loop(core.ui(), A::ID, show_first)
         }
     };
+    // The compositor went (a logout, or a shutdown that signals the whole session at once): no
+    // one is there, and the app is owed its logout before the end, as it is for a signal.
+    if ending == crate::event_loop::Ending::DisplayGone {
+        core.display_gone();
+    }
     core.shutdown(GRACE);
     DRAIN.with(|cell| *cell.borrow_mut() = None);
     // A close, an `fx.exit()` and a logout are all 0; only a loop that failed with the display
@@ -191,10 +196,11 @@ pub fn run<A: App>() -> ExitCode {
     }
 }
 
-/// The drain and the window's close handler, on the UI thread.
+/// The drain, and the first window's close handler and activation, on the UI thread.
 fn install<A: App>(core: &Rc<Core<A>>) {
     let for_drain = core.clone();
     DRAIN.with(|cell| *cell.borrow_mut() = Some(Box::new(move || for_drain.drain())));
+    core.hear_activation(WindowId::PRIMARY, core.ui());
     let post = core.post();
     use slint::ComponentHandle as _;
     core.ui().window().on_close_requested(move || {

@@ -25,7 +25,7 @@ use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use serde_json::Value;
-use yantrik_app::app::{App, Boot, Event, ExitReason, WindowId};
+use yantrik_app::app::{App, Boot, Event, ExitReason};
 use yantrik_app::cx::{Core, Cx, Inbound, Parts};
 use yantrik_app::intents::{self, Intents};
 use yantrik_app::jobs::{Cancel, Deliver, Executor, Job, JobId, Manual};
@@ -38,6 +38,8 @@ use yantrik_app::watch::Seen;
 use yantrik_app::window::Window;
 use yantrik_ipc_transport::gate::{Authority, Mode};
 use yantrik_surface::{AgentTokenScope, CallerScope, Later, LaterScope, LocalRegistry};
+
+mod windows;
 
 pub mod headless {
     //! Slint on a software window with no window system.
@@ -520,30 +522,6 @@ impl<A: App> TestApp<A> {
         });
     }
 
-    /// The windows open, the first one first.
-    pub fn windows(&self) -> Vec<WindowId> {
-        self.with(|u| u.core.windows_open())
-    }
-
-    /// Reads an open window (`None` once it is closed), as `ui` reads the first.
-    pub fn window<R: Send + 'static>(
-        &self,
-        id: WindowId,
-        f: impl FnOnce(&A::Ui) -> R + Send + 'static,
-    ) -> Option<R> {
-        self.with(move |u| u.core.window(id).map(|ui| f(&ui)))
-    }
-
-    /// A second launch asked for the app (`present`).
-    pub fn present(&self) -> Result<(), String> {
-        self.with(|u| u.core.present())
-    }
-
-    /// The person pressed a window's close button: `Event::CloseRequested` for it.
-    pub fn close_requested(&self, id: WindowId) {
-        self.event(Event::CloseRequested(id));
-    }
-
     /// The documents' files the app watches (`fx.watch`), by key.
     pub fn watched(&self) -> Vec<(String, std::path::PathBuf)> {
         self.with(|u| u.core.watched().entries())
@@ -649,6 +627,12 @@ impl<A: App> TestApp<A> {
                 later: later.take(),
             })
         })
+    }
+
+    /// The display went away (the compositor exited), as the runner hears it when its loop ends
+    /// with no one having asked the app to end: the app is owed its logout. `shutdown` follows.
+    pub fn display_gone(&self) {
+        self.with(|u| u.core.display_gone());
     }
 
     /// The end, as the runner does it.
