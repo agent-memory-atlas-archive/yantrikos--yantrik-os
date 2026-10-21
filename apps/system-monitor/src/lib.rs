@@ -32,6 +32,9 @@ mod update;
 mod view;
 #[cfg(test)]
 mod app_tests;
+// The kill tests end children of their own and read `/proc`, as the old crate's did.
+#[cfg(all(test, target_os = "linux"))]
+mod outcome_tests;
 
 pub use model::{Command, Model};
 
