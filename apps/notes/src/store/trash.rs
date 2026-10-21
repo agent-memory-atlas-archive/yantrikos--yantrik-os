@@ -51,7 +51,9 @@ impl Vault {
     }
 
     /// A note's text written to a new file outside the vault: never over anything already there.
+    /// Not a write into the vault, so a vault open read-only still exports: it is how its notes
+    /// get out.
     pub fn export(&self, path: &Path, text: &str) -> Result<(), String> {
-        self.put(path, text, false).map_err(|e| e.error)
+        self.disk.create_new(path, text.as_bytes()).map_err(|e| e.error)
     }
 }

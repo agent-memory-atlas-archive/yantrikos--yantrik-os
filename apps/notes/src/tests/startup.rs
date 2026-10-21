@@ -1,5 +1,6 @@
 //! One copy per library: a second Notes on a library another copy holds hands its launch over and
-//! does not start, and the lock in the vault is never a note.
+//! does not start, and the lock in the vault is never a note. A library a newer Notes wrote is
+//! refused at start, before anything in it is touched.
 
 use std::sync::Arc;
 
@@ -9,8 +10,9 @@ use yantrik_app::paths::Paths;
 use yantrik_app::Services;
 use yantrik_testing::TestApp;
 
-use super::{settle, started, state, vault};
+use super::{settle, snapshot, started, state, vault};
 use crate::claim::{ALREADY_RUNNING, LEGACY_NAME, VAULT_NAME};
+use crate::store::version::MARKER;
 use crate::Notes;
 
 fn boot(paths: &Paths) -> Boot {
@@ -42,6 +44,24 @@ fn a_copy_the_library_claim_turns_away_has_handed_over_and_has_not_failed() {
     let paths = Paths::temporary(Notes::ID);
     let _first = TestApp::<Notes>::start_at(paths.clone(), Vec::new());
     assert!(declined(&paths).expect("held").is_handed_over());
+}
+
+#[test]
+fn a_library_a_newer_notes_wrote_is_refused_at_start_and_left_as_it_was() {
+    let paths = Paths::temporary(Notes::ID);
+    let dir = paths.data_dir().to_path_buf();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(MARKER), "3\n").unwrap();
+    std::fs::write(dir.join("a.md"), "# Written by format 3\n").unwrap();
+    let before = snapshot(&dir);
+    let refused = declined(&paths).expect("refused");
+    assert_eq!(
+        refused.sentence,
+        "This library was written by a newer Notes (format 3); this Notes reads format 2. It was not \
+         opened, and nothing in it was changed."
+    );
+    assert!(!refused.is_handed_over(), "a refusal is a failed start, said and filed");
+    assert_eq!(snapshot(&dir), before, "not even the library's lock was made in it");
 }
 
 #[test]

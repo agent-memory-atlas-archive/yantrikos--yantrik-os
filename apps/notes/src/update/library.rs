@@ -34,6 +34,7 @@ pub fn loaded(m: &mut Model, fx: &mut Effects<Notes>, result: Result<Loaded, Str
     m.busy = None;
     match result {
         Ok(loaded) => {
+            m.vault = m.vault.with_access(loaded.read_only.clone());
             let key = m.current().map(|c| (c.id().to_string(), c.trash()));
             m.library = loaded.notes;
             let again = key.and_then(|(id, trash)| m.library.iter().find(|n| n.id == id && n.trash == trash).cloned());
@@ -48,7 +49,7 @@ pub fn loaded(m: &mut Model, fx: &mut Effects<Notes>, result: Result<Loaded, Str
                 show_note(m, fx, again);
             }
             m.ready = true;
-            m.notice = sentences([Some(loaded.notice.as_str()), changed.then_some(KEPT_OVER_CHANGE)]);
+            m.notice = sentences([loaded.read_only.as_deref(), Some(loaded.notice.as_str()), changed.then_some(KEPT_OVER_CHANGE)]);
             if kept {
                 still_typing(m, fx);
             } else {

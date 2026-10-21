@@ -222,7 +222,7 @@ fn answer(m: &Model, expect: Expect, landed: bool) -> Result<Value, String> {
 }
 
 /// A refusal the person at the window sees too: the notice, and the call's error.
-fn refuse(m: &mut Model, fx: &mut Effects<Notes>, sentence: String) {
+pub(super) fn refuse(m: &mut Model, fx: &mut Effects<Notes>, sentence: String) {
     m.notice = sentence.clone();
     fx.changed(STATUS);
     fx.settle(Err(Refused::new("refused", sentence)));

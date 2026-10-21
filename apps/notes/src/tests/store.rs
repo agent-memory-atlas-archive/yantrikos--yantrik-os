@@ -22,7 +22,7 @@ pub fn fixture(name: &str) -> PathBuf {
 }
 
 /// Saves `content` as note `id`, whose files hold `on_disk`, as the document's save job would.
-fn save(vault: &Vault, id: &str, on_disk: Option<&NoteText>, content: &NoteText) -> Result<Saved, SaveFailed> {
+pub fn save(vault: &Vault, id: &str, on_disk: Option<&NoteText>, content: &NoteText) -> Result<Saved, SaveFailed> {
     vault.save(&SaveJob {
         id: id.into(),
         ticket: SaveTicket {
