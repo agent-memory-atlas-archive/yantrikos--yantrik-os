@@ -540,6 +540,10 @@ impl<A: App> Core<A> {
     /// An event: the app's command for it, or the default. The runner raises the first
     /// `Event::Launch` through this; a test may raise any.
     pub fn event(&self, event: Event<A::Settings>) {
+        // An activation queued behind a command that closed its window: said of no window.
+        if matches!(&event, Event::Activated(w) if !self.windows_open().contains(w)) {
+            return;
+        }
         // An app with a rail: the rail hears of the Mind's reach whatever the app makes of it.
         if let Event::ReachChanged(reach) = &event {
             if let Some(command) = A::rail(RailCommand::Reach(*reach)) {

@@ -74,11 +74,26 @@ pub fn close(window: &slint::Window) {
 /// or switched to. For a window that has to check something it may have missed while the person
 /// was elsewhere (Calendar asks whether the date has turned). A window that is not on a winit
 /// backend is never told, and `f` is never called.
+///
+/// Not for a window the framework runs: it hears this as `Event::Activated`, and winit keeps one
+/// event hook per window, so calling this on such a window would replace the framework's.
 pub fn on_activated(window: &slint::Window, mut f: impl FnMut() + 'static) {
+    on_focus_changed(window, move |focused| {
+        if focused {
+            f();
+        }
+    });
+}
+
+/// Call `f` with `true` each time the window gains the keyboard from the window manager and
+/// `false` each time it loses it (winit's `Focused`), as winit reports it: a repeat is passed on
+/// as it came. Slint still handles every event itself. A window that is not on a winit backend
+/// is never told. The window's one winit hook: a later call replaces an earlier one.
+pub fn on_focus_changed(window: &slint::Window, mut f: impl FnMut(bool) + 'static) {
     use slint::winit_030::{winit::event::WindowEvent, EventResult};
     window.on_winit_window_event(move |_, event| {
-        if matches!(event, WindowEvent::Focused(true)) {
-            f();
+        if let WindowEvent::Focused(focused) = event {
+            f(*focused);
         }
         EventResult::Propagate
     });

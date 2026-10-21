@@ -44,5 +44,6 @@ signal-hook = { workspace = true }
 libc = { workspace = true }
 
 [dev-dependencies]
-# The headless harness the core tests run on (a dev-dependency cycle cargo allows).
-yantrik-testing = { workspace = true }
+# The headless harness the core tests run on (a dev-dependency cycle cargo allows), with the
+# window manager's word on activation that tests/windows.rs gives.
+yantrik-testing = { workspace = true, features = ["testing"] }
