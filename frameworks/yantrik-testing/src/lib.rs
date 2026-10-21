@@ -10,6 +10,9 @@
 //! when it calls [`TestApp::advance`], and posts from other threads land on [`TestApp::tick`].
 //! A test therefore chooses the order things land in, which is how a race is tested.
 //!
+//! The Mind's side is tested through the real dispatch: [`TestApp::act`] goes through the same
+//! registry the runner serves, with the authority the test pins, and no socket.
+//!
 //! This is the one headless platform; the six copies in app test files are retired as each app
 //! moves onto the framework.
 
@@ -21,13 +24,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+use serde_json::Value;
 use yantrik_app::app::{App, Boot, ExitReason};
 use yantrik_app::cx::{Core, Cx, Inbound};
+use yantrik_app::intents::{self, Intents};
 use yantrik_app::jobs::{Cancel, Deliver, Executor, Job, JobId, Manual};
 use yantrik_app::queue::Post;
 use yantrik_app::refused::Refused;
 use yantrik_app::timers::{Fire, ManualTimers, Sink, TimerId, Timers};
 use yantrik_app::window::Window;
+use yantrik_ipc_transport::gate::{Authority, Mode};
+use yantrik_surface::{AgentTokenScope, CallerScope, Later, LaterScope, LocalRegistry};
 
 pub mod headless {
     //! Slint on a software window with no window system.
@@ -101,7 +108,7 @@ static UI_THREAD: OnceLock<Mutex<mpsc::Sender<Step>>> = OnceLock::new();
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 thread_local! {
-    /// Every app under test, by id, on the UI thread. `Rc<dyn Any>` holds an `Rc<Core<A>>`.
+    /// Every app under test, by id, on the UI thread. `Rc<dyn Any>` holds an `Rc<Under<A>>`.
     static APPS: RefCell<HashMap<u64, Rc<dyn Any>>> = RefCell::new(HashMap::new());
 }
 
@@ -198,6 +205,96 @@ struct Under<A: App> {
     core: Rc<Core<A>>,
     jobs: SharedJobs<A::Command>,
     clock: Clock<A::Command>,
+    registry: LocalRegistry,
+}
+
+// ── Acting as the Mind ──────────────────────────────────────────────
+
+/// One call of an intent, as the test wants it dispatched. By default the person's own, in a
+/// mode that asks about nothing, with no revision expected.
+#[derive(Debug, Clone)]
+pub struct Call {
+    pub name: String,
+    pub args: Value,
+    pub agent_token: Option<String>,
+    pub mode: String,
+    pub granted: bool,
+    pub expect_revision: Option<String>,
+}
+
+impl Call {
+    pub fn new(name: &str, args: Value) -> Call {
+        Call {
+            name: name.into(),
+            args,
+            agent_token: None,
+            mode: "bypass_all".into(),
+            granted: false,
+            expect_revision: None,
+        }
+    }
+
+    /// The call arrives as an agent's, with this token.
+    pub fn as_agent(mut self, token: &str) -> Call {
+        self.agent_token = Some(token.into());
+        self
+    }
+
+    /// The machine's mode (`ask`, `auto`, `bypass`, `bypass_all`).
+    pub fn in_mode(mut self, mode: &str) -> Call {
+        self.mode = mode.into();
+        self
+    }
+
+    /// A person's Allow was spent for exactly this call.
+    pub fn granted(mut self) -> Call {
+        self.granted = true;
+        self
+    }
+
+    /// The caller acted on this revision of the app; a different one is refused as stale.
+    pub fn expecting(mut self, revision: &str) -> Call {
+        self.expect_revision = Some(revision.into());
+        self
+    }
+}
+
+/// An accepted call whose answer may still be owed (`Settle::Explicit`): the rest of the answer
+/// is run by [`Pending::settle`] on the test's thread, as the RPC thread would, while the test
+/// runs the jobs on the UI thread.
+pub struct Pending {
+    envelope: Value,
+    later: Option<Later>,
+}
+
+impl std::fmt::Debug for Pending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Pending")
+            .field("envelope", &self.envelope)
+            .field("owed", &self.later.is_some())
+            .finish()
+    }
+}
+
+impl Pending {
+    /// The envelope as the dispatch returned it. For an explicit settlement its `result` is a
+    /// placeholder until [`Pending::settle`] runs.
+    pub fn envelope(&self) -> &Value {
+        &self.envelope
+    }
+
+    /// Whether the answer is still owed.
+    pub fn is_owed(&self) -> bool {
+        self.later.is_some()
+    }
+
+    /// Waits for the outcome (the deadline is the intent's) and returns the settled result.
+    pub fn settle(self) -> Result<Value, String> {
+        match self.later {
+            Some(work) => work(),
+            None => Ok(self.envelope.get("result").cloned().unwrap_or(Value::Null)),
+        }
+    }
 }
 
 // ── The handle ──────────────────────────────────────────────────────
@@ -211,8 +308,8 @@ pub struct TestApp<A: App> {
 
 impl<A: App> TestApp<A> {
     /// Boots the app as the runner would: the model from `boot`, the window headless, `wire`,
-    /// the first render, `start`. Effects `start` asked for are staged: jobs wait for
-    /// [`TestApp::run_jobs`], timers for [`TestApp::advance`].
+    /// the first render, `start`, the intents in a registry (not served). Effects `start` asked
+    /// for are staged: jobs wait for [`TestApp::run_jobs`], timers for [`TestApp::advance`].
     pub fn start_with(boot: Boot) -> TestApp<A> {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         on_ui(move || {
@@ -237,7 +334,15 @@ impl<A: App> TestApp<A> {
             A::wire(&Cx::new(core.clone()));
             core.render_all();
             core.start();
-            let under: Rc<dyn Any> = Rc::new(Under { core, jobs, clock });
+            let mut table = Intents::new();
+            A::intents(&mut table);
+            let registry = intents::registry(&core, table);
+            let under: Rc<dyn Any> = Rc::new(Under {
+                core,
+                jobs,
+                clock,
+                registry,
+            });
             APPS.with(|apps| apps.borrow_mut().insert(id, under));
         });
         TestApp {
@@ -341,9 +446,59 @@ impl<A: App> TestApp<A> {
         self.with(|u| u.core.timers_armed())
     }
 
+    pub fn settlements_open(&self) -> usize {
+        self.with(|u| u.core.settlements_open())
+    }
+
     /// The `Send` endpoint another thread posts to; what it posts lands on [`TestApp::tick`].
     pub fn post(&self) -> Post<Inbound<A>> {
         self.with(|u| u.core.post())
+    }
+
+    /// What the Mind reads: the real `describe`, through the registry.
+    pub fn describe(&self) -> Value {
+        self.with(|u| u.registry.describe())
+    }
+
+    /// The app's current revision, as `describe` reports it.
+    pub fn revision(&self) -> String {
+        self.describe()
+            .get("revision")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    /// The person's own call of an intent, through the real dispatch (the argument checks, the
+    /// ceiling and mode, the revision guard), in a mode that asks about nothing.
+    pub fn act(&self, name: &str, args: Value) -> Result<Pending, String> {
+        self.act_as(Call::new(name, args))
+    }
+
+    /// A call as the test describes it.
+    pub fn act_as(&self, call: Call) -> Result<Pending, String> {
+        self.with(move |u| {
+            let _agent = AgentTokenScope::enter(call.agent_token.clone());
+            let _who = CallerScope::enter(None);
+            let later = LaterScope::enter();
+            let authority = Authority {
+                ceiling: "dangerous".into(),
+                mode: Mode::named(&call.mode),
+                granted: call.granted,
+                asks_above: None,
+            };
+            let envelope = u.registry.act(
+                &call.name,
+                &call.args,
+                call.expect_revision.as_deref(),
+                "test-call",
+                &authority,
+            )?;
+            Ok(Pending {
+                envelope,
+                later: later.take(),
+            })
+        })
     }
 
     /// The end, as the runner does it.

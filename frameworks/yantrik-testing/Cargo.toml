@@ -9,4 +9,8 @@ description = "How a Yantrik app is tested without a display: a headless Slint p
 # A dev-dependency of apps and of yantrik-app itself. Never in a shipped binary.
 [dependencies]
 slint = { workspace = true }
+serde_json = { workspace = true }
 yantrik-app = { workspace = true }
+# The real dispatch a test acts through, and the authority it pins.
+yantrik-surface = { workspace = true }
+yantrik-ipc-transport = { workspace = true }
