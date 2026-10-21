@@ -123,6 +123,18 @@ fn save_a_copy_leaves_no_draft_of_the_original() {
     crashed_offers_nothing(app, "save a copy");
 }
 
+/// *Save a copy* of a note whose file is gone is *Save as new* by another button: the gone note
+/// leaves the library with its draft.
+#[test]
+fn save_a_copy_of_a_gone_note_leaves_neither_its_draft_nor_its_card() {
+    let (app, path) = file_gone();
+    let original = path.file_name().unwrap().to_str().unwrap().to_string();
+    press(&app, "copy");
+    assert_eq!(kept(&app, "copy-"), "# Gone\n\nkeep me");
+    assert!(app.model(move |m| !m.library.iter().any(|n| n.id == original)), "the gone note is not listed");
+    crashed_offers_nothing(app, "save a copy of a gone note");
+}
+
 /// Never none either: a copy that cannot be saved keeps its own draft, written at once in place of
 /// the original's, so the text is offered once, as the copy.
 #[test]

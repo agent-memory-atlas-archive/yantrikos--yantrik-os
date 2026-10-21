@@ -4,6 +4,7 @@ import { AppWindow } from "app_window.slint";
 export { WindowChrome } from "app_window.slint";
 import { YButton, YIconButton } from "y_button.slint";
 import { YInput } from "y_input.slint";
+import { YStatusPill } from "y_status_pill.slint";
 import { Icon, Icons } from "icon.slint";
 import { ScrollView } from "std-widgets.slint";
 export { ThemeMode, AccentPreset }
@@ -168,14 +169,12 @@ export component NotesApp inherits AppWindow {
          VerticalLayout {padding:12px;spacing:5px;
           HorizontalLayout{spacing:5px;
            if note.pinned : Icon{commands:Icons.star;size:12px;tint:Theme.amber;y:(parent.height - self.height)/2;}
-           Text{text:note.title;color:Theme.text-primary;font-size:14px;font-weight:600;overflow:elide;}
+           Text{text:note.title;color:Theme.text-primary;font-size:14px;font-weight:600;overflow:elide;horizontal-stretch:1;}
+           // A copy or a recovered note has the title of the note it was kept from: its card says which it is.
+           if note.marker!="" : YStatusPill{text:note.marker;}
           }
           Text{text:note.preview;color:Theme.text-secondary;font-size:12px;overflow:elide;}
-          // A copy or a recovered note has the title of the note it was kept from: its card says which it is.
-          HorizontalLayout{spacing:6px;
-           if note.marker!="" : Text{text:note.marker;color:Theme.amber;font-size:10px;font-weight:600;}
-           Text{text:note.date;color:Theme.text-dim;font-size:10px;overflow:elide;horizontal-stretch:1;}
-          }
+          Text{text:note.date;color:Theme.text-dim;font-size:10px;overflow:elide;}
          }
         }
        }

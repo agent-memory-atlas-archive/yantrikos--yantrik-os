@@ -210,18 +210,18 @@ fn save_then_close(m: &mut Model, fx: &mut Effects<Notes>, documents: &[Document
 }
 
 /// *Don't save*: the edits and their draft dropped; the note is shown as its file holds it. A note
-/// whose file is gone has nothing left on disk, so it leaves the library with its edits.
+/// whose file is gone has nothing left on disk, so it leaves the library as it closes (show_note).
 fn drop_edits(m: &mut Model, fx: &mut Effects<Notes>, documents: &[DocumentId]) {
     for id in documents {
-        let Some(d) = m.documents.get_mut(*id) else { continue };
-        drafts::discard(d, fx);
-        if d.outside == OutsideState::Deleted {
-            if let Some(gone) = m.files.get(id).map(|f| f.id.clone()) {
-                m.library.retain(|n| n.trash || n.id != gone);
-            }
+        if let Some(d) = m.documents.get_mut(*id) {
+            drafts::discard(d, fx);
         }
     }
-    let again = m.current().and_then(|c| m.library.iter().find(|n| n.id == c.id() && n.trash == c.trash()).cloned());
+    // A note whose file is gone is not opened again: there is no file to show it as.
+    let again = m
+        .current()
+        .filter(|c| *c.outside() != OutsideState::Deleted)
+        .and_then(|c| m.library.iter().find(|n| n.id == c.id() && n.trash == c.trash()).cloned());
     show_note(m, fx, None);
     show_note(m, fx, again);
     show(m, fx);
