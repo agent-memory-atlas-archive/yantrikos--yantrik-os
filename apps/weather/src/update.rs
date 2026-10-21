@@ -30,7 +30,13 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Effects<Weather>) -> Res
             if place != m.active() || fahrenheit != m.prefs.fahrenheit {
                 return Ok(());
             }
+            // A fetch that failed keeps the last good numbers under its error, as the screen
+            // keeps them: the rail and the AI button still have conditions to speak about.
+            let last_good = m.reading.current.take();
             m.reading = fetched.reading;
+            if m.reading.error.is_some() && m.reading.current.is_none() {
+                m.reading.current = last_good;
+            }
             m.source = fetched.source;
             m.loading = false;
             m.last_fetch = Some(Instant::now());
@@ -52,7 +58,13 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Effects<Weather>) -> Res
             fx.changed(PART_READING);
         }
         Command::SelectLocation(idx) => {
-            places::select(&mut m.prefs, idx)?;
+            // A button's refusal is said where the person is looking: a refused command's
+            // effects are dropped, so the notice is set and the command is not refused.
+            if let Err(refused) = places::select(&mut m.prefs, idx) {
+                m.notice = format!("Could not switch location: {}", refused.sentence);
+                fx.changed(PART_NOTICE);
+                return Ok(());
+            }
             kept(m, fx);
             start_fetch(m, fx);
         }
@@ -92,7 +104,11 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Effects<Weather>) -> Res
         }
         Command::RemoveLocation(idx) => {
             let was_active = m.prefs.active == idx;
-            places::remove(&mut m.prefs, idx)?;
+            if let Err(refused) = places::remove(&mut m.prefs, idx) {
+                m.notice = format!("Could not remove that location: {}", refused.sentence);
+                fx.changed(PART_NOTICE);
+                return Ok(());
+            }
             kept(m, fx);
             if was_active {
                 start_fetch(m, fx);
@@ -104,6 +120,10 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Effects<Weather>) -> Res
             start_fetch(m, fx);
         }
         Command::Explain => {
+            // The panel opens with the press, whatever the answer turns out to be; only
+            // `DismissAi` closes it. (The flag was only ever written false before, so the
+            // answer landed in a panel the render had just closed.)
+            m.ai.panel_open = true;
             let Some(current) = m.reading.current.clone().filter(|_| !m.loading) else {
                 m.ai.response = "There is no reading yet — refresh first.".into();
                 fx.changed(PART_AI);

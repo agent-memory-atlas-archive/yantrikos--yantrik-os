@@ -122,7 +122,8 @@ impl Reading {
 
     /// The most severe alert, if any.
     pub fn severe(&self) -> Option<&Alert> {
-        self.alerts.iter().max_by_key(|a| a.severity)
+        // The first of equal severities, as the screen always chose it.
+        self.alerts.iter().rev().max_by_key(|a| a.severity)
     }
 }
 

@@ -266,11 +266,11 @@ mod tests {
         let reply = app.act("show_location", json!({ "name": "lon" })).unwrap();
         assert_eq!(reply.envelope()["result"]["showing"], json!("London"));
         assert!(app.act("show_location", json!({ "name": "berlin" })).unwrap_err().contains("there is: London, Paris, France"));
-        // The last place cannot be removed.
+        // The last place cannot be removed: the button's refusal is the notice, drawn.
         app.run(Command::RemoveLocation(1));
         app.run(Command::RemoveLocation(0));
-        assert_eq!(app.last_refusal().unwrap().kind, "last_place");
         assert_eq!(app.model(|m| m.prefs.locations.len()), 1);
+        assert!(app.ui(|ui| ui.get_notice()).starts_with("Could not remove that location:"));
     }
 
     #[test]
@@ -363,10 +363,20 @@ mod tests {
         assert_eq!(card.verb, "Close");
         assert!(card.applies.is_none(), "an answer to read, nothing to apply");
         assert!(mind.prompts()[0].starts_with("It is Overcast at 12°C"));
-        // The header's AI Insights button asks the same question.
-        app.run(Command::Explain);
+        // The header's AI Insights button asks the same question, driven as the markup drives
+        // it (the callback, then the panel flag): the answer lands with the panel open.
+        app.ui(|ui| {
+            ui.invoke_ai_explain_pressed();
+            ui.set_ai_panel_open(true);
+        });
         app.run_jobs();
         assert_eq!(mind.prompts().len(), 2);
         assert_eq!(mind.prompts()[1], mind.prompts()[0]);
+        assert!(app.model(|m| m.ai.panel_open), "the panel stays open for the answer");
+        assert!(app.ui(|ui| ui.get_ai_panel_open()));
+        assert!(!app.ui(|ui| ui.get_ai_response()).is_empty());
+        // A failed fetch keeps the last good numbers under its error.
+        app.run(Command::FetchFailed("gone".into()));
+        assert!(app.model(|m| m.reading.current.is_some() && m.reading.error.is_some()));
     }
 }
