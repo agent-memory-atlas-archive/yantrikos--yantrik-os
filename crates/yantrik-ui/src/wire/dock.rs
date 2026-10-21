@@ -1371,8 +1371,12 @@ mod tests {
     /// changed for, so the ids are read from the apps instead. `windows::app_name_tests` reads
     /// the same tree for the same reason.
     ///
-    /// An app that publishes nothing (the two on the shelf) has no `App::new` to find and is
-    /// simply absent, which is what it should be.
+    /// An app on YantrikApp publishes through the framework, under its `App::ID`
+    /// (`const ID: &'static str = "…";` in its `src/lib.rs`), and its `main.rs` is three lines; so
+    /// the library is read when the main has no `App::new`. Every Rust app the desktop ships (a
+    /// `.desktop` file beside a `src/`) must yield an id, so the next app to move onto the
+    /// framework cannot drop out of these checks unnoticed. Blender is a Python add-on with no
+    /// crate, and is not read.
     fn published_ids() -> Vec<(String, String)> {
         let apps = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps");
         let Ok(entries) = std::fs::read_dir(&apps) else {
@@ -1383,8 +1387,10 @@ mod tests {
             .filter_map(|e| e.ok())
             .filter_map(|e| {
                 let dir = e.file_name().into_string().ok()?;
-                let source = std::fs::read_to_string(e.path().join("src/main.rs")).ok()?;
-                published_id(&source).map(|id| (dir, id))
+                let read = |file: &str| std::fs::read_to_string(e.path().join(file)).unwrap_or_default();
+                published_id(&read("src/main.rs"))
+                    .or_else(|| framework_id(&read("src/lib.rs")))
+                    .map(|id| (dir, id))
             })
             .collect();
         found.sort();
@@ -1394,7 +1400,29 @@ mod tests {
             found.len(),
             apps.display()
         );
+        let desktop = apps.join("desktop-files");
+        let unread: Vec<String> = std::fs::read_dir(&desktop)
+            .expect("the desktop files beside the apps")
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                let name = e.file_name().into_string().ok()?;
+                let dir = name.strip_prefix("yantrik-")?.strip_suffix(".desktop")?.to_string();
+                apps.join(&dir).join("src").is_dir().then_some(dir)
+            })
+            .filter(|dir| !found.iter().any(|(d, _)| d == dir))
+            .collect();
+        assert!(
+            unread.is_empty(),
+            "these apps ship a .desktop file and the scan found no id they publish: {unread:?}"
+        );
         found
+    }
+
+    /// The id an app on YantrikApp publishes: its `App::ID`.
+    fn framework_id(lib: &str) -> Option<String> {
+        let declaration = "const ID: &'static str = \"";
+        let value = lib.find(declaration)? + declaration.len();
+        lib[value..].split('"').next().map(str::to_string)
     }
 
     /// The id one app publishes, from its `App::new(…)`.

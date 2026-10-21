@@ -1,0 +1,152 @@
+//! The window's actions: its header, its keys and its buttons, each as it has always behaved.
+
+use yantrik_app::effects::Effects;
+
+use super::{editing, library, navigate, reblock, saving};
+use crate::command::{Step, WindowAction};
+use crate::model::{Cue, Model, Pending};
+use crate::store::expand_home;
+use crate::view::render::{CHROME, CUES, STATUS};
+use crate::Notes;
+
+/// Which of the window's two dialogs a path was typed into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dialog {
+    Import = 1,
+    Export = 2,
+}
+
+pub fn act(m: &mut Model, fx: &mut Effects<Notes>, action: WindowAction) {
+    // These change only the view, so they never wait: not for the store, not for a save.
+    match action {
+        WindowAction::Focus => {
+            m.pane.focus_mode = !m.pane.focus_mode;
+            m.pane.cues.push(Cue::FocusContent);
+            fx.changed(CHROME);
+            fx.changed(CUES);
+        }
+        WindowAction::Preview => {
+            m.pane.preview = !m.pane.preview;
+            if m.pane.preview {
+                reblock(m, fx);
+                m.pane.cues.push(Cue::FocusShortcuts);
+            } else {
+                m.pane.cues.push(Cue::FocusEditor);
+            }
+            fx.changed(CHROME);
+            fx.changed(CUES);
+        }
+        WindowAction::Undo => editing::undo(m, fx, false),
+        WindowAction::Redo => editing::undo(m, fx, true),
+        other => {
+            if may_go_on(m, fx, &other) {
+                guarded(m, fx, other);
+            }
+        }
+    }
+}
+
+/// What every other action is held to: the store is not busy, the library is open, and the
+/// open note is saved before anything leaves it (the action then waits for that save).
+fn may_go_on(m: &mut Model, fx: &mut Effects<Notes>, action: &WindowAction) -> bool {
+    if m.busy.is_some() {
+        m.notice = "Please wait for the current operation.".into();
+        fx.changed(STATUS);
+        return false;
+    }
+    if !m.ready {
+        m.notice = "The library is unavailable. Resolve the storage error, then Refresh.".into();
+        fx.changed(STATUS);
+        if *action == WindowAction::Reload {
+            library::load(m, fx);
+        }
+        return false;
+    }
+    if action.navigates() && m.unsaved() {
+        m.pending = Some(Pending { step: Step::Window(action.clone()), refuse_if_unsaved: false });
+        saving::save(m, fx, saving::How::Asked);
+        return false;
+    }
+    m.notice.clear();
+    fx.changed(STATUS);
+    true
+}
+
+fn guarded(m: &mut Model, fx: &mut Effects<Notes>, action: WindowAction) {
+    match action {
+        WindowAction::New(title) => {
+            // The window's own New has no use for the file name; a refusal is already the notice.
+            let _ = navigate::new_note(m, fx, title.as_deref().unwrap_or("Untitled"), "");
+        }
+        WindowAction::Open { id, trash } => navigate::open(m, fx, &id, trash),
+        WindowAction::Save => saving::save(m, fx, saving::How::Asked),
+        WindowAction::Reload => library::load(m, fx),
+        WindowAction::Pin => editing::pin(m, fx),
+        WindowAction::Trash => library::trash(m, fx),
+        WindowAction::Restore => library::restore(m, fx),
+        WindowAction::Copy => navigate::copy(m, fx),
+        WindowAction::Import => open_dialog(m, fx, Dialog::Import),
+        WindowAction::Export => {
+            if m.current().is_some() {
+                open_dialog(m, fx, Dialog::Export);
+            }
+        }
+        WindowAction::Confirm { path } => {
+            m.pane.path = path.clone();
+            match m.pane.dialog {
+                1 => confirmed(m, fx, Dialog::Import, &path),
+                2 => confirmed(m, fx, Dialog::Export, &path),
+                _ => {}
+            }
+        }
+        // The view's own actions were handled before the guards.
+        WindowAction::Focus | WindowAction::Preview | WindowAction::Undo | WindowAction::Redo => {}
+    }
+}
+
+fn open_dialog(m: &mut Model, fx: &mut Effects<Notes>, dialog: Dialog) {
+    m.pane.path.clear();
+    m.pane.dialog = dialog as i32;
+    fx.changed(CHROME);
+}
+
+/// An import or export the surface asked for, once the open note is saved: held to the same
+/// guards as the dialog's Continue, without opening the dialog.
+pub fn confirm(m: &mut Model, fx: &mut Effects<Notes>, dialog: Dialog, path: &str) {
+    let action = WindowAction::Confirm { path: path.into() };
+    if may_go_on(m, fx, &action) {
+        confirmed(m, fx, dialog, path);
+    }
+}
+
+fn confirmed(m: &mut Model, fx: &mut Effects<Notes>, dialog: Dialog, path: &str) {
+    let path = expand_home(path.trim());
+    if !path.is_absolute() {
+        m.notice = "Enter an absolute file path.".into();
+        fx.changed(STATUS);
+        return;
+    }
+    match dialog {
+        Dialog::Import => library::import(m, fx, path),
+        Dialog::Export => library::export(m, fx, path),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_window_sends_these_ids_and_nothing_else_is_an_action() {
+        let path = || "/tmp/x.md".to_string();
+        assert_eq!(WindowAction::parse("new", path), Some(WindowAction::New(None)));
+        assert_eq!(WindowAction::parse("new:Field notes", path), Some(WindowAction::New(Some("Field notes".into()))));
+        assert_eq!(
+            WindowAction::parse("open:trash:a.md", path),
+            Some(WindowAction::Open { id: "a.md".into(), trash: true })
+        );
+        assert_eq!(WindowAction::parse("confirm", path), Some(WindowAction::Confirm { path: "/tmp/x.md".into() }));
+        assert_eq!(WindowAction::parse("nonsense", path), None);
+        assert!(WindowAction::Trash.navigates() && !WindowAction::Copy.navigates());
+    }
+}

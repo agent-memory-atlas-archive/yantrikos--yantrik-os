@@ -124,6 +124,44 @@ fn a_link_is_not_replaced() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[cfg(unix)]
+#[test]
+fn a_create_never_replaces_what_is_there_and_a_new_file_is_private() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = scratch("create");
+    let path = dir.join("note.md");
+    RealDisk.create_new(&path, b"first").unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"first");
+    assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+    let err = RealDisk.create_new(&path, b"second").unwrap_err();
+    assert_eq!(err.step, Step::Rename);
+    assert_eq!(err.step.durability(), Durability::NotWritten);
+    assert_eq!(std::fs::read(&path).unwrap(), b"first", "nothing already there is replaced");
+    // Nor a link, even one that points nowhere.
+    let link = dir.join("dangling.md");
+    std::os::unix::fs::symlink(dir.join("nowhere"), &link).unwrap();
+    assert!(RealDisk.create_new(&link, b"x").is_err());
+    assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+    let names: Vec<String> =
+        std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    assert_eq!(names.len(), 2, "no temp file is left behind: {names:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_create_fails_at_the_chosen_step() {
+    let dir = scratch("create-faults");
+    let path = dir.join("note.md");
+    let disk = FaultyDisk::new();
+    disk.fail(Step::Write, ".md", Some(1));
+    assert_eq!(disk.create_new(&path, b"x").unwrap_err().step, Step::Write);
+    assert!(!path.exists(), "a failure before the link leaves nothing");
+    disk.fail(Step::SyncDir, ".md", Some(1));
+    assert_eq!(disk.create_new(&path, b"x").unwrap_err().step.durability(), Durability::Unknown);
+    assert_eq!(std::fs::read(&path).unwrap(), b"x", "after the link the bytes are there");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_large_file_unchanged_is_not_reported_and_a_change_to_it_is() {
     let dir = scratch("large");

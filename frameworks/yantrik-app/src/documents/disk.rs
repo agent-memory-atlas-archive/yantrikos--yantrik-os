@@ -3,7 +3,8 @@
 //!
 //! An atomic replace is five steps after a check: create a temp file, write it, sync it, rename
 //! it over the destination, sync the directory. Each failure means something different for what
-//! is on disk, and [`Step::durability`] says which.
+//! is on disk, and [`Step::durability`] says which. A create is the same five steps, with the temp
+//! file linked at the destination instead of renamed over it, so it can never replace anything.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -19,6 +20,7 @@ pub enum Step {
     CreateTemp,
     Write,
     SyncFile,
+    /// The new bytes take the destination's name: a rename over it, or a link at it (a create).
     Rename,
     SyncDir,
 }
@@ -50,6 +52,10 @@ impl std::fmt::Display for DiskError {
 pub trait Disk: Send + Sync {
     /// Replaces (or creates) `path` with `bytes`, whole or not at all.
     fn write_atomically(&self, path: &Path, bytes: &[u8]) -> Result<(), DiskError>;
+    /// Creates `path` with `bytes`, whole or not at all, and never over anything already there:
+    /// a file, a link or anything else at `path` fails the publishing step and is left as it was.
+    /// For a document saved for the first time, an export, a record that must not be replaced.
+    fn create_new(&self, path: &Path, bytes: &[u8]) -> Result<(), DiskError>;
     /// The file's bytes, or `None` when it is absent.
     fn read(&self, path: &Path) -> std::io::Result<Option<Vec<u8>>>;
     fn remove(&self, path: &Path) -> std::io::Result<()>;
@@ -63,9 +69,10 @@ static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
 pub struct RealDisk;
 
 impl RealDisk {
-    /// A temp file beside `path`, made by this call and by nothing else (`create_new`), private
-    /// until it carries the destination's own mode.
-    fn create_temp(path: &Path) -> std::io::Result<(PathBuf, std::fs::File)> {
+    /// A temp file beside `path`, made by this call and by nothing else (`create_new`), private.
+    /// For a replace (`wear_mode`) it then carries the destination's own mode; a create has no
+    /// destination to take one from, and stays private.
+    fn create_temp(path: &Path, wear_mode: bool) -> std::io::Result<(PathBuf, std::fs::File)> {
         let parent = path.parent().ok_or_else(|| std::io::Error::other("no parent directory"))?;
         let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         let n = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
@@ -79,7 +86,7 @@ impl RealDisk {
         }
         let file = options.open(&temp)?;
         // A note made private stays private: the replacement wears the original's mode.
-        if let Ok(meta) = std::fs::metadata(path) {
+        if let Some(meta) = wear_mode.then(|| std::fs::metadata(path).ok()).flatten() {
             if let Err(e) = file.set_permissions(meta.permissions()) {
                 drop(file);
                 let _ = std::fs::remove_file(&temp);
@@ -98,7 +105,7 @@ impl Disk for RealDisk {
         if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
             return Err(DiskError { step: Step::Check, error: "the file is a link, and is not replaced".into() });
         }
-        let (temp, mut file) = RealDisk::create_temp(path).map_err(fail(Step::CreateTemp))?;
+        let (temp, mut file) = RealDisk::create_temp(path, true).map_err(fail(Step::CreateTemp))?;
         let result = (|| {
             file.write_all(bytes).map_err(fail(Step::Write))?;
             file.sync_all().map_err(fail(Step::SyncFile))?;
@@ -111,6 +118,24 @@ impl Disk for RealDisk {
             let _ = std::fs::remove_file(&temp);
         }
         result
+    }
+
+    fn create_new(&self, path: &Path, bytes: &[u8]) -> Result<(), DiskError> {
+        let fail = |step: Step| move |e: std::io::Error| DiskError { step, error: e.to_string() };
+        let (temp, mut file) = RealDisk::create_temp(path, false).map_err(fail(Step::CreateTemp))?;
+        let result = (|| {
+            file.write_all(bytes).map_err(fail(Step::Write))?;
+            file.sync_all().map_err(fail(Step::SyncFile))?;
+            // A link fails with "File exists" when anything is at `path`: the check and the
+            // publish are one step, so a file made meanwhile by someone else is never replaced.
+            std::fs::hard_link(&temp, path).map_err(fail(Step::Rename))
+        })();
+        // The temp name is ours alone in every outcome: after the link it is a second name for
+        // the new file, before it the only one.
+        let _ = std::fs::remove_file(&temp);
+        result?;
+        let parent = path.parent().unwrap_or(Path::new("."));
+        std::fs::File::open(parent).and_then(|d| d.sync_all()).map_err(fail(Step::SyncDir))
     }
 
     fn read(&self, path: &Path) -> std::io::Result<Option<Vec<u8>>> {
@@ -197,6 +222,20 @@ mod faulty {
                     Err(DiskError { step: Step::SyncDir, error: "injected failure at SyncDir".into() })
                 }
                 None => RealDisk.write_atomically(path, bytes),
+            }
+        }
+
+        fn create_new(&self, path: &Path, bytes: &[u8]) -> Result<(), DiskError> {
+            match self.fault_for(path) {
+                // A failure before the link leaves nothing at the destination.
+                Some(step @ (Step::Check | Step::CreateTemp | Step::Write | Step::SyncFile | Step::Rename)) => {
+                    Err(DiskError { step, error: format!("injected failure at {step:?}") })
+                }
+                Some(Step::SyncDir) => {
+                    RealDisk.create_new(path, bytes)?;
+                    Err(DiskError { step: Step::SyncDir, error: "injected failure at SyncDir".into() })
+                }
+                None => RealDisk.create_new(path, bytes),
             }
         }
 
