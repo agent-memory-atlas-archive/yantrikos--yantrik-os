@@ -22,6 +22,7 @@ pub mod instance;
 pub mod intents;
 pub mod jobs;
 pub mod launch;
+pub mod lock;
 pub mod paths;
 pub mod persist;
 pub mod present;

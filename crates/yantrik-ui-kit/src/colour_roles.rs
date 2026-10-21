@@ -12,6 +12,10 @@ fn read(rel: &str) -> String {
 }
 
 const UI: &str = "crates/yantrik-ui-slint/ui/";
+/// System Monitor's screen, in its app since it moved onto YantrikApp.
+const SYSTEM_MONITOR: &str = "apps/system-monitor/ui/system_monitor.slint";
+/// The kit, where the status row and the tier badge live now that two screens share each.
+const KIT: &str = "crates/yantrik-ui-kit/slint/";
 
 /// A screen's source, wherever it lives now: in its app once the app is on YantrikApp
 /// (`apps/<app>/ui/<file>`), in the shell's folder until then.
@@ -34,14 +38,18 @@ fn screen(file: &str) -> String {
 /// the setup and login screens, and the shared chart, toast and ribbon all did.
 #[test]
 fn teal_stays_off_screens_that_are_not_a_minds() {
-    for file in [
+    for (file, src) in [
         "container_manager.slint", "about.slint", "skill_store.slint", "settings.slint",
-        "system_dashboard.slint", "system_monitor.slint", "recipes.slint", "permission_dashboard.slint",
+        "system_dashboard.slint", "recipes.slint", "permission_dashboard.slint",
         "installer.slint", "onboarding.slint", "onboarding_first_run.slint", "login.slint", "terminal.slint",
         "components/onboard_kit.slint", "components/app_ribbon.slint", "components/window_frame.slint",
-        "components/model_tier_badge.slint",
-    ] {
-        let src = screen(file);
+        "system_monitor.slint",
+    ]
+    .map(|file| (file.to_string(), screen(file)))
+    .into_iter()
+    // The badge lives in the kit; the shell's file of that name only re-exports it.
+    .chain([(format!("{KIT}model_tier_badge.slint"), read(&format!("{KIT}model_tier_badge.slint")))])
+    {
         for teal in ["Theme.cyan", "Theme.tint-cyan"] {
             assert!(!src.contains(teal), "{file} draws `{teal}`, the minds' colour");
         }
@@ -70,8 +78,12 @@ fn a_primary_button_is_the_accent_not_the_apps_colour() {
 /// these screens only behind that limit (`needs-you`), never as the colour of a reading.
 #[test]
 fn amber_is_not_used_for_data() {
-    for file in ["bond.slint", "personality.slint", "system_dashboard.slint", "system_monitor.slint", "components/model_tier_badge.slint"] {
-        let src = read(&format!("{UI}{file}"));
+    for file in ["bond.slint", "personality.slint", "system_dashboard.slint"]
+        .map(|file| format!("{UI}{file}"))
+        .into_iter()
+        .chain([SYSTEM_MONITOR.to_string(), format!("{KIT}model_tier_badge.slint")])
+    {
+        let src = read(&file);
         for line in src.lines().filter(|l| l.contains("Theme.amber")) {
             assert!(line.contains("needs-you ? Theme.amber"), "{file} paints data amber: {}", line.trim());
         }
@@ -82,14 +94,14 @@ fn amber_is_not_used_for_data() {
 /// A full disk is amber, at the same limit the status row checks, and never red.
 #[test]
 fn a_full_disk_is_amber_never_red() {
-    let src = read(&format!("{UI}system_monitor.slint"));
+    let src = read(SYSTEM_MONITOR);
     let start = src.find("for disk in root.disks").expect("the disk card's rows");
     let rows = &src[start..start + src[start..].find("Rectangle { height: 1px").expect("the row's rule")];
     assert!(rows.contains("disk.needs-you ? Theme.amber"), "the disk bar is amber at the limit");
     for red in ["color-emotional", "color-danger"] {
         assert!(!rows.contains(red), "a disk row draws `{red}`");
     }
-    let row = read(&format!("{UI}components/machine_status_row.slint"));
+    let row = read(&format!("{KIT}machine_status_row.slint"));
     let glyph = row.find("if root.needs-you : Icon").expect("the warning glyph, only when a limit is reached");
     assert_eq!(row.matches("Theme.amber").count(), 1, "amber is the glyph's and nothing else's");
     assert!(row.find("Theme.amber").unwrap() > glyph);
