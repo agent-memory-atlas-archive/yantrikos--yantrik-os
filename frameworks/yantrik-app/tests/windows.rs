@@ -5,7 +5,7 @@
 //! `Event::Activated`, and only an open window that was not already active raises it.
 
 use yantrik_app::app::{App, Boot, Changed, Event, ExitReason, Startup, WindowId};
-use yantrik_app::cx::Cx;
+use yantrik_app::cx::{Cx, Inbound};
 use yantrik_app::effects::Effects;
 use yantrik_app::refused::Refused;
 use yantrik_testing::TestApp;
@@ -283,6 +283,18 @@ fn a_closed_window_raises_none() {
     app.close_requested(WindowId::PRIMARY);
     app.activate(WindowId::PRIMARY);
     assert_eq!(activated(&app), vec![second]);
+}
+
+#[test]
+fn an_activation_queued_behind_its_windows_close_is_dropped() {
+    let app = TestApp::<Pair>::start();
+    let second = opened(&app);
+    // A close posted from elsewhere, not yet drained: the window is still open when the window
+    // manager's word arrives, and closed by the time the drain reaches the activation.
+    assert!(app.post().post(Inbound::Event(Event::CloseRequested(second))).is_ok());
+    app.activate(second);
+    assert_eq!(app.windows(), vec![WindowId::PRIMARY]);
+    assert!(activated(&app).is_empty(), "an activation of a window that closed reached the app");
 }
 
 #[test]

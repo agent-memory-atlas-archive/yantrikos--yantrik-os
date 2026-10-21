@@ -174,38 +174,52 @@ impl<A: App> Core<A> {
     /// `ui`, as `window`, tells the core when the window manager gives it the keyboard or takes
     /// it away (winit's `Focused`). The runner installs the first window's; `open_window` every
     /// later one's. The hook holds the core weakly: the window it lives in is the core's.
+    ///
+    /// The hook only enqueues, as the close handler does: the app's `update` runs in the drain
+    /// after it, not inside winit's dispatch of the event.
     pub(crate) fn hear_activation(&self, window: WindowId, ui: &A::Ui) {
         let core = self.me.clone();
         crate::chrome::on_focus_changed(ui.window(), move |focused| {
-            if let Some(core) = core.upgrade() {
-                core.focus_changed(window, focused);
+            let posted = core.upgrade().is_some_and(|core| core.focus_changed(window, focused));
+            if posted {
+                crate::runner::drain_on_ui_thread();
             }
         });
     }
 
     /// The window manager's word on `window`: it has the keyboard now, or it lost it. Gaining it
-    /// raises `Event::Activated` when the window is open and was not already the active one; a
-    /// loss only forgets it, so the next gain raises again.
-    fn focus_changed(&self, window: WindowId, focused: bool) {
+    /// posts `Event::Activated` when the window is open and was not already the active one, and
+    /// says so; the caller drains. A loss only forgets it, so the next gain raises again.
+    fn focus_changed(&self, window: WindowId, focused: bool) -> bool {
         if !focused {
             self.windows.borrow_mut().not_active(window);
-            return;
+            return false;
         }
         if !self.windows_open().contains(&window) {
-            return;
+            return false;
         }
         let was = self.windows.borrow_mut().active.replace(window);
-        if was != Some(window) {
-            self.event(Event::Activated(window));
+        if was == Some(window) {
+            return false;
         }
+        if let Err(dropped) = self.post.post(Inbound::Event(Event::Activated(window))) {
+            // Not heard, so not counted: the window manager's next word about it tries again.
+            tracing::debug!(app = self.id, ?dropped, "an activation was not queued");
+            self.windows.borrow_mut().active = was;
+            return false;
+        }
+        true
     }
 
     /// What the window manager would say, for a test (the headless platform has none): `window`
-    /// gained the keyboard (`true`) or lost it (`false`), exactly as winit's `Focused` reaches
-    /// [`Core::hear_activation`]'s hook. Behind the `testing` feature, as `TestApp` reaches it.
+    /// gained the keyboard (`true`) or lost it (`false`). The same path as winit's `Focused`
+    /// through [`Core::hear_activation`]'s hook, with the drain called here, as `TestApp::seen`
+    /// drains what it posts. Behind the `testing` feature, as `TestApp` reaches it.
     #[cfg(any(test, feature = "testing"))]
     pub fn focus_for_test(&self, window: WindowId, focused: bool) {
-        self.focus_changed(window, focused);
+        if self.focus_changed(window, focused) {
+            self.drain();
+        }
     }
 
     /// The process ends when no window is open.

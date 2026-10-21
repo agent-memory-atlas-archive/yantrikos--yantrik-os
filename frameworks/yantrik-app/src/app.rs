@@ -63,7 +63,9 @@ pub enum Event<S> {
     /// raises nothing more, so it fires again only after the window lost the activation to
     /// another window, this app's or another's. Never raised when a window loses the activation,
     /// for a window that is closed, or where there is no window manager (the headless platform;
-    /// a test raises it with `TestApp::activate`). `None` does nothing.
+    /// a test raises it with `TestApp::activate`). The window manager's hook only queues it; it
+    /// is applied in the drain right after, and one queued behind a command that closed its
+    /// window is dropped. `None` does nothing.
     Activated(WindowId),
     /// The last `fx.save_settings` reached the disk. `None` does nothing.
     SettingsSaved,
