@@ -247,24 +247,35 @@ pub const MAX_SETTLE_WAIT: Duration = Duration::from_secs(30);
 /// Action names an app may not declare: the framework registers these itself.
 pub const RESERVED: [&str; 2] = ["launch", "present"];
 
-/// Whether a deep link's intent may be raised: its name is one the app declares, its arguments
-/// pass the declared parameters' check (and are typed by it), and, when the launch came by
-/// hand-over, it is graded standard or below. Any process of the uid may call `launch`, which is
-/// graded safe, so an intent that writes something lasting (#48) cannot come in that way; the
-/// person's own command line may name any intent, it is their input.
-pub fn admit(specs: &[Action], intent: &crate::launch::LaunchIntent, handed_over: bool) -> Result<(), String> {
+/// A deep link's intent, admitted: its name is one the app declares; its arguments are given
+/// the declared defaults, checked and typed by the declared parameters, as the surface does for
+/// a socket call; and, when the launch came by hand-over, it is graded standard or below. Any
+/// process of the uid may call `launch`, which is graded safe, so an intent that writes
+/// something lasting (#48) cannot come in that way; the person's own command line may name any
+/// intent, it is their input. What comes back is what `Event::Launch` carries.
+pub fn admit(
+    specs: &[Action],
+    intent: crate::launch::LaunchIntent,
+    handed_over: bool,
+) -> Result<crate::launch::LaunchIntent, String> {
+    use yantrik_ipc_transport::gate::grade;
     let spec = specs
         .iter()
         .find(|s| s.name == intent.name)
         .ok_or_else(|| format!("this app has no intent `{}`", intent.name))?;
-    yantrik_surface::check_arguments(spec, &intent.args)?;
-    if handed_over && yantrik_ipc_transport::gate::grade(spec.permission) > yantrik_ipc_transport::gate::grade("standard") {
+    let args = yantrik_surface::with_defaults(spec, &intent.args);
+    yantrik_surface::check_arguments(spec, &args)?;
+    let args = yantrik_surface::as_declared(spec, &args).into_owned();
+    // A grade off the ladder is refused, never read as "below standard".
+    let level = grade(spec.permission)
+        .ok_or_else(|| format!("`{}` is graded `{}`, which is not a level this OS defines", spec.name, spec.permission))?;
+    if handed_over && level > grade("standard").unwrap_or(1) {
         return Err(format!(
             "a launch handed over may raise an intent graded safe or standard; `{}` is {}",
             spec.name, spec.permission
         ));
     }
-    Ok(())
+    Ok(crate::launch::LaunchIntent { name: intent.name, args })
 }
 
 pub fn registry<A: App>(core: &Rc<Core<A>>, table: Intents<A>) -> LocalRegistry {
@@ -375,7 +386,7 @@ fn launch_handler<A: App>(
                 .into());
         }
         let core = core.upgrade().ok_or("the app is closing")?;
-        let launch = crate::launch::Launch::from_value(&args["launch"])?;
+        let mut launch = crate::launch::Launch::from_value(&args["launch"])?;
         let profile = core.paths().profile().to_string();
         if launch.profile != profile {
             return Err(format!(
@@ -383,8 +394,8 @@ fn launch_handler<A: App>(
                 launch.profile
             ));
         }
-        if let Some(intent) = &launch.intent {
-            admit(&specs, intent, true)?;
+        if let Some(intent) = launch.intent.take() {
+            launch.intent = Some(admit(&specs, intent, true)?);
         }
         let fresh = {
             let mut seen = seen.borrow_mut();
@@ -422,12 +433,17 @@ mod tests {
             Action::new("set_step", "Set the step").risk("sensitive").arg(Param::integer("step")),
         ];
         let intent = |name: &str, args: Value| crate::launch::LaunchIntent { name: name.into(), args };
-        assert!(admit(&specs, &intent("nope", json!({})), true).unwrap_err().contains("no intent `nope`"));
-        assert!(admit(&specs, &intent("find", json!({ "n": "3" })), true).is_ok(), "text typed as the integer it is");
-        assert!(admit(&specs, &intent("find", json!({ "n": "three" })), true).is_err());
-        let e = admit(&specs, &intent("set_step", json!({ "step": "5" })), true).unwrap_err();
+        assert!(admit(&specs, intent("nope", json!({})), true).unwrap_err().contains("no intent `nope`"));
+        let typed = admit(&specs, intent("find", json!({ "n": "3" })), true).unwrap();
+        assert_eq!(typed.args, json!({ "n": 3 }), "text typed as the integer it is");
+        assert!(admit(&specs, intent("find", json!({ "n": "three" })), true).is_err());
+        let e = admit(&specs, intent("set_step", json!({ "step": "5" })), true).unwrap_err();
         assert!(e.contains("safe or standard") && e.contains("sensitive"), "{e}");
-        assert!(admit(&specs, &intent("set_step", json!({ "step": "5" })), false).is_ok(), "the person's own command line");
+        assert!(admit(&specs, intent("set_step", json!({ "step": "5" })), false).is_ok(), "the person's own command line");
+        let odd = vec![Action::new("odd", "Off the ladder").risk("whatever")];
+        assert!(admit(&odd, intent("odd", json!({})), false).unwrap_err().contains("not a level"));
+        let defaults = vec![Action::new("list", "List").risk("safe").arg(Param::integer("limit").optional().default(10))];
+        assert_eq!(admit(&defaults, intent("list", json!({})), true).unwrap().args, json!({ "limit": 10 }));
     }
 
 

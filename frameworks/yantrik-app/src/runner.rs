@@ -50,7 +50,7 @@ pub fn run<A: App>() -> ExitCode {
     // The launch is parsed before the claim: a command line this app does not take is said and
     // refused here, whichever copy would have run it. Opening the settings and drafts writes
     // nothing, so a copy that hands over and exits leaves no trace.
-    let (boot, store) = match Boot::<A::Settings>::open(paths.clone(), args) {
+    let (mut boot, store) = match Boot::<A::Settings>::open(paths.clone(), args) {
         Ok(opened) => opened,
         Err(e) => return startup_failed(A::ID, "launch", &e.sentence),
     };
@@ -58,9 +58,10 @@ pub fn run<A: App>() -> ExitCode {
     // before the claim: a link this app cannot take is refused here, bothering no running copy.
     let mut table = Intents::new();
     A::intents(&mut table);
-    if let Some(intent) = &boot.launch.intent {
-        if let Err(why) = intents::admit(&table.specs(), intent, false) {
-            return startup_failed(A::ID, "launch", &why);
+    if let Some(intent) = boot.launch.intent.take() {
+        match intents::admit(&table.specs(), intent, false) {
+            Ok(admitted) => boot.launch.intent = Some(admitted),
+            Err(why) => return startup_failed(A::ID, "launch", &why),
         }
     }
 
