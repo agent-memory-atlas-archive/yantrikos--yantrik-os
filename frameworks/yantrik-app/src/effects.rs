@@ -220,7 +220,13 @@ impl<A: App> Effects<A> {
         self.requests.push(Request::Cancel(job));
     }
 
+    /// A command every `period` under `id`; arming the same id again restarts it. An id of the
+    /// framework's own (`TimerId::is_framework`) is not the app's to arm: dropped, with a
+    /// warning, as it is for [`Effects::after`] and [`Effects::stop_timer`].
     pub fn every(&mut self, id: TimerId, period: Duration, command: A::Command) {
+        if Self::framework_timer(id, "every") {
+            return;
+        }
         self.requests.push(Request::Every {
             id,
             period,
@@ -229,11 +235,27 @@ impl<A: App> Effects<A> {
     }
 
     pub fn after(&mut self, id: TimerId, delay: Duration, command: A::Command) {
+        if Self::framework_timer(id, "after") {
+            return;
+        }
         self.requests.push(Request::After { id, delay, command });
     }
 
     pub fn stop_timer(&mut self, id: TimerId) {
+        if Self::framework_timer(id, "stop_timer") {
+            return;
+        }
         self.requests.push(Request::StopTimer(id));
+    }
+
+    /// The framework's own timer, asked for by the app: said, and not requested. A linger's
+    /// backstop must always end the process, whatever the app's commands do.
+    fn framework_timer(id: TimerId, what: &str) -> bool {
+        if !id.is_framework() {
+            return false;
+        }
+        tracing::warn!(app = A::ID, timer = id.0, "fx.{what} ignored: the timer is the framework's own");
+        true
     }
 
     pub fn report(&mut self, what: &'static str, error: &dyn std::error::Error) {
