@@ -50,18 +50,32 @@ pub fn run<A: App>() -> ExitCode {
     // The launch is parsed before the claim: a command line this app does not take is said and
     // refused here, whichever copy would have run it. Opening the settings and drafts writes
     // nothing, so a copy that hands over and exits leaves no trace.
-    let (boot, store) = match Boot::<A::Settings>::open(paths.clone(), args, yantrik_mind::live()) {
+    let (mut boot, store) = match Boot::<A::Settings>::open(paths.clone(), args, yantrik_mind::live()) {
         Ok(opened) => opened,
         Err(e) => return startup_failed(A::ID, "launch", &e.sentence),
     };
+    // The intents are declared, not read from the model, so a deep link's intent is admitted
+    // before the claim: a link this app cannot take is refused here, bothering no running copy.
+    let mut table = Intents::new();
+    A::intents(&mut table);
+    if let Some(intent) = boot.launch.intent.take() {
+        match intents::admit(&table.specs(), intent, false) {
+            Ok(admitted) => boot.launch.intent = Some(admitted),
+            Err(why) => return startup_failed(A::ID, "launch", &why),
+        }
+    }
 
     // One instance per app and profile: a second launch hands what it was asked to open to the
     // running copy, which shows its window, and exits.
     let instance = paths.instance_name();
+    // What the running copy did not answer, kept for the end: a copy that is alive and silent
+    // twice has lost the launch, and the person hears so rather than nothing.
+    let unanswered = std::cell::RefCell::new(None::<String>);
     let claimed = instance::claim_or_hand_over(&instance, |_| {
         match launch::hand_over(&instance, &boot.launch) {
             Presented::Unanswered(why) => {
                 tracing::warn!(app = A::ID, "the running copy did not answer the hand-over: {why}");
+                *unanswered.borrow_mut() = Presented::Unanswered(why).sentence(A::ID);
                 Held::OwnerGone
             }
             answered => {
@@ -72,12 +86,16 @@ pub fn run<A: App>() -> ExitCode {
                         eprintln!("{said}");
                     }
                 }
+                *unanswered.borrow_mut() = None;
                 Held::HandedOver
             }
         }
     });
     let Some(_instance) = claimed else {
-        return ExitCode::SUCCESS;
+        return match unanswered.into_inner() {
+            Some(said) => startup_failed(A::ID, "launch", &said),
+            None => ExitCode::SUCCESS,
+        };
     };
 
     if let crate::settings::Health::Recovery(e) = &boot.settings_health {
@@ -132,8 +150,6 @@ pub fn run<A: App>() -> ExitCode {
     // The surface: the app's intents, `present` for the desktop's own handover, and `launch`
     // for a second copy's. Served only now that commands can be applied, on the instance's own
     // socket (`app-<id>[-<profile>].sock`).
-    let mut table = Intents::new();
-    A::intents(&mut table);
     let registry = intents::registry(&core, table);
     let registry = crate::control::App::from_registry(registry).serve_as(&instance);
     core.attach_registry(registry);
