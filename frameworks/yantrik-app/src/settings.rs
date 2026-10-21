@@ -30,6 +30,15 @@ pub trait Settings:
         let _ = from;
         Ok(raw)
     }
+
+    /// A file from before the framework: no `schema` envelope, the app's own shape. `Some` is
+    /// the settings as this schema reads them; it is imported once, the original backed up
+    /// beside it (`<file>.legacy.json`), and the file rewritten in the envelope. The default
+    /// recognises nothing, so such a file is recovery.
+    fn legacy(raw: Value) -> Option<Value> {
+        let _ = raw;
+        None
+    }
 }
 
 /// An app with nothing to remember: `type Settings = ();`.
@@ -123,6 +132,9 @@ struct Envelope {
 pub enum Opened<T: Settings> {
     /// The settings as read (migrated if they were older), and whether a rewrite is owed.
     Read { value: T, rewrite: bool },
+    /// A file from before the framework, read through `Settings::legacy`: owed a backup and a
+    /// rewrite in the envelope.
+    Imported { value: T },
     /// No file: the defaults, nothing written.
     Missing,
     /// The file is not usable; the defaults, in recovery.
@@ -155,7 +167,19 @@ pub fn read_file<T: Settings>(path: &Path) -> Opened<T> {
     };
     let envelope: Envelope = match serde_json::from_str(&text) {
         Ok(e) => e,
-        Err(e) => return Opened::Recovery(SettingsError::Malformed(describe(&e))),
+        Err(e) => {
+            // Not the envelope. The app's own shape from before the framework, perhaps.
+            if let Ok(raw) = serde_json::from_str::<Value>(&text) {
+                if raw.as_object().is_some_and(|o| !o.contains_key("schema")) {
+                    if let Some(legacy) = T::legacy(raw) {
+                        if let Ok(value) = serde_json::from_value::<T>(legacy) {
+                            return Opened::Imported { value };
+                        }
+                    }
+                }
+            }
+            return Opened::Recovery(SettingsError::Malformed(describe(&e)));
+        }
     };
     if envelope.schema > T::SCHEMA {
         return Opened::Recovery(SettingsError::Newer { found: envelope.schema, known: T::SCHEMA });
@@ -175,6 +199,27 @@ pub fn read_file<T: Settings>(path: &Path) -> Opened<T> {
     }
 }
 
+/// Keeps the file from before the framework beside the new one, once: `<file>.legacy.json`,
+/// never overwritten, never deleted (design §6: imported once, backed up).
+fn back_up_legacy(path: &Path) -> bool {
+    let mut name = path.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+    name.push(".legacy.json");
+    let backup = path.with_file_name(name);
+    if backup.exists() {
+        return true;
+    }
+    match std::fs::copy(path, &backup) {
+        Ok(_) => {
+            tracing::info!(file = %path.display(), backup = %backup.display(), "settings from before the framework imported; the original is kept beside them");
+            true
+        }
+        Err(e) => {
+            tracing::warn!(file = %path.display(), error = %e, "the settings from before the framework could not be backed up; they are read, and the file is left as it is");
+            false
+        }
+    }
+}
+
 /// The bytes the file holds for `value`.
 pub fn render<T: Settings>(value: &T) -> Result<Vec<u8>, SettingsError> {
     let envelope = Envelope { schema: T::SCHEMA, settings: serde_json::to_value(value).map_err(|e| SettingsError::Write(e.to_string()))? };
@@ -189,6 +234,12 @@ impl<T: Settings> Store<T> {
         yantrik_foundation::json_store::sweep_stale_temps(&path, std::time::Duration::from_secs(600));
         let (committed, health, rewrite) = match read_file::<T>(&path) {
             Opened::Read { value, rewrite } => (value, Health::Fine, rewrite),
+            Opened::Imported { value } => {
+                // The rewrite in the envelope is owed only once the original is kept beside it
+                // (design §6: imported once, backed up); without the backup the bare file stays.
+                let backed_up = back_up_legacy(&path);
+                (value, Health::Fine, backed_up)
+            }
             Opened::Missing => (T::default(), Health::Fine, false),
             Opened::Recovery(e) => (T::default(), Health::Recovery(e), false),
         };
@@ -305,7 +356,7 @@ impl<T: Settings> Store<T> {
         }
         let was_unusable = self.in_recovery();
         let outside = match read_file::<T>(&self.path) {
-            Opened::Read { value, .. } => value,
+            Opened::Read { value, .. } | Opened::Imported { value } => value,
             Opened::Missing => T::default(),
             Opened::Recovery(e) => {
                 self.health = Health::Recovery(e.clone());
@@ -504,6 +555,37 @@ mod tests {
         assert!(!store.changed_outside());
         assert!(store.desire(Prefs { step: 5, unit: "c".into() }).is_some());
         assert!(store.bytes_to_write().is_some(), "saves flow again");
+    }
+
+    /// A file from before the framework (the app's own shape, no envelope) is imported once,
+    /// backed up, and rewritten in the envelope.
+    #[test]
+    fn a_file_from_before_the_framework_is_imported_once_and_kept() {
+        #[derive(Debug, Clone, PartialEq, Default, Serialize, serde::Deserialize)]
+        struct Old {
+            n: i32,
+        }
+        impl Settings for Old {
+            const SCHEMA: u32 = 1;
+            fn legacy(raw: Value) -> Option<Value> {
+                raw.get("n").is_some().then_some(raw)
+            }
+        }
+        let path = dir("legacy").join("app.json");
+        std::fs::write(&path, r#"{"n": 7}"#).unwrap();
+        let mut store = Store::<Old>::open(path.clone());
+        assert_eq!(store.get(), &Old { n: 7 });
+        assert!(!store.in_recovery());
+        assert!(store.is_pending(), "owed the rewrite in the envelope");
+        let backup = path.with_file_name("app.json.legacy.json");
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), r#"{"n": 7}"#);
+        let (rev, bytes) = store.bytes_to_write().unwrap();
+        write_atomically(&path, &bytes).unwrap();
+        store.committed_at(rev);
+        assert!(std::fs::read_to_string(&path).unwrap().contains("\"schema\""));
+        // A file of another shape without the envelope is still recovery.
+        std::fs::write(&path, r#"{"other": 1}"#).unwrap();
+        assert!(Store::<Old>::open(path).in_recovery());
     }
 
     #[test]

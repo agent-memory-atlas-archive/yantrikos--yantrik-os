@@ -56,6 +56,7 @@ px-font 22 apps/notes/ui/app.slint
 px-font 2 apps/spreadsheet/ui/sheet_dialog.slint
 px-font 7 apps/studio/ui/app.slint
 px-font 15 apps/text-editor/ui/app.slint
+px-font 1 apps/weather/ui/weather.slint
 px-font 7 crates/yantrik-switcher/ui/switcher.slint
 px-font 1 crates/yantrik-ui-kit/slint/line_chart.slint
 px-font 1 crates/yantrik-ui-slint/ui/desktop.slint
@@ -66,7 +67,6 @@ px-font 1 crates/yantrik-ui-slint/ui/login.slint
 px-font 5 crates/yantrik-ui-slint/ui/notes_editor.slint
 px-font 21 crates/yantrik-ui-slint/ui/settings.slint
 px-font 8 crates/yantrik-ui-slint/ui/terminal_workbench.slint
-px-font 1 crates/yantrik-ui-slint/ui/weather.slint
 std-widgets 1 apps/arcade/ui/app.slint
 std-widgets 1 apps/notes/ui/app.slint
 std-widgets 1 apps/studio/ui/app.slint

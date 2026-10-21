@@ -108,6 +108,9 @@ pub struct Boot<S = ()> {
     /// The Mind, as this process reaches it: the live one under the runner, a fake under a
     /// test. An app with an agent rail hands it to its `Rail`.
     pub mind: std::sync::Arc<dyn yantrik_mind::Mind>,
+    /// The platform's services, typed: live under the runner, fakes under a test unless the
+    /// test gives its own. An app's jobs call them; nothing here does.
+    pub services: crate::services::Services,
 }
 
 impl<S: Settings> Boot<S> {
@@ -118,6 +121,7 @@ impl<S: Settings> Boot<S> {
         paths: Paths,
         args: Vec<OsString>,
         mind: std::sync::Arc<dyn yantrik_mind::Mind>,
+        services: crate::services::Services,
     ) -> Result<(Boot<S>, Store<S>), Startup> {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
         let launch = Launch::parse(paths.id(), paths.profile(), &cwd, &args)?;
@@ -131,6 +135,7 @@ impl<S: Settings> Boot<S> {
             settings: store.get().clone(),
             settings_health: store.health().clone(),
             mind,
+            services,
         };
         Ok((boot, store))
     }

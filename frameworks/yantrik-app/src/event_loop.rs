@@ -398,7 +398,9 @@ mod tests {
                 wrong.push(format!(
                     "{name} unwraps its event loop; use run_until_closed"
                 ));
-            } else if !flat.contains("run_until_closed(") {
+            } else if !flat.contains("run_until_closed(") && !flat.contains("yantrik_app::run::<") {
+                // A main on the framework is three lines: the runner reaches the end of the loop
+                // through `run_until_ending` for it.
                 wrong.push(format!(
                     "{name} does not run its window through run_until_closed"
                 ));

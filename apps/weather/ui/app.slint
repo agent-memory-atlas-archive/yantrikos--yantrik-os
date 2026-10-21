@@ -1,12 +1,12 @@
 // Yantrik Weather — standalone app window.
 // Wraps the shared WeatherDashboard component in its own Window.
 
-import { Theme, ThemeMode, AccentPreset } from "theme.slint";
-import { AppWindow } from "app_window.slint";
-export { WindowChrome } from "app_window.slint";
-import { AgentContextItem, AgentSuggestion } from "components/agent_rail.slint";
-import { AgentProposal } from "components/agent_proposal.slint";
-import { AppIdentity } from "app_color.slint";
+import { Theme, ThemeMode, AccentPreset } from "@yantrik-design/theme.slint";
+import { AppWindow } from "@yantrik-kit/app_window.slint";
+export { WindowChrome } from "@yantrik-kit/app_window.slint";
+import { AgentContextItem, AgentSuggestion } from "@yantrik-kit/agent_rail.slint";
+import { AgentProposal } from "@yantrik-kit/agent_proposal.slint";
+import { AppIdentity } from "@yantrik-kit/app_color.slint";
 import { WeatherDashboard, WeatherCurrent, WeatherHourly, WeatherDaily,
          WeatherSavedLocation, WeatherAlert } from "weather.slint";
 
