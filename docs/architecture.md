@@ -58,6 +58,7 @@ The largest break today is the shell linking the companion, `yantrik-ml` and `ya
 **`cargo run -q -p xtask -- check-architecture`** (the `architecture` job; source in [tools/xtask](../tools/xtask)):
 - **layer:** a dependency that points up, or from an app to anything but L0–L2;
 - **build-path:** an app's or a framework's `build.rs` that reaches into another crate's folder by a relative path, instead of using that crate's library;
+- **testing-feature:** a member whose own build (a normal or build dependency, or its default features) turns on another member's `testing` feature. `cargo build --workspace`, which cuts the release, merges every member's features, so one such member ships the test-only API in every app. A test asks for it through a dev-dependency, or through a harness's non-default feature (`yantrik-testing/testing`);
 - **size:** a tracked `.rs` or `.slint` file over 1,200 lines.
 
 What broke a rule on the day the rule landed is listed in [tools/xtask/architecture-baseline.txt](../tools/xtask/architecture-baseline.txt). The check fails on anything new. It also fails when a listed entry is fixed but still listed, so that a fix is kept. The baseline may only shrink. After a fix, rewrite it with:

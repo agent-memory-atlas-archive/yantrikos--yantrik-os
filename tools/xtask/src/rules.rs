@@ -71,6 +71,20 @@ pub fn build_paths(
     out
 }
 
+/// `testing-feature a->b`: a's own build, not its tests, turns on b's `testing` feature, so the
+/// test-only API reaches every binary `cargo build --workspace` makes (the release build). A
+/// test asks for it through a dev-dependency, or through a non-default feature of a harness.
+pub fn testing_features(members: &[Member]) -> Vec<Finding> {
+    members
+        .iter()
+        .flat_map(|m| {
+            m.ships_testing
+                .iter()
+                .map(|used| Finding::new("testing-feature", format!("{}->{}", m.name, used)))
+        })
+        .collect()
+}
+
 /// `size path lines` for each file over [`HARD_LINES`], and how many are over [`SOFT_LINES`].
 pub fn sizes(files: &[(String, usize)]) -> (Vec<Finding>, usize) {
     let hard = files
@@ -98,6 +112,7 @@ mod tests {
             name: name.into(),
             dir: dir.into(),
             uses: uses.iter().map(|u| u.to_string()).collect(),
+            ships_testing: Vec::new(),
         }
     }
 
@@ -147,6 +162,17 @@ mod tests {
         );
         let commented = |_: &str| Some("// once: \"../old\"\nfn main() {}".to_string());
         assert!(build_paths(&members, &placements, commented).is_empty());
+    }
+
+    #[test]
+    fn a_shipped_build_that_turns_on_a_testing_feature_is_found() {
+        let (mut members, _) = workspace();
+        assert!(testing_features(&members).is_empty());
+        members[0].ships_testing = vec!["kit".into()];
+        assert_eq!(
+            testing_features(&members),
+            vec![Finding::new("testing-feature", "notes->kit")]
+        );
     }
 
     #[test]
