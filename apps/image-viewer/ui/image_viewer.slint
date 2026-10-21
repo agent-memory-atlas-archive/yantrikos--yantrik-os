@@ -1,15 +1,16 @@
 // Image Viewer — full-screen image display with prev/next navigation,
 // mouse-wheel zoom, click-drag pan, fit-to-window and actual-size buttons.
 // Rotate/flip, EXIF info panel, slideshow mode, hover info overlay.
-// Screen 11. Opens from file browser when clicking image files.
+// The Images app's own screen (moved here from the shell's folder with the app's move onto
+// YantrikApp; it was screen 11). Opens from the file browser when an image file is clicked.
 
-import { Theme } from "theme.slint";
-import { Icon, Icons } from "components/icon.slint";
-import { AppHeader } from "components/app_header.slint";
-import { AgentRail, AgentContextItem } from "components/agent_rail.slint";
-import { AppColor, AppIdentity } from "components/app_color.slint";
-import { YEmptyState } from "components/y_empty_state.slint";
-import { YTooltip } from "components/y_tooltip.slint";
+import { Theme } from "@yantrik-design/theme.slint";
+import { Icon, Icons } from "@yantrik-kit/icon.slint";
+import { AppHeader } from "@yantrik-kit/app_header.slint";
+import { AgentRail, AgentContextItem } from "@yantrik-kit/agent_rail.slint";
+import { AppColor, AppIdentity } from "@yantrik-kit/app_color.slint";
+import { YEmptyState } from "@yantrik-kit/y_empty_state.slint";
+import { YTooltip } from "@yantrik-kit/y_tooltip.slint";
 
 component ToolbarButton inherits Rectangle {
     in property <string> label;
@@ -160,7 +161,7 @@ export component ImageViewer inherits Rectangle {
     // A picture is on screen. Every view control and every header action acts on one, so with
     // none (nothing opened, or a file that would not load) they are off and say why, rather than
     // zooming, turning and describing an empty window. The control surface refuses the same
-    // actions with the same words (`NO_PICTURE` in apps/image-viewer/src/main.rs).
+    // actions with the same words (`NO_PICTURE` in apps/image-viewer/src/model.rs).
     property <bool> has-picture: root.current-image.width > 0;
     property <string> no-picture: "Open a picture first";
 

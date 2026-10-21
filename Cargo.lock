@@ -11544,16 +11544,16 @@ dependencies = [
 name = "yantrik-image-viewer"
 version = "0.1.0"
 dependencies = [
- "serde",
  "serde_json",
  "slint",
  "tracing",
+ "yantrik-app",
  "yantrik-app-build",
- "yantrik-app-runtime",
  "yantrik-design-tokens",
+ "yantrik-foundation",
  "yantrik-image-core",
  "yantrik-ipc-contracts",
- "yantrik-ipc-transport",
+ "yantrik-testing",
  "yantrik-ui-kit",
 ]
 
