@@ -319,3 +319,23 @@ fn two_notes_drafts_of_one_text_are_both_offered_and_discarded_one_at_a_time() {
     let drafts = [draft_file(&again, &left).exists(), draft_file(&again, &right).exists()];
     assert_eq!(drafts.iter().filter(|kept| **kept).count(), 1, "one draft discarded, one kept: {drafts:?}");
 }
+
+/// P12 and P14 of the same review: only a note in the Trash holding the text does not count, and
+/// the comparison is exact (one newline more is another text). Either way the draft is offered.
+#[test]
+fn a_draft_matched_only_by_a_trashed_note_or_nearly_is_offered() {
+    for (trashed, typed) in [(true, "# Same\n\nshared\n"), (false, "# Same\n\nshared\n\n")] {
+        let (app, path) = with_note("Typed");
+        let holder = super::note(&app, "Same", "shared");
+        if trashed {
+            act(&app, "trash", json!({})).expect("trashed");
+        }
+        let id = path.file_name().unwrap().to_str().unwrap().to_string();
+        app.run(Command::Window(WindowAction::Open { id, trash: false }));
+        app.run(Command::Edit(typed.into()));
+        app.run_writes();
+        let again = killed_and_started_again(app);
+        let offers = state(&again)["recovery"].as_array().unwrap().len();
+        assert_eq!(offers, 1, "trashed holder {trashed}, {holder}");
+    }
+}
