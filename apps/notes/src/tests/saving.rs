@@ -1,9 +1,8 @@
 //! Saves as jobs through the open note's document: one in flight, the edits made meanwhile as one
 //! follow-up, no retry by the autosave after a failure, never over a file changed outside, the
-//! file watched while the note is open, and a close that waits for its save.
+//! file watched while the note is open. Closing is closing.rs's.
 
 use serde_json::json;
-use yantrik_app::app::{ExitReason, WindowId};
 use yantrik_app::documents::disk::Step;
 use yantrik_app::documents::OutsideState;
 
@@ -132,35 +131,4 @@ fn our_own_save_is_not_an_outside_edit_and_the_watch_follows_the_open_note() {
     app.run(Command::Window(WindowAction::Trash));
     settle(&app);
     assert!(app.watched().is_empty(), "nothing open, nothing watched");
-}
-
-#[test]
-fn a_clean_window_closes_at_once_and_a_dirty_one_once_its_save_lands() {
-    let (app, _) = with_note("Closing");
-    app.close_requested(WindowId::PRIMARY);
-    assert_eq!(app.exit_reason(), Some(ExitReason::LastWindowClosed));
-
-    let (app, path) = with_note("Closing later");
-    app.run(Command::Edit("# Closing later\n\nlast words".into()));
-    app.close_requested(WindowId::PRIMARY);
-    assert_eq!(app.exit_reason(), None, "the window waits for the save");
-    settle(&app);
-    assert_eq!(file(&path), "# Closing later\n\nlast words");
-    assert_eq!(app.exit_reason(), Some(ExitReason::LastWindowClosed));
-}
-
-#[test]
-fn a_close_whose_save_fails_keeps_the_window_and_says_why() {
-    let (app, _) = with_note("Stuck");
-    failing(&app).fail(Step::Rename, ".md", None);
-    app.run(Command::Edit("# Stuck\n\nunsaved".into()));
-    app.close_requested(WindowId::PRIMARY);
-    settle(&app);
-    assert_eq!(app.exit_reason(), None);
-    assert!(notice(&app).contains("injected failure at Rename"));
-    assert_eq!(app.model(|m| m.quitting), None, "the close is over; asking again tries again");
-    // A close while the store is busy waits, in words.
-    app.run(Command::Window(WindowAction::Save));
-    app.close_requested(WindowId::PRIMARY);
-    assert_eq!(notice(&app), "Please wait for the current operation before closing.");
 }

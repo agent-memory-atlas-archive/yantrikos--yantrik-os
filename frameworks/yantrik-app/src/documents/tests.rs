@@ -397,6 +397,10 @@ fn a_draft_is_owed_only_for_edits_newer_than_the_last_one_kept() {
     let envelope: Envelope<String> = serde_json::from_slice(&bytes).unwrap();
     assert_eq!((envelope.seq, envelope.content.as_str(), envelope.at), (d.seq, "v1", 100));
     assert_eq!(envelope.path.as_deref(), Some("/notes/a.md"));
+    assert_eq!(envelope.baseline, Some(fp("v0")), "the file it was written over");
+    let older: Envelope<String> = serde_json::from_str(r#"{"version":1,"key":"k","path":null,"seq":1,"at":1,"content":"x"}"#)
+        .expect("a draft from before the baseline was kept still reads");
+    assert_eq!(older.baseline, None);
     d.draft_asked();
     assert!(d.draft_owed(101).is_none());
     d.edit(|c| *c = "v2".into());

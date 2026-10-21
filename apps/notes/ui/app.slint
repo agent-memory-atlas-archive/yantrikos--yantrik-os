@@ -42,8 +42,21 @@ export component NotesApp inherits AppWindow {
  in-out property <string> folder:"all";
  in-out property <bool> focus-mode;
  in-out property <bool> preview;
- // 0 none, 1 import, 2 export, 3 compare (the window's text beside the file's, read-only).
+ // 0 none, 1 import, 2 export, 3 compare (the window's text beside the file's, read-only),
+ // 4 the close prompt.
  in-out property <int> dialog;
+ // The close prompt's heading and sentence.
+ in property <string> close-heading;
+ in property <string> close-said;
+ // The prompt offers Save: there is something to save, in a library that may be written.
+ in property <bool> close-saves;
+ // Unsaved text from before Notes closed, offered back: the bar's sentence, empty when none.
+ in property <string> recovery-said;
+ // Where the bar's offer stands: 0 none, 1 its note open (its text drawn), 2 its note listed
+ // and not open (Show opens it), 3 its note's file gone (described on the bar).
+ in property <int> recovery;
+ // The open note's offer waits on the person: it takes no keys until then.
+ in property <bool> recovering;
  in-out property <string> path;
  // An outside change the person chooses about: 0 none, 1 changed under unsaved edits, 2 file gone.
  in property <int> outside;
@@ -67,6 +80,12 @@ export component NotesApp inherits AppWindow {
  public function focus-editor(){editor.focus();}
  public function reset-position(){writing.viewport-y=0px;editor.set-selection-offsets(0,0);}
  public function shortcut(event:KeyEvent)->EventResult {
+  // The close prompt is modal: only its own keys reach the app, Escape (Cancel) and Return (Save).
+  if(root.dialog==4){
+   if(event.text==Key.Escape){root.action("close-cancel");}
+   else if(event.text==Key.Return&&root.close-saves){root.action("close-save");}
+   return accept;
+  }
   if(event.modifiers.control){
    if(event.text=="z"||event.text=="Z"||event.text=="y"){root.action(event.modifiers.shift||event.text=="y"?"redo":"undo");return accept;}
    if(event.text=="s"){root.action("save");return accept;}
@@ -80,12 +99,22 @@ export component NotesApp inherits AppWindow {
   return reject;
  }
  // The path dialogs take keys in their field; the comparison has none, so the window's keys do.
- changed dialog=>{if(root.dialog==1||root.dialog==2){path-field.focus();}else if(root.dialog==3){keys.focus();}}
+ changed dialog=>{if(root.dialog==1||root.dialog==2){path-field.focus();}else if(root.dialog==3||root.dialog==4){keys.focus();}}
  keys:=FocusScope {key-pressed(event)=>{return root.shortcut(event);}
  Flickable { width:parent.width;height:parent.height;interactive:false;viewport-width:self.width;viewport-height:self.height;
  VerticalLayout {spacing:0px;
   if root.notice!="" : Rectangle {height:message.preferred-height+20px;background:Theme.bg-elevated;
    message:=Text{x:20px;y:10px;width:parent.width - 40px;text:root.notice;color:Theme.amber;font-size:13px;wrap:word-wrap;}
+  }
+  if root.recovery-said!="" : Rectangle {height:offer.preferred-height;background:Theme.notice-surface;border-width:1px;border-color:Theme.notice-line;
+   offer:=HorizontalLayout{padding-left:20px;padding-right:14px;padding-top:8px;padding-bottom:8px;spacing:8px;
+    Text{text:root.recovery-said;color:Theme.text-primary;font-size:Theme.fs-caption;wrap:word-wrap;vertical-alignment:center;horizontal-stretch:1;}
+    if root.recovery==2 : YButton{label:"Show";variant:1;size:0;clicked=>{root.action("show-draft");}}
+    YButton{label:"Restore";variant:0;size:0;disabled:root.read-only;clicked=>{root.action("restore-draft");}}
+    // Discard drops the only copy, so it is offered once the text can be seen (or, its file
+    // gone, once the bar has said what it holds).
+    if root.recovery!=2 : YButton{label:"Discard";variant:3;size:0;clicked=>{root.action("discard-draft");}}
+   }
   }
   if root.outside!=0 : Rectangle {height:choices.preferred-height;background:Theme.notice-surface;border-width:1px;border-color:Theme.notice-line;
    choices:=HorizontalLayout{padding-left:20px;padding-right:14px;padding-top:8px;padding-bottom:8px;spacing:8px;
@@ -158,9 +187,9 @@ export component NotesApp inherits AppWindow {
     if root.opened && !root.trashed : Rectangle {height:44px;
      HorizontalLayout{padding-left:24px;padding-right:24px;spacing:10px;
       Text{text:"Notebook";color:Theme.text-dim;font-size:11px;vertical-alignment:center;}
-      YInput{value<=>root.notebook;placeholder:"Unfiled";min-width:100px;disabled:root.read-only;edited(_)=>{root.metadata();}cleared=>{root.metadata();}}
+      YInput{value<=>root.notebook;placeholder:"Unfiled";min-width:100px;disabled:root.read-only||root.recovering;edited(_)=>{root.metadata();}cleared=>{root.metadata();}}
       if root.width>850px : Text{text:"Tags";color:Theme.text-dim;font-size:11px;vertical-alignment:center;}
-      if root.width>850px : YInput{value<=>root.tags;placeholder:"Comma separated";min-width:100px;disabled:root.read-only;edited(_)=>{root.metadata();}cleared=>{root.metadata();}}
+      if root.width>850px : YInput{value<=>root.tags;placeholder:"Comma separated";min-width:100px;disabled:root.read-only||root.recovering;edited(_)=>{root.metadata();}cleared=>{root.metadata();}}
      }
     }
     Rectangle {vertical-stretch:1;clip:true;
@@ -177,7 +206,7 @@ export component NotesApp inherits AppWindow {
        editor:=TextInput {
         x:max(28px,(writing.visible-width - 720px)/2);y:30px;width:min(720px,writing.visible-width - 56px);height:max(self.preferred-height,writing.visible-height - 60px);
         text<=>root.content;single-line:false;wrap:word-wrap;font-size:16px;color:Theme.text-primary;
-        read-only:!root.opened||root.trashed||root.dialog!=0||root.read-only;
+        read-only:!root.opened||root.trashed||root.dialog!=0||root.read-only||root.recovering;
         selection-background-color:Theme.accent;selection-foreground-color:Theme.bg-deep;page-height:writing.visible-height;
         edited=>{root.edited(self.text);}key-pressed(event)=>{return root.shortcut(event);}
         cursor-position-changed(pos)=>{
@@ -246,6 +275,22 @@ export component NotesApp inherits AppWindow {
      YButton{label:"Close";variant:1;clicked=>{root.dialog=0;root.view-changed();root.focus-content();}}
      YButton{label:root.theirs-gone?"Save as new":"Keep mine as a copy";variant:1;clicked=>{root.action("keep-mine");}}
      if !root.theirs-gone : YButton{label:"Take theirs";variant:1;clicked=>{root.action("take-theirs");}}
+    }
+   }
+  }
+ }
+ // The close prompt, on the kit's dialog card (YDialog's tokens; it has three answers, which
+ // YDialog's two buttons do not).
+ Rectangle{visible:root.dialog==4;background:Theme.overlay-backdrop;TouchArea{}
+  Rectangle{x:(parent.width - self.width)/2;y:(parent.height - self.height)/2;width:min(480px,root.width - 48px);height:asking.preferred-height;
+   background:Theme.bg-card;border-radius:Theme.r-lg;border-width:1px;border-color:Theme.border-card;drop-shadow-blur:30px;drop-shadow-color:Theme.overlay-shadow;
+   asking:=VerticalLayout{padding:Theme.sp-6;spacing:Theme.sp-4;
+    Text{text:root.close-heading;color:Theme.text-primary;font-size:Theme.fs-title-2;font-weight:Theme.fw-title-2;wrap:word-wrap;}
+    Text{text:root.close-said;color:Theme.text-secondary;font-size:Theme.fs-body;wrap:word-wrap;}
+    HorizontalLayout{alignment:end;spacing:Theme.sp-2;
+     YButton{label:"Cancel";variant:2;clicked=>{root.action("close-cancel");}}
+     YButton{label:"Don't save";variant:1;clicked=>{root.action("close-discard");}}
+     if root.close-saves : YButton{label:"Save";variant:0;clicked=>{root.action("close-save");}}
     }
    }
   }

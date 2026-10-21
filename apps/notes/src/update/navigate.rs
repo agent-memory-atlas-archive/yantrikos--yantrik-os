@@ -4,7 +4,7 @@
 use yantrik_app::documents::{Fingerprint, Source};
 use yantrik_app::effects::Effects;
 
-use super::{saving, show};
+use super::{drafts, saving, show};
 use crate::model::{Cue, Model, NoteFile};
 use crate::note::Note;
 use crate::store::{validate, MAX_NOTES, VAULT_LIMIT};
@@ -34,6 +34,7 @@ pub fn show_note(m: &mut Model, fx: &mut Effects<Notes>, note: Option<Note>) {
                 if closed.source.path().is_some() {
                     fx.unwatch(&closed.source.key());
                 }
+                drafts::closing(&closed, fx);
             }
             m.files.remove(&doc);
         }
@@ -62,7 +63,7 @@ pub fn show_note(m: &mut Model, fx: &mut Effects<Notes>, note: Option<Note>) {
     }
     m.files.insert(
         doc,
-        NoteFile { id: note.id, trash: note.trash, on_disk, meta_unsure: None, ours: false, modified: note.modified },
+        NoteFile { id: note.id, trash: note.trash, on_disk, meta_unsure: None, modified: note.modified },
     );
     m.pane.view = Some(m.documents.show(doc, m.pane.window));
 }
@@ -112,7 +113,8 @@ pub fn new_note(m: &mut Model, fx: &mut Effects<Notes>, title: &str, body: &str)
 /// The open note, unsaved edits and all, as a new note under its own file name; the original
 /// file is left as it is. The way out of "this note changed on disk".
 pub fn copy(m: &mut Model, fx: &mut Effects<Notes>) {
-    let Some(mut note) = m.current().map(|c| c.as_note()) else { return };
+    // As the window shows it: an offered text waiting on the person is copied, offer and all.
+    let Some(mut note) = m.shown_note() else { return };
     if m.library.len() >= MAX_NOTES || m.library_text() + note.content.text.len() > VAULT_LIMIT {
         m.notice = LIBRARY_FULL.into();
         fx.changed(STATUS);

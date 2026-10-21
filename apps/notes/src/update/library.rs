@@ -11,7 +11,7 @@ use yantrik_app::effects::Effects;
 
 use super::navigate::show_note;
 use super::saving::{self, How};
-use super::{after_store, begin, failed, refreshed, relist, show, WORKER_STOPPED};
+use super::{after_store, begin, drafts, failed, recovery, refreshed, relist, said, show, WORKER_STOPPED};
 use crate::command::Command;
 use crate::model::{Model, Work};
 use crate::note::Note;
@@ -51,7 +51,15 @@ pub fn loaded(m: &mut Model, fx: &mut Effects<Notes>, result: Result<Loaded, Str
                 show_note(m, fx, again);
             }
             m.ready = true;
-            m.notice = sentences([loaded.read_only.as_deref(), Some(loaded.notice.as_str()), changed.then_some(KEPT_OVER_CHANGE)]);
+            // What the last run kept and did not save is weighed once, against the library as
+            // first read.
+            let offered = recovery::weigh(m, fx, loaded.interrupted.as_deref());
+            m.notice = sentences([
+                loaded.read_only.as_deref(),
+                Some(loaded.notice.as_str()),
+                changed.then_some(KEPT_OVER_CHANGE),
+                offered.as_deref(),
+            ]);
             if kept {
                 still_typing(m, fx);
                 // Kept while the vault refused writes: its save may have been refused already, and
@@ -91,9 +99,30 @@ pub fn trashed(m: &mut Model, fx: &mut Effects<Notes>, id: &str, result: Result<
             if let Some(n) = m.library.iter_mut().find(|n| n.id == id && !n.trash) {
                 n.trash = true;
             }
+            // The Trash holds the note as its file held it. Text typed while the job ran is in
+            // the window only: it becomes a note of its own, saved at once, never closed away.
+            let typed = m.current().filter(|c| c.id() == id && c.unsaved()).map(|c| c.content().clone());
+            if let (Some(_), Some(d)) = (&typed, m.current_id().and_then(|doc| m.documents.get_mut(doc))) {
+                // Its text moves to the new note, whose own draft takes over.
+                drafts::discard(d, fx);
+            }
             show_note(m, fx, None);
-            show(m, fx);
-            m.notice = "Moved to Trash. You can restore it from the library.".into();
+            match typed {
+                Some(content) => {
+                    let kept = Note { id: format!("recovered-{}.md", uuid7::uuid7()), content, ..Note::default() };
+                    m.library.push(kept.clone());
+                    show_note(m, fx, Some(kept));
+                    show(m, fx);
+                    // Said until the next action: the save that lands next must not take it back.
+                    m.notice = said::TYPED_DURING_TRASH.into();
+                    m.lasting_notice = true;
+                    saving::save(m, fx, How::Asked);
+                }
+                None => {
+                    show(m, fx);
+                    m.notice = "Moved to Trash. You can restore it from the library.".into();
+                }
+            }
             after_store(m, fx);
         }
         Err(e) => failed(m, fx, e),
@@ -120,7 +149,8 @@ pub fn import(m: &mut Model, fx: &mut Effects<Notes>, path: PathBuf) {
 }
 
 pub fn export(m: &mut Model, fx: &mut Effects<Notes>, path: PathBuf) {
-    let text = m.current().map(|c| c.text().to_string()).unwrap_or_default();
+    // What the window shows: an offered text while it waits.
+    let text = m.shown().map(|c| c.text.clone()).unwrap_or_default();
     begin(m, fx, Work::Export, Command::Exported(Err(WORKER_STOPPED.into())), move |vault| {
         Command::Exported(vault.export(&path, &text))
     });

@@ -10,12 +10,13 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 use yantrik_app::app::WindowId;
-use yantrik_app::documents::{Document, DocumentId, Documents, OutsideState, ViewId};
+use yantrik_app::documents::{CloseFlow, Document, DocumentId, Documents, Fingerprint, OutsideState, ViewId};
 use yantrik_app::intents::InvocationId;
 
 use crate::claim::Claim;
 use crate::command::Step;
 use crate::note::{Note, NoteText};
+use crate::recovery::Recovery;
 use crate::store::Vault;
 use crate::undo::History;
 use crate::view::listing::Listing;
@@ -41,8 +42,16 @@ pub struct Model {
     pub status: String,
     /// An action waiting for the open note to be saved first.
     pub pending: Option<Pending>,
-    /// A window whose close waits for the open note's save.
-    pub quitting: Option<WindowId>,
+    /// A close or a quit asking about unsaved notes, or waiting on their saves.
+    pub closing: Option<CloseFlow>,
+    /// Text kept from a run that ended before it was saved, offered back note by note.
+    pub recovery: Recovery,
+    /// This run's last landed write to each note, by file name: the fingerprint of its text. A
+    /// note whose file still holds it is ours to keep if another program replaces it
+    /// (update/follow.rs), however often it was closed, reopened or reloaded since.
+    pub written: BTreeMap<String, Fingerprint>,
+    /// The document, and its edit, whose draft could not be written: tried again at its next edit.
+    pub draft_failed_at: Option<(DocumentId, u64)>,
     /// A call from the surface waiting for the work it started.
     pub asked: Option<Asked>,
     /// What the last call from the surface is answered with.
@@ -62,9 +71,6 @@ pub struct NoteFile {
     pub on_disk: Option<NoteText>,
     /// A sidecar of ours a failed save may have left on disk.
     pub meta_unsure: Option<String>,
-    /// What the files hold is our own write from this run. If another program replaces it while
-    /// nothing is unsaved, it is kept as a recovered note first (update/follow.rs).
-    pub ours: bool,
     pub modified: u64,
 }
 
@@ -115,6 +121,10 @@ pub enum Expect {
     Saved,
     Trashed { id: String, title: String, path: PathBuf },
     Restored { id: String },
+    /// Unsaved text from before Notes closed, put back into its note.
+    Recovered { id: String },
+    /// Unsaved text from before Notes closed, dropped.
+    Discarded { id: String },
     Copied { from: String },
     Reloaded,
     Imported { from: PathBuf },
@@ -136,7 +146,7 @@ pub struct Pane {
     pub query: String,
     pub preview: bool,
     pub focus_mode: bool,
-    /// 0 none, 1 import, 2 export, 3 compare.
+    /// 0 none, 1 import, 2 export, 3 compare, 4 the close prompt.
     pub dialog: i32,
     /// The file's version beside the window's text in the comparison; `None` when its file is gone.
     pub theirs: Option<NoteText>,
@@ -218,7 +228,7 @@ impl Current<'_> {
 }
 
 impl Model {
-    pub fn new(vault: Vault, claim: Claim) -> Model {
+    pub fn new(vault: Vault, claim: Claim, recovery: Recovery) -> Model {
         Model {
             vault,
             library: Vec::new(),
@@ -250,7 +260,10 @@ impl Model {
             // The window's own first words, until the library is asked for.
             status: "Opening your library…".into(),
             pending: None,
-            quitting: None,
+            closing: None,
+            recovery,
+            written: BTreeMap::new(),
+            draft_failed_at: None,
             asked: None,
             answer: Value::Null,
             _claim: claim,
@@ -274,6 +287,45 @@ impl Model {
 
     pub fn unsaved(&self) -> bool {
         self.current().is_some_and(|c| c.unsaved())
+    }
+
+    /// The open note's unsaved text from before Notes closed, while its offer waits: what the
+    /// window shows of the note (text, title, fields, list card, preview), and what Copy and
+    /// Export take, until the person chooses.
+    pub fn offered(&self) -> Option<&NoteText> {
+        let c = self.current()?;
+        self.recovery.offer_for(c.id()).map(|o| &o.content)
+    }
+
+    /// What the window shows of the open note: its offered text while that waits, its content
+    /// otherwise.
+    pub fn shown(&self) -> Option<&NoteText> {
+        self.offered().or_else(|| self.current().map(|c| &c.doc.content))
+    }
+
+    /// The open note as the library lists it, as the window shows it.
+    pub fn shown_note(&self) -> Option<Note> {
+        let mut note = self.current()?.as_note();
+        if let Some(offered) = self.offered() {
+            note.content = offered.clone();
+        }
+        Some(note)
+    }
+
+    /// Whether what a note's files hold is this run's last landed write to it.
+    pub fn ours(&self, file: &NoteFile) -> bool {
+        let held = file.on_disk.as_ref().map(|d| Fingerprint::of_bytes(d.text.as_bytes()));
+        held.is_some() && self.written.get(&file.id) == held.as_ref()
+    }
+
+    /// The live notes, other than `except`, that held exactly `content` when last read: the ones
+    /// whose files a job reads to learn whether one still holds it, as file name and length.
+    pub fn alike(&self, content: &NoteText, except: &str) -> Vec<(String, usize)> {
+        self.library
+            .iter()
+            .filter(|n| !n.trash && n.id != except && n.content == *content)
+            .map(|n| (n.id.clone(), n.content.text.len()))
+            .collect()
     }
 
     /// The library's text, leaving out the open note's own entry.

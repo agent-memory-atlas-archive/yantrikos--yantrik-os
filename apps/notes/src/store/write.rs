@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use yantrik_app::documents::disk::{DiskError, Step};
+use yantrik_app::documents::disk::{DiskError, Exchanged, Step};
 
 use super::Vault;
 
@@ -20,6 +20,16 @@ impl Vault {
         } else {
             self.disk.create_new(path, text.as_bytes())
         }
+    }
+
+    /// `text` in place of the file at `path`, refused as a replacing `put` is, handing back what
+    /// it took the place of at that instant (`Disk::exchange`).
+    pub(super) fn exchange(&self, path: &Path, text: &str) -> Result<Exchanged, DiskError> {
+        if let Some(why) = &self.read_only {
+            return Err(DiskError { step: Step::Check, error: why.clone() });
+        }
+        replaceable(path)?;
+        self.disk.exchange(path, text.as_bytes())
     }
 
     /// Removes a file; one already gone is removed.

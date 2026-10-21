@@ -4,8 +4,9 @@
 //! word changed in `intents.rs` fails here.
 //!
 //! Step 8d added to the surface and to nothing else: the three choices about an outside change
-//! ([`ADDED_IN_8D`]) after the old table, and two `describe` keys ([`KEYS_ADDED_IN_8D`]). The old
-//! table and the old keys are unchanged.
+//! ([`ADDED_IN_8D`]) after the old table, and two `describe` keys ([`KEYS_ADDED_IN_8D`]); 8d-3
+//! added the two choices about text kept from before Notes closed ([`ADDED_IN_8D3`]) and two keys
+//! ([`KEYS_ADDED_IN_8D3`]). The old table and the old keys are unchanged.
 
 use serde_json::{json, Value};
 use yantrik_app::app::App as _;
@@ -205,9 +206,29 @@ const ADDED_IN_8D: &[Golden] = &[
 /// save reached the disk.
 const KEYS_ADDED_IN_8D: &[&str] = &["outside", "save_failure"];
 
+/// The recovery bar's choices (8d-3, gate row "Recovery after a forced kill"), after 8d's.
+const ADDED_IN_8D3: &[Golden] = &[
+    Golden {
+        name: "restore_draft",
+        risk: "sensitive",
+        description: r#"Put back the unsaved text Notes kept from before it closed (the one the recovery bar shows, first in `describe.recovery`) into its note, open it, and save it. If the note's file changed since, nothing is replaced: `describe.outside` becomes `conflict` and the outside choices apply."#,
+        params: &[],
+    },
+    Golden {
+        name: "discard_draft",
+        risk: "dangerous",
+        description: r#"Throw away the unsaved text Notes kept from before it closed (the one the recovery bar shows, first in `describe.recovery`). The note stays as its file holds it; the text cannot be got back."#,
+        params: &[],
+    },
+];
+
+/// `describe` keys 8d-3 added: whether the open note's unsaved edits are kept for recovery, and
+/// what is offered back from before Notes closed.
+const KEYS_ADDED_IN_8D3: &[&str] = &["draft", "recovery"];
+
 /// Every action, the old table first.
 fn golden() -> impl Iterator<Item = &'static Golden> {
-    BEFORE.iter().chain(ADDED_IN_8D)
+    BEFORE.iter().chain(ADDED_IN_8D).chain(ADDED_IN_8D3)
 }
 
 #[test]
@@ -260,6 +281,7 @@ fn describe_has_the_same_keys_and_values() {
         "focus", "note_count", "trash_count", "search_query", "matches", "notes",
     ];
     want.extend(KEYS_ADDED_IN_8D);
+    want.extend(KEYS_ADDED_IN_8D3);
     want.sort_unstable();
     let mut keys = keys;
     keys.sort_unstable();
@@ -272,7 +294,7 @@ fn describe_has_the_same_keys_and_values() {
             "notes_directory": vault(&app).display().to_string(), "library_ready": true, "busy": false,
             "notice": "", "status": "All changes saved", "folder": "all", "preview": false, "focus": false,
             "note_count": 0, "trash_count": 0, "search_query": "", "matches": 0, "notes": [],
-            "outside": null, "save_failure": null,
+            "outside": null, "save_failure": null, "draft": null, "recovery": [],
         })
     );
     assert_eq!(app.describe()["summary"], "Notes — nothing open, 0 notes");

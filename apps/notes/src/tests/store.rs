@@ -35,6 +35,7 @@ pub fn save(vault: &Vault, id: &str, on_disk: Option<&NoteText>, content: &NoteT
         on_disk: on_disk.cloned(),
         meta_unsure: None,
         modified: 0,
+        alike: Vec::new(),
     })
 }
 
@@ -217,6 +218,7 @@ fn a_sidecar_that_fails_after_the_text_is_content_only_and_the_journal_recovers_
         on_disk: Some(n.content.clone()),
         meta_unsure: None,
         modified: 0,
+        alike: Vec::new(),
     });
     assert!(retry.is_ok(), "{:?}", retry.err());
     assert_eq!(text(&dir.join(&n.id).with_extension("meta")), want.meta);
@@ -258,6 +260,7 @@ fn the_check_compares_the_text_itself_not_its_fingerprint() {
         on_disk: Some(n.content.clone()),
         meta_unsure: None,
         modified: 0,
+        alike: Vec::new(),
     });
     assert!(refused.unwrap_err().error.conflict);
     assert_eq!(text(&dir.join(&n.id)), "theirs");

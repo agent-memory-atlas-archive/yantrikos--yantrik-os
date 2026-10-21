@@ -20,12 +20,15 @@ use crate::view::preview;
 use crate::view::render::{CUES, EDIT, LIBRARY, MODEL_ONLY, NOTE, PREVIEW, STATUS};
 use crate::Notes;
 
+pub mod closing;
+mod drafts;
 mod editing;
 mod follow;
 mod library;
 mod navigate;
 mod outside;
 mod read_only;
+pub mod recovery;
 pub mod said;
 pub mod saving;
 mod surface;
@@ -41,7 +44,7 @@ const WORKER_STOPPED: &str = "Storage worker stopped. Keep this window open to p
 pub fn update(m: &mut Model, command: Command, fx: &mut Effects<Notes>) -> Result<(), Refused> {
     // A cue is for the render of the command that set it, and for no later one.
     m.pane.cues.clear();
-    if read_only::refused(m, fx, &command) {
+    if read_only::refused(m, fx, &command) || recovery::refused(m, fx, &command) {
         return Ok(());
     }
     match command {
@@ -60,11 +63,19 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Effects<Notes>) -> Resul
             if dialog != outside::COMPARE_DIALOG {
                 m.pane.theirs = None;
             }
+            // Escape on the close prompt is its Cancel.
+            if dialog != closing::CLOSE_DIALOG {
+                closing::put_away(m, fx);
+            }
             fx.changed(MODEL_ONLY);
         }
         Command::Surface(act) => surface::act(m, fx, act),
         Command::Autosave => saving::save(m, fx, saving::How::Autosave),
-        Command::CloseRequested(window) => saving::close(m, fx, window),
+        Command::CloseRequested(window) => closing::requested(m, fx, window),
+        Command::Quit => closing::quit(m, fx),
+        Command::LoggingOut => closing::logging_out(m, fx),
+        Command::DraftSaved(name) => drafts::saved(m, fx, &name),
+        Command::DraftNotSaved { name, why } => drafts::not_saved(m, fx, &name, &why),
         Command::FileChanged { key, seen } => outside::seen(m, fx, &key, seen),
         Command::Loaded(result) => library::loaded(m, fx, result),
         Command::SaveLanded { doc, seq, result } => saving::landed(m, fx, doc, seq, result),
@@ -80,6 +91,7 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Effects<Notes>) -> Resul
             fx.changed(MODEL_ONLY);
         }
     }
+    drafts::sync(m, fx);
     surface::finish(m, fx);
     Ok(())
 }
@@ -91,6 +103,8 @@ fn save_state(m: &Model) -> &'static str {
         // No autosave is pending while the person's choice is: saving is refused until then.
         Some(c) if c.unsaved() && c.doc.blocked() => said::WAITING_ON_CHOICE,
         Some(c) if c.unsaved() => "Unsaved · autosave pending",
+        // The window shows text that is on no disk but in its recovery copy.
+        Some(c) if m.recovery.offer_for(c.id()).is_some() => said::WAITING_ON_RECOVERY,
         _ => "All changes saved",
     }
 }
@@ -111,11 +125,7 @@ fn refreshed(m: &mut Model, fx: &mut Effects<Notes>) {
 /// the list is redrawn, and the view scrolls to the top and takes the keys.
 fn show(m: &mut Model, fx: &mut Effects<Notes>) {
     m.pane.history.clear();
-    let current = m.current();
-    let (notebook, tags) = current
-        .as_ref()
-        .map(|c| (c.content().field("notebook"), c.content().field("tags")))
-        .unwrap_or_default();
+    let (notebook, tags) = m.shown().map(|c| (c.field("notebook"), c.field("tags"))).unwrap_or_default();
     m.status = save_state(m).into();
     m.pane.notebook = notebook;
     m.pane.tags = tags;
@@ -131,15 +141,15 @@ fn show(m: &mut Model, fx: &mut Effects<Notes>) {
 
 /// The library list, worked out again for the pane's section and search.
 fn relist(m: &mut Model, fx: &mut Effects<Notes>) {
-    let open = m.current().map(|c| c.as_note());
+    let open = m.shown_note();
     m.pane.listing = listing::list(&m.library, open.as_ref(), &m.pane.folder, &m.pane.query, now());
     fx.changed(LIBRARY);
 }
 
 /// The preview's blocks, from the open note as it is now. Nothing open leaves them as they were.
 fn reblock(m: &mut Model, fx: &mut Effects<Notes>) {
-    if let Some(current) = m.current() {
-        m.pane.blocks = preview::blocks(current.text());
+    if let Some(shown) = m.shown() {
+        m.pane.blocks = preview::blocks(&shown.text);
         fx.changed(PREVIEW);
     }
 }
@@ -174,7 +184,7 @@ fn failed(m: &mut Model, fx: &mut Effects<Notes>, sentence: String) {
             }
         }
     }
-    m.quitting = None;
+    closing::failed(m, &sentence);
     m.notice = sentence;
     m.lasting_notice = false;
     m.status = "Needs attention · draft kept".into();
@@ -192,12 +202,10 @@ fn after_store(m: &mut Model, fx: &mut Effects<Notes>) {
         if let Some(pending) = m.pending.take() {
             run(m, fx, pending.step);
         }
-        if let Some(window) = m.quitting.take() {
-            fx.close(window);
-        }
-    } else if m.quitting.is_some() || m.pending.is_some() {
+    } else if m.pending.is_some() {
         saving::save(m, fx, saving::How::Asked);
     }
+    closing::progress(m, fx);
     // A change to the open note seen while the store was busy is followed now that it is not.
     if m.busy.is_none() && std::mem::take(&mut m.pane.reread_owed) {
         follow::follow(m, fx);

@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use yantrik_app::effects::Effects;
 use yantrik_app::Refused;
 
-use super::{editing, outside, relist, run, saving, window};
+use super::{editing, outside, recovery, relist, run, said, saving, window};
 use crate::command::{Act, Step, WindowAction};
 use crate::describe::{listed, read_notes, written};
 use crate::model::{Asked, Expect, Model, Pending};
@@ -120,6 +120,8 @@ pub fn act(m: &mut Model, fx: &mut Effects<Notes>, act: Act) {
                 save_then(m, fx, Step::Import { path });
             }
         }
+        Act::RestoreDraft => recovered(m, fx, WindowAction::RestoreDraft),
+        Act::DiscardDraft => recovered(m, fx, WindowAction::DiscardDraft),
         Act::KeepMineAsCopy => resolve(m, fx, WindowAction::KeepMine, false),
         Act::TakeTheirs => resolve(m, fx, WindowAction::TakeTheirs, true),
         Act::Compare => resolve(m, fx, WindowAction::Compare, true),
@@ -128,7 +130,10 @@ pub fn act(m: &mut Model, fx: &mut Effects<Notes>, act: Act) {
             if !to.is_absolute() {
                 return refuse(m, fx, format!("`export` needs an absolute path; `{path}` is not one."));
             }
-            let Some(text) = open_text(m, fx) else { return };
+            if open_text(m, fx).is_none() {
+                return;
+            }
+            let text = m.shown().map(|c| c.text.clone()).unwrap_or_default();
             if library_open(m, fx) {
                 ask(m, fx, Expect::Exported { to, text });
                 // A read-only library would refuse the save first; the export writes the text as
@@ -191,7 +196,8 @@ fn answer(m: &Model, expect: Expect, landed: bool, kept: Option<String>) -> Resu
                 "in_trash": true,
                 "trash_count": m.library.iter().filter(|n| n.trash).count(),
                 "notes": m.library.iter().filter(|n| !n.trash).count(),
-                "open_note": Value::Null,
+                // Nothing, unless text typed while the job ran became a note of its own.
+                "open_note": m.current().map(|c| c.id().to_string()),
             }))
         }
         Expect::Restored { id } => {
@@ -199,6 +205,18 @@ fn answer(m: &Model, expect: Expect, landed: bool, kept: Option<String>) -> Resu
                 return Err(why("The note is still in the Trash; nothing was restored.".into()));
             }
             note()
+        }
+        Expect::Recovered { id } => {
+            if m.recovery.offer_for(&id).is_some() || m.current().is_none_or(|c| c.id() != id) {
+                return Err(why("The unsaved text is still waiting; nothing was restored.".into()));
+            }
+            note()
+        }
+        Expect::Discarded { id } => {
+            if m.recovery.offer_for(&id).is_some() {
+                return Err(why("The unsaved text is still waiting; nothing was discarded.".into()));
+            }
+            Ok(json!({ "discarded": id, "still_offered": m.recovery.offers.len(), "notice": m.notice }))
         }
         Expect::Copied { from } => {
             let mut answer = note()?;
@@ -275,6 +293,21 @@ fn resolve(m: &mut Model, fx: &mut Effects<Notes>, action: WindowAction, theirs:
         WindowAction::TakeTheirs => Expect::TookTheirs { id },
         WindowAction::Compare => Expect::Compared,
         _ => Expect::Copied { from: id },
+    };
+    ask(m, fx, expect);
+    window::act(m, fx, action);
+}
+
+/// The recovery bar's choices, through the same commands as its buttons: refused, in the window's
+/// words, when nothing is offered. A restore is answered once the text is back and saved (or its
+/// conflict is offered), a discard with what is left.
+fn recovered(m: &mut Model, fx: &mut Effects<Notes>, action: WindowAction) {
+    let Some(offer) = recovery::shown(m).cloned() else {
+        return refuse(m, fx, said::NOTHING_OFFERED.into());
+    };
+    let expect = match action {
+        WindowAction::RestoreDraft => Expect::Recovered { id: offer.id },
+        _ => Expect::Discarded { id: offer.id },
     };
     ask(m, fx, expect);
     window::act(m, fx, action);

@@ -136,7 +136,6 @@ pub(super) fn take_theirs(m: &mut Model, fx: &mut Effects<Notes>, doc: DocumentI
     let Some(file) = m.files.get_mut(&doc) else { return };
     file.on_disk = Some(theirs.clone());
     file.meta_unsure = None;
-    file.ours = false;
     // The other program's write is recent; Refresh reads its exact time from the file.
     file.modified = now();
     let (id, modified) = (file.id.clone(), file.modified);
@@ -171,11 +170,9 @@ fn switch_to_kept(
         }
     }
     let typed_meanwhile = latest != kept.content;
-    show_note(m, fx, Some(kept));
     // The kept note is a write of ours: another program replacing it keeps it again (follow.rs).
-    if let Some((_, file)) = m.current_mut() {
-        file.ours = true;
-    }
+    m.written.insert(kept.id.clone(), Fingerprint::of_bytes(kept.content.text.as_bytes()));
+    show_note(m, fx, Some(kept));
     if typed_meanwhile {
         if let Some((d, _)) = m.current_mut() {
             d.edit(|c| *c = latest);

@@ -7,6 +7,8 @@ use yantrik_app::documents::{Durability, OutsideState, Replaced, SaveError};
 
 /// The footer while saving waits on the person's choice about an outside change.
 pub const WAITING_ON_CHOICE: &str = "Not saved · changed outside Notes";
+/// The footer while the open note's unsaved text from before Notes closed waits on the person.
+pub const WAITING_ON_RECOVERY: &str = "Not saved · unsaved text from before Notes closed: Restore or Discard";
 
 /// Why a store job ended without an answer (it panicked, or the pool refused it), as the reason
 /// in a sentence below.
@@ -108,7 +110,7 @@ pub fn reread_failed(error: &str) -> String {
 pub fn ours_not_kept(error: &str) -> String {
     format!(
         "This note changed on disk, but your last version could not be kept as a separate note ({}), \
-         so it was not replaced: the window still shows your version.",
+         so it was not replaced. It stays here, unsaved: Keep mine as a copy, Take theirs, or Compare.",
         reason(error)
     )
 }
@@ -118,10 +120,156 @@ pub fn compare_unread(error: &str) -> String {
     format!("The version on disk could not be read ({}), so there is nothing to compare.", reason(error))
 }
 
+/// Another program wrote the note's file in the instant before a save replaced it, and its version
+/// is kept as this note.
+pub fn theirs_kept(title: &str) -> String {
+    format!("Saved. Another program wrote this note's file just before; its version is kept as a separate note, \"{title}\".")
+}
+
+/// The same, when a note in the library already holds exactly that version.
+pub fn theirs_held(title: &str) -> String {
+    format!("Saved. Another program wrote this note's file just before; its version is the same as \"{title}\", which is kept.")
+}
+
+/// The same, when its version could not be a note (too large, or not text a note may hold).
+pub fn theirs_aside(path: &std::path::Path) -> String {
+    format!("Saved. Another program wrote this note's file just before; its version is kept as a file at {}.", path.display())
+}
+
+/// The same, when its version could not be written anywhere: it is only in the library list.
+pub fn theirs_unwritten(title: &str, why: &str) -> String {
+    format!(
+        "Saved. Another program wrote this note's file just before, and its version could not be written ({}). It is in the list as \"{title}\", not on disk yet: open it and save it.",
+        reason(why)
+    )
+}
+
+/// The same, when its version could not be kept at all.
+pub fn theirs_lost(why: &str) -> String {
+    format!(
+        "Saved. Another program wrote this note's file just before, and its version could not be kept ({}).",
+        reason(why)
+    )
+}
+
+/// The start of the sentence a draft that could not be written is said with.
+pub const DRAFT_NOT_KEPT_START: &str = "Notes could not keep a recovery copy of this note";
+
+/// A draft could not be written: if Notes stops now, the unsaved text is lost.
+pub fn draft_not_kept(why: &str) -> String {
+    format!(
+        "{DRAFT_NOT_KEPT_START} ({}). If Notes closes before it is saved, the unsaved text is lost; Save keeps it.",
+        reason(why)
+    )
+}
+
+/// How many notes have text offered back.
+pub fn offered(count: usize) -> String {
+    match count {
+        1 => "1 note has unsaved text from before Notes closed: Restore or Discard it.".into(),
+        n => format!("{n} notes have unsaved text from before Notes closed: Restore or Discard each."),
+    }
+}
+
+/// The recovery bar, with the note it offers open and its unsaved text drawn read-only.
+pub fn offer_open(title: &str) -> String {
+    format!("Notes closed before \"{title}\" was saved. This is the unsaved text; Restore keeps it, Discard drops it.")
+}
+
+/// The recovery bar, for a note in the library that is not open.
+pub fn offer_listed(title: &str) -> String {
+    format!("Notes closed before \"{title}\" was saved. Show opens it with the unsaved text, to Restore or Discard it.")
+}
+
+/// The recovery bar, for a note whose file is gone, so there is nothing to open.
+pub fn offer_gone(title: &str, characters: usize) -> String {
+    format!(
+        "Notes closed before \"{title}\" was saved, and its file is gone. Restore keeps the unsaved text \
+         ({characters} characters) as a note; Discard drops it."
+    )
+}
+
+/// Drafts found at start that could not be read, kept where they are.
+pub fn drafts_unreadable(paths: &[std::path::PathBuf]) -> Option<String> {
+    match paths {
+        [] => None,
+        [one] => Some(format!("A recovery copy could not be read; it is kept at {}.", one.display())),
+        many => Some(format!(
+            "{} recovery copies could not be read; they are kept in {}.",
+            many.len(),
+            many[0].parent().unwrap_or(&many[0]).display()
+        )),
+    }
+}
+
+/// Drafts of notes in another library, kept where they are.
+pub fn drafts_elsewhere(paths: &[std::path::PathBuf]) -> Option<String> {
+    match paths {
+        [] => None,
+        [one] => Some(format!("A recovery copy of a note in another library is kept at {}.", one.display())),
+        many => Some(format!(
+            "{} recovery copies of notes in another library are kept in {}.",
+            many.len(),
+            many[0].parent().unwrap_or(&many[0]).display()
+        )),
+    }
+}
+
+pub const NOTHING_OFFERED: &str = "There is no unsaved text from before Notes closed.";
+pub const RESTORED: &str = "Your text is back in this note.";
+/// Restored over a note that is not the one the text was written over (its text, or its
+/// notebook, tags or pin), or whose file is gone: the outside bar decides.
+pub const RESTORED_BESIDE: &str = "Your text is back. The note on disk changed after it was written (its text, \
+     or its notebook, tags or pin), so choose what happens to the two versions.";
+pub const DISCARDED: &str = "The unsaved text was discarded; the note is as it is on disk.";
+/// An edit refused on a note whose offer waits.
+pub const CHOOSE_FIRST: &str =
+    "This note has unsaved text from before Notes closed. Restore or Discard it first, then edit.";
+
+/// Typed while the note was moved to the Trash: kept, as a note of its own.
+pub const TYPED_DURING_TRASH: &str = "Moved to Trash. What you typed meanwhile is kept as a new note.";
+
+pub const WAIT_BEFORE_CLOSING: &str = "Please wait for the current operation before closing.";
+/// A close asked to save, and no save could start.
+pub const NOT_SAVED_NOW: &str = "The note could not be saved now, so the window stays open.";
+
+/// The close prompt: its heading and its sentence. `titles` are the notes with edits not on
+/// disk; `unstored` counts the notes listed in the library that are not on disk at all (another
+/// program's version that could not be written), which are kept as recovery copies.
+pub fn close_prompt(titles: &[String], quitting: bool, read_only: bool, unstored: usize) -> (String, String) {
+    let heading = match titles {
+        [] if !quitting => "Close this window?".to_string(),
+        [] => "Close Notes?".to_string(),
+        [title] if !quitting => format!("Save \"{title}\" before closing?"),
+        [title] => format!("Save \"{title}\" before Notes closes?"),
+        many => format!("Save {} notes before Notes closes?", many.len()),
+    };
+    let mut body = if titles.is_empty() {
+        String::new()
+    } else if read_only {
+        "This library is open read-only, so your changes cannot be saved here. Cancel, then Export, keeps a \
+         copy of the text; Don't save closes without it."
+            .to_string()
+    } else if titles.len() > 1 {
+        format!("Your changes to {} are not saved yet.", titles.join(", "))
+    } else {
+        "Your changes to this note are not saved yet.".to_string()
+    };
+    if unstored > 0 {
+        let notes = if unstored == 1 { "1 note in the list is".to_string() } else { format!("{unstored} notes in the list are") };
+        let more = format!(
+            "{notes} not on disk yet. Notes keeps a recovery copy and offers it at the next start; Cancel, then open \
+             and save it, to keep it now."
+        );
+        body = if body.is_empty() { more } else { format!("{body} {more}") };
+    }
+    (heading, body)
+}
+
 /// A reason from the store or the disk, as the middle of a sentence: no closing stop, and a
 /// leading capital lowered unless it starts an acronym ("Permission denied" reads "permission
 /// denied"; "UTF-8" stays).
-fn reason(sentence: &str) -> String {
+pub fn reason(sentence: &str) -> String {
     let trimmed = sentence.trim().trim_end_matches('.');
     let mut chars = trimmed.chars();
     match (chars.next(), chars.next()) {

@@ -1,8 +1,9 @@
 //! A note as the vault holds it: Markdown text in `<id>.md`, and a `.meta` sidecar of `key:value`
 //! lines (`notebook`, `tags`, `pinned`).
 
-/// What one note says: the content of an open document, and of every library entry.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// What one note says: the content of an open document, and of every library entry. Serialised
+/// in the document's draft (`documents::Envelope`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NoteText {
     pub text: String,
     pub meta: String,

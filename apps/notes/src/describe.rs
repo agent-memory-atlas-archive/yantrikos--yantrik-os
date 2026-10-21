@@ -3,7 +3,7 @@
 
 use serde_json::{json, Value};
 use yantrik_app::control::View;
-use yantrik_app::documents::{Durability, OutsideState, SaveState};
+use yantrik_app::documents::{DraftState, Durability, OutsideState, SaveState};
 
 use crate::model::Model;
 use crate::note::Note;
@@ -66,6 +66,14 @@ pub fn view(m: &Model) -> View {
         .with("trashed_note_open", open.as_ref().is_some_and(|n| n.trash()))
         .with("outside", open.as_ref().map(|n| outside(n.outside())))
         .with("save_failure", open.as_ref().and_then(|n| save_failure(&n.doc.save)))
+        .with("draft", open.as_ref().map(|n| draft(&n.doc.draft)))
+        .with(
+            "recovery",
+            crate::update::recovery::in_order(m)
+                .into_iter()
+                .map(|o| json!({ "filename": o.id, "title": o.content.title(), "characters": o.content.text.chars().count() }))
+                .collect::<Vec<_>>(),
+        )
         .with("content", open.as_ref().map(|n| n.text().chars().take(4000).collect::<String>()))
         // The `.meta` sidecar travels with the text — `tags`, `notebook` and `pinned` live in it —
         // so it belongs in the view a revision is hashed from: a caller whose "unchanged since I
@@ -111,6 +119,17 @@ fn outside(state: &OutsideState) -> &'static str {
         OutsideState::Changed { .. } => "changed",
         OutsideState::Conflict { .. } => "conflict",
         OutsideState::Deleted => "deleted",
+    }
+}
+
+/// `describe.draft`: whether the open note's unsaved edits are kept for recovery after a crash
+/// (`kept`), could not be (`failed`: they are lost if Notes stops before a save), or there is
+/// nothing unsaved to keep (`none`).
+fn draft(state: &DraftState) -> &'static str {
+    match state {
+        DraftState::None => "none",
+        DraftState::Kept { .. } => "kept",
+        DraftState::Failed { .. } => "failed",
     }
 }
 
