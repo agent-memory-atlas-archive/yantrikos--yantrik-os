@@ -1,26 +1,25 @@
 //! What Notes is: the model every command changes and every render reads.
 //!
-//! The library is every note as the vault holds it. The open note is a document in the
-//! framework's `Documents` table, with a [`NoteFile`] beside it saying what its files hold; the
-//! window shows it through a [`Pane`], which owns everything that belongs to the view and not to
-//! the note (its undo history, its search, its dialog). Notes has one window, so one pane.
+//! The library is every note as the vault holds it. Each open note is a document in the
+//! framework's `Documents` table, with a [`NoteFile`] beside it saying what its files hold; each
+//! window shows one through its [`Pane`], which owns everything that belongs to the view and not
+//! to the note (its undo history, its search, its dialog). The focused window's pane is
+//! [`Model::pane`] (pane.rs).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde_json::Value;
 use yantrik_app::app::WindowId;
-use yantrik_app::documents::{CloseFlow, Document, DocumentId, Documents, Fingerprint, OutsideState, ViewId};
+use yantrik_app::documents::{CloseFlow, Document, DocumentId, Documents, Fingerprint, OutsideState};
 use yantrik_app::intents::InvocationId;
 
 use crate::claim::Claim;
 use crate::command::Step;
 use crate::note::{Note, NoteText};
+use crate::pane::Pane;
 use crate::recovery::Recovery;
 use crate::store::Vault;
-use crate::undo::History;
-use crate::view::listing::Listing;
-use crate::view::preview::Block;
 
 pub struct Model {
     pub vault: Vault,
@@ -28,18 +27,21 @@ pub struct Model {
     pub documents: Documents<NoteText>,
     /// What each open document's files hold, by document.
     pub files: BTreeMap<DocumentId, NoteFile>,
+    /// The focused window's pane, where every command acts.
     pub pane: Pane,
+    /// The other windows' panes, by window, until one is focused.
+    pub parked: BTreeMap<WindowId, Pane>,
     /// The library has been read; until then nothing but `reload` touches it.
     pub ready: bool,
     /// The one store job in flight. The store does one thing at a time, as it always has.
     pub busy: Option<Work>,
+    /// The window the store's job was started from: its landing is applied there.
+    pub job_window: WindowId,
     /// What could not be done, in one line; also `describe.notice`.
     pub notice: String,
     /// The notice says something a person may not see while typing on (a save replaced another
     /// program's write): the next save that lands leaves it, and the next action takes it back.
     pub lasting_notice: bool,
-    /// The footer's save state, as the last thing that set it said it.
-    pub status: String,
     /// An action waiting for the open note to be saved first.
     pub pending: Option<Pending>,
     /// A close or a quit asking about unsaved notes, or waiting on their saves.
@@ -78,7 +80,8 @@ pub struct NoteFile {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Work {
     Load,
-    Save,
+    /// A save of this document. Only one runs at a time, of any document.
+    Save(DocumentId),
     Trash,
     Restore,
     Import,
@@ -95,6 +98,8 @@ pub enum Work {
 #[derive(Clone)]
 pub struct Pending {
     pub step: Step,
+    /// The window it was asked in, where it runs.
+    pub window: WindowId,
     /// From the surface, where a save that fails refuses the call ("nothing else was done").
     pub refuse_if_unsaved: bool,
 }
@@ -103,6 +108,8 @@ pub struct Pending {
 #[derive(Debug, Clone)]
 pub struct Asked {
     pub invocation: Option<InvocationId>,
+    /// The window that was focused when it was asked: the answer is about that window's note.
+    pub window: WindowId,
     pub expect: Expect,
     /// The save it waited on failed: the refusal.
     pub refused: Option<String>,
@@ -133,47 +140,6 @@ pub enum Expect {
     TookTheirs { id: String },
     /// The window's text beside the file's.
     Compared,
-}
-
-/// The window's view of the library and the open note: everything that is the view's, not the
-/// note's.
-pub struct Pane {
-    pub window: WindowId,
-    /// The view on the open note, when one is open.
-    pub view: Option<ViewId>,
-    pub history: History,
-    pub folder: String,
-    pub query: String,
-    pub preview: bool,
-    pub focus_mode: bool,
-    /// 0 none, 1 import, 2 export, 3 compare, 4 the close prompt.
-    pub dialog: i32,
-    /// The file's version beside the window's text in the comparison; `None` when its file is gone.
-    pub theirs: Option<NoteText>,
-    /// *Not now*: the outside bar is put away until a save is refused or the file changes again.
-    /// Saving stays refused all the while.
-    pub outside_later: bool,
-    /// The open note's file changed while the store was busy: it is read again once it is not.
-    pub reread_owed: bool,
-    pub path: String,
-    /// The notebook and tags fields as typed (the sidecar keeps them cut to length).
-    pub notebook: String,
-    pub tags: String,
-    /// The library list as last drawn: it is redrawn where it always was, not on every key.
-    pub listing: Listing,
-    pub blocks: Vec<Block>,
-    /// What the window is to do once drawn: focus, caret, scroll. Cleared before every command.
-    pub cues: Vec<Cue>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Cue {
-    /// A note was shown: scroll to its top and focus what can take keys.
-    Shown,
-    CaretAt(i32),
-    FocusEditor,
-    FocusShortcuts,
-    FocusContent,
 }
 
 /// The note the pane shows: its document and what its files hold.
@@ -235,30 +201,16 @@ impl Model {
             documents: Documents::new(),
             files: BTreeMap::new(),
             pane: Pane {
-                window: WindowId::PRIMARY,
-                view: None,
-                history: History::default(),
-                folder: "all".into(),
-                query: String::new(),
-                preview: false,
-                focus_mode: false,
-                dialog: 0,
-                theirs: None,
-                outside_later: false,
-                reread_owed: false,
-                path: String::new(),
-                notebook: String::new(),
-                tags: String::new(),
-                listing: Listing::default(),
-                blocks: Vec::new(),
-                cues: Vec::new(),
+                // The window's own first words, until the library is asked for.
+                status: "Opening your library…".into(),
+                ..Pane::new(WindowId::PRIMARY)
             },
+            parked: BTreeMap::new(),
             ready: false,
             busy: None,
+            job_window: WindowId::PRIMARY,
             notice: String::new(),
             lasting_notice: false,
-            // The window's own first words, until the library is asked for.
-            status: "Opening your library…".into(),
             pending: None,
             closing: None,
             recovery,
@@ -270,14 +222,14 @@ impl Model {
         }
     }
 
-    /// The document the pane shows.
+    /// The document the focused window shows.
     pub fn current_id(&self) -> Option<DocumentId> {
-        self.documents.view(self.pane.view?).map(|v| v.document)
+        self.document_in(&self.pane)
     }
 
+    /// The note the focused window shows.
     pub fn current(&self) -> Option<Current<'_>> {
-        let id = self.current_id()?;
-        Some(Current { doc: self.documents.get(id)?, file: self.files.get(&id)? })
+        self.current_in(&self.pane)
     }
 
     pub fn current_mut(&mut self) -> Option<(&mut Document<NoteText>, &mut NoteFile)> {
@@ -285,31 +237,34 @@ impl Model {
         Some((self.documents.get_mut(id)?, self.files.get_mut(&id)?))
     }
 
+    /// The focused window's note has edits not on disk.
     pub fn unsaved(&self) -> bool {
         self.current().is_some_and(|c| c.unsaved())
     }
 
-    /// The open note's unsaved text from before Notes closed, while its offer waits: what the
-    /// window shows of the note (text, title, fields, list card, preview), and what Copy and
-    /// Export take, until the person chooses.
-    pub fn offered(&self) -> Option<&NoteText> {
-        let c = self.current()?;
-        self.recovery.offer_for(c.id()).map(|o| &o.content)
-    }
-
-    /// What the window shows of the open note: its offered text while that waits, its content
-    /// otherwise.
-    pub fn shown(&self) -> Option<&NoteText> {
-        self.offered().or_else(|| self.current().map(|c| &c.doc.content))
-    }
-
-    /// The open note as the library lists it, as the window shows it.
-    pub fn shown_note(&self) -> Option<Note> {
-        let mut note = self.current()?.as_note();
-        if let Some(offered) = self.offered() {
-            note.content = offered.clone();
+    /// Whether a document has edits not on disk: its text or sidecar is not what its files hold.
+    /// The one rule for "unsaved", wherever it is asked (the save path, the close flow, the
+    /// footer, `describe`), so no window can call a note saved while another holds its edits.
+    pub fn unsaved_doc(&self, id: DocumentId) -> bool {
+        match (self.documents.get(id), self.files.get(&id)) {
+            (Some(doc), Some(file)) => Current { doc, file }.unsaved(),
+            _ => false,
         }
-        Some(note)
+    }
+
+    /// The focused window's note's offered text, while its offer waits (`offered_in`).
+    pub fn offered(&self) -> Option<&NoteText> {
+        self.offered_in(&self.pane)
+    }
+
+    /// What the focused window shows of its note (`shown_in`).
+    pub fn shown(&self) -> Option<&NoteText> {
+        self.shown_in(&self.pane)
+    }
+
+    /// The focused window's note as the library lists it, as the window shows it.
+    pub fn shown_note(&self) -> Option<Note> {
+        self.shown_note_in(&self.pane)
     }
 
     /// Whether what a note's files hold is this run's last landed write to it.
@@ -328,7 +283,7 @@ impl Model {
             .collect()
     }
 
-    /// The library's text, leaving out the open note's own entry.
+    /// The library's text, leaving out the focused window's note's own entry.
     pub fn text_beside_current(&self) -> usize {
         let key = self.current().map(|c| (c.id().to_string(), c.trash()));
         self.library

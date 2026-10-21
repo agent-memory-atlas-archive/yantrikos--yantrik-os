@@ -74,6 +74,8 @@ export component NotesApp inherits AppWindow {
  callback metadata();
  // The window changed its own focus mode or dialog (Escape, Ctrl+F, Cancel): the app reads them.
  callback view-changed();
+ // The window took the keys back (the window manager made it the active one): actions go to its note.
+ callback activated();
  public function caret(offset:int){editor.set-selection-offsets(offset,offset);}
  public function focus-shortcuts(){keys.focus();}
  public function focus-content(){if(root.preview||!root.opened){keys.focus();}else{editor.focus();}}
@@ -90,6 +92,8 @@ export component NotesApp inherits AppWindow {
    if(event.text=="z"||event.text=="Z"||event.text=="y"){root.action(event.modifiers.shift||event.text=="y"?"redo":"undo");return accept;}
    if(event.text=="s"){root.action("save");return accept;}
    if(event.text=="n"){root.action("new");return accept;}
+   // Ctrl+Shift+N: the open note in a window of its own.
+   if(event.text=="N"&&event.modifiers.shift){root.action("new-window");return accept;}
    if(event.text=="f"){root.focus-mode=false;root.view-changed();search.focus();return accept;}
    if(event.text=="p"){root.action("preview");return accept;}
    if(event.text=="e"){root.action("focus");return accept;}
@@ -101,6 +105,7 @@ export component NotesApp inherits AppWindow {
  // The path dialogs take keys in their field; the comparison has none, so the window's keys do.
  changed dialog=>{if(root.dialog==1||root.dialog==2){path-field.focus();}else if(root.dialog==3||root.dialog==4){keys.focus();}}
  keys:=FocusScope {key-pressed(event)=>{return root.shortcut(event);}
+ focus-gained(reason)=>{if(reason==FocusReason.window-activation){root.activated();}}
  Flickable { width:parent.width;height:parent.height;interactive:false;viewport-width:self.width;viewport-height:self.height;
  VerticalLayout {spacing:0px;
   if root.notice!="" : Rectangle {height:message.preferred-height+20px;background:Theme.bg-elevated;
@@ -179,6 +184,7 @@ export component NotesApp inherits AppWindow {
      HorizontalLayout{padding-left:20px;padding-right:14px;spacing:6px;
       Text{text:root.note-title;color:Theme.text-primary;font-weight:600;font-size:15px;overflow:elide;horizontal-stretch:1;vertical-alignment:center;}
       YIconButton{icon-path:Icons.star;variant:root.pinned?1:2;clicked=>{root.action("pin");}}
+      YIconButton{icon-path:Icons.window;label:"Open in new window";tooltip:"Open in new window (Ctrl+Shift+N)";variant:2;clicked=>{root.action("new-window");}}
       YButton{label:root.preview?"Write":"Preview";variant:root.preview?1:2;size:0;clicked=>{root.action("preview");}}
       YIconButton{icon-path:Icons.export;variant:2;clicked=>{root.action("export");}}
       YIconButton{icon-path:root.trashed?Icons.refresh:Icons.trash;variant:2;clicked=>{root.action(root.trashed?"restore":"trash");}}
@@ -209,6 +215,7 @@ export component NotesApp inherits AppWindow {
         read-only:!root.opened||root.trashed||root.dialog!=0||root.read-only||root.recovering;
         selection-background-color:Theme.accent;selection-foreground-color:Theme.bg-deep;page-height:writing.visible-height;
         edited=>{root.edited(self.text);}key-pressed(event)=>{return root.shortcut(event);}
+        changed has-focus=>{if(self.has-focus){root.activated();}}
         cursor-position-changed(pos)=>{
          if(pos.y+60px > -writing.viewport-y+writing.visible-height){writing.viewport-y=min(0px,writing.visible-height - pos.y - 60px);}
          if(pos.y+24px < -writing.viewport-y){writing.viewport-y=-pos.y;}

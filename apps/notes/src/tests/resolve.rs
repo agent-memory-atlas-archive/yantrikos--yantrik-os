@@ -120,7 +120,7 @@ fn not_now_keeps_editing_and_the_next_save_is_refused_until_a_choice_is_made() {
     app.run(Command::Edit(format!("{MINE}, more")));
     autosave(&app);
     assert_eq!((app.jobs_waiting(), notice(&app)), (0, String::new()), "the autosave is refused quietly");
-    assert_eq!(app.model(|m| m.status.clone()), said::WAITING_ON_CHOICE, "and the footer says why");
+    assert_eq!(app.model(|m| m.pane.status.clone()), said::WAITING_ON_CHOICE, "and the footer says why");
     assert_eq!(file(&path), THEIRS);
     app.run(Command::Window(WindowAction::Save));
     settle(&app);

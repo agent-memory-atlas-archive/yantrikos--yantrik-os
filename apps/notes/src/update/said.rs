@@ -233,6 +233,29 @@ pub const WAIT_BEFORE_CLOSING: &str = "Please wait for the current operation bef
 /// A close asked to save, and no save could start.
 pub const NOT_SAVED_NOW: &str = "The note could not be saved now, so the window stays open.";
 
+/// A close that asked about several notes, one of which did not save: which one, and why.
+pub fn close_failed(title: &str, sentence: &str) -> String {
+    format!("\"{title}\" was not saved, so Notes stays open. {sentence}")
+}
+
+/// *Open in new window* with no note open, and none named.
+pub const NOTHING_FOR_A_WINDOW: &str = "No note is open to show in a new window.";
+/// What a mind can do about it.
+pub const NAME_A_NOTE: &str = "Name one with `title`, or open one first with `open_note`.";
+
+/// A new window could not be made.
+pub fn window_not_opened(why: &str) -> String {
+    format!("A new window could not be opened ({}). The note is still open here.", reason(why))
+}
+
+/// A call's window closed before it could be answered.
+pub const WINDOW_GONE: &str = "The window this call was about has closed.";
+
+/// Undo or redo in a window whose note was changed in another window since its own last edit:
+/// its history is dropped, never put back over the other window's text.
+pub const UNDO_DROPPED: &str =
+    "Nothing to undo in this window: the note was changed in another window since, so its history here was cleared.";
+
 /// The close prompt: its heading and its sentence. `titles` are the notes with edits not on
 /// disk; `unstored` counts the notes listed in the library that are not on disk at all (another
 /// program's version that could not be written), which are kept as recovery copies.

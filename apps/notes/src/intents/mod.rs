@@ -1,6 +1,7 @@
 //! What a mind may ask Notes by name: the twenty-one actions worded, argued and graded as they
-//! always were, the three choices about an outside change (step 8d) and the two about unsaved
-//! text kept from before Notes closed (8d-3), each the command its window action runs.
+//! always were, the three choices about an outside change (step 8d), the two about unsaved text
+//! kept from before Notes closed (8d-3) and a note in a new window (8d-3b), each the command its
+//! window action runs.
 //!
 //! A description is written at the definition site of every action, and [`act`] and [`arg`]
 //! refuse to build one that is a placeholder: every description used to be `"Notes: {name}"`
@@ -31,6 +32,7 @@ mod library;
 mod note;
 mod outside;
 mod recovery;
+mod windows;
 mod writing;
 
 /// How long a call may wait for its saves and its file work. A save is one small file write; the
@@ -111,4 +113,5 @@ pub fn table(table: &mut Intents<Notes>) {
     files::table(table);
     outside::table(table);
     recovery::table(table);
+    windows::table(table);
 }

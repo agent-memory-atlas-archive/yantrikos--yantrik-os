@@ -172,7 +172,7 @@ fn the_first_refresh_that_can_make_the_marker_makes_the_library_writable_again()
 fn a_save_owed_when_the_library_turns_read_only_is_refused_and_the_text_is_kept() {
     let (app, _disk, path, saved, typed) = holding_unsaved_text();
     assert_eq!(state(&app)["notice"], READ_ONLY, "the vault refused the save");
-    assert_eq!(app.model(|m| m.status.clone()), "Needs attention · draft kept");
+    assert_eq!(app.model(|m| m.pane.status.clone()), "Needs attention · draft kept");
     assert_eq!(open_note(&app).1, typed, "the text is kept");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), saved, "and nothing was written");
     assert!(!vault(&app).join(".recovery-v2/pending.json").exists(), "not even the journal");

@@ -20,6 +20,7 @@ use super::{refreshed, show};
 use crate::command::{Act, Command, WindowAction};
 use crate::model::Model;
 use crate::note::Note;
+use crate::pane::Pane;
 use crate::recovery::{base_of, Found, Offer};
 use crate::store::Interrupted;
 use crate::update::said;
@@ -89,9 +90,10 @@ pub enum Showing {
     Gone = 3,
 }
 
-pub fn showing(m: &Model) -> Option<(Showing, &Offer)> {
-    let offer = shown(m)?;
-    let state = if m.current().is_some_and(|c| c.id() == offer.id) {
+/// Where the offer a window's bar shows stands, for that window.
+pub fn showing_in<'a>(m: &'a Model, pane: &Pane) -> Option<(Showing, &'a Offer)> {
+    let offer = shown_in(m, pane)?;
+    let state = if m.current_in(pane).is_some_and(|c| c.id() == offer.id) {
         Showing::Open
     } else if m.library.iter().any(|n| n.id == offer.id) {
         Showing::Listed
@@ -111,10 +113,24 @@ pub fn in_order(m: &Model) -> Vec<&Offer> {
         .collect()
 }
 
-/// The offer the bar shows: the open note's, or else the newest.
+/// The offer the focused window's bar shows, the one Restore and Discard act on.
 pub fn shown(m: &Model) -> Option<&Offer> {
-    let open = m.current().map(|c| c.id().to_string());
-    open.and_then(|id| m.recovery.offer_for(&id)).or_else(|| m.recovery.offers.first())
+    shown_in(m, &m.pane)
+}
+
+/// The offer a window's bar shows: its own note's, or else the newest whose note no other window
+/// shows. An offer appears in the window that shows its note, and is not offered twice.
+pub fn shown_in<'a>(m: &'a Model, pane: &Pane) -> Option<&'a Offer> {
+    let open = m.current_in(pane).map(|c| c.id().to_string());
+    if let Some(offer) = open.and_then(|id| m.recovery.offer_for(&id)) {
+        return Some(offer);
+    }
+    let elsewhere: Vec<String> = m
+        .panes()
+        .filter(|p| p.window != pane.window)
+        .filter_map(|p| m.current_in(p).map(|c| c.id().to_string()))
+        .collect();
+    m.recovery.offers.iter().find(|o| !elsewhere.contains(&o.id))
 }
 
 /// *Restore*: the offered text back in its note, open in the window. Reached through the guards,

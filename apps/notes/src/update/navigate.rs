@@ -5,8 +5,9 @@ use yantrik_app::documents::{Fingerprint, Source};
 use yantrik_app::effects::Effects;
 
 use super::{drafts, saving, show};
-use crate::model::{Cue, Model, NoteFile};
+use crate::model::{Model, NoteFile};
 use crate::note::Note;
+use crate::pane::Cue;
 use crate::store::{validate, MAX_NOTES, VAULT_LIMIT};
 use crate::view::render::{CHROME, CUES, STATUS};
 use crate::Notes;
@@ -17,8 +18,9 @@ const HEADING_ROOM: usize = 1024;
 /// Said when a copy of the open note would pass the library's limits.
 pub const LIBRARY_FULL: &str = "Library reached its note or text limit (2,000 notes / 32 MiB).";
 
-/// The pane shows `note` (or nothing), as a document of its own; the document it showed is
-/// closed, and its file no longer watched, once no view shows it.
+/// The focused window shows `note` (or nothing): as the document another window has open for it,
+/// or as a document of its own. The document it showed is closed, and its file no longer watched,
+/// once no window shows it.
 pub fn show_note(m: &mut Model, fx: &mut Effects<Notes>, note: Option<Note>) {
     // What the pane held about the last note's outside change is not about this one.
     m.pane.outside_later = false;
@@ -46,6 +48,12 @@ pub fn show_note(m: &mut Model, fx: &mut Effects<Notes>, note: Option<Note>) {
     } else {
         Source::File(m.vault.dir().join(&note.id))
     };
+    // A note another window shows is that window's document: this view joins it, unsaved edits,
+    // conflict and draft and all, rather than reading it again from the library.
+    if let Some(doc) = m.documents.find(&source) {
+        m.pane.view = Some(m.documents.show(doc, m.pane.window));
+        return;
+    }
     let on_disk = note.stored.then(|| note.content.clone());
     let baseline = on_disk
         .as_ref()

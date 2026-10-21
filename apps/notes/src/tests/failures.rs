@@ -38,7 +38,7 @@ fn tries(disk: &FaultyDisk) -> usize {
 }
 
 fn status(app: &TestApp<Notes>) -> String {
-    app.model(|m| m.status.clone())
+    app.model(|m| m.pane.status.clone())
 }
 
 /// What every failure shares: the edits kept as edits, no retry until something changes, and the

@@ -1,13 +1,13 @@
-//! Saving the open note through its document: one save in flight, the edits made meanwhile in
-//! one follow-up, a failed save not retried by the autosave until something changes and said with
-//! how much of it reached the disk, and a file changed outside never written over: the person
+//! Saving a note through its document: one save in flight, of any note, the edits made meanwhile
+//! in one follow-up, a failed save not retried by the autosave until something changes and said
+//! with how much of it reached the disk, and a file changed outside never written over: the person
 //! chooses what happens to the two versions first (outside.rs). Another program's version a save
 //! replaced is kept by the store and said here.
 
 use yantrik_app::documents::{BeginSave, DocumentId, Durability, Fingerprint, SaveError, SaveOutcome, SaveTicket};
 use yantrik_app::effects::Effects;
 
-use super::{after_store, begin, drafts, failed, refreshed, relist, said, save_state, AUTOSAVE};
+use super::{after_store, begin, drafts, failed, refreshed, relist, said, save_state, set_status, AUTOSAVE};
 use crate::command::Command;
 use crate::model::{Model, Work};
 use crate::note::{Note, NoteText};
@@ -24,18 +24,42 @@ pub enum How {
     Asked,
 }
 
-/// Saves the open note, if it has edits not on disk.
+/// The autosave's debounce ran out: every note with edits not on disk is saved, each in a window
+/// that shows it, the focused window's first. The store does one thing at a time, so one save
+/// starts now; its landing arms the debounce again (`refreshed`), and the next is saved then.
+pub fn autosave(m: &mut Model, fx: &mut Effects<Notes>) {
+    let focused = m.current_id();
+    let others = m.documents.iter().map(|d| d.id).filter(|id| Some(*id) != focused);
+    let order: Vec<DocumentId> = focused.into_iter().chain(others).collect();
+    for doc in order {
+        if m.unsaved_doc(doc) {
+            save_document(m, fx, doc, How::Autosave);
+        }
+        if m.busy.is_some() {
+            return;
+        }
+    }
+}
+
+/// Saves `doc` in a window that shows it, if it has edits not on disk.
+pub fn save_document(m: &mut Model, fx: &mut Effects<Notes>, doc: DocumentId, how: How) {
+    if let Some(window) = m.windows_showing(doc).first().copied() {
+        m.within(window, |m| save(m, fx, how));
+    }
+}
+
+/// Saves the focused window's note, if it has edits not on disk.
 pub fn save(m: &mut Model, fx: &mut Effects<Notes>, how: How) {
-    // The store does one thing at a time; a save already in flight takes the edits as its
-    // follow-up below.
-    if m.busy.is_some_and(|w| w != Work::Save) {
+    let Some(doc) = m.current_id() else { return };
+    // The store does one thing at a time. A save of this note already in flight takes the edits
+    // as its follow-up below; a save of another note is followed by this one's once it lands.
+    if m.busy.is_some_and(|w| w != Work::Save(doc)) {
         return;
     }
     fx.stop_timer(AUTOSAVE);
     if !m.ready || !m.current().is_some_and(|c| c.unsaved() && !c.trash()) {
         return;
     }
-    let Some(doc) = m.current_id() else { return };
     let Some((d, _)) = m.current_mut() else { return };
     // Notes says unsaved by comparing with the file; the document counts edits. Every change is
     // an edit of the document and a landed save sets what the file holds to the ticket's content,
@@ -67,7 +91,7 @@ fn blocked(m: &mut Model, fx: &mut Effects<Notes>, how: How) {
     let Some(sentence) = m.current().map(|c| said::blocked(c.outside())) else { return };
     match how {
         How::Autosave => {
-            m.status = save_state(m).into();
+            set_status(m, save_state(m));
             fx.changed(STATUS);
         }
         How::Asked => {
@@ -100,12 +124,12 @@ fn spawn(m: &mut Model, fx: &mut Effects<Notes>, doc: DocumentId, ticket: SaveTi
             ..SaveFailed::wrote_nothing("")
         }),
     };
-    begin(m, fx, Work::Save, lost, move |vault| Command::SaveLanded { doc, seq, result: vault.save(&job) });
+    begin(m, fx, Work::Save(doc), lost, move |vault| Command::SaveLanded { doc, seq, result: vault.save(&job) });
 }
 
 /// A save of `doc` at `seq` landed.
 pub fn landed(m: &mut Model, fx: &mut Effects<Notes>, doc: DocumentId, seq: u64, result: Result<Saved, SaveFailed>) {
-    if m.busy == Some(Work::Save) {
+    if m.busy == Some(Work::Save(doc)) {
         m.busy = None;
     }
     // Another program's version the replace took the place of is in the library, or beside it,

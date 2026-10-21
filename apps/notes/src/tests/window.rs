@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use slint::platform::{Key, WindowEvent};
 use slint::{ComponentHandle as _, Model as _, SharedString};
+use yantrik_app::app::WindowId;
 use yantrik_testing::TestApp;
 
 use super::{autosave, settle, started, vault};
@@ -20,15 +21,42 @@ fn shot_dir() -> PathBuf {
     dir
 }
 
-fn screenshot(app: &TestApp<Notes>, name: &str) {
-    let (width, height, pixels) = app.ui(|ui| {
-        let shot = ui.window().take_snapshot().expect("a snapshot of the software window");
-        (shot.width(), shot.height(), shot.as_bytes().to_vec())
-    });
+/// A window's pixels: its width, height and RGBA bytes.
+fn snapshot(ui: &NotesApp) -> (u32, u32, Vec<u8>) {
+    let shot = ui.window().take_snapshot().expect("a snapshot of the software window");
+    (shot.width(), shot.height(), shot.as_bytes().to_vec())
+}
+
+fn write_png(name: &str, width: u32, height: u32, pixels: &[u8]) {
     let mut png = png::Encoder::new(std::fs::File::create(shot_dir().join(name)).unwrap(), width, height);
     png.set_color(png::ColorType::Rgba);
     png.set_depth(png::BitDepth::Eight);
-    png.write_header().unwrap().write_image_data(&pixels).unwrap();
+    png.write_header().unwrap().write_image_data(pixels).unwrap();
+}
+
+fn screenshot(app: &TestApp<Notes>, name: &str) {
+    let (width, height, pixels) = app.ui(snapshot);
+    write_png(name, width, height, &pixels);
+}
+
+/// The first window and `second` side by side in one picture, as they stand on the desktop.
+fn screenshot_two(app: &TestApp<Notes>, second: WindowId, name: &str) {
+    const GAP: u32 = 24;
+    let shots = [app.ui(snapshot), app.window(second, snapshot).expect("the second window is open")];
+    let width = shots.iter().map(|s| s.0).sum::<u32>() + GAP;
+    let height = shots.iter().map(|s| s.1).max().unwrap();
+    // A dark desktop behind them, opaque.
+    let mut pixels: Vec<u8> = [0x20, 0x22, 0x26, 0xff].repeat((width * height) as usize);
+    let mut left = 0;
+    for (w, h, shot) in &shots {
+        for row in 0..*h {
+            let from = (row * w * 4) as usize..((row + 1) * w * 4) as usize;
+            let to = ((row * width + left) * 4) as usize;
+            pixels[to..to + (w * 4) as usize].copy_from_slice(&shot[from]);
+        }
+        left += w + GAP;
+    }
+    write_png(name, width, height, &pixels);
 }
 
 fn tap(ui: &NotesApp, text: &str) {
@@ -280,4 +308,47 @@ fn the_recovery_bar_and_the_close_prompt_are_drawn_and_answer() {
     settle(&app);
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Kept for later\n\nand more");
     assert_eq!(app.exit_reason(), Some(yantrik_app::app::ExitReason::LastWindowClosed));
+}
+
+/// One note in two windows, drawn (gate row "Two document contexts"): Ctrl+Shift+N opens the note
+/// in a second window, what is typed in that window's editor is drawn in the first, an outside
+/// change shows the same bar in both, and the window manager handing the first window the keys
+/// back makes it the one the actions act on.
+#[test]
+fn one_note_in_two_windows_is_drawn_in_both_and_the_window_manager_moves_the_focus() {
+    let (app, path) = super::with_note("Two windows");
+    let size = slint::PhysicalSize::new(900, 640);
+    ui(&app, move |ui| {
+        ui.show().unwrap();
+        ui.window().set_size(size);
+    });
+    app.ui(|ui| held(ui, Key::Control, |ui| held(ui, Key::Shift, |ui| tap(ui, "N"))));
+    settle(&app);
+    let windows = app.windows();
+    assert_eq!(windows.len(), 2, "Ctrl+Shift+N opened the note in a second window");
+    let second = windows[1];
+    assert_eq!(app.window(second, |ui| ui.get_note_title().to_string()), Some("Two windows".into()));
+    app.window(second, move |ui| ui.window().set_size(size));
+    let typed = "# Two windows\n\nTyped in the second window, drawn in the first.";
+    app.window(second, move |ui| {
+        ui.set_content(typed.into());
+        ui.invoke_edited(typed.into());
+    });
+    assert_eq!(ui(&app, |ui| ui.get_content().to_string()), typed, "the first window draws it");
+    assert!(ui(&app, |ui| ui.get_modified()), "and calls it unsaved too");
+    screenshot_two(&app, second, "notes-two-windows.png");
+    std::fs::write(&path, "# Two windows\n\nWritten by another program.\n").unwrap();
+    app.look_at_files();
+    let bars = (ui(&app, |ui| ui.get_outside()), app.window(second, |ui| ui.get_outside()));
+    assert_eq!(bars, (1, Some(1)), "one conflict, shown in both windows");
+    screenshot_two(&app, second, "notes-two-windows-conflict.png");
+    // The second window is focused (it was opened last). The window manager makes the first the
+    // active one again; its keys take the focus back, and the actions go to it.
+    assert_eq!(super::state(&app)["focused_window"], second.0);
+    ui(&app, |ui| {
+        ui.invoke_focus_shortcuts();
+        ui.window().dispatch_event(WindowEvent::WindowActiveChanged(false));
+        ui.window().dispatch_event(WindowEvent::WindowActiveChanged(true));
+    });
+    assert_eq!(super::state(&app)["focused_window"], 0, "the first window is the focused one");
 }

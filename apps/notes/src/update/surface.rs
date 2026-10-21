@@ -9,10 +9,12 @@ use serde_json::{json, Value};
 use yantrik_app::effects::Effects;
 use yantrik_app::Refused;
 
-use super::{editing, outside, recovery, relist, run, said, saving, window};
+use super::editing::Undone;
+use super::{editing, outside, recovery, relist, run, said, saving, window, windows};
 use crate::command::{Act, Step, WindowAction};
 use crate::describe::{listed, read_notes};
 use crate::model::{Asked, Expect, Model, Pending};
+use crate::note::Note;
 use crate::store::{expand_home, validate};
 use crate::view::render::{CHROME, CONTENT, FIELDS, STATUS};
 use crate::Notes;
@@ -120,6 +122,7 @@ pub fn act(m: &mut Model, fx: &mut Effects<Notes>, act: Act) {
                 save_then(m, fx, Step::Import { path });
             }
         }
+        Act::OpenInNewWindow { wanted } => open_in_new_window(m, fx, &wanted),
         Act::RestoreDraft => recovered(m, fx, WindowAction::RestoreDraft),
         Act::DiscardDraft => recovered(m, fx, WindowAction::DiscardDraft),
         Act::KeepMineAsCopy => resolve(m, fx, WindowAction::KeepMine, false),
@@ -156,9 +159,14 @@ pub fn finish(m: &mut Model, fx: &mut Effects<Notes>) {
         return;
     }
     let Some(asked) = m.asked.take() else { return };
+    // About the note of the window that was focused when the call came, wherever the focus is now
+    // (the focused window's, should that one have closed meanwhile).
+    let window = Some(asked.window).filter(|w| m.pane_of(*w).is_some()).unwrap_or(m.pane.window);
     let outcome = match asked.refused {
         Some(sentence) => Err(sentence),
-        None => answer::answer(m, asked.expect, asked.landed, asked.kept),
+        None => m
+            .within(window, |m| answer::answer(m, asked.expect, asked.landed, asked.kept))
+            .unwrap_or_else(|| Err(said::WINDOW_GONE.into())),
     };
     match outcome {
         Ok(answer) => {
@@ -177,7 +185,14 @@ pub(super) fn refuse(m: &mut Model, fx: &mut Effects<Notes>, sentence: String) {
 }
 
 fn ask(m: &mut Model, fx: &Effects<Notes>, expect: Expect) {
-    m.asked = Some(Asked { invocation: fx.invocation(), expect, refused: None, landed: false, kept: None });
+    m.asked = Some(Asked {
+        invocation: fx.invocation(),
+        window: m.pane.window,
+        expect,
+        refused: None,
+        landed: false,
+        kept: None,
+    });
 }
 
 /// A choice about an outside change, through the same command as the bar's button. Refused, in
@@ -223,7 +238,7 @@ fn library_open(m: &mut Model, fx: &mut Effects<Notes>) -> bool {
 /// is done. An open note an outside edit blocks is refused at once, as a failed save is.
 fn save_then(m: &mut Model, fx: &mut Effects<Notes>, step: Step) {
     if m.unsaved() {
-        m.pending = Some(Pending { step, refuse_if_unsaved: true });
+        m.pending = Some(Pending { step, refuse_if_unsaved: true, window: m.pane.window });
         saving::save(m, fx, saving::How::Asked);
     } else {
         run(m, fx, step);
@@ -284,21 +299,53 @@ fn retitled(text: &str, title: &str) -> String {
     }
 }
 
+/// The note a call names, by its exact title or its file name; or the refusal that lists what the
+/// library holds.
+fn named(m: &Model, wanted: &str) -> Result<Note, String> {
+    if let Some(note) = m.library.iter().find(|n| n.id == wanted || n.title() == wanted) {
+        return Ok(note.clone());
+    }
+    let titles: Vec<String> =
+        m.library.iter().filter(|n| !n.trash).take(8).map(|n| format!("\"{}\"", n.title())).collect();
+    let held = if titles.is_empty() { "nothing yet".to_string() } else { titles.join(", ") };
+    Err(format!("No note is called \"{wanted}\". The library holds: {held}"))
+}
+
 fn open_note(m: &mut Model, fx: &mut Effects<Notes>, wanted: &str) {
-    let Some((id, trash)) = m
-        .library
-        .iter()
-        .find(|n| n.id == wanted || n.title() == wanted)
-        .map(|n| (n.id.clone(), n.trash))
-    else {
-        let titles: Vec<String> =
-            m.library.iter().filter(|n| !n.trash).take(8).map(|n| format!("\"{}\"", n.title())).collect();
-        let held = if titles.is_empty() { "nothing yet".to_string() } else { titles.join(", ") };
-        return refuse(m, fx, format!("No note is called \"{wanted}\". The library holds: {held}"));
+    let (id, trash) = match named(m, wanted) {
+        Ok(note) => (note.id, note.trash),
+        Err(sentence) => return refuse(m, fx, sentence),
     };
     if library_open(m, fx) {
         ask(m, fx, Expect::Written);
         save_then(m, fx, Step::Window(WindowAction::Open { id, trash }));
+    }
+}
+
+/// `open_in_new_window`: the named note, or the focused window's, in a window of its own, through
+/// the command the window's button runs. Nothing is saved first: no window leaves its note. The
+/// answer names the new window, which is the focused one now.
+fn open_in_new_window(m: &mut Model, fx: &mut Effects<Notes>, wanted: &str) {
+    let note = match wanted {
+        "" => None,
+        wanted => match named(m, wanted) {
+            Ok(note) => Some(note),
+            Err(sentence) => return refuse(m, fx, sentence),
+        },
+    };
+    if !library_open(m, fx) {
+        return;
+    }
+    match windows::open(m, fx, note) {
+        Ok(window) => {
+            m.answer = json!({
+                "window": window.0,
+                "open_note": m.current().map(|c| c.id().to_string()),
+                "title": m.current().map(|c| c.title()),
+                "windows": m.windows().len(),
+            });
+        }
+        Err(sentence) => refuse(m, fx, format!("{sentence} {}", said::NAME_A_NOTE)),
     }
 }
 
@@ -342,7 +389,9 @@ fn restore(m: &mut Model, fx: &mut Effects<Notes>) {
 
 fn step_history(m: &mut Model, fx: &mut Effects<Notes>, redo: bool) {
     let Some(before) = open_text(m, fx) else { return };
-    editing::undo(m, fx, redo);
+    if editing::undo(m, fx, redo) == Undone::Dropped {
+        return refuse(m, fx, said::UNDO_DROPPED.into());
+    }
     if m.current().is_some_and(|c| c.text() == before) {
         let sentence = if redo {
             "There is nothing to redo on this note."
