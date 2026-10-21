@@ -128,3 +128,43 @@ fn show_date_answers_with_its_own_date_whatever_lands_beside_it() {
     assert_eq!(shown.settle().unwrap()["date"], json!("2026-10-25"));
     assert_eq!(read.settle().unwrap()["count"], json!(3));
 }
+
+/// A reading intent answers about what it asked for, from its own read, whatever another call or
+/// a press does before that read lands; it says the window has moved since (delta review of #921,
+/// P8).
+#[test]
+fn select_day_answers_about_its_day_when_another_call_moves_the_window() {
+    let f = open(a_week().holding("ev-early", "Early", "2026-09-07T08:00:00", "2026-09-07T09:00:00"));
+    let picked = f.app.act("select_day", json!({ "day": 7 })).unwrap();
+    f.app.ui(|ui| ui.invoke_delete_event(0));
+    let shown = f.app.act("show_date", json!({ "date": "2026-11-05" })).unwrap();
+    f.quiet();
+    assert_eq!(
+        picked.settle().unwrap(),
+        json!({
+            "day": 7,
+            "events": ["Early"],
+            "window_moved_since": "The window has since moved: it shows November 2026, day 5, in the month view.",
+        })
+    );
+    assert_eq!(shown.settle().unwrap()["showing"], json!("November 2026"));
+}
+
+/// The person's own navigation, landing before the intent's read, does not become its answer
+/// (delta review of #921, P13).
+#[test]
+fn select_day_answers_about_its_day_when_the_person_moves_on() {
+    let f = open(a_week().holding("ev-harvest", "Harvest", "2026-10-09T10:00:00", "2026-10-09T12:00:00"));
+    f.act("show_date", json!({ "date": "2026-10-01" })).unwrap();
+    let picked = f.app.act("select_day", json!({ "day": 9 })).unwrap();
+    f.app.ui(|ui| ui.invoke_next_month());
+    f.quiet();
+    assert_eq!(
+        picked.settle().unwrap(),
+        json!({
+            "day": 9,
+            "events": ["Harvest"],
+            "window_moved_since": "The window has since moved: it shows November 2026, no day picked, in the month view.",
+        })
+    );
+}

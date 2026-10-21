@@ -9,8 +9,10 @@
 //!
 //! Every read of the store and every write runs in a job now, so each intent is answered when
 //! its own result lands (`Settle::Explicit`), in the command that carries it (`answers.rs`): the
-//! answer is the store read back, as it always was, and never the arguments repeated. Nothing the
-//! person does meanwhile, and no other call, can change it.
+//! answer is the store read back, as it always was, and never the arguments repeated. A reading
+//! intent's answer is built from where it put the window and what its own read listed, so nothing
+//! the person does meanwhile, and no other call, can change it; if either has moved the window
+//! since, the answer says so in `window_moved_since`.
 
 use std::time::Duration;
 

@@ -8,7 +8,7 @@ use yantrik_app::timers::TimerId;
 use yantrik_app::Refused;
 
 use super::{apply, read, redraw, show_date, watch_read, Fx};
-use crate::answers::{self, Asked};
+use crate::answers::{self, Kind};
 use crate::backend::calls;
 use crate::command::{Command, Step, Work};
 use crate::model::{Model, NOTHING, PART_CLOCK, PART_NOTICE};
@@ -19,13 +19,14 @@ use crate::views::{self, ViewMode};
 pub const MIDNIGHT: TimerId = TimerId("calendar.midnight");
 
 pub fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refused> {
-    // A reading intent is answered when its own read lands (`answers.rs`).
+    // A reading intent is answered when its own read lands, about where it put the window
+    // (`answers.rs`).
     match &command {
-        Command::SelectDay(_) => answers::ask(m, fx, Asked::SelectDay),
-        Command::ShowDate(date) => answers::ask(m, fx, Asked::ShowDate(date.clone())),
-        Command::ShowMonth(_) => answers::ask(m, fx, Asked::ShowMonth),
-        Command::Today => answers::ask(m, fx, Asked::Today),
-        Command::SetView(_) => answers::ask(m, fx, Asked::SetView),
+        Command::SelectDay(_) => answers::ask(m, fx, Kind::SelectDay),
+        Command::ShowDate(date) => answers::ask(m, fx, Kind::ShowDate(date.clone())),
+        Command::ShowMonth(_) => answers::ask(m, fx, Kind::ShowMonth),
+        Command::Today => answers::ask(m, fx, Kind::Today),
+        Command::SetView(_) => answers::ask(m, fx, Kind::SetView),
         _ => {}
     }
     match command {
@@ -91,8 +92,8 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refuse
         }
         Command::Listed(listing) => {
             m.reads.in_flight = m.reads.in_flight.saturating_sub(1);
+            answers::read_landed(m, fx, &listing);
             landed(m, fx, *listing);
-            answers::read_landed(m, fx);
         }
         Command::Followed(listing) => landed(m, fx, *listing),
         Command::ReadFailed => {
@@ -167,9 +168,12 @@ fn landed(m: &mut Model, fx: &mut Fx, listing: crate::work::Listing) {
     }
 }
 
-/// The window moved, or what it shows did: read the store if anything says to, and draw.
+/// The window moved, or what it shows did: read the store if anything says to, and draw. A
+/// reading intent's read lists whatever the revision says, because its answer is built from what
+/// that read found.
 fn moved(m: &mut Model, fx: &mut Fx) {
-    read(m, fx, false);
+    let owed = answers::target_now(m, fx);
+    read(m, fx, owed);
     redraw(m, fx);
 }
 

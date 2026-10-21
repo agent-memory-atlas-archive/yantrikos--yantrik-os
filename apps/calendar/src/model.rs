@@ -13,7 +13,7 @@ use yantrik_app::queue::Post;
 use yantrik_app::rail::{Proposal, Rail};
 use yantrik_ipc_contracts::calendar::CalendarRevision;
 
-use crate::answers::Asked;
+use crate::answers::Owed;
 use crate::backend::Machine;
 use crate::events::{self, CalEvent};
 use crate::notice::Notice;
@@ -153,7 +153,7 @@ pub struct Model {
     /// it (`answers.rs`).
     pub answer: Value,
     /// What each reading intent still waiting on its read will answer with, by invocation.
-    pub asked: HashMap<InvocationId, Asked>,
+    pub asked: HashMap<InvocationId, Owed>,
     pub inbox: Option<Inbox>,
 }
 
