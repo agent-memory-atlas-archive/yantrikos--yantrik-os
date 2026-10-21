@@ -11935,28 +11935,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "yantrik-sysmon-core-tests"
-version = "0.1.0"
-dependencies = [
- "libc",
- "serde_json",
-]
-
-[[package]]
 name = "yantrik-system-monitor"
 version = "0.1.0"
 dependencies = [
  "libc",
- "serde",
  "serde_json",
  "slint",
  "sysinfo",
  "tracing",
+ "yantrik-app",
  "yantrik-app-build",
- "yantrik-app-runtime",
  "yantrik-design-tokens",
  "yantrik-ipc-contracts",
  "yantrik-ipc-transport",
+ "yantrik-testing",
  "yantrik-ui-kit",
 ]
 

@@ -1,6 +1,5 @@
 fn main() {
-    // The app's screen is still compiled from the shell's folder; migration step 3 moves it here.
-    yantrik_app_build::UiBuild::new()
-        .include_dir("../../crates/yantrik-ui-slint/ui")
-        .compile("ui/app.slint");
+    // The app's screen is its own (ui/system_monitor.slint); the kit and the theme come through
+    // the framework's build.
+    yantrik_app_build::UiBuild::new().compile("ui/app.slint");
 }
