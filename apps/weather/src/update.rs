@@ -91,10 +91,11 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Effects<Weather>) -> Res
         Command::RemoveLocation(idx) => {
             let was_active = m.prefs.active == idx;
             if let Err(refused) = places::remove(&mut m.prefs, idx) {
-                // The button's refusal is said where the person is looking.
-                m.notice = refused.sentence.clone();
+                // A button's refusal is said where the person is looking, as a notice that
+                // commits: a refused command's effects are dropped, so this one is not refused.
+                m.notice = refused.sentence;
                 fx.changed(PART_NOTICE);
-                return Err(refused);
+                return Ok(());
             }
             kept(m, fx);
             if was_active {
