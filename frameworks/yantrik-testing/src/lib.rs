@@ -651,6 +651,12 @@ impl<A: App> TestApp<A> {
         })
     }
 
+    /// The display went away (the compositor exited), as the runner hears it when its loop ends
+    /// with no one having asked the app to end: the app is owed its logout. `shutdown` follows.
+    pub fn display_gone(&self) {
+        self.with(|u| u.core.display_gone());
+    }
+
     /// The end, as the runner does it.
     pub fn shutdown(&self) -> bool {
         self.with(|u| u.core.shutdown(Duration::from_millis(100)))

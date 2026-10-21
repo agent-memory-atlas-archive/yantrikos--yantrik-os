@@ -8,29 +8,50 @@
 //!   work, once; the person may cancel, and the app runs on. Nothing ends until the flow runs
 //!   `fx.exit()`. An app that takes the default (`None`) ends at once.
 //! - **The session or the system** (`ExitReason::Logout`): SIGTERM (a shutdown, a logout, a
-//!   kill) or SIGHUP (the session hung up). No one is there to answer, and the process will be
-//!   killed after a grace period whatever the app does. The app saves without asking (a draft
-//!   of every unsaved edit, say) and runs `fx.exit()`. It is asked once: a second signal while
-//!   the first waits is not raised again, so nothing stacks. If the app has not ended within
-//!   [`SIGNAL_DEADLINE`], the framework ends it, and the shutdown's own grace (`runner::GRACE`)
-//!   still finishes the writes already handed to the persistence lane.
+//!   kill), SIGHUP (the session hung up), or the display going (the compositor exited, which on
+//!   this OS's shutdown happens at the same moment as the SIGTERM to the whole session). No one
+//!   is there to answer, and the process will be killed after a grace period whatever the app
+//!   does. The app saves without asking (a draft of every unsaved edit, say) and runs
+//!   `fx.exit()`. It is asked once, whichever comes first and however many come: nothing
+//!   stacks, and a person's quit during it asks nothing. A signal still queued when the event
+//!   loop ends, because the display went first, is heard before the end, and so is the display
+//!   going: the logout's writes need no display. [`SIGNAL_DEADLINE`] is a backstop for a flow
+//!   that never finishes: past it, the framework ends the app.
 //!
 //! The signal handler is async-signal-safe: `signal-hook`'s self-pipe, whose handler only writes
 //! a byte. A thread of its own reads the pipe and posts to the core's inbox on the reserved lane,
 //! so a full inbox of commands cannot lose a shutdown, and the post wakes the UI thread, where
 //! the event is raised. SIGINT keeps its default: Ctrl+C in a terminal ends the app as it always
-//! did.
+//! did, without the logout's save (it could join this path later).
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::app::App;
 use crate::cx::Inbound;
 use crate::queue::Post;
 
-/// How long the app has, after the first signal, to save and end before the framework ends it.
-/// The shutdown that follows waits up to `runner::GRACE` more for the writes, so the whole stays
-/// within the few seconds a session or a service manager gives before it kills.
-pub const SIGNAL_DEADLINE: Duration = Duration::from_secs(3);
+/// After the first signal, the backstop: an app that has not ended by then is ended. Only a flow
+/// that never finishes reaches it; an app that saves and exits is long gone. The shutdown's
+/// writes may use what is left of it ([`lane_grace`]), never less than the usual grace. Well
+/// under the 90 s systemd gives the session between SIGTERM and SIGKILL (no `TimeoutStopSec` is
+/// set on it); a shorter stop timeout on the session unit should shorten this with it.
+pub const SIGNAL_DEADLINE: Duration = Duration::from_secs(20);
+
+/// The logout the core raised: the signal that asked for it (`None`: the display went), and when.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct LoggedOut {
+    pub(crate) signal: Option<Signal>,
+    pub(crate) at: Instant,
+}
+
+/// How long the shutdown's writes may take: `grace`, or after a signal heard `since` ago, what is
+/// left of [`SIGNAL_DEADLINE`] if that is longer.
+pub(crate) fn lane_grace(grace: Duration, since_signal: Option<Duration>) -> Duration {
+    match since_signal {
+        Some(since) => SIGNAL_DEADLINE.saturating_sub(since).max(grace),
+        None => grace,
+    }
+}
 
 /// A signal that asks the process to end, as the core hears it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,6 +191,14 @@ mod tests {
             false
         });
         assert_eq!(*seen.lock().unwrap(), vec![Heard::Signal(Signal::HangUp)]);
+    }
+
+    #[test]
+    fn after_a_signal_the_writes_may_use_what_is_left_of_the_deadline() {
+        let grace = Duration::from_secs(2);
+        assert_eq!(lane_grace(grace, None), grace, "no signal: the usual grace");
+        assert_eq!(lane_grace(grace, Some(Duration::from_secs(5))), SIGNAL_DEADLINE - Duration::from_secs(5));
+        assert_eq!(lane_grace(grace, Some(SIGNAL_DEADLINE)), grace, "never less than the grace");
     }
 
     #[cfg(unix)]

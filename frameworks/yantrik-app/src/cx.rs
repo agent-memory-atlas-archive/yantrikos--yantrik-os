@@ -64,8 +64,9 @@ pub enum Inbound<A: App> {
     Written(Written),
     /// The housekeeping thread saw a file change.
     Seen(Seen),
-    /// The signal thread heard a signal that asks the process to end, or its deadline passed.
+    /// The signal thread heard a signal that asks the process to end.
     Signal(crate::quit::Signal),
+    /// `quit::SIGNAL_DEADLINE` passed since the first signal.
     Overdue(crate::quit::Signal),
     /// The rest of a drain that reached [`PENDING_PER_DRAIN`]: posted by the core to itself, and
     /// by nothing else (the token cannot be made outside this crate).
@@ -120,8 +121,8 @@ pub struct Core<A: App> {
     continue_posted: Cell<bool>,
     last_refusal: RefCell<Option<Refused>>,
     exit: Cell<Option<ExitReason>>,
-    /// The signal that first asked the process to end, so a second stacks nothing (`quitting`).
-    signalled: Cell<Option<crate::quit::Signal>>,
+    /// The logout raised, once: what asked for it and when (`quitting`).
+    logout: Cell<Option<crate::quit::LoggedOut>>,
     /// The windows beyond the first, and whether the first is open (`cx/windows.rs`).
     windows: RefCell<windows::Windows<A::Ui>>,
     /// This core, weakly: a window opened later is wired through a `Cx` made from it.
@@ -201,7 +202,7 @@ impl<A: App> Core<A> {
                 continue_posted: Cell::new(false),
                 last_refusal: RefCell::new(None),
                 exit: Cell::new(None),
-                signalled: Cell::new(None),
+                logout: Cell::new(None),
                 windows: RefCell::new(windows::Windows::new()),
                 me: weak.clone(),
                 registry: RefCell::new(None),
@@ -580,12 +581,15 @@ impl<A: App> Core<A> {
         }
     }
 
-    /// The end, in order: no more posts, no more timers, the writes owed handed to the lane,
-    /// every open answer refused, every job cancelled, then one bounded wait shared by the lane
-    /// and the pool (§4: the grace is the whole of it, not one per drain). Nothing in the model
-    /// is touched here.
+    /// The end, in order: a signal still queued heard (its logout raised and applied), no more
+    /// posts, no more timers, the writes owed handed to the lane, every open answer refused,
+    /// every job cancelled, then one bounded wait shared by the lane and the pool (§4: the grace
+    /// is the whole of it, not one per drain); after a signal, the lane may use what is left of
+    /// `quit::SIGNAL_DEADLINE`. Nothing else in the model is touched here.
     pub fn shutdown(&self, grace: Duration) -> bool {
+        self.hear_last_signals();
         let deadline = Instant::now() + grace;
+        let lane_deadline = Instant::now() + self.lane_grace(grace);
         self.inbox.close();
         self.timers.borrow_mut().stop_all();
         // A save asked for is a save made, before the process ends.
@@ -602,7 +606,7 @@ impl<A: App> Core<A> {
         let written = self
             .lane
             .borrow()
-            .drain(deadline.saturating_duration_since(Instant::now()));
+            .drain(lane_deadline.saturating_duration_since(Instant::now()));
         if !written {
             tracing::warn!(
                 app = self.id,
