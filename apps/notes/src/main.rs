@@ -6,6 +6,8 @@ use store::Note;
 use yantrik_app_runtime::control::{Action, App, Param, View};
 use yantrik_app_runtime::prelude::*;
 slint::include_modules!();
+yantrik_app::window!(NotesApp);
+use yantrik_app::Window as _;
 enum Job {
     Load,
     Save(Note),
@@ -74,12 +76,11 @@ fn main() {
         instance::present_running("notes");
         return;
     }
-    let ui = NotesApp::new().unwrap();
-    // The bar is the app's own (#256): moving, minimising, maximising and closing from it.
-    yantrik_app_runtime::window_chrome!(ui);
-    let prefs = theme::load();
-    ui.global::<ThemeMode>().set_dark(prefs.dark);
-    ui.global::<AccentPreset>().set_index(prefs.accent_index);
+    let ui = NotesApp::make().unwrap();
+    // The bar is the app's own (#256) and the theme the shell's: both by the framework's Window,
+    // which `window!` implements for this app's generated component.
+    ui.connect_chrome();
+    ui.apply_theme(&theme::load());
     let dir = std::env::var_os("YANTRIK_NOTES_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| {

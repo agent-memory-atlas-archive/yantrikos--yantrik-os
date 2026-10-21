@@ -132,7 +132,7 @@
 //! # Usage
 //!
 //! ```rust,ignore
-//! use yantrik_app_runtime::control::{self, Action, Param, View};
+//! use yantrik_app::control::{self, Action, Param, View};
 //!
 //! control::App::new("notes")
 //!     .describe({

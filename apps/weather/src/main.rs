@@ -14,6 +14,8 @@ mod state;
 use state::{SavedLocation, WeatherState, FROM_DIRECT, FROM_SERVICE};
 
 slint::include_modules!();
+yantrik_app::window!(WeatherApp);
+use yantrik_app::Window as _;
 
 /// Fill the agent rail from the conditions already on screen.
 ///
@@ -78,14 +80,11 @@ fn main() {
     // One window per app: a second launch defers to the running one (the shell focuses it).
     let Some(_instance) = instance::claim("weather") else { return };
 
-    let app = WeatherApp::new().unwrap();
-    // The window's title bar is the app's own (#256).
-    yantrik_app_runtime::window_chrome!(app);
-
-    // Same dark/accent choice as the shell, read from the shell's settings file.
-    let theme = theme::load();
-    app.global::<ThemeMode>().set_dark(theme.dark);
-    app.global::<AccentPreset>().set_index(theme.accent_index);
+    let app = WeatherApp::make().unwrap();
+    // The window's title bar is the app's own (#256), and the theme is the shell's: both by the
+    // framework's Window, which `window!` implements for this app's generated component.
+    app.connect_chrome();
+    app.apply_theme(&theme::load());
 
     wire(&app);
     // ── The agent layer ──

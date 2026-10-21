@@ -57,7 +57,10 @@ fn check(write: bool, since: Option<&Path>) -> Result<bool, String> {
 
     let existing = read(BASELINE);
     let baseline = ratchet::parse(existing.as_deref().unwrap_or(""))?;
-    let verdict = ratchet::judge(&findings, &baseline);
+    // A baseline path that is no longer a file in the tree: the one condition under which a
+    // same-named, same-sized finding elsewhere is that file, moved.
+    let gone = |path: &str| !root.join(path).is_file();
+    let verdict = ratchet::judge(&findings, &baseline, &gone);
 
     if write {
         if existing.is_some() && !verdict.new.is_empty() {
@@ -80,7 +83,7 @@ fn check(write: bool, since: Option<&Path>) -> Result<bool, String> {
         Some(old) => {
             let old =
                 std::fs::read_to_string(old).map_err(|e| format!("{}: {e}", old.display()))?;
-            ratchet::added(&ratchet::parse(&old)?, &baseline)
+            ratchet::added(&ratchet::parse(&old)?, &baseline, &gone)
         }
     };
     if !added.is_empty() {
@@ -113,6 +116,9 @@ fn report(members: &[workspace::Member], unplaced: &[String], v: &ratchet::Verdi
         soft,
         rules::SOFT_LINES
     );
+    for (old, new) in &v.moved {
+        println!("  moved: {old} -> {new} (rewrite the baseline with --write)");
+    }
     for (f, was) in &v.grew {
         println!(
             "  grew: {} {} ({was} -> {} lines)",

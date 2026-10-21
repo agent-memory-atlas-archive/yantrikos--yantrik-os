@@ -1,5 +1,8 @@
 //! Yantrik App Runtime — shared infrastructure for standalone app binaries.
 //!
+//! Being replaced by `yantrik-app` (design/app-framework-2026-10-21.md). Most of what is
+//! here is a re-export of it; this crate takes no new features.
+//!
 //! Provides:
 //! - `AppBuilder` for setting up standalone Slint app windows
 //! - IPC client for communicating with the shell and services
@@ -31,19 +34,13 @@ pub use yantrik_ipc_transport;
 
 pub use yantrik_ipc_transport::SyncRpcClient;
 
-pub use event_loop::run_until_closed;
+// Moved to frameworks/yantrik-app and frameworks/yantrik-foundation (design/app-framework-2026-10-21.md,
+// step 1), re-exported here unchanged so no app changes until its own framework pass.
+pub use yantrik_app::{chrome, companion, control, event_loop, instance, present, run_until_closed, theme, window_chrome};
+pub use yantrik_foundation::{place, problems};
 
-pub mod chrome;
-pub mod companion;
-pub mod control;
-pub mod event_loop;
-pub mod instance;
 pub mod notify;
-pub mod place;
-pub mod present;
-pub mod problems;
 pub mod service;
-pub mod theme;
 
 /// Held by every test in this crate that sets `XDG_RUNTIME_DIR`, or binds a socket under it.
 ///
@@ -108,7 +105,8 @@ pub fn init_tracing(app_name: &str) {
         .add_directive(directive.parse().expect("valid tracing directive"))
         // The runtime's own lines (instance guard, theme) must be visible too, or an
         // app that exits at once because another instance holds the slot says nothing.
-        .add_directive("yantrik_app_runtime=info".parse().expect("valid directive"));
+        .add_directive("yantrik_app_runtime=info".parse().expect("valid directive"))
+        .add_directive("yantrik_app=info".parse().expect("valid directive"));
     tracing_subscriber::registry()
         .with(filter)
         .with(tracing_subscriber::fmt::layer())
