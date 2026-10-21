@@ -22,6 +22,7 @@ mod follow;
 mod kept;
 mod outside;
 mod parity;
+mod private_mode;
 mod read_notes;
 mod read_only;
 mod recovery;

@@ -31,6 +31,8 @@ libc = "0.2"
 
 [dev-dependencies]
 yantrik-testing = { workspace = true }
+# A test's pin on Private mode for its own app (`control::private_mode::testing`).
+yantrik-app = { workspace = true, features = ["testing"] }
 
 [build-dependencies]
 yantrik-app-build = { workspace = true }
