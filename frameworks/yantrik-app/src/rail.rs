@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 use yantrik_ipc_transport::gate::Authority;
+use yantrik_ipc_transport::privacy;
 use yantrik_mind::{AskError, Mind, Reach};
 
 use crate::app::App;
@@ -34,6 +35,8 @@ pub const TICK_EVERY: Duration = Duration::from_secs(4);
 /// The refresh after a model change, debounced so a burst of commands is one refresh.
 pub const DEBOUNCE: TimerId = TimerId("rail.debounce");
 pub const DEBOUNCE_FOR: Duration = Duration::from_millis(300);
+/// The sentence for a second press while a card is applied.
+const APPLYING: &str = "A change is being applied; a moment.";
 
 /// One row of what the rail knows: where the person is, in the app's own words.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -124,6 +127,15 @@ pub trait HasRail {
 }
 
 /// The rail's state, kept in the app's model and changed only by [`update`].
+/// What the rail is busy with: asking the Mind about a suggestion, or applying the card shown.
+/// An enum, not a sentinel string, so a suggestion whose id is `apply` cannot be mistaken for
+/// an apply in flight.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Working {
+    Asking(String),
+    Applying,
+}
+
 #[derive(Debug, Clone)]
 pub struct Rail {
     mind: Arc<dyn Mind>,
@@ -132,8 +144,7 @@ pub struct Rail {
     suggestions: Vec<Suggestion>,
     unavailable: &'static str,
     proposal: Option<Proposal>,
-    /// The suggestion being asked, or `apply` while a proposal is applied.
-    working: Option<String>,
+    working: Option<Working>,
 }
 
 impl Default for Rail {
@@ -175,8 +186,17 @@ impl Rail {
     }
 
     /// The suggestion being asked, if one is.
+    /// The suggestion being asked, if one is; `None` while a card is applied.
     pub fn working(&self) -> Option<&str> {
-        self.working.as_deref()
+        match &self.working {
+            Some(Working::Asking(id)) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// A card is being applied: the authority is being read, or the intent runs.
+    pub fn is_applying(&self) -> bool {
+        matches!(self.working, Some(Working::Applying))
     }
 
     pub fn is_working(&self) -> bool {
@@ -228,6 +248,9 @@ where
             refresh(m);
         }
         RailCommand::Activate(id) => {
+            if m.rail().is_applying() {
+                return Err(Refused::new("applying", APPLYING));
+            }
             let Some(prompt) = m.prompt(&id) else {
                 return Err(Refused::new(
                     "no_suggestion",
@@ -238,7 +261,7 @@ where
             if let Some(hint) = rail.reach.hint() {
                 return Err(Refused::new("no_mind", hint));
             }
-            rail.working = Some(id.clone());
+            rail.working = Some(Working::Asking(id.clone()));
             rail.proposal = Some(Proposal {
                 title: prompt.title,
                 source: prompt.source,
@@ -253,7 +276,14 @@ where
                 },
                 Concurrency::ReplacePrevious,
                 move |_| {
-                    let answer = mind.ask(&prompt.text);
+                    // While the person has Private mode on, no agent sees anything of this
+                    // desktop: the app's context is not sent to the Mind (design §3.2). The
+                    // file is read here, off the UI thread; a missing file reads as private.
+                    let answer = if privacy::is_private() {
+                        Err(AskError::Failed(privacy::REFUSAL.into()))
+                    } else {
+                        mind.ask(&prompt.text)
+                    };
                     routed::<A>(RailCommand::Answered {
                         suggestion: id,
                         answer,
@@ -262,7 +292,7 @@ where
             );
         }
         RailCommand::Answered { suggestion, answer } => {
-            if m.rail().working.as_deref() != Some(suggestion.as_str()) {
+            if m.rail().working != Some(Working::Asking(suggestion.clone())) {
                 // A replaced ask's late answer, or a dismissal meanwhile.
                 return Ok(());
             }
@@ -280,16 +310,23 @@ where
             rail.working = None;
         }
         RailCommand::Apply => {
+            if m.rail().is_applying() {
+                return Err(Refused::new("applying", APPLYING));
+            }
             let Some(apply) = m.rail().proposal.as_ref().and_then(|p| p.applies.clone()) else {
                 return Err(Refused::new(
                     "nothing_to_apply",
                     "This proposal is an answer to read; there is nothing to apply.",
                 ));
             };
-            m.rail_mut().working = Some("apply".into());
-            // The ceiling and the mode are files: read off the UI thread, as the surface's own
-            // RPC thread reads them, then applied on it.
+            m.rail_mut().working = Some(Working::Applying);
+            // Private mode, the ceiling and the mode are files: read off the UI thread, as the
+            // surface's own RPC thread reads them, then applied on it. Private mode is the
+            // person's switch over every agent act, and the rail's apply is one (design §3.2).
             fx.spawn(move |_| {
+                if privacy::is_private() {
+                    return routed::<A>(RailCommand::Applied(Err(privacy::REFUSAL.into())));
+                }
                 routed::<A>(RailCommand::Authorised {
                     apply,
                     authority: Authority::now(),
@@ -297,9 +334,17 @@ where
             });
         }
         RailCommand::Authorised { apply, authority } => {
+            // Only the card the person pressed Apply on: one dismissed or replaced since is
+            // not applied on an authority that was read for it.
+            if !m.rail().is_applying() {
+                return Ok(());
+            }
             fx.apply_as_agent(apply, authority);
         }
         RailCommand::Applied(result) => {
+            if !m.rail().is_applying() {
+                return Ok(());
+            }
             let rail = m.rail_mut();
             rail.working = None;
             match result {

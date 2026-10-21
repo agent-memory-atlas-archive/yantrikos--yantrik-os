@@ -445,6 +445,96 @@ mod tests {
         assert!(app.act("reset", json!({})).is_ok());
     }
 
+    /// The rail's apply holds to the person's switches (design §3.2): a ceiling below the
+    /// intent's grade refuses it in the card; a card dismissed before its authority was read is
+    /// not applied; a second press while one applies is refused; and Private mode stops both
+    /// the ask and the apply.
+    #[test]
+    fn the_rails_apply_holds_to_the_ceiling_the_card_shown_and_private_mode() {
+        use yantrik_app::gate::{Authority, Mode};
+        use yantrik_app::mind::fake::FakeMind;
+        let _env = RAIL_ENV.lock().unwrap_or_else(|p| p.into_inner());
+        // Private mode is a file under `$HOME`; this test owns a home of its own.
+        let home = std::env::temp_dir().join(format!("yantrik-hello-home-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join(".config/yantrik")).unwrap();
+        let privacy = home.join(".config/yantrik/privacy.json");
+        let old_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", &home);
+        let restore = |old: Option<std::ffi::OsString>| match old {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        };
+
+        let permissive = || Authority { ceiling: "dangerous".into(), mode: Mode::named("bypass_all"), granted: false, asks_above: None };
+        let mind = std::sync::Arc::new(FakeMind::new().answers((0..4).map(|_| Ok("ok".to_string()))));
+        let app = TestApp::<Hello>::start_at_with(Paths::temporary(Hello::ID), Vec::new(), mind.clone());
+        app.run(Command::Add(4));
+        app.advance(Duration::from_millis(300));
+        app.seen(Seen::Reach(Reach::Ready));
+        let card_applies = |app: &TestApp<Hello>| app.model(|m| m.rail.proposal().unwrap().applies.clone().unwrap());
+
+        // 1. A ceiling of `safe` refuses `add` (standard): the refusal lands in the card, the
+        //    count does not move, and the authority read later for this press is dropped.
+        app.ui(|ui| ui.invoke_agent_suggestion_activated("double".into()));
+        app.run_jobs();
+        let apply = card_applies(&app);
+        app.run(Command::Rail(RailCommand::Apply));
+        assert!(app.model(|m| m.rail.is_applying()));
+        let strict = Authority { ceiling: "safe".into(), mode: Mode::named("ask"), granted: false, asks_above: None };
+        app.run(Command::Rail(RailCommand::Authorised { apply, authority: strict }));
+        assert_eq!(app.model(|m| m.count), 4, "refused by the ceiling");
+        assert_eq!(app.ui(|ui| ui.get_proposal().verb), "Close");
+        assert!(!app.ui(|ui| ui.get_proposal().body).is_empty(), "the refusal is the card's body");
+        app.run_jobs();
+        assert_eq!(app.model(|m| m.count), 4, "the late authority applied nothing");
+        app.ui(|ui| ui.invoke_proposal_dismissed());
+
+        // 2. Dismissed before the authority arrived: nothing applies, nothing is drawn.
+        app.ui(|ui| ui.invoke_agent_suggestion_activated("double".into()));
+        app.run_jobs();
+        let apply = card_applies(&app);
+        app.run(Command::Rail(RailCommand::Apply));
+        app.ui(|ui| ui.invoke_proposal_dismissed());
+        app.run(Command::Rail(RailCommand::Authorised { apply, authority: permissive() }));
+        app.run_jobs();
+        assert_eq!(app.model(|m| m.count), 4, "a dismissed card is not applied");
+        assert!(app.model(|m| m.rail.proposal().is_none()));
+
+        // 3. A second press while one applies is refused, as is a new ask.
+        app.ui(|ui| ui.invoke_agent_suggestion_activated("double".into()));
+        app.run_jobs();
+        app.run(Command::Rail(RailCommand::Apply));
+        app.run(Command::Rail(RailCommand::Apply));
+        assert_eq!(app.last_refusal().unwrap().kind, "applying");
+        app.run(Command::Rail(RailCommand::Activate("wipe".into())));
+        assert_eq!(app.last_refusal().unwrap().kind, "applying");
+        app.run_jobs();
+        assert_eq!(app.model(|m| m.count), 8, "the one press applied, through the machine's own authority");
+        assert!(app.model(|m| m.rail.proposal().is_none()));
+
+        // 4. Private mode: the ask is not sent, and an apply pressed while private is refused.
+        std::fs::write(&privacy, r#"{"private": true}"#).unwrap();
+        app.ui(|ui| ui.invoke_agent_suggestion_activated("double".into()));
+        app.run_jobs();
+        assert_eq!(mind.prompts().len(), 3, "nothing of the desktop went to the Mind");
+        assert!(app.ui(|ui| ui.get_proposal().body).contains("Private mode"));
+        app.ui(|ui| ui.invoke_proposal_dismissed());
+        std::fs::write(&privacy, r#"{"private": false}"#).unwrap();
+        app.ui(|ui| ui.invoke_agent_suggestion_activated("double".into()));
+        app.run_jobs();
+        assert_eq!(mind.prompts().len(), 4);
+        std::fs::write(&privacy, r#"{"private": true}"#).unwrap();
+        app.run(Command::Rail(RailCommand::Apply));
+        app.run_jobs();
+        assert_eq!(app.model(|m| m.count), 8, "not applied while private");
+        assert!(app.ui(|ui| ui.get_proposal().body).contains("Private mode"));
+        assert_eq!(app.ui(|ui| ui.get_proposal().verb), "Close");
+
+        restore(old_home);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     #[test]
     fn the_tick_is_a_command_on_the_clock() {
         let app = TestApp::<Hello>::start();
@@ -591,6 +681,9 @@ mod tests {
         assert_eq!(app.ui(|ui| ui.get_notice()), "");
     }
 
+    /// The rail's jobs read Private mode from `$HOME`; the tests that touch it take turns.
+    static RAIL_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// The rail: fed by the model, refreshed on a change (debounced) and when the Mind's reach
     /// changes; a suggestion asks the Mind from a job; the answer is a card; applying it runs
     /// the app's own intent as an agent through the admitted path.
@@ -599,6 +692,7 @@ mod tests {
         use yantrik_app::gate::{Authority, Mode};
         use yantrik_app::mind::fake::FakeMind;
         use yantrik_app::slint::Model as _;
+        let _env = RAIL_ENV.lock().unwrap_or_else(|p| p.into_inner());
         // Three asks below: "double", "wipe", "double" again.
         let mind = std::sync::Arc::new(FakeMind::new().answers((0..3).map(|_| Ok("ok".to_string()))));
         let app = TestApp::<Hello>::start_at_with(Paths::temporary(Hello::ID), Vec::new(), mind.clone());
@@ -625,6 +719,8 @@ mod tests {
         // Applying runs `add` as an agent through the admitted path, with the authority given.
         let permissive = Authority { ceiling: "dangerous".into(), mode: Mode::named("bypass_all"), granted: false, asks_above: None };
         let apply = app.model(|m| m.rail.proposal().unwrap().applies.clone().unwrap());
+        // The press first: an authority that arrives for no press is dropped.
+        app.run(Command::Rail(RailCommand::Apply));
         app.run(Command::Rail(RailCommand::Authorised { apply, authority: permissive.clone() }));
         assert_eq!(app.model(|m| m.count), 8);
         assert!(app.model(|m| m.rail.proposal().is_none()), "an applied card closes");
@@ -632,6 +728,7 @@ mod tests {
         app.ui(|ui| ui.invoke_agent_suggestion_activated("wipe".into()));
         app.run_jobs();
         let apply = app.model(|m| m.rail.proposal().unwrap().applies.clone().unwrap());
+        app.run(Command::Rail(RailCommand::Apply));
         app.run(Command::Rail(RailCommand::Authorised { apply, authority: permissive }));
         assert_eq!(app.model(|m| m.count), 8, "nothing applied");
         assert_eq!(app.ui(|ui| ui.get_proposal().body), "An agent may count but not reset.");

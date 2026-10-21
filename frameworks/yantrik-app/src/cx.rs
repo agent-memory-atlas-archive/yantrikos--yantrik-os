@@ -100,7 +100,12 @@ pub struct Core<A: App> {
     current: Cell<Option<Invocation>>,
     post: Post<Inbound<A>>,
     inbox: Inbox<Inbound<A>>,
-    pending: RefCell<VecDeque<(Option<Invocation>, A::Command)>>,
+    /// Queued commands, each with the invocation it runs under and whether the rail's apply
+    /// queued it (its outcome is then the rail's `Applied`).
+    pending: RefCell<VecDeque<(Option<Invocation>, A::Command, bool)>>,
+    /// Set while the rail's apply runs through the surface: what is queued meanwhile is its.
+    rail_applying: Cell<bool>,
+    rail_queued: Cell<bool>,
     applying: Cell<bool>,
     /// Queued commands this wake may still apply: one [`PENDING_PER_DRAIN`] per wake, shared by
     /// every drain within it, so a flood is bounded per wake and not per call.
@@ -177,6 +182,8 @@ impl<A: App> Core<A> {
                 post,
                 inbox,
                 pending: RefCell::new(VecDeque::new()),
+                rail_applying: Cell::new(false),
+                rail_queued: Cell::new(false),
                 applying: Cell::new(false),
                 budget: Cell::new(PENDING_PER_DRAIN),
                 in_wake: Cell::new(false),
@@ -301,8 +308,8 @@ impl<A: App> Core<A> {
         });
         let invocation = Invocation { id, origin };
         if self.applying.get() {
-            // A surface call while a command is applied cannot happen on one UI thread, but the
-            // queue is the safe answer if it ever does.
+            // A surface call while a command is applied: the rail's apply, which runs through
+            // the surface from `commit`. The command is queued and runs when this one is done.
             self.queue(Some(invocation), command);
             return Ok(());
         }
@@ -321,7 +328,11 @@ impl<A: App> Core<A> {
         if let Some(invocation) = invocation {
             self.count_queued(invocation.id, 1);
         }
-        self.pending.borrow_mut().push_back((invocation, command));
+        let from_rail = self.rail_applying.get();
+        if from_rail {
+            self.rail_queued.set(true);
+        }
+        self.pending.borrow_mut().push_back((invocation, command, from_rail));
     }
 
     /// Applies what is queued while this wake's budget lasts; the rest wait for the next wake,
@@ -331,7 +342,7 @@ impl<A: App> Core<A> {
     fn drain_pending(&self) {
         while self.budget.get() > 0 {
             let next = self.pending.borrow_mut().pop_front();
-            let Some((invocation, command)) = next else {
+            let Some((invocation, command, from_rail)) = next else {
                 return;
             };
             self.budget.set(self.budget.get() - 1);
@@ -339,6 +350,13 @@ impl<A: App> Core<A> {
                 self.count_queued(invocation.id, -1);
             }
             let result = self.apply(invocation, command);
+            // The rail's apply is answered by what its command did, not by its admission.
+            if from_rail {
+                let outcome = result.as_ref().map(|_| ()).map_err(|r| r.sentence.clone());
+                if let Some(applied) = A::rail(RailCommand::Applied(outcome)) {
+                    self.queue(None, applied);
+                }
+            }
             if let Some(invocation) = invocation {
                 match result {
                     Ok(()) => self.settle_if_idle(invocation.id),
@@ -443,9 +461,22 @@ impl<A: App> Core<A> {
                     yantrik_notifications::send(notification.from_app(self.id));
                 }
                 Request::ApplyAsAgent { apply, authority } => {
+                    // The surface queues the intent's command (a command is being applied);
+                    // what it queues is tagged and reports `Applied` once it has run. A call
+                    // the surface refused reports now.
+                    self.rail_queued.set(false);
+                    self.rail_applying.set(true);
                     let admitted = self.act_as_agent(apply, authority);
-                    if let Some(applied) = A::rail(RailCommand::Applied(admitted)) {
-                        self.queue(None, applied);
+                    self.rail_applying.set(false);
+                    let report = match admitted {
+                        Err(why) => Some(Err(why)),
+                        Ok(()) if !self.rail_queued.get() => Some(Ok(())),
+                        Ok(()) => None,
+                    };
+                    if let Some(report) = report {
+                        if let Some(applied) = A::rail(RailCommand::Applied(report)) {
+                            self.queue(None, applied);
+                        }
                     }
                 }
                 Request::Close(window) => self.close_window(window),
