@@ -1426,6 +1426,31 @@ def main():
               "could not start it" in out, out)
         check("with nothing on stderr", err == "", err)
 
+        print("Private mode: the commands that read or act refuse every run, token or not")
+        home = pathlib.Path(tmp) / "private-home"
+        (home / ".config" / "yantrik").mkdir(parents=True)
+        saved_home, saved_token = os.environ.get("HOME"), os.environ.pop(yos.AGENT_TOKEN_ENV, None)
+        os.environ["HOME"] = str(home)
+        try:
+            check("off, nothing is refused", not any(
+                yos.refused_while_private([c, "notes"]) for c in yos.PRIVATE_REFUSES), None)
+            (home / ".config" / "yantrik" / "privacy.json").write_text('{"private": true}', "utf-8")
+            refused = [c for c in yos.PRIVATE_REFUSES if yos.refused_while_private([c, "notes", "x"])]
+            check("on, act, perception, journal, web and screen are refused with no token",
+                  refused == list(yos.PRIVATE_REFUSES), refused)
+            check("describe and ls still run: the surface answers them with the private view",
+                  not yos.refused_while_private(["describe", "notes"])
+                  and not yos.refused_while_private(["ls"]), None)
+            check("and any run carrying a token is refused, describe included",
+                  yos.refused_while_private(["describe", "notes", "--agent-token", "t"]), None)
+        finally:
+            if saved_home is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = saved_home
+            if saved_token is not None:
+                os.environ[yos.AGENT_TOKEN_ENV] = saved_token
+
         print("ensure_service, with no desktop to ask")
         out, err, code = run(lambda: yos.ensure_service("notifications"))
         check("still ends the command", code == 1, "exit=%r" % (code,))

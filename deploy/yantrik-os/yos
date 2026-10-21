@@ -3007,14 +3007,27 @@ def private_now():
     return flag if isinstance(flag, bool) else True
 
 
+# The commands that read what the person's apps hold, or act in them: refused while the person is
+# private for every run, token or not (#926 review, M1). `yos` cannot tell a harness the person
+# started by hand from the person, and these answer with content — an act's result, the screen's
+# text, the perception ring and journal, a page. `describe` and `ls` stay: the surfaces themselves
+# answer them with the private view, which says the app is there and nothing it holds.
+PRIVATE_REFUSES = ("act", "perception", "journal", "web", "screen")
+
+
+def refused_while_private(argv):
+    """Whether this run of yos (`argv` without the program) is refused because the person is
+    private: any run carrying an agent token, and every run of a command in PRIVATE_REFUSES."""
+    agent = os.environ.get(AGENT_TOKEN_ENV, "").strip() or any(
+        a == "--agent-token" or a.startswith("agent_token=") for a in argv[1:])
+    return bool(agent or (argv and argv[0] in PRIVATE_REFUSES)) and private_now()
+
+
 def main():
     if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help", "help"):
         print(__doc__.strip())
         return
-    # Run for an agent (a harness put its token here): nothing, while the person is private.
-    agent = os.environ.get(AGENT_TOKEN_ENV, "").strip() or any(
-        a == "--agent-token" or a.startswith("agent_token=") for a in sys.argv[2:])
-    if agent and private_now():
+    if refused_while_private(sys.argv[1:]):
         print(PRIVACY_REFUSAL)
         sys.exit(3)
     command = COMMANDS.get(sys.argv[1])
