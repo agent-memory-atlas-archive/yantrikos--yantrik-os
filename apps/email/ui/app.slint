@@ -146,6 +146,16 @@ export component EmailApp inherits AppWindow {
     callback test-connection <=> client.test-connection;
     callback cancel-setup <=> client.cancel-setup;
 
+    // The window's own edits reach the app's model, which `describe` reads: the composer's
+    // fields and the search box.
+    callback edited();
+    changed compose-to => { root.edited(); }
+    changed compose-cc => { root.edited(); }
+    changed compose-bcc => { root.edited(); }
+    changed compose-subject => { root.edited(); }
+    changed compose-body => { root.edited(); }
+    changed email-search-query => { root.edited(); }
+
     client := EmailClient {
         window-bar: true;
         // Fills the window (no explicit size: Slint forbids width/height next to max-*).

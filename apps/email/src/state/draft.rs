@@ -1,6 +1,6 @@
 //! The draft that used to be lost: the unsent message, kept as one file.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// A message that was being written when the composer was closed.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -27,15 +27,6 @@ impl Draft {
             && self.subject.trim().is_empty()
             && self.body.trim().is_empty()
     }
-}
-
-/// Where the unsent message lives: one file, beside the rest of this OS's per-app state.
-pub fn draft_path() -> PathBuf {
-    if let Ok(explicit) = std::env::var("YANTRIK_EMAIL_DRAFT") {
-        return PathBuf::from(explicit);
-    }
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(home).join(".local/share/yantrik/email/draft.json")
 }
 
 pub fn save_draft(path: &Path, draft: &Draft) -> Result<(), String> {

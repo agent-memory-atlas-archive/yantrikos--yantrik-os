@@ -143,20 +143,6 @@ fn attr_value(tag: &str, name: &str) -> Option<String> {
     None
 }
 
-/// Where "Open original" writes its files for the browser.
-///
-/// The cache, not the app's state directory: these files are copies of what the mailbox already
-/// holds, written so that a browser has something to open, and losing them loses nothing. The
-/// override is the draft file's pattern, so `tests/email-core` can point it at a temporary
-/// directory instead of a real home.
-pub fn original_html_dir() -> PathBuf {
-    if let Ok(explicit) = std::env::var("YANTRIK_EMAIL_HTML_DIR") {
-        return PathBuf::from(explicit);
-    }
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(home).join(".cache/yantrik/email")
-}
-
 /// The file one message's original is written to, inside `dir`.
 ///
 /// The id came off a wire, and what comes off a wire never becomes a filename as it stands:
