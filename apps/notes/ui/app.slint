@@ -31,6 +31,8 @@ export component NotesApp inherits AppWindow {
  in property <bool> busy;
  in property <bool> opened;
  in property <bool> trashed;
+ // The library is open read-only: nothing in the editor or the fields takes a key.
+ in property <bool> read-only;
  in property <bool> modified;
  in property <bool> pinned;
  in property <int> words;
@@ -156,9 +158,9 @@ export component NotesApp inherits AppWindow {
     if root.opened && !root.trashed : Rectangle {height:44px;
      HorizontalLayout{padding-left:24px;padding-right:24px;spacing:10px;
       Text{text:"Notebook";color:Theme.text-dim;font-size:11px;vertical-alignment:center;}
-      YInput{value<=>root.notebook;placeholder:"Unfiled";min-width:100px;edited(_)=>{root.metadata();}cleared=>{root.metadata();}}
+      YInput{value<=>root.notebook;placeholder:"Unfiled";min-width:100px;disabled:root.read-only;edited(_)=>{root.metadata();}cleared=>{root.metadata();}}
       if root.width>850px : Text{text:"Tags";color:Theme.text-dim;font-size:11px;vertical-alignment:center;}
-      if root.width>850px : YInput{value<=>root.tags;placeholder:"Comma separated";min-width:100px;edited(_)=>{root.metadata();}cleared=>{root.metadata();}}
+      if root.width>850px : YInput{value<=>root.tags;placeholder:"Comma separated";min-width:100px;disabled:root.read-only;edited(_)=>{root.metadata();}cleared=>{root.metadata();}}
      }
     }
     Rectangle {vertical-stretch:1;clip:true;
@@ -175,7 +177,7 @@ export component NotesApp inherits AppWindow {
        editor:=TextInput {
         x:max(28px,(writing.visible-width - 720px)/2);y:30px;width:min(720px,writing.visible-width - 56px);height:max(self.preferred-height,writing.visible-height - 60px);
         text<=>root.content;single-line:false;wrap:word-wrap;font-size:16px;color:Theme.text-primary;
-        read-only:!root.opened||root.trashed||root.dialog!=0;
+        read-only:!root.opened||root.trashed||root.dialog!=0||root.read-only;
         selection-background-color:Theme.accent;selection-foreground-color:Theme.bg-deep;page-height:writing.visible-height;
         edited=>{root.edited(self.text);}key-pressed(event)=>{return root.shortcut(event);}
         cursor-position-changed(pos)=>{

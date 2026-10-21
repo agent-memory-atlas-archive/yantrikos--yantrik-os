@@ -25,6 +25,7 @@ mod follow;
 mod library;
 mod navigate;
 mod outside;
+mod read_only;
 pub mod said;
 pub mod saving;
 mod surface;
@@ -40,6 +41,9 @@ const WORKER_STOPPED: &str = "Storage worker stopped. Keep this window open to p
 pub fn update(m: &mut Model, command: Command, fx: &mut Effects<Notes>) -> Result<(), Refused> {
     // A cue is for the render of the command that set it, and for no later one.
     m.pane.cues.clear();
+    if read_only::refused(m, fx, &command) {
+        return Ok(());
+    }
     match command {
         Command::Load => library::load(m, fx),
         Command::Window(action) => window::act(m, fx, action),

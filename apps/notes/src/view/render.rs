@@ -9,7 +9,7 @@ use crate::note::NoteText;
 use crate::update::said;
 use crate::{BookRow, NoteRow, NotesApp, PreviewBlock};
 
-/// The busy flag, the footer's save state and the notice line.
+/// The busy flag, the footer's save state, the notice line, and whether the library takes edits.
 pub const STATUS: &str = "status";
 /// A note was shown: everything about it, its text and its fields included.
 pub const NOTE: &str = "note";
@@ -37,6 +37,8 @@ pub fn render(ui: &NotesApp, m: &Model, changed: &Changed) {
         ui.set_busy(m.busy.is_some());
         ui.set_status(m.status.clone().into());
         ui.set_notice(m.notice.clone().into());
+        // Said with the notice, which every load that finds the library read-only sets.
+        ui.set_read_only(m.vault.read_only().is_some());
     }
     if changed.has(NOTE) || changed.has(EDIT) {
         ui.set_opened(current.is_some());

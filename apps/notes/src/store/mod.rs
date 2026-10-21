@@ -1,10 +1,11 @@
 //! The Markdown vault, with bounded reads and recoverable writes.
 //!
 //! One `.md` file per note, an optional `.meta` beside it, a write-ahead journal at
-//! `.recovery-v2/pending.json` around every save, and a Trash of JSON records in `.trash-v2`. The
-//! format is the one Notes has always written. Reads are the store's own (no link is followed,
-//! every size is bounded); every write and removal goes through the framework's [`Disk`], so a
-//! test can make any step of any write fail.
+//! `.recovery-v2/pending.json` around every save, a Trash of JSON records in `.trash-v2`, and the
+//! format's number in `.vault-version` (`version`). The format is the one Notes has always
+//! written. Reads are the store's own (no link is followed, every size is bounded); every write
+//! and removal goes through the framework's [`Disk`], so a test can make any step of any write
+//! fail.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -17,6 +18,7 @@ mod records;
 mod resolve;
 mod save;
 mod trash;
+pub mod version;
 mod write;
 
 pub use load::Loaded;
@@ -41,16 +43,19 @@ const LINE_LIMIT: usize = 10000;
 pub const CHANGED_ON_DISK: &str =
     "This note changed on disk. Your draft is protected; use Save a copy, then Refresh.";
 
-/// The vault: where it is, and the disk it writes through.
+/// The vault: where it is, the disk it writes through, and whether it may be written.
 #[derive(Clone)]
 pub struct Vault {
     dir: PathBuf,
     disk: Arc<dyn Disk>,
+    /// Why nothing in the vault may be changed, when the last load found something stopping it
+    /// (`version`): every write into the vault refuses with this sentence.
+    read_only: Option<String>,
 }
 
 impl Vault {
     pub fn new(dir: PathBuf, disk: Arc<dyn Disk>) -> Vault {
-        Vault { dir, disk }
+        Vault { dir, disk, read_only: None }
     }
 
     /// The vault at `dir` on the real disk.
@@ -60,6 +65,16 @@ impl Vault {
 
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    /// Why the vault is open read-only, if it is.
+    pub fn read_only(&self) -> Option<&str> {
+        self.read_only.as_deref()
+    }
+
+    /// This vault as a load found it: read-only for the reason given, or writable.
+    pub fn with_access(&self, read_only: Option<String>) -> Vault {
+        Vault { read_only, ..self.clone() }
     }
 
     /// A note's `.md` and `.meta`, for a valid file name only.

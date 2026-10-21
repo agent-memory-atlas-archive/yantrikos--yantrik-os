@@ -51,7 +51,25 @@ impl Vault {
     }
 
     /// A note's text written to a new file outside the vault: never over anything already there.
+    /// Not a write into the vault, so a vault open read-only still exports: it is how its notes
+    /// get out. Into the vault, or any folder in it, it is a write like any other, and refused
+    /// while read-only: a vault a newer Notes wrote may be a writable folder all the same.
     pub fn export(&self, path: &Path, text: &str) -> Result<(), String> {
-        self.put(path, text, false).map_err(|e| e.error)
+        if let Some(why) = &self.read_only {
+            if self.holds(path) {
+                return Err(why.clone());
+            }
+        }
+        self.disk.create_new(path, text.as_bytes()).map_err(|e| e.error)
+    }
+
+    /// Whether `path` would land in the vault or a folder in it, through any link on the way. A
+    /// parent that cannot be resolved holds nothing: the create there fails on its own.
+    fn holds(&self, path: &Path) -> bool {
+        let resolved = |p: &Path| std::fs::canonicalize(p).ok();
+        match (path.parent().and_then(resolved), resolved(&self.dir)) {
+            (Some(parent), Some(vault)) => parent.starts_with(vault),
+            _ => false,
+        }
     }
 }

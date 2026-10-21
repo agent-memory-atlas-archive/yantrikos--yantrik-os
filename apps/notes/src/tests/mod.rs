@@ -2,6 +2,7 @@
 //! temporary root, jobs run when the test says, the autosave's clock moved by hand, and the disk
 //! made to fail where a test asks.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -16,14 +17,17 @@ use crate::Notes;
 
 mod failures;
 mod follow;
+mod kept;
 mod outside;
 mod parity;
 mod read_notes;
+mod read_only;
 mod resolve;
 mod saving;
 mod startup;
 mod store;
 mod surface;
+mod version;
 mod window;
 
 /// A Notes with its library read.
@@ -53,6 +57,26 @@ pub fn autosave(app: &TestApp<Notes>) {
 
 pub fn vault(app: &TestApp<Notes>) -> PathBuf {
     app.paths().data_dir().to_path_buf()
+}
+
+/// Everything under `dir`, by path: each file's bytes, and each folder (with no bytes), so a test
+/// can say a vault was left exactly as it was.
+pub fn snapshot(dir: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
+    let mut seen = BTreeMap::new();
+    let mut folders = vec![dir.to_path_buf()];
+    while let Some(folder) = folders.pop() {
+        let Ok(entries) = std::fs::read_dir(&folder) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                seen.insert(path.clone(), None);
+                folders.push(path);
+            } else {
+                seen.insert(path.clone(), Some(std::fs::read(&path).unwrap_or_default()));
+            }
+        }
+    }
+    seen
 }
 
 /// The vault writes through `disk` from now on.

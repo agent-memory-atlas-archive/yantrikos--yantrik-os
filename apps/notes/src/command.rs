@@ -138,6 +138,26 @@ impl WindowAction {
         }
     }
 
+    /// Whether this changes the library, so a library open read-only refuses it. The dialog's
+    /// Continue depends on which dialog is open, so the guard decides it (`update::read_only`).
+    pub fn writes(&self) -> bool {
+        matches!(
+            self,
+            WindowAction::Save
+                | WindowAction::Pin
+                | WindowAction::Trash
+                | WindowAction::Restore
+                | WindowAction::Copy
+                | WindowAction::Import
+                | WindowAction::New(_)
+                | WindowAction::Undo
+                | WindowAction::Redo
+                // Each writes the window's text as a note of its own; Compare only reads.
+                | WindowAction::KeepMine
+                | WindowAction::TakeTheirs
+        )
+    }
+
     /// Whether this leaves the open note, so its edits are saved first.
     pub fn navigates(&self) -> bool {
         matches!(
@@ -190,4 +210,29 @@ pub enum Act {
     Compare,
     /// A required argument given empty: refused, in the window's notice too.
     Refuse(String),
+}
+
+impl Act {
+    /// Whether this call changes the library, so a library open read-only refuses it. An export
+    /// does not: it writes outside the vault, and is the way a read-only library's notes get out.
+    pub fn writes(&self) -> bool {
+        matches!(
+            self,
+            Act::NewNote { .. }
+                | Act::SetTitle(_)
+                | Act::Append(_)
+                | Act::SetContent(_)
+                | Act::Notebook(_)
+                | Act::Tags(_)
+                | Act::Save
+                | Act::Trash
+                | Act::Restore
+                | Act::Copy
+                | Act::Undo
+                | Act::Redo
+                | Act::Import { .. }
+                | Act::KeepMineAsCopy
+                | Act::TakeTheirs
+        )
+    }
 }

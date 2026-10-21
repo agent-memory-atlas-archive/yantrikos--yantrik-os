@@ -96,6 +96,7 @@ fn spawn(m: &mut Model, fx: &mut Effects<Notes>, doc: DocumentId, ticket: SaveTi
         result: Err(SaveFailed {
             error: SaveError::after_writing(Durability::Unknown, written, said::JOB_LOST),
             meta_unsure: None,
+            read_only: false,
         }),
     };
     begin(m, fx, Work::Save, lost, move |vault| Command::SaveLanded { doc, seq, result: vault.save(&job) });
@@ -144,7 +145,11 @@ pub fn landed(m: &mut Model, fx: &mut Effects<Notes>, doc: DocumentId, seq: u64,
         }
         Err(failure) => {
             let conflict = failure.error.conflict;
-            let mut sentence = said::save_failed(&failure.error);
+            let mut sentence = if failure.read_only {
+                failure.error.sentence.clone()
+            } else {
+                said::save_failed(&failure.error)
+            };
             if matches!(d.save_landed(seq, Err(failure.error)), SaveOutcome::Stale) {
                 return;
             }

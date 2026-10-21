@@ -2,12 +2,13 @@
 //! (design/app-framework-2026-10-21.md, §2.2). An app's `main` is
 //! `yantrik_app::run::<MyApp>()` and nothing else.
 
+use std::path::Path;
 use std::process::ExitCode;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::app::{App, Boot, Event, WindowId};
+use crate::app::{App, Boot, Event, Startup, WindowId};
 use crate::cx::{Core, Cx, Inbound, Parts};
 use crate::instance::Held;
 use crate::intents::{self, Intents};
@@ -40,8 +41,8 @@ pub(crate) fn drain_on_ui_thread() {
     });
 }
 
-/// Runs the app to its end. The exit code says how it ended: 0 for a close or a display that
-/// went away, 1 for a failure, with a problem record.
+/// Runs the app to its end. The exit code says how it ended: 0 for a close, a display that went
+/// away or a launch handed to a running copy, 1 for a failure, with a problem record.
 pub fn run<A: App>() -> ExitCode {
     boot::init_tracing_for(A::ID, Some(boot::crate_of::<A>()));
     boot::choose_backend();
@@ -110,7 +111,7 @@ pub fn run<A: App>() -> ExitCode {
     }
     let model = match A::model(&boot) {
         Ok(model) => model,
-        Err(e) => return startup_failed(A::ID, "model", &e.sentence),
+        Err(declined) => return model_declined(A::ID, &declined, &problems::dir()),
     };
     let ui = match A::Ui::make() {
         Ok(ui) => ui,
@@ -200,8 +201,54 @@ fn install<A: App>(core: &Rc<Core<A>>) {
 }
 
 fn startup_failed(id: &str, what: &str, sentence: &str) -> ExitCode {
+    failed_into(&problems::dir(), id, what, sentence)
+}
+
+/// Ends a start the app's model declined, filing into `records` when it is a failure. A copy the
+/// app found another copy for (`Startup::handed_over`) did what a second launch is for, exactly
+/// as the framework's own hand-over above: logged at info, exit 0, nothing filed.
+fn model_declined(id: &str, declined: &Startup, records: &Path) -> ExitCode {
+    if declined.is_handed_over() {
+        tracing::info!(app = id, "{}", declined.sentence);
+        return ExitCode::SUCCESS;
+    }
+    failed_into(records, id, "model", &declined.sentence)
+}
+
+fn failed_into(records: &Path, id: &str, what: &str, sentence: &str) -> ExitCode {
     eprintln!("{id}: {sentence}");
     tracing::error!(app = id, what, "{sentence}");
-    problems::record_failure(id, what, sentence);
+    problems::record_failure_in(records, id, what, sentence);
     ExitCode::from(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn records(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("yantrik-runner-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        d.join("problems")
+    }
+
+    #[test]
+    fn a_start_another_copy_took_exits_0_and_files_nothing() {
+        let dir = records("handed-over");
+        let declined = Startup::handed_over("Already running on this library.");
+        assert_eq!(model_declined("runner-test", &declined, &dir), ExitCode::SUCCESS);
+        assert!(problems::list_in(&dir).is_empty(), "a hand-over was filed as a problem");
+    }
+
+    #[test]
+    fn a_model_that_cannot_start_exits_1_and_is_filed() {
+        let dir = records("refused");
+        let declined = Startup::new("The library is a newer format.");
+        assert_eq!(model_declined("runner-test", &declined, &dir), ExitCode::from(1));
+        let filed = problems::list_in(&dir);
+        assert_eq!(filed.len(), 1, "a failed start left no record");
+        assert_eq!(filed[0].1.program, "runner-test");
+        assert_eq!(filed[0].1.message, "model: The library is a newer format.");
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    }
 }

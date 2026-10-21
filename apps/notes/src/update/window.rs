@@ -63,7 +63,7 @@ fn may_go_on(m: &mut Model, fx: &mut Effects<Notes>, action: &WindowAction) -> b
         }
         return false;
     }
-    if action.navigates() && m.unsaved() {
+    if saves_first(m, action) {
         m.pending = Some(Pending { step: Step::Window(action.clone()), refuse_if_unsaved: false });
         saving::save(m, fx, saving::How::Asked);
         return false;
@@ -72,6 +72,15 @@ fn may_go_on(m: &mut Model, fx: &mut Effects<Notes>, action: &WindowAction) -> b
     m.lasting_notice = false;
     fx.changed(STATUS);
     true
+}
+
+/// Whether `action` waits for the open note to be saved first: it leaves the note, and the note
+/// has edits not on disk. A Refresh of a library open read-only does not: the vault would refuse
+/// that save, and the Refresh is what can make the library writable again. The reload keeps the
+/// unsaved text open across it (`library::loaded`), and saves it once the library is writable.
+pub fn saves_first(m: &Model, action: &WindowAction) -> bool {
+    let read_only_refresh = *action == WindowAction::Reload && m.vault.read_only().is_some();
+    action.navigates() && m.unsaved() && !read_only_refresh
 }
 
 fn guarded(m: &mut Model, fx: &mut Effects<Notes>, action: WindowAction) {
