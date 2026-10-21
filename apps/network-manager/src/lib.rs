@@ -41,7 +41,7 @@ use yantrik_app::Refused;
 
 mod backend;
 /// The windowless half of connecting: the plan, the published action, the request the typed
-/// secret travels in. Pure, so `tests/network-core` exercises it without a window.
+/// secret travels in. Pure, so `secret_tests.rs` exercises it without a window.
 mod connect;
 mod describe;
 mod intents;
@@ -54,6 +54,8 @@ mod update;
 mod view;
 #[cfg(test)]
 mod intent_tests;
+#[cfg(test)]
+mod secret_tests;
 #[cfg(test)]
 mod tests;
 
