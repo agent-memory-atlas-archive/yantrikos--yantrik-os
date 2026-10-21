@@ -6,7 +6,9 @@
 //! Step 8d added to the surface and to nothing else: the three choices about an outside change
 //! ([`ADDED_IN_8D`]) after the old table, and two `describe` keys ([`KEYS_ADDED_IN_8D`]); 8d-3
 //! added the two choices about text kept from before Notes closed ([`ADDED_IN_8D3`]) and two keys
-//! ([`KEYS_ADDED_IN_8D3`]). The old table and the old keys are unchanged.
+//! ([`KEYS_ADDED_IN_8D3`]); 8d-3b added a note in a new window ([`ADDED_IN_8D3B`]) and the two
+//! keys that say which window is focused and what each shows ([`KEYS_ADDED_IN_8D3B`]). The old
+//! table and the old keys are unchanged.
 
 use serde_json::{json, Value};
 use yantrik_app::app::App as _;
@@ -226,9 +228,24 @@ const ADDED_IN_8D3: &[Golden] = &[
 /// what is offered back from before Notes closed.
 const KEYS_ADDED_IN_8D3: &[&str] = &["draft", "recovery"];
 
+/// More than one window (8d-3b, gate row "Two document contexts"), after 8d-3's.
+const ADDED_IN_8D3B: &[Golden] = &[Golden {
+    name: "open_in_new_window",
+    risk: "standard",
+    description: r#"Show a note in a new window of its own, beside the one it is open in: the note that is open, or the one `title` names. Both windows show the same note, so an edit in either is in both; the new window is the focused one afterwards."#,
+    params: &[(
+        "title",
+        false,
+        r#"The note's exact title, or the filename `describe` lists it under. Leave it out for the note open in the focused window."#,
+    )],
+}];
+
+/// `describe` keys 8d-3b added: which window the actions act on, and what each window shows.
+const KEYS_ADDED_IN_8D3B: &[&str] = &["focused_window", "windows"];
+
 /// Every action, the old table first.
 fn golden() -> impl Iterator<Item = &'static Golden> {
-    BEFORE.iter().chain(ADDED_IN_8D).chain(ADDED_IN_8D3)
+    BEFORE.iter().chain(ADDED_IN_8D).chain(ADDED_IN_8D3).chain(ADDED_IN_8D3B)
 }
 
 #[test]
@@ -282,6 +299,7 @@ fn describe_has_the_same_keys_and_values() {
     ];
     want.extend(KEYS_ADDED_IN_8D);
     want.extend(KEYS_ADDED_IN_8D3);
+    want.extend(KEYS_ADDED_IN_8D3B);
     want.sort_unstable();
     let mut keys = keys;
     keys.sort_unstable();
@@ -295,6 +313,8 @@ fn describe_has_the_same_keys_and_values() {
             "notice": "", "status": "All changes saved", "folder": "all", "preview": false, "focus": false,
             "note_count": 0, "trash_count": 0, "search_query": "", "matches": 0, "notes": [],
             "outside": null, "save_failure": null, "draft": null, "recovery": [],
+            "focused_window": 0,
+            "windows": [{ "window": 0, "focused": true, "open_note": null, "title": null, "unsaved": false }],
         })
     );
     assert_eq!(app.describe()["summary"], "Notes — nothing open, 0 notes");

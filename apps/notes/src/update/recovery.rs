@@ -20,6 +20,7 @@ use super::{refreshed, show};
 use crate::command::{Act, Command, WindowAction};
 use crate::model::Model;
 use crate::note::Note;
+use crate::pane::Pane;
 use crate::recovery::{base_of, Found, Offer};
 use crate::store::Interrupted;
 use crate::update::said;
@@ -89,9 +90,10 @@ pub enum Showing {
     Gone = 3,
 }
 
-pub fn showing(m: &Model) -> Option<(Showing, &Offer)> {
-    let offer = shown(m)?;
-    let state = if m.current().is_some_and(|c| c.id() == offer.id) {
+/// Where the offer a window's bar shows stands, for that window.
+pub fn showing_in<'a>(m: &'a Model, pane: &Pane) -> Option<(Showing, &'a Offer)> {
+    let offer = shown_in(m, pane)?;
+    let state = if m.current_in(pane).is_some_and(|c| c.id() == offer.id) {
         Showing::Open
     } else if m.library.iter().any(|n| n.id == offer.id) {
         Showing::Listed
@@ -111,10 +113,30 @@ pub fn in_order(m: &Model) -> Vec<&Offer> {
         .collect()
 }
 
-/// The offer the bar shows: the open note's, or else the newest.
+/// The offer the focused window's bar shows, the one Restore and Discard act on.
 pub fn shown(m: &Model) -> Option<&Offer> {
-    let open = m.current().map(|c| c.id().to_string());
-    open.and_then(|id| m.recovery.offer_for(&id)).or_else(|| m.recovery.offers.first())
+    shown_in(m, &m.pane)
+}
+
+/// The offer a window's bar shows: its own note's, or else the newest whose note no window shows,
+/// on one window's bar only: the focused window's, or, when that bar holds its own note's offer,
+/// the lowest numbered window's whose bar is free. An offer appears in the window that shows its
+/// note, moves with the person otherwise, and is never offered in two windows at once.
+pub fn shown_in<'a>(m: &'a Model, pane: &Pane) -> Option<&'a Offer> {
+    if let Some(offer) = own(m, pane) {
+        return Some(offer);
+    }
+    let free = m.panes().filter(|p| own(m, p).is_none()).map(|p| p.window).min_by_key(|w| (*w != m.pane.window, *w));
+    if free != Some(pane.window) {
+        return None;
+    }
+    let open: Vec<String> = m.panes().filter_map(|p| m.current_in(p).map(|c| c.id().to_string())).collect();
+    m.recovery.offers.iter().find(|o| !open.contains(&o.id))
+}
+
+/// The offer for the note a window shows, if it has one.
+fn own<'a>(m: &'a Model, pane: &Pane) -> Option<&'a Offer> {
+    m.current_in(pane).and_then(|c| m.recovery.offer_for(c.id()))
 }
 
 /// *Restore*: the offered text back in its note, open in the window. Reached through the guards,
@@ -124,6 +146,7 @@ pub fn restore(m: &mut Model, fx: &mut Effects<Notes>) {
     m.recovery.offers.retain(|o| o.id != offer.id);
     let on_disk = m.library.iter().find(|n| !n.trash && n.id == offer.id).cloned();
     let file = on_disk.as_ref().map(|n| Fingerprint::of_bytes(n.content.text.as_bytes()));
+    let gone = file.is_none();
     // The draft's baseline is the note's text and sidecar as they were when it was written
     // (`recovery::base_of`): equal, and the person's own edits, the sidecar's included, go back
     // as they were; different, and another program changed the note since.
@@ -147,7 +170,12 @@ pub fn restore(m: &mut Model, fx: &mut Effects<Notes>) {
     fx.changed(CONTENT);
     fx.changed(FIELDS);
     fx.changed(OUTSIDE);
-    let sentence = if moved_on { said::RESTORED_BESIDE } else { said::RESTORED };
+    let sentence = match (moved_on, gone) {
+        (false, _) => said::RESTORED,
+        // #917's review, F: no second version to choose between, only Save as new.
+        (true, true) => said::RESTORED_GONE,
+        (true, false) => said::RESTORED_BESIDE,
+    };
     refreshed(m, fx);
     say(m, fx, &left(m, sentence));
     // Saved at once, as the person's own Save would be. One the outside bar holds back is

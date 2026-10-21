@@ -48,7 +48,7 @@ fn text_typed_during_a_reload_is_kept_unsaved_with_its_history_and_then_autosave
     assert_eq!(app.jobs_waiting(), 1);
     settle(&app);
     assert_eq!(open(&app), (id, typed.clone(), true), "the reload closed the typing away");
-    assert_eq!(app.model(|m| m.status.clone()), "Unsaved · autosave pending");
+    assert_eq!(app.model(|m| m.pane.status.clone()), "Unsaved · autosave pending");
     assert_eq!(state(&app)["notice"], "", "the file had not changed, so there is nothing to say");
     assert_eq!(file(&path), saved);
     // Not shown afresh: the edit typed during the reload is in the view's history.

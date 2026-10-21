@@ -2,9 +2,10 @@
 
 use yantrik_app::effects::Effects;
 
-use super::{closing, editing, library, navigate, outside, reblock, recovery, saving};
+use super::{closing, editing, library, navigate, outside, reblock, recovery, saving, windows};
 use crate::command::{Resolution, Step, WindowAction};
-use crate::model::{Cue, Model, Pending};
+use crate::model::{Model, Pending};
+use crate::pane::Cue;
 use crate::store::expand_home;
 use crate::view::render::{CHROME, CUES, STATUS};
 use crate::Notes;
@@ -36,8 +37,13 @@ pub fn act(m: &mut Model, fx: &mut Effects<Notes>, action: WindowAction) {
             fx.changed(CHROME);
             fx.changed(CUES);
         }
-        WindowAction::Undo => editing::undo(m, fx, false),
-        WindowAction::Redo => editing::undo(m, fx, true),
+        // Said in the notice when the other window's edits overtook this window's history.
+        WindowAction::Undo => {
+            editing::undo(m, fx, false);
+        }
+        WindowAction::Redo => {
+            editing::undo(m, fx, true);
+        }
         WindowAction::NotNow => outside::not_now(m, fx),
         // The close prompt answers while a save it asked for is in flight.
         WindowAction::Close(choice) => closing::answer(m, fx, choice),
@@ -68,7 +74,8 @@ fn may_go_on(m: &mut Model, fx: &mut Effects<Notes>, action: &WindowAction) -> b
         return false;
     }
     if saves_first(m, action) {
-        m.pending = Some(Pending { step: Step::Window(action.clone()), refuse_if_unsaved: false });
+        let step = Step::Window(action.clone());
+        m.pending = Some(Pending { step, refuse_if_unsaved: false, window: m.pane.window });
         saving::save(m, fx, saving::How::Asked);
         return false;
     }
@@ -105,6 +112,12 @@ fn guarded(m: &mut Model, fx: &mut Effects<Notes>, action: WindowAction) {
         WindowAction::Compare => outside::compare(m, fx),
         WindowAction::RestoreDraft => recovery::restore(m, fx),
         WindowAction::ShowDraft => recovery::show_offer(m, fx),
+        WindowAction::NewWindow => {
+            if let Err(sentence) = windows::open(m, fx, None) {
+                m.notice = sentence.into();
+                fx.changed(STATUS);
+            }
+        }
         WindowAction::Import => open_dialog(m, fx, Dialog::Import),
         WindowAction::Export => {
             if m.current().is_some() {

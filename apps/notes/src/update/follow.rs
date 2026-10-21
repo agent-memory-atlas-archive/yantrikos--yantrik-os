@@ -19,7 +19,7 @@ use yantrik_app::documents::{DocumentId, Fingerprint, Observed, OutsideState};
 use yantrik_app::effects::Effects;
 
 use super::outside::{say, take_theirs};
-use super::{after_store, begin, relist, said, save_state};
+use super::{after_store, begin, relist, said, save_state, set_status};
 use crate::command::{Command, Resolution};
 use crate::model::{Model, Work};
 use crate::note::NoteText;
@@ -44,7 +44,7 @@ pub fn follow(m: &mut Model, fx: &mut Effects<Notes>) {
         if let Some(d) = m.documents.get_mut(doc) {
             d.observe(Observed::File(now));
         }
-        m.status = save_state(m).into();
+        set_status(m, save_state(m));
         fx.changed(STATUS);
         fx.changed(OUTSIDE);
         return;
@@ -132,12 +132,17 @@ fn hold(m: &mut Model, fx: &mut Effects<Notes>, doc: DocumentId, theirs: Result<
     // The text is now not what the file holds: an edit of its document, so it is dirty as well
     // as unsaved, and its draft is kept.
     d.edit(|_| ());
-    m.pane.outside_later = false;
+    // The bar comes back in every window on the note.
+    for window in m.windows_showing(doc) {
+        if let Some(pane) = m.pane_of_mut(window) {
+            pane.outside_later = false;
+        }
+    }
     fx.changed(OUTSIDE);
 }
 
 fn settle(m: &mut Model, fx: &mut Effects<Notes>) {
-    m.status = save_state(m).into();
+    set_status(m, save_state(m));
     fx.changed(STATUS);
     after_store(m, fx);
 }

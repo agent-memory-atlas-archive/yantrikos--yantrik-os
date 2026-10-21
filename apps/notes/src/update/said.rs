@@ -218,9 +218,11 @@ pub fn drafts_elsewhere(paths: &[std::path::PathBuf]) -> Option<String> {
 pub const NOTHING_OFFERED: &str = "There is no unsaved text from before Notes closed.";
 pub const RESTORED: &str = "Your text is back in this note.";
 /// Restored over a note that is not the one the text was written over (its text, or its
-/// notebook, tags or pin), or whose file is gone: the outside bar decides.
+/// notebook, tags or pin): the outside bar decides.
 pub const RESTORED_BESIDE: &str = "Your text is back. The note on disk changed after it was written (its text, \
      or its notebook, tags or pin), so choose what happens to the two versions.";
+/// Restored for a note whose file is gone: there is one version, and the bar offers Save as new.
+pub const RESTORED_GONE: &str = "Your text is back. The note's file is gone; Save as new keeps your text.";
 pub const DISCARDED: &str = "The unsaved text was discarded; the note is as it is on disk.";
 /// An edit refused on a note whose offer waits.
 pub const CHOOSE_FIRST: &str =
@@ -230,8 +232,38 @@ pub const CHOOSE_FIRST: &str =
 pub const TYPED_DURING_TRASH: &str = "Moved to Trash. What you typed meanwhile is kept as a new note.";
 
 pub const WAIT_BEFORE_CLOSING: &str = "Please wait for the current operation before closing.";
+/// A window's close that would ask, while another window's close prompt waits for its answer.
+pub const ANSWER_THE_OTHER_FIRST: &str = "Answer the other window's question first.";
 /// A close asked to save, and no save could start.
 pub const NOT_SAVED_NOW: &str = "The note could not be saved now, so the window stays open.";
+
+/// A close that asked about several notes, one of which did not save: which one, and why.
+pub fn close_failed(title: &str, sentence: &str) -> String {
+    format!("\"{title}\" was not saved, so Notes stays open. {sentence}")
+}
+
+/// A save failed of a note the person's window does not show: which note, and why.
+pub fn note_failed(title: &str, sentence: &str) -> String {
+    format!("\"{title}\": {sentence}")
+}
+
+/// *Open in new window* with no note open, and none named.
+pub const NOTHING_FOR_A_WINDOW: &str = "No note is open to show in a new window.";
+/// What a mind can do about it.
+pub const NAME_A_NOTE: &str = "Name one with `title`, or open one first with `open_note`.";
+
+/// A new window could not be made.
+pub fn window_not_opened(why: &str) -> String {
+    format!("A new window could not be opened ({}). The note is still open here.", reason(why))
+}
+
+/// A call's window closed before it could be answered.
+pub const WINDOW_GONE: &str = "The window this call was about has closed.";
+
+/// Undo or redo in a window whose note was changed in another window since its own last edit:
+/// its history is dropped, never put back over the other window's text.
+pub const UNDO_DROPPED: &str =
+    "Nothing to undo in this window: the note was changed in another window since, so its history here was cleared.";
 
 /// The close prompt: its heading and its sentence. `titles` are the notes with edits not on
 /// disk; `unstored` counts the notes listed in the library that are not on disk at all (another
