@@ -13,6 +13,22 @@ fn read(rel: &str) -> String {
 
 const UI: &str = "crates/yantrik-ui-slint/ui/";
 
+/// A screen's source, wherever it lives now: in its app once the app is on YantrikApp
+/// (`apps/<app>/ui/<file>`), in the shell's folder until then.
+fn screen(file: &str) -> String {
+    let root: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+    let moved = std::fs::read_dir(root.join("apps"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|app| app.path().join("ui").join(file))
+        .find(|path| path.is_file());
+    match moved {
+        Some(path) => std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display())),
+        None => read(&format!("{UI}{file}")),
+    }
+}
+
 /// Screens that are not a mind's, and so must not draw the minds' teal. Containers' "Run New",
 /// About's version pill and section bars, the Skills chips, the System and System Monitor bars,
 /// the setup and login screens, and the shared chart, toast and ribbon all did.
@@ -25,7 +41,7 @@ fn teal_stays_off_screens_that_are_not_a_minds() {
         "components/onboard_kit.slint", "components/app_ribbon.slint", "components/window_frame.slint",
         "components/model_tier_badge.slint",
     ] {
-        let src = read(&format!("{UI}{file}"));
+        let src = screen(file);
         for teal in ["Theme.cyan", "Theme.tint-cyan"] {
             assert!(!src.contains(teal), "{file} draws `{teal}`, the minds' colour");
         }
@@ -39,13 +55,8 @@ fn teal_stays_off_screens_that_are_not_a_minds() {
 /// ("Scanning..." looked destructive). These screens use the kit's YButton now.
 #[test]
 fn a_primary_button_is_the_accent_not_the_apps_colour() {
-    // Network's screen is its own since it moved onto YantrikApp (apps/network-manager/ui/).
-    for file in [
-        format!("{UI}container_manager.slint"),
-        format!("{UI}permission_dashboard.slint"),
-        "apps/network-manager/ui/network_manager.slint".to_string(),
-    ] {
-        let src = read(&file);
+    for file in ["container_manager.slint", "permission_dashboard.slint", "network_manager.slint"] {
+        let src = screen(file);
         assert!(!src.contains("primary ? AppIdentity.accent"), "{file} fills its primary with the app's colour");
         assert!(src.contains("import { YButton }"), "{file} uses the kit's button");
     }

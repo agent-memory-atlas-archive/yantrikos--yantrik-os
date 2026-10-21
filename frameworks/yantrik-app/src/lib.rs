@@ -14,6 +14,7 @@ pub mod companion;
 pub mod control;
 pub mod cx;
 pub mod desktop;
+pub mod documents;
 pub mod drafts;
 pub mod effects;
 pub mod event_loop;

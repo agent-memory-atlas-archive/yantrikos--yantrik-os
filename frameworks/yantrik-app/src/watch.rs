@@ -3,8 +3,8 @@
 //! and not by mtime alone, so an edit that keeps the size and the time is still seen, and a
 //! replaced or deleted file too. It posts what it saw; the core decides what it means.
 //!
-//! Watched: the app's own settings file (an outside edit), and the shell's `settings.yaml`
-//! (the theme, applied live). Polling, not inotify: no new dependency, and it works on the
+//! Watched: the app's own settings file (an outside edit), the shell's `settings.yaml` (the
+//! theme, applied live), and the files of the app's open documents (`fx.watch`). Polling, not inotify: no new dependency, and it works on the
 //! network and 9p mounts a development machine runs from.
 
 use std::path::PathBuf;
@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::documents::{Observed, Watched};
 use crate::settings::Fingerprint;
 use crate::theme::{self, ThemeSettings};
 
@@ -27,6 +28,8 @@ pub enum Seen {
     Theme(ThemeSettings),
     /// Whether the Mind can answer is not what it was (the first tick says what it is).
     Reach(yantrik_mind::Reach),
+    /// A watched document's file is not what was last seen (`fx.watch`).
+    File { key: String, seen: Observed },
 }
 
 /// Where sightings go: the core's queue.
@@ -40,9 +43,16 @@ pub struct Watch {
 }
 
 impl Watch {
-    /// Watches `settings_file` and the shell's theme, reporting to `notice`. `theme_now` is what
-    /// the window was started with, so only a change is reported.
-    pub fn start(name: &str, settings_file: PathBuf, theme_now: ThemeSettings, notice: Arc<dyn Notice>) -> Watch {
+    /// Watches `settings_file`, the shell's theme and the documents' files in `files`, reporting
+    /// to `notice`. `theme_now` is what the window was started with, so only a change is
+    /// reported.
+    pub fn start(
+        name: &str,
+        settings_file: PathBuf,
+        theme_now: ThemeSettings,
+        files: Watched,
+        notice: Arc<dyn Notice>,
+    ) -> Watch {
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = stop.clone();
         std::thread::Builder::new()
@@ -78,6 +88,9 @@ impl Watch {
                             theme_seen = theme_now;
                             notice.seen(Seen::Theme(theme_now));
                         }
+                    }
+                    for (key, seen) in files.poll() {
+                        notice.seen(Seen::File { key, seen });
                     }
                 }
             })

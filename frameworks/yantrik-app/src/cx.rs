@@ -119,6 +119,8 @@ pub struct Core<A: App> {
     window_shown: Cell<bool>,
     /// The app's served surface, once it is: the rail applies a proposal through it.
     registry: RefCell<Option<Rc<LocalRegistry>>>,
+    /// The documents' files the watch thread looks at (`fx.watch`).
+    watched: crate::documents::Watched,
 }
 
 /// Delivers a finished job to the core's queue.
@@ -192,8 +194,14 @@ impl<A: App> Core<A> {
                 exit: Cell::new(None),
                 window_shown: Cell::new(true),
                 registry: RefCell::new(None),
+                watched: crate::documents::Watched::new(),
             }
         })
+    }
+
+    /// The documents' files watched, shared with the watch thread the runner starts.
+    pub fn watched(&self) -> crate::documents::Watched {
+        self.watched.clone()
     }
 
     pub fn id(&self) -> &'static str {
@@ -456,6 +464,8 @@ impl<A: App> Core<A> {
                 } => self.save_settings(value, replace_unusable),
                 Request::SaveDraft { name, bytes, delay } => self.save_draft(name, bytes, delay),
                 Request::DiscardDraft(name) => self.discard_draft(name),
+                Request::Watch { key, path, seen } => self.watched.add(&key, path, seen),
+                Request::Unwatch(key) => self.watched.remove(&key),
                 // Never blocks: the send is a thread of its own, bounded by the crate.
                 Request::Notify(notification) => {
                     // Always this app's: the name comes from the framework, not the caller (§5).
@@ -542,6 +552,7 @@ impl<A: App> Core<A> {
                 problems::record_failure(self.id, "draft", &format!("{name}: {why}"));
             }
             (None, Event::ReachChanged(_)) => {}
+            (None, Event::FileChanged { .. }) => {}
         }
     }
 
