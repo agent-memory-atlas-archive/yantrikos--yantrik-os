@@ -50,7 +50,11 @@ pub fn init_tracing_for(app_name: &str, crate_target: Option<&str>) {
     ]);
     let asked = std::env::var("RUST_LOG").unwrap_or_default();
     for directive in unless_asked(defaults, &asked) {
-        filter = filter.add_directive(directive.parse().expect("valid tracing directive"));
+        // The crate's target comes from `type_name`, whose format is not promised: a target that
+        // does not parse costs a hidden line, never a start.
+        if let Ok(directive) = directive.parse() {
+            filter = filter.add_directive(directive);
+        }
     }
     // A second init (a test harness after the app) is not an error worth stopping for.
     let _ = tracing_subscriber::registry()
@@ -95,16 +99,29 @@ pub(crate) fn crate_of<T>() -> &'static str {
 /// replaces an earlier one, so a default added after the environment's would undo
 /// `RUST_LOG=yantrik_weather=debug`; the person's own setting wins.
 fn unless_asked(defaults: Vec<String>, rust_log: &str) -> Vec<String> {
-    let named: Vec<&str> = rust_log
-        .split(',')
-        .filter_map(|d| d.split_once('=').map(|(target, _)| target.trim()))
-        .collect();
+    let named = named_targets(rust_log);
     defaults
         .into_iter()
         .filter(|d| {
             d.split_once('=')
                 .is_some_and(|(target, _)| !named.contains(&target))
         })
+        .collect()
+}
+
+/// The targets `RUST_LOG` sets a level for, read as the filter reads it (tracing-subscriber's
+/// `parse_lossy`): split on commas, nothing trimmed, and a piece that does not parse ignored, as
+/// the filter ignores it. A bare target means its trace level, so it names the target; a bare
+/// level names none. A span-scoped piece (`target[span]=level`) is kept by the filter apart
+/// from the target's own level, so it does not name the target either.
+fn named_targets(rust_log: &str) -> Vec<&str> {
+    use tracing_subscriber::filter::{Directive, LevelFilter};
+    rust_log
+        .split(',')
+        .filter(|piece| !piece.is_empty() && !piece.contains('['))
+        .filter(|piece| piece.parse::<Directive>().is_ok())
+        .filter(|piece| piece.parse::<LevelFilter>().is_err())
+        .map(|piece| piece.split_once('=').map_or(piece, |(target, _)| target))
         .collect()
 }
 
@@ -145,13 +162,40 @@ mod directive_tests {
         ];
         assert_eq!(unless_asked(defaults.clone(), ""), defaults);
         assert_eq!(
-            unless_asked(defaults.clone(), "yantrik_weather=debug, hyper=warn"),
+            unless_asked(defaults.clone(), "yantrik_weather=debug,hyper=warn"),
             vec!["yantrik_app=info"]
+        );
+        assert_eq!(
+            unless_asked(defaults.clone(), "yantrik_weather"),
+            vec!["yantrik_app=info"],
+            "a bare target is its trace level"
         );
         assert_eq!(
             unless_asked(defaults.clone(), "debug"),
             defaults,
             "a bare level names no target"
+        );
+    }
+
+    #[test]
+    fn a_piece_the_filter_ignores_names_nothing() {
+        let defaults = vec!["yantrik_weather=info".to_string()];
+        // The filter ignores each of these, so the default must stand.
+        for ignored in [
+            "hyper=warn, yantrik_weather=debug",
+            "yantrik_weather=debug ",
+            "yantrik_weather=bogus",
+        ] {
+            assert_eq!(
+                unless_asked(defaults.clone(), ignored),
+                defaults,
+                "{ignored:?}"
+            );
+        }
+        // A span-scoped directive is kept apart from the target's own level.
+        assert_eq!(
+            unless_asked(defaults.clone(), "yantrik_weather[fetch]=debug"),
+            defaults
         );
     }
 
