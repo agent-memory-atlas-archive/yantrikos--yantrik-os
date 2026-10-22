@@ -1,8 +1,8 @@
 //! The only code that writes the window: the model, drawn, for the parts that changed.
 
-use slint::{ModelRc, VecModel};
 use yantrik_app::app::Changed;
 use yantrik_app::rail::{self, RailView as _};
+use yantrik_app::rows;
 use yantrik_ipc_contracts::system_monitor::ProcessInfo;
 
 use crate::model::{Model, PART_AI, PART_NOTICE, PART_PROCESSES, PART_READINGS};
@@ -29,6 +29,8 @@ pub fn render(ui: &SystemMonitorApp, m: &Model, changed: &Changed) {
     }
 }
 
+/// The sample, on screen. Every property is set to its value, which Slint compares, and every
+/// list through `rows::set`, so a sample the same as the last one draws nothing.
 fn readings(ui: &SystemMonitorApp, m: &Model) {
     let r = &m.readout;
     ui.set_cpu_measured(r.cpu_measured);
@@ -37,7 +39,7 @@ fn readings(ui: &SystemMonitorApp, m: &Model) {
     ui.set_load_avg_5(r.load_avg[1].as_str().into());
     ui.set_load_avg_15(r.load_avg[2].as_str().into());
     let cores: Vec<CpuCoreData> = r.cores.iter().map(|c| CpuCoreData { core_id: c.id, usage: c.usage }).collect();
-    ui.set_cpu_cores(ModelRc::new(VecModel::from(cores)));
+    rows::set(ui.get_cpu_cores(), cores, |list| ui.set_cpu_cores(list));
 
     ui.set_memory_usage(r.memory_usage);
     ui.set_memory_used_text(r.memory_used.as_str().into());
@@ -61,7 +63,7 @@ fn readings(ui: &SystemMonitorApp, m: &Model) {
             needs_you: d.needs_you,
         })
         .collect();
-    ui.set_disks(ModelRc::new(VecModel::from(disks)));
+    rows::set(ui.get_disks(), disks, |list| ui.set_disks(list));
 
     let nets: Vec<NetworkInterfaceData> = r
         .interfaces
@@ -75,7 +77,7 @@ fn readings(ui: &SystemMonitorApp, m: &Model) {
             tx_speed: n.tx_speed.as_str().into(),
         })
         .collect();
-    ui.set_network_interfaces(ModelRc::new(VecModel::from(nets)));
+    rows::set(ui.get_network_interfaces(), nets, |list| ui.set_network_interfaces(list));
 
     ui.set_uptime_text(r.uptime.as_str().into());
 
@@ -105,7 +107,7 @@ fn processes(ui: &SystemMonitorApp, m: &Model) {
             status: p.state.as_str().into(),
         })
         .collect();
-    ui.set_processes(ModelRc::new(VecModel::from(items)));
+    rows::set(ui.get_processes(), items, |list| ui.set_processes(list));
     // The list was just rebuilt under the selection, and the row the selection points at may
     // not have survived it. Dropping a stale pid here is what hides End and Force Kill with the
     // row they act on (#220). The selection is the list's own (a row press sets it), so it is
