@@ -471,6 +471,20 @@ impl Library {
         Ok(Imported { ids, kind: "bundle" })
     }
 
+    /// Never give an id or a collection id `other` has already given: a library read back after a
+    /// refused write takes the counters of the one it replaces when they are higher, so an id a
+    /// refused create used, and a draft may be named by, is never given to another snippet. The
+    /// next write keeps the higher counters on disk (#938 review, M3).
+    pub fn keep_counters_from(&mut self, other: &Library) {
+        self.next_id = self.next_id.max(other.next_id);
+        self.next_collection = self.next_collection.max(other.next_collection);
+    }
+
+    /// Never give `id` again: a draft from an earlier run names it.
+    pub fn reserve(&mut self, id: i32) {
+        self.next_id = self.next_id.max(id.saturating_add(1));
+    }
+
     fn index_of(&self, id: i32) -> Result<usize, String> {
         self.snippets
             .iter()

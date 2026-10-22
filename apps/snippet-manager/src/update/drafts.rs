@@ -14,7 +14,7 @@ use yantrik_app::Refused;
 use super::changes::commit;
 use super::{fail, written, Fx};
 use crate::command::{After, Command};
-use crate::model::{draft_name, Editor, Model, Offer, Why, PART_DETAIL, PART_LIST, PART_RECOVERY};
+use crate::model::{draft_name, Draft, Editor, Model, Offer, Why, PART_DETAIL, PART_LIST, PART_RECOVERY};
 use crate::store::ALL;
 
 /// The editor's text drafted while it is unsaved; drafts let go once kept, or offered once the
@@ -22,13 +22,15 @@ use crate::store::ALL;
 pub(super) fn keep(m: &mut Model, fx: &mut Fx, now: bool) {
     let editor = m.editor.clone();
     let typing = editor.id >= 0 && (m.editor_dirty() || m.offered(editor.id).is_some());
-    if typing && (now || m.drafts.get(&editor.id) != Some(&editor)) {
+    if typing && (now || m.drafted(editor.id) != Some(&editor)) {
         put(fx, &editor, now);
-        m.drafts.insert(editor.id, editor.clone());
+        // The editor's text is the newest there is for its snippet.
+        m.drafts.insert(editor.id, Draft { text: editor.clone(), typed: m.typed });
     }
-    // A write still in flight could be refused and give the text back to the editor: the drafts
-    // wait for it.
-    if !m.lane.idle() {
+    // A draft goes only once a write has positively landed: one still in flight could be refused
+    // and give the text back, and after a write that did not finish, memory is not known to be on
+    // disk until the file has been read again (#925 N-B, #920 E-L7).
+    if !m.lane.idle() || m.reloading > 0 {
         return;
     }
     let ids: Vec<i32> = m.drafts.keys().copied().collect();
@@ -36,7 +38,7 @@ pub(super) fn keep(m: &mut Model, fx: &mut Fx, now: bool) {
         if (id == editor.id && typing) || m.offers.iter().any(|o| o.id == id) {
             continue;
         }
-        let text = &m.drafts[&id];
+        let text = &m.drafts[&id].text;
         let kept = m.library.get(id).is_some() && !m.library.differs(id, &text.patch());
         if kept || id == editor.id {
             // Kept, or the editor holds this snippet as it is kept: the person's text is what the
@@ -49,10 +51,16 @@ pub(super) fn keep(m: &mut Model, fx: &mut Fx, now: bool) {
     }
 }
 
-/// A text the store did not take, kept now: its draft written at once.
-pub(super) fn hold(m: &mut Model, fx: &mut Fx, text: &Editor) {
+/// A text the store did not take, kept now: its draft written at once. A text older than the one
+/// the draft lane already holds for its snippet is not: the newest typing always wins (#938
+/// review, M1). Says whether it was held.
+pub(super) fn hold(m: &mut Model, fx: &mut Fx, text: &Editor, typed: u64) -> bool {
+    if m.drafts.get(&text.id).is_some_and(|d| d.typed > typed) {
+        return false;
+    }
     put(fx, text, true);
-    m.drafts.insert(text.id, text.clone());
+    m.drafts.insert(text.id, Draft { text: text.clone(), typed });
+    true
 }
 
 /// The draft of `id` removed, and anything it offered with it.
@@ -78,7 +86,7 @@ fn put(fx: &mut Fx, text: &Editor, now: bool) {
 /// The bar's choices, about the first text it offers.
 pub(super) fn choose(m: &mut Model, command: Command, fx: &mut Fx) {
     let Some(offer) = m.offers.first().copied() else { return };
-    let Some(text) = m.drafts.get(&offer.id).cloned() else {
+    let Some(draft) = m.drafts.get(&offer.id).cloned() else {
         m.offers.retain(|o| o.id != offer.id);
         fx.changed(PART_RECOVERY);
         return;
@@ -89,7 +97,7 @@ pub(super) fn choose(m: &mut Model, command: Command, fx: &mut Fx) {
                 super::browsing::move_to(m, fx, offer.id, false);
             }
         }
-        Command::RestoreOffer => restore(m, fx, offer, text),
+        Command::RestoreOffer => restore(m, fx, offer, draft),
         Command::DiscardOffer => {
             forget(m, fx, offer.id);
             if m.editor.id == offer.id {
@@ -107,8 +115,9 @@ pub(super) fn choose(m: &mut Model, command: Command, fx: &mut Fx) {
 /// *Restore*: the text back into its snippet, opened and kept; *Restore as new* for a snippet no
 /// longer kept. The typing in the editor goes in first, as any move of the editor keeps it. The
 /// draft stays until what it holds is on disk (`keep`), so a refused write offers it again.
-fn restore(m: &mut Model, fx: &mut Fx, offer: Offer, text: Editor) {
-    let restore = m.restore_point();
+fn restore(m: &mut Model, fx: &mut Fx, offer: Offer, draft: Draft) {
+    let Draft { text, typed } = draft;
+    let mut restore = m.restore_point();
     let committed = match commit(m) {
         Ok(committed) => committed,
         Err(why) => return fail(m, fx, &why),
@@ -122,9 +131,13 @@ fn restore(m: &mut Model, fx: &mut Fx, offer: Offer, text: Editor) {
         m.library.create(&text.title, &text.language, &text.code, &text.tags, ALL).map(|id| {
             m.select(id);
             // The draft moves to the new snippet's name before the old one goes, so the text is
-            // in a draft until the new snippet is on disk.
-            hold(m, fx, &Editor { id, ..text.clone() });
+            // in a draft until the new snippet is on disk; and if its write is refused, it is
+            // this text the refusal keeps and says is kept (#938 review, L1).
+            let moved = Editor { id, ..text.clone() };
+            hold(m, fx, &moved, typed);
             forget(m, fx, offer.id);
+            restore.typing = moved;
+            restore.typed = typed;
         })
     };
     match outcome {
@@ -154,7 +167,7 @@ pub fn choice(action: &str) -> Result<Command, Refused> {
 /// bar.
 pub fn bar(m: &Model) -> Option<(String, i32)> {
     let offer = m.offers.first()?;
-    let text = m.drafts.get(&offer.id)?;
+    let text = m.drafted(offer.id)?;
     let title = format!("\u{201c}{}\u{201d}", text.title);
     let (state, said) = match (m.library.get(offer.id).is_some(), m.editor.id == offer.id, offer.why) {
         (false, _, _) => (3, format!("Your unsaved changes to {title} are kept, but that snippet is no longer kept.")),

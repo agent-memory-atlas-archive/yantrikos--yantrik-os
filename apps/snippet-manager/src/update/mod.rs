@@ -173,7 +173,7 @@ fn work_failed(m: &mut Model, work: Work, fx: &mut Fx) {
     match work {
         Work::Write(write) => {
             m.lane.landed();
-            written::did_not_finish(m, write.after, fx);
+            written::did_not_finish(m, write.after, &write.restore, fx);
         }
         Work::Copy { from_window } => {
             m.copied = false;
@@ -186,7 +186,11 @@ fn work_failed(m: &mut Model, work: Work, fx: &mut Fx) {
         }
         Work::Import => fail(m, fx, "Reading the file did not finish; nothing was imported."),
         Work::Export => fail(m, fx, "The export did not finish; try it again."),
-        Work::Reload => {}
+        Work::Reload => {
+            // The file could not be read again; memory stays as it is, and the drafts with it
+            // until a write lands.
+            m.reloading = m.reloading.saturating_sub(1);
+        }
     }
 }
 
