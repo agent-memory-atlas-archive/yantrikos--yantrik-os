@@ -1,6 +1,10 @@
 //! What the Mind reads: the same keys and values the app published before the framework, read off
 //! the committed model.
 //!
+//! No line of a snippet's code is in it. The list's `preview`, its first line, was, and a snippet
+//! may be a password or a key: what a snippet is called (title, language, tags) and how long it
+//! is say what it is for without saying what it holds.
+//!
 //! In Private mode the framework replaces all of it (#924); this app keeps none of its keys there
 //! (`tests/private_mode.rs`), because every one names, counts or quotes the person's snippets.
 
@@ -43,7 +47,6 @@ pub fn view(m: &Model) -> View {
                 "favorite": s.favorite,
                 "collection": m.library.collection_name(s.collection),
                 "lines": s.code.lines().count(),
-                "preview": s.preview(),
             })
         })
         .collect();

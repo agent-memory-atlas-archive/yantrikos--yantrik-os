@@ -3,6 +3,11 @@
 //! `apps/snippet-manager/src/main.rs` at 2be8dd24 (`publish_control`), with the string literals
 //! evaluated as rustc reads them, not copied by hand from the new intents, so a word changed in
 //! `intents.rs` fails here.
+//!
+//! Three values changed on purpose since, each a security fix (`fix/snippets-agent-exposure`), and
+//! are marked where they are: `search`'s `query` and `import`'s `path` say what an agent's call
+//! may match and read, and the list in `describe` no longer carries a `preview` of each
+//! snippet's code.
 
 use serde_json::{json, Value};
 use yantrik_app::app::App as _;
@@ -58,7 +63,8 @@ const BEFORE: &[Golden] = &[
         risk: "safe",
         description: r#"Narrow the list to what matches"#,
         params: &[
-            ("query", "string", true, r#"Matched against title, code, tags and language"#),
+            // Security: an agent's search never matches code.
+            ("query", "string", true, r#"Matched against title, code, tags and language; an agent's search matches title, tags and language only"#),
         ],
     },
     Golden {
@@ -90,7 +96,8 @@ const BEFORE: &[Golden] = &[
         risk: "standard",
         description: r#"Keep a file as a snippet, or read back an export"#,
         params: &[
-            ("path", "string", true, r#"A source file, or a file `export` wrote"#),
+            // Security: an agent's import reads only a file in the person's home (#443).
+            ("path", "string", true, r#"A source file, or a file `export` wrote; an agent may name only a file in the person's home, outside its protected places"#),
         ],
     },
     Golden {
@@ -102,7 +109,8 @@ const BEFORE: &[Golden] = &[
 ];
 
 const KEYS: &[&str] = &["total", "matching", "shown", "snippets", "favorites", "query", "tag", "collection", "collections", "open", "open_id", "open_language", "open_favorite", "open_lines", "store", "copied_recently", "notice"];
-const ROW_KEYS: &[&str] = &["id", "title", "language", "tags", "favorite", "collection", "lines", "preview"];
+// Security: `preview`, the first line of each snippet's code, is gone from the list.
+const ROW_KEYS: &[&str] = &["id", "title", "language", "tags", "favorite", "collection", "lines"];
 
 #[test]
 fn the_nine_actions_are_published_as_they_were() {
@@ -233,7 +241,6 @@ fn a_store_with_a_snippet_open_is_described_as_it_was() {
         json!({
             "id": borrow, "title": "Borrow checker dance", "language": "Rust", "tags": ["rust", "borrow"],
             "favorite": false, "collection": "All Snippets", "lines": 1,
-            "preview": "let mut guard = state.borrow_mut();",
         })
     );
     // A search narrows the summary as it did.

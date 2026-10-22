@@ -10,6 +10,8 @@
 //! - `copying.rs` and `files.rs`: the clipboard, import, export and a file on the command line.
 //! - `ending.rs`: the window closed, a logout, the display going. `recovery.rs`: unsaved text kept
 //!   in the draft lane and offered back on the recovery bar, after a refused save or a restart.
+//! - `agent_exposure.rs`: no snippet code in `describe` or an agent's search, and an agent's
+//!   import only of a file in the person's home.
 //! - `secrets.rs`: a snippet's code is never in a log, an answer, `describe` or a debug print.
 //! - `rail.rs`: the agent rail and the AI button. `private_mode.rs`: `describe` in Private mode.
 
@@ -25,6 +27,7 @@ use crate::disk::testing::{self as faulty, Faulty};
 use crate::store::{file, Library};
 use crate::SnippetManager;
 
+mod agent_exposure;
 mod copying;
 mod editing;
 mod ending;

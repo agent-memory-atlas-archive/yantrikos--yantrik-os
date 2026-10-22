@@ -139,7 +139,8 @@ pub struct Read {
     pub path: PathBuf,
     pub from: From,
     pub result: Result<Incoming, String>,
-    /// The Mind named a file that is not there: refused, and not said on the notice line.
+    /// The Mind named a file that is not there, or one an agent may not have read: refused, and
+    /// not said on the notice line.
     pub missing: bool,
     /// The collection selected when the import was asked for: what comes in is filed there.
     pub collection: i32,

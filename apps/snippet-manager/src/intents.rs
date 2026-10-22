@@ -49,7 +49,7 @@ pub fn table(table: &mut Intents<SnippetManager>) {
         .arg(Param::text("id").describe("Its id, or its title"))
         .risk("safe"), |a| Ok(Command::Open(raw(a, "id"))));
     add(table, Action::new("search", "Narrow the list to what matches")
-        .arg(Param::text("query").describe("Matched against title, code, tags and language"))
+        .arg(Param::text("query").describe("Matched against title, code, tags and language; an agent's search matches title, tags and language only"))
         .risk("safe"), |a| Ok(Command::Find(raw(a, "query"))));
     // Standard: the clipboard is readable by everything else on the session, so this is data
     // leaving the app — reversible, but not nothing.
@@ -66,7 +66,7 @@ pub fn table(table: &mut Intents<SnippetManager>) {
         .arg(Param::text("id").describe("Its id, or its title"))
         .risk("standard"), |a| Ok(Command::FavoriteNamed(raw(a, "id"))));
     add(table, Action::new("import", "Keep a file as a snippet, or read back an export")
-        .arg(Param::text("path").describe("A source file, or a file `export` wrote"))
+        .arg(Param::text("path").describe("A source file, or a file `export` wrote; an agent may name only a file in the person's home, outside its protected places"))
         .risk("standard"), import);
     add(table, Action::new("show", "Bring the window forward").risk("safe"), |_| Ok(Command::Show));
 }

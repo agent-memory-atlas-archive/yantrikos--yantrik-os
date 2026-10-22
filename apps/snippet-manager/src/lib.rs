@@ -82,6 +82,7 @@ impl App for SnippetManager {
         let mut m = Model {
             library: loaded.library,
             query: String::new(),
+            query_by: store::Matched::Everything,
             tag: String::new(),
             collection: store::ALL,
             selected: -1,
