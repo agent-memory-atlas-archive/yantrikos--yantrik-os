@@ -22,6 +22,9 @@ use crate::SystemMonitor;
 pub const KILL_WITHIN: Duration = Duration::from_secs(3);
 
 pub fn table(table: &mut Intents<SystemMonitor>) {
+    // In Private mode only the machine's load stays (#924): the processes, the filter, the disks'
+    // mount points and the interfaces can say what the person is doing.
+    table.shown_in_private(&["cpu_percent", "cpu_window_ms", "load_average", "memory_percent", "swap_percent"]);
     table.add(
         Intent::new(
             Action::new("sort_processes", "Order the process list by what it is using")
