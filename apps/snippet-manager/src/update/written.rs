@@ -26,7 +26,7 @@ pub(super) fn write(m: &mut Model, fx: &mut Fx, after: After, restore: Restore) 
     m.work += 1;
     let write = Write { ticket, after, restore };
     let job = m.lane.job(ticket, bytes);
-    let failed = Command::WorkFailed(Box::new(Work::Write(write.clone())));
+    let failed = Command::WorkFailed(Box::new(Work::Write(Box::new(write.clone()))));
     fx.spawn_or(failed, move |_| {
         Command::Written(Box::new(Written { write, landed: job() }))
     });

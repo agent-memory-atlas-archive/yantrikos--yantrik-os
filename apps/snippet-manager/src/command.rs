@@ -148,7 +148,7 @@ pub struct Read {
 /// The work a job was doing when it ended without a result.
 #[derive(Clone)]
 pub enum Work {
-    Write(Write),
+    Write(Box<Write>),
     Copy { from_window: bool },
     Import,
     Export,
