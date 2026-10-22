@@ -151,8 +151,7 @@ fn perform(write: Write, report: &dyn Report) {
     let result = match write.op {
         // A settings save replaces only a file with the app's own mark, or nothing: a file that
         // arrived after the save was queued and is not this app's is left as it is.
-        Op::Put(bytes) if write.key == PersistKey::Settings => crate::settings::file::may_replace(&write.path, &bytes)
-            .and_then(|()| write_atomically(&write.path, &bytes).map_err(|e| e.to_string())),
+        Op::Put(bytes) if write.key == PersistKey::Settings => crate::settings::file::replace(&write.path, &bytes),
         Op::Put(bytes) => write_atomically(&write.path, &bytes).map_err(|e| e.to_string()),
         Op::Remove => match std::fs::remove_file(&write.path) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),

@@ -6,7 +6,12 @@
 //! app's, whatever else it holds: the store does not read it past the mark, does not write over
 //! it, and says only its path. Looking for the mark materialises nothing else (every other value
 //! is skipped unread by serde), so a secret in such a file never reaches the model, the log, a
-//! problem record or the window. A link is never followed: the framework never makes one.
+//! problem record or the window.
+//!
+//! Every read of the file, and every fingerprint of it, goes through [`crate::quiet`]: no link
+//! is followed, no FIFO blocks, and only a regular file of at most [`MAX_BYTES`] is read, from
+//! the descriptor that was checked. Anything else is fingerprinted by its metadata alone, so
+//! the watcher sees it change without reading a byte of it.
 
 use std::path::{Path, PathBuf};
 
@@ -15,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{Settings, SettingsError};
+use crate::quiet::{self, Looked, Stat};
 
 /// The mark's `kind`.
 pub const KIND: &str = "yantrik-app-settings";
@@ -57,10 +63,24 @@ pub struct Fingerprint {
 }
 
 impl Fingerprint {
-    /// The file's fingerprint now, or `None` when it is absent or unreadable.
+    /// The file's fingerprint now, or `None` when it is absent or unreadable. A regular file of
+    /// at most [`MAX_BYTES`] is fingerprinted by its content; anything else at the path (a link,
+    /// a FIFO, a device, a larger file) by its metadata alone, and none of it is read.
     pub fn of(path: &Path) -> Option<Fingerprint> {
-        let bytes = std::fs::read(path).ok()?;
-        Some(Fingerprint::of_bytes(&bytes))
+        match quiet::read_within(path, MAX_BYTES).ok()? {
+            Looked::Missing => None,
+            Looked::Read(bytes) => Some(Fingerprint::of_bytes(&bytes)),
+            Looked::Refused(stat) => Some(Fingerprint::of_stat(&stat)),
+        }
+    }
+
+    /// What is known of a thing that is not read: its identity and change marks.
+    fn of_stat(stat: &Stat) -> Fingerprint {
+        let mut marks = b"not read\0".to_vec();
+        marks.extend_from_slice(&stat.dev.to_le_bytes());
+        marks.extend_from_slice(&stat.ino.to_le_bytes());
+        marks.extend_from_slice(&stat.mtime_ns.to_le_bytes());
+        Fingerprint { len: stat.len, hash: hash(&marks) }
     }
 
     /// The fingerprint the file will have once these bytes are in it.
@@ -113,19 +133,13 @@ pub fn is_marked(bytes: &[u8], app: &str) -> bool {
 }
 
 /// The bytes at `path`: `Ok(None)` when there is nothing there, `Err(NotOurs)` for a link, a
-/// directory or a file too large to be settings, none of which is read.
+/// FIFO, a device, a directory or a file too large to be settings, none of which is read
+/// ([`crate::quiet::read_within`]).
 pub(crate) fn read_bounded(path: &Path) -> Result<Option<Vec<u8>>, SettingsError> {
-    let meta = match std::fs::symlink_metadata(path) {
-        Ok(meta) => meta,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(SettingsError::Unreadable(e.to_string())),
-    };
-    if !meta.is_file() || meta.len() > MAX_BYTES {
-        return Err(SettingsError::NotOurs);
-    }
-    match std::fs::read(path) {
-        Ok(bytes) => Ok(Some(bytes)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+    match quiet::read_within(path, MAX_BYTES) {
+        Ok(Looked::Missing) => Ok(None),
+        Ok(Looked::Read(bytes)) => Ok(Some(bytes)),
+        Ok(Looked::Refused(_)) => Err(SettingsError::NotOurs),
         Err(e) => Err(SettingsError::Unreadable(e.to_string())),
     }
 }
@@ -179,23 +193,66 @@ pub(crate) fn render_raw(app: &str, schema: u32, settings: Value) -> Result<Vec<
     serde_json::to_vec_pretty(&envelope).map_err(|e| SettingsError::Write(e.to_string()))
 }
 
+fn refused(path: &Path) -> String {
+    format!("{} is not a settings file this app wrote; it is left as it is", path.display())
+}
+
+/// The app a save's bytes are marked for: only bytes the store rendered are a settings save.
+fn saved_for(bytes: &[u8]) -> Option<String> {
+    match serde_json::from_slice::<Mark>(bytes) {
+        Ok(Mark { kind: Some(kind), app: Some(app) }) if kind == KIND && !app.is_empty() => Some(app),
+        _ => None,
+    }
+}
+
 /// Whether a save of `bytes` may replace what is at `path`: nothing, or a file with the same mark
-/// the bytes carry. The lane asks just before it writes, so a file that arrived after the save
-/// was queued, and is not this app's, is still not written over. The answer is a sentence with
-/// the path and nothing of the file.
+/// the bytes carry. The answer is a sentence with the path and nothing of the file.
 pub fn may_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let refused = || format!("{} is not a settings file this app wrote; it is left as it is", path.display());
-    // Only bytes the store rendered, with a mark of their own, are a settings save.
-    let app = match serde_json::from_slice::<Mark>(bytes) {
-        Ok(Mark { kind: Some(kind), app: Some(app) }) if kind == KIND && !app.is_empty() => app,
-        _ => return Err(refused()),
-    };
+    let app = saved_for(bytes).ok_or_else(|| refused(path))?;
     match read_bounded(path) {
         Ok(None) => Ok(()),
         Ok(Some(existing)) if is_marked(&existing, &app) => Ok(()),
-        Ok(Some(_)) | Err(SettingsError::NotOurs) => Err(refused()),
+        Ok(Some(_)) | Err(SettingsError::NotOurs) => Err(refused(path)),
         Err(e) => Err(e.to_string()),
     }
+}
+
+/// The lane's settings write: `bytes` at `path`, only over nothing or this app's own file.
+///
+/// Looked at first ([`may_replace`]), then written by exchange
+/// ([`crate::documents::exchange::replace_if`]), which checks what it actually displaced: a file
+/// without the mark that arrived between the look and the write goes back where it was, or, if it
+/// cannot, is kept whole beside the path. Never written over unseen, except on a filesystem with
+/// no exchange (NFS, 9p, FUSE), where the look before is the only check.
+pub fn replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    may_replace(path, bytes)?;
+    let app = saved_for(bytes).ok_or_else(|| refused(path))?;
+    if let Some(dir) = path.parent() {
+        private_dir(dir).map_err(|e| e.to_string())?;
+    }
+    use crate::documents::exchange::{replace_if, Guarded};
+    match replace_if(path, bytes, MAX_BYTES, |theirs| is_marked(theirs, &app)) {
+        Ok(Guarded::Placed) => Ok(()),
+        Ok(Guarded::Refused) => Err(refused(path)),
+        Ok(Guarded::KeptAside(kept)) => {
+            tracing::warn!(app = %app, file = %path.display(), kept = %kept.display(), "a file this app did not write arrived as its settings were saved; it is kept beside them, unread");
+            Ok(())
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Makes `dir` and any missing parent owner-only (0700): `apps/` and `apps/<id>/` list app
+/// names and set-aside files, which are no one else's to see.
+pub(crate) fn private_dir(dir: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        builder.mode(0o700);
+    }
+    builder.create(dir)
 }
 
 /// Moves the file at `path` aside, to `<file>.set-aside-<seconds>.json` beside it, so a save can
