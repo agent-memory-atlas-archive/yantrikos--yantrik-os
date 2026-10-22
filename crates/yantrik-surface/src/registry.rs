@@ -3,11 +3,12 @@
 use std::sync::Mutex;
 
 use serde_json::Value;
-use yantrik_ipc_contracts::control_surface::{act_json, act_json_stateless, describe_json, Action, View};
+use yantrik_ipc_contracts::control_surface::{act_json, act_json_stateless, Action, View};
 use yantrik_ipc_transport::gate::{self, decide, Authority, LADDER};
 use yantrik_ipc_transport::reach::{self, Reach};
 
 use crate::args::{as_declared, check_arguments, declaration_problems};
+use crate::private::{Hold, PrivacySource};
 
 /// What an app reports about itself, for a surface whose describe closure lives on one thread.
 pub type Describer = dyn Fn() -> View;
@@ -50,6 +51,11 @@ pub struct Registry<D: ?Sized = Describer, H: ?Sized = Handler> {
     /// which borrowed the whole registry mutably, panicked with "RefCell already borrowed" the
     /// first time an action called it and took the app down.
     overrides: Mutex<Vec<(String, &'static str)>>,
+    /// Private mode (#924, `crate::private`): the app's own keys it still shows, what the
+    /// framework says of its windows, and where an in-process read learns whether it is on.
+    pub(crate) shown_in_private: Vec<String>,
+    pub(crate) presence: Option<Box<D>>,
+    pub(crate) privacy: Option<Box<PrivacySource>>,
 }
 
 impl<D: ?Sized, H: ?Sized> Registry<D, H> {
@@ -60,6 +66,9 @@ impl<D: ?Sized, H: ?Sized> Registry<D, H> {
             actions: Vec::new(),
             state_rule: None,
             overrides: Mutex::new(Vec::new()),
+            shown_in_private: Vec::new(),
+            presence: None,
+            privacy: None,
         }
     }
 
@@ -292,10 +301,10 @@ where
     }
 
     /// The reply to `app.describe`: the live view, its revision, and every action with the
-    /// grade it is published at now. Takes no authority — reading an app is free.
+    /// grade it is published at now — or in Private mode, read now, the private view
+    /// ([`Registry::describe_in`]). Takes no authority — reading an app is free.
     pub fn describe(&self) -> Value {
-        let view = self.snapshot();
-        describe_json(&self.app_id, &view, &self.specs())
+        self.describe_in(self.private_now())
     }
 
     /// Check the arguments, the ceiling and the mode, and the guard; dispatch with the arguments
@@ -328,6 +337,24 @@ where
         action_id: &str,
         authority: &Authority,
     ) -> Result<Value, String> {
+        // In process (the rail, a test) nobody is vouched for: the app itself reads its own model.
+        self.act_in(name, args, expect_revision, action_id, authority, Hold::of(self.private_now(), false))
+    }
+
+    /// [`Registry::act`] under the [`Hold`] the door worked out for this call: in Private mode the
+    /// guard holds the call to the view the caller could have read and the reply carries that
+    /// view, and for a caller nobody vouches for the handler's own answer and refusal are withheld,
+    /// so no reply and no refusal says more than `describe` would.
+    pub fn act_in(
+        &self,
+        name: &str,
+        args: &Value,
+        expect_revision: Option<&str>,
+        action_id: &str,
+        authority: &Authority,
+        hold: Hold,
+    ) -> Result<Value, String> {
+        let private = hold.is_private();
         let Some((spec, run)) = self.actions.iter().find(|(a, _)| a.name == name) else {
             return Err(self.unknown(name));
         };
@@ -354,7 +381,7 @@ where
         // it was looking at; if the app has moved on, the action does not happen. Refusing is
         // cheap and correctable — acting on a stale premise is neither.
         if let Some(expected) = expect_revision {
-            let before = self.snapshot();
+            let before = self.published(private);
             let revision = before.revision();
             if revision != expected {
                 return Err(format!(
@@ -367,20 +394,20 @@ where
 
         // The handler reads what it declared: every argument of its declared type, converted where
         // it arrived as something that converts without loss, and every default filled in.
-        let result = run(&as_declared(spec, args))?;
+        let result = run(&as_declared(spec, args)).map_err(|why| hold.refusal(why))?;
 
         // An answer about something other than this app carries nothing of it, and the app is not
-        // read again for a reply that would not use it.
-        if spec.stateless {
-            return Ok(act_json_stateless(&self.app_id, action_id, !spec.deferred, result));
-        }
-
-        // Read back through the same path a `describe` would take, so a caller never has to make
-        // a second round trip to find out what its own action did. `accepted` says the handler
-        // ran; `settled` (from the action's own `deferred`) says whether the work finished —
-        // never `ok`, never `done`.
-        let after = self.snapshot();
-        Ok(act_json(&self.app_id, action_id, !spec.deferred, result, &after))
+        // read again for a reply that would not use it. Otherwise it is read back through the same
+        // path a `describe` would take, so a caller never has to make a second round trip to find
+        // out what its own action did. `accepted` says the handler ran; `settled` (from the
+        // action's own `deferred`) says whether the work finished — never `ok`, never `done`.
+        let mut reply = if spec.stateless {
+            act_json_stateless(&self.app_id, action_id, !spec.deferred, result)
+        } else {
+            act_json(&self.app_id, action_id, !spec.deferred, result, &self.published(private))
+        };
+        hold.seal(&mut reply);
+        Ok(reply)
     }
 }
 

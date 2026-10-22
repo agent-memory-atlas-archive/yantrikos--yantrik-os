@@ -184,6 +184,21 @@ mod tests {
     }
 
     #[test]
+    fn in_private_mode_describe_keeps_the_units_and_says_nothing_of_where() {
+        use yantrik_app::control::private_mode::{testing::pin, PRIVATE_SUMMARY};
+        let (app, _, _) = start(FakeWeather::new().forecasting(Ok(forecast_at(21.4))));
+        app.run_jobs();
+        pin(&app.paths(), true);
+        let d = app.describe();
+        assert_eq!(d["private"], json!(true));
+        assert_eq!(d["summary"], json!(PRIVATE_SUMMARY));
+        assert_eq!(d["state"], json!({ "private": true, "open": true, "windows_open": 1, "units": "celsius" }));
+        assert!(!d.to_string().contains("London") && !d.to_string().contains("21°C"), "{d}");
+        pin(&app.paths(), false);
+        assert_eq!(app.describe()["state"]["location"], json!("London"), "and all of it once it is off");
+    }
+
+    #[test]
     fn a_refresh_reads_the_service_and_describe_says_what_the_screen_shows() {
         let (app, weather, _) = start(FakeWeather::new().forecasting(Ok(forecast_at(21.4))));
         assert!(app.model(|m| m.loading), "the first fetch starts at start");

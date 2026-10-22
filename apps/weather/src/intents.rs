@@ -16,6 +16,9 @@ use crate::Weather;
 const ADD_WITHIN: Duration = Duration::from_secs(15);
 
 pub fn table(table: &mut Intents<Weather>) {
+    // In Private mode only the units stay (#924): the place, the readings, the alerts and the
+    // saved places all say where the person is.
+    table.shown_in_private(&["units"]);
     table.add(
         Intent::new(
             Action::new("refresh", "Fetch the current conditions again"),
