@@ -8,8 +8,20 @@
 //! be ported, clear of every entry: an app's settings, data, state and cache never land on a
 //! component's file, except where an entry names that app as sharing it on purpose.
 //!
+//! An entry covers its own name and every name made from it ([`covers`]): the backups, the
+//! markers and the temporaries a component keeps beside its file. From the audit, among others:
+//! `deepseek.json.before-yantrik` (an API key), `pi.json.before-yantrik`,
+//! `openclaw.env.before-yantrik` (a gateway token), `openclaw.json.before-yantrik`,
+//! `companion-models.json.before-yantrik` and their `.absent` markers (harness `backup_once`,
+//! shell `backup_path`); `notifications.notices.json`, `notifications.json.unreadable-<ts>`,
+//! `notifications.tmp<pid>`, `notices.json.migrated-<ts>` and `notices-archive.<N>.jsonl`
+//! (notifications-service); `mind-mode.json.tmp`, `mind-panel.json.new`, `free-ai.json.new`,
+//! `.privacy.json.<pid>.<nanos>`, `taint-scopes.json.<pid>` and `last-brief.tmp` (shell).
+//!
 //! Kept from the audit of 21 Oct 2026 (the pull request that moved the settings to `apps/`). A
-//! component that starts keeping a new file under one of the roots adds it here.
+//! component that starts keeping a new file under one of the roots adds it here; a test reads
+//! the services', the shell's, the harnesses' and the deploy scripts' sources for paths under
+//! the four roots and fails on a name no entry covers.
 
 /// Which of the four roots an entry is under.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,9 +90,11 @@ pub const ENTRIES: &[Entry] = &[
     other(Config, "agents", "shell agent catalog"),
     other(Config, "plugins", "companion-tools"),
     other(Config, "scripts", "companion-tools coder"),
+    other(Config, "browser", "companion-tools browser profile (S)"),
+    other(Config, "memory.db", "memory database, protected by ipc-contracts home_paths"),
     // config: an app's own settings from before the framework, its to bring across.
     apps(Config, "weather.json", "Weather, before its own directory", "weather"),
-    apps(Config, "music.json", "Music, before the framework", "music-player"),
+    apps(Config, "music.json", "Music, before the framework", "music"),
     apps(Config, "studio.json", "Studio, before the framework", "studio"),
     // data
     apps(Data, "notes", "notes-service vault, which Notes shows and edits", "notes"),
@@ -120,11 +134,21 @@ pub const ENTRIES: &[Entry] = &[
     other(Cache, "build-cache", "dev scripts"),
 ];
 
+/// Whether entry `e` covers `name`: its own name, or one made from it by what follows a dot
+/// (`<entry>.before-yantrik`, `<entry>.tmp`, `.<entry>.<pid>`), or from its stem
+/// (`notifications.json` covers `notifications.tmp<pid>` and `notifications.notices.json`).
+pub fn covers(e: &Entry, name: &str) -> bool {
+    let name = name.trim_start_matches('.').trim_end_matches('.');
+    let made_from = |base: &str| name == base || name.strip_prefix(base).is_some_and(|rest| rest.starts_with('.'));
+    let stem = e.name.rsplit_once('.').map_or(e.name, |(stem, _)| stem);
+    made_from(e.name) || (!stem.is_empty() && made_from(stem))
+}
+
 /// Whether `name` under `<root>/yantrik/` is kept by a component other than app `app`.
 pub fn is_others(root: Root, name: &str, app: &str) -> bool {
     ENTRIES
         .iter()
-        .any(|e| e.root == root && e.name == name && e.app != Some(app))
+        .any(|e| e.root == root && e.app != Some(app) && covers(e, name))
 }
 
 #[cfg(test)]

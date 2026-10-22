@@ -7,7 +7,8 @@ use crate::paths::{Paths, APPS_DIR, DEFAULT_PROFILE, SETTINGS_FILE};
 
 /// The repository, from this crate's manifest (`frameworks/yantrik-app`).
 fn repo() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    repo.canonicalize().unwrap_or(repo)
 }
 
 /// The ids the apps in `apps/` use or will use: each folder's name, and every id its sources
@@ -101,7 +102,7 @@ fn no_apps_folders_are_another_components_unless_shared_on_purpose() {
             for e in ENTRIES.iter().filter(|e| e.root == root && e.app != Some(id.as_str())) {
                 let other = entry_path(base, e);
                 assert!(
-                    !dir.starts_with(&other) && !other.starts_with(dir),
+                    !covers(e, &id) && !other.starts_with(dir),
                     "{id}'s {} meets {} ({})",
                     dir.display(),
                     other.display(),
@@ -115,10 +116,106 @@ fn no_apps_folders_are_another_components_unless_shared_on_purpose() {
 #[test]
 fn the_apps_directory_is_the_frameworks_alone_and_the_table_is_one_entry_a_name() {
     for e in ENTRIES {
-        assert_ne!(e.name, APPS_DIR, "{} keeps `{APPS_DIR}`: the framework's own", e.owner);
+        assert!(!covers(e, APPS_DIR), "{} keeps `{APPS_DIR}`: the framework's own", e.owner);
         assert!(!e.name.contains('/') && !e.name.is_empty(), "{}: first component only", e.name);
         let twins = ENTRIES.iter().filter(|o| o.root == e.root && o.name == e.name).count();
         assert_eq!(twins, 1, "{:?} {} twice", e.root, e.name);
+    }
+}
+
+/// The names a component makes from its own file (a backup, a marker, a temporary) are its own
+/// too: a former file or an app folder by any of them is another component's.
+#[test]
+fn an_entry_covers_the_names_made_from_it() {
+    for (root, name) in [
+        (Root::Config, "deepseek.json.before-yantrik"),
+        (Root::Config, "pi.json.before-yantrik"),
+        (Root::Config, "openclaw.env.before-yantrik"),
+        (Root::Config, "openclaw.json.before-yantrik.absent"),
+        (Root::Config, "companion-models.json.before-yantrik"),
+        (Root::Config, "mind-mode.json.tmp"),
+        (Root::Config, "mind-panel.json.new"),
+        (Root::Config, "free-ai.json.new"),
+        (Root::Config, ".privacy.json.4242.123456789"),
+        (Root::Config, "email.json.tmp"),
+        (Root::Config, "providers.yaml.1"),
+        (Root::Data, "taint-scopes.json.4242"),
+        (Root::Data, "notifications.tmp4242"),
+        (Root::Data, "notifications.notices.json"),
+        (Root::Data, "notifications.json.unreadable-1700000000"),
+        (Root::Data, "notices.json.migrated-1700000000"),
+        (Root::Data, "notices-archive.3.jsonl"),
+        (Root::Data, "last-brief.tmp"),
+    ] {
+        assert!(is_others(root, name, "any-app"), "{root:?} {name}");
+    }
+    assert!(!is_others(Root::Config, "weather.json", "weather"), "an app's own former file is its own");
+    assert!(is_others(Root::Config, "weather.json", "notes"), "and no other app's");
+    assert!(!is_others(Root::Config, "notes.json", "notes"));
+}
+
+/// The names under the four roots that the rest of the system writes, as its sources spell them
+/// (`.config/yantrik/<name>`, `.local/share/yantrik/<name>`, `.local/state/yantrik/<name>`,
+/// `.cache/yantrik/<name>`, `join("yantrik").join("<name>")`), are every one in the table: a
+/// service that starts keeping a new file there fails this until it is added.
+#[test]
+fn every_name_the_rest_of_the_system_keeps_is_in_the_table() {
+    let repo = repo();
+    let mut sources = Vec::new();
+    for top in ["services", "crates", "deploy", "harnesses", "packaging", "scripts", "sdk", "tools", "frameworks"] {
+        collect(&repo.join(top), &mut sources);
+    }
+    // The framework's own paths are its own: the rule and its tests.
+    sources.retain(|p| !p.to_string_lossy().contains("frameworks/yantrik-app/"));
+    assert!(sources.len() > 100, "the sources are there to read: {}", sources.len());
+    let roots = [
+        (".config/yantrik/", Some(Root::Config)),
+        (".local/share/yantrik/", Some(Root::Data)),
+        (".local/state/yantrik/", Some(Root::State)),
+        (".cache/yantrik/", Some(Root::Cache)),
+        ("join(\"yantrik\").join(\"", None),
+    ];
+    let mut missing = Vec::new();
+    for path in &sources {
+        let Ok(text) = std::fs::read_to_string(path) else { continue };
+        let squeezed: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+        for (marker, root) in roots {
+            let haystack = if root.is_none() { &squeezed } else { &text };
+            for (at, _) in haystack.match_indices(marker) {
+                let rest = &haystack[at + marker.len()..];
+                let name: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')).collect();
+                let name = name.trim_end_matches('.');
+                if name.is_empty() {
+                    continue;
+                }
+                let listed = ENTRIES.iter().any(|e| root.is_none_or(|r| e.root == r) && covers(e, name));
+                if !listed {
+                    missing.push(format!("{root:?} {name} ({})", path.display()));
+                }
+            }
+        }
+    }
+    missing.sort();
+    missing.dedup();
+    assert!(missing.is_empty(), "kept under a yantrik root, not in paths/others.rs: {missing:#?}");
+}
+
+fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if path.is_dir() {
+            if !matches!(name.as_str(), "target" | "node_modules" | ".git" | "__pycache__") {
+                collect(&path, out);
+            }
+        } else if ["rs", "sh", "py", "yaml", "yml", "toml", "service", "desktop"]
+            .iter()
+            .any(|ext| path.extension().is_some_and(|e| e == *ext))
+            || path.extension().is_none()
+        {
+            out.push(path);
+        }
     }
 }
 
