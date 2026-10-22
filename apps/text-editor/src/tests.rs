@@ -1079,6 +1079,16 @@ fn an_agent_names_only_files_in_the_home(ui: &TextEditorApp, s: &State, publishe
         assert!(err.ends_with(why), "{name} {args}: {err}");
     };
     refused("open", serde_json::json!({ "path": "~/.ssh/id_ed25519" }), " is protected");
+    // Yantrik's own data and state: the snippets store, an Email draft, a Notes draft (#940
+    // review, High 1). Each app's data goes through its own door.
+    for own in [
+        "~/.local/share/yantrik/snippets/snippets.json",
+        "~/.local/share/yantrik/email/draft.json",
+        "~/.local/state/yantrik/email/drafts/composing.json",
+        "~/.local/state/yantrik/notes/drafts/note-today.json",
+    ] {
+        refused("open", serde_json::json!({ "path": own }), " is protected");
+    }
     refused("open", serde_json::json!({ "path": "/etc/hostname" }), " is outside");
     refused("open", serde_json::json!({ "path": tab.display().to_string() }), " is outside");
     refused("save", serde_json::json!({}), " is outside");
@@ -1142,6 +1152,11 @@ fn an_agent_names_only_files_in_the_home(ui: &TextEditorApp, s: &State, publishe
     refused("save_as", serde_json::json!({ "path": dir.join("agent.txt").display().to_string() }), " is outside");
     assert!(!dir.join("agent.txt").exists(), "nothing was written");
     drop(agent);
+    // The person is not asked: their own open of the same places is as it was.
+    for own in ["~/.local/share/yantrik/snippets/snippets.json", "~/.local/state/yantrik/email/drafts/composing.json"] {
+        let path = yantrik_ipc_contracts::home_paths::expand(own, &home).expect("a path");
+        assert_eq!(agent_rule::may_read(&path), Ok(()), "{own}");
+    }
     act_on(published, "set_content", serde_json::json!({ "text": "" })).expect("empty the scratch tab");
     act_on(published, "close", serde_json::json!({})).expect("close the scratch tab");
     if ui.get_dialog() == 3 {

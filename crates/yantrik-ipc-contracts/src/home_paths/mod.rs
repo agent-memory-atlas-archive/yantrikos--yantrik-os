@@ -38,8 +38,8 @@ pub use writes::{resolve, where_programs_look, HIDDEN_RULE};
 /// startup scripts, autostart entries, user service units, the environment files, desktop
 /// entries (which run their `Exec=` when clicked), and `mimeapps.list`, which decides which of
 /// them opens a file. Written relative to the home, one or more whole path components each, in
-/// lower case. The same places under `$XDG_CONFIG_HOME` and `$XDG_DATA_HOME`, when those are set
-/// elsewhere, are protected too; see [`is_protected`].
+/// lower case. The same places under `$XDG_CONFIG_HOME`, `$XDG_DATA_HOME` and `$XDG_STATE_HOME`,
+/// when those are set elsewhere, are protected too; see [`is_protected`].
 ///
 /// The file tools in `yantrik-companion-core` add places outside the home to this (their
 /// BLOCKED_SEGMENTS); this is the part every side shares.
@@ -97,6 +97,13 @@ pub const PROTECTED: &[&str] = &[
     // review of #828, finding 1). The shell's `open_capture` is a mind's one way to one.
     "pictures/screenshots",
     "videos/recordings",
+    // Yantrik's own data and state, as whole trees: every app's store, exports and drafts (the
+    // snippets library, Email's draft and its unsent mail, every Notes draft), the minds' and
+    // agents' sessions, the gateway's records. Each app's data is reached through that app's own
+    // door, which applies its grades and Private mode; read as a file, the snippets store was
+    // every snippet's code as a `safe` editor `open` (security review of #940, High 1).
+    ".local/share/yantrik",
+    ".local/state/yantrik",
 ];
 
 /// What `.config/...` in [`PROTECTED`] names, found under `$XDG_CONFIG_HOME` instead.
@@ -107,15 +114,32 @@ const CONFIG_PLACES: &[&str] = &["autostart", "systemd", "environment.d", "labwc
 /// protected, `.ssh-notes` is not, and `.config/labwc` only as those two in a row.
 ///
 /// The session reads desktop entries from `$XDG_DATA_HOME/applications` and its configuration
-/// from `$XDG_CONFIG_HOME`, and a session that moves either elsewhere would otherwise leave the
-/// real place open; a const list cannot name a path from the environment, so it is asked here.
+/// from `$XDG_CONFIG_HOME`, and Yantrik keeps its own data and state in `$XDG_DATA_HOME/yantrik`
+/// and `$XDG_STATE_HOME/yantrik`; a session that moves any of them elsewhere would otherwise
+/// leave the real place open, and a const list cannot name a path from the environment, so it is
+/// asked here.
 pub fn is_protected(path: &Path) -> bool {
     let from_env = |name: &str| std::env::var_os(name).map(PathBuf::from).filter(|p| p.is_absolute());
-    is_protected_with(path, from_env("XDG_DATA_HOME").as_deref(), from_env("XDG_CONFIG_HOME").as_deref())
+    is_protected_with(
+        path,
+        &Xdg {
+            data_home: from_env("XDG_DATA_HOME").as_deref(),
+            config_home: from_env("XDG_CONFIG_HOME").as_deref(),
+            state_home: from_env("XDG_STATE_HOME").as_deref(),
+        },
+    )
 }
 
-/// [`is_protected`] with the XDG data and config homes given, or none.
-pub fn is_protected_with(path: &Path, xdg_data_home: Option<&Path>, xdg_config_home: Option<&Path>) -> bool {
+/// Where the session's XDG base directories are, when they are set: absolute paths, or none.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Xdg<'a> {
+    pub data_home: Option<&'a Path>,
+    pub config_home: Option<&'a Path>,
+    pub state_home: Option<&'a Path>,
+}
+
+/// [`is_protected`] with the XDG base directories given.
+pub fn is_protected_with(path: &Path, xdg: &Xdg<'_>) -> bool {
     let parts = lowered(path);
     let listed = PROTECTED.iter().any(|place| {
         let want = lowered(Path::new(place));
@@ -127,8 +151,9 @@ pub fn is_protected_with(path: &Path, xdg_data_home: Option<&Path>, xdg_config_h
         starts_with_folded(path, &at) || at.canonicalize().is_ok_and(|real| starts_with_folded(path, &real))
     };
     listed
-        || xdg_data_home.is_some_and(|xdg| under(xdg, "applications"))
-        || xdg_config_home.is_some_and(|xdg| CONFIG_PLACES.iter().any(|place| under(xdg, place)))
+        || xdg.data_home.is_some_and(|base| under(base, "applications") || under(base, "yantrik"))
+        || xdg.state_home.is_some_and(|base| under(base, "yantrik"))
+        || xdg.config_home.is_some_and(|base| CONFIG_PLACES.iter().any(|place| under(base, place)))
 }
 
 fn lowered(path: &Path) -> Vec<String> {
