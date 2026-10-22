@@ -2,10 +2,10 @@
 //! kept: it is whatever the folders hold, and a scan on start reads it again.
 //!
 //! Before the framework this was `~/.config/yantrik/music.json`, written by this app alone and
-//! read by nothing else, in the shape `{"folders": [...], "volume": n}`. That file is the
-//! framework's settings file for this app's id, so it is read once in that shape
-//! ([`Settings::legacy`]), kept beside itself as `music.json.legacy.json`, and written in the
-//! framework's envelope from then on.
+//! read by nothing else, in the shape `{"folders": [...], "volume": n}`. The framework keeps the
+//! settings in the app's own file now (`<config>/yantrik/apps/music/settings.json`); the old
+//! file is named as this app's (`FORMER_FILE`), brought across once in that shape
+//! ([`Settings::legacy`]), and left exactly where it was as the backup.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -37,6 +37,7 @@ impl Default for Kept {
 
 impl Settings for Kept {
     const SCHEMA: u32 = 1;
+    const FORMER_FILE: Option<&'static str> = Some("music.json");
 
     /// The file from before the framework: a list of folders, and the volume when it was set.
     fn legacy(raw: Value) -> Option<Value> {

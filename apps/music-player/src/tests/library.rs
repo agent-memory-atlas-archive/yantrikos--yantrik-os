@@ -78,18 +78,27 @@ fn folders_are_added_and_removed_in_the_dialogs_words_and_kept() {
     assert_eq!(f.notice(), "That folder is not in the list.");
 }
 
+/// `~/.config/yantrik/music.json`, as the old app wrote it: brought across once to the app's own
+/// file, and left exactly as it was.
 #[test]
-fn the_file_from_before_the_framework_is_read_once_and_kept_beside_the_new_one() {
+fn the_file_from_before_the_framework_is_brought_across_and_left_as_it_was() {
     let Some(f) = open("legacy") else { return };
     let paths = f.app.paths();
-    let backup = paths.config_file().with_file_name("music.json.legacy.json");
-    let old: Value = serde_json::from_slice(&std::fs::read(&backup).unwrap()).unwrap();
-    assert_eq!(old["volume"], 40.0, "the original is kept as it was");
+    let former = paths.former_config_file("music.json").unwrap();
+    let old: Value = serde_json::from_slice(&std::fs::read(&former).unwrap()).unwrap();
+    assert_eq!(old, json!({"folders": [f.music], "volume": 40.0}), "the old file is as it was");
     assert_eq!(f.state()["volume"], 40.0);
+    assert_eq!(f.state()["folders"][0]["path"], json!(f.music));
+    assert!(paths.config_file().ends_with("apps/music/settings.json"), "{}", paths.config_file().display());
+    let now: Value = serde_json::from_slice(&std::fs::read(paths.config_file()).unwrap()).unwrap();
+    assert_eq!((now["app"].clone(), now["schema"].clone()), (json!("music"), json!(1)), "{now}");
+    assert_eq!(now["settings"]["volume"], 40.0);
+    // A change is written to the app's own file, never the old one.
+    f.act("set_volume", json!({"percent": 55})).unwrap();
     f.app.run_writes();
     let now: Value = serde_json::from_slice(&std::fs::read(paths.config_file()).unwrap()).unwrap();
-    assert_eq!(now["schema"], 1, "rewritten in the framework's envelope: {now}");
-    assert_eq!(now["settings"]["volume"], 40.0);
+    assert_eq!(now["settings"]["volume"], 55.0);
+    assert_eq!(serde_json::from_slice::<Value>(&std::fs::read(&former).unwrap()).unwrap(), old);
 }
 
 #[test]

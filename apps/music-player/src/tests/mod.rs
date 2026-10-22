@@ -8,6 +8,7 @@
 //! - `agents.rs`: what an agent is told, and what it is not, in every answer and in `describe`.
 //! - `library.rs`: the scan, the folders and the settings file.
 //! - `order.rs`: answers per invocation, and commands that reach mpv in the order they were asked.
+//! - `private_mode.rs`: Music keeps none of its keys in Private mode.
 //! - `closing.rs`: the player stopped and reaped on a close, a logout, the display going, and
 //!   when the app is killed.
 
@@ -32,6 +33,7 @@ mod library;
 mod order;
 mod parity;
 mod playback;
+mod private_mode;
 
 /// The token an agent's calls carry here.
 pub(crate) const AGENT: &str = "tok-test-agent";
@@ -92,7 +94,7 @@ pub(crate) struct Fixture {
 pub(crate) struct Setup {
     /// The stand-in mpv, or a program that is not there.
     pub player: bool,
-    /// The settings file from before the framework, as the old app wrote it.
+    /// The settings file from before the framework, as the old app wrote it at the old place.
     pub kept: Option<Value>,
     pub args: Vec<std::ffi::OsString>,
 }
@@ -118,9 +120,11 @@ pub(crate) fn open_with(tag: &str, setup: Setup) -> Option<Fixture> {
     let music = library_in(&dir);
     let program = if setup.player { fake::install(&dir) } else { dir.join("no-mpv-here") };
     let paths = Paths::temporary(Music::ID);
+    // The file the app kept before the framework, where it kept it.
     let kept = setup.kept.unwrap_or_else(|| json!({ "folders": [music], "volume": 40.0 }));
-    std::fs::create_dir_all(paths.config_file().parent().unwrap()).unwrap();
-    std::fs::write(paths.config_file(), serde_json::to_vec(&kept).unwrap()).unwrap();
+    let former = paths.former_config_file("music.json").expect("Music's own file from before");
+    std::fs::create_dir_all(former.parent().unwrap()).unwrap();
+    std::fs::write(&former, serde_json::to_vec(&kept).unwrap()).unwrap();
     let rig = Rig { program: program.to_string_lossy().into_owned(), runtime: Some(runtime_in(&dir)), music: None };
     installed().lock().unwrap_or_else(|p| p.into_inner()).insert(paths.config_file().to_path_buf(), rig);
     let app = TestApp::<Music>::start_at(paths, setup.args);

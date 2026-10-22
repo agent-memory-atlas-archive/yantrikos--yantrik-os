@@ -80,7 +80,8 @@ pub const ENTRIES: &[Entry] = &[
     other(Config, "scripts", "companion-tools coder"),
     // config: an app's own settings from before the framework, its to bring across.
     apps(Config, "weather.json", "Weather, before its own directory", "weather"),
-    apps(Config, "music.json", "Music, before the framework", "music-player"),
+    // Music's framework id is its surface's, `music` (`app-music.sock`), not its folder's.
+    apps(Config, "music.json", "Music, before the framework", "music"),
     apps(Config, "studio.json", "Studio, before the framework", "studio"),
     // data
     apps(Data, "notes", "notes-service vault, which Notes shows and edits", "notes"),
