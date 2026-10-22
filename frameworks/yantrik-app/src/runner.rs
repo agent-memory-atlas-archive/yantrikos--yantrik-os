@@ -47,6 +47,8 @@ pub fn run<A: App>() -> ExitCode {
     boot::init_tracing_for(A::ID, Some(boot::crate_of::<A>()));
     boot::choose_backend();
     let paths = Paths::for_app(A::ID);
+    // Every record from here on, a panic's included, goes where this run's other files go.
+    problems::set_dir(paths.problems_dir());
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     // The launch is parsed before the claim: a command line this app does not take is said and
     // refused here, whichever copy would have run it. Opening the settings and drafts writes

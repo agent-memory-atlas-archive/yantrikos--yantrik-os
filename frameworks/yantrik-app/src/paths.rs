@@ -200,6 +200,13 @@ impl Paths {
     pub fn cache_dir(&self) -> &Path {
         &self.cache_dir
     }
+
+    /// `<data>/yantrik/problems/`: where this app's problem records go. Under `$YANTRIK_HOME`
+    /// for a second profile or a scratch run, like every other path here, so a run that is not
+    /// the person's own never files into the person's records.
+    pub fn problems_dir(&self) -> PathBuf {
+        self.data_dir.parent().map_or_else(|| PathBuf::from("problems"), |yantrik| yantrik.join("problems"))
+    }
 }
 
 #[cfg(test)]
@@ -231,6 +238,17 @@ mod tests {
         // A name that is not one, or a home that is relative, is refused too.
         assert_eq!(Paths::resolve("notes", Some(Path::new("/h")), Some("../x")).profile(), DEFAULT_PROFILE);
         assert_eq!(Paths::resolve("notes", Some(Path::new("rel")), None).config_file(), Paths::resolve("notes", None, None).config_file());
+    }
+
+    #[test]
+    fn problem_records_follow_the_home_like_every_other_path() {
+        let p = Paths::resolve("weather", Some(Path::new("/h")), Some("scratch"));
+        assert_eq!(p.problems_dir(), Path::new("/h/data/yantrik/problems"));
+        let q = Paths::under(Path::new("/r"), "notes", DEFAULT_PROFILE);
+        assert_eq!(q.problems_dir(), Path::new("/r/data/yantrik/problems"));
+        // The session's own: the same folder the records always went to.
+        let own = Paths::resolve("weather", None, None);
+        assert_eq!(own.problems_dir(), yantrik_foundation::xdg::data_home().join("yantrik").join("problems"));
     }
 
     #[test]
