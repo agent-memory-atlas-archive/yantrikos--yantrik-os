@@ -6,7 +6,8 @@
 //! - an agent's `search` matches titles, tags and language, never code, so its counts cannot be
 //!   used to read a secret back a character at a time;
 //! - an agent's `import` names only a file in the person's home, outside its protected places
-//!   (`home_paths`, #443, as Images' `open`).
+//!   (`home_paths`, #443, as Images' `open`);
+//! - `copy` answers that it copied, with neither the code nor its length.
 
 use serde_json::{json, Value};
 use yantrik_testing::Call;
@@ -87,4 +88,23 @@ fn an_agents_import_reads_only_a_file_in_the_home() {
     let answer = f.act("import", json!({ "path": outside.display().to_string() })).unwrap();
     assert_eq!(answer["imported"], json!(1));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A PIN is four bytes: a length is a hint at a secret. `copy` answers which snippet it copied and
+/// that it did, and no number in the answer is the code's length.
+#[test]
+fn copy_answers_with_neither_the_code_nor_its_length() {
+    let f = open();
+    // A length no other number in the answer can be: not an id, a use count or a flag.
+    let code = format!("{SENTINEL}-{}", "x".repeat(41));
+    let id = f.keep("Vault PIN", "Other", &code, "");
+    for answer in [f.act("copy", json!({ "id": id.to_string() })).unwrap(), as_agent(&f, "copy", json!({ "id": id.to_string() })).unwrap()] {
+        let mut keys: Vec<&str> = answer.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["copied", "id", "use_count", "use_count_saved", "with"], "{answer}");
+        assert!(!answer.to_string().contains(SENTINEL), "{answer}");
+        let length = json!(code.len());
+        assert!(answer.as_object().unwrap().values().all(|v| *v != length), "a size hint: {answer}");
+    }
+    assert_eq!(f.clipboard.texts(), [code.clone(), code], "and it was copied, both times");
 }

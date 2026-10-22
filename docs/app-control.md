@@ -356,7 +356,7 @@ content, and a content action a paired action takes back stays `standard` (`add_
 | presentation | `open`, `show`, `save`, `save_as`, `new_deck`, `add_slide`, `set_slide`, `move_slide`, `go_to`, `next`, `previous`, `present`, `export_markdown` | standard | deck content, editable again |
 | presentation | `delete_slide` | sensitive | takes the slide and its contents off the deck |
 | snippets | `open`, `search`, `show` | safe | reads; an agent's `search` matches titles, tags and language, never a snippet's code, and `describe` carries no line of any snippet's code |
-| snippets | `new`, `save`, `copy`, `toggle_favorite`, `import` | standard | library content, paired verbs; an agent's `import` names only a file in the person's home outside its protected places (`home_paths`, as Images' `open`), and `copy` answers the code's length, never the code |
+| snippets | `new`, `save`, `copy`, `toggle_favorite`, `import` | standard | library content, paired verbs; an agent's `import` names only a file in the person's home outside its protected places (`home_paths`, as Images' `open`), and `copy` answers that it copied, never the code nor its length |
 | snippets | `delete` | sensitive | no trash |
 | studio | `refresh` | safe | reads |
 | studio | `generate`, `variations` | standard ⇄ sensitive | regraded at runtime: `standard` to a model on the machine, `sensitive` when the backend sends the prompt to a hosted service |

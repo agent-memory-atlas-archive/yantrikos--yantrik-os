@@ -76,12 +76,12 @@ pub fn starred(m: &Model, id: i32) -> Value {
     })
 }
 
-/// What `copy` answers. The code itself never: only how long it was.
-pub fn copied(id: i32, title: &str, bytes: usize, use_count: i32, saved: bool) -> Value {
+/// What `copy` answers: that it copied, and which snippet. Never the code, and no length or size
+/// of it either: a length is a hint at a secret (a four-digit PIN is four bytes).
+pub fn copied(id: i32, title: &str, use_count: i32, saved: bool) -> Value {
     json!({
         "copied": title,
         "id": id,
-        "bytes": bytes,
         "with": "wl-copy",
         "use_count": use_count,
         "use_count_saved": saved,

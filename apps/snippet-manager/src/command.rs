@@ -124,10 +124,9 @@ pub struct Written {
 #[derive(Clone)]
 pub struct Copied {
     /// The snippet as it was when the copy began. Its code went to the clipboard and is not
-    /// carried back, only how long it was.
+    /// carried back, nor its length.
     pub id: i32,
     pub title: String,
-    pub bytes: usize,
     pub use_count: i32,
     pub result: Result<(), String>,
     pub from_window: bool,

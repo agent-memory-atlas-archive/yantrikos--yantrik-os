@@ -254,3 +254,16 @@ fn a_store_with_a_snippet_open_is_described_as_it_was() {
     f.act("search", json!({ "query": " " })).unwrap();
     assert_eq!(f.describe()["summary"], json!("Snippets \u{2014} 2 kept, none open"));
 }
+
+/// What `copy` answers: the keys the old app answered with, less one. Security
+/// (`fix/snippets-agent-exposure`): `bytes`, the code's length, is gone; a length is a hint at a
+/// secret.
+#[test]
+fn copy_answers_as_it_did_without_the_length() {
+    const BEFORE_COPY: &[&str] = &["copied", "id", "bytes", "with", "use_count", "use_count_saved"];
+    let f = open();
+    let (journal, _) = f.seeded();
+    let answer = f.act("copy", json!({ "id": journal.to_string() })).unwrap();
+    let now: Vec<&str> = BEFORE_COPY.iter().copied().filter(|k| *k != "bytes").collect();
+    assert_eq!(keys(&answer), sorted(&now));
+}
