@@ -28,7 +28,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::app::{App, Changed, Event, ExitReason};
-use crate::effects::{Effects, Request};
+use crate::effects::Request;
 use crate::intents::{Invocation, InvocationId, Origin};
 use crate::jobs::{Cancel, Deliver, Executor, Finished, JobId, JobKey};
 use crate::persist::{Lane, Report, Written};
@@ -41,6 +41,7 @@ use crate::rail::RailCommand;
 use crate::watch::Seen;
 use yantrik_surface::LocalRegistry;
 
+mod drawn;
 mod events;
 mod handle;
 mod jobs_table;
@@ -264,7 +265,7 @@ impl<A: App> Core<A> {
     /// is redrawn unless it says so; the first render has just happened.
     pub fn start(&self) {
         self.fresh_wake();
-        let mut fx = Effects::starting(self.next_job.get(), self.timers.borrow().instant());
+        let mut fx = self.effects(None).starting();
         A::start(&self.model.borrow(), &mut fx);
         let (requests, changed, next) = fx.into_parts();
         self.next_job.set(next);
@@ -397,7 +398,7 @@ impl<A: App> Core<A> {
     fn apply(&self, invocation: Option<Invocation>, command: A::Command) -> Result<(), Refused> {
         self.applying.set(true);
         self.current.set(invocation);
-        let mut fx = Effects::new(self.next_job.get(), invocation, self.timers.borrow().instant());
+        let mut fx = self.effects(invocation);
         let result = A::update(&mut self.model.borrow_mut(), command, &mut fx);
         let (requests, changed, next) = fx.into_parts();
         match &result {
