@@ -384,3 +384,87 @@ fn the_settings_folders_are_made_owner_only() {
     }
     assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
 }
+
+/// Finding E of the review: a second name for another component's file, made and removed as
+/// fast as it can be (`ln email.json settings.json; rm settings.json`), so that removing it
+/// between the open and the `fstat` makes the account file look like ours alone. No round of
+/// `read_file` or `Fingerprint::of` reads more than a few hundred bytes (the count's own).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_second_name_made_and_removed_under_the_read_never_gets_the_file_read() {
+    use crate::quiet::tests::{account_file, bytes_read_by};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    let d = dir("link-unlink");
+    let path = d.join("app.json");
+    let account = account_file(&d);
+    let stop = Arc::new(AtomicBool::new(false));
+    let racer = {
+        let (stop, path, account) = (stop.clone(), path.clone(), account.clone());
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                let _ = std::fs::hard_link(&account, &path);
+                let _ = std::fs::remove_file(&path);
+            }
+        })
+    };
+    let (mut refused, mut missing, mut worst) = (0u32, 0u32, 0u64);
+    for _ in 0..20_000 {
+        let (opened, read) = bytes_read_by(|| read_file::<Prefs>(&path, APP));
+        let (_, fingerprint_read) = bytes_read_by(|| Fingerprint::of_settings(&path));
+        worst = worst.max(read).max(fingerprint_read);
+        match opened {
+            Opened::Recovery(SettingsError::NotOurs) => refused += 1,
+            Opened::Missing => missing += 1,
+            Opened::Read { .. } => panic!("the account file was read as settings"),
+            Opened::Recovery(_) => {}
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    racer.join().unwrap();
+    assert!(refused > 0 && missing > 0, "the race ran both ways: {refused} refused, {missing} missing");
+    assert!(worst < 16 * 1024, "a round read {worst} bytes of the account file");
+    assert!(std::fs::read(&account).unwrap().starts_with(b"SENTINEL"), "the account file is as it was");
+}
+
+/// The review's second race: our marked file and a fresh hard link to the account file renamed
+/// over the path in turn. Our file is read; the link never is.
+#[cfg(target_os = "linux")]
+#[test]
+fn our_file_and_a_hard_link_renamed_in_turn_never_get_the_link_read() {
+    use crate::quiet::tests::{account_file, bytes_read_by};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    let d = dir("rename-hard");
+    let path = d.join("app.json");
+    let account = account_file(&d);
+    let small = marked(2, r#"{"step":1,"unit":"c"}"#);
+    std::fs::write(&path, &small).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let racer = {
+        let (stop, path, account, d) = (stop.clone(), path.clone(), account.clone(), d.clone());
+        std::thread::spawn(move || {
+            let (file, link) = (d.join("stage-file"), d.join("stage-link"));
+            while !stop.load(Ordering::Relaxed) {
+                let _ = std::fs::write(&file, &small);
+                let _ = std::fs::rename(&file, &path);
+                let _ = std::fs::remove_file(&link);
+                let _ = std::fs::hard_link(&account, &link);
+                let _ = std::fs::rename(&link, &path);
+            }
+        })
+    };
+    let (mut ours, mut worst) = (0u32, 0u64);
+    for _ in 0..20_000 {
+        let (opened, read) = bytes_read_by(|| read_file::<Prefs>(&path, APP));
+        let (_, fingerprint_read) = bytes_read_by(|| Fingerprint::of_settings(&path));
+        worst = worst.max(read).max(fingerprint_read);
+        if matches!(opened, Opened::Read { .. }) {
+            ours += 1;
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    racer.join().unwrap();
+    assert!(ours > 0, "our own file is still read between the swaps");
+    assert!(worst < 16 * 1024, "a round read {worst} bytes of the account file");
+}

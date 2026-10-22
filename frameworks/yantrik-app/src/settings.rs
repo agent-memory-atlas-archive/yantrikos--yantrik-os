@@ -126,7 +126,7 @@ impl<T: Settings> Store<T> {
                 (T::default(), Health::Recovery(e), false)
             }
         };
-        let fingerprint = Fingerprint::of(&path);
+        let fingerprint = Fingerprint::of_settings(&path);
         let mut store = Store {
             path,
             app: app.to_string(),
@@ -205,7 +205,7 @@ impl<T: Settings> Store<T> {
             }
             // What was written is known without reading the file back, so an outside edit that
             // lands between the write and this is not mistaken for the app's own.
-            self.fingerprint = written.or_else(|| Fingerprint::of(&self.path));
+            self.fingerprint = written.or_else(|| Fingerprint::of_settings(&self.path));
             if self.in_recovery() {
                 tracing::info!(app = %self.app, "a write of this app's own landed over the unusable settings file; recovery ends");
                 self.health = Health::Fine;
@@ -239,12 +239,12 @@ impl<T: Settings> Store<T> {
 
     /// Whether the file changed under this app since it last read or wrote it.
     pub fn changed_outside(&self) -> bool {
-        Fingerprint::of(&self.path) != self.fingerprint
+        Fingerprint::of_settings(&self.path) != self.fingerprint
     }
 
     /// Re-reads a file that changed outside this app.
     pub fn reload(&mut self) -> Reloaded<T> {
-        let now = Fingerprint::of(&self.path);
+        let now = Fingerprint::of_settings(&self.path);
         if now == self.fingerprint {
             return Reloaded::Unchanged;
         }

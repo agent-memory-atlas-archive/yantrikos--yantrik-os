@@ -23,7 +23,7 @@ use std::path::Path;
 use serde_json::Value;
 use yantrik_foundation::json_store::write_atomically;
 
-use super::file::{private_dir, read_bounded, render_raw, KIND};
+use super::file::{private_dir, read_bounded_unmarked, render_raw, KIND};
 use super::{Settings, SettingsError};
 use crate::paths::Paths;
 
@@ -58,7 +58,7 @@ pub fn import<T: Settings>(paths: &Paths) -> Imported {
     }
     // Read as the settings file is (`crate::quiet`): a link, a FIFO, a device or a file over the
     // limit is not opened past its metadata, and nothing of it is parsed.
-    let bytes = match read_bounded(&former) {
+    let bytes = match read_bounded_unmarked(&former) {
         Ok(Some(bytes)) => Some(bytes),
         Ok(None) => return Imported::NoFile,
         Err(SettingsError::NotOurs) => None,

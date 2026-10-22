@@ -8,10 +8,11 @@
 //! is skipped unread by serde), so a secret in such a file never reaches the model, the log, a
 //! problem record or the window.
 //!
-//! Every read of the file, and every fingerprint of it, goes through [`crate::quiet::read_own`]:
-//! no link is followed, no FIFO blocks, and only a regular file of at most [`MAX_BYTES`] with one
-//! name (no hard link to another component's file) is read, from the descriptor that was
-//! checked. Anything else is fingerprinted by its metadata alone, so
+//! Every read of the file, and every fingerprint of it, goes through [`crate::quiet::read_own_marked`]
+//! (with [`KIND`] as the mark): no link is followed, no FIFO blocks, and only a regular file of at
+//! most [`MAX_BYTES`], with one name (no hard link to another component's file) and the mark in
+//! its first bytes, is read past that probe, from the descriptor that was checked. A race that
+//! unlinks a second name to make another component's file look sole gives up at most the probe. Anything else is fingerprinted by its metadata alone, so
 //! the watcher sees it change without reading a byte of it.
 
 use std::path::{Path, PathBuf};
@@ -64,11 +65,24 @@ pub struct Fingerprint {
 }
 
 impl Fingerprint {
-    /// The file's fingerprint now, or `None` when it is absent or unreadable. A regular file of
-    /// at most [`MAX_BYTES`] is fingerprinted by its content; anything else at the path (a link,
-    /// a FIFO, a device, a larger file) by its metadata alone, and none of it is read.
+    /// A file's fingerprint now, or `None` when it is absent or unreadable. A regular file of one
+    /// name (not hard-linked) at most [`MAX_BYTES`] is fingerprinted by its content; anything
+    /// else at the path (a link, a FIFO, a device, a larger file) by its metadata alone, and none
+    /// of it is read. For a document, whose path is one the person chose; a settings file has its
+    /// own ([`Fingerprint::of_settings`]).
     pub fn of(path: &Path) -> Option<Fingerprint> {
-        match quiet::read_own(path, MAX_BYTES).ok()? {
+        Fingerprint::from(quiet::read_own(path, MAX_BYTES).ok()?)
+    }
+
+    /// The fingerprint of a settings file this app owns alone: a file without the mark in its
+    /// first bytes is fingerprinted by its metadata, not read, so another component's file at the
+    /// settings path (a hard link raced into place) is still seen to change without being read.
+    pub fn of_settings(path: &Path) -> Option<Fingerprint> {
+        Fingerprint::from(quiet::read_own_marked(path, MAX_BYTES, KIND.as_bytes()).ok()?)
+    }
+
+    fn from(looked: Looked) -> Option<Fingerprint> {
+        match looked {
             Looked::Missing => None,
             Looked::Read(bytes) => Some(Fingerprint::of_bytes(&bytes)),
             Looked::Refused(stat) => Some(Fingerprint::of_stat(&stat)),
@@ -133,11 +147,22 @@ pub fn is_marked(bytes: &[u8], app: &str) -> bool {
         .is_ok_and(|m| m.kind.as_deref() == Some(KIND) && m.app.as_deref() == Some(app))
 }
 
-/// The bytes at `path`: `Ok(None)` when there is nothing there, `Err(NotOurs)` for a link, a
-/// FIFO, a device, a directory or a file too large to be settings, none of which is read
-/// ([`crate::quiet::read_own`]).
+/// The bytes of the marked settings file at `path`: `Ok(None)` when there is nothing there,
+/// `Err(NotOurs)` for a link, a hard link to another file, a FIFO, a device, a directory, a file
+/// too large, or a file without the mark in its first [`crate::quiet::PROBE`] bytes, none of
+/// which is read past that probe ([`crate::quiet::read_own_marked`]).
 pub(crate) fn read_bounded(path: &Path) -> Result<Option<Vec<u8>>, SettingsError> {
-    match quiet::read_own(path, MAX_BYTES) {
+    bounded(quiet::read_own_marked(path, MAX_BYTES, KIND.as_bytes()))
+}
+
+/// The bytes at `path` for the migration's look at an old file, which may be a legacy file with
+/// no mark: the same checks but no mark needle ([`crate::quiet::read_own`]).
+pub(crate) fn read_bounded_unmarked(path: &Path) -> Result<Option<Vec<u8>>, SettingsError> {
+    bounded(quiet::read_own(path, MAX_BYTES))
+}
+
+fn bounded(looked: std::io::Result<Looked>) -> Result<Option<Vec<u8>>, SettingsError> {
+    match looked {
         Ok(Looked::Missing) => Ok(None),
         Ok(Looked::Read(bytes)) => Ok(Some(bytes)),
         Ok(Looked::Refused(_)) => Err(SettingsError::NotOurs),
