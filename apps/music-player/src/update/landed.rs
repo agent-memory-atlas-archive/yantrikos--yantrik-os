@@ -54,6 +54,17 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Fx) {
         },
         Command::Rewound(result) => landed(m, fx, "not_moved", result),
         Command::Sought(result) => landed(m, fx, "not_moved", result),
+        Command::VolumeSet { result, .. } if !answers::owed(fx) => {
+            // The person's: the volume asked for since is sent now, so the last one wins.
+            m.volume_sending = false;
+            if let Err(why) = result {
+                refuse(m, fx, "not_set", why);
+            }
+            match m.volume_next.take() {
+                Some(next) => playback::send_volume(m, fx, next),
+                None => fx.changed(NOTHING),
+            }
+        }
         Command::VolumeSet { percent, result } => match result {
             // Nothing to ask: the volume is kept and mpv starts with it.
             Ok(VolumeSet::NotRunning) => {

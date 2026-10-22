@@ -29,18 +29,20 @@ fn the_scan_runs_off_the_ui_thread_and_its_last_sentence_stays_on_screen() {
     assert_eq!(found["unreadable"], json!([]));
 }
 
-/// Two rescans in flight: each is answered with the scan it started, not the other's.
+/// A `rescan` while a scan runs is told so and starts nothing; once that scan lands, the next
+/// one is answered with what it found.
 #[test]
-fn each_rescan_is_answered_with_its_own_scan() {
+fn a_rescan_while_a_scan_runs_is_told_so_and_the_next_one_finds_the_new_file() {
     let Some(f) = open("two-scans") else { return };
     let first = f.app.act("rescan", json!({})).unwrap();
-    let second = f.app.act("rescan", json!({})).unwrap();
-    assert_eq!(f.app.jobs_waiting(), 2, "the second started a scan of its own");
-    f.app.run_one_job();
-    std::fs::write(f.music.join("Gamma/zz new.mp3"), b"").unwrap();
+    let second = f.app.act("rescan", json!({})).unwrap().settle();
+    assert_eq!(second.unwrap_err(), crate::update::SCANNING);
+    assert_eq!(f.app.jobs_waiting(), 1, "the second started nothing");
+    assert!(f.notice().is_empty() || f.notice() == crate::update::SCANNING);
     f.quiet();
-    assert_eq!(second.settle().unwrap()["library_size"], 301, "the second scan saw the new file");
-    assert_eq!(first.settle().unwrap()["library_size"], 300, "the first is answered with its own");
+    assert_eq!(first.settle().unwrap()["library_size"], 300);
+    std::fs::write(f.music.join("Gamma/zz new.mp3"), b"").unwrap();
+    assert_eq!(f.act("rescan", json!({})).unwrap()["library_size"], 301);
     assert_eq!(f.state()["library_size"], 301);
 }
 

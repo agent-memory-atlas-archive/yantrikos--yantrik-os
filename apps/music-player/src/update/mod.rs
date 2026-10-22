@@ -30,6 +30,10 @@ mod landed;
 mod library;
 mod playback;
 
+/// What a test checks a `rescan` during a scan is told.
+#[cfg(test)]
+pub use library::SCANNING;
+
 type Fx = Effects<Music>;
 
 /// How long a close waits for the player to be stopped before the framework ends the app anyway
@@ -136,7 +140,7 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refuse
             Ok(())
         }
         Command::NotSaved(why) => {
-            m.notice = format!("could not save the folder list to {}: {why}", m.config_file.display());
+            m.notice = format!("could not save Music's settings to {}: {why}", m.config_file.display());
             fx.changed(PART_STATUS);
             Ok(())
         }
@@ -234,6 +238,11 @@ fn failed(m: &mut Model, work: Work, fx: &mut Fx) {
             m.agent_status = None;
         }
         Work::Check | Work::Folder => m.notice = "That could not be looked at; try again.".into(),
+        Work::Volume => {
+            m.volume_sending = false;
+            m.volume_next = None;
+            m.notice = "The player did not answer; try again.".into();
+        }
         _ => m.notice = "The player did not answer; try again.".into(),
     }
     fx.changed(PART_STATUS);

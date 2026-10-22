@@ -7,7 +7,8 @@
 //! takes the player down; `playlist` behaves like an mpv that follows a playlist (it reports a
 //! `redirect` and starts playing the URL inside); `elsewhere` loads another file than the one
 //! asked for, one outside the home; `slow` is said to have loaded only when the next file is
-//! asked for, as a player still opening one file when it is handed another.
+//! asked for, as a player still opening one file when it is handed another; `stuck` is taken
+//! and never said to have loaded.
 
 use std::path::{Path, PathBuf};
 
@@ -64,7 +65,8 @@ for line in f:
             after.append({'event': 'end-file', 'reason': 'error', 'file_error': 'unrecognized file format'})
         else:
             change('path', p); change('idle-active', False)
-            (deferred if 'slow' in p else after).append({'event': 'file-loaded'})
+            if 'stuck' not in p:
+                (deferred if 'slow' in p else after).append({'event': 'file-loaded'})
             change('duration', 200.0); change('time-pos', 0.0)
             if 'short' in p:
                 after.append({'event': 'end-file', 'reason': 'eof'})

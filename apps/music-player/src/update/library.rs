@@ -3,9 +3,11 @@
 //!
 //! Scans are numbered as they start. The library in hand is the latest scan's that has landed:
 //! one that lands after a later one changes nothing on screen, though the call that started it
-//! is still answered with what it found. The person's Rescan, and a folder added or removed,
-//! while a scan runs, scan once more when it lands, as before. A `rescan` from the Mind starts a
-//! scan of its own and is answered with that one.
+//! is still answered with what it found. One scan runs at a time: a walk of a large library
+//! holds a job thread for its whole length, and the player's commands share those threads. The
+//! person's Rescan, and a folder added or removed, while a scan runs, scan once more when it
+//! lands, as before. A `rescan` from the Mind while a scan runs is refused with a sentence that
+//! says where to read its progress.
 
 use serde_json::{json, Value};
 use yantrik_app::cx::Inbound;
@@ -19,15 +21,15 @@ use crate::seen;
 
 use super::{kept, Fx};
 
+/// What a `rescan` asked while a scan runs is told.
+pub const SCANNING: &str =
+    "Music is already scanning the library; `describe` shows its progress, and `rescan` can be asked again once `scanning` is false.";
+
 pub fn update(m: &mut Model, command: Command, fx: &mut Fx) {
     match command {
-        Command::Rescan => {
-            if owed(fx) {
-                scan(m, fx);
-            } else {
-                rescan(m, fx);
-            }
-        }
+        Command::Rescan if owed(fx) && m.scans.running > 0 => refuse(m, fx, "busy", SCANNING),
+        Command::Rescan if owed(fx) => scan(m, fx),
+        Command::Rescan => rescan(m, fx),
         Command::Scanned(scanned) => landed(m, *scanned, fx),
         Command::Scanning { scan, found } => {
             if scan == m.scans.started && m.scans.running > 0 {
@@ -52,7 +54,7 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Fx) {
                     m,
                     fx,
                     "bad_folder",
-                    format!("Give the folder's full path, starting with / or ~/ (not \u{201c}{raw}\u{201d})."),
+                    format!("Give the folder's full path, starting with / or ~/ (not \u{201c}{}\u{201d}).", library::plain(&raw)),
                 );
             }
             fx.spawn_or(Command::WorkFailed(Work::Folder), move |_| {
@@ -63,10 +65,10 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Fx) {
         }
         Command::FolderChecked { path, is_folder } => {
             if m.folders.contains(&path) {
-                return refuse(m, fx, "bad_folder", format!("{path} is already in the list."));
+                return refuse(m, fx, "bad_folder", format!("{} is already in the list.", library::plain(&path)));
             }
             if !is_folder {
-                return refuse(m, fx, "bad_folder", format!("Not a folder: {path}"));
+                return refuse(m, fx, "bad_folder", format!("Not a folder: {}", library::plain(&path)));
             }
             m.folders.push(path);
             m.per_folder.push(0);

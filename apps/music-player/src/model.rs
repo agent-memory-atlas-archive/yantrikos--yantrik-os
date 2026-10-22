@@ -103,6 +103,11 @@ pub struct Model {
     /// The player's jobs started and not landed. A close with none and no player running ends at
     /// once, as it always did.
     pub player_jobs: u32,
+    /// A volume change of the person's is on its way to the player. The newest one asked for
+    /// meanwhile waits in `volume_next` until it lands, so a drag is one change at a time and the
+    /// last one always reaches mpv. (`volume` follows what mpv reports, so it cannot hold it.)
+    pub volume_sending: bool,
+    pub volume_next: Option<f64>,
 
     pub status: String,
     /// What an agent reads in place of `status` when it names folders the agent may not see.
@@ -149,6 +154,8 @@ impl Model {
             muted: false,
             tickets: 0,
             player_jobs: 0,
+            volume_sending: false,
+            volume_next: None,
             status: String::new(),
             agent_status: None,
             notice: String::new(),

@@ -83,3 +83,20 @@ fn a_second_launch_with_a_file_plays_it_in_the_window_already_open() {
     f.quiet();
     assert!(f.notice().contains("not a sound file"), "{}", f.notice());
 }
+
+/// A name with a newline or a direction override is said as one line of plain text.
+#[test]
+fn a_name_is_said_as_one_line_of_plain_text() {
+    let Some(f) = open("names") else { return };
+    let odd = f.dir.join("two\nlines\u{202E}.txt");
+    std::fs::write(&odd, b"").unwrap();
+    let err = f.act("play_file", json!({"path": odd})).unwrap_err();
+    assert!(err.contains("two\u{FFFD}lines\u{FFFD}.txt is not a sound file"), "{err}");
+    assert!(!f.notice().contains('\n') && !f.notice().contains('\u{202E}'), "{:?}", f.notice());
+    let missing = f.dir.join("gone\n.mp3");
+    assert!(!f.act("play_file", json!({"path": missing})).unwrap_err().contains('\n'));
+    let not_folder = odd.to_string_lossy().into_owned();
+    f.app.ui(move |ui| ui.invoke_scan_add_folder(not_folder.into()));
+    f.quiet();
+    assert!(f.notice().starts_with("Not a folder: ") && !f.notice().contains('\n'), "{:?}", f.notice());
+}

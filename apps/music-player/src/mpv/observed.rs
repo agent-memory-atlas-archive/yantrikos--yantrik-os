@@ -79,6 +79,13 @@ impl Shared {
         self.changed.notify_all();
     }
 
+    /// Wakes every waiter to look again at what it waits for, with nothing new reported: the
+    /// player was handed another file, and a wait for the last one may be over.
+    pub fn wake(&self) {
+        let _state = self.state.lock().unwrap();
+        self.changed.notify_all();
+    }
+
     pub fn snapshot(&self) -> Observed {
         self.state.lock().unwrap().clone()
     }

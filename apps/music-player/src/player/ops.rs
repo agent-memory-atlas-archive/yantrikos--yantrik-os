@@ -10,7 +10,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use super::{Player, Start, Ticket};
-use crate::library::Track;
+use crate::library::{self, Track};
 use crate::mpv::{Engine, Observed};
 use crate::seen;
 
@@ -117,18 +117,22 @@ pub fn load(p: &Player, ticket: Ticket, track: &Track, start: &Start, answer: bo
         let why = format!("Could not play \u{201c}{}\u{201d}: {why}.", track.title);
         return Loaded::Refused { why, gone: !e.is_alive() };
     }
+    let mine = p.handed(&e);
     let _ = e.client.set("pause", json!(false));
     drop(turn);
     let for_agents = seen::for_agents(&track.path);
-    let answer = answer.then(|| wait_loaded(&e, track, &before, agent));
+    let answer = answer.then(|| wait_loaded(p, &e, track, &before, mine, agent));
     Loaded::Sent { player, started, for_agents, answer }
 }
 
 /// Wait for mpv to have loaded `track`, and answer with what it reported; or say what it said
-/// instead. Out of turn: a pause pressed meanwhile is not held up by it.
-fn wait_loaded(e: &Engine, track: &Track, before: &Observed, agent: bool) -> Result<Played, String> {
+/// instead. Out of turn: a pause pressed meanwhile is not held up by it. The wait ends early
+/// when another file is handed over (`mine` is no longer the last), so however many calls play
+/// at once, at most one wait holds a job thread and the player's commands always find one.
+fn wait_loaded(p: &Player, e: &Engine, track: &Track, before: &Observed, mine: u64, agent: bool) -> Result<Played, String> {
     let is_it = |o: &Observed| o.loads > before.loads && o.path.as_deref() == Some(track.path.as_str());
-    let (_, o) = e.observed.wait_for(LOAD_WAIT, |o| o.gone || o.errors > before.errors || is_it(o));
+    let superseded = || p.last_handed() != mine;
+    let (_, o) = e.observed.wait_for(LOAD_WAIT, |o| o.gone || o.errors > before.errors || is_it(o) || superseded());
     if !o.gone && o.errors == before.errors && is_it(&o) {
         let now = report(e);
         return Ok(match now.path {
@@ -142,9 +146,12 @@ fn wait_loaded(e: &Engine, track: &Track, before: &Observed, agent: bool) -> Res
     let why = match (&o.last_error, &o.path) {
         (Some(error), _) if o.errors > before.errors => error.clone(),
         _ if o.gone => "the player (mpv) stopped".into(),
+        _ if superseded() && o.loads == before.loads => {
+            "another file was handed to it before it said this one was playing".into()
+        }
         // mpv loaded something, but not this file: say what it is playing instead.
         (_, Some(other)) if o.loads > before.loads => {
-            format!("mpv is playing {} instead", seen::shown(other, agent, seen::for_agents(other)))
+            format!("mpv is playing {} instead", library::plain(&seen::shown(other, agent, seen::for_agents(other))))
         }
         _ => "mpv did not report the file as loaded".into(),
     };

@@ -53,7 +53,8 @@ fn the_players_commands_land_in_the_order_they_were_asked() {
     f.app.ui(|ui| ui.invoke_play_track_index(9));
     f.app.ui(|ui| ui.invoke_volume_changed(0.2));
     f.app.ui(|ui| ui.invoke_volume_changed(0.7));
-    assert_eq!(f.app.model(|m| m.player_jobs), 4);
+    // The play, the row, and the first volume step; the second waits for the first to land.
+    assert_eq!(f.app.model(|m| m.player_jobs), 3);
     let answer = f.settled(pending).unwrap();
     assert_eq!(answer["track"], "Alpha 002", "the Mind is told about its own play: {answer}");
     f.until("the person's row plays", |f| f.playing_path().is_some_and(|p| p.ends_with("Alpha 009.mp3")));

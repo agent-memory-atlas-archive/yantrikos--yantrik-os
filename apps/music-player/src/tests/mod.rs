@@ -9,6 +9,7 @@
 //! - `library.rs`: the scan, the folders and the settings file.
 //! - `order.rs`: answers per invocation, and commands that reach mpv in the order they were asked.
 //! - `private_mode.rs`: Music keeps none of its keys in Private mode.
+//! - `busy.rs`: the player's commands never wait behind the library's scans.
 //! - `closing.rs`: the player stopped and reaped on a close, a logout, the display going, and
 //!   when the app is killed.
 
@@ -26,6 +27,7 @@ use crate::player::Rig;
 use crate::Music;
 
 mod agents;
+mod busy;
 mod closing;
 pub(crate) mod fake;
 mod files;

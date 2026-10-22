@@ -78,12 +78,13 @@ pub fn track_from(path: &Path) -> Track {
 /// An audio file on disk, by its absolute path: never anything mpv would read as a URL, a
 /// playlist or an option. Reads the disk: from a job only.
 pub fn audio_file(path: &Path) -> Result<PathBuf, String> {
-    let path = std::fs::canonicalize(path).map_err(|e| format!("There is no file at {}: {e}.", path.display()))?;
+    let said = |p: &Path| plain(&p.to_string_lossy());
+    let path = std::fs::canonicalize(path).map_err(|e| format!("There is no file at {}: {e}.", said(path)))?;
     if !path.is_file() {
-        return Err(format!("{} is not a file.", path.display()));
+        return Err(format!("{} is not a file.", said(&path)));
     }
     if !is_audio(&path) {
-        return Err(format!("{} is not a sound file Music plays (mp3, flac, ogg, opus, wav, m4a).", path.display()));
+        return Err(format!("{} is not a sound file Music plays (mp3, flac, ogg, opus, wav, m4a).", said(&path)));
     }
     Ok(path)
 }
@@ -157,7 +158,7 @@ pub fn summary(library: &Library, folders: usize, name: impl Fn(&str) -> String)
         count(folders, "folder", "folders")
     );
     if !library.unreadable.is_empty() {
-        let names: Vec<String> = library.unreadable.iter().map(|(f, _)| name(f)).collect();
+        let names: Vec<String> = library.unreadable.iter().map(|(f, _)| plain(&name(f))).collect();
         said.push_str(&format!(
             " — could not read {}: {}",
             if names.len() == 1 { "this folder" } else { "these folders" },

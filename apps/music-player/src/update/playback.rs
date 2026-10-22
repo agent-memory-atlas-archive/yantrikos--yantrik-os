@@ -160,12 +160,27 @@ fn seek_to(m: &mut Model, fx: &mut Fx, seconds: f64) {
 }
 
 /// The volume is the window's at once and kept for next time; the player is told in its turn.
+/// The person's changes go one at a time: while one is on its way the newest waits in the model,
+/// and is sent when that one lands (`send_volume`), so a drag never piles up jobs and the last
+/// value is the one mpv ends at. A call's change is sent at once, to be answered with mpv's word.
 fn set_volume(m: &mut Model, fx: &mut Fx, percent: f64) {
     let percent = percent.clamp(0.0, 100.0);
     m.volume = percent;
     fx.save_settings(kept(m));
     fx.changed(PART_TRANSPORT);
+    if !owed(fx) && m.volume_sending {
+        m.volume_next = Some(percent);
+    } else {
+        send_volume(m, fx, percent);
+    }
+}
+
+/// Tell the player `percent`.
+pub fn send_volume(m: &mut Model, fx: &mut Fx, percent: f64) {
     let answer = owed(fx);
+    if !answer {
+        m.volume_sending = true;
+    }
     job(m, fx, Work::Volume, move |p, t| Command::VolumeSet { percent, result: ops::volume(p, t, percent, answer) });
 }
 

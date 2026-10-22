@@ -212,3 +212,41 @@ fn nothing_redraws_at_rest_and_the_position_redraws_only_the_transport() {
     f.quiet();
     assert_eq!(f.app.revision(), before, "paused, nothing reached the window");
 }
+
+/// Paused part of the way into a second, `describe` says where it stopped, not the second before.
+#[test]
+fn a_pause_shows_where_the_track_stopped() {
+    let Some(f) = open("pause-position") else { return };
+    f.act("play", json!({"index": 1})).unwrap();
+    f.act("seek", json!({"seconds": 12.0})).unwrap();
+    f.act("seek", json!({"seconds": 12.9})).unwrap();
+    f.quiet();
+    assert_eq!(f.state()["position"], 12.0, "within the second shown, the window is not redrawn");
+    f.act("pause", json!({})).unwrap();
+    f.until("the position it stopped at is in", |f| f.state()["position"] == 12.9);
+}
+
+/// A fast drag is one change at a time, and mpv ends at the slider's last value.
+#[test]
+fn a_volume_drag_ends_where_the_slider_does() {
+    let Some(f) = open("drag") else { return };
+    f.act("play", json!({"index": 1})).unwrap();
+    for step in 0..=20 {
+        f.app.ui(move |ui| ui.invoke_volume_changed(step as f32 * 0.04));
+    }
+    assert_eq!(f.app.model(|m| m.player_jobs), 1, "one change on its way, the newest waiting");
+    let last = (20.0f32 * 0.04) as f64 * 100.0;
+    f.until("mpv is at the slider's last value", |f| f.state()["volume"].as_f64().is_some_and(|v| (v - last).abs() < 0.001));
+    assert!(!f.app.model(|m| m.volume_sending));
+    f.app.run_writes();
+    assert!((f.app.committed_settings().volume - last).abs() < 0.001);
+}
+
+/// A save that did not reach the disk is said as what it was.
+#[test]
+fn a_failed_save_is_said_as_a_settings_save() {
+    let Some(f) = open("not-saved") else { return };
+    f.app.event(yantrik_app::app::Event::SettingsNotSaved("the disk is full".into()));
+    assert!(f.notice().starts_with("could not save Music's settings to "), "{}", f.notice());
+    assert!(f.notice().ends_with(": the disk is full"), "{}", f.notice());
+}

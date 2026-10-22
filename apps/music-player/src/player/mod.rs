@@ -73,6 +73,9 @@ pub struct Player {
     engine: Mutex<Option<(u64, Arc<Engine>)>>,
     /// The number the last player started was given. Numbers only grow.
     started: AtomicU64,
+    /// Files handed to the player so far. A wait for one file ends when another is handed over
+    /// (`ops::load`), so at most one call's wait holds a job thread.
+    loads: AtomicU64,
 }
 
 impl std::fmt::Debug for Player {
@@ -98,6 +101,7 @@ impl Player {
             lane: Turnstile::new(),
             engine: Mutex::new(None),
             started: AtomicU64::new(0),
+            loads: AtomicU64::new(0),
         })
     }
 
@@ -136,6 +140,19 @@ impl Player {
         Ok((number, engine, true))
     }
 
+    /// Counts one more file handed to the player `e` and wakes any wait for the one before it.
+    /// Returns this file's number.
+    pub fn handed(&self, e: &Engine) -> u64 {
+        let n = self.loads.fetch_add(1, Ordering::SeqCst) + 1;
+        e.observed.wake();
+        n
+    }
+
+    /// The number of the last file handed to the player.
+    pub fn last_handed(&self) -> u64 {
+        self.loads.load(Ordering::SeqCst)
+    }
+
     /// Stops the player, if there is one, and reaps it: the end of the app, or a close. Returns
     /// the number of the last player started, so what it says from now on is not heard. From a
     /// job, in its turn.
@@ -165,21 +182,45 @@ impl Player {
     }
 }
 
+/// What the throttle last passed on, and the position it held back since.
+#[derive(Default)]
+struct Held {
+    passed: Option<f64>,
+    held: Option<f64>,
+}
+
 /// The reader thread's events for player `number`, with the position passed on only when the
-/// second it shows changes, or it goes back.
+/// second it shows changes, or it goes back. A position held back is passed on when the player
+/// pauses or a file ends, so what is drawn and described while it rests is where it stopped.
 fn throttled(number: u64, forward: Forward) -> impl Fn(Event) + Send + Sync + 'static {
-    let last = Mutex::new(None::<f64>);
+    let state = Mutex::new(Held::default());
     move |event: Event| {
-        if let Event::Property(name, value) = &event {
-            if let (true, Some(t)) = (name == "time-pos", value.as_f64()) {
-                let mut last = last.lock().unwrap_or_else(|p| p.into_inner());
-                if last.is_some_and(|before| t >= before && t.floor() == before.floor()) {
-                    return;
+        let mut s = state.lock().unwrap_or_else(|p| p.into_inner());
+        match &event {
+            Event::Property(name, value) if name == "time-pos" => {
+                if let Some(t) = value.as_f64() {
+                    if s.passed.is_some_and(|before| t >= before && t.floor() == before.floor()) {
+                        s.held = Some(t);
+                        return;
+                    }
+                    s.passed = Some(t);
                 }
-                *last = Some(t);
+                s.held = None;
             }
+            Event::Property(name, value) if name == "pause" && value.as_bool() == Some(true) => flush(&mut s, number, &forward),
+            Event::EndFile { .. } => flush(&mut s, number, &forward),
+            _ => {}
         }
+        drop(s);
         forward(number, event);
+    }
+}
+
+/// Pass on the position held back, if there is one.
+fn flush(s: &mut Held, number: u64, forward: &Forward) {
+    if let Some(t) = s.held.take() {
+        s.passed = Some(t);
+        forward(number, Event::Property("time-pos".into(), json!(t)));
     }
 }
 
@@ -207,5 +248,27 @@ mod tests {
         assert_eq!(positions, vec![json!(0.0), json!(1.0), json!(2.01), json!(1.2), json!(30.0), Value::Null]);
         assert!(seen.iter().all(|(n, _)| *n == 7), "every event carries its player's number");
         assert!(seen.iter().any(|(_, e)| matches!(e, Event::Property(n, _) if n == "pause")));
+    }
+
+    #[test]
+    fn a_pause_passes_on_the_position_it_held_back_first() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let forward: Forward = Arc::new(move |_, e| sink.lock().unwrap().push(e));
+        let on_event = throttled(1, forward);
+        for t in [12.0, 12.4, 12.9] {
+            on_event(Event::Property("time-pos".into(), json!(t)));
+        }
+        on_event(Event::Property("pause".into(), json!(true)));
+        let seen = seen.lock().unwrap();
+        assert_eq!(
+            *seen,
+            vec![
+                Event::Property("time-pos".into(), json!(12.0)),
+                Event::Property("time-pos".into(), json!(12.9)),
+                Event::Property("pause".into(), json!(true)),
+            ],
+            "paused at 12.9, the window and describe say 12.9 before they say paused"
+        );
     }
 }
