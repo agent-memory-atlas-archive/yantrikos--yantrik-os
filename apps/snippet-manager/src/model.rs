@@ -1,0 +1,158 @@
+//! What Snippets is: the model every command changes and every render reads.
+
+use std::sync::Arc;
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use yantrik_app::rail::Rail;
+
+use crate::clipboard::Clipboard;
+use crate::lane::Lane;
+use crate::store::{Library, Patch, Snippet};
+
+/// The parts of the model `render` redraws by name. Every command names what it changed.
+pub const NOTHING: &str = "nothing";
+/// The list, the tag chips, the sidebar, the counts and the search box.
+pub const PART_LIST: &str = "list";
+/// The editor pane.
+pub const PART_DETAIL: &str = "detail";
+pub const PART_NOTICE: &str = "notice";
+/// "Copied!" on the button.
+pub const PART_COPY: &str = "copy";
+/// The window brought forward. A part of its own so only the commands that ask for it raise the
+/// window.
+pub const PART_RAISE: &str = "raise";
+
+/// The draft the editor's unsaved typing is kept under (`fx.save_draft`).
+pub const DRAFT: &str = "editor";
+
+/// What the editor holds: the snippet it shows, and its four fields as the person has them. It
+/// is the truth about the typing; the library is the truth about what is kept, and the two differ
+/// exactly while there is typing the store has not taken.
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Editor {
+    /// The snippet's id, or -1 for none.
+    pub id: i32,
+    pub title: String,
+    pub language: String,
+    pub code: String,
+    pub tags: String,
+}
+
+/// The code may be a secret: never printed, only its length.
+impl std::fmt::Debug for Editor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Editor")
+            .field("id", &self.id)
+            .field("title", &self.title)
+            .field("language", &self.language)
+            .field("code", &format_args!("<{} bytes>", self.code.len()))
+            .field("tags", &self.tags)
+            .finish()
+    }
+}
+
+impl Editor {
+    pub fn none() -> Editor {
+        Editor { id: -1, ..Editor::default() }
+    }
+
+    pub fn of(snippet: &Snippet) -> Editor {
+        Editor {
+            id: snippet.id,
+            title: snippet.title.clone(),
+            language: snippet.language.clone(),
+            code: snippet.code.clone(),
+            tags: snippet.tags.clone(),
+        }
+    }
+
+    pub fn patch(&self) -> Patch {
+        Patch::edits(&self.title, &self.language, &self.code, &self.tags)
+    }
+}
+
+/// Where the window was before a change, put back if the change's write fails and the window
+/// would otherwise be left on something the file does not hold.
+#[derive(Clone, Debug)]
+pub struct Restore {
+    pub selected: i32,
+    pub editor: Editor,
+    pub collection: i32,
+}
+
+pub struct Model {
+    /// What is kept: the file's library, with the changes whose writes are still in flight.
+    pub library: Library,
+    /// The search box, the tag chip and the sidebar's collection: what the person is looking at.
+    pub query: String,
+    pub tag: String,
+    pub collection: i32,
+    /// The snippet open in the editor, or -1. The editor's `id` is always this.
+    pub selected: i32,
+    pub editor: Editor,
+    /// The last thing that went wrong, in words. Shown on screen and published in `describe`.
+    pub notice: String,
+    /// "Copied!" is on the button.
+    pub copied: bool,
+    /// The writes of the library's file.
+    pub lane: Lane,
+    /// Jobs whose outcome is the person's and must land before the app ends: writes, copies,
+    /// imports and exports.
+    pub work: usize,
+    /// The last window closed with work in flight: the app runs on without it until the work
+    /// lands (`fx.linger`).
+    pub closing: bool,
+    /// The app was asked to end (a logout, a quit): it ends once the work lands.
+    pub ending: bool,
+    /// The answer of the invocation settling now: written and read in one command
+    /// (`answers::settle`).
+    pub answer: Value,
+    pub rail: Rail,
+    pub clipboard: Arc<dyn Clipboard>,
+    /// The editor text last handed to the draft lane, while there is one there.
+    pub drafted: Option<Editor>,
+    /// Unsaved typing from the last run whose snippet is no longer kept: kept as a new snippet
+    /// by the first command after the start.
+    pub orphan: Option<Editor>,
+}
+
+impl Model {
+    /// The snippet open in the editor, as it is kept.
+    pub fn open(&self) -> Option<&Snippet> {
+        self.library.get(self.selected)
+    }
+
+    /// The rows the list shows.
+    pub fn rows(&self) -> Vec<Snippet> {
+        self.library.matching(&self.query, &self.tag, self.collection)
+    }
+
+    /// The editor holds typing the store has not taken.
+    pub fn editor_dirty(&self) -> bool {
+        self.editor.id >= 0 && self.library.differs(self.editor.id, &self.editor.patch())
+    }
+
+    /// Open `id` in the editor, from what is kept; -1, or an id not kept, opens nothing.
+    pub fn select(&mut self, id: i32) {
+        match self.library.get(id) {
+            Some(snippet) => {
+                self.selected = id;
+                self.editor = Editor::of(snippet);
+            }
+            None => {
+                self.selected = -1;
+                self.editor = Editor::none();
+            }
+        }
+    }
+
+    /// Where the window is now, for a change that may have to put it back.
+    pub fn restore_point(&self) -> Restore {
+        Restore {
+            selected: self.selected,
+            editor: self.editor.clone(),
+            collection: self.collection,
+        }
+    }
+}
