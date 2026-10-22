@@ -135,7 +135,10 @@ fn a_reading_from_the_service_is_drawn_and_described_value_for_value() {
     // And the window says the same.
     app.ui(|ui| {
         assert!(ui.get_cpu_measured());
-        assert_eq!(ui.get_cpu_usage(), 12.34f32);
+        // Held to what is drawn, "12%" (crate::figures); describe keeps the tenth above.
+        assert_eq!(ui.get_cpu_usage(), 12.0f32);
+        let top = slint::Model::row_data(&ui.get_processes(), 0).unwrap();
+        assert_eq!((top.cpu_percent, top.mem_percent), (30.0f32, 12.4f32), "as describe says");
         assert_eq!(ui.get_memory_used_text(), "8.0 GB");
         assert_eq!(ui.get_uptime_text(), "3h 25m");
         assert_eq!(ui.get_load_avg_5(), "1.00");
