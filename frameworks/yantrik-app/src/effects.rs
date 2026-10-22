@@ -4,7 +4,7 @@
 //! here and committed by the runtime only when `update` returns `Ok`, so a refused command runs
 //! nothing. In a test, `Effects::recording()` captures them as data.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::app::{App, Changed, WindowId};
 use crate::intents::{Invocation, InvocationId, Origin};
@@ -94,45 +94,53 @@ pub struct Effects<A: App> {
     changed: Changed,
     next_job: u64,
     invocation: Option<Invocation>,
+    now: Instant,
 }
 
 impl<A: App> Effects<A> {
     /// For the runtime: job ids continue from `next_job`; `invocation` is what the command runs
     /// under, if it came through the surface. Every part counts as changed until `changed`
-    /// narrows it (§3), so an `update` that forgets to say never leaves the window stale.
-    pub(crate) fn new(next_job: u64, invocation: Option<Invocation>) -> Effects<A> {
+    /// narrows it (§3), so an `update` that forgets to say never leaves the window stale. `now`
+    /// is the time on the app's clock (`Timers::instant`).
+    pub(crate) fn new(next_job: u64, invocation: Option<Invocation>, now: Instant) -> Effects<A> {
         Effects {
             requests: Vec::new(),
             changed: Changed::all(),
             next_job,
             invocation,
+            now,
         }
     }
 
     /// For `App::start`, which reads the model and changes nothing: no redraw unless it says.
-    pub(crate) fn starting(next_job: u64) -> Effects<A> {
+    pub(crate) fn starting(next_job: u64, now: Instant) -> Effects<A> {
         Effects {
-            requests: Vec::new(),
             changed: Changed::none(),
-            next_job,
-            invocation: None,
+            ..Effects::new(next_job, None, now)
         }
     }
 
     /// For a test of `update`: nothing is run, and [`Effects::requests`] says what was asked.
+    /// The time is the machine's.
     pub fn recording() -> Effects<A> {
-        Effects::new(1, None)
+        Effects::new(1, None, Instant::now())
     }
 
     /// The same, as if the command came through the surface from `origin`.
     pub fn recording_from(origin: Origin) -> Effects<A> {
-        Effects::new(
-            1,
-            Some(Invocation {
-                id: InvocationId(1),
-                origin,
-            }),
-        )
+        let invocation = Invocation {
+            id: InvocationId(1),
+            origin,
+        };
+        Effects::new(1, Some(invocation), Instant::now())
+    }
+
+    /// The time this command runs at, on the clock the app's timers keep: the machine's under
+    /// the runner, the test's virtual clock under `TestApp`, which `advance` moves. An age an
+    /// app keeps from it ("updated 3 min ago") moves with the timer that re-says it, in a test
+    /// as on the desktop.
+    pub fn now(&self) -> Instant {
+        self.now
     }
 
     /// Where this command came from: a button or a timer here, or the surface.
@@ -151,6 +159,16 @@ impl<A: App> Effects<A> {
         match &mut self.changed {
             Changed::All => self.changed = Changed::Parts(vec![part]),
             parts => parts.add(part),
+        }
+    }
+
+    /// Nothing this command did is on screen: no part redraws, where a command that names no
+    /// part redraws every part. A part named after this still redraws. For a command that looked
+    /// and found nothing new (a refresh, a tick whose words are the same): a redraw it did not
+    /// need is a frame at rest, and a window at rest draws nothing.
+    pub fn unchanged(&mut self) {
+        if let Changed::All = self.changed {
+            self.changed = Changed::none();
         }
     }
 

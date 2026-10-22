@@ -22,7 +22,7 @@ fn readings_of(procs: Vec<yantrik_ipc_contracts::system_monitor::ProcessInfo>, f
 }
 
 /// The machine as most tests see it: the service answered, three processes, chromium busiest.
-fn normal() -> Reading {
+pub(crate) fn normal() -> Reading {
     readings_of(
         vec![
             process(4242, "chromium", 30.04, 12.36),
@@ -42,7 +42,7 @@ fn start_with(machine: FakeMachine, mind: FakeMind) -> (TestApp<SystemMonitor>, 
     (app, machine, mind)
 }
 
-fn start(machine: FakeMachine) -> (TestApp<SystemMonitor>, Arc<FakeMachine>) {
+pub(crate) fn start(machine: FakeMachine) -> (TestApp<SystemMonitor>, Arc<FakeMachine>) {
     let (app, machine, _) = start_with(machine, FakeMind::new());
     (app, machine)
 }
