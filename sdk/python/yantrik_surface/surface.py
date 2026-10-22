@@ -32,6 +32,7 @@ import signal
 import sys
 import threading
 import time
+import traceback
 import types
 import typing
 
@@ -507,6 +508,36 @@ def action_from_function(fn, name=None, *, grade="standard", settles="on return"
 # ── the surface ──────────────────────────────────────────────────────────────
 
 
+def _vouched(peer, surface):
+    """Whether the kernel vouches for `peer` reading an act's own answer from `surface` while the
+    person is private (`privacy.reads_while_private`). No peer is nobody's."""
+    return peer is not None and privacy.reads_while_private(getattr(peer, "pid", None), surface)
+
+
+class _HeldFaults:
+    """A handler's unhandled fault, held like its refusal (#926 review, M1): when the reply is
+    withheld, or Private mode is on once the fault arrives and nobody vouches for the caller, the
+    fault is printed to stderr as the wire prints it and the caller gets `WITHHELD_REFUSAL` — never
+    the exception's text, which so often names what the person had open. `RpcError`, `Refusal` and
+    `NotAnswered` are the dispatch's own words and pass through."""
+
+    def __init__(self, peer, surface, withheld):
+        self.peer, self.surface, self.withheld = peer, surface, withheld
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, kind, error, trace):
+        if error is None or isinstance(error, (wire.RpcError, Refusal, NotAnswered)):
+            return False
+        if not isinstance(error, Exception):
+            return False
+        if not (self.withheld or (privacy.is_private() and not _vouched(self.peer, self.surface))):
+            return False
+        traceback.print_exception(kind, error, trace, file=sys.stderr)
+        raise wire.RpcError(wire.RPC_INVALID_PARAMS, privacy.WITHHELD_REFUSAL) from None
+
+
 class Surface:
     """An app's control surface: `app.describe` and `app.act` on `app-<id>.sock`.
 
@@ -545,6 +576,8 @@ class Surface:
         self.server = None
         self._summary = summary
         self._view = None
+        # The keys of the state kept in Private mode (`show_in_private`). None unless listed.
+        self._shown_in_private = []
         self._handlers = {}
         self._overrides = {}
         self._settings_path = settings_path
@@ -578,6 +611,20 @@ class Surface:
         if callable(name):
             return register(name)
         return register
+
+    def show_in_private(self, *keys):
+        """Keep these keys of the state in `describe` while the person is in Private mode (#924).
+        Default-deny: every other key is left out. List a key only when its whole value says
+        nothing about the person — a unit, a CPU figure — never a title, a name, a path or a place.
+        """
+        for key in keys:
+            if not isinstance(key, str) or not key.strip():
+                raise ValueError("an empty key cannot be shown in Private mode")
+            if key in privacy.RESERVED_KEYS:
+                raise ValueError("`%s` is written by the private view itself; an app cannot show "
+                                 "its own under that name" % key)
+            if key not in self._shown_in_private:
+                self._shown_in_private.append(key)
 
     def add_action(self, spec, handler):
         """Publish `spec` with a handler called with the arguments as one dict — the shape of
@@ -718,14 +765,33 @@ class Surface:
         summary = str(summary)
         return summary, state, wire.revision(summary, state)
 
+    def _private_of(self, own):
+        """The private view of `own` (the app's state): the marker and the listed keys only."""
+        state = {}
+        if isinstance(own, dict):
+            state = {key: own[key] for key in self._shown_in_private if key in own}
+        state["private"] = True
+        return self._as_read((privacy.PRIVATE_SUMMARY, state))
+
+    def _published(self, private):
+        """`(summary, state, revision)` as this surface publishes it now: its own, or in Private
+        mode the private view, for which the app is read only when it listed keys to keep."""
+        if not private:
+            return self._read()
+        own = self.snapshot()[1] if self._shown_in_private else {}
+        return self._private_of(wire.jsonable(own, "the state of %s" % self.app_id))
+
     # ── describe ─────────────────────────────────────────────────────────────
 
     def describe_json(self, peer=None):
         """The reply to `app.describe`: `describe_json` in the Rust contracts, plus
-        `protocol`, so a client can tell what it is talking to."""
+        `protocol`, so a client can tell what it is talking to. In Private mode, read for this
+        call, the private view, marked `"private": true` (#924)."""
+        private = privacy.is_private()
+
         def read():
             with _Scope(peer, None):
-                summary, state, revision = self._read()
+                summary, state, revision = self._published(private)
                 actions = [a.schema(self._grade(a)) for a in self.actions]
             return summary, state, revision, actions
 
@@ -737,12 +803,17 @@ class Surface:
                 answer = self.busy_answer()
                 if answer is None:
                     return None
-                summary, state, revision = self._as_read(answer)
+                if private:
+                    summary, state, revision = self._private_of(
+                        wire.jsonable(answer[1], "the state of %s" % self.app_id))
+                else:
+                    summary, state, revision = self._as_read(answer)
                 actions = [a.schema(self._grade(a)) for a in self.actions]
             return summary, state, revision, actions
 
-        summary, state, revision, actions = self._turn(read, self.describe_timeout, busy=busy)
-        return {
+        with _HeldFaults(peer, self.app_id, private and not _vouched(peer, self.app_id)):
+            summary, state, revision, actions = self._turn(read, self.describe_timeout, busy=busy)
+        answer = {
             "app": self.app_id,
             "protocol": PROTOCOL,
             "summary": summary,
@@ -750,6 +821,29 @@ class Surface:
             "revision": revision,
             "actions": actions,
         }
+        if private:
+            answer["private"] = True
+        else:
+            self._recheck_private(answer, self.describe_timeout)
+        return answer
+
+    def _recheck_private(self, reply, timeout, peer=None):
+        """Private mode may have come on while the call waited for, or ran on, the app's thread.
+        If it has, the app's view in `reply` becomes the private one, read again (or, when the app
+        does not answer that, the private view with nothing of the app), `reply` is marked, and its
+        result is withheld from a caller the kernel does not vouch for — the crate's
+        `recheck_private` (#926 review, L1 and M1)."""
+        if not privacy.is_private():
+            return
+        try:
+            summary, state, revision = self._turn(lambda: self._published(True), timeout)
+        except wire.RpcError:
+            summary, state, revision = self._private_of({})
+        if "summary" in reply or "state" in reply:
+            reply.update(summary=summary, state=state, revision=revision)
+        reply["private"] = True
+        if "result" in reply and not _vouched(peer, self.app_id):
+            reply.update(result=None, withheld=privacy.WITHHELD)
 
     # ── act ──────────────────────────────────────────────────────────────────
 
@@ -816,6 +910,12 @@ class Surface:
             if refusal is not None:
                 raise wire.RpcError(wire.RPC_INVALID_PARAMS, refusal)
 
+        # What the guard and the reply may say of the app: the private view while the person is
+        # private, for the person's own calls too (#924); and the action's own answer and refusal
+        # only for a caller the kernel vouches for (#926 review, M1).
+        private = privacy.is_private()
+        withheld = private and not _vouched(peer, self.app_id)
+
         def turn():
             with _Scope(peer, token):
                 # The reach, on the grade this surface publishes now — the one the dispatch
@@ -824,24 +924,40 @@ class Surface:
                 refusal = self._within_reach(held, found, args) if found is not None else None
                 if refusal is not None:
                     raise Refusal(refusal)
-                return self._dispatch(name, args, expect, authority)
+                return self._dispatch(name, args, expect, authority, private, withheld)
 
         timeout = (spec.timeout if spec is not None and spec.timeout else self.act_timeout)
-        outcome = self._turn(turn, timeout)
+        try:
+            with _HeldFaults(peer, self.app_id, withheld):
+                outcome = self._turn(turn, timeout)
+        except wire.RpcError as e:
+            # Private mode came on during the call: a refusal is held to it as a reply would be.
+            if (not private and e.code == wire.RPC_INVALID_PARAMS and privacy.is_private()
+                    and not _vouched(peer, self.app_id)):
+                raise wire.RpcError(wire.RPC_INVALID_PARAMS, privacy.WITHHELD_REFUSAL) from None
+            raise
         spec, result, later, summary, state, revision = outcome
 
         if later is not None:
             with _Scope(peer, token):
                 try:
-                    result = wire.jsonable(later.work(), "the answer of %s" % name)
+                    with _HeldFaults(peer, self.app_id, withheld):
+                        result = wire.jsonable(later.work(), "the answer of %s" % name)
                 except Refusal as r:
-                    raise wire.RpcError(wire.RPC_INVALID_PARAMS, str(r)) from None
+                    said = (privacy.WITHHELD_REFUSAL
+                            if privacy.is_private() and not _vouched(peer, self.app_id) else str(r))
+                    raise wire.RpcError(wire.RPC_INVALID_PARAMS, said) from None
+            # Under Private mode as it is once the work is done, not as it was when it started.
+            private = privacy.is_private()
+            withheld = private and not _vouched(peer, self.app_id)
             try:
-                summary, state, revision = self._turn(self._read, timeout)
+                summary, state, revision = self._turn(lambda: self._published(private), timeout)
             except wire.RpcError:
-                pass  # the result stands; the view is the one from when the handler ran
+                if private:
+                    summary, state, revision = self._private_of({})
+                # Otherwise the result stands; the view is the one from when the handler ran.
 
-        return {
+        reply = {
             "app": self.app_id,
             "action_id": action_id,
             "accepted": True,
@@ -851,9 +967,17 @@ class Surface:
             "summary": summary,
             "state": state,
         }
+        if private:
+            reply["private"] = True
+            if withheld:
+                reply.update(result=None, withheld=privacy.WITHHELD)
+        else:
+            self._recheck_private(reply, timeout, peer)
+        return reply
 
-    def _dispatch(self, name, args, expect, authority):
-        """One act, on the app's thread: every check, the handler, and the view read back."""
+    def _dispatch(self, name, args, expect, authority, private=False, withheld=False):
+        """One act, on the app's thread: every check, the handler, and the view read back — in
+        Private mode the private view, which the guard is held to as well."""
         spec = self._find(name)
         if spec is None:
             raise Refusal(self._unknown(name))
@@ -869,18 +993,23 @@ class Surface:
             raise Refusal(refusal)
 
         if expect is not None:
-            summary, _, current = self._read()
+            summary, _, current = self._published(private)
             if current != expect:
                 raise Refusal("STALE: this app is at revision %s and you acted on %s. It now "
                               "reports: %s. Read it again before deciding."
                               % (current, expect, summary))
 
         # The handler reads what it declared: converted where the call converts, defaults in.
-        result = self._handlers[name](as_declared(spec, args))
+        try:
+            result = self._handlers[name](as_declared(spec, args))
+        except Refusal:
+            if withheld:
+                raise Refusal(privacy.WITHHELD_REFUSAL) from None
+            raise
         later = result if isinstance(result, Later) else None
         if later is None:
             result = wire.jsonable(result, "the answer of %s" % name)
-        summary, state, revision = self._read()
+        summary, state, revision = self._published(private)
         return spec, (None if later else result), later, summary, state, revision
 
     # ── serving ──────────────────────────────────────────────────────────────

@@ -27,6 +27,7 @@ mod leaving;
 mod moved;
 mod outside;
 mod parity;
+mod private_mode;
 mod prompts;
 mod read_notes;
 mod read_only;
