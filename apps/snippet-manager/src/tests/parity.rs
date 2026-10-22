@@ -255,15 +255,28 @@ fn a_store_with_a_snippet_open_is_described_as_it_was() {
     assert_eq!(f.describe()["summary"], json!("Snippets \u{2014} 2 kept, none open"));
 }
 
-/// What `copy` answers: the keys the old app answered with, less one. Security
-/// (`fix/snippets-agent-exposure`): `bytes`, the code's length, is gone; a length is a hint at a
-/// secret.
+/// What `copy`, `new`, `save` and `open` answer: the keys the old app answered with, less one.
+/// Security (`fix/snippets-agent-exposure`): `bytes`, the code's length, is gone from all four; a
+/// length is a hint at a secret.
 #[test]
-fn copy_answers_as_it_did_without_the_length() {
+fn copy_new_save_and_open_answer_as_they_did_without_the_length() {
     const BEFORE_COPY: &[&str] = &["copied", "id", "bytes", "with", "use_count", "use_count_saved"];
     let f = open();
     let (journal, _) = f.seeded();
     let answer = f.act("copy", json!({ "id": journal.to_string() })).unwrap();
     let now: Vec<&str> = BEFORE_COPY.iter().copied().filter(|k| *k != "bytes").collect();
     assert_eq!(keys(&answer), sorted(&now));
+    // `new`, `save` and `open` answered the snippet as stored (the old `stored_answer`).
+    const BEFORE_STORED: &[&str] =
+        &["id", "title", "language", "tags", "favorite", "collection", "bytes", "stored_in", "total"];
+    let now: Vec<&str> = BEFORE_STORED.iter().copied().filter(|k| *k != "bytes").collect();
+    let made = f.act("new", json!({ "title": "Pinned", "language": "Rust", "code": "x" })).unwrap();
+    let id = made["id"].to_string();
+    for answer in [
+        made,
+        f.act("save", json!({ "id": id, "code": "y" })).unwrap(),
+        f.act("open", json!({ "id": id })).unwrap(),
+    ] {
+        assert_eq!(keys(&answer), sorted(&now), "{answer}");
+    }
 }

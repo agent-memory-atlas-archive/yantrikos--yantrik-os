@@ -7,7 +7,7 @@
 //!   used to read a secret back a character at a time;
 //! - an agent's `import` names only a file in the person's home, outside its protected places
 //!   (`home_paths`, #443, as Images' `open`);
-//! - `copy` answers that it copied, with neither the code nor its length.
+//! - `new`, `save`, `open` and `copy` answer with neither the code nor its length.
 
 use serde_json::{json, Value};
 use yantrik_testing::Call;
@@ -90,21 +90,31 @@ fn an_agents_import_reads_only_a_file_in_the_home() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A PIN is four bytes: a length is a hint at a secret. `copy` answers which snippet it copied and
-/// that it did, and no number in the answer is the code's length.
+/// A PIN is four bytes: a length is a hint at a secret, whichever action reveals it. `new`, `save`,
+/// `open` and `copy` each answer which snippet and what came of it, as the person and as an agent,
+/// and no answer carries the code or a number that is its length.
 #[test]
-fn copy_answers_with_neither_the_code_nor_its_length() {
+fn new_save_open_and_copy_answer_with_neither_the_code_nor_its_length() {
     let f = open();
-    // A length no other number in the answer can be: not an id, a use count or a flag.
+    // Lengths no other number in an answer can be: not an id, a count, a total or a flag.
     let code = format!("{SENTINEL}-{}", "x".repeat(41));
-    let id = f.keep("Vault PIN", "Other", &code, "");
-    for answer in [f.act("copy", json!({ "id": id.to_string() })).unwrap(), as_agent(&f, "copy", json!({ "id": id.to_string() })).unwrap()] {
-        let mut keys: Vec<&str> = answer.as_object().unwrap().keys().map(String::as_str).collect();
-        keys.sort_unstable();
-        assert_eq!(keys, ["copied", "id", "use_count", "use_count_saved", "with"], "{answer}");
-        assert!(!answer.to_string().contains(SENTINEL), "{answer}");
-        let length = json!(code.len());
-        assert!(answer.as_object().unwrap().values().all(|v| *v != length), "a size hint: {answer}");
+    let changed = format!("{SENTINEL}-{}", "y".repeat(52));
+    let made = f.act("new", json!({ "title": "Vault PIN", "language": "Other", "code": code })).unwrap();
+    let id = made["id"].as_i64().unwrap().to_string();
+    let mut answers = vec![("new", made)];
+    // As the person, then as an agent.
+    for agent in [false, true] {
+        let call = |name: &str, args: Value| if agent { as_agent(&f, name, args) } else { f.act(name, args) };
+        answers.push(("save", call("save", json!({ "id": id, "code": changed })).unwrap()));
+        answers.push(("open", call("open", json!({ "id": id })).unwrap()));
+        answers.push(("copy", call("copy", json!({ "id": id })).unwrap()));
     }
-    assert_eq!(f.clipboard.texts(), [code.clone(), code], "and it was copied, both times");
+    let lengths = [json!(code.len()), json!(changed.len())];
+    for (name, answer) in &answers {
+        assert!(!answer.to_string().contains(SENTINEL), "{name}: {answer}");
+        assert!(answer.get("bytes").is_none(), "{name}: {answer}");
+        let values = answer.as_object().unwrap().values();
+        assert!(values.into_iter().all(|v| !lengths.contains(v)), "{name}, a size hint: {answer}");
+    }
+    assert_eq!(f.clipboard.texts(), [changed.clone(), changed], "and it was copied, both times");
 }

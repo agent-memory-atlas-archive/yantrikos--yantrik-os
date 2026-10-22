@@ -27,7 +27,8 @@ pub fn settle(m: &mut Model, fx: &mut Effects<SnippetManager>, answer: Value) {
 }
 
 /// What `new`, `save` and `open` answer: the snippet as the library holds it right after the
-/// change.
+/// change. Never its code, and no length of it: a length is the same hint at a secret whichever
+/// action reveals it.
 pub fn stored(m: &Model, id: i32) -> Value {
     let stored = m.library.get(id);
     json!({
@@ -37,7 +38,6 @@ pub fn stored(m: &Model, id: i32) -> Value {
         "tags": stored.map(|s| s.tag_list()),
         "favorite": stored.map(|s| s.favorite),
         "collection": stored.map(|s| m.library.collection_name(s.collection)),
-        "bytes": stored.map(|s| s.code.len()),
         "stored_in": m.lane.path().display().to_string(),
         "total": m.library.snippets().len(),
     })
