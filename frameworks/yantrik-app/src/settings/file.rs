@@ -8,9 +8,10 @@
 //! is skipped unread by serde), so a secret in such a file never reaches the model, the log, a
 //! problem record or the window.
 //!
-//! Every read of the file, and every fingerprint of it, goes through [`crate::quiet`]: no link
-//! is followed, no FIFO blocks, and only a regular file of at most [`MAX_BYTES`] is read, from
-//! the descriptor that was checked. Anything else is fingerprinted by its metadata alone, so
+//! Every read of the file, and every fingerprint of it, goes through [`crate::quiet::read_own`]:
+//! no link is followed, no FIFO blocks, and only a regular file of at most [`MAX_BYTES`] with one
+//! name (no hard link to another component's file) is read, from the descriptor that was
+//! checked. Anything else is fingerprinted by its metadata alone, so
 //! the watcher sees it change without reading a byte of it.
 
 use std::path::{Path, PathBuf};
@@ -67,7 +68,7 @@ impl Fingerprint {
     /// at most [`MAX_BYTES`] is fingerprinted by its content; anything else at the path (a link,
     /// a FIFO, a device, a larger file) by its metadata alone, and none of it is read.
     pub fn of(path: &Path) -> Option<Fingerprint> {
-        match quiet::read_within(path, MAX_BYTES).ok()? {
+        match quiet::read_own(path, MAX_BYTES).ok()? {
             Looked::Missing => None,
             Looked::Read(bytes) => Some(Fingerprint::of_bytes(&bytes)),
             Looked::Refused(stat) => Some(Fingerprint::of_stat(&stat)),
@@ -134,9 +135,9 @@ pub fn is_marked(bytes: &[u8], app: &str) -> bool {
 
 /// The bytes at `path`: `Ok(None)` when there is nothing there, `Err(NotOurs)` for a link, a
 /// FIFO, a device, a directory or a file too large to be settings, none of which is read
-/// ([`crate::quiet::read_within`]).
+/// ([`crate::quiet::read_own`]).
 pub(crate) fn read_bounded(path: &Path) -> Result<Option<Vec<u8>>, SettingsError> {
-    match quiet::read_within(path, MAX_BYTES) {
+    match quiet::read_own(path, MAX_BYTES) {
         Ok(Looked::Missing) => Ok(None),
         Ok(Looked::Read(bytes)) => Ok(Some(bytes)),
         Ok(Looked::Refused(_)) => Err(SettingsError::NotOurs),
@@ -240,6 +241,52 @@ pub fn replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
         }
         Err(e) => Err(e.to_string()),
     }
+}
+
+/// Removes the temporaries a killed process left beside `app`'s settings file, once they are
+/// older than `older_than`: `.<file>.<…>.tmp` (the atomic writer's) and `.<file>.<…>.exchange`
+/// (the guarded write's). Only one whose content is known to be the app's own is removed: empty,
+/// marked as `app`'s, or the start of a file this framework rendered for `app`, cut short. An
+/// exchange temp may hold what the exchange displaced, someone else's file, and that is never
+/// removed; neither is anything not read as a regular file of one name.
+pub fn sweep_own_temps(path: &Path, app: &str, older_than: std::time::Duration) {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name().map(|n| n.to_string_lossy().to_string())) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let prefix = format!(".{name}.");
+    let suffixes = [".tmp".to_string(), format!(".{}", crate::documents::exchange::EXCHANGE_SUFFIX)];
+    let head = rendered_head(app);
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let file = entry.file_name().to_string_lossy().to_string();
+        if !file.starts_with(&prefix) || !suffixes.iter().any(|s| file.ends_with(s.as_str())) {
+            continue;
+        }
+        let old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|m| now.duration_since(m).ok())
+            .is_some_and(|age| age >= older_than);
+        if !old {
+            continue;
+        }
+        let ours = match quiet::read_own(&entry.path(), MAX_BYTES) {
+            Ok(Looked::Read(bytes)) => bytes.is_empty() || is_marked(&bytes, app) || head.starts_with(&bytes) || bytes.starts_with(&head),
+            _ => false,
+        };
+        if ours {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// How every file this framework renders for `app` begins (`render_raw`: the mark first).
+fn rendered_head(app: &str) -> Vec<u8> {
+    let full = render_raw(app, 0, Value::Null).unwrap_or_default();
+    let cut = full.windows(b"\"schema\"".len()).position(|w| w == b"\"schema\"").unwrap_or(full.len());
+    full[..cut].to_vec()
 }
 
 /// Makes `dir` and any missing parent owner-only (0700): `apps/` and `apps/<id>/` list app

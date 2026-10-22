@@ -173,6 +173,36 @@ fn settings_saved_by_an_app_named_email_never_touch_the_services_account_file() 
     assert!(!logged().contains(SENTINEL), "the password never reaches the log");
 }
 
+/// A hard link from the settings path to the service's 0600 account file: a regular file under
+/// the limit, but a second name of someone else's. Not read at open, at a save or by the watcher;
+/// the account file is never written; nothing of it reaches the log.
+#[cfg(unix)]
+#[test]
+fn a_hard_link_to_the_account_file_is_not_read_written_or_logged() {
+    use std::os::unix::fs::PermissionsExt as _;
+    capture_the_log();
+    let paths = Paths::temporary(Mail::ID);
+    let account = shared_config(&paths).join("email.json");
+    let content = account_list();
+    write(&account, &content);
+    std::fs::set_permissions(&account, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::create_dir_all(paths.config_file().parent().unwrap()).unwrap();
+    std::fs::hard_link(&account, paths.config_file()).unwrap();
+
+    let app = TestApp::<Mail>::start_at(paths.clone(), Vec::new());
+    assert_eq!(app.model(|m| m.health.clone()), Some(Health::Recovery(SettingsError::NotOurs)));
+    assert_eq!(app.model(|m| m.prefs.clone()), Prefs::default());
+    app.seen(yantrik_app::watch::Seen::SettingsFile);
+    app.run(Command::Save("mine".into()));
+    app.run_writes();
+    assert_eq!(app.model(|m| m.not_saved.len()), 1);
+    let _ = app.shutdown();
+    drop(app);
+    assert_eq!(std::fs::read_to_string(&account).unwrap(), content, "never written");
+    assert_eq!(std::fs::read_to_string(paths.config_file()).unwrap(), content, "the second name is left as it is");
+    assert!(!logged().contains(SENTINEL), "nothing of it reaches the log");
+}
+
 /// A file without the app's mark where its settings go: never parsed into the model, never
 /// written over by a save, its path alone said; the person's "replace" sets it aside, intact.
 #[test]

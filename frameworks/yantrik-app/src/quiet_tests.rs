@@ -10,6 +10,19 @@ use super::*;
 /// A sentinel file larger than any limit here, so reading any of it shows in the count.
 pub(crate) const BIG: usize = 4 * 1024 * 1024;
 
+/// A sentinel account file under the settings limit, as email-service keeps it: 0600.
+pub(crate) const ACCOUNT_SIZE: usize = 512 * 1024;
+
+/// `email.json` beside `d`'s things: owner-only, under the limit, a sentinel all through.
+#[cfg(unix)]
+pub(crate) fn account_file(d: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+    let account = d.join("email.json");
+    std::fs::write(&account, "SENTINEL-HARD-LINKED-PASSWORD,".repeat(ACCOUNT_SIZE / 30)).unwrap();
+    std::fs::set_permissions(&account, std::fs::Permissions::from_mode(0o600)).unwrap();
+    account
+}
+
 pub(crate) fn dir(name: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("yantrik-quiet-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
@@ -69,7 +82,10 @@ pub(crate) fn hostile(d: &Path) -> Vec<(&'static str, PathBuf)> {
     };
     let big = d.join("big.json");
     std::fs::write(&big, "B".repeat(BIG)).unwrap();
+    let hard = d.join("hard-linked");
+    std::fs::hard_link(account_file(d), &hard).unwrap();
     vec![
+        ("a hard link to a 0600 account file under the limit", hard),
         ("a link to a sentinel file", link("to-secret", &secret)),
         ("a FIFO", pipe.clone()),
         ("a link to a FIFO", link("to-pipe", &pipe)),
@@ -98,10 +114,26 @@ fn anything_else_is_refused_by_its_metadata_without_a_byte_of_it_read_or_a_wait(
     let (_, followed) = bytes_read_by(|| std::fs::read(d.join("to-secret")).unwrap());
     assert!(followed >= BIG as u64, "the count is live: {followed}");
     for (what, path) in things {
-        let (looked, read) = within(Duration::from_secs(5), move || bytes_read_by(|| read_within(&path, 1024 * 1024).unwrap()));
+        let (looked, read) = within(Duration::from_secs(5), move || bytes_read_by(|| read_own(&path, 1024 * 1024).unwrap()));
         assert!(matches!(looked, Looked::Refused(_)), "{what}: {looked:?}");
         assert!(read < NOTHING_OF_IT, "{what}: {read} bytes read");
     }
+}
+
+/// A document may be hard-linked by the person, and is read as it always was; a file the
+/// framework owns alone is not read when it has a second name.
+#[cfg(unix)]
+#[test]
+fn a_second_name_is_refused_only_for_a_file_the_framework_owns_alone() {
+    let d = dir("names");
+    let one = d.join("one.json");
+    std::fs::write(&one, b"{}").unwrap();
+    assert_eq!(read_own(&one, 1024).unwrap(), Looked::Read(b"{}".to_vec()), "one name: read");
+    let second = d.join("second.json");
+    std::fs::hard_link(&one, &second).unwrap();
+    assert!(matches!(read_own(&one, 1024).unwrap(), Looked::Refused(_)), "now it has two");
+    assert!(matches!(read_own(&second, 1024).unwrap(), Looked::Refused(_)));
+    assert_eq!(read_within(&second, 1024).unwrap(), Looked::Read(b"{}".to_vec()), "a document's read is unchanged");
 }
 
 #[cfg(unix)]

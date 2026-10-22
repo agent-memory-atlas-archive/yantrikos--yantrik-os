@@ -314,6 +314,40 @@ fn a_path_swapped_under_the_read_never_leads_it_through_a_link() {
     assert!(worst < NOTHING_OF_IT, "a read went through the link: {worst} bytes");
 }
 
+/// The temporaries beside the settings file are swept only when they are known to be the app's
+/// own: an exchange temp may hold a displaced file of someone else's, with its own old age.
+#[test]
+fn only_the_apps_own_temps_are_swept() {
+    let d = dir("sweep");
+    let path = d.join("app.json");
+    let day_old = std::time::SystemTime::now() - std::time::Duration::from_secs(86_400);
+    let ours = render(APP, &Prefs::default()).unwrap();
+    let cases: [(&str, &[u8], bool); 6] = [
+        (".app.json.11.1.exchange", br#"[{"password":"SENTINEL-PASSWORD-5"}]"#, true),
+        (".app.json.11-2.tmp", b"someone else's", true),
+        (".app.json.11.3.exchange", &ours, false),
+        (".app.json.11-4.tmp", &ours[..ours.len() / 2], false),
+        (".app.json.11-5.tmp", b"", false),
+        (".app.json.11.6.exchange", &ours[..ours.len() - 3], false),
+    ];
+    for (name, bytes, _) in cases {
+        let at = d.join(name);
+        std::fs::write(&at, bytes).unwrap();
+        std::fs::File::options().write(true).open(&at).unwrap().set_modified(day_old).unwrap();
+    }
+    let young = d.join(".app.json.11.7.exchange");
+    std::fs::write(&young, &ours).unwrap();
+    let _ = open(&path);
+    for (name, bytes, kept) in cases {
+        let at = d.join(name);
+        assert_eq!(at.exists(), kept, "{name}");
+        if kept {
+            assert_eq!(std::fs::read(&at).unwrap(), bytes, "{name} untouched");
+        }
+    }
+    assert!(young.exists(), "a young one may be a write in progress");
+}
+
 /// A file without the mark that arrives between the lane's look and its write is caught by what
 /// the exchange displaced: it goes back to the path, whole, and the save is refused.
 #[cfg(target_os = "linux")]

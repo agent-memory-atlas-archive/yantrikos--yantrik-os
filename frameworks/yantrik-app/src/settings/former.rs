@@ -248,9 +248,11 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_link_or_a_fifo_at_the_old_place_is_not_followed_read_or_waited_on() {
-        use crate::quiet::tests::{bytes_read_by, fifo, within, BIG, NOTHING_OF_IT};
+        use crate::quiet::tests::{account_file, bytes_read_by, fifo, within, BIG, NOTHING_OF_IT};
         use std::time::Duration;
-        let makers: [fn(&Path, &Path); 3] = [
+        let makers: [fn(&Path, &Path); 4] = [
+            // A hard link to email-service's 0600 file, under the limit: a second name, not read.
+            |at: &Path, d: &Path| std::fs::hard_link(account_file(&d.join("..")), at).unwrap(),
             |at: &Path, d: &Path| {
                 let secret = d.join("email.json");
                 std::fs::write(&secret, format!("[{}]", "SENTINEL,".repeat(BIG / 9))).unwrap();

@@ -11,6 +11,13 @@
 //! file too large) is [`Looked::Refused`] with its metadata only, and none of its bytes are read.
 //!
 //! Only the last component is not followed: the directories above are the app's own.
+//!
+//! A hard link is not a link to follow: it is the other file itself, under a second name. So a
+//! file the framework owns alone ([`read_own`]: a settings file, the file a settings import
+//! comes from, a settings write's displaced file) is also refused when it has more than one
+//! name (`st_nlink > 1`); the framework never makes a second name for one of its files (it
+//! writes a temp and renames). A document ([`read_within`]) may be hard-linked by the person:
+//! that is their own business, and a document's semantics stay as they were.
 
 use std::io::Read as _;
 use std::path::Path;
@@ -88,6 +95,27 @@ fn refused_by_open(_: &std::io::Error) -> bool {
 
 /// What is at `path`, read only if it is a regular file of at most `limit` bytes.
 pub fn read_within(path: &Path, limit: u64) -> std::io::Result<Looked> {
+    read_checked(path, limit, false)
+}
+
+/// [`read_within`] for a file the framework owns alone: a file with a second name (a hard link
+/// to someone else's file) is refused too, and none of it is read.
+pub fn read_own(path: &Path, limit: u64) -> std::io::Result<Looked> {
+    read_checked(path, limit, true)
+}
+
+#[cfg(unix)]
+fn names(meta: &std::fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt as _;
+    meta.nlink()
+}
+
+#[cfg(not(unix))]
+fn names(_: &std::fs::Metadata) -> u64 {
+    1
+}
+
+fn read_checked(path: &Path, limit: u64, single_name: bool) -> std::io::Result<Looked> {
     let file = match open_quietly(path) {
         Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Looked::Missing),
@@ -102,7 +130,7 @@ pub fn read_within(path: &Path, limit: u64) -> std::io::Result<Looked> {
         Err(e) => return Err(e),
     };
     let meta = file.metadata()?;
-    if !meta.is_file() || meta.len() > limit {
+    if !meta.is_file() || meta.len() > limit || (single_name && names(&meta) != 1) {
         return Ok(Looked::Refused(Stat::of(&meta)));
     }
     let mut bytes = Vec::with_capacity(meta.len() as usize);

@@ -113,8 +113,9 @@ impl<T: Settings> Store<T> {
     /// Opens `app`'s store at `path`. Never fails: a file that cannot be used leaves the store
     /// in recovery, which `health` says.
     pub fn open(path: PathBuf, app: &str) -> Store<T> {
-        // A temporary a killed process left beside the file is swept; nothing else would.
-        yantrik_foundation::json_store::sweep_stale_temps(&path, std::time::Duration::from_secs(600));
+        // A temporary a killed process left beside the file is swept, if it is the app's own;
+        // nothing else would. Never one that may hold a displaced file of someone else's.
+        file::sweep_own_temps(&path, app, std::time::Duration::from_secs(600));
         let (committed, health, rewrite) = match read_file::<T>(&path, app) {
             Opened::Read { value, rewrite } => (value, Health::Fine, rewrite),
             Opened::Missing => (T::default(), Health::Fine, false),
