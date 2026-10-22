@@ -10,6 +10,11 @@
 //! launch meanwhile brings the window back and the editor runs on. A save that fails then is not
 //! lost: the tab's text is in its draft, offered at the next start, and the person is told.
 //!
+//! The window closed while a file is read or written, with another tab unsaved, waits for that
+//! file, then goes on with the close as asked: the usual prompt over each tab still unsaved, the
+//! window staying until it is answered. A save that fails then keeps everything open, and says
+//! why.
+//!
 //! The session ending (a logout, SIGTERM, the display gone) asks nothing: every unsaved tab's text
 //! goes to its draft in the command that answers, and the editor ends.
 
@@ -32,8 +37,11 @@ use crate::TextEditor;
 pub const LINGER: Duration = Duration::from_secs(10);
 
 /// Said when the window is closed while a file is read, or a save is in flight and other tabs are
-/// unsaved: the window waits, in words, rather than dropping the click.
-pub const WAIT_BEFORE_CLOSING: &str = "Please wait for the current operation before closing.";
+/// unsaved: the close is taken, and goes on once that file is done.
+pub const CLOSING_WHEN_DONE: &str = "The window closes once the file being read or written is done.";
+
+/// Said when the save the close waited on failed: nothing closes.
+pub const NOT_CLOSED: &str = "The window was not closed, so nothing is lost.";
 
 /// The person closed the window, or asked the editor to quit.
 pub fn window(m: &mut Model, fx: &mut Effects<TextEditor>) {
@@ -48,7 +56,10 @@ pub fn window(m: &mut Model, fx: &mut Effects<TextEditor>) {
             fx.linger(LINGER);
             m.lingering = true;
         }
-        Some(_) => say(m, WAIT_BEFORE_CLOSING),
+        Some(_) => {
+            m.close_when_done = true;
+            say(m, CLOSING_WHEN_DONE);
+        }
         None => {
             // An Open, Save As or Go to line dialog is put away: the window's close is the answer.
             m.dialog = Dialog::None;
@@ -177,6 +188,9 @@ pub fn not_saved(m: &mut Model, fx: &mut Effects<TextEditor>, id: TabId, why: &s
         // Blocked: the prompt stays up, asking again, with the reason under it.
         let _ = closing.flow.progress(&m.documents, Some(why.to_string()));
     }
+    if std::mem::take(&mut m.close_when_done) {
+        say(m, format!("{why} {NOT_CLOSED}"));
+    }
     if m.lingering {
         end_after_linger(m, fx, Some(why));
     }
@@ -196,6 +210,15 @@ fn end_after_linger(m: &mut Model, fx: &mut Effects<TextEditor>, why: Option<&st
     }
     m.lingering = false;
     fx.exit();
+}
+
+/// After every command: a close that waited for a file to be read or written goes on once it is.
+pub fn resume(m: &mut Model, fx: &mut Effects<TextEditor>) {
+    if m.close_when_done && m.busy.is_none() {
+        m.close_when_done = false;
+        m.notice.clear();
+        window(m, fx);
+    }
 }
 
 /// A second launch brought the window back during a linger: the editor runs on, and the save in

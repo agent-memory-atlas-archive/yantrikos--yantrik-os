@@ -59,18 +59,62 @@ fn a_second_launch_during_the_wait_brings_the_window_back_and_the_editor_runs_on
     assert!(app.exit_reason().is_none(), "the backstop is the framework's, and was cancelled");
 }
 
-#[test]
-fn the_window_closed_during_a_save_with_another_tab_unsaved_waits_in_words() {
-    // Another tab with unsaved changes would need asking, and the editor reads or writes one file
-    // at a time: the window waits, and says so.
-    let (app, _) = with_file("linger-other", "x\n");
+/// A saved file open and edited, another tab unsaved, and the first one's Save in flight.
+fn saving_beside_another() -> (yantrik_testing::TestApp<crate::TextEditor>, std::path::PathBuf) {
+    let (app, path) = with_file("linger-other", "x
+");
     act(&app, "new", json!({ "text": "unsaved" })).unwrap();
     act(&app, "select_tab", json!({ "index": 0 })).unwrap();
-    typed(&app, "y\n");
+    typed(&app, "y
+");
+    app.run(Command::Window(WindowAction::Save));
+    assert_eq!(app.jobs_waiting(), 1, "the save is in flight");
+    (app, path)
+}
+
+#[test]
+fn the_window_closed_during_a_save_with_another_tab_unsaved_asks_about_it_once_the_save_lands() {
+    let (app, path) = saving_beside_another();
+    app.close_requested(WindowId::PRIMARY);
+    // Taken, not refused: the window stays while the save is in flight, and says what it waits for.
+    assert_eq!(notice(&app), crate::update::closing::CLOSING_WHEN_DONE);
+    assert_eq!(app.windows(), vec![WindowId::PRIMARY]);
+    assert_eq!(state(&app)["dialog"], 0, "no question while the save is in flight");
+    settle(&app);
+    assert_eq!(file(&path), "y
+");
+    // The close as asked: the usual prompt over the tab still unsaved, the window staying for it.
+    assert_eq!(state(&app)["dialog"], 3);
+    assert_eq!(state(&app)["dialog_is"], "Untitled has unsaved changes.");
+    assert_eq!(app.windows(), vec![WindowId::PRIMARY]);
+    assert!(app.exit_reason().is_none());
+    super::press(&app, WindowAction::Discard);
+    assert_eq!(app.exit_reason(), Some(ExitReason::LastWindowClosed));
+}
+
+#[test]
+fn the_window_closed_during_a_save_that_fails_stays_open_and_says_why() {
+    let (app, path) = with_file("linger-other-fails", "x
+");
+    act(&app, "new", json!({ "text": "unsaved" })).unwrap();
+    act(&app, "select_tab", json!({ "index": 0 })).unwrap();
+    typed(&app, "y
+");
+    let disk = failing(&app);
+    disk.fail(Step::Write, "notes.txt", Some(1));
     app.run(Command::Window(WindowAction::Save));
     app.close_requested(WindowId::PRIMARY);
-    assert_eq!(notice(&app), crate::update::closing::WAIT_BEFORE_CLOSING);
-    assert_eq!(app.windows(), vec![WindowId::PRIMARY]);
     settle(&app);
-    assert_eq!((state(&app)["dialog"].clone(), tabs(&app)), (json!(0), 2));
+    assert_eq!(file(&path), "x
+");
+    assert!(notice(&app).starts_with("Save failed: injected failure"), "{}", notice(&app));
+    assert!(notice(&app).ends_with(crate::update::closing::NOT_CLOSED), "{}", notice(&app));
+    assert_eq!((app.windows(), tabs(&app)), (vec![WindowId::PRIMARY], 2), "everything stays open");
+    assert_eq!(state(&app)["dialog"], 0);
+    assert!(app.exit_reason().is_none());
+    assert_eq!(text(&app), "y
+");
+    // Nothing is left waiting: the next close is asked as any other.
+    app.close_requested(WindowId::PRIMARY);
+    assert_eq!(state(&app)["dialog"], 3);
 }

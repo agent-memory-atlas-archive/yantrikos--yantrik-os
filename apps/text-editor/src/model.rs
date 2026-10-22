@@ -126,6 +126,9 @@ pub struct Model {
     pub queue: VecDeque<PathBuf>,
     /// The window closed with a save in flight: the editor ends when it lands (`fx.linger`).
     pub lingering: bool,
+    /// The window was asked to close while a file was read or written, with other tabs unsaved:
+    /// the close goes on once that lands (update/closing.rs).
+    pub close_when_done: bool,
     /// What the last call from the surface is answered with.
     pub answer: Value,
     /// The last tab closed and the file it had, for the answer of the save that closed it.
@@ -159,6 +162,7 @@ impl Model {
             legacy: Legacy::Done,
             queue: VecDeque::new(),
             lingering: false,
+            close_when_done: false,
             answer: Value::Null,
             last_closed: None,
             cues: Vec::new(),

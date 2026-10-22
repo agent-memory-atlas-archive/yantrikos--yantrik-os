@@ -45,7 +45,9 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Effects<TextEditor>) -> 
     // The caret moving changes the footer's line and column and nothing else.
     let caret_only = matches!(command, Command::Cursor(_));
     dispatch(m, fx, command);
-    // A launch's file waiting for a dialog to be answered opens once it is.
+    // A close that waited for a file to be read or written goes on; then a launch's file waiting
+    // for a dialog to be answered opens once it is.
+    closing::resume(m, fx);
     opening::next(m, fx);
     keep_in_step(m);
     drafts::sync(m, fx);
