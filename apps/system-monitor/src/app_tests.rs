@@ -50,6 +50,25 @@ fn start(machine: FakeMachine) -> (TestApp<SystemMonitor>, Arc<FakeMachine>) {
 // ── describe, in each case ──────────────────────────────────────────
 
 #[test]
+fn in_private_mode_describe_keeps_the_machines_load_and_names_no_process() {
+    use yantrik_app::control::private_mode::{testing::pin, PRIVATE_SUMMARY};
+    let (app, _) = start(FakeMachine::new().reads(normal()));
+    app.run_jobs();
+    pin(&app.paths(), true);
+    let d = app.describe();
+    assert_eq!(d["summary"], json!(PRIVATE_SUMMARY));
+    let mut keys: Vec<&str> = d["state"].as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        ["cpu_percent", "cpu_window_ms", "load_average", "memory_percent", "open", "private", "swap_percent", "windows_open"]
+    );
+    assert!(!d.to_string().contains("chromium"), "{d}");
+    pin(&app.paths(), false);
+    assert_eq!(app.describe()["state"]["top_processes"][0]["name"], json!("chromium"));
+}
+
+#[test]
 fn before_the_first_reading_describe_says_there_is_none() {
     let (app, _) = start(FakeMachine::new().reads(normal()));
     // The first reading is asked for at start and has not landed.

@@ -1095,6 +1095,10 @@ pub fn publish(
 
     let surface = ControlSurface::new("shell")
         .describe(describe)
+        // In Private mode (#924) only whether the desktop is locked and which build it is stay:
+        // neither says anything about the person. `screen` says which screen they are on, so it
+        // goes with everything else.
+        .shown_in_private(&["locked", "version"])
         // The locked-desktop rule, installed on the dispatch every action on this surface
         // crosses rather than in the actions themselves (#203): the login screen used to be a
         // picture over a signed-in session, and `yos act shell open_lens` walked the desktop
