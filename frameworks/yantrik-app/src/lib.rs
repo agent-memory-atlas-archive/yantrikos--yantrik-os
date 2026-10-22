@@ -30,6 +30,7 @@ pub mod queue;
 pub mod quit;
 pub mod rail;
 pub mod refused;
+pub mod rows;
 pub mod runner;
 pub mod services;
 pub mod settings;

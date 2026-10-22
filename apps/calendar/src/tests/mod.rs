@@ -26,6 +26,7 @@ mod describe;
 mod ending;
 mod parity;
 mod reading;
+mod rest;
 mod store;
 mod window;
 mod writing;

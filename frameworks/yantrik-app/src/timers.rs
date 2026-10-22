@@ -9,7 +9,7 @@
 //! is a virtual clock for tests, so no test sleeps through a four-second tick.
 
 use std::collections::{BTreeMap, HashMap};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// A timer's name within the app: `TimerId("forecast.tick")`. Stable, so re-arming finds it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -54,6 +54,8 @@ pub trait Timers<C: 'static> {
     fn stop(&mut self, id: TimerId);
     fn stop_all(&mut self);
     fn armed(&self) -> usize;
+    /// What this clock reads: the machine's time for real timers, the virtual time for a test's.
+    fn instant(&self) -> Instant;
 }
 
 /// The runtime's timers: `slint::Timer`s on the UI thread, which stop when dropped.
@@ -99,10 +101,16 @@ impl<C: 'static> Timers<C> for SlintTimers<C> {
     fn armed(&self) -> usize {
         self.timers.len()
     }
+
+    fn instant(&self) -> Instant {
+        Instant::now()
+    }
 }
 
 /// A virtual clock: timers fire when a test advances it, in deadline order.
 pub struct ManualTimers<C: 'static> {
+    /// The instant the clock reads at zero: when it was made.
+    epoch: Instant,
     now: Duration,
     due: BTreeMap<(Duration, TimerId), (Option<Duration>, Fire<C>)>,
     sink: Sink<C>,
@@ -111,6 +119,7 @@ pub struct ManualTimers<C: 'static> {
 impl<C: 'static> ManualTimers<C> {
     pub fn new(sink: Sink<C>) -> ManualTimers<C> {
         ManualTimers {
+            epoch: Instant::now(),
             now: Duration::ZERO,
             due: BTreeMap::new(),
             sink,
@@ -181,6 +190,10 @@ impl<C: 'static> Timers<C> for ManualTimers<C> {
 
     fn armed(&self) -> usize {
         self.due.len()
+    }
+
+    fn instant(&self) -> Instant {
+        self.epoch + self.now
     }
 }
 
