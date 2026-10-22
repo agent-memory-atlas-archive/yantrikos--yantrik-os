@@ -96,9 +96,10 @@ fn intent(
         .reply(|m: &Model| m.answer.clone())
 }
 
-/// Why an agent's copy that the person did not allow is refused.
-pub const COPY_NEEDS_ALLOW: &str = "a mind copies a snippet only with the person's Allow for that copy: the clipboard is \
-     readable by everything on the session, the mind included, so the code would leave Snippets unseen";
+/// Why an agent's copy that the person did not allow is refused: what to do instead, in the
+/// person's words. A constant, so it can never carry a snippet's code or title.
+pub const COPY_NEEDS_ALLOW: &str =
+    "Copying a snippet to the clipboard needs the person's say; ask them to press Copy in Snippets.";
 
 /// An agent's `copy` is admitted only when the call carries a person's Allow, spent for exactly
 /// this call (`control::call_was_granted`, which the dispatch establishes and a caller cannot

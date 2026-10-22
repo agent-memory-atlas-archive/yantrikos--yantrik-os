@@ -142,6 +142,7 @@ fn an_agents_copy_needs_the_persons_allow() {
     let id = a_secret(&f).to_string();
     let e = as_agent(&f, "copy", json!({ "id": id })).unwrap_err();
     assert_eq!(e, crate::intents::COPY_NEEDS_ALLOW);
+    assert!(!e.contains(SENTINEL) && !e.contains("Deploy key"), "the refusal carries no code: {e}");
     assert!(f.clipboard.texts().is_empty(), "nothing reached the clipboard");
     assert_eq!(f.on_disk().snippets()[0].use_count, 0, "and nothing was counted");
     assert_eq!(f.notice(), "", "a refusal to the agent, not a failure on the person's screen");
