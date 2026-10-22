@@ -24,6 +24,12 @@ pub(super) fn write(m: &mut Model, fx: &mut Fx, after: After, restore: Restore) 
     };
     let ticket = m.lane.ticket();
     m.work += 1;
+    // Every draft whose text these bytes hold waits on this write to go (`drafts::release`).
+    for draft in m.drafts.values_mut() {
+        if m.library.get(draft.kept_as).is_some() && !m.library.differs(draft.kept_as, &draft.text.patch()) {
+            draft.pending = Some(ticket.revision);
+        }
+    }
     let write = Write { ticket, after, restore };
     let job = m.lane.job(ticket, bytes);
     let failed = Command::WorkFailed(Box::new(Work::Write(Box::new(write.clone()))));
@@ -38,8 +44,12 @@ pub(super) fn update(m: &mut Model, command: Command, fx: &mut Fx) {
             let Written { write, landed } = *written;
             m.lane.landed();
             match landed {
-                Landed::Saved | Landed::Covered => kept(m, write.after, fx),
+                Landed::Saved | Landed::Covered => {
+                    m.lane.confirm(write.ticket.revision);
+                    kept(m, write.after, fx);
+                }
                 Landed::Failed { why, on_disk } => {
+                    super::drafts::not_landed(m, write.ticket.revision);
                     if m.lane.spend(write.ticket) {
                         match on_disk {
                             Ok(library) => take_back(m, library, &write.restore, fx),
@@ -52,13 +62,13 @@ pub(super) fn update(m: &mut Model, command: Command, fx: &mut Fx) {
                     keep_typing(m, &write.restore, &why, fx);
                 }
                 Landed::Undone(why) => {
+                    super::drafts::not_landed(m, write.ticket.revision);
                     not_kept(m, write.after, &why, fx);
                     keep_typing(m, &write.restore, &why, fx);
                 }
             }
         }
         Command::Reloaded(result) => {
-            m.reloading = m.reloading.saturating_sub(1);
             // Taken only while nothing else is being written: a write in flight says for itself
             // what the file holds once it lands.
             if let (Ok(library), true) = (result, m.lane.idle()) {
@@ -83,7 +93,6 @@ pub(super) fn did_not_finish(m: &mut Model, after: After, restore: &Restore, fx:
     if m.drafts.contains_key(&typing.id) && super::drafts::hold(m, fx, typing, restore.typed) {
         say(m, fx, &format!("{why} Your text is kept as a draft."));
     }
-    m.reloading += 1;
     let disk = m.lane.disk();
     let path = m.lane.path().to_path_buf();
     fx.spawn_or(Command::WorkFailed(Box::new(Work::Reload)), move |_| {

@@ -69,6 +69,8 @@ pub struct Lane {
     revision: u64,
     epoch: u64,
     in_flight: usize,
+    /// The newest revision known to be on disk: a write of it, or of a newer one, has landed.
+    confirmed: u64,
 }
 
 impl Lane {
@@ -80,6 +82,7 @@ impl Lane {
             revision: 0,
             epoch: 0,
             in_flight: 0,
+            confirmed: 0,
         }
     }
 
@@ -105,6 +108,21 @@ impl Lane {
 
     pub fn landed(&mut self) {
         self.in_flight = self.in_flight.saturating_sub(1);
+    }
+
+    /// A write of `revision` landed `Saved` or `Covered`: the file holds it, or a newer one.
+    pub fn confirm(&mut self, revision: u64) {
+        self.confirmed = self.confirmed.max(revision);
+    }
+
+    /// The newest revision known to be on disk. 0 is the file as the start read it.
+    pub fn confirmed(&self) -> u64 {
+        self.confirmed
+    }
+
+    /// The newest revision issued.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// A write of `ticket`'s epoch failed and its read-back is being put on screen: true the

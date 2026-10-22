@@ -98,7 +98,6 @@ impl App for SnippetManager {
             clipboard: clipboard::for_app(&boot.paths),
             drafts: Default::default(),
             typed: 0,
-            reloading: 0,
             offers: Vec::new(),
         };
         recover(&mut m, &boot.drafts);
@@ -137,6 +136,8 @@ impl App for SnippetManager {
             Event::ExitRequested(_) => Some(Command::Ending),
             // A second launch opened the window again while a close waited: the close is over.
             Event::Presented(_) if m.closing => Some(Command::Reopened),
+            // Said, so the person knows the text is only in the window; no other copy goes.
+            Event::DraftNotSaved { name, why } => Some(Command::DraftNotKept { name, why }),
             _ => None,
         }
     }
@@ -158,10 +159,14 @@ fn recover(m: &mut Model, drafts: &yantrik_app::Drafts) {
         // A draft for a snippet no longer kept names an id a refused create may have used and the
         // file never counted past: it is never given to another snippet.
         m.library.reserve(id);
-        m.drafts.insert(id, model::Draft { text, typed: 0 });
-        if !kept {
+        let mut draft = model::Draft::of(text, 0);
+        if kept {
+            // The file just read holds it: the first command lets it go (`update::drafts`).
+            draft.pending = Some(0);
+        } else {
             m.offers.push(model::Offer { id, why: model::Why::Closed });
         }
+        m.drafts.insert(id, draft);
     }
     if let Some(first) = m.offers.first().map(|o| o.id) {
         m.select(first);
