@@ -10,7 +10,7 @@
 //! - `copying.rs` and `files.rs`: the clipboard, import, export and a file on the command line.
 //! - `ending.rs`: the window closed, a logout, the draft, and the next start.
 //! - `secrets.rs`: a snippet's code is never in a log, an answer, `describe` or a debug print.
-//! - `rail.rs`: the agent rail and the AI button.
+//! - `rail.rs`: the agent rail and the AI button. `private_mode.rs`: `describe` in Private mode.
 
 use std::sync::Arc;
 
@@ -29,6 +29,7 @@ mod editing;
 mod ending;
 mod files;
 mod parity;
+mod private_mode;
 mod rail;
 mod secrets;
 mod writes;

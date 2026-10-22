@@ -1,8 +1,8 @@
 //! What the Mind reads: the same keys and values the app published before the framework, read off
 //! the committed model.
 //!
-//! In Private mode the framework replaces all of it (#926); this app keeps none of its keys there,
-//! because every one names, counts or quotes the person's snippets.
+//! In Private mode the framework replaces all of it (#924); this app keeps none of its keys there
+//! (`tests/private_mode.rs`), because every one names, counts or quotes the person's snippets.
 
 use serde_json::{json, Value};
 use yantrik_app::control::View;
