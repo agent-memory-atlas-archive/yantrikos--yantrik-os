@@ -340,3 +340,29 @@ fn a_real_mpv_does_not_open_network_ports_for_an_sdp_file_named_like_a_sound_fil
     drop(engine);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A file that loaded is found by a waiter however soon the next one followed: mpv may load a
+/// file and be handed the next before the waiter looks (#937 delta review, finding A).
+#[test]
+fn a_file_that_loaded_is_found_though_the_next_one_followed_before_anyone_looked() {
+    let mut o = Observed::default();
+    for event in [
+        Event::Property("path".into(), json!("/m/slow.mp3")),
+        Event::Property("duration".into(), json!(200.0)),
+        Event::FileLoaded,
+        Event::EndFile { reason: "stop".into(), error: None },
+        Event::Property("path".into(), json!("/m/next.mp3")),
+        Event::FileLoaded,
+    ] {
+        o.apply(&event);
+    }
+    assert_eq!(o.path.as_deref(), Some("/m/next.mp3"), "the latest state has moved on");
+    let at = o.loaded_since(0, "/m/slow.mp3").expect("the history has it");
+    assert_eq!((at.path.as_deref(), at.duration), (Some("/m/slow.mp3"), Some(200.0)));
+    assert!(o.loaded_since(1, "/m/slow.mp3").is_none(), "not a load from before the wait");
+    for n in 0..20 {
+        o.apply(&Event::Property("path".into(), json!(format!("/m/{n}.mp3"))));
+        o.apply(&Event::FileLoaded);
+    }
+    assert_eq!(o.loaded.len(), 8, "only the last few are kept");
+}

@@ -104,3 +104,17 @@ fn an_agent_may_name_only_a_file_in_the_home_and_is_told_so_before_it_is_looked_
     let missing = f.agent("play_file", json!({"path": "/etc/passwd"})).unwrap_err();
     assert!(!missing.contains("root:"), "{missing}");
 }
+
+/// An agent's `play_file` of a path outside the home is refused in the rule's words, with the
+/// path it gave said as one line of plain text (#937 delta review, finding C).
+#[test]
+fn an_agents_refused_path_is_said_as_one_line_of_plain_text() {
+    let Some(f) = open("agent-name") else { return };
+    let odd = f.dir.join("two\nlines\u{202E}.mp3");
+    std::fs::write(&odd, b"").unwrap();
+    let err = f.agent("play_file", json!({"path": odd})).unwrap_err();
+    assert!(err.contains("two\u{FFFD}lines\u{FFFD}.mp3"), "{err}");
+    for said in [err, f.notice(), f.summary()] {
+        assert!(!said.contains('\n') && !said.contains('\u{202E}'), "{said:?}");
+    }
+}

@@ -1,5 +1,6 @@
 //! What mpv last reported, and a condition to wait on for the next change.
 
+use std::collections::VecDeque;
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -24,9 +25,45 @@ pub struct Observed {
     /// failure is never read as the answer to a new load.
     pub errors: u64,
     pub gone: bool,
+    /// The last few files that loaded, each with its load's number and what mpv had said by
+    /// then. A waiter asks this, not the latest state: mpv may load a file and be handed the
+    /// next one before the waiter looks, and the moment the first was playing is then gone.
+    pub loaded: VecDeque<(u64, Moment)>,
 }
 
+/// What mpv had said at one moment: the fields a report carries.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Moment {
+    pub path: Option<String>,
+    pub time_pos: Option<f64>,
+    pub duration: Option<f64>,
+    pub paused: bool,
+    pub volume: Option<f64>,
+    pub muted: bool,
+    pub playing: bool,
+}
+
+/// How many loads [`Observed::loaded`] keeps.
+const LOADS_KEPT: usize = 8;
+
 impl Observed {
+    /// What mpv had said when `path` loaded, if it did after load number `after`.
+    pub fn loaded_since(&self, after: u64, path: &str) -> Option<&Moment> {
+        self.loaded.iter().rev().find(|(n, m)| *n > after && m.path.as_deref() == Some(path)).map(|(_, m)| m)
+    }
+
+    fn moment(&self) -> Moment {
+        Moment {
+            path: self.path.clone(),
+            time_pos: self.time_pos,
+            duration: self.duration,
+            paused: self.paused,
+            volume: self.volume,
+            muted: self.muted,
+            playing: self.playing(),
+        }
+    }
+
     pub fn apply(&mut self, event: &Event) {
         match event {
             Event::Property(name, v) => match name.as_str() {
@@ -42,6 +79,11 @@ impl Observed {
             Event::FileLoaded => {
                 self.loads += 1;
                 self.last_error = None;
+                if self.loaded.len() == LOADS_KEPT {
+                    self.loaded.pop_front();
+                }
+                let at = self.moment();
+                self.loaded.push_back((self.loads, at));
             }
             Event::EndFile { reason, error } => match reason.as_str() {
                 "error" => {

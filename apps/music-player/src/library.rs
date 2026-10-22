@@ -105,6 +105,8 @@ pub fn plain(name: &str) -> String {
 
 fn is_direction_control(c: char) -> bool {
     matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}' | '\u{061C}')
+        // The line and paragraph separators, which some renderers break a line on.
+        || matches!(c, '\u{2028}' | '\u{2029}')
 }
 
 /// What scanning every library folder found.
@@ -310,5 +312,6 @@ mod tests {
         assert_eq!(t.album, "Al\u{FFFD}bum");
         assert_eq!(t.path, "/m/Al\nbum/one\u{1b}[2J\u{202E}3pm.mp3", "mpv is handed the file's own path");
         assert_eq!(title_of("/x/Ünïcode — fine.flac"), "Ünïcode — fine");
+        assert_eq!(plain("a\u{2028}b\u{2029}c"), "a\u{FFFD}b\u{FFFD}c", "the separators some renderers break on");
     }
 }

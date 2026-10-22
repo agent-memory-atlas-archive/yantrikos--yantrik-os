@@ -234,14 +234,23 @@ fn failed(m: &mut Model, work: Work, fx: &mut Fx) {
         }
         Work::Scan => {
             m.scans.running = m.scans.running.saturating_sub(1);
+            // The rescan the person asked for meanwhile is the one this message asks them to
+            // press; it is not owed on top.
+            m.scans.again = false;
             m.status = "The scan did not finish; press Rescan to try again.".into();
             m.agent_status = None;
         }
         Work::Check | Work::Folder => m.notice = "That could not be looked at; try again.".into(),
         Work::Volume => {
-            m.volume_sending = false;
-            m.volume_next = None;
             m.notice = "The player did not answer; try again.".into();
+            // The person's change that did not run lets the newest waiting one go now; a call's
+            // leaves the person's in flight as it was.
+            if !crate::answers::owed(fx) {
+                m.volume_sending = false;
+                if let Some(next) = m.volume_next.take() {
+                    playback::send_volume(m, fx, next);
+                }
+            }
         }
         _ => m.notice = "The player did not answer; try again.".into(),
     }

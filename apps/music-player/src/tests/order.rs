@@ -133,3 +133,28 @@ fn a_command_refused_while_closing_leaves_the_model_as_it_was() {
     Music::update(&mut m, Command::Mpv { player: 1, event: eof }, &mut fx).unwrap();
     assert!(fx.requests().is_empty());
 }
+
+/// A scan that ends without a result leaves no follow-up owed: the person is told to press
+/// Rescan, and that press scans once.
+#[test]
+fn a_scan_that_fails_owes_no_follow_up() {
+    let mut m = model();
+    m.scans.started = 1;
+    m.scans.running = 1;
+    m.scans.again = true;
+    Music::update(&mut m, Command::WorkFailed(crate::command::Work::Scan), &mut Effects::recording()).unwrap();
+    assert_eq!((m.scans.running, m.scans.again), (0, false));
+}
+
+/// The person's volume job that did not run lets the newest waiting value go, rather than drop it.
+#[test]
+fn a_volume_change_that_did_not_run_sends_the_one_waiting() {
+    let mut m = model();
+    m.volume_sending = true;
+    m.volume_next = Some(55.0);
+    m.player_jobs = 1;
+    let mut fx = Effects::<Music>::recording();
+    Music::update(&mut m, Command::WorkFailed(crate::command::Work::Volume), &mut fx).unwrap();
+    assert!(fx.requests().iter().any(|r| r.name() == "spawn"), "the 55 is sent");
+    assert_eq!((m.volume_sending, m.volume_next), (true, None));
+}

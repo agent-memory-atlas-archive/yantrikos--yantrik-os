@@ -175,10 +175,13 @@ fn set_volume(m: &mut Model, fx: &mut Fx, percent: f64) {
     }
 }
 
-/// Tell the player `percent`.
+/// Tell the player `percent`. A call's value is the newest: a value of the person's still
+/// waiting for the one ahead of it is dropped, so it cannot land after the call's.
 pub fn send_volume(m: &mut Model, fx: &mut Fx, percent: f64) {
     let answer = owed(fx);
-    if !answer {
+    if answer {
+        m.volume_next = None;
+    } else {
         m.volume_sending = true;
     }
     job(m, fx, Work::Volume, move |p, t| Command::VolumeSet { percent, result: ops::volume(p, t, percent, answer) });

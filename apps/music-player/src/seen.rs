@@ -23,7 +23,8 @@ pub fn for_agents(path: &str) -> bool {
 /// places, in the rule's own words. Reads the disk: from a job only, before the path is looked
 /// at, so a refusal says nothing about whether a file is there.
 pub fn may_play(path: &str) -> Result<(), String> {
-    home_paths::may_read_file(path, &yantrik_foundation::place::home())
+    // The rule's sentence quotes the path the agent gave, which is untrusted: one line, plain.
+    home_paths::may_read_file(path, &yantrik_foundation::place::home()).map_err(|why| crate::library::plain(&why))
 }
 
 /// `path` as this caller may see it, given whether agents may (`may`).

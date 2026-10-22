@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 
 use super::{Player, Start, Ticket};
 use crate::library::{self, Track};
-use crate::mpv::{Engine, Observed};
+use crate::mpv::{Engine, Moment, Observed};
 use crate::seen;
 
 /// How long an intent waits for mpv to say a file it was handed is playing.
@@ -35,17 +35,17 @@ pub struct Report {
 }
 
 impl Report {
-    /// The report as mpv's last word on its own had it: what a waiter saw when it was satisfied.
-    fn of(o: &Observed) -> Report {
+    /// The report as mpv's own word had it at one moment: when the file a call asked for loaded.
+    fn of(m: &Moment) -> Report {
         Report {
-            playing: o.playing(),
-            paused: o.paused,
-            path_for_agents: o.path.as_deref().is_some_and(seen::for_agents),
-            path: o.path.clone(),
-            position: json!(o.time_pos),
-            duration: json!(o.duration),
-            volume: json!(o.volume),
-            muted: o.muted,
+            playing: m.playing,
+            paused: m.paused,
+            path_for_agents: m.path.as_deref().is_some_and(seen::for_agents),
+            path: m.path.clone(),
+            position: json!(m.time_pos),
+            duration: json!(m.duration),
+            volume: json!(m.volume),
+            muted: m.muted,
         }
     }
 }
@@ -130,15 +130,17 @@ pub fn load(p: &Player, ticket: Ticket, track: &Track, start: &Start, answer: bo
 /// when another file is handed over (`mine` is no longer the last), so however many calls play
 /// at once, at most one wait holds a job thread and the player's commands always find one.
 fn wait_loaded(p: &Player, e: &Engine, track: &Track, before: &Observed, mine: u64, agent: bool) -> Result<Played, String> {
-    let is_it = |o: &Observed| o.loads > before.loads && o.path.as_deref() == Some(track.path.as_str());
+    let played = |o: &Observed| o.loaded_since(before.loads, &track.path).is_some();
     let superseded = || p.last_handed() != mine;
-    let (_, o) = e.observed.wait_for(LOAD_WAIT, |o| o.gone || o.errors > before.errors || is_it(o) || superseded());
-    if !o.gone && o.errors == before.errors && is_it(&o) {
+    let (_, o) = e.observed.wait_for(LOAD_WAIT, |o| played(o) || o.gone || o.errors > before.errors || superseded());
+    // mpv said this file loaded, whatever it has done since: the history is asked, never only
+    // the latest state, so a file handed over straight after cannot hide it.
+    if let Some(at) = o.loaded_since(before.loads, &track.path) {
         let now = report(e);
         return Ok(match now.path {
             Some(ref p) if *p != track.path => {
                 let moved_to = Some((p.clone(), now.path_for_agents));
-                Played { report: Report::of(&o), moved_to }
+                Played { report: Report::of(at), moved_to }
             }
             _ => Played { report: now, moved_to: None },
         });

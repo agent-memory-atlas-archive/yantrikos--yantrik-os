@@ -250,3 +250,23 @@ fn a_failed_save_is_said_as_a_settings_save() {
     assert!(f.notice().starts_with("could not save Music's settings to "), "{}", f.notice());
     assert!(f.notice().ends_with(": the disk is full"), "{}", f.notice());
 }
+
+/// A call's `set_volume` in the middle of the person's drag is the newest, so it is the one mpv
+/// ends at, the one kept, and the one the call is told (#937 delta review, finding B).
+#[test]
+fn a_calls_volume_in_the_middle_of_a_drag_is_the_one_that_wins() {
+    let Some(f) = open("drag-and-call") else { return };
+    f.act("play", json!({"index": 1})).unwrap();
+    f.app.ui(|ui| ui.invoke_volume_changed(0.2));
+    f.app.ui(|ui| ui.invoke_volume_changed(0.7));
+    assert!(f.app.model(|m| m.volume_next.is_some()), "the 0.7 waits for the 0.2 to land");
+    let answer = f.agent("set_volume", json!({"percent": 30})).unwrap();
+    assert_eq!(answer["volume"], 30.0, "the call is told what mpv applied: {answer}");
+    f.quiet();
+    assert_eq!(f.state()["volume"], 30.0, "mpv ends at the newest value, the call's");
+    f.app.run_writes();
+    assert_eq!(f.app.committed_settings().volume, 30.0);
+    // The person's next move after the call is the newest again.
+    f.app.ui(|ui| ui.invoke_volume_changed(0.5));
+    f.until("mpv follows the person again", |f| f.state()["volume"] == 50.0);
+}

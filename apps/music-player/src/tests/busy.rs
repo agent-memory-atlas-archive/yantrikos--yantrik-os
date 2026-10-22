@@ -56,8 +56,9 @@ impl Deliver<&'static str> for Landed {
 }
 
 /// On the framework's own pool, with a scan holding one thread and a call's wait for a file that
-/// never loads holding another: a pause lands at once, a newer file ends the wait, and a close's
-/// reap lands at once, all while the scan is still walking.
+/// never loads holding another: a pause lands, a newer file ends the wait, and a close's reap
+/// lands, all while the scan is still walking. The scan walks until they have, so the test is
+/// decided by what can run, not by how fast.
 #[test]
 fn on_the_real_pool_a_scan_and_a_wait_never_hold_up_the_player() {
     if !fake::python() {
@@ -77,9 +78,11 @@ fn on_the_real_pool_a_scan_and_a_wait_never_hold_up_the_player() {
         pool.spawn(JobId(id), Cancel::new(), job, landed.clone());
     };
     let began = Instant::now();
-    // The one scan, standing in for a walk of a large library.
-    run(Box::new(|_| {
-        std::thread::sleep(Duration::from_secs(3));
+    // The one scan, standing in for a walk of a large library: it walks until the test has seen
+    // every player job land, so a job queued behind it could never land at all.
+    let (release, walking) = mpsc::channel::<()>();
+    run(Box::new(move |_| {
+        let _ = walking.recv_timeout(Duration::from_secs(20));
         "scan"
     }));
     let track = |name: &str| library::track_from(&dir.join(name));
@@ -101,7 +104,7 @@ fn on_the_real_pool_a_scan_and_a_wait_never_hold_up_the_player() {
     }));
     let mut at = std::collections::HashMap::new();
     let land = |at: &mut std::collections::HashMap<&'static str, Duration>| {
-        let (label, when) = rx.recv_timeout(Duration::from_secs(10)).expect("a job landed");
+        let (label, when) = rx.recv_timeout(Duration::from_secs(10)).expect("a job landed while the scan walked");
         at.insert(label, when - began);
     };
     for _ in 0..3 {
@@ -117,10 +120,11 @@ fn on_the_real_pool_a_scan_and_a_wait_never_hold_up_the_player() {
     }));
     land(&mut at);
     for label in ["wait", "pause", "next", "retire"] {
-        assert!(at[label] < Duration::from_millis(1500), "{label} landed after {:?}, behind the scan", at[label]);
+        assert!(at.contains_key(label), "{label} did not land while the scan walked: {at:?}");
     }
     let pid = pid.lock().unwrap().expect("the player ran");
     assert!(fake::reaped(pid), "mpv was reaped while the scan still walked");
+    release.send(()).unwrap();
     assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap().0, "scan");
     let _ = std::fs::remove_dir_all(&dir);
 }

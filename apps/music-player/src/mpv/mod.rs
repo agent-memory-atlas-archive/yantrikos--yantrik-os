@@ -24,4 +24,4 @@ mod tests;
 
 pub use client::Event;
 pub use engine::{socket_path, Engine, REDIRECTED};
-pub use observed::Observed;
+pub use observed::{Moment, Observed};
