@@ -68,7 +68,7 @@ fn a_file_past_the_limit_another_program_put_there_mid_save_is_kept_and_named() 
     assert_eq!(file(&path), "mine\n");
     let kept = path.with_file_name("notes (outside version).txt");
     assert_eq!(std::fs::metadata(&kept).unwrap().len(), BIG, "kept unread, under a name a person sees");
-    assert!(notice(&app).contains("kept beside it as"), "{}", notice(&app));
+    assert!(notice(&app).contains("its version is kept as"), "{}", notice(&app));
     let hidden: Vec<String> = std::fs::read_dir(path.parent().unwrap())
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())

@@ -15,6 +15,7 @@ use crate::TextEditor;
 mod agents;
 mod big;
 mod closing;
+mod findings;
 mod launch;
 mod lingering;
 mod outside;
@@ -67,7 +68,7 @@ pub fn summary(app: &TestApp<TextEditor>) -> String {
 }
 
 pub fn notice(app: &TestApp<TextEditor>) -> String {
-    app.model(|m| m.notice.clone())
+    app.model(|m| m.notice.window().to_string())
 }
 
 /// The tab in front's whole text.

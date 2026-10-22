@@ -83,7 +83,7 @@ pub fn replace(m: &mut Model, fx: &mut Effects<TextEditor>, all: bool, caller: &
     let replaced = bar::replaced(m, all, &m.find.replacement)?;
     editing::put(m, fx, replaced, &caller.opener)?;
     if m.active_text() == before {
-        return Err(if m.notice.is_empty() { "Nothing was replaced.".into() } else { m.notice.clone() });
+        return Err(if m.notice.is_empty() { "Nothing was replaced.".into() } else { m.notice.read(caller.agent).to_string() });
     }
     let mut answer = now(m, caller);
     answer.value["replaced"] = json!(intended);

@@ -92,7 +92,7 @@ fn chrome(ui: &TextEditorApp, m: &Model) {
     ui.set_view_limited(view.limited);
     ui.set_view_status(viewport::status(view, text).into());
     ui.set_busy(m.busy.is_some());
-    ui.set_notice(m.notice.clone().into());
+    ui.set_notice(m.notice.window().into());
     ui.set_recovery_status(m.recovery.clone().into());
     ui.set_cursor_line(m.cursor.0);
     ui.set_cursor_column(m.cursor.1);

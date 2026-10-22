@@ -11,9 +11,9 @@ use yantrik_app::effects::Effects;
 use super::{closing, say, surface};
 use crate::command::{AfterSave, Command};
 use crate::files::kept;
-use crate::files::save::{save, SaveFailed, SaveJob, Wrote};
-use crate::model::{Dialog, Model, Work};
-use crate::tab::TabId;
+use crate::files::save::{save, SaveFailed, SaveJob, Wrote, CHANGED_ON_DISK};
+use crate::model::{Dialog, Model, Work, HIDDEN_TAB};
+use crate::tab::{Tab, TabId};
 use crate::TextEditor;
 
 /// Said when a save ended without an answer: it may have written anything, so nothing is called
@@ -33,6 +33,13 @@ pub fn start(
     let Some(tab) = m.tab(id).cloned() else { return };
     let own = m.path(&tab).map(PathBuf::from);
     let Some(target) = target.or_else(|| own.clone()) else { return };
+    let others = m
+        .tabs
+        .iter()
+        .filter(|t| t.id != id)
+        .filter_map(|t| m.path(t).map(|p| (p.to_path_buf(), if t.hidden { HIDDEN_TAB.into() } else { m.title(t) })))
+        .collect();
+    let elsewhere = m.state_dir.join("kept");
     let Some(doc) = m.doc_mut(tab.doc) else { return };
     let seq = doc.seq;
     let job = SaveJob {
@@ -44,6 +51,8 @@ pub fn start(
         inode: tab.inode,
         overwrite,
         agent,
+        others,
+        elsewhere,
     };
     // One save in flight, judged by the document when it lands, whatever the save was for.
     doc.save = SaveState::Saving { seq };
@@ -64,7 +73,12 @@ pub fn start(
     fx.spawn_or(lost, move |_| Command::SaveLanded { tab: id, seq, then, result: save(&job, disk.as_ref()) });
 }
 
-/// A save of tab `id` at `seq` landed.
+/// Said when a save's landing is no longer the one its document expects. Nothing else changes a
+/// tab's save while it is in flight, so this is a guard, not a path: the write is not called saved.
+const OVERTAKEN: &str = "Save failed: the save was overtaken before it landed. Your draft is still open.";
+
+/// A save of tab `id` at `seq` landed. Whatever it was, the call it was for is answered, and a close
+/// or a linger waiting on it goes on.
 pub fn landed(
     m: &mut Model,
     fx: &mut Effects<TextEditor>,
@@ -77,43 +91,82 @@ pub fn landed(
         m.busy = None;
     }
     let Some(tab) = m.tab(id).cloned() else {
-        return surface::refuse_if_owed(m, fx, &then, "The tab was closed before its save landed.");
-    };
-    let kept = match &result {
-        Ok(w) => w.kept.as_ref().map(|k| kept::said(k, &w.file.path)),
-        Err(f) => f.kept.as_ref().zip(m.path(&tab)).map(|(k, p)| kept::said(k, p)),
+        say(m, "The tab was closed before its save landed.");
+        return surface::refuse_if_owed(m, fx, &then);
     };
     match result {
         Ok(wrote) => {
             let Some(doc) = m.doc_mut(tab.doc) else { return };
             let outcome = doc.save_landed_witnessed(seq, Ok(wrote.written.clone()), wrote.witnessed);
             if !matches!(outcome, SaveOutcome::Saved { .. }) {
-                return;
+                if let Some(t) = m.tab_mut(id) {
+                    t.unsure = Some(wrote.written.clone());
+                }
+                return not_saved(m, fx, &tab, &then, OVERTAKEN.into(), NOT_SAVED_HIDDEN.into());
             }
+            let hidden = tab.hidden || wrote.file.hidden;
             moved_to_file(m, fx, id, &wrote);
-            say(m, kept.unwrap_or_else(|| "Saved".into()));
+            match &wrote.kept {
+                Some(k) => m.notice.set_about(hidden, kept::said(k, &wrote.file.path), || kept::said_hidden(k)),
+                None => say(m, "Saved"),
+            }
             m.dialog = Dialog::None;
             closing::saved(m, fx, id);
             surface::answers::saved(m, fx, &then, id);
         }
         Err(failed) => {
             let Some(doc) = m.doc_mut(tab.doc) else { return };
-            if matches!(doc.save_landed(seq, Err(failed.error.clone())), SaveOutcome::Stale) {
-                return;
-            }
+            let stale = matches!(doc.save_landed(seq, Err(failed.error.clone())), SaveOutcome::Stale);
             if let (Some(t), Some(landed)) = (m.tab_mut(id), failed.error.landed.clone()) {
                 t.unsure = Some(landed);
             }
-            let sentence = match kept {
-                Some(kept) => format!("{kept} {}", failed.error.sentence),
-                None => failed.error.sentence.clone(),
+            let kept = failed.kept.as_ref().zip(m.path(&tab)).map(|(k, p)| (kept::said(k, p), kept::said_hidden(k)));
+            let sentence = if stale { OVERTAKEN.to_string() } else { failed.error.sentence.clone() };
+            let (window, agents) = match kept {
+                Some((said, safe)) => (format!("{said} {sentence}"), Some(safe)),
+                None => (sentence, None),
             };
-            m.dialog_error = sentence.clone();
-            say(m, sentence.clone());
-            closing::not_saved(m, fx, id, &sentence);
-            surface::refuse_if_owed(m, fx, &then, &sentence);
+            let failure = if failed.error.conflict {
+                CHANGED_ON_DISK.to_string()
+            } else {
+                unnamed(&failed.error.sentence, m.path(&tab))
+            };
+            let for_agents = agents.map_or(failure.clone(), |safe| format!("{safe} {failure}"));
+            not_saved(m, fx, &tab, &then, window, for_agents);
         }
     }
+}
+
+/// What an agent reads of a failed save of a tab it is not shown, when the reason cannot be said
+/// without a path.
+const NOT_SAVED_HIDDEN: &str = "The tab's file was not saved, and its draft is intact.";
+
+/// A failed save's sentence as an agent may read it about a tab it is not shown: the file's path,
+/// its folder and its name each said as `(hidden)`; or, when any other path is left in it (where a
+/// moved file looks to be), the reason without one.
+fn unnamed(sentence: &str, path: Option<&std::path::Path>) -> String {
+    let Some(path) = path else { return NOT_SAVED_HIDDEN.into() };
+    let mut said = sentence.replace(&path.display().to_string(), HIDDEN_TAB);
+    if let Some(folder) = path.parent().filter(|f| !f.as_os_str().is_empty()) {
+        said = said.replace(&folder.display().to_string(), HIDDEN_TAB);
+    }
+    if let Some(name) = path.file_name() {
+        said = said.replace(&*name.to_string_lossy(), HIDDEN_TAB);
+    }
+    if said.contains('/') {
+        NOT_SAVED_HIDDEN.into()
+    } else {
+        said
+    }
+}
+
+/// A save that is not called saved: said (in its agent-safe form for a tab an agent is not shown),
+/// its close or linger told, its call refused.
+fn not_saved(m: &mut Model, fx: &mut Effects<TextEditor>, tab: &Tab, then: &AfterSave, sentence: String, for_agents: String) {
+    m.notice.set_about(tab.hidden, sentence.clone(), || for_agents);
+    m.dialog_error = sentence.clone();
+    closing::not_saved(m, fx, tab.id, &sentence);
+    surface::refuse_if_owed(m, fx, then);
 }
 
 /// The tab now is the file the save wrote: its source, its baseline, its watch, what an agent is

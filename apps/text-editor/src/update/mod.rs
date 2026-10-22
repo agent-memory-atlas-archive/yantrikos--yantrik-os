@@ -10,7 +10,7 @@ use yantrik_app::Refused;
 
 use crate::command::Command;
 use crate::view::render::{CARET, CHROME, TEXT};
-use crate::model::Model;
+use crate::model::{Finish, Model};
 use crate::TextEditor;
 
 pub mod closing;
@@ -55,7 +55,22 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Effects<TextEditor>) -> 
         fx.changed(TEXT);
     }
     fx.changed(if caret_only { CARET } else { CHROME });
+    finish(m, fx);
     Ok(())
+}
+
+/// The window's close, or the editor's end, once every answer owed has settled: closing the last
+/// window ends the process, and its shutdown refuses whatever is still owed, so a call whose own
+/// work led here (the prompt's `save` or `discard`, a save that ended a linger) is answered first.
+fn finish(m: &mut Model, fx: &mut Effects<TextEditor>) {
+    if m.answers_pending > 0 {
+        return;
+    }
+    match m.finish.take() {
+        Some(Finish::Close) => fx.close(yantrik_app::app::WindowId::PRIMARY),
+        Some(Finish::Exit) => fx.exit(),
+        None => {}
+    }
 }
 
 fn dispatch(m: &mut Model, fx: &mut Effects<TextEditor>, command: Command) {
@@ -90,7 +105,7 @@ fn dispatch(m: &mut Model, fx: &mut Effects<TextEditor>, command: Command) {
         Command::SaveLanded { tab, seq, then, result } => saving::landed(m, fx, tab, seq, then, result),
         Command::Reread { tab, seq, result } => outside::reread(m, fx, tab, seq, result),
         Command::Located { tab, from, found } => outside::located(m, fx, tab, from, found),
-        Command::Answered { value, failed } => surface::answered(m, fx, value, failed),
+        Command::Answered { value, failed, agent } => surface::answered(m, fx, value, failed, agent),
         Command::LegacyArchived(result) => drafts::legacy_archived(m, result),
         #[cfg(test)]
         Command::UseDisk(disk) => m.disk = disk,
@@ -116,5 +131,5 @@ fn keep_in_step(m: &mut Model) {
 
 /// Says `sentence` in the window's notice line, which is also `describe.notice`.
 pub fn say(m: &mut Model, sentence: impl Into<String>) {
-    m.notice = sentence.into();
+    m.notice.set(sentence);
 }

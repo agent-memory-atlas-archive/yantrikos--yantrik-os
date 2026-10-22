@@ -27,6 +27,7 @@ mod describe;
 mod files;
 mod intents;
 mod model;
+mod notice;
 mod owner;
 mod prompt;
 mod reading;
@@ -81,7 +82,7 @@ impl App for TextEditor {
         if m.tabs.is_empty() {
             update::tabs::blank(&mut m, owner::Opener::Person);
         }
-        m.notice = notice;
+        m.notice.set(notice);
         Ok(m)
     }
 

@@ -49,6 +49,9 @@ fn an_agent_names_only_files_in_the_home_and_is_not_shown_the_persons_other_file
     refused("open", json!({ "path": "/etc/hostname" }), " is outside");
     refused("open", json!({ "path": tab.display().to_string() }), " is outside");
     refused("save", none(), " is outside");
+    // The refusal of a save of the tab it is not shown names neither the file nor its folder.
+    let err = act_as_agent(&app, "tok-editor", "save", none()).unwrap_err();
+    assert!(!err.contains("secret.txt") && !err.contains(&dir.display().to_string()), "{err}");
     let hidden = "its text is left alone; `select_tab` another or `new` one.";
     refused("save_as", json!({ "path": "~/Documents/copied-out.txt" }), hidden);
     // `read` takes no path at all: the dispatch refuses one before the editor is asked.

@@ -58,6 +58,11 @@ pub struct SaveJob {
     pub overwrite: bool,
     /// An agent's call: the write rule holds (agent_rule.rs).
     pub agent: bool,
+    /// The files the other open tabs hold, each with its name as anyone may read it: a save onto
+    /// one is refused, so one file is never two tabs (whose drafts could not both come back).
+    pub others: Vec<(PathBuf, String)>,
+    /// Where another program's version is kept when no name beside the file can be made.
+    pub elsewhere: PathBuf,
 }
 
 /// A save that landed.
@@ -125,6 +130,11 @@ pub fn save(job: &SaveJob, disk: &dyn Disk) -> Result<Wrote, Box<SaveFailed>> {
     let name = job.target.file_name().ok_or_else(|| SaveFailed::nothing("Choose a file name."))?;
     let parent = std::fs::canonicalize(parent).map_err(|e| SaveFailed::nothing(format!("Cannot open folder: {e}")))?;
     let path = parent.join(name);
+    if let Some((_, tab)) = job.others.iter().find(|(p, _)| *p == path) {
+        return Err(SaveFailed::nothing(format!(
+            "That file is open in another tab ({tab}); close it there, or choose another name. Nothing was written."
+        )));
+    }
     let own = job.own.as_deref() == Some(path.as_path());
     let meta = match std::fs::symlink_metadata(&path) {
         // The tab's own file is not where it was. That is almost never a deletion (Files moves
@@ -209,7 +219,7 @@ fn judge(job: &SaveJob, disk: &dyn Disk, path: &Path, expect: &Expect, displaced
             if expected {
                 (Witnessed::Same, None)
             } else {
-                (Witnessed::Replaced(Replaced::OutsideEdit), Some(keep_bytes(disk, path, &bytes)))
+                (Witnessed::Replaced(Replaced::OutsideEdit), Some(keep_bytes(disk, path, &bytes, &job.elsewhere)))
             }
         }
         Displaced::Unread(temp) => {

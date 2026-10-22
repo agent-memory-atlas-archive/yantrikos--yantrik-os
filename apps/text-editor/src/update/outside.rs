@@ -13,12 +13,12 @@ use std::path::PathBuf;
 use yantrik_app::documents::{Fingerprint, Observed, OutsideState, Source};
 use yantrik_app::effects::Effects;
 
-use super::{find, say};
+use super::find;
 use crate::command::Command;
 use crate::files::locate::locate;
 use crate::files::open::{described, Opened};
 use crate::files::read::read_text;
-use crate::model::{Cue, Model};
+use crate::model::{Cue, Model, Work, HIDDEN_TAB};
 use crate::tab::TabId;
 use crate::view::render::TEXT;
 use crate::TextEditor;
@@ -46,7 +46,7 @@ pub fn seen(m: &mut Model, fx: &mut Effects<TextEditor>, key: &str, seen: Observ
         }
         OutsideState::Conflict { .. } if !matches!(before, OutsideState::Conflict { .. }) => {
             let sentence = conflict(&m.title(&tab));
-            say(m, sentence);
+            m.notice.set_about(tab.hidden, sentence, || conflict(HIDDEN_TAB));
         }
         OutsideState::Deleted if before != OutsideState::Deleted => {
             let (on_disk, inode) = (tab.on_disk.clone().unwrap_or_default(), tab.inode);
@@ -73,6 +73,11 @@ pub fn conflict(title: &str) -> String {
 /// A tab with nothing unsaved, read again after another program changed its file.
 pub fn reread(m: &mut Model, fx: &mut Effects<TextEditor>, id: TabId, seq: u64, result: Result<Opened, String>) {
     let Some(tab) = m.tab(id).cloned() else { return };
+    // A save of this tab went out meanwhile: its own check against the file decides, and its
+    // landing is the one its document expects. The re-read is dropped.
+    if m.busy == Some(Work::Save(id)) {
+        return;
+    }
     let title = m.title(&tab);
     let edited = m.doc(&tab).seq != seq || m.modified(&tab);
     let Some(d) = m.doc_mut(tab.doc) else { return };
@@ -82,17 +87,17 @@ pub fn reread(m: &mut Model, fx: &mut Effects<TextEditor>, id: TabId, seq: u64, 
         Ok(opened) if !edited => opened,
         Ok(_) => {
             d.outside = OutsideState::Conflict { now: None };
-            return say(m, conflict(&title));
+            return m.notice.set_about(tab.hidden, conflict(&title), || conflict(HIDDEN_TAB));
         }
         Err(why) => {
             d.outside = OutsideState::Conflict { now: None };
-            return say(
-                m,
+            let unshown = |name: &str| {
                 format!(
-                    "{title} was changed outside the editor and cannot be shown here: {why} The tab keeps \
+                    "{name} was changed outside the editor and cannot be shown here: {why} The tab keeps \
                      the text it had; Save As keeps it."
-                ),
-            );
+                )
+            };
+            return m.notice.set_about(tab.hidden, unshown(&title), || unshown(HIDDEN_TAB));
         }
     };
     let before = d.content.clone();
@@ -107,7 +112,10 @@ pub fn reread(m: &mut Model, fx: &mut Effects<TextEditor>, id: TabId, seq: u64, 
         t.inode = opened.inode;
         t.unsure = None;
     }
-    say(m, format!("{title} was changed outside the editor; the tab now shows the file as it is, and Undo goes back."));
+    let followed = |name: &str| {
+        format!("{name} was changed outside the editor; the tab now shows the file as it is, and Undo goes back.")
+    };
+    m.notice.set_about(tab.hidden || opened.hidden, followed(&title), || followed(HIDDEN_TAB));
     if m.active_tab().id == id {
         m.cues.push(Cue::ResetContent);
         find::search(m, false);
@@ -123,15 +131,14 @@ pub fn located(m: &mut Model, fx: &mut Effects<TextEditor>, id: TabId, from: Pat
     if d.source.path() != Some(from.as_path()) || d.outside != OutsideState::Deleted {
         return;
     }
+    let gone = |name: &str| {
+        format!(
+            "{name} is not there any more, and nothing with the same name and the same contents was found \
+             near it. Your draft is untouched — Save As to give it a file again."
+        )
+    };
     let Some(opened) = found else {
-        return say(
-            m,
-            format!(
-                "{} is not there any more, and nothing with the same name and the same contents was \
-                 found near it. Your draft is untouched — Save As to give it a file again.",
-                from.display()
-            ),
-        );
+        return m.notice.set_about(tab.hidden, gone(&from.display().to_string()), || gone(HIDDEN_TAB));
     };
     // The same file, carried somewhere else: the tab follows it. Only the path changes; the text
     // and the baseline are untouched, because a move keeps the same bytes.
@@ -145,5 +152,6 @@ pub fn located(m: &mut Model, fx: &mut Effects<TextEditor>, id: TabId, from: Pat
         t.hidden = opened.hidden;
         t.inode = opened.inode;
     }
-    say(m, format!("This file moved. It is {} now.", opened.path.display()));
+    let moved = format!("This file moved. It is {} now.", opened.path.display());
+    m.notice.set_about(tab.hidden || opened.hidden, moved, || "A file an agent is not shown moved; its tab follows it.".into());
 }

@@ -143,7 +143,7 @@ fn another_programs_write_that_a_save_replaced_is_kept_beside_the_file() {
     assert_eq!(file(&path), "mine\n");
     assert_eq!(file(&kept), "theirs, in that instant\n", "never dropped");
     assert_eq!(std::fs::metadata(&kept).unwrap().permissions().mode() & 0o777, 0o600, "kept private");
-    assert!(notice(&app).contains("its version is kept beside it as"), "{}", notice(&app));
+    assert!(notice(&app).contains("its version is kept as"), "{}", notice(&app));
     assert!(notice(&app).contains("notes (outside version).txt"));
 }
 

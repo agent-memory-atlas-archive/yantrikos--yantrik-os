@@ -52,7 +52,7 @@ pub enum Command {
     Located { tab: TabId, from: PathBuf, found: Option<Opened> },
     /// An answer to a call, read back off the disk: refused with `failed` (or the notice) when
     /// the disk did not hold what the call was owed.
-    Answered { value: Value, failed: Option<String> },
+    Answered { value: Value, failed: Option<String>, agent: bool },
     /// The old build's recovery file was set aside once its drafts were the lane's.
     LegacyArchived(Result<(), String>),
     /// The disk saves write through, for a test to make a step fail.

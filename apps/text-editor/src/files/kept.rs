@@ -9,6 +9,10 @@
 //! The exchange reads back at most 64 MiB. A larger file it took the place of is left unread under
 //! a hidden temporary name beside the original (`Displaced::Unread`); it is given a visible name
 //! here when it can be, and the notice says where it is either way. Nothing here ever deletes it.
+//!
+//! A name beside the original that cannot be made (taken by anything, a link that leads nowhere
+//! included; too long for the folder) is passed for the next, then for short names, then for the
+//! editor's own state folder: another program's version is dropped only if none can be written.
 
 use std::path::{Path, PathBuf};
 
@@ -19,44 +23,62 @@ use yantrik_app::documents::disk::{Disk, Step};
 pub enum Kept {
     /// Kept as this file, beside the original.
     Beside(PathBuf),
+    /// No name beside the original could be made (the folder refused it): kept as this file in
+    /// the editor's own state folder instead.
+    Elsewhere(PathBuf),
     /// Too large to read back, or unreadable: kept where the exchange left it, at this path.
     Unread(PathBuf),
     /// It could not be written anywhere, and why.
     Lost(String),
 }
 
-/// How many names beside the original are tried before giving up.
+/// How many names of each kind are tried.
 const NAMES: usize = 100;
 
-/// Another program's `bytes`, which a save of `original` replaced, kept beside it.
-pub fn keep_bytes(disk: &dyn Disk, original: &Path, bytes: &[u8]) -> Kept {
+/// The names a kept version is given, in the order they are tried: beside the original with its
+/// stem (`notes (outside version).txt`, `… 2`), then short ones that fit any folder whatever the
+/// stem's length (`outside version 1`), all in the original's folder.
+fn names(original: &Path) -> impl Iterator<Item = PathBuf> + '_ {
+    let long = (1..=NAMES).map(move |n| beside(original, n));
+    let short = (1..=NAMES).map(move |n| original.with_file_name(format!("outside version {n}")));
+    long.chain(short)
+}
+
+/// Another program's `bytes`, which a save of `original` replaced, kept: beside it, created new so
+/// nothing is ever replaced (a name taken by anything, a link that leads nowhere included, is
+/// passed by), and failing that in `elsewhere`, the editor's own folder. Never dropped while any
+/// of those can be written.
+pub fn keep_bytes(disk: &dyn Disk, original: &Path, bytes: &[u8], elsewhere: &Path) -> Kept {
+    for path in names(original) {
+        match disk.create_new(&path, bytes) {
+            // Made, its directory sync aside: it is there to be found.
+            Ok(()) => return Kept::Beside(path),
+            Err(e) if e.step == Step::SyncDir => return Kept::Beside(path),
+            // Taken, or a name the folder will not have (too long): the next one.
+            Err(_) => continue,
+        }
+    }
+    let _ = std::fs::create_dir_all(elsewhere);
     let mut last = String::new();
     for n in 1..=NAMES {
-        let path = beside(original, n);
+        let path = elsewhere.join(format!("outside-version-{}-{n}", crate::files::drafts::now_ms()));
         match disk.create_new(&path, bytes) {
-            Ok(()) => return Kept::Beside(path),
-            // Made, its directory sync aside: it is there to be found.
-            Err(e) if e.step == Step::SyncDir => return Kept::Beside(path),
-            // Something already has that name: try the next.
-            Err(e) if e.step == Step::Rename && path.exists() => last = e.error,
-            Err(e) => return Kept::Lost(e.error),
+            Ok(()) => return Kept::Elsewhere(path),
+            Err(e) if e.step == Step::SyncDir => return Kept::Elsewhere(path),
+            Err(e) => last = e.error,
         }
     }
     Kept::Lost(last)
 }
 
 /// A file the exchange left unread at `temp`, given a visible name beside `original` when it can
-/// be (a second name, then the hidden one removed), and left where it is when not.
+/// be (a second name, then the hidden one removed), and left where it is when not: it is kept
+/// either way.
 pub fn keep_unread(original: &Path, temp: &Path) -> Kept {
-    for n in 1..=NAMES {
-        let path = beside(original, n);
-        match std::fs::hard_link(temp, &path) {
-            Ok(()) => {
-                let _ = std::fs::remove_file(temp);
-                return Kept::Beside(path);
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(_) => break,
+    for path in names(original) {
+        if std::fs::hard_link(temp, &path).is_ok() {
+            let _ = std::fs::remove_file(temp);
+            return Kept::Beside(path);
         }
     }
     Kept::Unread(temp.to_path_buf())
@@ -74,19 +96,27 @@ fn beside(original: &Path, n: usize) -> PathBuf {
 pub fn said(kept: &Kept, file: &Path) -> String {
     let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     match kept {
-        Kept::Beside(path) => format!(
-            "Another program wrote {name} while it was being saved; its version is kept beside it as {}.",
+        Kept::Beside(path) | Kept::Elsewhere(path) => format!(
+            "Another program wrote {name} while it was being saved; its version is kept as {}.",
             path.display()
         ),
         Kept::Unread(path) => format!(
-            "Another program put a file at {name} while it was being saved, too large to check (over \
-             64 MiB); it is kept unread at {}.",
+            "Another program put a file at {name} while it was being saved, too large to check (over 64 MiB); it is kept unread at {}.",
             path.display()
         ),
         Kept::Lost(why) => format!(
-            "Another program wrote {name} while it was being saved, and its version could not be kept \
-             ({why})."
+            "Another program wrote {name} while it was being saved, and its version could not be kept ({why})."
         ),
+    }
+}
+
+/// The same, as an agent reads it about a tab it is not shown: no name, no path.
+pub fn said_hidden(kept: &Kept) -> String {
+    match kept {
+        Kept::Beside(_) | Kept::Elsewhere(_) | Kept::Unread(_) => {
+            "Another program wrote (hidden) while it was being saved; its version is kept.".into()
+        }
+        Kept::Lost(_) => "Another program wrote (hidden) while it was being saved, and its version could not be kept.".into(),
     }
 }
 

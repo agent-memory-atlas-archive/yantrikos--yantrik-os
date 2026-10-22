@@ -34,7 +34,7 @@ pub fn new(m: &mut Model, fx: &mut Effects<TextEditor>, text: String, caller: &C
     window::new_tab(m, fx, caller.opener.clone());
     if m.tabs.len() == before {
         // The notice the refusal left names the tab this caller can close to make room.
-        return Err(m.notice.clone());
+        return Err(m.notice.window().to_string());
     }
     if !text.is_empty() {
         editing::put(m, fx, text, &caller.opener).map_err(|e| format!("The new tab is open but empty: {e}"))?;

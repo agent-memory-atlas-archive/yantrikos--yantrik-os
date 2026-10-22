@@ -28,7 +28,7 @@ use yantrik_app::Notification;
 
 use super::{drafts, say, saving, tabs};
 use crate::command::AfterSave;
-use crate::model::{Dialog, Model, Work};
+use crate::model::{Dialog, Finish, Model, Work};
 use crate::prompt::{self, Closing};
 use crate::tab::TabId;
 use crate::TextEditor;
@@ -72,7 +72,8 @@ pub fn window(m: &mut Model, fx: &mut Effects<TextEditor>) {
 fn ask_next(m: &mut Model, fx: &mut Effects<TextEditor>) {
     match m.tabs.iter().position(|t| m.modified(t)) {
         Some(index) => ask(m, fx, index, true),
-        None => fx.close(WindowId::PRIMARY),
+        // Once every answer owed is settled: a call whose own work closed the window is answered.
+        None => m.finish = Some(Finish::Close),
     }
 }
 
@@ -189,7 +190,9 @@ pub fn not_saved(m: &mut Model, fx: &mut Effects<TextEditor>, id: TabId, why: &s
         let _ = closing.flow.progress(&m.documents, Some(why.to_string()));
     }
     if std::mem::take(&mut m.close_when_done) {
-        say(m, format!("{why} {NOT_CLOSED}"));
+        // Added to the failure already said, in both its forms (notice.rs).
+        let (window, agents) = (m.notice.window().to_string(), m.notice.read(true).to_string());
+        m.notice.set_about(window != agents, format!("{window} {NOT_CLOSED}"), || format!("{agents} {NOT_CLOSED}"));
     }
     if m.lingering {
         end_after_linger(m, fx, Some(why));
@@ -209,7 +212,7 @@ fn end_after_linger(m: &mut Model, fx: &mut Effects<TextEditor>, why: Option<&st
         fx.notify(Notification::titled("Text Editor could not save everything").body(body));
     }
     m.lingering = false;
-    fx.exit();
+    m.finish = Some(Finish::Exit);
 }
 
 /// After every command: a close that waited for a file to be read or written goes on once it is.

@@ -56,8 +56,9 @@ pub fn view(m: &Model) -> View {
     if m.busy.is_some() {
         summary.push_str(" · working");
     }
-    if !m.notice.is_empty() {
-        summary.push_str(&format!(" · {}", m.notice));
+    let notice = m.notice.read(caller.agent).to_string();
+    if !notice.is_empty() {
+        summary.push_str(&format!(" · {notice}"));
     }
     let cut = if hidden { None } else { reading::describe_cut(text) };
     if cut.is_some() {
@@ -90,7 +91,7 @@ pub fn view(m: &Model) -> View {
         .with("tabs", tabs(m, &caller))
         .with("active_tab", m.active)
         .with("busy", m.busy.is_some())
-        .with("notice", m.notice.clone())
+        .with("notice", notice)
         .with("dialog", dialog)
         .with("dialog_is", prompt::label(m, caller.agent))
         .with("recovery", m.recovery.clone())

@@ -58,7 +58,7 @@ pub fn document_now(m: &Model, caller: &Caller) -> (Value, Fill) {
         "on_disk": false,
         "matches_disk": false,
         "language": language(m.path(tab)),
-        "notice": m.notice,
+        "notice": m.notice.read(caller.agent),
         // Empty unless the tab is too big to draw whole and the person sees only its first lines
         // (#328); the counts above are the whole document's either way.
         "view_status": if hidden { String::new() } else { viewport::status(view, text) },
@@ -90,7 +90,7 @@ pub fn opened(m: &mut Model, fx: &mut Effects<TextEditor>, caller: &Caller) {
         answer.value["content_cut"] = json!(cut.is_some());
         answer.value["read_with"] = json!(cut);
     }
-    answer_with(m, fx, answer);
+    answer_with(m, fx, answer, caller.agent);
 }
 
 /// A save a call asked for landed: what is on disk, read back.
@@ -111,11 +111,11 @@ pub fn saved(m: &mut Model, fx: &mut Effects<TextEditor>, then: &AfterSave, id: 
             let answer = with_now(m, caller, value)
                 .fill(Fill::Written { path })
                 .require(Require::Written("The file was not written; the draft is still open.".into()));
-            answer_with(m, fx, answer);
+            answer_with(m, fx, answer, caller.agent);
         }
         AfterSave::SaveAs { caller, path } => {
             let answer = now(m, caller).require(Require::Matches(format!("Nothing was written to {}.", path.display())));
-            answer_with(m, fx, answer);
+            answer_with(m, fx, answer, caller.agent);
         }
     }
 }

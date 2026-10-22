@@ -26,6 +26,7 @@ pub const HIDDEN_REFUSAL: &str = "The tab in front holds a file an agent is not 
                                   alone; `select_tab` another or `new` one.";
 
 pub fn act(m: &mut Model, fx: &mut Effects<TextEditor>, act: Act, caller: Caller) {
+    let agent = caller.agent;
     let done = match act {
         Act::New { text } => documents::new(m, fx, text, &caller),
         Act::Open { path } => documents::open(m, fx, path, caller),
@@ -50,7 +51,7 @@ pub fn act(m: &mut Model, fx: &mut Effects<TextEditor>, act: Act, caller: Caller
         Act::Refuse(sentence) => Err(sentence),
     };
     match done {
-        Ok(Some(answer)) => answer_with(m, fx, answer),
+        Ok(Some(answer)) => answer_with(m, fx, answer, agent),
         // Answered when its job lands.
         Ok(None) => {}
         Err(sentence) => refuse(m, fx, sentence),
@@ -60,37 +61,46 @@ pub fn act(m: &mut Model, fx: &mut Effects<TextEditor>, act: Act, caller: Caller
 /// A refusal the person at the window sees too: the notice, and the call's error.
 pub fn refuse(m: &mut Model, fx: &mut Effects<TextEditor>, sentence: impl Into<String>) {
     let sentence = sentence.into();
-    m.notice = sentence.clone();
+    m.notice.set(sentence.clone());
     fx.settle(Err(Refused::new("refused", sentence)));
 }
 
-/// Refuses the call a save was for, if it was a call's.
-pub fn refuse_if_owed(m: &mut Model, fx: &mut Effects<TextEditor>, then: &AfterSave, sentence: &str) {
-    if !matches!(then, AfterSave::Window) {
-        refuse(m, fx, sentence);
-    }
+/// Refuses the call a save was for, if it was a call's, with the notice the landing already said,
+/// in the form this caller may read.
+pub fn refuse_if_owed(m: &Model, fx: &mut Effects<TextEditor>, then: &AfterSave) {
+    let agent = match then {
+        AfterSave::Window => return,
+        AfterSave::Save { caller, .. } | AfterSave::SaveAs { caller, .. } => caller.agent,
+    };
+    fx.settle(Err(Refused::new("refused", m.notice.read(agent).to_string())));
 }
 
 /// The answer, once what the disk holds is read into it: at once when nothing is to be read.
-pub fn answer_with(m: &mut Model, fx: &mut Effects<TextEditor>, answer: ReadBack) {
+///
+/// While a read-back is out, a close or an exit already decided waits for it (`Model::finish`):
+/// a call whose own work closed the window is still answered from that work.
+pub fn answer_with(m: &mut Model, fx: &mut Effects<TextEditor>, answer: ReadBack, agent: bool) {
     if answer.fills.is_empty() {
         m.answer = answer.value;
         return fx.settle(Ok(()));
     }
-    let lost = Command::Answered { value: Value::Null, failed: Some("The answer could not be read back.".into()) };
+    m.answers_pending += 1;
+    let lost = Command::Answered { value: Value::Null, failed: Some("The answer could not be read back.".into()), agent };
     fx.spawn_or(lost, move |_| {
         let (value, failed) = read_back(answer);
-        Command::Answered { value, failed }
+        Command::Answered { value, failed, agent }
     });
 }
 
 /// The disk was read into an answer: the call is settled with it, or refused when the disk did
 /// not hold what it was owed, in the words of what went wrong when the notice says so.
-pub fn answered(m: &mut Model, fx: &mut Effects<TextEditor>, value: Value, failed: Option<String>) {
+pub fn answered(m: &mut Model, fx: &mut Effects<TextEditor>, value: Value, failed: Option<String>, agent: bool) {
+    m.answers_pending = m.answers_pending.saturating_sub(1);
     match failed {
         Some(otherwise) => {
-            let why = if m.notice.is_empty() || m.notice == "Saved" { otherwise } else { m.notice.clone() };
-            refuse(m, fx, why);
+            let said = m.notice.read(agent);
+            let why = if said.is_empty() || said == "Saved" { otherwise } else { said.to_string() };
+            fx.settle(Err(Refused::new("refused", why)));
         }
         None => {
             m.answer = value;

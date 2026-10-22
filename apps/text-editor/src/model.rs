@@ -14,6 +14,7 @@ use yantrik_app::documents::disk::{Disk, RealDisk};
 use yantrik_app::documents::{Document, DocumentId, Documents, OutsideState};
 
 use crate::claim::Claim;
+use crate::notice::Notice;
 use crate::owner::TabFacts;
 use crate::prompt::Closing;
 use crate::tab::{Tab, TabId};
@@ -70,6 +71,15 @@ pub enum Cue {
     Replacement,
 }
 
+/// How the editor ends once every owed answer has settled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Finish {
+    /// The last window closes.
+    Close,
+    /// The editor ends, after a linger.
+    Exit,
+}
+
 /// The font size and render limit the view is windowed for (#328).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Layout {
@@ -100,8 +110,8 @@ pub struct Model {
     pub active: usize,
     pub busy: Option<Work>,
     /// What could not be done, or what happened that the person must know, in one line; also
-    /// `describe.notice`.
-    pub notice: String,
+    /// `describe.notice`, in its agent-safe form for an agent (notice.rs).
+    pub notice: Notice,
     pub dialog: Dialog,
     /// What the dialog's field was given when it opened.
     pub dialog_path: String,
@@ -126,6 +136,10 @@ pub struct Model {
     pub queue: VecDeque<PathBuf>,
     /// The window closed with a save in flight: the editor ends when it lands (`fx.linger`).
     pub lingering: bool,
+    /// Answers waiting on their read-back job: a close or an exit waits for them (`finish`).
+    pub answers_pending: usize,
+    /// The window's close, or the editor's end, decided and waiting for those answers.
+    pub finish: Option<Finish>,
     /// The window was asked to close while a file was read or written, with other tabs unsaved:
     /// the close goes on once that lands (update/closing.rs).
     pub close_when_done: bool,
@@ -147,7 +161,7 @@ impl Model {
             tabs: Vec::new(),
             active: 0,
             busy: None,
-            notice: String::new(),
+            notice: Notice::default(),
             dialog: Dialog::None,
             dialog_path: String::new(),
             dialog_error: String::new(),
@@ -162,6 +176,8 @@ impl Model {
             legacy: Legacy::Done,
             queue: VecDeque::new(),
             lingering: false,
+            answers_pending: 0,
+            finish: None,
             close_when_done: false,
             answer: Value::Null,
             last_closed: None,
@@ -226,12 +242,13 @@ impl Model {
     }
 
     /// Whether the tab holds anything its file does not: its text is not what the file held,
-    /// it was restored from a draft, or its file was moved or deleted and not found again, so
-    /// its text is on no disk at all.
+    /// it was restored from a draft, its file was moved or deleted and not found again, or another
+    /// program changed the file under it: in the last two its text is on no disk at all, whatever
+    /// it is, until it is saved somewhere.
     pub fn modified(&self, tab: &Tab) -> bool {
         let doc = self.doc(tab);
         tab.recovered
-            || doc.outside == OutsideState::Deleted
+            || matches!(doc.outside, OutsideState::Deleted | OutsideState::Conflict { .. })
             || doc.content != tab.on_disk.as_deref().unwrap_or_default()
     }
 
