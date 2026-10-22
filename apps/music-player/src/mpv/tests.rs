@@ -11,7 +11,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use super::client::{Client, Event};
-use super::engine::{args, Engine, StartError, REDIRECTED};
+use super::engine::{args, socket_path, Engine, StartError, REDIRECTED};
 use super::observed::{Observed, Shared};
 
 fn scratch(tag: &str) -> PathBuf {
@@ -196,6 +196,22 @@ fn mpv_is_told_never_to_follow_what_a_file_points_at() {
     assert_eq!(args.last().unwrap(), "--input-ipc-server=/run/user/1000/m.sock");
 }
 
+/// The socket goes only where no other account can reach it, and each player gets its own name.
+#[test]
+fn the_socket_goes_only_in_a_private_runtime_directory_under_a_name_of_its_own() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = scratch("runtime");
+    assert!(socket_path(None).unwrap_err().to_string().contains("XDG_RUNTIME_DIR is not set"));
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let open = socket_path(Some(&dir)).unwrap_err().to_string();
+    assert!(open.contains("is not a directory only this account can open"), "{open}");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let (a, b) = (socket_path(Some(&dir)).unwrap(), socket_path(Some(&dir)).unwrap());
+    assert!(a.starts_with(&dir) && b.starts_with(&dir));
+    assert_ne!(a, b, "a player starting never takes the name of one still going away");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The real thing, where the machine has it: the socket is 0600, a file plays, and mpv is gone
 /// once the engine is dropped.
 #[test]
@@ -211,7 +227,7 @@ fn a_real_mpv_runs_behind_a_private_socket_and_exits_with_the_engine() {
     let mode = std::fs::metadata(&socket).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o600, "the socket is this account's alone");
     assert_eq!(engine.client.get("volume"), Ok(json!(0.0)));
-    let pid = engine.child.lock().unwrap().id();
+    let pid = engine.pid();
     drop(engine);
     assert!(!socket.exists(), "the socket goes with the engine");
     let state = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();

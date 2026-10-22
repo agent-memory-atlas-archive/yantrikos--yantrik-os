@@ -39,18 +39,21 @@ impl std::fmt::Display for StartError {
 pub struct Engine {
     pub client: Client,
     pub observed: Arc<Shared>,
-    pub(super) child: Mutex<Child>,
+    child: Mutex<Child>,
     socket: PathBuf,
 }
 
-/// Where this instance's socket goes: the session's runtime directory, which must be ours and
-/// closed to everyone else, or there is no safe place for it.
-pub fn socket_path() -> Result<PathBuf, StartError> {
+/// Where the next player's socket goes: the session's runtime directory (`runtime`, read from
+/// `XDG_RUNTIME_DIR` at start), which must be ours and closed to everyone else, or there is no
+/// safe place for it. Each player started gets a name of its own, so a player starting never
+/// unlinks the socket of one still going away. Reads the disk: from a job only.
+pub fn socket_path(runtime: Option<&Path>) -> Result<PathBuf, StartError> {
     use std::os::unix::fs::MetadataExt;
-    let dir = std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static STARTED: AtomicU64 = AtomicU64::new(0);
+    let dir = runtime
         .ok_or_else(|| StartError::Failed("XDG_RUNTIME_DIR is not set, so there is no private place for its socket".into()))?;
-    let meta = std::fs::symlink_metadata(&dir)
+    let meta = std::fs::symlink_metadata(dir)
         .map_err(|e| StartError::Failed(format!("{} cannot be read: {e}", dir.display())))?;
     // SAFETY: geteuid cannot fail and touches no memory.
     let me = unsafe { libc::geteuid() };
@@ -60,7 +63,8 @@ pub fn socket_path() -> Result<PathBuf, StartError> {
             dir.display()
         )));
     }
-    Ok(dir.join(format!("yantrik-music-mpv.{}.sock", std::process::id())))
+    let n = STARTED.fetch_add(1, Ordering::Relaxed) + 1;
+    Ok(dir.join(format!("yantrik-music-mpv.{}.{n}.sock", std::process::id())))
 }
 
 /// ffmpeg opens nothing but local files, and only reads the containers Music's sound files come in.
@@ -119,8 +123,9 @@ impl Engine {
     /// Start mpv with its socket at `socket` and observe [`OBSERVED`]. `forward` gets every
     /// event after [`Observed`] has taken it in. `volume` is the starting volume, 0–100.
     ///
-    /// Must be called from the main thread: `PR_SET_PDEATHSIG` fires when the thread that
-    /// spawned the child ends, and only the main thread lives as long as the app.
+    /// Called from a thread that lives as long as the app: `PR_SET_PDEATHSIG` fires when the
+    /// thread that spawned the child ends. The app's job threads are that: the framework's pool
+    /// keeps them until the process ends, and a job that panics is caught on its thread.
     pub fn start(
         program: &str,
         socket: PathBuf,
@@ -129,7 +134,8 @@ impl Engine {
     ) -> Result<Engine, StartError> {
         use std::os::unix::process::CommandExt;
         let forward = Arc::new(forward);
-        // An earlier instance with this pid left it; it is ours, and mpv will not bind over it.
+        // A player of an earlier process with this pid left it; it is ours, and mpv will not
+        // bind over it.
         let _ = std::fs::remove_file(&socket);
         let mut command = Command::new(program);
         command
@@ -211,26 +217,41 @@ impl Engine {
         if !self.client.is_alive() {
             return false;
         }
-        !matches!(self.child.lock().unwrap().try_wait(), Ok(Some(_)))
+        !matches!(self.child.lock().unwrap_or_else(|p| p.into_inner()).try_wait(), Ok(Some(_)))
+    }
+
+    /// The player's process id.
+    pub fn pid(&self) -> u32 {
+        self.child.lock().unwrap_or_else(|p| p.into_inner()).id()
+    }
+
+    /// Ends mpv and reaps it: asked first, so it closes its audio device cleanly, and killed if
+    /// it has not gone in half a second. Its socket goes with it. Blocks for up to the reply
+    /// timeout and that half second: from a job only. A second call finds it gone.
+    pub fn stop(&self) {
+        let mut child = self.child.lock().unwrap_or_else(|p| p.into_inner());
+        if !matches!(child.try_wait(), Ok(Some(_))) {
+            let _ = self.client.command(&[json!("quit")]);
+            let deadline = Instant::now() + Duration::from_millis(500);
+            while Instant::now() < deadline {
+                if let Ok(Some(_)) = child.try_wait() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            if let Ok(None) = child.try_wait() {
+                let _ = child.kill();
+            }
+        }
+        let _ = child.wait();
+        let _ = std::fs::remove_file(&self.socket);
     }
 }
 
 impl Drop for Engine {
+    /// The last handle on a player that was never stopped (the process is ending with it still
+    /// running) stops it here.
     fn drop(&mut self) {
-        // Asked first, so mpv closes its audio device cleanly; killed if it does not go.
-        let _ = self.client.command(&[json!("quit")]);
-        let mut child = self.child.lock().unwrap();
-        let deadline = Instant::now() + Duration::from_millis(500);
-        while Instant::now() < deadline {
-            if let Ok(Some(_)) = child.try_wait() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        if let Ok(None) = child.try_wait() {
-            let _ = child.kill();
-        }
-        let _ = child.wait();
-        let _ = std::fs::remove_file(&self.socket);
+        self.stop();
     }
 }

@@ -3,7 +3,6 @@
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-
 use super::client::Event;
 use super::engine::REDIRECTED;
 
