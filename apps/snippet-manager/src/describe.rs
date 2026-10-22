@@ -80,7 +80,7 @@ pub fn view(m: &Model) -> View {
 fn recovery(m: &Model) -> Vec<Value> {
     m.offers
         .iter()
-        .filter_map(|o| m.drafts.get(&o.id).map(|text| (o, text)))
+        .filter_map(|o| m.drafted(o.id).map(|text| (o, text)))
         .map(|(o, text)| json!({ "id": o.id, "title": text.title, "gone": m.library.get(o.id).is_none() }))
         .collect()
 }

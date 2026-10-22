@@ -10,6 +10,7 @@
 //! - `copying.rs` and `files.rs`: the clipboard, import, export and a file on the command line.
 //! - `ending.rs`: the window closed, a logout, the display going. `recovery.rs`: unsaved text kept
 //!   in the draft lane and offered back on the recovery bar, after a refused save or a restart.
+//!   `refused.rs`: a refused or unfinished write never loses the typing or offers it wrongly.
 //! - `agent_exposure.rs`: no snippet code in `describe` or an agent's search, and an agent's
 //!   import only of a file in the person's home.
 //! - `secrets.rs`: a snippet's code is never in a log, an answer, `describe` or a debug print.
@@ -36,6 +37,7 @@ mod parity;
 mod private_mode;
 mod rail;
 mod recovery;
+mod refused;
 mod secrets;
 mod writes;
 

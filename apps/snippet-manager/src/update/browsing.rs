@@ -35,6 +35,7 @@ pub(super) fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(),
             // The window already shows it: nothing is drawn, so the caret stays where it is.
             if editor.id >= 0 && editor.id == m.editor.id {
                 m.editor = editor;
+                m.typed += 1;
             }
         }
         Command::Select(id) => move_to(m, fx, id, false),

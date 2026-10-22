@@ -21,19 +21,21 @@ fn a_change_the_file_refuses_is_refused_said_and_taken_back() {
     let f = open();
     let (first, second) = f.seeded();
     let bytes_before = f.file_bytes().unwrap();
-    let before = f.app.model(|m| m.library.clone());
+    // What is kept, snippets and collections; the id counters only ever go up (#938 review, M3).
+    let kept = |f: &super::Fixture| f.app.model(|m| (m.library.snippets().to_vec(), m.library.collections().to_vec()));
+    let before = kept(&f);
     f.disk.refuse(true);
 
     let e = f.act("new", json!({ "title": "Should not be kept", "language": "Shell", "code": "echo no" })).unwrap_err();
     assert!(e.contains(REFUSED), "refused in words: {e}");
     assert!(f.state()["notice"].as_str().unwrap().contains(REFUSED), "the same failure is in describe.notice");
-    assert_eq!(f.app.model(|m| m.library.clone()), before, "the failed create is not in memory");
+    assert_eq!(kept(&f), before, "the failed create is not in memory");
     assert!(f.act("save", json!({ "id": first.to_string(), "title": "Renamed" })).is_err());
     assert!(f.act("delete", json!({ "id": second.to_string() })).is_err());
     assert!(f.act("toggle_favorite", json!({ "id": first.to_string() })).is_err());
     f.app.ui(|ui| ui.invoke_collection_create("Infra".into()));
     f.quiet();
-    assert_eq!(f.app.model(|m| m.library.clone()), before, "each one taken back");
+    assert_eq!(kept(&f), before, "each one taken back");
     assert_eq!(f.state()["total"], json!(2));
     assert_eq!(f.file_bytes().unwrap(), bytes_before, "and nothing was written while it refused");
 
@@ -60,7 +62,7 @@ fn typing_the_file_refused_stays_in_the_editor() {
     assert_eq!(f.app.model(|m| m.selected), journal, "back on the snippet whose typing was not kept");
     assert_eq!(f.app.ui(|ui| ui.get_detail_title().to_string()), "Not yet kept");
     assert_eq!(f.on_disk().get(journal).unwrap().title, "Tail the journal");
-    assert!(f.app.model(move |m| m.editor_dirty() && m.drafts.contains_key(&journal)));
+    assert!(f.app.model(move |m| m.editor_dirty() && m.drafted(journal).is_some()));
     assert!(f.notice().starts_with("Not saved: ") && f.notice().ends_with("Your text is still in the editor, and kept as a draft until it is saved."), "{}", f.notice());
     f.disk.refuse(false);
     f.app.ui(move |ui| ui.invoke_snip_select(borrow));
@@ -165,7 +167,7 @@ fn a_write_that_did_not_finish_reads_the_file_again() {
     let e = f.act("delete", json!({ "id": journal.to_string() })).unwrap_err();
     assert!(e.contains("did not finish") || e.contains("work failed"), "{e}");
     assert!(f.notice().starts_with("Saving did not finish"), "{}", f.notice());
-    assert_eq!(f.app.model(|m| m.library.clone()), f.on_disk(), "memory is the file again");
+    assert_eq!(f.app.model(|m| m.library.snippets().to_vec()), f.on_disk().snippets(), "memory is the file again");
     assert!(f.on_disk().get(journal).is_some(), "the write never happened, and the window says so");
     assert_eq!(f.app.model(|m| m.work), 0, "nothing is left counted in flight");
     // The writer is not left stuck by the panic: the next change writes.

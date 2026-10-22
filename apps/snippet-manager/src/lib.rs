@@ -97,6 +97,8 @@ impl App for SnippetManager {
             rail: Rail::new(boot.mind.clone()),
             clipboard: clipboard::for_app(&boot.paths),
             drafts: Default::default(),
+            typed: 0,
+            reloading: 0,
             offers: Vec::new(),
         };
         recover(&mut m, &boot.drafts);
@@ -153,7 +155,10 @@ fn recover(m: &mut Model, drafts: &yantrik_app::Drafts) {
         let Some(id) = name.strip_prefix(model::DRAFT_PREFIX).and_then(|n| n.parse::<i32>().ok()) else { continue };
         let Some(text) = drafts.json::<Editor>(name).filter(|t| t.id == id) else { continue };
         let kept = m.library.get(id).is_some() && !m.library.differs(id, &text.patch());
-        m.drafts.insert(id, text);
+        // A draft for a snippet no longer kept names an id a refused create may have used and the
+        // file never counted past: it is never given to another snippet.
+        m.library.reserve(id);
+        m.drafts.insert(id, model::Draft { text, typed: 0 });
         if !kept {
             m.offers.push(model::Offer { id, why: model::Why::Closed });
         }

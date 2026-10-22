@@ -43,6 +43,15 @@ pub enum Why {
     NotSaved,
 }
 
+/// A snippet's text as the draft lane holds it, and how new it is: `typed` is `Model::typed` when
+/// it was handed over, so of two texts for one snippet the newer typing always wins (#938 review,
+/// M1).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Draft {
+    pub text: Editor,
+    pub typed: u64,
+}
+
 /// Unsaved text kept in the draft lane and offered back on the recovery bar, until the person
 /// chooses: Restore (Restore as new, for a snippet no longer kept) or Discard. Nothing is put back
 /// until then. The text is `Model::drafts[id]`.
@@ -99,12 +108,18 @@ impl Editor {
 }
 
 /// Where the window was before a change, put back if the change's write fails and the window
-/// would otherwise be left on something the file does not hold.
+/// would otherwise be left on something the file does not hold; and the typing the change was
+/// keeping, handed to the draft lane if the file did not take it.
 #[derive(Clone, Debug)]
 pub struct Restore {
     pub selected: i32,
     pub editor: Editor,
     pub collection: i32,
+    /// The text the change was keeping: the editor's, or the offered text a *Restore as new* made
+    /// a snippet of.
+    pub typing: Editor,
+    /// How new that text is (`Model::typed` when the change was made).
+    pub typed: u64,
 }
 
 pub struct Model {
@@ -140,7 +155,12 @@ pub struct Model {
     pub rail: Rail,
     pub clipboard: Arc<dyn Clipboard>,
     /// What the draft lane holds, by snippet: the text last handed to it, until it is removed.
-    pub drafts: BTreeMap<i32, Editor>,
+    pub drafts: BTreeMap<i32, Draft>,
+    /// Counts every edit the person makes in the editor: how new a text is.
+    pub typed: u64,
+    /// Reads of the file after a write that did not finish, not landed yet. Until they have, what
+    /// memory holds is not known to be on disk, and no draft is let go.
+    pub reloading: usize,
     /// The drafts offered back, the bar's first.
     pub offers: Vec<Offer>,
 }
@@ -163,7 +183,12 @@ impl Model {
 
     /// The text offered back for `id`, if one is.
     pub fn offered(&self, id: i32) -> Option<&Editor> {
-        self.offers.iter().any(|o| o.id == id).then(|| self.drafts.get(&id)).flatten()
+        self.offers.iter().any(|o| o.id == id).then(|| self.drafted(id)).flatten()
+    }
+
+    /// The text the draft lane holds for `id`, if any.
+    pub fn drafted(&self, id: i32) -> Option<&Editor> {
+        self.drafts.get(&id).map(|d| &d.text)
     }
 
     /// Open `id` in the editor, from what is kept, or from the text offered back for it so the
@@ -187,6 +212,8 @@ impl Model {
             selected: self.selected,
             editor: self.editor.clone(),
             collection: self.collection,
+            typing: self.editor.clone(),
+            typed: self.typed,
         }
     }
 }
