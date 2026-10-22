@@ -104,10 +104,28 @@ pub const PROTECTED: &[&str] = &[
     // every snippet's code as a `safe` editor `open` (security review of #940, High 1).
     ".local/share/yantrik",
     ".local/state/yantrik",
+    // The Mind's folders from before `yantrik-update migrate-minds`: its database, the egress key
+    // and the console and memory tokens, which `shared_memory.rs` still reads from there, and
+    // the environment file its service starts from (security review of #942, finding 4).
+    ".local/share/yantrik-mind",
+    ".config/yantrik-mind",
+    ".config/yantrik-mind.env",
 ];
 
 /// What `.config/...` in [`PROTECTED`] names, found under `$XDG_CONFIG_HOME` instead.
-const CONFIG_PLACES: &[&str] = &["autostart", "systemd", "environment.d", "labwc", "yantrik", "mimeapps.list"];
+const CONFIG_PLACES: &[&str] = &[
+    "autostart",
+    "systemd",
+    "environment.d",
+    "labwc",
+    "yantrik",
+    "mimeapps.list",
+    "yantrik-mind",
+    "yantrik-mind.env",
+];
+
+/// What `.local/share/...` in [`PROTECTED`] names, found under `$XDG_DATA_HOME` instead.
+const DATA_PLACES: &[&str] = &["applications", "yantrik", "yantrik-mind", "keyrings"];
 
 /// Whether `path` passes through a protected place, compared a whole component at a time and
 /// without regard to case (a case-folding filesystem makes `.SSH` the same folder): `.ssh` is
@@ -118,11 +136,23 @@ const CONFIG_PLACES: &[&str] = &["autostart", "systemd", "environment.d", "labwc
 /// and `$XDG_STATE_HOME/yantrik`; a session that moves any of them elsewhere would otherwise
 /// leave the real place open, and a const list cannot name a path from the environment, so it is
 /// asked here.
+///
+/// A protected place reached through a link is protected where it really is, too: a dotfile
+/// manager that makes `~/.local` a link to `~/dotfiles/local` leaves the snippets store at
+/// `~/dotfiles/local/share/yantrik` as well, and the list, matched as written, would know only
+/// its alias (security review of #942, finding 3).
 pub fn is_protected(path: &Path) -> bool {
+    is_protected_in(path, None)
+}
+
+/// [`is_protected`] for a path asked about in `home`, which the person's `$HOME` is otherwise.
+pub(crate) fn is_protected_in(path: &Path, home: Option<&Path>) -> bool {
     let from_env = |name: &str| std::env::var_os(name).map(PathBuf::from).filter(|p| p.is_absolute());
+    let env_home = from_env("HOME");
     is_protected_with(
         path,
-        &Xdg {
+        &Places {
+            home: home.or(env_home.as_deref()),
             data_home: from_env("XDG_DATA_HOME").as_deref(),
             config_home: from_env("XDG_CONFIG_HOME").as_deref(),
             state_home: from_env("XDG_STATE_HOME").as_deref(),
@@ -130,16 +160,18 @@ pub fn is_protected(path: &Path) -> bool {
     )
 }
 
-/// Where the session's XDG base directories are, when they are set: absolute paths, or none.
+/// Where the session's home and XDG base directories are, when they are set: absolute paths, or
+/// none.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct Xdg<'a> {
+pub struct Places<'a> {
+    pub home: Option<&'a Path>,
     pub data_home: Option<&'a Path>,
     pub config_home: Option<&'a Path>,
     pub state_home: Option<&'a Path>,
 }
 
-/// [`is_protected`] with the XDG base directories given.
-pub fn is_protected_with(path: &Path, xdg: &Xdg<'_>) -> bool {
+/// [`is_protected`] with the home and the XDG base directories given.
+pub fn is_protected_with(path: &Path, places: &Places<'_>) -> bool {
     let parts = lowered(path);
     let listed = PROTECTED.iter().any(|place| {
         let want = lowered(Path::new(place));
@@ -148,12 +180,36 @@ pub fn is_protected_with(path: &Path, xdg: &Xdg<'_>) -> bool {
     let under = |base: &Path, place: &str| {
         // As written and as resolved, since the path may be either.
         let at = base.join(place);
-        starts_with_folded(path, &at) || at.canonicalize().is_ok_and(|real| starts_with_folded(path, &real))
+        starts_with_folded(path, &at) || resolved(&at).is_some_and(|real| starts_with_folded(path, &real))
+    };
+    // Matched as written above; here, where each place in the home really is. Only a place whose
+    // first part is there can have moved, which keeps this to a few lookups in a common home.
+    let moved = |home: &Path| {
+        PROTECTED.iter().any(|place| {
+            let first = place.split('/').next().unwrap_or(place);
+            home.join(first).symlink_metadata().is_ok()
+                && resolved(&home.join(place)).is_some_and(|real| starts_with_folded(path, &real))
+        })
     };
     listed
-        || xdg.data_home.is_some_and(|base| under(base, "applications") || under(base, "yantrik"))
-        || xdg.state_home.is_some_and(|base| under(base, "yantrik"))
-        || xdg.config_home.is_some_and(|base| CONFIG_PLACES.iter().any(|place| under(base, place)))
+        || places.home.is_some_and(moved)
+        || places.data_home.is_some_and(|base| DATA_PLACES.iter().any(|place| under(base, place)))
+        || places.state_home.is_some_and(|base| under(base, "yantrik"))
+        || places.config_home.is_some_and(|base| CONFIG_PLACES.iter().any(|place| under(base, place)))
+}
+
+/// Where `at` really is: its deepest part that exists, resolved through every link, with the
+/// rest joined on. A protected folder not made yet is still protected where it would be made.
+fn resolved(at: &Path) -> Option<PathBuf> {
+    let mut rest = Vec::new();
+    let mut base = at;
+    loop {
+        if let Ok(real) = base.canonicalize() {
+            return Some(rest.iter().rev().fold(real, |p, part| p.join(part)));
+        }
+        rest.push(base.file_name()?);
+        base = base.parent()?;
+    }
 }
 
 fn lowered(path: &Path) -> Vec<String> {
