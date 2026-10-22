@@ -214,3 +214,54 @@ fn the_last_place_and_a_row_that_is_not_there_are_refused_by_name() {
     assert!(e.sentence.contains("no saved location"), "{}", e.sentence);
     assert_eq!(p.active, 0);
 }
+
+/// A change made while the file is not Weather's to write (an unmarked file where the settings
+/// go) is not kept, and the intent says so in the window's words: no `saved_to` for a file
+/// nothing was written to. Once the file is usable again, the answer says where it is kept.
+#[test]
+fn an_intent_never_says_saved_when_the_change_was_not_kept() {
+    let paths = Paths::temporary(Weather::ID);
+    let file = paths.config_file().to_path_buf();
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let foreign = r#"{"fahrenheit": false, "note": "SENTINEL-NOT-OURS"}"#;
+    std::fs::write(&file, foreign).unwrap();
+    let app = start(&paths);
+    let reply = app.act("set_units", serde_json::json!({ "units": "F" })).unwrap();
+    let said = reply.envelope()["result"].clone();
+    assert_eq!(said["units"], "fahrenheit", "the window uses it: {said}");
+    assert_eq!(said["kept"], false, "{said}");
+    assert!(said.get("saved_to").is_none(), "nothing was written there: {said}");
+    assert!(said["not_kept"].as_str().unwrap().starts_with("Could not keep the change"), "{said}");
+    assert!(app.model(|m| m.notice.starts_with("Could not keep the change")));
+    app.run_writes();
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), foreign, "and it was not");
+
+    // The person repairs the file by hand: the next change is kept, and said to be.
+    let ours = serde_json::json!({
+        "kind": "yantrik-app-settings", "app": "weather", "schema": 1,
+        "settings": { "fahrenheit": false, "active": 0, "locations": [] },
+    });
+    std::fs::write(&file, ours.to_string()).unwrap();
+    app.seen(yantrik_app::watch::Seen::SettingsFile);
+    let said = app.act("set_units", serde_json::json!({ "units": "F" })).unwrap().envelope()["result"].clone();
+    assert_eq!(said["kept"], true, "{said}");
+    assert!(said["saved_to"].as_str().unwrap().ends_with("apps/weather/settings.json"), "{said}");
+    app.run_writes();
+    assert!(std::fs::read_to_string(&file).unwrap().contains("\"fahrenheit\": true"));
+}
+
+/// The file turns unusable while Weather runs: the first change after it is already answered as
+/// not kept, not only the ones after the notice.
+#[test]
+fn a_file_that_turns_unusable_while_running_is_answered_as_not_kept() {
+    let paths = Paths::temporary(Weather::ID);
+    let app = start(&paths);
+    app.run(Command::SetUnits(true));
+    app.run_writes();
+    std::fs::write(paths.config_file(), "{ not ours").unwrap();
+    app.seen(yantrik_app::watch::Seen::SettingsFile);
+    let said = app.act("set_units", serde_json::json!({ "units": "C" })).unwrap().envelope()["result"].clone();
+    assert_eq!(said["kept"], false, "{said}");
+    assert!(said.get("saved_to").is_none(), "{said}");
+    assert_eq!(std::fs::read_to_string(paths.config_file()).unwrap(), "{ not ours");
+}

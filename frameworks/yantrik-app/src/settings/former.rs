@@ -23,8 +23,8 @@ use std::path::Path;
 use serde_json::Value;
 use yantrik_foundation::json_store::write_atomically;
 
-use super::file::{read_bounded, render_raw, KIND};
-use super::Settings;
+use super::file::{private_dir, read_bounded, render_raw, KIND};
+use super::{Settings, SettingsError};
 use crate::paths::Paths;
 
 /// What came of the look at the old place.
@@ -56,17 +56,24 @@ pub fn import<T: Settings>(paths: &Paths) -> Imported {
     if exists(new) || exists(&record) {
         return Imported::Nothing;
     }
+    // Read as the settings file is (`crate::quiet`): a link, a FIFO, a device or a file over the
+    // limit is not opened past its metadata, and nothing of it is parsed.
     let bytes = match read_bounded(&former) {
-        Ok(Some(bytes)) => bytes,
+        Ok(Some(bytes)) => Some(bytes),
         Ok(None) => return Imported::NoFile,
+        Err(SettingsError::NotOurs) => None,
         Err(e) => {
             // Unreadable now is not a decision; the look is taken again at the next start.
             tracing::warn!(app = paths.id(), file = %former.display(), error = %e, "the settings from before could not be looked at");
             return Imported::Failed(e.to_string());
         }
     };
-    let outcome = match recognise::<T>(&bytes, paths.id()).map(|(schema, settings)| render_raw(paths.id(), schema, settings)) {
-        Some(Ok(rendered)) => match write_atomically(new, &rendered) {
+    let recognised = bytes.and_then(|bytes| recognise::<T>(&bytes, paths.id()));
+    let written = |rendered: Vec<u8>| {
+        new.parent().map_or(Ok(()), private_dir).and_then(|()| write_atomically(new, &rendered))
+    };
+    let outcome = match recognised.map(|(schema, settings)| render_raw(paths.id(), schema, settings)) {
+        Some(Ok(rendered)) => match written(rendered) {
             Ok(()) => {
                 tracing::info!(app = paths.id(), from = %former.display(), to = %new.display(), "the settings from before are brought across; the old file is kept as it was");
                 Imported::Copied
@@ -83,7 +90,8 @@ pub fn import<T: Settings>(paths: &Paths) -> Imported {
         }
     };
     let said = serde_json::json!({ "from": former.display().to_string(), "taken": outcome == Imported::Copied });
-    if let Err(e) = write_atomically(&record, said.to_string().as_bytes()) {
+    let recorded = record.parent().map_or(Ok(()), private_dir).and_then(|()| write_atomically(&record, said.to_string().as_bytes()));
+    if let Err(e) = recorded {
         tracing::warn!(app = paths.id(), file = %record.display(), error = %e, "the look at the old settings could not be recorded");
     }
     outcome
@@ -233,6 +241,39 @@ mod tests {
         assert_eq!(import::<Quiet>(&paths), Imported::Nothing);
         assert_eq!(import::<()>(&paths), Imported::Nothing);
         assert!(!paths.config_file().exists() && !paths.imported_record().exists());
+    }
+
+    /// A link, a FIFO or a file over the limit at the old place is not this app's: nothing of it
+    /// is read or parsed, the look is recorded once, and the app starts without waiting on it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_link_or_a_fifo_at_the_old_place_is_not_followed_read_or_waited_on() {
+        use crate::quiet::tests::{bytes_read_by, fifo, within, BIG, NOTHING_OF_IT};
+        use std::time::Duration;
+        let makers: [fn(&Path, &Path); 3] = [
+            |at: &Path, d: &Path| {
+                let secret = d.join("email.json");
+                std::fs::write(&secret, format!("[{}]", "SENTINEL,".repeat(BIG / 9))).unwrap();
+                std::os::unix::fs::symlink(&secret, at).unwrap();
+            },
+            |at: &Path, _: &Path| fifo(at),
+            |at: &Path, _: &Path| std::os::unix::fs::symlink("/dev/zero", at).unwrap(),
+        ];
+        for (n, make) in makers.into_iter().enumerate() {
+            let paths = fresh(&format!("hostile-{n}"), "old");
+            let former = shared(&paths, "old.json");
+            make(&former, former.parent().unwrap());
+            let (imported, read) = within(Duration::from_secs(5), {
+                let paths = paths.clone();
+                move || bytes_read_by(|| import::<Old>(&paths))
+            });
+            assert_eq!(imported, Imported::NotOurs, "case {n}");
+            assert!(read < NOTHING_OF_IT, "case {n}: {read} bytes read");
+            assert!(!paths.config_file().exists());
+            let record = std::fs::read_to_string(paths.imported_record()).unwrap();
+            assert!(record.contains("\"taken\":false"), "{record}");
+            assert_eq!(import::<Old>(&paths), Imported::Nothing, "case {n}: not looked at again");
+        }
     }
 
     #[test]

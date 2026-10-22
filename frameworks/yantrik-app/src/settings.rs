@@ -194,7 +194,7 @@ impl<T: Settings> Store<T> {
 
     /// The write of `revision` landed. Only the newest revision moves the committed value; an
     /// older write's success is nothing. The file is this app's now, whatever it was before: the
-    /// lane writes only over a file with this app's mark (`file::may_replace`), so recovery ends.
+    /// lane writes only over a file with this app's mark (`file::replace`), so recovery ends.
     pub fn committed_at(&mut self, revision: Revision) {
         let written = self.in_flight.remove(&revision);
         if revision > self.committed_revision {

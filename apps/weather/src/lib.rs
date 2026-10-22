@@ -69,6 +69,10 @@ impl App for Weather {
                     format!("The saved places could not be read ({e}); using the defaults.")
                 }
             },
+            not_kept: match &boot.settings_health {
+                yantrik_app::Health::Fine => None,
+                yantrik_app::Health::Recovery(e) => Some(e.to_string()),
+            },
             last_fetch: None,
             rail: Rail::new(boot.mind.clone()),
             weather: boot.services.weather.clone(),
@@ -122,7 +126,8 @@ impl App for Weather {
     fn event(event: Event<Prefs>, _: &Model) -> Option<Command> {
         match event {
             Event::SettingsChangedOutside(prefs) => Some(Command::PrefsFromFile(prefs)),
-            Event::SettingsNotSaved(why) => Some(Command::Note(format!("Could not keep the change: {why}"))),
+            Event::SettingsNotSaved(why) => Some(Command::NotKept(why)),
+            Event::SettingsSaved => Some(Command::Kept),
             _ => None,
         }
     }

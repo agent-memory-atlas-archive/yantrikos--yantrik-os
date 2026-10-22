@@ -235,3 +235,118 @@ impl<T: Settings> Store<T> {
         }
     }
 }
+
+/// Whatever is at the settings path that is not a settings file (a link to a sentinel, a FIFO, a
+/// link to one, a link to `/dev/zero`, a device, a directory, a file over the limit) is NotOurs
+/// at open, at every watcher look and at a reload: none of its bytes are read, and nothing waits.
+#[cfg(target_os = "linux")]
+#[test]
+fn nothing_at_the_path_is_followed_waited_on_or_read_past_the_limit() {
+    use crate::quiet::tests::{bytes_read_by, hostile, within, NOTHING_OF_IT};
+    use std::time::Duration;
+    let d = dir("hostile");
+    for (what, thing) in hostile(&d) {
+        let (seen, read) = within(Duration::from_secs(5), move || {
+            bytes_read_by(move || {
+                let mut store = open(&thing);
+                let health = store.health().clone();
+                let changed = store.changed_outside();
+                let reloaded = store.reload();
+                let fingerprint = Fingerprint::of(&thing);
+                (health, changed, reloaded, fingerprint.is_some())
+            })
+        });
+        let (health, changed, reloaded, fingerprinted) = seen;
+        assert_eq!(health, Health::Recovery(SettingsError::NotOurs), "{what}");
+        assert!(!changed, "{what}: its metadata is its fingerprint, and it did not change");
+        assert_eq!(reloaded, Reloaded::Unchanged, "{what}");
+        assert!(fingerprinted, "{what}: seen, by its metadata");
+        assert!(read < NOTHING_OF_IT, "{what}: {read} bytes read");
+    }
+}
+
+/// The path swapped, as fast as it can be, between a small marked file and a link to a 4 MiB
+/// sentinel: no read and no fingerprint ever reads through the link (the review's race read past
+/// 1 MiB 29 times in 20000 with a check by path and a read by path).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_path_swapped_under_the_read_never_leads_it_through_a_link() {
+    use crate::quiet::tests::{bytes_read_by, BIG, NOTHING_OF_IT};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    let d = dir("swap");
+    let path = d.join("app.json");
+    let secret = d.join("secret.json");
+    std::fs::write(&secret, "S".repeat(BIG)).unwrap();
+    let small = marked(2, r#"{"step":1,"unit":"c"}"#);
+    std::fs::write(&path, &small).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let swapper = {
+        let (stop, path, secret, d) = (stop.clone(), path.clone(), secret.clone(), d.clone());
+        std::thread::spawn(move || {
+            let (file, link) = (d.join("stage-file"), d.join("stage-link"));
+            while !stop.load(Ordering::Relaxed) {
+                let _ = std::fs::write(&file, &small);
+                let _ = std::fs::rename(&file, &path);
+                let _ = std::fs::remove_file(&link);
+                let _ = std::os::unix::fs::symlink(&secret, &link);
+                let _ = std::fs::rename(&link, &path);
+            }
+        })
+    };
+    let (mut ours, mut refused, mut worst) = (0u32, 0u32, 0u64);
+    for _ in 0..20_000 {
+        let (opened, read) = bytes_read_by(|| read_file::<Prefs>(&path, APP));
+        let (_, fingerprint_read) = bytes_read_by(|| Fingerprint::of(&path));
+        worst = worst.max(read).max(fingerprint_read);
+        match opened {
+            Opened::Read { .. } => ours += 1,
+            Opened::Recovery(SettingsError::NotOurs) => refused += 1,
+            _ => {}
+        }
+        if ours > 50 && refused > 50 && worst > 0 {
+            break;
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    swapper.join().unwrap();
+    assert!(ours > 0 && refused > 0, "the race ran both ways: {ours} read, {refused} refused");
+    assert!(worst < NOTHING_OF_IT, "a read went through the link: {worst} bytes");
+}
+
+/// A file without the mark that arrives between the lane's look and its write is caught by what
+/// the exchange displaced: it goes back to the path, whole, and the save is refused.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_file_that_arrives_after_the_look_is_put_back_not_written_over() {
+    use crate::documents::exchange::{replace_if, Guarded};
+    let d = dir("arrives");
+    let path = d.join("app.json");
+    let ours = render(APP, &Prefs { step: 1, unit: "c".into() }).unwrap();
+    assert_eq!(file::may_replace(&path, &ours), Ok(()), "nothing there at the look");
+    let account = r#"[{"password":"SENTINEL-PASSWORD-4"}]"#;
+    std::fs::write(&path, account).unwrap();
+    let outcome = replace_if(&path, &ours, file::MAX_BYTES, |theirs| file::is_marked(theirs, APP)).unwrap();
+    assert_eq!(outcome, Guarded::Refused);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), account, "put back, whole");
+    let beside: Vec<_> = std::fs::read_dir(&d).unwrap().flatten().map(|e| e.file_name()).collect();
+    assert_eq!(beside.len(), 1, "nothing left beside it: {beside:?}");
+    // Its own file is replaced as before; and through the lane's own call.
+    std::fs::write(&path, marked(2, "{}")).unwrap();
+    assert_eq!(file::replace(&path, &ours), Ok(()));
+    assert_eq!(std::fs::read(&path).unwrap(), ours);
+}
+
+/// `apps/` and `apps/<id>/` are made owner-only: they list app names and set-aside files.
+#[cfg(unix)]
+#[test]
+fn the_settings_folders_are_made_owner_only() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let d = dir("private");
+    let path = d.join("apps").join(APP).join("settings.json");
+    file::replace(&path, &render(APP, &Prefs::default()).unwrap()).unwrap();
+    for folder in [d.join("apps"), d.join("apps").join(APP)] {
+        assert_eq!(std::fs::metadata(&folder).unwrap().permissions().mode() & 0o777, 0o700, "{}", folder.display());
+    }
+    assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+}
