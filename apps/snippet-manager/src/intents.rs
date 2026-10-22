@@ -9,8 +9,8 @@
 
 use std::time::Duration;
 
-use yantrik_app::control::{Action, Param};
-use yantrik_app::intents::{Args, Intent, Intents, Settle};
+use yantrik_app::control::{call_was_granted, Action, Param};
+use yantrik_app::intents::{Agents, Args, Intent, Intents, Settle};
 use yantrik_app::Refused;
 
 use crate::command::{Command, From};
@@ -52,10 +52,16 @@ pub fn table(table: &mut Intents<SnippetManager>) {
         .arg(Param::text("query").describe("Matched against title, code, tags and language; an agent's search matches title, tags and language only"))
         .risk("safe"), |a| Ok(Command::Find(raw(a, "query"))));
     // Standard: the clipboard is readable by everything else on the session, so this is data
-    // leaving the app — reversible, but not nothing.
-    add(table, Action::new("copy", "Put a snippet's code on the clipboard")
-        .arg(Param::text("id").describe("Its id, or its title"))
-        .risk("standard"), |a| Ok(Command::CopyNamed(raw(a, "id"))));
+    // leaving the app — reversible, but not nothing. For an agent it is more: the clipboard is
+    // where the same agent can read the whole code back, so an agent's copy runs only as a call
+    // the person allowed on a card (`granted_copy`). The person's button and their own `yos act`
+    // are unchanged.
+    table.add(
+        intent(Action::new("copy", "Put a snippet's code on the clipboard")
+            .arg(Param::text("id").describe("Its id, or its title"))
+            .risk("standard"), |a| Ok(Command::CopyNamed(raw(a, "id"))))
+        .agents(Agents::Rule(Box::new(granted_copy))),
+    );
     // Sensitive, not standard: this destroys something the person wrote and there is no trash to
     // take it out of. Container Manager grades `remove` the same way for the same reason — the
     // recoverable and the unrecoverable are not one grade.
@@ -78,11 +84,31 @@ fn add(
     action: Action,
     parse: impl Fn(&Args<'_>) -> Result<Command, Refused> + 'static,
 ) {
-    table.add(
-        Intent::new(action, parse)
-            .settles(Settle::Explicit { within: WITHIN })
-            .reply(|m: &Model| m.answer.clone()),
-    );
+    table.add(intent(action, parse));
+}
+
+fn intent(
+    action: Action,
+    parse: impl Fn(&Args<'_>) -> Result<Command, Refused> + 'static,
+) -> Intent<SnippetManager> {
+    Intent::new(action, parse)
+        .settles(Settle::Explicit { within: WITHIN })
+        .reply(|m: &Model| m.answer.clone())
+}
+
+/// Why an agent's copy that the person did not allow is refused.
+pub const COPY_NEEDS_ALLOW: &str = "a mind copies a snippet only with the person's Allow for that copy: the clipboard is \
+     readable by everything on the session, the mind included, so the code would leave Snippets unseen";
+
+/// An agent's `copy` is admitted only when the call carries a person's Allow, spent for exactly
+/// this call (`control::call_was_granted`, which the dispatch establishes and a caller cannot
+/// claim). Otherwise it is refused before anything is copied.
+fn granted_copy(_: &Model, _: &Args<'_>) -> Result<(), Refused> {
+    if call_was_granted() {
+        Ok(())
+    } else {
+        Err(Refused::new("needs_allow", COPY_NEEDS_ALLOW))
+    }
 }
 
 /// One text argument, trimmed of nothing: code keeps its whitespace.
