@@ -143,6 +143,9 @@ pub struct Model {
     /// The window was asked to close while a file was read or written, with other tabs unsaved:
     /// the close goes on once that lands (update/closing.rs).
     pub close_when_done: bool,
+    /// Tabs whose re-read, after another program changed their file, was set aside for the save
+    /// in flight: the save's landing takes the change up again (update/outside.rs).
+    pub reread_owed: BTreeSet<TabId>,
     /// What the last call from the surface is answered with.
     pub answer: Value,
     /// The last tab closed and the file it had, for the answer of the save that closed it.
@@ -179,6 +182,7 @@ impl Model {
             answers_pending: 0,
             finish: None,
             close_when_done: false,
+            reread_owed: BTreeSet::new(),
             answer: Value::Null,
             last_closed: None,
             cues: Vec::new(),

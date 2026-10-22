@@ -106,6 +106,7 @@ pub fn landed(
             }
             let hidden = tab.hidden || wrote.file.hidden;
             moved_to_file(m, fx, id, &wrote);
+            super::outside::after_save(m, fx, id, true);
             match &wrote.kept {
                 Some(k) => m.notice.set_about(hidden, kept::said(k, &wrote.file.path), || kept::said_hidden(k)),
                 None => say(m, "Saved"),
@@ -165,6 +166,7 @@ fn unnamed(sentence: &str, path: Option<&std::path::Path>) -> String {
 fn not_saved(m: &mut Model, fx: &mut Effects<TextEditor>, tab: &Tab, then: &AfterSave, sentence: String, for_agents: String) {
     m.notice.set_about(tab.hidden, sentence.clone(), || for_agents);
     m.dialog_error = sentence.clone();
+    super::outside::after_save(m, fx, tab.id, false);
     closing::not_saved(m, fx, tab.id, &sentence);
     surface::refuse_if_owed(m, fx, then);
 }

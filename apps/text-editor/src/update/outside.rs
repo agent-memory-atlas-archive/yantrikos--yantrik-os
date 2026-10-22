@@ -74,8 +74,10 @@ pub fn conflict(title: &str) -> String {
 pub fn reread(m: &mut Model, fx: &mut Effects<TextEditor>, id: TabId, seq: u64, result: Result<Opened, String>) {
     let Some(tab) = m.tab(id).cloned() else { return };
     // A save of this tab went out meanwhile: its own check against the file decides, and its
-    // landing is the one its document expects. The re-read is dropped.
+    // landing is the one its document expects. The re-read is set aside, and the save's landing
+    // takes the change up again (`after_save`), so it is never left unsaid.
     if m.busy == Some(Work::Save(id)) {
+        m.reread_owed.insert(id);
         return;
     }
     let title = m.title(&tab);
@@ -121,6 +123,39 @@ pub fn reread(m: &mut Model, fx: &mut Effects<TextEditor>, id: TabId, seq: u64, 
         find::search(m, false);
         fx.changed(TEXT);
     }
+}
+
+/// A save of tab `id` landed, `saved` or not, while a re-read of it was set aside. A save that
+/// landed checked the file held what the tab expected, so nothing is owed. One that did not leaves
+/// the outside change as it was: taken up again now, as when it was first seen, a conflict for a
+/// tab with anything unsaved and a re-read for one without. The watch is also re-armed from the
+/// baseline, so its next look reads the file afresh whatever happens here.
+pub fn after_save(m: &mut Model, fx: &mut Effects<TextEditor>, id: TabId, saved: bool) {
+    if !m.reread_owed.remove(&id) || saved {
+        return;
+    }
+    let Some(tab) = m.tab(id).cloned() else { return };
+    let modified = m.modified(&tab);
+    let title = m.title(&tab);
+    let Some(d) = m.doc_mut(tab.doc) else { return };
+    if !matches!(d.outside, OutsideState::Changed { .. }) {
+        return;
+    }
+    if let Some((key, path, seen)) = d.watch_entry() {
+        fx.watch(&key, path, seen);
+    }
+    let (seq, path) = (d.seq, d.source.path().map(PathBuf::from));
+    if modified {
+        d.outside = OutsideState::Conflict { now: None };
+        let failed = (m.notice.window().to_string(), m.notice.read(true).to_string());
+        m.notice.set_about(tab.hidden, format!("{} {}", failed.0, conflict(&title)), || {
+            format!("{} {}", failed.1, conflict(HIDDEN_TAB))
+        });
+        return;
+    }
+    let Some(path) = path else { return };
+    let lost = Command::Reread { tab: id, seq, result: Err("the file could not be read".into()) };
+    fx.spawn_or(lost, move |_| Command::Reread { tab: id, seq, result: read_text(&path).map(|text| described(path, text)) });
 }
 
 /// Where a tab's file went, after the watch found it gone.

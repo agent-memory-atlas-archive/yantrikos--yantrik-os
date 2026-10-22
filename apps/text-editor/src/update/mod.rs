@@ -67,6 +67,9 @@ fn finish(m: &mut Model, fx: &mut Effects<TextEditor>) {
         return;
     }
     match m.finish.take() {
+        // Something was changed while the close waited on its answers (a call arriving then):
+        // asked about as any unsaved tab is, rather than closed away.
+        Some(Finish::Close) if m.tabs.iter().any(|t| m.modified(t)) => closing::ask_next(m, fx),
         Some(Finish::Close) => fx.close(yantrik_app::app::WindowId::PRIMARY),
         Some(Finish::Exit) => fx.exit(),
         None => {}

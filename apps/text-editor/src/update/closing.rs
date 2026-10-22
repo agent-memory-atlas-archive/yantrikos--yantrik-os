@@ -69,7 +69,7 @@ pub fn window(m: &mut Model, fx: &mut Effects<TextEditor>) {
 }
 
 /// The next unsaved tab asked about, while the window closes; the window closed once none is left.
-fn ask_next(m: &mut Model, fx: &mut Effects<TextEditor>) {
+pub fn ask_next(m: &mut Model, fx: &mut Effects<TextEditor>) {
     match m.tabs.iter().position(|t| m.modified(t)) {
         Some(index) => ask(m, fx, index, true),
         // Once every answer owed is settled: a call whose own work closed the window is answered.

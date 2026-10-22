@@ -210,3 +210,42 @@ fn undo_back_to_the_old_text_after_a_conflict_is_not_saved() {
     press(&app, WindowAction::Close);
     assert_eq!(state(&app)["dialog"], 3);
 }
+
+// The delta review of #939 (head 519a3e75).
+
+/// N1: a re-read set aside for a save that then fails is taken up again: the clean tab follows
+/// its file, and is never left showing an old copy as saved.
+#[test]
+fn a_reread_set_aside_for_a_save_that_fails_is_taken_up_again() {
+    let (app, path) = with_file("n1", "first\n");
+    let taken = path.with_file_name("other.txt");
+    std::fs::write(&taken, "somebody else's\n").unwrap();
+    std::fs::write(&path, "theirs\n").unwrap();
+    app.look_at_files();
+    assert_eq!(app.jobs_waiting(), 1, "the re-read is out");
+    let refused = act(&app, "save_as", json!({ "path": taken.display().to_string() })).unwrap_err();
+    assert!(refused.contains("already exists"), "{refused}");
+    assert_eq!(text(&app), "theirs\n", "the tab follows its file: {}", notice(&app));
+    assert!(!modified(&app));
+    assert!(notice(&app).contains("was changed outside the editor"), "{}", notice(&app));
+}
+
+/// N2: something changed while a decided close waits on its answers is asked about, not closed
+/// away.
+#[test]
+fn a_change_made_while_a_decided_close_waits_is_asked_about() {
+    let (app, path) = with_file("n2", "v1\n");
+    typed(&app, "v2\n");
+    app.close_requested(WindowId::PRIMARY);
+    let save = app.act("save", json!({})).unwrap();
+    app.run_one_job();
+    assert_eq!(file(&path), "v2\n", "the prompt's save landed");
+    assert!(app.exit_reason().is_none(), "the close waits on the save's answer");
+    let append = app.act("append", json!({ "text": "late\n" })).unwrap();
+    settle(&app);
+    assert!(save.settle().is_ok());
+    assert!(append.settle().is_ok());
+    assert!(app.exit_reason().is_none(), "not closed over the late text");
+    assert_eq!(state(&app)["dialog"], 3);
+    assert_eq!(state(&app)["dialog_is"], "Untitled has unsaved changes.");
+}
