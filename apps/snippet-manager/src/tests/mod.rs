@@ -16,6 +16,7 @@
 //!   import only of a file in the person's home.
 //! - `secrets.rs`: a snippet's code is never in a log, an answer, `describe` or a debug print.
 //! - `rail.rs`: the agent rail and the AI button. `private_mode.rs`: `describe` in Private mode.
+//! - `folders.rs`: the library's and the drafts' folders are the person's alone (0700).
 
 use std::sync::Arc;
 
@@ -34,6 +35,7 @@ mod copying;
 mod editing;
 mod ending;
 mod files;
+mod folders;
 mod kept;
 mod parity;
 mod private_mode;
