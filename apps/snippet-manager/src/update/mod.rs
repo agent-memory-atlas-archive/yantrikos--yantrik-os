@@ -124,6 +124,10 @@ fn dispatch(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refused>
             ending::reopened(m, fx);
             Ok(())
         }
+        Command::DraftNotKept { name, why } => {
+            drafts::not_drafted(m, fx, &name, &why);
+            Ok(())
+        }
         Command::ShowOffer | Command::RestoreOffer | Command::DiscardOffer => {
             drafts::choose(m, command, fx);
             Ok(())
@@ -173,6 +177,7 @@ fn work_failed(m: &mut Model, work: Work, fx: &mut Fx) {
     match work {
         Work::Write(write) => {
             m.lane.landed();
+            drafts::not_landed(m, write.ticket.revision);
             written::did_not_finish(m, write.after, &write.restore, fx);
         }
         Work::Copy { from_window } => {
@@ -186,11 +191,9 @@ fn work_failed(m: &mut Model, work: Work, fx: &mut Fx) {
         }
         Work::Import => fail(m, fx, "Reading the file did not finish; nothing was imported."),
         Work::Export => fail(m, fx, "The export did not finish; try it again."),
-        Work::Reload => {
-            // The file could not be read again; memory stays as it is, and the drafts with it
-            // until a write lands.
-            m.reloading = m.reloading.saturating_sub(1);
-        }
+        // The file could not be read again; memory stays as it is, and every draft with it until
+        // a write holding its text has landed (`drafts::release`).
+        Work::Reload => {}
     }
 }
 

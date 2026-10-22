@@ -2,49 +2,90 @@
 //! recovery bar, which offers back what a draft holds until the person chooses.
 //!
 //! A snippet's text is drafted while the editor holds typing the store has not taken, debounced,
-//! and at once when the app ends or a save of it is refused. A draft goes once what it holds is
-//! kept and every write has landed. One that the editor has moved away from while its text is
-//! still not kept (its save was refused, or a mind deleted the snippet under it) is offered back
-//! on the bar, as a draft found at the next start is (`lib.rs`). Nothing is put back until the
-//! person chooses: *Restore* keeps the text in its snippet (*Restore as new* for one no longer
-//! kept), *Discard* throws it away. Notes offers its drafts the same way.
+//! and at once when the app ends or a save of it is refused. One that the editor has moved away
+//! from while its text is still not kept (its save was refused, or a mind deleted the snippet
+//! under it) is offered back on the bar, as a draft found at the next start is (`lib.rs`). Nothing
+//! is put back until the person chooses: *Restore* keeps the text in its snippet (*Restore as new*
+//! for one no longer kept), *Discard* throws it away. Notes offers its drafts the same way.
+//!
+//! # When a draft goes: one rule, in [`release`]
+//!
+//! A draft is removed only when a write of the library that holds its text has positively landed
+//! (`Saved` or `Covered`), or when the person presses *Discard*. Nothing else removes one: not a
+//! refused, undone or unfinished write, not a failed re-read, not a move of the text to another
+//! snippet's name, not the snippet being kept in memory (#938 delta review, M2b and N1; #925 N-B,
+//! #920 E-L7). Every write records which drafts' text it carries (`Draft::pending`,
+//! `written::write`); its landing releases them; any failure takes that back.
 
 use yantrik_app::Refused;
 
 use super::changes::commit;
-use super::{fail, written, Fx};
+use super::{fail, say, written, Fx};
 use crate::command::{After, Command};
 use crate::model::{draft_name, Draft, Editor, Model, Offer, Why, PART_DETAIL, PART_LIST, PART_RECOVERY};
 use crate::store::ALL;
 
-/// The editor's text drafted while it is unsaved; drafts let go once kept, or offered once the
-/// editor has left them unkept. `now`: written at once rather than after the debounce.
+/// Why a draft may go.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Because {
+    /// A write holding its text has landed (`Model::lane`'s confirmed revision is at or past the
+    /// draft's `pending`).
+    Kept,
+    /// The person pressed *Discard*.
+    Discarded,
+}
+
+/// The one way a draft is removed, and the rule it is held to. Says whether it went.
+pub(super) fn release(m: &mut Model, fx: &mut Fx, id: i32, because: Because) -> bool {
+    let Some(draft) = m.drafts.get(&id) else { return false };
+    let allowed = match because {
+        Because::Discarded => true,
+        Because::Kept => draft.pending.is_some_and(|p| p <= m.lane.confirmed()),
+    };
+    if !allowed {
+        return false;
+    }
+    m.drafts.remove(&id);
+    fx.discard_draft(&draft_name(id));
+    if m.offers.iter().any(|o| o.id == id) {
+        m.offers.retain(|o| o.id != id);
+        fx.changed(PART_RECOVERY);
+    }
+    true
+}
+
+/// The editor's text drafted while it is unsaved; drafts whose text a landed write holds let go;
+/// the others offered once the editor has left them. `now`: written at once rather than after the
+/// debounce.
 pub(super) fn keep(m: &mut Model, fx: &mut Fx, now: bool) {
     let editor = m.editor.clone();
     let typing = editor.id >= 0 && (m.editor_dirty() || m.offered(editor.id).is_some());
+    // The person typed in the editor since this snippet's draft was made, and the text differs.
+    let typed_since = m.drafts.get(&editor.id).is_some_and(|d| d.text != editor && m.typed > d.typed);
     if typing && (now || m.drafted(editor.id) != Some(&editor)) {
         put(fx, &editor, now);
-        // The editor's text is the newest there is for its snippet.
-        m.drafts.insert(editor.id, Draft { text: editor.clone(), typed: m.typed });
-    }
-    // A draft goes only once a write has positively landed: one still in flight could be refused
-    // and give the text back, and after a write that did not finish, memory is not known to be on
-    // disk until the file has been read again (#925 N-B, #920 E-L7).
-    if !m.lane.idle() || m.reloading > 0 {
-        return;
+        // The editor's text is the newest there is for its snippet, and no write holds it yet.
+        m.drafts.insert(editor.id, Draft::of(editor.clone(), m.typed));
+    } else if !typing && typed_since {
+        // The person typed the snippet back to what is kept: the draft follows the editor, and the
+        // newest write issued holds that text, so it goes when that write is known to have landed.
+        put(fx, &editor, now);
+        let mut draft = Draft::of(editor.clone(), m.typed);
+        draft.pending = Some(m.lane.revision());
+        m.drafts.insert(editor.id, draft);
     }
     let ids: Vec<i32> = m.drafts.keys().copied().collect();
     for id in ids {
-        if (id == editor.id && typing) || m.offers.iter().any(|o| o.id == id) {
+        if release(m, fx, id, Because::Kept) {
             continue;
         }
-        let text = &m.drafts[&id].text;
-        let kept = m.library.get(id).is_some() && !m.library.differs(id, &text.patch());
-        if kept || id == editor.id {
-            // Kept, or the editor holds this snippet as it is kept: the person's text is what the
-            // store has.
-            forget(m, fx, id);
-        } else {
+        let draft = &m.drafts[&id];
+        let in_editor = id == editor.id && typing;
+        let offered = m.offers.iter().any(|o| o.id == id);
+        // Held in memory: kept there, and on its way to disk or waiting for the next write (after
+        // a write that did not finish, memory may be ahead of the file; the draft stays).
+        let held = m.library.get(draft.kept_as).is_some() && !m.library.differs(draft.kept_as, &draft.text.patch());
+        if !in_editor && !offered && draft.pending.is_none() && !held {
             m.offers.push(Offer { id, why: Why::NotSaved });
             fx.changed(PART_RECOVERY);
         }
@@ -59,18 +100,25 @@ pub(super) fn hold(m: &mut Model, fx: &mut Fx, text: &Editor, typed: u64) -> boo
         return false;
     }
     put(fx, text, true);
-    m.drafts.insert(text.id, Draft { text: text.clone(), typed });
+    m.drafts.insert(text.id, Draft::of(text.clone(), typed));
     true
 }
 
-/// The draft of `id` removed, and anything it offered with it.
-pub(super) fn forget(m: &mut Model, fx: &mut Fx, id: i32) {
-    if m.drafts.remove(&id).is_some() {
-        fx.discard_draft(&draft_name(id));
+/// A write whose outcome is not that it landed (refused, undone, unfinished): no draft is let go
+/// on its account, nor on any later write's of its epoch.
+pub(super) fn not_landed(m: &mut Model, revision: u64) {
+    for draft in m.drafts.values_mut() {
+        if draft.pending.is_some_and(|p| p >= revision) {
+            draft.pending = None;
+        }
     }
-    if m.offers.iter().any(|o| o.id == id) {
-        m.offers.retain(|o| o.id != id);
-        fx.changed(PART_RECOVERY);
+}
+
+/// The draft lane could not write a snippet's draft: said, so the person knows the text is only
+/// in the window. No other copy of it is removed (`release` waits for a landed write).
+pub(super) fn not_drafted(m: &mut Model, fx: &mut Fx, name: &str, why: &str) {
+    if name.starts_with(crate::model::DRAFT_PREFIX) {
+        say(m, fx, &format!("Your unsaved text could not be kept as a draft ({why}); it is still in Snippets. Save it, or copy it out."));
     }
 }
 
@@ -99,7 +147,7 @@ pub(super) fn choose(m: &mut Model, command: Command, fx: &mut Fx) {
         }
         Command::RestoreOffer => restore(m, fx, offer, draft),
         Command::DiscardOffer => {
-            forget(m, fx, offer.id);
+            release(m, fx, offer.id, Because::Discarded);
             if m.editor.id == offer.id {
                 // The editor shows the snippet as it is kept again.
                 m.select(offer.id);
@@ -114,9 +162,10 @@ pub(super) fn choose(m: &mut Model, command: Command, fx: &mut Fx) {
 
 /// *Restore*: the text back into its snippet, opened and kept; *Restore as new* for a snippet no
 /// longer kept. The typing in the editor goes in first, as any move of the editor keeps it. The
-/// draft stays until what it holds is on disk (`keep`), so a refused write offers it again.
+/// draft stays, under its own name, until the write that holds its text has landed (`release`),
+/// so a refused write offers it again.
 fn restore(m: &mut Model, fx: &mut Fx, offer: Offer, draft: Draft) {
-    let Draft { text, typed } = draft;
+    let Draft { text, typed, .. } = draft;
     let mut restore = m.restore_point();
     let committed = match commit(m) {
         Ok(committed) => committed,
@@ -130,13 +179,14 @@ fn restore(m: &mut Model, fx: &mut Fx, offer: Offer, draft: Draft) {
     } else {
         m.library.create(&text.title, &text.language, &text.code, &text.tags, ALL).map(|id| {
             m.select(id);
-            // The draft moves to the new snippet's name before the old one goes, so the text is
-            // in a draft until the new snippet is on disk; and if its write is refused, it is
-            // this text the refusal keeps and says is kept (#938 review, L1).
-            let moved = Editor { id, ..text.clone() };
-            hold(m, fx, &moved, typed);
-            forget(m, fx, offer.id);
-            restore.typing = moved;
+            // The draft keeps its own name and file, and now names the new snippet as where its
+            // text is kept: it goes when the new snippet's write has landed, and never before
+            // (#938 delta review, N1). If that write is refused, it is this draft the refusal
+            // keeps and says is kept (#938 review, L1).
+            if let Some(d) = m.drafts.get_mut(&offer.id) {
+                d.kept_as = id;
+            }
+            restore.typing = Editor { id: offer.id, ..text.clone() };
             restore.typed = typed;
         })
     };

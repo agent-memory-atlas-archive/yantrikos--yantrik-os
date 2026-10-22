@@ -81,6 +81,8 @@ pub enum Command {
     Ending,
     /// A second launch opened the window again while a close waited.
     Reopened,
+    /// The draft lane could not write a draft.
+    DraftNotKept { name: String, why: String },
     /// The recovery bar's choices about the text it offers.
     ShowOffer,
     RestoreOffer,

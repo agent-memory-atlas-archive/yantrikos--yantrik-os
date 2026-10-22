@@ -58,6 +58,8 @@ pub mod testing {
     pub struct Faulty {
         refuse: AtomicBool,
         panic: AtomicBool,
+        fail_read: AtomicBool,
+        panic_read: AtomicBool,
         writes: AtomicUsize,
     }
 
@@ -69,6 +71,16 @@ pub mod testing {
         /// The next write panics, as a job that ends without a result.
         pub fn panic_next(&self) {
             self.panic.store(true, Ordering::SeqCst);
+        }
+
+        /// Reading the file back fails, as an I/O error would.
+        pub fn fail_reads(&self, on: bool) {
+            self.fail_read.store(on, Ordering::SeqCst);
+        }
+
+        /// The next read back panics, as a job that ends without a result.
+        pub fn panic_next_read(&self) {
+            self.panic_read.store(true, Ordering::SeqCst);
         }
 
         /// Writes that reached the disk.
@@ -91,6 +103,12 @@ pub mod testing {
         }
 
         fn read_back(&self, path: &Path) -> Result<Library, String> {
+            if self.panic_read.swap(false, Ordering::SeqCst) {
+                panic!("the test's disk gave way on a read");
+            }
+            if self.fail_read.load(Ordering::SeqCst) {
+                return Err(format!("{}: Input/output error (os error 5)", path.display()));
+            }
             Real.read_back(path)
         }
     }

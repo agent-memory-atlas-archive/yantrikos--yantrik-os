@@ -50,6 +50,18 @@ pub enum Why {
 pub struct Draft {
     pub text: Editor,
     pub typed: u64,
+    /// The snippet whose kept text this draft's text becomes: its own, or the new snippet a
+    /// *Restore as new* made of it.
+    pub kept_as: i32,
+    /// The write that holds this text, once one is issued: when it has landed the draft may go
+    /// (`update::drafts::release`). `None` while no write is known to hold it.
+    pub pending: Option<u64>,
+}
+
+impl Draft {
+    pub fn of(text: Editor, typed: u64) -> Draft {
+        Draft { kept_as: text.id, text, typed, pending: None }
+    }
 }
 
 /// Unsaved text kept in the draft lane and offered back on the recovery bar, until the person
@@ -155,9 +167,6 @@ pub struct Model {
     pub drafts: BTreeMap<i32, Draft>,
     /// Counts every edit the person makes in the editor: how new a text is.
     pub typed: u64,
-    /// Reads of the file after a write that did not finish, not landed yet. Until they have, what
-    /// memory holds is not known to be on disk, and no draft is let go.
-    pub reloading: usize,
     /// The drafts offered back, the bar's first.
     pub offers: Vec<Offer>,
 }

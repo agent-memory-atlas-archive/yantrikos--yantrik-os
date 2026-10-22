@@ -172,11 +172,17 @@ fn delete(m: &mut Model, fx: &mut Fx, id: i32, asked: bool) {
             if m.selected == id {
                 m.select(-1);
             }
-            if !asked {
-                super::drafts::forget(m, fx, id);
-            }
+            let draft_goes = !asked && m.drafts.contains_key(&id);
             let answer = if asked { answers::deleted(m, &removed) } else { Value::Null };
             written::write(m, fx, After::Answer(answer), restore);
+            // The person deleting the snippet throws its unsaved text away with it, once the write
+            // that deletes it has landed; a refused delete brings both back.
+            if draft_goes {
+                let issued = m.lane.revision();
+                if let Some(d) = m.drafts.get_mut(&id) {
+                    d.pending = Some(issued);
+                }
+            }
         }
         Err(why) => fail(m, fx, &why),
     }
