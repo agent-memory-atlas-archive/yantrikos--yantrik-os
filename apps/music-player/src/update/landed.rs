@@ -79,7 +79,7 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Fx) {
         },
         Command::Stopped(Ok(())) => say(m, fx, "Stopped."),
         Command::Stopped(Err(why)) => refuse(m, fx, "not_stopped", why),
-        Command::Halted => fx.changed(NOTHING),
+        Command::Tidied => fx.changed(NOTHING),
         Command::Checked(Ok(track)) => {
             // The file is the whole queue.
             m.queue.start(vec![track.clone()], 0);

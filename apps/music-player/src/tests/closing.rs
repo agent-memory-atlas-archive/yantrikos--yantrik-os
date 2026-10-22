@@ -84,6 +84,24 @@ fn a_window_presented_during_the_close_wait_cancels_the_close() {
     assert_eq!(f.app.exit_reason(), None, "and runs on past the backstop");
 }
 
+/// A second launch with a file during the close wait: the window comes back and the file plays.
+#[test]
+fn a_file_handed_over_during_the_close_wait_cancels_the_close_and_plays() {
+    let Some(f) = open("close-handover") else { return };
+    let pid = playing(&f);
+    f.app.close_requested(WindowId::PRIMARY);
+    let profile = f.app.paths().profile().to_string();
+    let launch = yantrik_app::launch::Launch::of_files(&profile, &f.dir, [f.track("Gamma", 1)]);
+    // As the `launch` action applies it: the launch, then the window shown.
+    f.app.event(yantrik_app::app::Event::Launch(launch));
+    f.app.present().unwrap();
+    let want = f.track("Gamma", 1).to_string_lossy().into_owned();
+    f.until("the handed-over file plays", |f| f.playing_path().as_deref() == Some(want.as_str()));
+    assert_eq!(f.app.exit_reason(), None);
+    assert!(fake::reaped(pid), "the player the person closed was stopped first");
+    assert_eq!(f.app.windows(), vec![WindowId::PRIMARY]);
+}
+
 #[test]
 fn a_logout_stops_the_player_reaps_it_and_ends() {
     let Some(f) = open("logout") else { return };

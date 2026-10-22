@@ -45,6 +45,11 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refuse
     // An answer is written only in the command that settles it (`answers.rs`); what an earlier
     // command wrote is never anyone else's.
     m.answer = Value::Null;
+    // A file handed over by a second launch while a close waits: the launch shows the window
+    // again straight after (`Event::Presented`), so the close is over and the file is played.
+    if m.closing && !m.ending && matches!(command, Command::Open(_)) {
+        m.closing = false;
+    }
     if (m.closing || m.ending) && plays(&command) {
         return Err(Refused::new("closing", CLOSING));
     }
@@ -65,7 +70,7 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refuse
         | Command::VolumeSet { .. }
         | Command::Muted { .. }
         | Command::Stopped(_)
-        | Command::Halted
+        | Command::Tidied
         | Command::Checked(_) => {
             landed::update(m, command, fx);
             Ok(())
@@ -176,7 +181,7 @@ fn player_job_landed(command: &Command) -> bool {
         | Command::VolumeSet { .. }
         | Command::Muted { .. }
         | Command::Stopped(_)
-        | Command::Halted
+        | Command::Tidied
         | Command::Retired(_) => true,
         Command::WorkFailed(work) => work.is_player(),
         _ => false,

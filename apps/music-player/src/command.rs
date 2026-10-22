@@ -99,7 +99,8 @@ pub enum Command {
     VolumeSet { percent: f64, result: Result<VolumeSet, String> },
     Muted { muted: bool, result: Result<bool, String> },
     Stopped(Result<(), String>),
-    Halted,
+    /// A stop or a reap the player was asked for is done; nothing changes on screen.
+    Tidied,
     /// The player was stopped and reaped; the number of the last one started.
     Retired(u64),
     /// `play_file`'s path checked: the track it names, or why it is refused.

@@ -70,7 +70,7 @@ pub fn update(m: &mut Model, player: u64, event: Event, fx: &mut Fx) {
             "redirect" => {
                 job(m, fx, Work::Halt, move |p, t| {
                     ops::halt(p, t, player);
-                    Command::Halted
+                    Command::Tidied
                 });
                 let title = playback::title_now(m);
                 refuse(m, fx, "not_played", format!("Could not play \u{201c}{title}\u{201d}: {REDIRECTED}."));
@@ -79,6 +79,10 @@ pub fn update(m: &mut Model, player: u64, event: Event, fx: &mut Fx) {
             _ => fx.changed(PART_TRANSPORT),
         },
         Event::Gone => {
+            job(m, fx, Work::Halt, move |p, t| {
+                ops::bury(p, t, player);
+                Command::Tidied
+            });
             m.state = PlayerState::Stopped;
             refuse(m, fx, "player_stopped", PLAYER_GONE);
             fx.changed(PART_TRANSPORT);

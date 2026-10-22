@@ -190,12 +190,13 @@ fn a_player_that_dies_is_said_in_plain_words_and_the_next_play_starts_another() 
     f.until("the death is noticed", |f| f.state()["player"] == "stopped");
     assert_eq!(f.notice(), "The player (mpv) stopped. Press play to start it again.");
     assert!(!f.playing());
+    f.quiet();
+    assert!(super::fake::reaped(first), "the player that died was reaped, not left a zombie");
     let again = f.act("play_file", json!({"path": f.track("Beta", 3)})).unwrap();
     assert_eq!(again["playing"], true, "a new mpv: {again}");
     assert_eq!(f.state()["player"], "running");
     assert!(f.notice().is_empty(), "the complaint about mpv is gone: {}", f.notice());
     assert_ne!(f.pid(), Some(first));
-    assert!(super::fake::reaped(first), "the player that died was reaped");
 }
 
 #[test]

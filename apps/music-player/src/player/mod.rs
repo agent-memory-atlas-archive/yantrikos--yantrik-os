@@ -147,6 +147,17 @@ impl Player {
         self.started.load(Ordering::SeqCst)
     }
 
+    /// Reaps player `number` if it is the one in hand and has gone away; a newer one is left.
+    pub fn bury(&self, number: u64) {
+        let mut slot = self.engine.lock().unwrap_or_else(|p| p.into_inner());
+        if slot.as_ref().is_some_and(|(n, e)| *n == number && !e.is_alive()) {
+            if let Some((_, e)) = slot.take() {
+                drop(slot);
+                e.stop();
+            }
+        }
+    }
+
     /// The running player's process id, for a test that checks it is gone.
     #[cfg(test)]
     pub fn pid(&self) -> Option<u32> {

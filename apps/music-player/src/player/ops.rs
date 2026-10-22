@@ -278,6 +278,12 @@ pub fn halt(p: &Player, ticket: Ticket, number: u64) {
     }
 }
 
+/// Player `number` went away on its own: it is reaped now, so no zombie waits for the next play.
+pub fn bury(p: &Player, ticket: Ticket, number: u64) {
+    let _turn = ticket.wait();
+    p.bury(number);
+}
+
 /// Stops and reaps the player, in its turn: after every command sent before it.
 pub fn retire(p: &Player, ticket: Ticket) -> u64 {
     let _turn = ticket.wait();
