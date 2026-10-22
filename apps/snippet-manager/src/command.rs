@@ -81,8 +81,10 @@ pub enum Command {
     Ending,
     /// A second launch opened the window again while a close waited.
     Reopened,
-    /// The first command after a start that found typing for a snippet no longer kept.
-    KeepOrphan,
+    /// The recovery bar's choices about the text it offers.
+    ShowOffer,
+    RestoreOffer,
+    DiscardOffer,
 }
 
 /// Who asked for an import: the Mind or `yos` by name, or a file on the command line.

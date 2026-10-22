@@ -1,5 +1,6 @@
 //! What Snippets is: the model every command changes and every render reads.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -22,9 +23,34 @@ pub const PART_COPY: &str = "copy";
 /// The window brought forward. A part of its own so only the commands that ask for it raise the
 /// window.
 pub const PART_RAISE: &str = "raise";
+/// The recovery bar: unsaved text kept and offered back.
+pub const PART_RECOVERY: &str = "recovery";
 
-/// The draft the editor's unsaved typing is kept under (`fx.save_draft`).
-pub const DRAFT: &str = "editor";
+/// What a snippet's unsaved text is kept under in the framework's draft lane: one draft per
+/// snippet, so the text of one is never written over by typing in another.
+pub fn draft_name(id: i32) -> String {
+    format!("{DRAFT_PREFIX}{id}")
+}
+
+pub const DRAFT_PREFIX: &str = "snippet-";
+
+/// Why a text is offered back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Why {
+    /// A run of Snippets ended before it was kept.
+    Closed,
+    /// Its save was refused, and the editor has since moved on.
+    NotSaved,
+}
+
+/// Unsaved text kept in the draft lane and offered back on the recovery bar, until the person
+/// chooses: Restore (Restore as new, for a snippet no longer kept) or Discard. Nothing is put back
+/// until then. The text is `Model::drafts[id]`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Offer {
+    pub id: i32,
+    pub why: Why,
+}
 
 /// What the editor holds: the snippet it shows, and its four fields as the person has them. It
 /// is the truth about the typing; the library is the truth about what is kept, and the two differ
@@ -110,11 +136,10 @@ pub struct Model {
     pub answer: Value,
     pub rail: Rail,
     pub clipboard: Arc<dyn Clipboard>,
-    /// The editor text last handed to the draft lane, while there is one there.
-    pub drafted: Option<Editor>,
-    /// Unsaved typing from the last run whose snippet is no longer kept: kept as a new snippet
-    /// by the first command after the start.
-    pub orphan: Option<Editor>,
+    /// What the draft lane holds, by snippet: the text last handed to it, until it is removed.
+    pub drafts: BTreeMap<i32, Editor>,
+    /// The drafts offered back, the bar's first.
+    pub offers: Vec<Offer>,
 }
 
 impl Model {
@@ -133,12 +158,18 @@ impl Model {
         self.editor.id >= 0 && self.library.differs(self.editor.id, &self.editor.patch())
     }
 
-    /// Open `id` in the editor, from what is kept; -1, or an id not kept, opens nothing.
+    /// The text offered back for `id`, if one is.
+    pub fn offered(&self, id: i32) -> Option<&Editor> {
+        self.offers.iter().any(|o| o.id == id).then(|| self.drafts.get(&id)).flatten()
+    }
+
+    /// Open `id` in the editor, from what is kept, or from the text offered back for it so the
+    /// person sees what Restore keeps; -1, or an id not kept, opens nothing.
     pub fn select(&mut self, id: i32) {
         match self.library.get(id) {
             Some(snippet) => {
                 self.selected = id;
-                self.editor = Editor::of(snippet);
+                self.editor = self.offered(id).cloned().unwrap_or_else(|| Editor::of(snippet));
             }
             None => {
                 self.selected = -1;

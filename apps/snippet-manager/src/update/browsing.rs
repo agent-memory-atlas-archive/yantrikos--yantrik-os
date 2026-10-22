@@ -74,7 +74,7 @@ pub(super) fn named(m: &Model, needle: &str) -> Result<i32, Refused> {
 /// cannot be: the typing is still on screen where it can be retried or copied out, which is the
 /// one thing the old app took away. `asked`: the Mind's `open`, which brings the window forward
 /// and is answered with the snippet.
-fn move_to(m: &mut Model, fx: &mut Fx, id: i32, asked: bool) {
+pub(super) fn move_to(m: &mut Model, fx: &mut Fx, id: i32, asked: bool) {
     let restore = m.restore_point();
     let wrote = match changes::commit(m) {
         Ok(wrote) => wrote,

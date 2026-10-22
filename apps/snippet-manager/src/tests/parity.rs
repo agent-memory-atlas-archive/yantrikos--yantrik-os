@@ -181,20 +181,28 @@ fn sorted(list: &[&str]) -> Vec<String> {
     keys
 }
 
+/// The keys as before, and the one added on purpose: `recovery`, what the recovery bar offers
+/// back (titles only), as Notes' `describe.recovery`.
+fn described() -> Vec<String> {
+    let mut keys = KEYS.to_vec();
+    keys.push("recovery");
+    sorted(&keys)
+}
+
 #[test]
 fn an_empty_store_is_described_as_it_was() {
     let f = open();
     let d = f.describe();
     assert_eq!(d["summary"], json!("Snippets \u{2014} nothing kept yet"));
     let s = &d["state"];
-    assert_eq!(keys(s), sorted(KEYS));
+    assert_eq!(keys(s), described());
     assert_eq!(
         *s,
         json!({
             "total": 0, "matching": 0, "shown": 0, "snippets": [], "favorites": 0,
             "query": "", "tag": "", "collection": "All Snippets", "collections": [],
             "open": null, "open_id": null, "open_language": null, "open_favorite": null, "open_lines": null,
-            "store": f.path().display().to_string(), "copied_recently": false, "notice": "",
+            "store": f.path().display().to_string(), "copied_recently": false, "notice": "", "recovery": [],
         })
     );
 }
@@ -208,7 +216,7 @@ fn a_store_with_a_snippet_open_is_described_as_it_was() {
     let d = f.describe();
     assert_eq!(d["summary"], json!("Snippets \u{2014} \u{201c}Tail the journal\u{201d}, 2 kept"));
     let s = &d["state"];
-    assert_eq!(keys(s), sorted(KEYS));
+    assert_eq!(keys(s), described());
     for row in s["snippets"].as_array().unwrap() {
         assert_eq!(keys(row), sorted(ROW_KEYS));
     }

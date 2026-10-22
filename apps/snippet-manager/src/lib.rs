@@ -95,21 +95,15 @@ impl App for SnippetManager {
             answer: serde_json::Value::Null,
             rail: Rail::new(boot.mind.clone()),
             clipboard: clipboard::for_app(&boot.paths),
-            drafted: None,
-            orphan: None,
+            drafts: Default::default(),
+            offers: Vec::new(),
         };
-        recover(&mut m, boot.drafts.json::<Editor>(model::DRAFT));
+        recover(&mut m, &boot.drafts);
         Ok(m)
     }
 
     fn wire(cx: &Cx<Self>) {
         view::wire(cx);
-    }
-
-    fn start(m: &Model, fx: &mut Effects<Self>) {
-        if m.orphan.is_some() {
-            fx.then(Command::KeepOrphan);
-        }
     }
 
     fn update(m: &mut Model, command: Command, fx: &mut Effects<Self>) -> Result<(), Refused> {
@@ -149,22 +143,21 @@ impl App for SnippetManager {
     }
 }
 
-/// Typing the last run did not keep, offered back: the snippet it was typed into opened with it in
-/// the editor, unsaved, until it is saved or the editor moves on. Typing for a snippet that is no
-/// longer kept is kept as a new one by the first command (`Command::KeepOrphan`).
-fn recover(m: &mut Model, draft: Option<Editor>) {
-    let Some(draft) = draft else { return };
-    m.drafted = Some(draft.clone());
-    match m.library.get(draft.id) {
-        None => m.orphan = Some(draft),
-        Some(_) if !m.library.differs(draft.id, &draft.patch()) => {}
-        Some(snippet) => {
-            m.notice = format!(
-                "Snippets closed before your changes to \u{201c}{}\u{201d} were kept. They are back in the editor; Save keeps them.",
-                snippet.title
-            );
-            m.selected = draft.id;
-            m.editor = draft;
+/// Text the last run did not keep, offered back on the recovery bar: each draft whose text the
+/// store does not hold. The first one's snippet is opened with the text in the editor, so the
+/// person sees what Restore keeps; nothing is put back until they choose. A draft whose text the
+/// store already holds is let go by the first command (`update::drafts::keep`).
+fn recover(m: &mut Model, drafts: &yantrik_app::Drafts) {
+    for name in drafts.names() {
+        let Some(id) = name.strip_prefix(model::DRAFT_PREFIX).and_then(|n| n.parse::<i32>().ok()) else { continue };
+        let Some(text) = drafts.json::<Editor>(name).filter(|t| t.id == id) else { continue };
+        let kept = m.library.get(id).is_some() && !m.library.differs(id, &text.patch());
+        m.drafts.insert(id, text);
+        if !kept {
+            m.offers.push(model::Offer { id, why: model::Why::Closed });
         }
+    }
+    if let Some(first) = m.offers.first().map(|o| o.id) {
+        m.select(first);
     }
 }

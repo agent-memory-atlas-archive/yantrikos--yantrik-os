@@ -69,4 +69,15 @@ pub fn view(m: &Model) -> View {
         .with("store", m.lane.path().display().to_string())
         .with("copied_recently", m.copied)
         .with("notice", m.notice.clone())
+        .with("recovery", recovery(m))
+}
+
+/// The texts offered back on the recovery bar, the bar's first: which snippet, by title, and
+/// whether it is still kept. Never the text.
+fn recovery(m: &Model) -> Vec<Value> {
+    m.offers
+        .iter()
+        .filter_map(|o| m.drafts.get(&o.id).map(|text| (o, text)))
+        .map(|(o, text)| json!({ "id": o.id, "title": text.title, "gone": m.library.get(o.id).is_none() }))
+        .collect()
 }

@@ -7,7 +7,8 @@ use yantrik_app::cx::Cx;
 use yantrik_app::rail::{self, RailView as _};
 
 use crate::command::Command;
-use crate::model::{Editor, Model, PART_COPY, PART_DETAIL, PART_LIST, PART_NOTICE, PART_RAISE};
+use crate::model::{Editor, Model, PART_COPY, PART_DETAIL, PART_LIST, PART_NOTICE, PART_RAISE, PART_RECOVERY};
+use crate::update::drafts;
 use crate::store::{text, ALL, FAVORITES};
 use crate::{CollectionData, LanguageOption, SnippetData, SnippetManager, SnippetManagerApp, TagChip};
 
@@ -37,6 +38,7 @@ pub fn wire(cx: &Cx<SnippetManager>) {
     ui.on_snip_export_all(cx.cmd(|| Command::ExportAll));
     ui.on_ai_explain_pressed(cx.cmd(|| Command::AiExplain));
     ui.on_agent_context_activated(cx.cmd1(|id: SharedString| Command::ContextActivated(id.to_string())));
+    ui.on_recovery_action(cx.try_cmd1(|action: SharedString| drafts::choice(&action)));
     // Save sends the four fields as the editor has them.
     let saving = cx.clone();
     ui.on_snip_save(move |id, title, language, code, tags| {
@@ -76,6 +78,12 @@ pub fn render(ui: &SnippetManagerApp, m: &Model, changed: &Changed) {
     }
     if changed.has(PART_DETAIL) {
         detail(ui, m);
+    }
+    // Whether the offer's snippet is open is the editor's to say, so the bar follows it too.
+    if changed.has(PART_RECOVERY) || changed.has(PART_DETAIL) {
+        let (said, state) = drafts::bar(m).unwrap_or_default();
+        ui.set_recovery_said(said.into());
+        ui.set_recovery(state);
     }
     if changed.has(PART_NOTICE) {
         ui.set_notice(m.notice.as_str().into());

@@ -91,7 +91,7 @@ fn a_snippets_code_reaches_no_log_answer_notice_or_describe() {
     // The close keeps the typing in the draft lane: a file of the person's own.
     f.app.close_requested(WindowId::PRIMARY);
     let _ = f.app.shutdown();
-    let draft = yantrik_app::drafts::path_in(f.paths.state_dir(), crate::model::DRAFT);
+    let draft = yantrik_app::drafts::path_in(f.paths.state_dir(), &crate::model::draft_name(id));
     assert!(std::fs::read_to_string(&draft).unwrap().contains(SENTINEL), "the typing is kept");
     #[cfg(unix)]
     {

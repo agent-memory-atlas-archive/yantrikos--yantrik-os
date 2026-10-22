@@ -60,7 +60,8 @@ fn typing_the_file_refused_stays_in_the_editor() {
     assert_eq!(f.app.model(|m| m.selected), journal, "back on the snippet whose typing was not kept");
     assert_eq!(f.app.ui(|ui| ui.get_detail_title().to_string()), "Not yet kept");
     assert_eq!(f.on_disk().get(journal).unwrap().title, "Tail the journal");
-    assert!(f.app.model(|m| m.editor_dirty() && m.drafted.is_some()));
+    assert!(f.app.model(move |m| m.editor_dirty() && m.drafts.contains_key(&journal)));
+    assert!(f.notice().starts_with("Not saved: ") && f.notice().ends_with("Your text is still in the editor, and kept as a draft until it is saved."), "{}", f.notice());
     f.disk.refuse(false);
     f.app.ui(move |ui| ui.invoke_snip_select(borrow));
     f.quiet();

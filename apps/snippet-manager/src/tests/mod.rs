@@ -8,7 +8,8 @@
 //! - `editing.rs`: the window's buttons and the editor's typing.
 //! - `writes.rs`: the write lane: a refused write, writes landing out of order, answers per call.
 //! - `copying.rs` and `files.rs`: the clipboard, import, export and a file on the command line.
-//! - `ending.rs`: the window closed, a logout, the draft, and the next start.
+//! - `ending.rs`: the window closed, a logout, the display going. `recovery.rs`: unsaved text kept
+//!   in the draft lane and offered back on the recovery bar, after a refused save or a restart.
 //! - `secrets.rs`: a snippet's code is never in a log, an answer, `describe` or a debug print.
 //! - `rail.rs`: the agent rail and the AI button. `private_mode.rs`: `describe` in Private mode.
 
@@ -31,6 +32,7 @@ mod files;
 mod parity;
 mod private_mode;
 mod rail;
+mod recovery;
 mod secrets;
 mod writes;
 

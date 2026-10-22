@@ -12,7 +12,7 @@ use std::time::Duration;
 use yantrik_app::app::WindowId;
 
 use super::Fx;
-use crate::model::{Model, DRAFT, NOTHING};
+use crate::model::{Model, NOTHING};
 
 /// How long a closed window's work may take before the framework ends the app anyway
 /// (`fx.linger`'s backstop, which logs that it did). Each write is a local file, so this is
@@ -23,7 +23,7 @@ pub const CLOSE_BACKSTOP: Duration = Duration::from_secs(10);
 /// lane now, the window closes at once, as the person asked, and the process runs on without it
 /// until the work lands. A second launch meanwhile opens it again (`Event::Presented`).
 pub(super) fn closing(m: &mut Model, window: WindowId, fx: &mut Fx) {
-    keep_draft_now(m, fx);
+    super::drafts::keep(m, fx, true);
     fx.close(window);
     if m.work > 0 {
         m.closing = true;
@@ -36,7 +36,7 @@ pub(super) fn closing(m: &mut Model, window: WindowId, fx: &mut Fx) {
 /// once the work in flight has landed; after a signal the framework still ends it at its own
 /// deadline, whatever is in flight.
 pub(super) fn ending(m: &mut Model, fx: &mut Fx) {
-    keep_draft_now(m, fx);
+    super::drafts::keep(m, fx, true);
     m.ending = true;
 }
 
@@ -46,40 +46,4 @@ pub(super) fn ending(m: &mut Model, fx: &mut Fx) {
 pub(super) fn reopened(m: &mut Model, fx: &mut Fx) {
     fx.changed(NOTHING);
     m.closing = false;
-}
-
-/// The editor's typing, in the draft lane while it is unsaved; the draft removed once the typing
-/// is kept and every write has landed.
-pub(super) fn keep_draft(m: &mut Model, fx: &mut Fx) {
-    keep(m, fx, m.closing || m.ending, false);
-}
-
-/// The typing written now, whatever was handed over before: the end is a meaningful moment, and
-/// a debounced save still waiting is replaced by this one.
-fn keep_draft_now(m: &mut Model, fx: &mut Fx) {
-    keep(m, fx, true, true);
-}
-
-fn keep(m: &mut Model, fx: &mut Fx, now: bool, force: bool) {
-    if m.orphan.is_some() {
-        // The last run's typing is on disk as the draft until it is kept as a snippet.
-        return;
-    }
-    if m.editor_dirty() {
-        if m.drafted.as_ref() == Some(&m.editor) && !force {
-            return;
-        }
-        let Ok(bytes) = serde_json::to_vec(&m.editor) else { return };
-        if now {
-            fx.checkpoint_draft(DRAFT, bytes);
-        } else {
-            fx.save_draft(DRAFT, bytes);
-        }
-        m.drafted = Some(m.editor.clone());
-    } else if m.drafted.is_some() && m.lane.idle() {
-        // Kept by the store, and the store's file has it: a write still in flight could yet fail
-        // and give the typing back to the editor, so the draft waits for it.
-        fx.discard_draft(DRAFT);
-        m.drafted = None;
-    }
 }

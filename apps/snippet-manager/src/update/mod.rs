@@ -16,6 +16,7 @@ use crate::SnippetManager;
 mod browsing;
 mod changes;
 mod copying;
+pub(crate) mod drafts;
 mod ending;
 mod files;
 mod written;
@@ -45,7 +46,7 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refuse
         m.work = m.work.saturating_sub(1);
     }
     dispatch(m, command, fx)?;
-    ending::keep_draft(m, fx);
+    drafts::keep(m, fx, false);
     // The end waits for the work already started, so none of it is lost to a close or a logout:
     // it is each job's own result that says what happened, and the app ends after the last.
     if (m.ending || m.closing) && m.work == 0 {
@@ -76,8 +77,7 @@ fn dispatch(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refused>
         | Command::Add { .. }
         | Command::Change { .. }
         | Command::DeleteNamed(_)
-        | Command::FavoriteNamed(_)
-        | Command::KeepOrphan => changes::update(m, command, fx),
+        | Command::FavoriteNamed(_) => changes::update(m, command, fx),
         Command::Copy(_) | Command::CopyNamed(_) | Command::Copied(_) | Command::CopyFeedbackOver => {
             copying::update(m, command, fx)
         }
@@ -124,6 +124,10 @@ fn dispatch(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refused>
             ending::reopened(m, fx);
             Ok(())
         }
+        Command::ShowOffer | Command::RestoreOffer | Command::DiscardOffer => {
+            drafts::choose(m, command, fx);
+            Ok(())
+        }
     }
 }
 
@@ -145,7 +149,7 @@ fn starts_work(m: &Model, command: &Command) -> bool {
         | Command::DeleteNamed(_)
         | Command::FavoriteNamed(_)
         | Command::Import { .. }
-        | Command::KeepOrphan => true,
+        | Command::RestoreOffer => true,
         Command::SetLanguage(_) => m.editor.id >= 0,
         // Moving to another snippet keeps the typing first, which is a write.
         Command::Select(_) | Command::Open(_) | Command::ContextActivated(_) => m.editor_dirty(),

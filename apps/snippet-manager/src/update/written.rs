@@ -5,7 +5,7 @@ use super::{fail, say, worked, Fx};
 use crate::answers;
 use crate::command::{After, Command, Work, Write, Written};
 use crate::lane::Landed;
-use crate::model::{Model, Restore, PART_DETAIL, PART_LIST};
+use crate::model::{Editor, Model, Restore, PART_DETAIL, PART_LIST};
 use crate::store::{file, Library, ALL, FAVORITES};
 
 /// The library as it now is in memory, written in a job. `after` is what the change does once
@@ -49,8 +49,12 @@ pub(super) fn update(m: &mut Model, command: Command, fx: &mut Fx) {
                         }
                     }
                     not_kept(m, write.after, &why, fx);
+                    keep_typing(m, &write.restore.editor, &why, fx);
                 }
-                Landed::Undone(why) => not_kept(m, write.after, &why, fx),
+                Landed::Undone(why) => {
+                    not_kept(m, write.after, &why, fx);
+                    keep_typing(m, &write.restore.editor, &why, fx);
+                }
             }
         }
         Command::Reloaded(result) => {
@@ -106,6 +110,21 @@ fn not_kept(m: &mut Model, after: After, why: &str, fx: &mut Fx) {
         }
         After::Answer(_) | After::Say(_) => fail(m, fx, why),
     }
+}
+
+/// The typing a refused change was keeping, if the store does not hold it: in its draft at once,
+/// and said plainly, so the person knows the save failed and where the text is.
+fn keep_typing(m: &mut Model, typing: &Editor, why: &str, fx: &mut Fx) {
+    if typing.id < 0 || !m.library.differs(typing.id, &typing.patch()) {
+        return;
+    }
+    super::drafts::hold(m, fx, typing);
+    let kept_where = if m.editor == *typing {
+        "Your text is still in the editor, and kept as a draft until it is saved."
+    } else {
+        "Your text is kept as a draft; the bar offers it back."
+    };
+    say(m, fx, &format!("Not saved: {why}. {kept_where}"));
 }
 
 /// The file's library on screen again: memory is the disk.

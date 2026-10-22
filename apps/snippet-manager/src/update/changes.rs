@@ -15,7 +15,9 @@ use crate::store::{Patch, ALL, FAVORITES};
 /// The editor's typing, kept: the store takes it before anything moves the editor or repaints it
 /// from the store. Says whether there was any, so the caller writes it.
 pub(super) fn commit(m: &mut Model) -> Result<bool, String> {
-    if !m.editor_dirty() {
+    // Text offered back is kept only by the person's Restore (or Save): nothing is put back by a
+    // move of the editor. It stays in its draft.
+    if !m.editor_dirty() || m.offered(m.editor.id).is_some() {
         return Ok(false);
     }
     let saved = m.library.save(m.editor.id, m.editor.patch())?;
@@ -32,6 +34,8 @@ pub(super) fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(),
             let id = editor.id;
             match m.library.save(id, editor.patch()) {
                 Ok(_) => {
+                    m.offers.retain(|o| o.id != id);
+                    fx.changed(crate::model::PART_RECOVERY);
                     follow(m, id);
                     written::write(m, fx, After::Answer(Value::Null), restore);
                 }
@@ -109,7 +113,6 @@ pub(super) fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(),
             // collection, and repainting it here would throw away uncommitted typing.
             fx.changed(PART_LIST);
         }
-        Command::KeepOrphan => keep_orphan(m, fx),
         _ => {}
     }
     Ok(())
@@ -168,6 +171,9 @@ fn delete(m: &mut Model, fx: &mut Fx, id: i32, asked: bool) {
         Ok(removed) => {
             if m.selected == id {
                 m.select(-1);
+            }
+            if !asked {
+                super::drafts::forget(m, fx, id);
             }
             let answer = if asked { answers::deleted(m, &removed) } else { Value::Null };
             written::write(m, fx, After::Answer(answer), restore);
@@ -289,25 +295,3 @@ fn collection_named(m: &Model, wanted: &str) -> Result<i32, String> {
         })
 }
 
-/// Typing from the last run, for a snippet that is no longer kept, kept as a new snippet rather
-/// than dropped: it is the person's, and there is nothing else it could be saved into.
-fn keep_orphan(m: &mut Model, fx: &mut Fx) {
-    let Some(orphan) = m.orphan.take() else { return };
-    let restore = m.restore_point();
-    match m.library.create(&orphan.title, &orphan.language, &orphan.code, &orphan.tags, ALL) {
-        Ok(id) => {
-            m.select(id);
-            let title = m.editor.title.clone();
-            let said = format!(
-                "Snippets closed with unsaved changes to a snippet that is no longer kept. They are kept as a new snippet, \u{201c}{title}\u{201d}."
-            );
-            written::write(m, fx, After::Say(said), restore);
-        }
-        Err(why) => {
-            // Not kept, so the draft stays where it is for the next start.
-            m.orphan = Some(orphan);
-            say(m, fx, &format!("Unsaved changes from before Snippets closed could not be kept: {why}"));
-        }
-    }
-    redraw(fx);
-}
