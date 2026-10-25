@@ -15,7 +15,10 @@ pub(super) fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(),
     match command {
         Command::Search(query) => {
             m.query = query;
-            m.query_by = Matched::Everything;
+            // The window's box in Mind View is read back as text: it matches what snippets are
+            // called, as an agent's search does, or its count would tell the code a character
+            // at a time.
+            m.query_by = if m.for_mind { Matched::Labels } else { Matched::Everything };
             fx.changed(PART_LIST);
         }
         Command::TagFilter(tag) => {
@@ -55,7 +58,7 @@ pub(super) fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(),
             // An agent's search is matched against what snippets are called, never their code,
             // and so is the list it leaves on screen and in `describe`: neither answers a count
             // an agent could read a secret out of.
-            m.query_by = if agent(fx) { Matched::Labels } else { Matched::Everything };
+            m.query_by = if agent(fx) || m.for_mind { Matched::Labels } else { Matched::Everything };
             fx.changed(PART_LIST);
             let answer = answers::searched(m, &query);
             answers::settle(m, fx, answer);

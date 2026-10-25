@@ -5,10 +5,14 @@
 //! previews and rows, and keeps titles, tags and language. Nothing there can change or copy the
 //! code: the commands that would are refused ([`refuses`]).
 
+use yantrik_app::rail::RailCommand;
+
 use crate::command::Command;
 
-/// What the window shows in place of any code while a Mind is looking.
-pub const HIDDEN: &str = "Code is hidden while a Mind is looking.";
+/// What the window shows in place of any code where a Mind may be looking. It says only that the
+/// code is hidden: the window is masked from its display as well as from the marker, and a window
+/// masked from the display alone must not claim to know a Mind is there.
+pub const HIDDEN: &str = "Code is hidden in this window.";
 
 /// The code the window shows: the code itself for the person, [`HIDDEN`] for a Mind.
 pub fn shown(for_mind: bool, code: &str) -> String {
@@ -26,7 +30,11 @@ pub fn refuses(command: &Command) -> Option<&'static str> {
         Command::Copy(_) | Command::CopyNamed(_) => {
             Some("The code cannot be copied while a Mind is looking.")
         }
-        Command::AiExplain => Some("The code cannot be explained while a Mind is looking."),
+        // The rail's chip sends the code to the Mind in its prompt; the rail offers nothing
+        // here, and this is the second lock on the same door.
+        Command::AiExplain | Command::Rail(RailCommand::Activate(_)) => {
+            Some("The code cannot be explained while a Mind is looking.")
+        }
         _ => None,
     }
 }

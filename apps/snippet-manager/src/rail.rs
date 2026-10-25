@@ -36,7 +36,9 @@ impl Source for Model {
     }
 
     fn suggestions(&self, reach: Reach) -> Vec<Suggestion> {
-        if reach != Reach::Ready || self.open().is_none() {
+        // Nothing is offered where a Mind is looking: the question carries the code to the Mind,
+        // and the answer is drawn on the window `read_mind_view` reads.
+        if self.for_mind || reach != Reach::Ready || self.open().is_none() {
             return Vec::new();
         }
         vec![Suggestion {
@@ -50,7 +52,7 @@ impl Source for Model {
 
     /// The snippet as it is kept: the question is about the code, and only the code.
     fn prompt(&self, suggestion: &str) -> Option<Prompt> {
-        if suggestion != EXPLAIN {
+        if self.for_mind || suggestion != EXPLAIN {
             return None;
         }
         let snippet = self.open()?;

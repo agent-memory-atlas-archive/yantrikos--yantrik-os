@@ -715,8 +715,10 @@ every window a mind opens is drawn in Mind View and never on the person's deskto
   `MindDisplay::mind_view`) or when the window's `WAYLAND_DISPLAY` is not the person's
   (`present::elsewhere`, the comparison `present` already makes), so a launch that lost the marker is
   still masked. The marker only turns masking on. `TestApp::start_for_mind` starts a test that way.
-  Snippets shows "Code is hidden while a Mind is looking." for its code and refuses editing,
-  Copy and AI Explain.
+  The display rule assumes the person's session is on `wayland-0` (`PERSON_DISPLAY`); on any other
+  display every window is masked, which fails closed. Snippets shows "Code is hidden in this
+  window." for its code, searches only titles, tags and language, offers no rail question, and
+  refuses editing, Copy, AI Explain and the rail's "What does this do?".
 - Not changed by design: `open_app files|settings|launchpad` switches the person's own screen;
   `focus_window`/`close_window` act on the person's windows; a mind typing into the Terminal app
   drives whichever Terminal window is open, including the person's if that is the one open.

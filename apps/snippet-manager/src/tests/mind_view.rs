@@ -89,9 +89,9 @@ fn copy_in_a_mind_view_window_puts_nothing_on_the_clipboard() {
     f.app.ui(move |ui| ui.invoke_snip_copy(id));
     f.quiet();
     assert!(f.clipboard.texts().is_empty(), "{:?}", f.clipboard.texts());
-    let by_name = f.app.act("copy", json!({ "id": id.to_string() }));
+    let by_name = f.act("copy", json!({ "id": id.to_string() }));
     f.quiet();
-    assert!(by_name.is_err() || by_name.unwrap().settle().is_err());
+    assert_eq!(by_name.unwrap_err(), "The code cannot be copied while a Mind is looking.");
     assert!(f.clipboard.texts().is_empty());
     assert_eq!(f.on_disk().get(id).unwrap().use_count, 0, "and nothing was counted");
 }
@@ -104,4 +104,61 @@ fn explain_in_a_mind_view_window_does_not_send_the_code_anywhere() {
     f.app.ui(|ui| ui.invoke_ai_explain_pressed());
     f.quiet();
     assert!(f.mind.prompts().is_empty(), "no prompt was made of the code");
+}
+
+/// A Mind View window with the Mind reachable, so a refusal is the app's and not the reach's.
+fn ready_for_mind(paths: yantrik_app::Paths) -> Fixture {
+    let f = start_for_mind(paths);
+    f.mind.set_reach(yantrik_app::mind::Reach::Ready);
+    f.app.seen(yantrik_app::watch::Seen::Reach(yantrik_app::mind::Reach::Ready));
+    f
+}
+
+#[test]
+fn the_rail_offers_and_sends_nothing_in_a_mind_view_window() {
+    let (paths, id) = kept();
+    let f = ready_for_mind(paths);
+    f.app.run(Command::Select(id));
+    f.app.advance(std::time::Duration::from_millis(300));
+    assert!(f.app.model(|m| m.rail.suggestions().is_empty()), "no chip is offered");
+    f.app.ui(|ui| ui.invoke_agent_suggestion_activated("explain".into()));
+    f.app.ui(|ui| ui.invoke_ai_explain_pressed());
+    f.app.run(Command::Rail(yantrik_app::rail::RailCommand::Activate("explain".into())));
+    f.quiet();
+    assert!(f.mind.prompts().is_empty(), "no prompt was made of the code: {:?}", f.mind.prompts());
+    assert!(f.app.model(|m| m.rail.proposal().is_none()), "and no card is drawn on Mind View");
+}
+
+fn shown_rows(f: &Fixture) -> usize {
+    f.app.ui(|ui| slint::Model::row_count(&ui.get_snippets()))
+}
+
+#[test]
+fn the_search_box_in_a_mind_view_window_matches_labels_not_code() {
+    let (paths, _) = kept();
+    let f = start_for_mind(paths);
+    f.app.run(Command::Search("TOKEN=SENTINEL-mind-view-5c1d".into()));
+    f.quiet();
+    assert_eq!(shown_rows(&f), 0, "the code is not searched");
+    assert_eq!(f.app.model(|m| m.rows().len()), 0);
+    for label in ["deploy key", "shell", "secrets"] {
+        f.app.run(Command::Search(label.into()));
+        f.quiet();
+        assert_eq!(shown_rows(&f), 1, "{label} still finds it");
+    }
+}
+
+#[test]
+fn a_call_the_masked_copy_refuses_answers_with_the_refusal() {
+    let (paths, id) = kept();
+    let f = start_for_mind(paths);
+    let args = || json!({ "id": id.to_string() });
+    let sentence = "The code cannot be copied while a Mind is looking.";
+    // Answered at once, or by the settled call, never by a timeout.
+    let answer = f.app.act("copy", args()).and_then(|p| p.settle());
+    assert_eq!(answer.unwrap_err(), sentence);
+    assert_eq!(f.act("copy", args()).unwrap_err(), sentence);
+    f.app.run(Command::CopyNamed(id.to_string()));
+    f.quiet();
+    assert!(f.clipboard.texts().is_empty());
 }

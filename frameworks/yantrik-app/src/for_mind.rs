@@ -11,6 +11,10 @@
 //!   of two displays ([`present::elsewhere`]): a launch that lost the marker but landed on Mind
 //!   View is still masked.
 //!
+//! The person's display is taken to be [`PERSON_DISPLAY`] (`wayland-0`), as every shipping setup
+//! has it. A session on another display is masked throughout: that is the fail-closed side, so an
+//! app's sentence must not say a Mind is looking when only this rule decided it.
+//!
 //! The marker can only turn masking on. Nothing here reads a variable that turns it off.
 
 use crate::present;
