@@ -834,6 +834,10 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         // One decision, made in `resolve` where the tests can reach it. The shell's own route
         // is asked before the .desktop catalogue — see `resolve` for the Blender that taught us.
         let installed = catalogue.get();
+        if let Err(why) = crate::control_files_mind::may_launch(&app, &installed) {
+            tracing::warn!(app = %app, "{why}");
+            return;
+        }
         let launch = match resolve(&app, &installed) {
             Resolved::Shelved(shelf) => {
                 tracing::warn!(
@@ -973,9 +977,12 @@ pub fn spawn_app_with_args(app_id: &str, bin: &str, args: &[&str]) {
 /// app means at double-click time.
 pub fn launch_entry_with_file(entry: &DesktopEntry, installed: &[DesktopEntry], file: &str) {
     // The one funnel a file reaches an app's Exec line through (open-with, MIME launch, intents):
-    // the person's LibreOffice is closed to a mind until its sandbox exists (#953).
-    if crate::control_files_mind::a_mind_is_calling() && yantrik_shell_core::office::is_libreoffice(entry) {
-        tracing::warn!(app = %entry.app_id, "{}", yantrik_shell_core::office::CLOSED_TO_AGENTS);
+    // a mind opens files only in Yantrik's own apps (#942, #953).
+    if let Err(why) = crate::control_files_mind::may_open_in_default_app(
+        &crate::mime_dispatch::FileAction::DesktopApp(entry.app_id.clone()),
+        installed,
+    ) {
+        tracing::warn!(app = %entry.app_id, "{why}");
         return;
     }
     if entry.exec.is_empty() || entry.exec == "__builtin__" {

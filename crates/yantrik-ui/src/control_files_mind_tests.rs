@@ -335,14 +335,28 @@ fn a_mind_cannot_open_an_office_document_in_libreoffice() {
         let action = classify_with(name, &MimeDefaults::default(), &installed);
         let FileAction::DesktopApp(_) = action else { continue };
         routed += 1;
-        for who in minds() {
-            assert_ne!(who, crate::mind_view::Requester::Person);
-            let err = office_verdict(who != crate::mind_view::Requester::Person, &action, &installed).expect_err(name);
-            assert!(err.contains("#953"), "{name}: {err}");
-        }
-        assert!(office_verdict(false, &action, &installed).is_ok(), "{name}: the person is not stopped");
+        let err = agent_verdict(&action, &installed).expect_err(name);
+        assert!(err.contains("#953"), "{name}: {err}");
     }
     assert!(routed >= 8, "the office types must reach the LibreOffice entry, got {routed}");
+}
+
+#[test]
+fn a_mind_cannot_open_a_local_page_in_the_browser() {
+    use crate::mime_dispatch::{classify_with, FileAction, MimeDefaults};
+    // A browser shows other local files on screen, and the mind can read the screen back.
+    for who in minds() {
+        assert_ne!(who, crate::mind_view::Requester::Person, "every caller here is not the person");
+    }
+    for name in ["a.html", "a.htm", "a.svg", "a.xhtml", "a.pdf"] {
+        let action = classify_with(name, &MimeDefaults::default(), &[]);
+        if action != FileAction::Browser {
+            continue;
+        }
+        let err = agent_verdict(&action, &[]).expect_err(name);
+        assert!(err.contains("Yantrik's own apps"), "{name}: {err}");
+    }
+    assert!(agent_verdict(&classify_with("a.html", &MimeDefaults::default(), &[]), &[]).is_err());
 }
 
 #[test]
@@ -351,8 +365,8 @@ fn a_default_naming_libreoffice_is_refused_by_the_handler_not_the_extension() {
     let installed = vec![libreoffice_entry()];
     let defaults = MimeDefaults::parse("[Default Applications]\ntext/plain=yantrik-libreoffice.desktop\n");
     let action = classify_with("notes.txt", &defaults, &installed);
-    assert!(office_verdict(true, &action, &installed).is_err(), "{action:?}");
+    assert!(agent_verdict(&action, &installed).is_err(), "{action:?}");
     // A handler that is not installed cannot be told from LibreOffice, so it is refused too.
     let gone = crate::mime_dispatch::FileAction::DesktopApp("soffice.desktop".into());
-    assert!(office_verdict(true, &gone, &[]).is_err());
+    assert!(agent_verdict(&gone, &[]).is_err());
 }

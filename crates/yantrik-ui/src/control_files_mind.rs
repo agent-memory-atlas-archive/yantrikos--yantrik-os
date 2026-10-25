@@ -53,29 +53,42 @@ pub fn may_open_entry(label: &str, name: &str) -> Result<(), String> {
     entry_verdict(label, name, &home())
 }
 
-/// Refuse a mind opening `name` in the app the one rule picked (`action`), when that app is the
-/// person's LibreOffice: it evaluates what it opens as the person, and its sandbox is not built
-/// yet (#942, #953). Decided by the handler the file resolves to, and refused when the handler
-/// cannot be found.
+/// Refuse a mind opening a file in the app the one rule picked (`action`) unless it is one of
+/// Yantrik's own apps (#942, #953). Decided by the handler the file resolves to, and refused when
+/// the handler cannot be found.
 pub fn may_open_in_default_app(
     action: &crate::mime_dispatch::FileAction,
     installed: &[crate::apps::DesktopEntry],
 ) -> Result<(), String> {
-    office_verdict(a_mind_is_calling(), action, installed)
+    if !a_mind_is_calling() {
+        return Ok(());
+    }
+    agent_verdict(action, installed)
 }
 
-/// [`may_open_in_default_app`] with the caller given.
-pub fn office_verdict(
-    mind: bool,
+/// [`may_open_in_default_app`] for a caller who is not the person.
+pub fn agent_verdict(
     action: &crate::mime_dispatch::FileAction,
     installed: &[crate::apps::DesktopEntry],
 ) -> Result<(), String> {
-    match action {
-        crate::mime_dispatch::FileAction::DesktopApp(id) if mind => {
-            yantrik_shell_core::office::may_open_in(id, installed)
-        }
-        _ => Ok(()),
+    use crate::mime_dispatch::FileAction;
+    use yantrik_shell_core::agent_open::{may_open_file, Handler};
+    let handler = match action {
+        FileAction::ImageViewer => Handler::ImageViewer,
+        FileAction::TextEditor => Handler::TextEditor,
+        FileAction::MediaPlayer => Handler::MediaPlayer,
+        FileAction::Browser => Handler::Browser,
+        FileAction::DesktopApp(id) => Handler::Desktop(id),
+    };
+    may_open_file(handler, installed)
+}
+
+/// Refuse a mind launching the app `name` unless it is one of Yantrik's own.
+pub fn may_launch(name: &str, installed: &[crate::apps::DesktopEntry]) -> Result<(), String> {
+    if !a_mind_is_calling() {
+        return Ok(());
     }
+    yantrik_shell_core::agent_open::may_launch(name, installed)
 }
 
 /// Refuse a mind making `name` in the folder Files is showing - a new folder, a new file, or a

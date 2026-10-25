@@ -49,19 +49,6 @@ pub fn is_office_document(name: &str, mime: Option<&str>) -> bool {
         || mime == "text/csv"
 }
 
-/// The verdict for an agent or the Mind opening a file in the entry named `id` (with or without
-/// `.desktop`), looked up in `installed`. An entry that cannot be found is refused: the handler is
-/// unknown, so it may be LibreOffice.
-pub fn may_open_in(id: &str, installed: &[DesktopEntry]) -> Result<(), String> {
-    let stem = id.trim().strip_suffix(".desktop").unwrap_or(id.trim());
-    match installed.iter().find(|e| e.app_id.eq_ignore_ascii_case(stem)) {
-        Some(entry) if is_libreoffice(entry) => Err(CLOSED_TO_AGENTS.to_string()),
-        Some(_) => Ok(()),
-        None if NAMES.iter().any(|n| stem.to_lowercase().contains(n)) => Err(CLOSED_TO_AGENTS.to_string()),
-        None => Err(format!("`{id}` is not installed, so what it would run cannot be told. {CLOSED_TO_AGENTS}")),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,14 +76,5 @@ mod tests {
         assert!(is_office_document("noext", Some("application/vnd.oasis.opendocument.text")));
         assert!(is_office_document("noext", Some("application/vnd.openxmlformats-officedocument.wordprocessingml.document")));
         assert!(!is_office_document("a.txt", Some("text/plain")));
-    }
-
-    #[test]
-    fn a_handler_that_is_libreoffice_or_unknown_is_refused() {
-        let installed = vec![entry("yantrik-libreoffice", "yantrik-libreoffice %U"), entry("editor", "edit %f")];
-        assert_eq!(may_open_in("yantrik-libreoffice.desktop", &installed), Err(CLOSED_TO_AGENTS.to_string()));
-        assert!(may_open_in("editor.desktop", &installed).is_ok());
-        assert!(may_open_in("gone.desktop", &installed).is_err(), "fails closed");
-        assert!(may_open_in("libreoffice-writer.desktop", &[]).unwrap_err().contains("#953"));
     }
 }

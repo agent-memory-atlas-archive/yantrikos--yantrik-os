@@ -15,6 +15,12 @@ use crate::App;
 /// missing media player on the Files screen — a caller without one still gets the launch, and
 /// the refusal goes to the log instead.
 pub fn launch(action: &FileAction, name: &str, full: &Path, ui: Option<&App>) {
+    // The one gate every file launch passes (files_open, Open with, the MIME default): a mind
+    // opens files only in Yantrik's own apps (#942).
+    if let Err(why) = crate::control_files_mind::may_open_in_default_app(action, &crate::apps::Catalogue::shared().get()) {
+        tracing::warn!(path = %full.display(), "{why}");
+        return;
+    }
     match action {
         // The same app the launcher opens, given the file that was double-clicked. It used
         // to load the picture into the shell's own screen instead, which is why the

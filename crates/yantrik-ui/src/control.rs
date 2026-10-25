@@ -1177,6 +1177,8 @@ pub fn publish(
                 // app whose program is not installed used to be answered "launching" as well.
                 let catalogue = installed.get();
                 check_launchable(&name, &catalogue)?;
+                // A mind launches Yantrik's own apps only; LibreOffice by name is closed (#942, #953).
+                crate::control_files_mind::may_launch(&name, &catalogue)?;
                 // The launcher is drawn by the shell itself and settles on return, so it is
                 // answered with what is observed — open, on which screen, raised or not —
                 // rather than with "launching" and an empty screen. See `open_launcher`.
