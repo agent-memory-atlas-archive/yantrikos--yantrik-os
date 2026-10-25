@@ -514,23 +514,41 @@ def _vouched(peer, surface):
     return peer is not None and privacy.reads_while_private(getattr(peer, "pid", None), surface)
 
 
-class _HeldFaults:
-    """A handler's unhandled fault, held like its refusal (#926 review, M1): when the reply is
-    withheld, or Private mode is on once the fault arrives and nobody vouches for the caller, the
-    fault is printed to stderr as the wire prints it and the caller gets `WITHHELD_REFUSAL` — never
-    the exception's text, which so often names what the person had open. `RpcError`, `Refusal` and
-    `NotAnswered` are the dispatch's own words and pass through."""
+class _TransportError(wire.RpcError):
+    """An error the SDK's own transport raises for a thread that did not turn up. Private to this
+    module, and raised only by `_turn`: that provenance, never the code an error carries, is what
+    lets its text through Private mode (#935 review, H1). An app cannot be handed one."""
 
-    def __init__(self, peer, surface, withheld):
+
+class _HeldFaults:
+    """A handler's fault, held like its refusal (#926 review, M1): when the reply is withheld, or
+    Private mode is on once the fault arrives and nobody vouches for the caller, the fault is
+    printed to stderr as the wire prints it and the caller gets `WITHHELD_REFUSAL` — never the
+    exception's text, which so often names what the person had open.
+
+    An app's refusal words are held the same way, where the app itself is the one speaking
+    (`own_words`, #935): a `Refusal`, or the `wire.RpcError` one is answered as, is the app talking
+    about the person's data just as an unhandled fault is, so a handler or a view that refused by
+    name leaked what it refused over while its unhandled faults were held. Somewhere else in the
+    same call the runtime refuses on the app's behalf — the reach, an argument that does not fit, a
+    revision gone stale — and those words must reach the caller, which is why holding refusals is
+    asked for per region and not done everywhere. Only a `_TransportError`, which `_turn` raises for a
+    thread that did not turn up, passes through either way: it is judged by where it came from, not
+    by its code, so an app that raises `-32000` or `NotAnswered` itself is held like any other."""
+
+    def __init__(self, peer, surface, withheld, own_words=False):
         self.peer, self.surface, self.withheld = peer, surface, withheld
+        self.own_words = own_words
 
     def __enter__(self):
         return self
 
     def __exit__(self, kind, error, trace):
-        if error is None or isinstance(error, (wire.RpcError, Refusal, NotAnswered)):
+        if error is None or not isinstance(error, Exception):
             return False
-        if not isinstance(error, Exception):
+        if isinstance(error, _TransportError):
+            return False
+        if not self.own_words and isinstance(error, (wire.RpcError, Refusal)):
             return False
         if not (self.withheld or (privacy.is_private() and not _vouched(self.peer, self.surface))):
             return False
@@ -751,8 +769,8 @@ class Surface:
                 answer = busy()
                 if answer is not None:
                     return answer
-            raise wire.RpcError(wire.RPC_TRANSPORT_ERROR,
-                                "app did not answer within %ds" % int(timeout)) from None
+            raise _TransportError(wire.RPC_TRANSPORT_ERROR,
+                                  "app did not answer within %ds" % int(timeout)) from None
         except Refusal as r:
             raise wire.RpcError(wire.RPC_INVALID_PARAMS, str(r)) from None
 
@@ -811,7 +829,11 @@ class Surface:
                 actions = [a.schema(self._grade(a)) for a in self.actions]
             return summary, state, revision, actions
 
-        with _HeldFaults(peer, self.app_id, private and not _vouched(peer, self.app_id)):
+        # What the view refuses by is its own words about the person's data (#935); the only other
+        # errors this region raises are the runtime's about the app's thread, which are held as
+        # faults already, or pass through as they always did.
+        with _HeldFaults(peer, self.app_id, private and not _vouched(peer, self.app_id),
+                         own_words=True):
             summary, state, revision, actions = self._turn(read, self.describe_timeout, busy=busy)
         answer = {
             "app": self.app_id,
@@ -824,10 +846,10 @@ class Surface:
         if private:
             answer["private"] = True
         else:
-            self._recheck_private(answer, self.describe_timeout)
+            self._recheck_private(answer, self.describe_timeout, peer)
         return answer
 
-    def _recheck_private(self, reply, timeout, peer=None):
+    def _recheck_private(self, reply, timeout, peer):
         """Private mode may have come on while the call waited for, or ran on, the app's thread.
         If it has, the app's view in `reply` becomes the private one, read again (or, when the app
         does not answer that, the private view with nothing of the app), `reply` is marked, and its
@@ -837,7 +859,8 @@ class Surface:
             return
         try:
             summary, state, revision = self._turn(lambda: self._published(True), timeout)
-        except wire.RpcError:
+        except Exception:
+            # Whatever the view said, this path only ever shows the private view (#935 review, H3).
             summary, state, revision = self._private_of({})
         if "summary" in reply or "state" in reply:
             reply.update(summary=summary, state=state, revision=revision)
@@ -924,7 +947,7 @@ class Surface:
                 refusal = self._within_reach(held, found, args) if found is not None else None
                 if refusal is not None:
                     raise Refusal(refusal)
-                return self._dispatch(name, args, expect, authority, private, withheld)
+                return self._dispatch(name, args, expect, authority, private, withheld, peer)
 
         timeout = (spec.timeout if spec is not None and spec.timeout else self.act_timeout)
         try:
@@ -941,17 +964,22 @@ class Surface:
         if later is not None:
             with _Scope(peer, token):
                 try:
-                    with _HeldFaults(peer, self.app_id, withheld):
+                    # The work is the app speaking, whenever it gets round to it, so it is held
+                    # against Private mode as it is now and in the two shapes a refusal arrives in
+                    # (#935) — as it is for a handler that answers at once.
+                    with _HeldFaults(peer, self.app_id, withheld, own_words=True):
                         result = wire.jsonable(later.work(), "the answer of %s" % name)
                 except Refusal as r:
-                    said = (privacy.WITHHELD_REFUSAL
-                            if privacy.is_private() and not _vouched(peer, self.app_id) else str(r))
-                    raise wire.RpcError(wire.RPC_INVALID_PARAMS, said) from None
+                    # Only the shape the wire needs; the holder above left the words alone, which
+                    # is what a caller the kernel vouches for is owed.
+                    raise wire.RpcError(wire.RPC_INVALID_PARAMS, str(r)) from None
             # Under Private mode as it is once the work is done, not as it was when it started.
             private = privacy.is_private()
             withheld = private and not _vouched(peer, self.app_id)
             try:
-                summary, state, revision = self._turn(lambda: self._published(private), timeout)
+                with _HeldFaults(peer, self.app_id, withheld, own_words=True):
+                    summary, state, revision = self._turn(
+                        lambda: self._published(private), timeout)
             except wire.RpcError:
                 if private:
                     summary, state, revision = self._private_of({})
@@ -975,7 +1003,7 @@ class Surface:
             self._recheck_private(reply, timeout, peer)
         return reply
 
-    def _dispatch(self, name, args, expect, authority, private=False, withheld=False):
+    def _dispatch(self, name, args, expect, authority, private, withheld, peer):
         """One act, on the app's thread: every check, the handler, and the view read back — in
         Private mode the private view, which the guard is held to as well."""
         spec = self._find(name)
@@ -993,23 +1021,29 @@ class Surface:
             raise Refusal(refusal)
 
         if expect is not None:
-            summary, _, current = self._published(private)
+            # The view's own words here too; the stale revision raised just below is the runtime's.
+            with _HeldFaults(peer, self.app_id, withheld, own_words=True):
+                summary, _, current = self._published(private)
             if current != expect:
                 raise Refusal("STALE: this app is at revision %s and you acted on %s. It now "
                               "reports: %s. Read it again before deciding."
                               % (current, expect, summary))
 
         # The handler reads what it declared: converted where the call converts, defaults in.
-        try:
+        # Its own region, one of five that ask for `own_words`: what the app refuses by, or
+        # faults with, are its own words about the person's data, held as Private mode is once they
+        # are said — a person who turns it on while an act runs does not pay for the race (#935).
+        # Every refusal above is the runtime's about the reach, the arguments or a stale revision,
+        # and keeps its words, so those stay outside.
+        with _HeldFaults(peer, self.app_id, withheld, own_words=True):
             result = self._handlers[name](as_declared(spec, args))
-        except Refusal:
-            if withheld:
-                raise Refusal(privacy.WITHHELD_REFUSAL) from None
-            raise
         later = result if isinstance(result, Later) else None
         if later is None:
             result = wire.jsonable(result, "the answer of %s" % name)
-        summary, state, revision = self._published(private)
+        # Read back held the same way: what the view objects to is its own words about the person's
+        # data, and an act that ran does not hand them to a caller the kernel does not vouch for.
+        with _HeldFaults(peer, self.app_id, withheld, own_words=True):
+            summary, state, revision = self._published(private)
         return spec, (None if later else result), later, summary, state, revision
 
     # ── serving ──────────────────────────────────────────────────────────────

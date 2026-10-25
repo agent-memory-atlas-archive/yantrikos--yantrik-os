@@ -155,6 +155,9 @@ pub struct Boot<S = ()> {
     /// The platform's services, typed: live under the runner, fakes under a test unless the
     /// test gives its own. An app's jobs call them; nothing here does.
     pub services: crate::services::Services,
+    /// This copy is drawn for a Mind (Mind View), where an agent reads the window as text. An app
+    /// with content an agent must not read masks it when this is set; see [`crate::for_mind`].
+    pub for_mind: bool,
 }
 
 impl<S: Settings> Boot<S> {
@@ -167,9 +170,22 @@ impl<S: Settings> Boot<S> {
         mind: std::sync::Arc<dyn yantrik_mind::Mind>,
         services: crate::services::Services,
     ) -> Result<(Boot<S>, Store<S>), Startup> {
+        Self::open_as(paths, args, mind, services, crate::for_mind::from_env())
+    }
+
+    /// [`Boot::open`] with `for_mind` given rather than read from the environment: for a test.
+    pub fn open_as(
+        paths: Paths,
+        args: Vec<OsString>,
+        mind: std::sync::Arc<dyn yantrik_mind::Mind>,
+        services: crate::services::Services,
+        for_mind: bool,
+    ) -> Result<(Boot<S>, Store<S>), Startup> {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
         let launch = Launch::parse(paths.id(), paths.profile(), &cwd, &args)?;
-        let store = Store::<S>::open(paths.config_file().to_path_buf());
+        // Settings from the old shared place, once, before the app's own file is opened.
+        crate::settings::former::import::<S>(&paths);
+        let store = Store::<S>::open(paths.config_file().to_path_buf(), paths.id());
         let drafts = Drafts::read(paths.state_dir());
         let boot = Boot {
             args,
@@ -180,6 +196,7 @@ impl<S: Settings> Boot<S> {
             settings_health: store.health().clone(),
             mind,
             services,
+            for_mind,
         };
         Ok((boot, store))
     }

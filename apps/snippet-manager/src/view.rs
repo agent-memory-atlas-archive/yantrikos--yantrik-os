@@ -7,6 +7,7 @@ use yantrik_app::cx::Cx;
 use yantrik_app::rail::{self, RailView as _};
 
 use crate::command::Command;
+use crate::mind_view::shown;
 use crate::model::{Editor, Model, PART_COPY, PART_DETAIL, PART_LIST, PART_NOTICE, PART_RAISE, PART_RECOVERY};
 use crate::update::drafts;
 use crate::store::{text, ALL, FAVORITES};
@@ -111,9 +112,9 @@ fn list(ui: &SnippetManagerApp, m: &Model) {
             id: s.id,
             title: s.title.as_str().into(),
             language: s.language.as_str().into(),
-            code: s.code.as_str().into(),
+            code: shown(m.for_mind, &s.code).into(),
             tags: s.tags.as_str().into(),
-            preview: s.preview().into(),
+            preview: if m.for_mind { shown(true, &s.code) } else { s.preview() }.into(),
             date_text: text::relative(s.updated, now).into(),
             is_selected: s.id == m.selected,
             is_favorite: s.favorite,
@@ -182,7 +183,8 @@ fn detail(ui: &SnippetManagerApp, m: &Model) {
     ui.set_detail_id(e.id);
     set_if_differs(ui.get_detail_title(), &e.title, |v| ui.set_detail_title(v));
     set_if_differs(ui.get_detail_language(), &e.language, |v| ui.set_detail_language(v));
-    set_if_differs(ui.get_detail_code(), &e.code, |v| ui.set_detail_code(v));
+    set_if_differs(ui.get_detail_code(), &shown(m.for_mind, &e.code), |v| ui.set_detail_code(v));
+    ui.set_detail_read_only(m.for_mind);
     set_if_differs(ui.get_detail_tags(), &e.tags, |v| ui.set_detail_tags(v));
     let open = m.open();
     let now = text::now();

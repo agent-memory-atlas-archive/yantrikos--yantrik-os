@@ -20,27 +20,25 @@ fn about(title: &str) -> String {
 }
 
 impl Source for Model {
-    /// The open snippet, read off the editor, so the rail says what the person is looking at.
+    /// The open snippet, read off the editor, so the rail says what the person is looking at: by
+    /// title and language, with no measure of its code.
     fn context(&self) -> Vec<ContextItem> {
         if self.editor.id < 0 {
             return Vec::new();
         }
-        let lines = self.editor.code.lines().count();
         let language = &self.editor.language;
         vec![ContextItem {
             id: self.editor.id.to_string(),
             label: self.editor.title.clone(),
-            detail: if language.is_empty() {
-                format!("{lines} lines")
-            } else {
-                format!("{language}, {lines} lines")
-            },
+            detail: if language.is_empty() { "snippet".into() } else { language.clone() },
             source: "file".into(),
         }]
     }
 
     fn suggestions(&self, reach: Reach) -> Vec<Suggestion> {
-        if reach != Reach::Ready || self.open().is_none() {
+        // Nothing is offered where a Mind is looking: the question carries the code to the Mind,
+        // and the answer is drawn on the window `read_mind_view` reads.
+        if self.for_mind || reach != Reach::Ready || self.open().is_none() {
             return Vec::new();
         }
         vec![Suggestion {
@@ -54,7 +52,7 @@ impl Source for Model {
 
     /// The snippet as it is kept: the question is about the code, and only the code.
     fn prompt(&self, suggestion: &str) -> Option<Prompt> {
-        if suggestion != EXPLAIN {
+        if self.for_mind || suggestion != EXPLAIN {
             return None;
         }
         let snippet = self.open()?;

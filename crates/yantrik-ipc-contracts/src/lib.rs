@@ -30,3 +30,4 @@ pub mod route_table;
 pub mod notifications;
 pub mod control_surface;
 pub mod home_paths;
+pub mod mind_view;
