@@ -3,6 +3,7 @@
 person's own use through the desktop is unaffected."""
 
 import os
+import types
 import unittest
 from unittest import mock
 
@@ -47,6 +48,16 @@ class TestClosedToAgents(AgentCase):
         self.assertEqual(self.agents.starts, 0, "the fenced LibreOffice was never started")
         self.assertEqual(self.soffice.connections, 0, "the person's UNO was never reached")
         self.assertEqual(self.soffice.documents + self.agent_soffice.documents, [])
+
+    def test_the_minds_account_is_refused_with_no_token_at_all(self):
+        """A peer on the Mind's uid is an agent whether or not it carries a token (L3)."""
+        peer = types.SimpleNamespace(uid=4242, pid=77)
+        with mock.patch("yantrik_surface.files.caller", return_value=peer),                 mock.patch("yantrik_surface.mind_door.mind_uid", return_value=4242):
+            for action in ACTIONS:
+                with self.assertRaises(support.RpcError) as caught:
+                    self.surface.act({"action": action, "args": self.args(action)})
+                self.assertEqual(caught.exception.message, surface.CLOSED_TO_AGENTS, action)
+        self.assertEqual(self.agents.starts + self.agent_soffice.connections + self.soffice.connections, 0)
 
     def test_the_real_agent_office_is_never_started_or_fenced(self):
         with mock.patch("yantrik_libreoffice.agent_office.start_headless") as start, \

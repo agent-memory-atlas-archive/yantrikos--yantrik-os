@@ -67,6 +67,8 @@ pub struct Found {
 pub struct Line {
     pub found: Found,
     pub guard: Option<String>,
+    /// The reason of a `-` line; empty on a line with a guard file.
+    pub reason: String,
 }
 
 fn is_test(file: &str) -> bool {
@@ -144,6 +146,10 @@ pub fn scan(file: &str, text: &str) -> Vec<Found> {
 }
 
 /// The registry: `<file> <action> <param> <guard file>`, or `... - <reason>`; `#` comments.
+///
+/// A `-` line's reason must be at least three words. One that says the action is `refused` must
+/// also name, in backticks, the call that refuses it; [`judge`] looks for that name in the
+/// action's source file, so a refusal that is taken out fails the check.
 pub fn parse(text: &str) -> Result<Vec<Line>, String> {
     let mut lines = Vec::new();
     for (n, raw) in text.lines().enumerate() {
@@ -156,12 +162,14 @@ pub fn parse(text: &str) -> Result<Vec<Line>, String> {
             return Err(format!("{REGISTRY}:{}: want `<file> <action> <param> <guard file | - reason>`", n + 1));
         };
         let found = Found { file: (*file).into(), action: (*action).into(), param: (*param).into() };
+        let reason = rest.first().map(|r| r.trim().to_string()).unwrap_or_default();
         let guard = match *guard {
-            "-" if rest.first().is_some_and(|r| !r.trim().is_empty()) => None,
-            "-" => return Err(format!("{REGISTRY}:{}: `-` needs the reason no rule is needed", n + 1)),
+            "-" if reason.split_whitespace().count() >= 3 => None,
+            "-" => return Err(format!("{REGISTRY}:{}: `-` needs the reason no rule is needed, in at least three words", n + 1)),
             g => Some(g.to_string()),
         };
-        lines.push(Line { found, guard });
+        let reason = if guard.is_none() { reason } else { String::new() };
+        lines.push(Line { found, guard, reason });
     }
     Ok(lines)
 }
@@ -182,6 +190,21 @@ pub fn judge(found: &[Found], lines: &[Line], read: impl Fn(&str) -> Option<Stri
         if !found.contains(f) {
             problems.push(format!("{REGISTRY} names {} `{}` `{}`, which is not there any more", f.file, f.action, f.param));
             continue;
+        }
+        if l.guard.is_none() && l.reason.contains("refused") {
+            // The call that refuses is named in backticks; it has to be in the action's file.
+            let marker = l.reason.split('`').nth(1).filter(|m| !m.is_empty());
+            match (marker, read(&f.file)) {
+                (None, _) => problems.push(format!(
+                    "{} `{}`: its reason says `refused` but names no call, in backticks, that refuses it",
+                    f.file, f.action
+                )),
+                (Some(m), Some(text)) if !text.contains(m) => problems.push(format!(
+                    "{} `{}`: its reason says `{m}` refuses it, and {} no longer says `{m}`",
+                    f.file, f.action, f.file
+                )),
+                _ => {}
+            }
         }
         if let Some(guard) = &l.guard {
             match read(guard) {

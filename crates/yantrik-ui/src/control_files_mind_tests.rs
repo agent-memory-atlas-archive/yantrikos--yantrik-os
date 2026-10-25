@@ -279,3 +279,80 @@ fn a_mind_reaches_a_saved_capture_only_through_open_capture() {
     use yantrik_app_runtime::control::unrecoverable;
     assert!(unrecoverable(crate::control_capture::OPEN_CAPTURE_PURPOSE));
 }
+
+// LibreOffice is closed to a mind (#942, #953): the shell's own routes to it are shut as well as the adapter's.
+
+fn libreoffice_entry() -> crate::apps::DesktopEntry {
+    crate::apps::DesktopEntry {
+        app_id: "yantrik-libreoffice".into(),
+        exec: "yantrik-libreoffice %U".into(),
+        surface: Some("libreoffice".into()),
+        mime_types: [
+            "application/vnd.oasis.opendocument.text",
+            "application/vnd.oasis.opendocument.spreadsheet",
+            "application/vnd.oasis.opendocument.presentation",
+            "application/vnd.oasis.opendocument.graphics",
+            "application/msword",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "application/vnd.ms-excel",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "application/vnd.ms-powerpoint",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "application/rtf",
+            "text/csv",
+        ]
+        .map(String::from)
+        .to_vec(),
+        ..Default::default()
+    }
+}
+
+/// Every way a caller is told apart from the person: an agent's token, a token that was not
+/// believed, a peer on the Mind's account with no token at all, and an attached mind.
+fn minds() -> Vec<crate::mind_view::Requester> {
+    use crate::mind_view::{classify, CallerFacts};
+    let facts = |agent, mind_account, attached: Option<&str>| CallerFacts {
+        pid: Some(4242),
+        agent,
+        attached_mind: attached.map(String::from),
+        mind_account,
+    };
+    vec![
+        classify(&facts(Some(true), false, None), 1),
+        classify(&facts(Some(false), false, None), 1),
+        classify(&facts(None, true, None), 1),
+        classify(&CallerFacts { pid: None, agent: None, attached_mind: None, mind_account: true }, 1),
+        classify(&facts(None, false, Some("hermes")), 1),
+    ]
+}
+
+#[test]
+fn a_mind_cannot_open_an_office_document_in_libreoffice() {
+    use crate::mime_dispatch::{classify_with, FileAction, MimeDefaults};
+    let installed = vec![libreoffice_entry()];
+    let mut routed = 0;
+    for name in ["a.odt", "a.ods", "a.odp", "a.odg", "a.doc", "a.docx", "a.xls", "a.xlsx", "a.ppt", "a.pptx", "a.rtf", "a.csv"] {
+        let action = classify_with(name, &MimeDefaults::default(), &installed);
+        let FileAction::DesktopApp(_) = action else { continue };
+        routed += 1;
+        for who in minds() {
+            assert_ne!(who, crate::mind_view::Requester::Person);
+            let err = office_verdict(who != crate::mind_view::Requester::Person, &action, &installed).expect_err(name);
+            assert!(err.contains("#953"), "{name}: {err}");
+        }
+        assert!(office_verdict(false, &action, &installed).is_ok(), "{name}: the person is not stopped");
+    }
+    assert!(routed >= 8, "the office types must reach the LibreOffice entry, got {routed}");
+}
+
+#[test]
+fn a_default_naming_libreoffice_is_refused_by_the_handler_not_the_extension() {
+    use crate::mime_dispatch::{classify_with, MimeDefaults};
+    let installed = vec![libreoffice_entry()];
+    let defaults = MimeDefaults::parse("[Default Applications]\ntext/plain=yantrik-libreoffice.desktop\n");
+    let action = classify_with("notes.txt", &defaults, &installed);
+    assert!(office_verdict(true, &action, &installed).is_err(), "{action:?}");
+    // A handler that is not installed cannot be told from LibreOffice, so it is refused too.
+    let gone = crate::mime_dispatch::FileAction::DesktopApp("soffice.desktop".into());
+    assert!(office_verdict(true, &gone, &[]).is_err());
+}

@@ -4,5 +4,6 @@
 //! installed applications, built-in apps, and screen ID routing.
 
 pub mod apps;
+pub mod office;
 pub mod screens;
 pub mod service_manager;

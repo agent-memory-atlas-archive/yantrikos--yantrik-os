@@ -972,6 +972,12 @@ pub fn spawn_app_with_args(app_id: &str, bin: &str, args: &[&str]) {
 /// app the shell has no route of its own to, and what a `mimeapps.list` default naming such an
 /// app means at double-click time.
 pub fn launch_entry_with_file(entry: &DesktopEntry, installed: &[DesktopEntry], file: &str) {
+    // The one funnel a file reaches an app's Exec line through (open-with, MIME launch, intents):
+    // the person's LibreOffice is closed to a mind until its sandbox exists (#953).
+    if crate::control_files_mind::a_mind_is_calling() && yantrik_shell_core::office::is_libreoffice(entry) {
+        tracing::warn!(app = %entry.app_id, "{}", yantrik_shell_core::office::CLOSED_TO_AGENTS);
+        return;
+    }
     if entry.exec.is_empty() || entry.exec == "__builtin__" {
         tracing::error!(app = %entry.app_id, "Cannot open the file: the entry runs nothing");
         return;

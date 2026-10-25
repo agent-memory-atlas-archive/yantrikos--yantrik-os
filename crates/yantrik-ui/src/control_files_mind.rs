@@ -53,6 +53,31 @@ pub fn may_open_entry(label: &str, name: &str) -> Result<(), String> {
     entry_verdict(label, name, &home())
 }
 
+/// Refuse a mind opening `name` in the app the one rule picked (`action`), when that app is the
+/// person's LibreOffice: it evaluates what it opens as the person, and its sandbox is not built
+/// yet (#942, #953). Decided by the handler the file resolves to, and refused when the handler
+/// cannot be found.
+pub fn may_open_in_default_app(
+    action: &crate::mime_dispatch::FileAction,
+    installed: &[crate::apps::DesktopEntry],
+) -> Result<(), String> {
+    office_verdict(a_mind_is_calling(), action, installed)
+}
+
+/// [`may_open_in_default_app`] with the caller given.
+pub fn office_verdict(
+    mind: bool,
+    action: &crate::mime_dispatch::FileAction,
+    installed: &[crate::apps::DesktopEntry],
+) -> Result<(), String> {
+    match action {
+        crate::mime_dispatch::FileAction::DesktopApp(id) if mind => {
+            yantrik_shell_core::office::may_open_in(id, installed)
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Refuse a mind making `name` in the folder Files is showing - a new folder, a new file, or a
 /// rename's new name - where it would be a protected place. Each step of "make a folder x in
 /// ~/.local/share, save a .desktop into it, rename x to applications" was allowed on its own.
