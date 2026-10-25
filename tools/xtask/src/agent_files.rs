@@ -32,7 +32,20 @@ const SCANNED: &[&str] = &[
 const PATH_PARAMS: &[&str] = &[
     "path", "paths", "file", "files", "output", "destination", "dest", "directory", "dir", "folder",
     "save_dir", "workflow", "cwd", "working_dir", "working_directory", "of", "record",
+    "file_path", "filepath", "filename", "src", "source", "target", "input", "image",
 ];
+
+/// Words that make a parameter name look like a path whatever else is in it (`export_path`,
+/// `icon_file`, `output_dir`): the check fails closed on these, so a new action cannot get past
+/// it by choosing a name [`PATH_PARAMS`] has not heard of. A name that is not a path in fact is
+/// listed in the registry with `-` and the reason.
+const PATH_WORDS: &[&str] = &["path", "paths", "file", "files", "filename", "dir", "directory", "folder", "dest", "destination"];
+
+/// Whether a parameter carries a path: by its listed name, by a word in its name, or by being
+/// declared with `Param::path(` (checked in [`scan`]).
+fn path_like(name: &str) -> bool {
+    PATH_PARAMS.contains(&name) || name.split(['_', '-']).any(|w| PATH_WORDS.contains(&w))
+}
 
 /// Where an action's name is declared, in each style the tree uses.
 const ACTION_MARKS: &[&str] = &["Action::new(", "act(", "_action(", ".action("];
@@ -113,12 +126,14 @@ fn annotated(text: &str) -> Vec<(usize, &str)> {
 pub fn scan(file: &str, text: &str) -> Vec<Found> {
     let actions = calls(text, ACTION_MARKS);
     let mut params = calls(text, PARAM_MARKS);
+    // A parameter declared as a path is one whatever it is called.
+    let declared: Vec<usize> = calls(text, &["Param::path("]).into_iter().map(|(at, _)| at).collect();
     if file.ends_with(".py") {
         params.extend(annotated(text));
     }
     let mut found = BTreeSet::new();
     for (at, param) in params {
-        if !PATH_PARAMS.contains(&param) {
+        if !path_like(param) && !declared.contains(&at) {
             continue;
         }
         if let Some((_, action)) = actions.iter().rev().find(|(a, _)| *a < at) {
@@ -262,6 +277,19 @@ mod tests {
         """react("path") is prose."""
 "#;
         assert_eq!(names(scan("a.py", python)), ["export_pdf.path", "save.path"]);
+    }
+
+    #[test]
+    fn a_path_is_found_by_its_name_its_words_or_its_declared_kind() {
+        let rust = r#"
+            Action::new("a", "A").arg(Param::text("file_path"))
+            Action::new("b", "B").arg(Param::text("export_dir"))
+            Action::new("c", "C").arg(Param::path("whatever"))
+            Action::new("d", "D").arg(Param::text("query"))
+            Action::new("e", "E").arg(Param::text("profile"))
+        "#;
+        let names: Vec<_> = scan("a.rs", rust).into_iter().map(|f| f.action).collect();
+        assert_eq!(names, ["a", "b", "c"]);
     }
 
     #[test]
