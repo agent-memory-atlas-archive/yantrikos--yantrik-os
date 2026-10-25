@@ -248,6 +248,159 @@ class TestPrivateSurface(test_mind_door.TestTheDoor):
         # A vouched caller is nobody here: this process is not an installed desktop program.
         self.assertFalse(privacy.reads_while_private(os.getpid(), "notes"))
 
+    # ── #935 review (d3f84cbf): provenance, deferred work, every view read ──────────────
+
+    S = "Divorce lawyer SENTINEL-935"
+
+    def _app(self, **flags):
+        """A surface whose every kind of speaking is switched by `flags`: what each action raises."""
+        from yantrik_surface import Later, NotAnswered, Refusal
+        s = Surface("notes")
+        view = {"raise": None, "calls": 0, "on_call": None}
+
+        @s.view
+        def state():
+            view["calls"] += 1
+            if view["on_call"] and view["calls"] == view["on_call"][0]:
+                view["on_call"][1]()
+            if view["raise"] and view["calls"] >= view["raise"][0]:
+                raise view["raise"][1]
+            return {"rows": 3}
+
+        s.show_in_private("rows")
+        S = self.S
+        transport = wire.RpcError(wire.RPC_TRANSPORT_ERROR, "locked: " + S)
+        shapes = {
+            "refusal": lambda: Refusal(S),
+            "invalid": lambda: wire.RpcError(wire.RPC_INVALID_PARAMS, "no note: " + S),
+            "transport": lambda: transport,
+            "unanswered": lambda: NotAnswered("locked: " + S),
+        }
+        def register(shape, make):
+            @s.action("h_" + shape, grade="safe")
+            def handler() -> dict:
+                "Raises at once."
+                raise make()
+
+            @s.action("l_" + shape, grade="safe", settles="later")
+            def deferred() -> dict:
+                "Raises off the app's thread."
+                def work():
+                    raise make()
+                return Later(work)
+
+        for shape, make in shapes.items():
+            register(shape, make)
+
+        @s.action("l_on", grade="safe", settles="later")
+        def l_on() -> dict:
+            "Private mode comes on while the work runs."
+            def work():
+                self.private()
+                raise Refusal(S)
+            return Later(work)
+
+        @s.action("l_ok", grade="safe", settles="later")
+        def l_ok() -> dict:
+            "Works, then the view faults."
+            def work():
+                self.private()
+                view["raise"] = (view["calls"] + 1, KeyError(S))
+                return {"done": True}
+            return Later(work)
+
+        @s.action("ok", grade="safe")
+        def ok() -> dict:
+            "Fine."
+            return {"done": True}
+
+        server = s.serve_in_thread()
+        self.addCleanup(s.stop)
+        return s, server, view
+
+    def _act(self, server, action, **extra):
+        return self.call(server.path, "app.act", dict({"action": action, "args": {}}, **extra))
+
+    def test_an_error_is_trusted_by_where_it_came_from_not_by_its_code(self):
+        # H1, H2: -32000 and NotAnswered raised by the app (handler, deferred work) are its words.
+        _, server, _ = self._app()
+        self.private()
+        for action in ("h_transport", "l_transport", "h_unanswered", "l_unanswered"):
+            r = self._act(server, action)
+            self.assertEqual(r["error"]["message"], privacy.WITHHELD_REFUSAL, (action, r))
+            self.assertNotIn("SENTINEL-935", json.dumps(r), action)
+
+    def test_a_view_raising_the_transport_code_is_held(self):
+        s, server, view = self._app()
+        view["raise"] = (1, wire.RpcError(wire.RPC_TRANSPORT_ERROR, "locked: " + self.S))
+        self.private()
+        r = self.call(server.path, "app.describe")
+        self.assertEqual(r["error"]["message"], privacy.WITHHELD_REFUSAL, r)
+        self.assertNotIn("SENTINEL-935", json.dumps(r))
+
+    def test_the_runtimes_own_timeout_keeps_its_words(self):
+        s, server, _ = self._app()
+        s.run_on_app_thread = mock.Mock(side_effect=__import__("yantrik_surface").NotAnswered())
+        self.private()
+        r = self.call(server.path, "app.describe")
+        self.assertIn("app did not answer", r["error"]["message"], r)
+
+    def test_deferred_refusals_and_errors_are_held(self):
+        # M1: the deferred path, both shapes, and Private mode coming on mid-work.
+        _, server, _ = self._app()
+        self.private()
+        for action in ("l_refusal", "l_invalid", "h_refusal", "h_invalid"):
+            r = self._act(server, action)
+            self.assertEqual(r["error"]["message"], privacy.WITHHELD_REFUSAL, (action, r))
+        self.private(False)
+        r = self._act(server, "l_on")
+        self.assertEqual(r["error"]["message"], privacy.WITHHELD_REFUSAL, r)
+        self.assertNotIn("SENTINEL-935", json.dumps(r))
+
+    def test_a_view_fault_after_deferred_work_is_held(self):
+        # H3, first read: the read-back after a `Later` finishes.
+        _, server, _ = self._app()
+        r = self._act(server, "l_ok")
+        self.assertNotIn("SENTINEL-935", json.dumps(r), r)
+
+    def test_a_view_fault_on_the_private_recheck_is_held(self):
+        # H3, second read: Private mode comes on while describe reads the view.
+        s, server, view = self._app()
+        view["on_call"] = (1, self.private)
+        view["raise"] = (2, KeyError(self.S))
+        r = self.call(server.path, "app.describe")
+        self.assertNotIn("SENTINEL-935", json.dumps(r), r)
+        self.assertTrue(r["result"]["private"], r)
+
+    def test_a_view_refusing_the_act_read_back_or_the_expect_read_is_held(self):
+        from yantrik_surface import Refusal
+        _, server, view = self._app()
+        self.private()
+        view["raise"] = (1, Refusal(self.S))
+        for extra in ({}, {"expect_revision": "r1"}):
+            r = self._act(server, "ok", **extra)
+            self.assertEqual(r["error"]["message"], privacy.WITHHELD_REFUSAL, (extra, r))
+            self.assertNotIn("SENTINEL-935", json.dumps(r))
+
+    def test_a_vouched_caller_still_hears_the_words(self):
+        _, server, _ = self._app()
+        self.private()
+        with mock.patch.object(privacy, "reads_while_private", return_value=True):
+            for action in ("h_refusal", "h_invalid", "l_refusal", "l_invalid"):
+                r = self._act(server, action)
+                self.assertIn("SENTINEL-935", json.dumps(r), (action, r))
+
+    def test_no_peer_is_not_vouched(self):
+        # A call that carries no peer fails closed, even where reads would be vouched.
+        s, _, _ = self._app()
+        self.private()
+        with mock.patch.object(privacy, "reads_while_private", return_value=True):
+            for action in ("h_refusal", "l_refusal"):
+                with self.assertRaises(wire.RpcError) as caught:
+                    s.act({"action": action, "args": {}})
+                self.assertEqual(caught.exception.message if hasattr(caught.exception, "message")
+                                 else str(caught.exception.args[-1]), privacy.WITHHELD_REFUSAL)
+
     def test_the_readers_while_private_are_the_crates(self):
         d = privacy.INSTALL_DIR
         own = d + "/yantrik-notes"
