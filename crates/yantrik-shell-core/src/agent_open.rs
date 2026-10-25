@@ -39,7 +39,7 @@ pub enum Handler<'a> {
     ImageViewer,
     /// `yantrik-text-editor`.
     TextEditor,
-    /// The shell's own media route: mpv with fixed flags and the one file the caller was allowed.
+    /// The shell's media route, which is mpv.
     MediaPlayer,
     /// The machine's web browser.
     Browser,
@@ -77,7 +77,10 @@ fn not_a_yantrik_app(what: &str) -> String {
 /// catalogue. Call it only for a non-person caller.
 pub fn may_open_file(handler: Handler, installed: &[DesktopEntry]) -> Result<(), String> {
     match handler {
-        Handler::ImageViewer | Handler::TextEditor | Handler::MediaPlayer => Ok(()),
+        Handler::ImageViewer | Handler::TextEditor => Ok(()),
+        // mpv follows playlists to other local files and draws subtitle files on screen, so a
+        // protected text file would be readable through it. There is no framework video app.
+        Handler::MediaPlayer => Err(not_a_yantrik_app("the media player")),
         Handler::Browser => Err(not_a_yantrik_app("the browser")),
         Handler::Desktop(id) => {
             let stem = id.trim().strip_suffix(".desktop").unwrap_or(id.trim());

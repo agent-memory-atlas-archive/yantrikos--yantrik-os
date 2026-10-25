@@ -101,3 +101,23 @@ fn every_framework_app_is_listed() {
         assert!(YANTRIK_APPS.iter().any(|(_, i)| *i == id), "framework app `{id}` is not in YANTRIK_APPS");
     }
 }
+
+#[test]
+fn the_media_player_is_refused_for_playlists_video_and_subtitles() {
+    // mpv follows an m3u to local files and draws an srt or ass on screen.
+    for name in ["list.m3u", "clip.mp4", "subs.srt", "subs.ass"] {
+        let err = may_open_file(Handler::MediaPlayer, &installed()).expect_err(name);
+        assert!(err.contains("Yantrik's own apps") && err.ends_with("Nothing was opened."), "{name}: {err}");
+    }
+}
+
+#[test]
+fn no_listed_app_is_mpv_or_a_wrapper_of_an_external_binary() {
+    assert!(YANTRIK_APPS.iter().all(|(stem, _)| stem.starts_with("yantrik-") && !stem.contains("mpv")));
+    // Our name over someone else's program does not pass.
+    for exec in ["mpv --player-operation-mode=pseudo-gui %f", "/usr/bin/env mpv %f", "sh -c mpv"] {
+        let wrapped = vec![entry("yantrik-music-player", exec)];
+        assert!(may_open_file(Handler::Desktop("yantrik-music-player"), &wrapped).is_err(), "{exec}");
+    }
+    assert!(may_open_file(Handler::Desktop("mpv.desktop"), &[entry("mpv", "mpv %f")]).is_err());
+}
