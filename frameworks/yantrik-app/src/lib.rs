@@ -35,6 +35,7 @@ pub mod rows;
 pub mod runner;
 pub mod services;
 pub mod settings;
+pub mod shown;
 pub mod theme;
 pub mod timers;
 pub mod watch;

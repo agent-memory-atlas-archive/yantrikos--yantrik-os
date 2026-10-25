@@ -6,6 +6,7 @@ use slint::platform::{
 };
 use std::cell::RefCell;
 use std::rc::{Rc, Weak};
+use std::time::Duration;
 
 thread_local! {
     /// Every window this platform made, so a test can draw the one behind a component: the
@@ -64,6 +65,10 @@ impl Platform for Headless {
 
     fn new_event_loop_proxy(&self) -> Option<Box<dyn EventLoopProxy>> {
         Some(Box::new(Proxy))
+    }
+
+    fn duration_since_start(&self) -> Duration {
+        crate::display_clock::now()
     }
 }
 
