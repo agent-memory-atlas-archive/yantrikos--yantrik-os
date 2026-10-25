@@ -11712,6 +11712,7 @@ dependencies = [
  "yantrik-app",
  "yantrik-app-build",
  "yantrik-design-tokens",
+ "yantrik-ipc-contracts",
  "yantrik-testing",
  "yantrik-ui-kit",
 ]

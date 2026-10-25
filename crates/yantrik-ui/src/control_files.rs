@@ -226,7 +226,10 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                 // learns where it went and not only that it went. `invoke_file_open` runs the
                 // same `classify` on the callback side; asking it here too is the cheap way to
                 // keep the answer and the launch on one rule (#233).
-                let app = crate::mime_dispatch::app_name(&crate::mime_dispatch::classify(&name));
+                let action = crate::mime_dispatch::classify(&name);
+                let app = crate::mime_dispatch::app_name(&action);
+                // Before anything opens: the person's LibreOffice is closed to a mind (#953).
+                mind::may_open_in_default_app(&action, &crate::apps::Catalogue::shared().get())?;
                 // The entry too, links followed: opening puts its contents in a window the mind
                 // can read back, and a link in the home may lead anywhere.
                 mind::may_open_entry(&ui.get_file_browser_path(), &name)?;

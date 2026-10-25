@@ -167,6 +167,12 @@ fn every_name_the_rest_of_the_system_keeps_is_in_the_table() {
     }
     // The framework's own paths are its own: the rule and its tests.
     sources.retain(|p| !p.to_string_lossy().contains("frameworks/yantrik-app/"));
+    // A test's fixtures spell paths the test makes up, not files a service keeps.
+    sources.retain(|p| {
+        let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let in_tests_dir = p.components().any(|c| c.as_os_str() == "tests");
+        !(in_tests_dir || name == "tests.rs" || name.ends_with("_tests.rs") || name.starts_with("test_"))
+    });
     assert!(sources.len() > 100, "the sources are there to read: {}", sources.len());
     let roots = [
         (".config/yantrik/", Some(Root::Config)),

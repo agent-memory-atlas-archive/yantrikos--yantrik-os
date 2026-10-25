@@ -53,6 +53,44 @@ pub fn may_open_entry(label: &str, name: &str) -> Result<(), String> {
     entry_verdict(label, name, &home())
 }
 
+/// Refuse a mind opening a file in the app the one rule picked (`action`) unless it is one of
+/// Yantrik's own apps (#942, #953). Decided by the handler the file resolves to, and refused when
+/// the handler cannot be found.
+pub fn may_open_in_default_app(
+    action: &crate::mime_dispatch::FileAction,
+    installed: &[crate::apps::DesktopEntry],
+) -> Result<(), String> {
+    if !a_mind_is_calling() {
+        return Ok(());
+    }
+    agent_verdict(action, installed)
+}
+
+/// [`may_open_in_default_app`] for a caller who is not the person.
+pub fn agent_verdict(
+    action: &crate::mime_dispatch::FileAction,
+    installed: &[crate::apps::DesktopEntry],
+) -> Result<(), String> {
+    use crate::mime_dispatch::FileAction;
+    use yantrik_shell_core::agent_open::{may_open_file, Handler};
+    let handler = match action {
+        FileAction::ImageViewer => Handler::ImageViewer,
+        FileAction::TextEditor => Handler::TextEditor,
+        FileAction::MediaPlayer => Handler::MediaPlayer,
+        FileAction::Browser => Handler::Browser,
+        FileAction::DesktopApp(id) => Handler::Desktop(id),
+    };
+    may_open_file(handler, installed)
+}
+
+/// Refuse a mind launching the app `name` unless it is one of Yantrik's own.
+pub fn may_launch(name: &str, installed: &[crate::apps::DesktopEntry]) -> Result<(), String> {
+    if !a_mind_is_calling() {
+        return Ok(());
+    }
+    yantrik_shell_core::agent_open::may_launch(name, installed)
+}
+
 /// Refuse a mind making `name` in the folder Files is showing - a new folder, a new file, or a
 /// rename's new name - where it would be a protected place. Each step of "make a folder x in
 /// ~/.local/share, save a .desktop into it, rename x to applications" was allowed on its own.

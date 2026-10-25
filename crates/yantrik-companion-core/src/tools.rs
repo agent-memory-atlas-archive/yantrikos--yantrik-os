@@ -477,6 +477,20 @@ fn in_scratch(path: &std::path::Path) -> bool {
         && resolved.is_some_and(|real| under_any(&real.to_string_lossy(), &roots))
 }
 
+/// A regular file with more than one name: the other name may be anywhere, a protected file
+/// included, and no link to follow says where (the files rule refuses these too, `hard_link`;
+/// security review of #942, finding 3).
+#[cfg(unix)]
+fn has_second_name(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file() && m.nlink() > 1)
+}
+
+#[cfg(not(unix))]
+fn has_second_name(_path: &std::path::Path) -> bool {
+    false
+}
+
 /// Where `path` really goes, links followed, must be inside `roots` and outside the protected
 /// places. The deepest part of the path that resolves decides: looking only at the path and its
 /// parent let a link two levels up (~/l -> /etc, asked as ~/l/X/y.txt) go unchecked whenever X
@@ -505,6 +519,9 @@ fn resolves_within(path: &std::path::Path, roots: &[std::path::PathBuf]) -> Resu
                 }
                 if yantrik_ipc_contracts::home_paths::is_protected(&whole) {
                     return Err("Access denied: path resolves to a protected location".to_string());
+                }
+                if has_second_name(&resolved) {
+                    return Err("Access denied: the file has a second name (a hard link), and the other name may be a protected file".to_string());
                 }
                 if !under_any(&resolved.to_string_lossy(), roots) {
                     return Err("Access denied: path resolves outside your home directory".to_string());
@@ -925,6 +942,26 @@ mod path_root_tests {
             assert!(err.contains("protected location"), "{refused}: {err}");
         }
         assert!(at("x/c/gtk-3.0/settings.ini").is_ok(), "an ordinary folder under the link");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_second_name_for_a_file_is_refused() {
+        use super::resolves_within;
+        let root = std::env::temp_dir().join(format!("yantrik-resolves-hard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("Documents")).unwrap();
+        std::fs::create_dir_all(root.join(".local/share/yantrik")).unwrap();
+        let root = root.canonicalize().unwrap();
+        let store = root.join(".local/share/yantrik").join("store.json");
+        std::fs::write(&store, "x").unwrap();
+        std::fs::write(root.join("Documents/plain.txt"), "x").unwrap();
+        std::fs::hard_link(&store, root.join("Documents/hl.json")).unwrap();
+        let roots = [root.clone()];
+        let err = resolves_within(&root.join("Documents/hl.json"), &roots).unwrap_err();
+        assert!(err.contains("hard link"), "{err}");
+        assert!(resolves_within(&root.join("Documents/plain.txt"), &roots).is_ok());
         let _ = std::fs::remove_dir_all(&root);
     }
 

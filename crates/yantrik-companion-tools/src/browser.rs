@@ -2876,3 +2876,7 @@ mod mind_display_tests {
         assert!(!is_foreign_debug_browser(&cmd(&["vim"]), 9222, ours));
     }
 }
+
+#[cfg(test)]
+#[path = "browser_url_tests.rs"]
+mod url_tests;
