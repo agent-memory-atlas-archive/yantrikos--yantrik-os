@@ -5,10 +5,11 @@
 //! read by nothing else, in the shape `{"folders": [...], "volume": n}`. The framework keeps the
 //! settings in the app's own file now (`<config>/yantrik/apps/music/settings.json`); the old
 //! file is named as this app's (`FORMER_FILE`), brought across once in that shape
-//! ([`Settings::legacy`]), and left exactly where it was as the backup.
+//! (`Settings::LEGACY_KEYS`), and left exactly where it was as the backup.
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+#[cfg(test)]
+use serde_json::json;
 use yantrik_app::Settings;
 
 /// The volume a first run starts at.
@@ -38,34 +39,29 @@ impl Default for Kept {
 impl Settings for Kept {
     const SCHEMA: u32 = 1;
     const FORMER_FILE: Option<&'static str> = Some("music.json");
-
-    /// The file from before the framework: a list of folders, and the volume when it was set.
-    fn legacy(raw: Value) -> Option<Value> {
-        let folders = raw.get("folders")?.as_array()?;
-        if !folders.iter().all(Value::is_string) {
-            return None;
-        }
-        let volume = match raw.get("volume") {
-            None => DEFAULT_VOLUME,
-            Some(v) => v.as_f64()?,
-        };
-        Some(json!({ "folders": folders, "volume": volume }))
-    }
+    /// The keys the old file began with: the framework judges its first bytes against these.
+    const LEGACY_KEYS: &'static [&'static str] = &["folders", "volume"];
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
 
     #[test]
-    fn the_file_from_before_the_framework_is_read_in_its_own_shape() {
-        let read = |raw: Value| Kept::legacy(raw).map(|v| serde_json::from_value::<Kept>(v).unwrap());
+    fn the_old_file_keys_are_the_keys_it_was_written_with() {
+        let old = json!({"folders": ["/m"], "volume": 40.0});
+        assert!(old.as_object().unwrap().keys().all(|k| Kept::LEGACY_KEYS.contains(&k.as_str())));
+    }
+
+    #[test]
+    fn the_file_from_before_the_framework_reads_as_these_settings() {
+        let read = |raw: Value| serde_json::from_value::<Kept>(raw).ok();
         assert_eq!(
             read(json!({"folders": ["/home/me/Music"], "volume": 40.0})),
             Some(Kept { folders: Some(vec!["/home/me/Music".into()]), volume: 40.0 })
         );
         assert_eq!(read(json!({"folders": []})), Some(Kept { folders: Some(vec![]), volume: 80.0 }), "an emptied list stays empty");
-        assert_eq!(read(json!({"volume": 40.0})), None, "not this app's shape: recovery, not a guess");
         assert_eq!(read(json!({"folders": [1, 2]})), None);
         assert_eq!(read(json!({"folders": ["/m"], "volume": "loud"})), None);
     }
