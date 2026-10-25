@@ -43,9 +43,9 @@ pub struct Watch {
 }
 
 impl Watch {
-    /// Watches `settings_file`, the shell's theme and the documents' files in `files`, reporting
-    /// to `notice`. `theme_now` is what the window was started with, so only a change is
-    /// reported.
+    /// Watches `settings_file` (app `name`'s, judged by its mark), the shell's theme and the
+    /// documents' files in `files`, reporting to `notice`. `theme_now` is what the window was
+    /// started with, so only a change is reported.
     pub fn start(
         name: &str,
         settings_file: PathBuf,
@@ -55,10 +55,11 @@ impl Watch {
     ) -> Watch {
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = stop.clone();
+        let app = name.to_string();
         std::thread::Builder::new()
             .name(format!("{name}-watch"))
             .spawn(move || {
-                let mut settings_seen = Fingerprint::of_settings(&settings_file);
+                let mut settings_seen = Fingerprint::of_settings(&settings_file, &app);
                 let shell_settings = theme::settings_path();
                 let mut shell_seen = Fingerprint::of(&shell_settings);
                 let mut theme_seen = theme_now;
@@ -75,7 +76,7 @@ impl Watch {
                         reach_seen = Some(reach_now);
                         notice.seen(Seen::Reach(reach_now));
                     }
-                    let now = Fingerprint::of_settings(&settings_file);
+                    let now = Fingerprint::of_settings(&settings_file, &app);
                     if now != settings_seen {
                         settings_seen = now;
                         notice.seen(Seen::SettingsFile);

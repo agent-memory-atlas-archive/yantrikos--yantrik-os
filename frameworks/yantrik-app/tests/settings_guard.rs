@@ -39,9 +39,7 @@ impl Settings for Prefs {
     const SCHEMA: u32 = 1;
     // An app that wrongly names the service's file as its own: refused all the same.
     const FORMER_FILE: Option<&'static str> = Some("email.json");
-    fn legacy(raw: serde_json::Value) -> Option<serde_json::Value> {
-        Some(raw)
-    }
+    const LEGACY_KEYS: &'static [&'static str] = &["id", "email", "password"];
 }
 
 #[derive(Default)]

@@ -8,12 +8,14 @@
 //! is skipped unread by serde), so a secret in such a file never reaches the model, the log, a
 //! problem record or the window.
 //!
-//! Every read of the file, and every fingerprint of it, goes through [`crate::quiet::read_own_marked`]
-//! (with [`KIND`] as the mark): no link is followed, no FIFO blocks, and only a regular file of at
-//! most [`MAX_BYTES`], with one name (no hard link to another component's file) and the mark in
-//! its first bytes, is read past that probe, from the descriptor that was checked. A race that
-//! unlinks a second name to make another component's file look sole gives up at most the probe. Anything else is fingerprinted by its metadata alone, so
-//! the watcher sees it change without reading a byte of it.
+//! Every read of the file, every fingerprint of it, the sweep of the temps beside it and the
+//! write's look at what it displaced go through [`crate::quiet::read_own_headed`], judged by
+//! [`super::mark`]: no link is followed, no FIFO blocks, and only a regular file of at most
+//! [`MAX_BYTES`], of this user, with one name, that *begins* with the app's mark is read past
+//! its first bytes, from the descriptor that was checked. A race that makes another component's
+//! file look like ours alone gives up at most [`crate::quiet::PROBE`] bytes, and one that holds
+//! the mark's words in a field gives up the same. Anything else is fingerprinted by its metadata
+//! alone, so the watcher sees it change without reading a byte of it.
 
 use std::path::{Path, PathBuf};
 
@@ -21,8 +23,8 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::{Settings, SettingsError};
-use crate::quiet::{self, Looked, Stat};
+use super::{mark, Settings, SettingsError};
+use crate::quiet::{self, Judge, Looked, Stat};
 
 /// The mark's `kind`.
 pub const KIND: &str = "yantrik-app-settings";
@@ -74,11 +76,12 @@ impl Fingerprint {
         Fingerprint::from(quiet::read_own(path, MAX_BYTES).ok()?)
     }
 
-    /// The fingerprint of a settings file this app owns alone: a file without the mark in its
-    /// first bytes is fingerprinted by its metadata, not read, so another component's file at the
-    /// settings path (a hard link raced into place) is still seen to change without being read.
-    pub fn of_settings(path: &Path) -> Option<Fingerprint> {
-        Fingerprint::from(quiet::read_own_marked(path, MAX_BYTES, KIND.as_bytes()).ok()?)
+    /// The fingerprint of `app`'s settings file: a file that does not begin with `app`'s mark is
+    /// fingerprinted by its metadata after a probe of its head, so another component's file at
+    /// the settings path (a hard link raced into place) is still seen to change without being
+    /// read.
+    pub fn of_settings(path: &Path, app: &str) -> Option<Fingerprint> {
+        Fingerprint::from(quiet::read_own_headed(path, MAX_BYTES, &mark::settings(app)).ok()?)
     }
 
     fn from(looked: Looked) -> Option<Fingerprint> {
@@ -147,22 +150,18 @@ pub fn is_marked(bytes: &[u8], app: &str) -> bool {
         .is_ok_and(|m| m.kind.as_deref() == Some(KIND) && m.app.as_deref() == Some(app))
 }
 
-/// The bytes of the marked settings file at `path`: `Ok(None)` when there is nothing there,
+/// The bytes of `app`'s settings file at `path`: `Ok(None)` when there is nothing there,
 /// `Err(NotOurs)` for a link, a hard link to another file, a FIFO, a device, a directory, a file
-/// too large, or a file without the mark in its first [`crate::quiet::PROBE`] bytes, none of
-/// which is read past that probe ([`crate::quiet::read_own_marked`]).
-pub(crate) fn read_bounded(path: &Path) -> Result<Option<Vec<u8>>, SettingsError> {
-    bounded(quiet::read_own_marked(path, MAX_BYTES, KIND.as_bytes()))
+/// too large, another user's, or one that does not begin with `app`'s mark, none of which is read
+/// past a probe of its head.
+pub(crate) fn read_bounded(path: &Path, app: &str) -> Result<Option<Vec<u8>>, SettingsError> {
+    read_judged(path, &mark::settings(app))
 }
 
-/// The bytes at `path` for the migration's look at an old file, which may be a legacy file with
-/// no mark: the same checks but no mark needle ([`crate::quiet::read_own`]).
-pub(crate) fn read_bounded_unmarked(path: &Path) -> Result<Option<Vec<u8>>, SettingsError> {
-    bounded(quiet::read_own(path, MAX_BYTES))
-}
-
-fn bounded(looked: std::io::Result<Looked>) -> Result<Option<Vec<u8>>, SettingsError> {
-    match looked {
+/// [`read_bounded`] with another judge of the head: the migration's look at the old place
+/// ([`mark::former`]).
+pub(crate) fn read_judged(path: &Path, judge: Judge) -> Result<Option<Vec<u8>>, SettingsError> {
+    match quiet::read_own_headed(path, MAX_BYTES, judge) {
         Ok(Looked::Missing) => Ok(None),
         Ok(Looked::Read(bytes)) => Ok(Some(bytes)),
         Ok(Looked::Refused(_)) => Err(SettingsError::NotOurs),
@@ -173,7 +172,7 @@ fn bounded(looked: std::io::Result<Looked>) -> Result<Option<Vec<u8>>, SettingsE
 /// Reads and migrates `app`'s file at `path`, without touching it. A file without `app`'s mark
 /// is `NotOurs`, and nothing of it past the mark is read.
 pub fn read_file<T: Settings>(path: &Path, app: &str) -> Opened<T> {
-    let bytes = match read_bounded(path) {
+    let bytes = match read_bounded(path, app) {
         Ok(Some(bytes)) => bytes,
         Ok(None) => return Opened::Missing,
         Err(e) => return Opened::Recovery(e),
@@ -235,7 +234,7 @@ fn saved_for(bytes: &[u8]) -> Option<String> {
 /// the bytes carry. The answer is a sentence with the path and nothing of the file.
 pub fn may_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let app = saved_for(bytes).ok_or_else(|| refused(path))?;
-    match read_bounded(path) {
+    match read_bounded(path, &app) {
         Ok(None) => Ok(()),
         Ok(Some(existing)) if is_marked(&existing, &app) => Ok(()),
         Ok(Some(_)) | Err(SettingsError::NotOurs) => Err(refused(path)),
@@ -257,7 +256,8 @@ pub fn replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
         private_dir(dir).map_err(|e| e.to_string())?;
     }
     use crate::documents::exchange::{replace_if, Guarded};
-    match replace_if(path, bytes, MAX_BYTES, |theirs| is_marked(theirs, &app)) {
+    let judge = mark::settings(&app);
+    match replace_if(path, bytes, MAX_BYTES, &judge, |theirs| is_marked(theirs, &app)) {
         Ok(Guarded::Placed) => Ok(()),
         Ok(Guarded::Refused) => Err(refused(path)),
         Ok(Guarded::KeptAside(kept)) => {
@@ -270,10 +270,11 @@ pub fn replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
 
 /// Removes the temporaries a killed process left beside `app`'s settings file, once they are
 /// older than `older_than`: `.<file>.<…>.tmp` (the atomic writer's) and `.<file>.<…>.exchange`
-/// (the guarded write's). Only one whose content is known to be the app's own is removed: empty,
-/// marked as `app`'s, or the start of a file this framework rendered for `app`, cut short. An
-/// exchange temp may hold what the exchange displaced, someone else's file, and that is never
-/// removed; neither is anything not read as a regular file of one name.
+/// (the guarded write's). Only one whose content is known to be the app's own is removed: one
+/// that begins with `app`'s mark, or is the start of it cut short, empty included
+/// ([`mark::temp`]). An exchange temp may hold what the exchange displaced, someone else's file,
+/// and that is never removed, nor read past a probe of its head; neither is anything not read as
+/// a regular file of this user with one name.
 pub fn sweep_own_temps(path: &Path, app: &str, older_than: std::time::Duration) {
     let (Some(dir), Some(name)) = (path.parent(), path.file_name().map(|n| n.to_string_lossy().to_string())) else {
         return;
@@ -281,7 +282,7 @@ pub fn sweep_own_temps(path: &Path, app: &str, older_than: std::time::Duration) 
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     let prefix = format!(".{name}.");
     let suffixes = [".tmp".to_string(), format!(".{}", crate::documents::exchange::EXCHANGE_SUFFIX)];
-    let head = rendered_head(app);
+    let judge = mark::temp(app);
     let now = std::time::SystemTime::now();
     for entry in entries.flatten() {
         let file = entry.file_name().to_string_lossy().to_string();
@@ -297,21 +298,12 @@ pub fn sweep_own_temps(path: &Path, app: &str, older_than: std::time::Duration) 
         if !old {
             continue;
         }
-        let ours = match quiet::read_own(&entry.path(), MAX_BYTES) {
-            Ok(Looked::Read(bytes)) => bytes.is_empty() || is_marked(&bytes, app) || head.starts_with(&bytes) || bytes.starts_with(&head),
-            _ => false,
-        };
-        if ours {
+        // Its head is all that decides: the bytes past it are never needed, so a file that
+        // passes is not kept either.
+        if matches!(quiet::read_own_headed(&entry.path(), MAX_BYTES, &judge), Ok(Looked::Read(_))) {
             let _ = std::fs::remove_file(entry.path());
         }
     }
-}
-
-/// How every file this framework renders for `app` begins (`render_raw`: the mark first).
-fn rendered_head(app: &str) -> Vec<u8> {
-    let full = render_raw(app, 0, Value::Null).unwrap_or_default();
-    let cut = full.windows(b"\"schema\"".len()).position(|w| w == b"\"schema\"").unwrap_or(full.len());
-    full[..cut].to_vec()
 }
 
 /// Makes `dir` and any missing parent owner-only (0700): `apps/` and `apps/<id>/` list app

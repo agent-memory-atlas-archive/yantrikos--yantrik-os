@@ -148,3 +148,50 @@ fn a_link_changed_to_point_elsewhere_is_seen_by_its_metadata() {
     let Looked::Refused(second) = read_within(&at, 1024).unwrap() else { panic!("refused") };
     assert_ne!(first, second, "a new link is a new thing at the path");
 }
+
+/// A file the framework wrote is judged by its head before the rest is read: one that does not
+/// begin as the judge wants gives up a step, one the judge never decides on gives up the probe,
+/// and one it calls ours is read whole.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_head_judged_read_gives_up_a_step_of_a_file_that_is_not_ours() {
+    let d = dir("headed");
+    let account = account_file(&d);
+    let brace = |b: &[u8], _: bool| match b.first() {
+        Some(b'{') => Head::Ours,
+        Some(_) => Head::NotOurs,
+        None => Head::More,
+    };
+    let (looked, read) = bytes_read_by(|| read_own_headed(&account, 1 << 20, &brace).unwrap());
+    assert!(matches!(looked, Looked::Refused(_)), "{looked:?}");
+    assert!(read <= STEP + 512, "{read} bytes read");
+    let undecided = d.join("undecided.json");
+    std::fs::write(&undecided, format!("{{{}", " ".repeat(ACCOUNT_SIZE))).unwrap();
+    let never = |_: &[u8], _: bool| Head::More;
+    let (looked, read) = bytes_read_by(|| read_own_headed(&undecided, 1 << 20, &never).unwrap());
+    assert!(matches!(looked, Looked::Refused(_)), "undecided by the probe's end is not ours");
+    assert!(read <= PROBE + 512, "{read} bytes read");
+    assert!(matches!(read_own_headed(&undecided, 1 << 20, &brace).unwrap(), Looked::Read(b) if b.len() == ACCOUNT_SIZE + 1));
+    let empty = d.join("empty.json");
+    std::fs::write(&empty, b"").unwrap();
+    assert!(matches!(read_own_headed(&empty, 1024, &brace).unwrap(), Looked::Refused(_)), "More at the end is not ours");
+}
+
+/// Every file the framework wrote was made by this user: another user's file, readable or not,
+/// is not read as one, by its head or otherwise.
+#[cfg(target_os = "linux")]
+#[test]
+fn another_users_file_is_never_read_as_the_frameworks() {
+    use std::os::unix::fs::MetadataExt as _;
+    let passwd = Path::new("/etc/passwd");
+    // SAFETY: geteuid has no preconditions.
+    let me = unsafe { libc::geteuid() };
+    let Ok(meta) = std::fs::symlink_metadata(passwd) else { return };
+    if !meta.is_file() || meta.uid() == me {
+        return; // Run as root, or a system without a plain /etc/passwd: nothing to tell apart.
+    }
+    let any = |_: &[u8], _: bool| Head::Ours;
+    let (looked, read) = bytes_read_by(|| read_own_headed(passwd, 1 << 20, &any).unwrap());
+    assert!(matches!(looked, Looked::Refused(_)), "{looked:?}");
+    assert!(read < 512, "{read} bytes read");
+}

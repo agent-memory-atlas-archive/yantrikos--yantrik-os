@@ -157,7 +157,8 @@ fn a_save_leaves_the_prefs_file_and_nothing_else() {
         .map(|e| e.file_name().to_string_lossy().to_string())
         .collect();
     beside.sort();
-    assert_eq!(beside, vec!["settings.json".to_string()]);
+    // `imported.json` is the record of the one look at the old place, taken at the first start.
+    assert_eq!(beside, vec!["imported.json".to_string(), "settings.json".to_string()]);
     // And what landed is the whole document, not a truncated one.
     let text = std::fs::read_to_string(paths.config_file()).unwrap();
     let doc: serde_json::Value = serde_json::from_str(&text).unwrap();

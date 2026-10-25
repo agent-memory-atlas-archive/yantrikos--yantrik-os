@@ -360,7 +360,7 @@ fn a_file_that_arrives_after_the_look_is_put_back_not_written_over() {
     assert_eq!(file::may_replace(&path, &ours), Ok(()), "nothing there at the look");
     let account = r#"[{"password":"SENTINEL-PASSWORD-4"}]"#;
     std::fs::write(&path, account).unwrap();
-    let outcome = replace_if(&path, &ours, file::MAX_BYTES, |theirs| file::is_marked(theirs, APP)).unwrap();
+    let outcome = replace_if(&path, &ours, file::MAX_BYTES, &super::mark::settings(APP), |theirs| file::is_marked(theirs, APP)).unwrap();
     assert_eq!(outcome, Guarded::Refused);
     assert_eq!(std::fs::read_to_string(&path).unwrap(), account, "put back, whole");
     let beside: Vec<_> = std::fs::read_dir(&d).unwrap().flatten().map(|e| e.file_name()).collect();
@@ -411,7 +411,7 @@ fn a_second_name_made_and_removed_under_the_read_never_gets_the_file_read() {
     let (mut refused, mut missing, mut worst) = (0u32, 0u32, 0u64);
     for _ in 0..20_000 {
         let (opened, read) = bytes_read_by(|| read_file::<Prefs>(&path, APP));
-        let (_, fingerprint_read) = bytes_read_by(|| Fingerprint::of_settings(&path));
+        let (_, fingerprint_read) = bytes_read_by(|| Fingerprint::of_settings(&path, APP));
         worst = worst.max(read).max(fingerprint_read);
         match opened {
             Opened::Recovery(SettingsError::NotOurs) => refused += 1,
@@ -457,7 +457,7 @@ fn our_file_and_a_hard_link_renamed_in_turn_never_get_the_link_read() {
     let (mut ours, mut worst) = (0u32, 0u64);
     for _ in 0..20_000 {
         let (opened, read) = bytes_read_by(|| read_file::<Prefs>(&path, APP));
-        let (_, fingerprint_read) = bytes_read_by(|| Fingerprint::of_settings(&path));
+        let (_, fingerprint_read) = bytes_read_by(|| Fingerprint::of_settings(&path, APP));
         worst = worst.max(read).max(fingerprint_read);
         if matches!(opened, Opened::Read { .. }) {
             ours += 1;

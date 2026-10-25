@@ -13,24 +13,33 @@
 //! Only the last component is not followed: the directories above are the app's own.
 //!
 //! A hard link is not a link to follow: it is the other file itself, under a second name. So a
-//! file the framework owns alone ([`read_own`]: a settings file, the file a settings import
-//! comes from, a settings write's displaced file) is also refused when it has more than one
-//! name (`st_nlink > 1`); the framework never makes a second name for one of its files (it
-//! writes a temp and renames). A document ([`read_within`]) may be hard-linked by the person:
+//! file the framework owns alone ([`read_own`], [`read_own_headed`]: a settings file, the file
+//! a settings import comes from, a settings write's displaced file) is also refused when it has
+//! more than one name (`st_nlink > 1`); the framework never makes a second name for one of its
+//! files (it writes a temp and renames). A document ([`read_within`]) may be hard-linked by the person:
 //! that is their own business, and a document's semantics stay as they were.
 //!
 //! `st_nlink` belongs to the file, not to the name, and changes whenever any name of it is
-//! added or removed: a second name removed between the open and the `fstat` would make another
+//! added or removed: a second name removed between the open and the `fstat` makes another
 //! component's file look like ours alone (`ln email.json settings.json; rm settings.json`, in a
-//! loop). So [`read_own`] also asks the path, after the `fstat` and before a byte is read
-//! (`lstat`): the name we opened must still be this very file (same device and inode), and the
-//! file must have that one name there too. Then, at an instant after the open, the file's only
-//! name was our path. Our name removed, replaced or given a twin in between is refused, unread.
-//! The same two looks are taken again after the read, and the bytes are dropped if either
-//! changed. What this cannot tell apart, and does not try to: a file whose *other* name was
-//! removed, or renamed away, so that ours is the only one left. Whoever did that has put the
-//! content at our path themselves, which is the same as writing to our path, and nothing the
-//! app does at read time can prevent it.
+//! loop). The path is asked again (`lstat`: still this file, still one name) before and after
+//! the read, but that is no proof either: the count drops before the name goes, so on ext4
+//! `lstat` reports one name for a file whose other name is still there, about one look in three
+//! under that loop (the review of #936 at 14fe65bd, finding F). The name checks are a first
+//! layer, never the guarantee.
+//!
+//! The guarantee is the head ([`read_own_headed`]). Every file the framework reads as its own
+//! (a settings file, the stale temps beside it, the file a settings import comes from, a
+//! settings write's displaced file) is judged by its first bytes before the rest is read. They
+//! are read [`STEP`] bytes at a time and handed to a [`Judge`], up to [`PROBE`] bytes, and only
+//! a file the judge calls [`Head::Ours`] is read past them. Anything else is refused, and the
+//! bytes looked at are dropped: never returned, logged, kept or fingerprinted. So another
+//! component's file at the path, however the name checks were won, gives up at most [`PROBE`]
+//! bytes, and one that does not begin like a file of the framework's gives up one [`STEP`].
+//! What a judge looks for is a structure at a fixed place, not a string anywhere
+//! (`settings::mark`): a value someone sets inside another component's file cannot make that
+//! file begin with it. A head-judged file must also belong to this process's user (`st_uid`):
+//! the framework made it, and a link to another user's readable file is not that.
 
 use std::io::Read as _;
 use std::path::Path;
@@ -106,40 +115,59 @@ fn refused_by_open(_: &std::io::Error) -> bool {
     false
 }
 
-/// How the read is guarded, beyond being a regular file within the limit.
-#[derive(Clone, Copy, Default)]
-pub struct Guard<'a> {
-    /// The file must have one name (no hard link to another component's file), checked on the
-    /// opened descriptor and against the path before and after the read.
-    pub single_name: bool,
-    /// A needle the file's first [`PROBE`] bytes must contain, or it is refused before the rest
-    /// is read. The store's mark (`"yantrik-app-settings"`) sits in the first tens of bytes of
-    /// every file the framework writes, so a file without it gives up at most [`PROBE`] bytes,
-    /// even when a race wins the name checks. `None` reads to the limit once the checks pass.
-    pub needle: Option<&'a [u8]>,
+/// What a file's first bytes, as far as they have been read, say about whose it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Head {
+    /// It begins as a file the framework wrote: the rest may be read.
+    Ours,
+    /// It does not: nothing more of it is read.
+    NotOurs,
+    /// Too few bytes to tell yet.
+    More,
 }
 
-/// How many bytes are read before the needle must have been seen. Large enough for the mark in
-/// a pretty-printed file with leading whitespace, small enough that a refused file gives up
-/// little: well under the 16 KiB a test calls "nothing of it".
-pub const PROBE: u64 = 1024;
+/// Judges a file by its first bytes: `(the bytes so far, whether they are the whole file)`.
+/// [`Head::More`] for the whole file, or once [`PROBE`] bytes are in, counts as
+/// [`Head::NotOurs`].
+pub type Judge<'a> = &'a dyn Fn(&[u8], bool) -> Head;
+
+/// How the read is guarded, beyond being a regular file within the limit.
+#[derive(Clone, Copy, Default)]
+struct Guard<'a> {
+    /// The file must have one name (no hard link to another component's file), checked on the
+    /// opened descriptor and against the path before and after the read. A first layer only.
+    single_name: bool,
+    /// A file the framework wrote: it must belong to this process's user, and its first bytes
+    /// must satisfy the judge before the rest is read. `None` reads to the limit.
+    head: Option<Judge<'a>>,
+}
+
+/// The most bytes read of a file before its judge must have called it ours: room for a mark
+/// after some whitespace, little enough that a refused file gives up next to nothing.
+pub const PROBE: u64 = 256;
+
+/// The head is read this much at a time, so a file that does not even begin like one of the
+/// framework's (`[`, for an account list) gives up one step, not the whole probe.
+pub const STEP: u64 = 64;
 
 /// What is at `path`, read only if it is a regular file of at most `limit` bytes.
 pub fn read_within(path: &Path, limit: u64) -> std::io::Result<Looked> {
     read_checked(path, limit, Guard::default())
 }
 
-/// [`read_within`] for a file the framework owns alone: a file with a second name (a hard link
-/// to someone else's file) is refused too, and none of it is read.
+/// [`read_within`] for a file that should have one name: a file with a second name (a hard
+/// link) is refused too, and none of it is read. Content-blind, for what has no head to judge
+/// (a document's fingerprint, the shell's `settings.yaml`); a file the framework wrote is read
+/// with [`read_own_headed`].
 pub fn read_own(path: &Path, limit: u64) -> std::io::Result<Looked> {
-    read_checked(path, limit, Guard { single_name: true, needle: None })
+    read_checked(path, limit, Guard { single_name: true, head: None })
 }
 
-/// [`read_own`] that also refuses, after at most [`PROBE`] bytes, a file whose start does not
-/// carry `needle`: a file the framework owns alone, recognised by its mark before it is read in
-/// full, so another component's file at the path gives up only its first [`PROBE`] bytes.
-pub fn read_own_marked(path: &Path, limit: u64, needle: &[u8]) -> std::io::Result<Looked> {
-    read_checked(path, limit, Guard { single_name: true, needle: Some(needle) })
+/// [`read_own`] for a file the framework wrote: refused too unless it belongs to this process's
+/// user and `judge` calls its first bytes ours, so anything else at the path gives up at most
+/// [`PROBE`] bytes, whatever a race did to the name checks.
+pub fn read_own_headed(path: &Path, limit: u64, judge: Judge) -> std::io::Result<Looked> {
+    read_checked(path, limit, Guard { single_name: true, head: Some(judge) })
 }
 
 #[cfg(unix)]
@@ -151,6 +179,36 @@ fn names(meta: &std::fs::Metadata) -> u64 {
 #[cfg(not(unix))]
 fn names(_: &std::fs::Metadata) -> u64 {
     1
+}
+
+/// Whether the file belongs to this process's user, who made every file the framework wrote.
+#[cfg(unix)]
+fn owned(meta: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    meta.uid() == unsafe { libc::geteuid() }
+}
+
+#[cfg(not(unix))]
+fn owned(_: &std::fs::Metadata) -> bool {
+    true
+}
+
+/// Reads `file`'s first bytes into `bytes`, a [`STEP`] at a time, until `judge` can tell:
+/// `true` when the rest may be read. A file it cannot call ours within [`PROBE`] bytes, or by
+/// its end, is not.
+fn head_is_ours(file: &std::fs::File, bytes: &mut Vec<u8>, judge: Judge) -> std::io::Result<bool> {
+    loop {
+        let want = STEP.min(PROBE - bytes.len() as u64);
+        let got = file.take(want).read_to_end(bytes)? as u64;
+        let whole = got < want;
+        match judge(bytes, whole) {
+            Head::Ours => return Ok(true),
+            Head::NotOurs => return Ok(false),
+            Head::More if whole || bytes.len() as u64 >= PROBE => return Ok(false),
+            Head::More => {}
+        }
+    }
 }
 
 /// What the path is now, against the file that was opened from it.
@@ -216,7 +274,8 @@ fn read_once(path: &Path, limit: u64, guard: Guard) -> std::io::Result<Result<Lo
         Err(e) => return Err(e),
     };
     let meta = file.metadata()?;
-    if !meta.is_file() || meta.len() > limit || (guard.single_name && names(&meta) != 1) {
+    let foreign = guard.head.is_some() && !owned(&meta);
+    if !meta.is_file() || meta.len() > limit || (guard.single_name && names(&meta) != 1) || foreign {
         return Ok(Ok(Looked::Refused(Stat::of(&meta))));
     }
     // The name asked again, before a byte is read: still this file, and its only name.
@@ -227,14 +286,11 @@ fn read_once(path: &Path, limit: u64, guard: Guard) -> std::io::Result<Result<Lo
             Name::Moved => return Ok(Err(Stat::of(&meta))),
         }
     }
-    // The mark must be in the first PROBE bytes, or the rest is never read: a file that is not
-    // the framework's gives up at most PROBE bytes, race won or not.
+    // The head is judged before the rest is read: a file that is not the framework's gives up
+    // at most PROBE bytes, race won or not, and they are dropped here.
     let mut bytes = Vec::with_capacity((meta.len() as usize).min(PROBE as usize));
-    if let Some(needle) = guard.needle {
-        (&file).take(PROBE).read_to_end(&mut bytes)?;
-        if find(&bytes, needle).is_none() {
-            // Not the mark in the first PROBE bytes; if the whole file was shorter than that, it
-            // simply is not ours, and if it was longer, the rest is never touched.
+    if let Some(judge) = guard.head {
+        if !head_is_ours(&file, &mut bytes, judge)? {
             return Ok(Ok(Looked::Refused(Stat::of(&meta))));
         }
     }
@@ -257,14 +313,6 @@ fn read_once(path: &Path, limit: u64, guard: Guard) -> std::io::Result<Result<Lo
         }
     }
     Ok(Ok(Looked::Read(bytes)))
-}
-
-/// Where `needle` first appears in `haystack`, or `None`.
-fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() {
-        return Some(0);
-    }
-    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 #[cfg(test)]

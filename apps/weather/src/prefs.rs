@@ -78,14 +78,13 @@ impl Prefs {
 
 impl Settings for Prefs {
     const SCHEMA: u32 = 1;
+    /// Looked at once per install, at the first start of a version with the settings folder;
+    /// once every supported install has had that start (a stable release after the one that
+    /// ships it), this and `LEGACY_KEYS` can go, and the old place is never looked at again.
     const FORMER_FILE: Option<&'static str> = Some("weather.json");
 
     /// The file as it was before the framework: the three fields, no envelope.
-    fn legacy(raw: Value) -> Option<Value> {
-        let object = raw.as_object()?;
-        let known = ["fahrenheit", "active", "locations"];
-        object.keys().all(|k| known.contains(&k.as_str())).then_some(raw)
-    }
+    const LEGACY_KEYS: &'static [&'static str] = &["fahrenheit", "active", "locations"];
 
     fn migrate(_from: u32, raw: Value) -> Result<Value, SettingsError> {
         Ok(raw)
@@ -118,10 +117,9 @@ mod tests {
     }
 
     #[test]
-    fn the_old_bare_file_is_recognised() {
+    fn the_old_bare_file_has_only_the_legacy_keys_and_reads_as_these_settings() {
         let bare = serde_json::json!({ "fahrenheit": true, "active": 0, "locations": [] });
-        assert!(Prefs::legacy(bare).is_some());
-        assert!(Prefs::legacy(serde_json::json!({ "something": "else" })).is_none());
-        assert!(Prefs::legacy(serde_json::json!(3)).is_none());
+        assert!(bare.as_object().unwrap().keys().all(|k| Prefs::LEGACY_KEYS.contains(&k.as_str())));
+        assert!(serde_json::from_value::<Prefs>(bare).is_ok());
     }
 }

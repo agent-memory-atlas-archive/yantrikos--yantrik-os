@@ -114,13 +114,21 @@ pub(crate) enum Guarded {
 pub(crate) const EXCHANGE_SUFFIX: &str = "exchange";
 
 /// Replaces `path` with `bytes` only over nothing, or over a regular file of one name within
-/// `limit` whose bytes `accept` takes ([`crate::quiet::read_own`]). The check is made on what
-/// the exchange actually displaced, not on a look taken before it, so nothing that arrives in
-/// between is replaced unseen. Nothing is removed unless it is known: the displaced file once
+/// `limit` whose head `judge` calls the caller's and whose bytes `accept` takes
+/// ([`crate::quiet::read_own_headed`]: anything else gives up at most a probe of its head, and
+/// `bytes` must satisfy `judge` too, as they are read back the same way). The check is made on
+/// what the exchange actually displaced, not on a look taken before it, so nothing that arrives
+/// in between is replaced unseen. Nothing is removed unless it is known: the displaced file once
 /// accepted, the app's own bytes once they are back under the temp name. Anything else is kept
 /// aside under a name of its own. Where the filesystem has no exchange, a plain rename is used;
 /// the caller's own look before is then the only check (the limit `Placed` cannot remove there).
-pub(crate) fn replace_if(path: &Path, bytes: &[u8], limit: u64, accept: impl Fn(&[u8]) -> bool) -> std::io::Result<Guarded> {
+pub(crate) fn replace_if(
+    path: &Path,
+    bytes: &[u8],
+    limit: u64,
+    judge: quiet::Judge,
+    accept: impl Fn(&[u8]) -> bool,
+) -> std::io::Result<Guarded> {
     let (temp, mut file) = RealDisk::create_temp_as(path, false, EXCHANGE_SUFFIX)?;
     let written = file.write_all(bytes).and_then(|()| file.sync_all());
     drop(file);
@@ -137,7 +145,7 @@ pub(crate) fn replace_if(path: &Path, bytes: &[u8], limit: u64, accept: impl Fn(
     };
     let outcome = match placed {
         Placed::Created | Placed::Renamed => Guarded::Placed,
-        Placed::Exchanged => match quiet::read_own(&temp, limit) {
+        Placed::Exchanged => match quiet::read_own_headed(&temp, limit, judge) {
             Ok(Looked::Read(theirs)) if accept(&theirs) => {
                 let _ = std::fs::remove_file(&temp);
                 Guarded::Placed
@@ -147,7 +155,7 @@ pub(crate) fn replace_if(path: &Path, bytes: &[u8], limit: u64, accept: impl Fn(
                 Ok(()) => {
                     // What came back under the temp name is removed only if it is ours: a third
                     // writer may have put its own file at the path in that instant.
-                    match quiet::read_own(&temp, limit) {
+                    match quiet::read_own_headed(&temp, limit, judge) {
                         Ok(Looked::Read(back)) if back == bytes => {
                             let _ = std::fs::remove_file(&temp);
                         }
