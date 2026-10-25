@@ -954,9 +954,10 @@ mod path_root_tests {
         std::fs::create_dir_all(root.join("Documents")).unwrap();
         std::fs::create_dir_all(root.join(".local/share/yantrik")).unwrap();
         let root = root.canonicalize().unwrap();
-        std::fs::write(root.join(".local/share/yantrik/store.json"), "x").unwrap();
+        let store = root.join(".local/share/yantrik").join("store.json");
+        std::fs::write(&store, "x").unwrap();
         std::fs::write(root.join("Documents/plain.txt"), "x").unwrap();
-        std::fs::hard_link(root.join(".local/share/yantrik/store.json"), root.join("Documents/hl.json")).unwrap();
+        std::fs::hard_link(&store, root.join("Documents/hl.json")).unwrap();
         let roots = [root.clone()];
         let err = resolves_within(&root.join("Documents/hl.json"), &roots).unwrap_err();
         assert!(err.contains("hard link"), "{err}");
