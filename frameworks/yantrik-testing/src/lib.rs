@@ -39,6 +39,7 @@ use yantrik_app::window::Window;
 use yantrik_ipc_transport::gate::{Authority, Mode};
 use yantrik_surface::{AgentTokenScope, CallerScope, Later, LaterScope, LocalRegistry};
 
+mod display_clock;
 mod frames;
 pub mod headless;
 mod shared;
