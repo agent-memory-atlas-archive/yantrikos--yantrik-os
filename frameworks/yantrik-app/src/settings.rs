@@ -24,6 +24,9 @@ use serde_json::Value;
 
 pub mod file;
 pub mod former;
+mod mark;
+#[cfg(all(test, target_os = "linux"))]
+mod probe_tests;
 #[cfg(test)]
 mod tests;
 
@@ -48,13 +51,12 @@ pub trait Settings:
         Ok(raw)
     }
 
-    /// The `FORMER_FILE` as it was before the framework: no envelope, the app's own shape.
-    /// `Some` is the settings as this schema reads them, brought across in the envelope. The
-    /// default recognises nothing, so only the framework's own envelope is brought across.
-    fn legacy(raw: Value) -> Option<Value> {
-        let _ = raw;
-        None
-    }
+    /// The keys of the `FORMER_FILE` as it was before the framework: no envelope, an object of
+    /// the app's own fields, read as this schema reads them. Such a file is looked at past its
+    /// first bytes only if its first key is one of these, and taken only if every key is one of
+    /// these and the object reads as `Self` (`former`). The default, none, recognises no such
+    /// shape, so only the framework's own envelope is brought across.
+    const LEGACY_KEYS: &'static [&'static str] = &[];
 }
 
 /// An app with nothing to remember: `type Settings = ();`.
@@ -113,8 +115,9 @@ impl<T: Settings> Store<T> {
     /// Opens `app`'s store at `path`. Never fails: a file that cannot be used leaves the store
     /// in recovery, which `health` says.
     pub fn open(path: PathBuf, app: &str) -> Store<T> {
-        // A temporary a killed process left beside the file is swept; nothing else would.
-        yantrik_foundation::json_store::sweep_stale_temps(&path, std::time::Duration::from_secs(600));
+        // A temporary a killed process left beside the file is swept, if it is the app's own;
+        // nothing else would. Never one that may hold a displaced file of someone else's.
+        file::sweep_own_temps(&path, app, std::time::Duration::from_secs(600));
         let (committed, health, rewrite) = match read_file::<T>(&path, app) {
             Opened::Read { value, rewrite } => (value, Health::Fine, rewrite),
             Opened::Missing => (T::default(), Health::Fine, false),
@@ -125,7 +128,7 @@ impl<T: Settings> Store<T> {
                 (T::default(), Health::Recovery(e), false)
             }
         };
-        let fingerprint = Fingerprint::of(&path);
+        let fingerprint = Fingerprint::of_settings(&path, app);
         let mut store = Store {
             path,
             app: app.to_string(),
@@ -204,7 +207,7 @@ impl<T: Settings> Store<T> {
             }
             // What was written is known without reading the file back, so an outside edit that
             // lands between the write and this is not mistaken for the app's own.
-            self.fingerprint = written.or_else(|| Fingerprint::of(&self.path));
+            self.fingerprint = written.or_else(|| Fingerprint::of_settings(&self.path, &self.app));
             if self.in_recovery() {
                 tracing::info!(app = %self.app, "a write of this app's own landed over the unusable settings file; recovery ends");
                 self.health = Health::Fine;
@@ -238,12 +241,12 @@ impl<T: Settings> Store<T> {
 
     /// Whether the file changed under this app since it last read or wrote it.
     pub fn changed_outside(&self) -> bool {
-        Fingerprint::of(&self.path) != self.fingerprint
+        Fingerprint::of_settings(&self.path, &self.app) != self.fingerprint
     }
 
     /// Re-reads a file that changed outside this app.
     pub fn reload(&mut self) -> Reloaded<T> {
-        let now = Fingerprint::of(&self.path);
+        let now = Fingerprint::of_settings(&self.path, &self.app);
         if now == self.fingerprint {
             return Reloaded::Unchanged;
         }

@@ -9,22 +9,30 @@
 //! look at, and a name that is another component's file is refused whatever the app says
 //! (`Paths::former_config_file`).
 //!
-//! The old file is read once, and only taken if it is one of two shapes: the framework's own
-//! envelope (`schema` and `settings`, as it was written before the mark, or with this app's
-//! mark), or the app's shape from before the framework (`Settings::legacy`). It is copied to the
-//! new place in the marked envelope and left exactly where it was, as the backup: never
-//! rewritten, never removed. A file of any other shape is not this app's: it is not taken, its
-//! path alone is logged, and it is not looked at again. Either way `imported.json` beside the new
-//! file records that the look was taken, so a person who later removes their settings gets the
-//! defaults, not the old file a second time.
+//! The old place is in the shared folder, where anything with the person's file tools can put a
+//! link or a file, so the old file is judged by its first bytes before the rest is read
+//! (`mark::former`): it must begin as one of the shapes the app wrote there, the framework's own
+//! envelope (`{"schema": n, "settings": {`, as it was written before the mark, or with this app's
+//! mark) or the app's object from before the framework, whose first key is one of
+//! `Settings::LEGACY_KEYS`. Anything else, another component's file however it got there, gives
+//! up at most a probe of its head, which is dropped. Only then is the whole shape checked
+//! (`recognise`), and only a file of that shape is taken: copied to the new place in the marked
+//! envelope and left exactly where it was, as the backup, never rewritten, never removed. A file
+//! of any other shape is not this app's: it is not taken, and its path alone is logged.
+//!
+//! The look is taken once per install, whatever it finds: `imported.json` beside the new file
+//! records it, even when there was nothing at the old place, so a person who later removes their
+//! settings gets the defaults, not the old file a second time, and a file put at the old place
+//! later is never looked at. An old file that could not be read (an error, not a refusal) is
+//! looked at again at the next start.
 
 use std::path::Path;
 
 use serde_json::Value;
 use yantrik_foundation::json_store::write_atomically;
 
-use super::file::{private_dir, read_bounded, render_raw, KIND};
-use super::{Settings, SettingsError};
+use super::file::{private_dir, read_judged, render_raw, KIND};
+use super::{mark, Settings, SettingsError};
 use crate::paths::Paths;
 
 /// What came of the look at the old place.
@@ -52,15 +60,18 @@ pub fn import<T: Settings>(paths: &Paths) -> Imported {
         return Imported::Nothing;
     };
     let new = paths.config_file();
-    let record = paths.imported_record();
-    if exists(new) || exists(&record) {
+    if exists(new) || exists(&paths.imported_record()) {
         return Imported::Nothing;
     }
     // Read as the settings file is (`crate::quiet`): a link, a FIFO, a device or a file over the
-    // limit is not opened past its metadata, and nothing of it is parsed.
-    let bytes = match read_bounded(&former) {
+    // limit is not opened past its metadata, a file that does not begin as one of the app's old
+    // shapes is not read past a probe of its head, and nothing of either is parsed.
+    let bytes = match read_judged(&former, &mark::former(paths.id(), T::LEGACY_KEYS)) {
         Ok(Some(bytes)) => Some(bytes),
-        Ok(None) => return Imported::NoFile,
+        Ok(None) => {
+            record(paths, &former, false);
+            return Imported::NoFile;
+        }
         Err(SettingsError::NotOurs) => None,
         Err(e) => {
             // Unreadable now is not a decision; the look is taken again at the next start.
@@ -89,12 +100,18 @@ pub fn import<T: Settings>(paths: &Paths) -> Imported {
             Imported::NotOurs
         }
     };
-    let said = serde_json::json!({ "from": former.display().to_string(), "taken": outcome == Imported::Copied });
+    record(paths, &former, outcome == Imported::Copied);
+    outcome
+}
+
+/// Writes `imported.json`: the look at `former` was taken, and whether anything was taken.
+fn record(paths: &Paths, former: &Path, taken: bool) {
+    let record = paths.imported_record();
+    let said = serde_json::json!({ "from": former.display().to_string(), "taken": taken });
     let recorded = record.parent().map_or(Ok(()), private_dir).and_then(|()| write_atomically(&record, said.to_string().as_bytes()));
     if let Err(e) = recorded {
         tracing::warn!(app = paths.id(), file = %record.display(), error = %e, "the look at the old settings could not be recorded");
     }
-    outcome
 }
 
 fn exists(path: &Path) -> bool {
@@ -117,9 +134,13 @@ fn recognise<T: Settings>(bytes: &[u8], app: &str) -> Option<(u32, Value)> {
         let schema = u32::try_from(object.get("schema")?.as_u64()?).ok()?;
         return Some((schema, object.get("settings")?.clone()));
     }
-    let value = T::legacy(raw)?;
-    serde_json::from_value::<T>(value.clone()).ok()?;
-    Some((T::SCHEMA, value))
+    // The app's object from before the framework: its own fields only, read as this schema.
+    let own = !T::LEGACY_KEYS.is_empty() && object.keys().all(|k| T::LEGACY_KEYS.contains(&k.as_str()));
+    if !own {
+        return None;
+    }
+    serde_json::from_value::<T>(raw.clone()).ok()?;
+    Some((T::SCHEMA, raw))
 }
 
 #[cfg(test)]
@@ -135,9 +156,7 @@ mod tests {
     impl Settings for Old {
         const SCHEMA: u32 = 2;
         const FORMER_FILE: Option<&'static str> = Some("old.json");
-        fn legacy(raw: Value) -> Option<Value> {
-            raw.get("n").is_some().then_some(raw)
-        }
+        const LEGACY_KEYS: &'static [&'static str] = &["n"];
     }
 
     /// Names email-service's account file as its own: refused, whatever it says.
@@ -148,9 +167,7 @@ mod tests {
     impl Settings for Greedy {
         const SCHEMA: u32 = 1;
         const FORMER_FILE: Option<&'static str> = Some("email.json");
-        fn legacy(raw: Value) -> Option<Value> {
-            Some(raw)
-        }
+        const LEGACY_KEYS: &'static [&'static str] = &["id", "email", "password"];
     }
 
     #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
@@ -248,9 +265,11 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_link_or_a_fifo_at_the_old_place_is_not_followed_read_or_waited_on() {
-        use crate::quiet::tests::{bytes_read_by, fifo, within, BIG, NOTHING_OF_IT};
+        use crate::quiet::tests::{account_file, bytes_read_by, fifo, within, BIG, NOTHING_OF_IT};
         use std::time::Duration;
-        let makers: [fn(&Path, &Path); 3] = [
+        let makers: [fn(&Path, &Path); 4] = [
+            // A hard link to email-service's 0600 file, under the limit: a second name, not read.
+            |at: &Path, d: &Path| std::fs::hard_link(account_file(&d.join("..")), at).unwrap(),
             |at: &Path, d: &Path| {
                 let secret = d.join("email.json");
                 std::fs::write(&secret, format!("[{}]", "SENTINEL,".repeat(BIG / 9))).unwrap();
@@ -274,6 +293,19 @@ mod tests {
             assert!(record.contains("\"taken\":false"), "{record}");
             assert_eq!(import::<Old>(&paths), Imported::Nothing, "case {n}: not looked at again");
         }
+    }
+
+    /// Nothing at the old place is recorded too: a file put there later, by anyone, is never
+    /// looked at, so the look is one try per install, not one per start.
+    #[test]
+    fn the_look_is_taken_once_even_when_nothing_was_there() {
+        let paths = fresh("later", "old");
+        assert_eq!(import::<Old>(&paths), Imported::NoFile);
+        let record = std::fs::read_to_string(paths.imported_record()).unwrap();
+        assert!(record.contains("\"taken\":false"), "{record}");
+        std::fs::write(shared(&paths, "old.json"), r#"{"n": 4}"#).unwrap();
+        assert_eq!(import::<Old>(&paths), Imported::Nothing, "not looked at again");
+        assert!(!paths.config_file().exists());
     }
 
     #[test]

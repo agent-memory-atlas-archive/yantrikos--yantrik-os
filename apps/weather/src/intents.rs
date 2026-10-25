@@ -14,6 +14,10 @@ use crate::Weather;
 
 /// What became of a change to the prefs, for an intent's answer: where it is kept, or that it
 /// was not, and why, in the window's own words. Never a file nothing was written to.
+///
+/// `kept: true` is said when the change is handed to the ordered write, before the write lands
+/// (the answer does not wait on the disk). A write that then fails reaches the window as its
+/// notice, and every answer after it says `kept: false` until a save lands.
 fn kept(m: &Model) -> serde_json::Map<String, serde_json::Value> {
     let mut said = serde_json::Map::new();
     match &m.not_kept {

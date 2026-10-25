@@ -592,7 +592,8 @@ mod tests {
         let app = TestApp::<Hello>::start();
         let file = app.paths().config_file().to_path_buf();
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-        std::fs::write(&file, r#"{"schema":1,"settings":{"step":3}}"#).unwrap();
+        std::fs::write(&file, r#"{"kind":"yantrik-app-settings","app":"hello-app","schema":1,"settings":{"step":3}}"#)
+            .unwrap();
         app.seen(Seen::SettingsFile);
         assert_eq!(app.model(|m| m.prefs.step), 3);
         assert_eq!(app.committed_settings(), Prefs { step: 3 });
@@ -603,13 +604,16 @@ mod tests {
         let paths = Paths::temporary(Hello::ID);
         let file = paths.config_file().to_path_buf();
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-        std::fs::write(&file, "{not json").unwrap();
+        // Marked as this app's but not whole JSON: the framework treats a file it cannot read as
+        // its own as not one it wrote, holds it, and runs on the defaults.
+        let unusable = r#"{"kind":"yantrik-app-settings","app":"hello-app", not json"#;
+        std::fs::write(&file, unusable).unwrap();
         let app = TestApp::<Hello>::start_at(paths, Vec::new());
         assert_eq!(app.model(|m| m.prefs.step), 1, "the defaults");
-        assert!(app.model(|m| m.note.clone()).unwrap().contains("not in a shape"));
+        assert!(app.model(|m| m.note.clone()).unwrap().contains("not one this app wrote"));
         app.run(Command::SetStep(9));
         app.run_writes();
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), "{not json", "held, not overwritten");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), unusable, "held, not overwritten");
         assert_eq!(app.model(|m| m.prefs.step), 9, "the app runs on the new value regardless");
         assert!(app.model(|m| m.note.clone()).unwrap().contains("kept until the file is replaced"));
     }

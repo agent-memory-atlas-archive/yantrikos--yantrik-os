@@ -173,18 +173,31 @@ fn every_name_the_rest_of_the_system_keeps_is_in_the_table() {
         (".local/share/yantrik/", Some(Root::Data)),
         (".local/state/yantrik/", Some(Root::State)),
         (".cache/yantrik/", Some(Root::Cache)),
-        ("join(\"yantrik\").join(\"", None),
+        // Shell: `${XDG_CONFIG_HOME:-$HOME/.config}/yantrik/<name>` and the like.
+        (".config}/yantrik/", Some(Root::Config)),
+        (".local/share}/yantrik/", Some(Root::Data)),
+        (".local/state}/yantrik/", Some(Root::State)),
+        (".cache}/yantrik/", Some(Root::Cache)),
+        ("XDG_CONFIG_HOME}/yantrik/", Some(Root::Config)),
+        ("XDG_DATA_HOME}/yantrik/", Some(Root::Data)),
+        ("XDG_STATE_HOME}/yantrik/", Some(Root::State)),
+        ("XDG_CACHE_HOME}/yantrik/", Some(Root::Cache)),
+        // Rust: `join("yantrik").join("<name>")`, or `.join(NAME)` with `const NAME: &str = "…"`.
+        ("join(\"yantrik\").join(", None),
     ];
     let mut missing = Vec::new();
     for path in &sources {
         let Ok(text) = std::fs::read_to_string(path) else { continue };
         let squeezed: String = text.chars().filter(|c| !c.is_whitespace()).collect();
         for (marker, root) in roots {
-            let haystack = if root.is_none() { &squeezed } else { &text };
+            let haystack = if marker.contains('/') && !marker.contains('}') { &text } else { &squeezed };
             for (at, _) in haystack.match_indices(marker) {
                 let rest = &haystack[at + marker.len()..];
-                let name: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')).collect();
-                let name = name.trim_end_matches('.');
+                let Some(name) = name_at(rest, marker, &squeezed) else {
+                    missing.push(format!("a name not resolved after `{marker}` ({})", path.display()));
+                    continue;
+                };
+                let name = name.as_str();
                 if name.is_empty() {
                     continue;
                 }
@@ -200,6 +213,28 @@ fn every_name_the_rest_of_the_system_keeps_is_in_the_table() {
     assert!(missing.is_empty(), "kept under a yantrik root, not in paths/others.rs: {missing:#?}");
 }
 
+/// The name a path is built with: the characters after a `…/yantrik/` marker, or after
+/// `join("yantrik").join(` the string literal, or the value of the `const` it names in the same
+/// file. `None` for a `join(` whose argument is neither (a name the scan cannot see).
+fn name_at(rest: &str, marker: &str, squeezed: &str) -> Option<String> {
+    let word = |s: &str| -> String { s.chars().take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')).collect() };
+    if !marker.ends_with("join(") {
+        return Some(word(rest).trim_end_matches('.').to_string());
+    }
+    if let Some(quoted) = rest.strip_prefix('"') {
+        return Some(word(quoted).trim_end_matches('.').to_string());
+    }
+    let ident: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+    if ident.is_empty() || !rest[ident.len()..].starts_with(')') || !ident.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_') {
+        // A variable or an expression: a run-time name, not one this scan can list.
+        return Some(String::new());
+    }
+    ["&str=\"", "&'staticstr=\""].iter().find_map(|ty| {
+        let decl = format!("const{ident}:{ty}");
+        squeezed.find(&decl).map(|at| word(&squeezed[at + decl.len()..]).trim_end_matches('.').to_string())
+    })
+}
+
 fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
@@ -209,7 +244,7 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
             if !matches!(name.as_str(), "target" | "node_modules" | ".git" | "__pycache__") {
                 collect(&path, out);
             }
-        } else if ["rs", "sh", "py", "yaml", "yml", "toml", "service", "desktop"]
+        } else if ["rs", "sh", "py", "yaml", "yml", "toml", "service", "desktop", "ts", "js", "conf"]
             .iter()
             .any(|ext| path.extension().is_some_and(|e| e == *ext))
             || path.extension().is_none()
