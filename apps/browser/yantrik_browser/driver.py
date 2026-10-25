@@ -265,8 +265,10 @@ class Driver:
             raise Refused("find needs words to look for")
         with self.held():
             t = self._tab(tab)
-            found = self._marked({"elements": self._run(t, "find", query, 40)})["elements"]
-            return {"query": query, "found": found, "url": t.url, "tab": short(t.id)}
+            got = self._run(t, "search", query, 40, True)
+            found = self._marked({"elements": got["found"]})["elements"]
+            return {"query": query, "found": found, "total": got["total"], "text": got["text"],
+                    "loading": got["loading"], "url": t.url, "tab": short(t.id)}
 
     def text(self, tab=None, limit=TEXT_LIMIT):
         with self.held():

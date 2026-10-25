@@ -180,6 +180,51 @@ class Live(unittest.TestCase):
         self.assertEqual(len(found), 1)
         self.assertFalse(found[0]["in_view"])
 
+    def open_fold(self):
+        out = self.d.go(self.site + "/pages/fold.html")
+        self.assertTrue(out.get("navigated"), out)
+
+    def test_find_places_a_match_below_the_fold(self):
+        self.open_fold()
+        got = self.d.find("More information")
+        self.assertEqual(len(got["found"]), 1, got)
+        self.assertEqual(got["total"], 1)
+        hit = got["found"][0]
+        self.assertFalse(hit["in_view"])
+        self.assertEqual(hit["place"]["dir"], "below")
+        self.assertGreaterEqual(hit["place"]["screens"], 2)
+
+    def test_find_leaves_a_match_in_view_unplaced(self):
+        self.open_fold()
+        hit = self.d.find("Example Domain")["found"][0]
+        self.assertTrue(hit["in_view"])
+        self.assertIsNone(hit["place"])
+
+    def test_find_reaches_words_that_only_the_text_holds(self):
+        self.open_fold()
+        got = self.d.find("quarterly ledger")
+        self.assertEqual(got["found"], [])
+        self.assertEqual(len(got["text"]), 1, got)
+        self.assertEqual(got["text"][0]["place"]["dir"], "below")
+
+    def test_find_with_no_match_anywhere_is_empty(self):
+        self.open_fold()
+        got = self.d.find("no such words")
+        self.assertEqual((got["found"], got["text"], got["total"]), ([], [], 0))
+
+    def test_find_counts_every_match_and_lists_a_bounded_few(self):
+        self.open_fold()
+        got = self.d.find("e")
+        self.assertLessEqual(len(got["found"]), 40)
+        self.assertGreaterEqual(got["total"], len(got["found"]))
+
+    def test_a_click_on_a_match_below_the_fold_scrolls_to_it_first(self):
+        self.open_fold()
+        ref = self.d.find("More information")["found"][0]["ref"]
+        out = self.d.click(ref)
+        self.assertIn("clicked link", out["did"], out)
+        self.assertIn("/info", out.get("url", ""), out)
+
     def test_states_are_read(self):
         self.open_shop()
         page = self.d.read(all=True)

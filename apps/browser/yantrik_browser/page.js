@@ -7,7 +7,8 @@
 //                      that say where they are — through open shadow roots and same-origin
 //                      frames, each with a ref that stays the same for as long as the element
 //                      exists, its role, name, state and box.
-//   find(q)            where the thing wanted is, anywhere on the page.
+//   find(q)            where the thing wanted is, anywhere on the page; search(q) also says
+//                      how many there are, and where the words are in the text.
 //   text(limit)        what the page says, as a reader sees it.
 //   target(ref)        scroll one element into view and say where to press it — or what covers it.
 //   focus/clear/pick   the small moves typing and choosing need.
@@ -372,9 +373,40 @@
     };
   }
 
-  function find(query, limit) {
+  // Where a box is against the viewport: null in view, else which way and about how many screens.
+  const placeOf = (b) => {
+    if (inView(b)) return null;
+    const vh = window.innerHeight || 1;
+    if (b[1] >= vh) return { dir: 'below', screens: Math.max(1, Math.round(b[1] / vh)) };
+    if (b[1] + b[3] <= 0) return { dir: 'above', screens: Math.max(1, Math.round(-b[1] / vh)) };
+    return { dir: 'aside', screens: 1 };
+  };
+
+  // The words in the page's own text, for when no control holds them: up to five, each placed.
+  function textHits(q) {
+    const hits = [];
+    const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT);
+    for (let n = walker.nextNode(); n && hits.length < 5; n = walker.nextNode()) {
+      const at = n.data.toLowerCase().indexOf(q);
+      const host = n.parentElement;
+      if (at < 0 || !host || /^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE)$/.test(host.tagName) || hidden(host, window)) continue;
+      const range = document.createRange();
+      range.setStart(n, at);
+      range.setEnd(n, at + q.length);
+      const r = range.getBoundingClientRect();
+      const box = [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)];
+      hits.push({ text: clean(n.data, 100), in_view: inView(box), place: placeOf(box) });
+    }
+    return hits;
+  }
+
+  // Every match on the whole document, not only the viewport. `count` keeps going past `limit`
+  // so the total is true; the wait loop asks for one and stops there.
+  function search(query, limit, count) {
     const q = (query || '').toLowerCase();
-    const out = [];
+    const cap = limit || 40;
+    const found = [];
+    let total = 0;
     for (const [el, frame] of walk(document.documentElement, TOP)) {
       let role = roleOf(el);
       let interactive = INTERACTIVE_ROLES.has(role);
@@ -386,11 +418,19 @@
       const e = entry(el, frame, role);
       const hay = (e.name + ' ' + (e.value || '') + ' ' + (e.href || '')).toLowerCase();
       if (!hay.includes(q)) continue;
-      e.in_view = inView(e.box);
-      out.push(e);
-      if (out.length >= (limit || 40)) break;
+      total++;
+      if (found.length < cap) {
+        e.in_view = inView(e.box);
+        e.place = placeOf(e.box);
+        found.push(e);
+      } else if (!count) break;
     }
-    return out;
+    return { found, total, text: found.length || !q ? [] : textHits(q),
+             loading: document.readyState !== 'complete' };
+  }
+
+  function find(query, limit) {
+    return search(query, limit, false).found;
   }
 
   function text(limit) {
@@ -620,7 +660,7 @@
     return out;
   }
 
-  globalThis.__yb = { __yantrik: true, snapshot, find, text, target, focus, pressables, pick,
+  globalThis.__yb = { __yantrik: true, snapshot, find, search, text, target, focus, pressables, pick,
                       scrollBy, watch, changes, where, media };
   return 'installed';
 })()

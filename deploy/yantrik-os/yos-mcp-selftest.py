@@ -1449,6 +1449,31 @@ with tempfile.TemporaryDirectory() as d:
     module._YOS_MODULE[:] = [_real]
     text, is_error = module.run_tool(module.BY_NAME["web_click"], {"ref": 12})
     module._YOS_MODULE[:] = saved_module
+    # web_find answers for the whole page and places each match (#955). The text is the real
+    # renderer's, from what the browser's `find` returns.
+    link = {"ref": "e2", "role": "link", "name": "More information...", "href": "https://iana.org/x"}
+    below = {"query": "More information", "url": "https://example.com/", "total": 1, "text": [],
+             "found": [dict(link, in_view=False, place={"dir": "below", "screens": 2})]}
+    shown = _real.render_browser(below)
+    check("web_find says a match below the fold is below, how far, and what to do",
+          '[e2] link "More information..."' in shown and "below the visible part (about 2 screens down); "
+          "scroll or click it" in shown and "nothing on this page" not in shown, shown)
+    shown = _real.render_browser(dict(below, found=[dict(link, in_view=False, place={"dir": "above", "screens": 1})]))
+    check("and a match above says above, about 1 screen up", "above the visible part (about 1 screen up)" in shown, shown)
+    shown = _real.render_browser(dict(below, found=[dict(link, in_view=True, place=None)]))
+    check("a match in view reads as it always did, with no position note",
+          '[e2] link "More information..." → ' in shown and "visible part" not in shown, shown)
+    shown = _real.render_browser(dict(below, total=90))
+    check("a long list says how many there are in all", "(90 matches; the first 1 are listed" in shown, shown)
+    shown = _real.render_browser({"query": "ledger", "url": "https://example.com/", "found": [], "total": 0,
+                                  "text": [{"text": "the quarterly ledger", "in_view": False,
+                                            "place": {"dir": "below", "screens": 3}}]})
+    check("words only the text holds are not reported as nothing, and are placed",
+          "nothing on this page" not in shown and "its text does" in shown
+          and "about 3 screens down); scroll to it" in shown, shown)
+    shown = _real.render_browser({"query": "zzz", "url": "https://example.com/", "found": [], "total": 0, "text": []})
+    check("only a match nowhere on the page is reported as none",
+          shown.startswith("nothing on this page matches") and "anywhere in the page" in shown, shown)
     s = read(state)
     check("web_click is an act on the browser, with the ref as the browser writes it",
           not is_error and ["click", {"ref": "e12"}] in s.get("web", []), (text, s.get("web")))
