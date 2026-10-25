@@ -112,20 +112,13 @@ pub const PROTECTED: &[&str] = &[
     ".config/yantrik-mind.env",
 ];
 
-/// What `.config/...` in [`PROTECTED`] names, found under `$XDG_CONFIG_HOME` instead.
-const CONFIG_PLACES: &[&str] = &[
-    "autostart",
-    "systemd",
-    "environment.d",
-    "labwc",
-    "yantrik",
-    "mimeapps.list",
-    "yantrik-mind",
-    "yantrik-mind.env",
-];
-
-/// What `.local/share/...` in [`PROTECTED`] names, found under `$XDG_DATA_HOME` instead.
-const DATA_PLACES: &[&str] = &["applications", "yantrik", "yantrik-mind", "keyrings"];
+/// The places [`PROTECTED`] keeps under `prefix` (`.config/`, `.local/share/`), without it: what
+/// is found under `$XDG_CONFIG_HOME` or `$XDG_DATA_HOME` instead when those are moved. Read from
+/// the one list, so a place added there is protected in both spots (`gh` and `gcloud` were
+/// missing from a hand copy; security review of #942, finding 4).
+fn under_prefix(prefix: &'static str) -> impl Iterator<Item = &'static str> {
+    PROTECTED.iter().filter_map(move |place| place.strip_prefix(prefix))
+}
 
 /// Whether `path` passes through a protected place, compared a whole component at a time and
 /// without regard to case (a case-folding filesystem makes `.SSH` the same folder): `.ssh` is
@@ -193,9 +186,9 @@ pub fn is_protected_with(path: &Path, places: &Places<'_>) -> bool {
     };
     listed
         || places.home.is_some_and(moved)
-        || places.data_home.is_some_and(|base| DATA_PLACES.iter().any(|place| under(base, place)))
+        || places.data_home.is_some_and(|base| under_prefix(".local/share/").any(|place| under(base, place)))
         || places.state_home.is_some_and(|base| under(base, "yantrik"))
-        || places.config_home.is_some_and(|base| CONFIG_PLACES.iter().any(|place| under(base, place)))
+        || places.config_home.is_some_and(|base| under_prefix(".config/").any(|place| under(base, place)))
 }
 
 /// Where `at` really is: its deepest part that exists, resolved through every link, with the

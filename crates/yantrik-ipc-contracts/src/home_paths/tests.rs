@@ -367,9 +367,22 @@ fn desktop_entries_under_a_moved_data_home_are_protected() {
 }
 
 #[test]
+fn every_config_and_data_place_in_the_list_is_protected_under_a_moved_base() {
+    let (config, data) = (Path::new("/srv/ann-config"), Path::new("/srv/ann-data"));
+    for place in PROTECTED {
+        if let Some(rest) = place.strip_prefix(".config/") {
+            assert!(is_protected_with(&config.join(rest), &Places { config_home: Some(config), ..Places::default() }), "{place}");
+        }
+        if let Some(rest) = place.strip_prefix(".local/share/") {
+            assert!(is_protected_with(&data.join(rest), &Places { data_home: Some(data), ..Places::default() }), "{place}");
+        }
+    }
+}
+
+#[test]
 fn startup_places_under_a_moved_config_home_are_protected() {
     let xdg = Path::new("/srv/ann-config");
-    for place in ["autostart/run.desktop", "systemd/user/a.service", "environment.d/x.conf", "labwc/rc.xml", "yantrik/config.yaml", "mimeapps.list"] {
+    for place in ["autostart/run.desktop", "systemd/user/a.service", "environment.d/x.conf", "labwc/rc.xml", "yantrik/config.yaml", "mimeapps.list", "gh/hosts.yml", "gcloud/credentials.db"] {
         assert!(is_protected_with(&xdg.join(place), &Places { config_home: Some(xdg), ..Places::default() }), "{place}");
     }
     assert!(!is_protected_with(Path::new("/srv/ann-config/gtk-3.0/settings.ini"), &Places { config_home: Some(xdg), ..Places::default() }));
