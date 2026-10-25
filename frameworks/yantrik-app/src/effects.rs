@@ -95,6 +95,8 @@ pub struct Effects<A: App> {
     next_job: u64,
     invocation: Option<Invocation>,
     now: Instant,
+    /// Frames the app's windows had drawn when this command ran (`Core::frame_drawn`).
+    frames: u64,
 }
 
 impl<A: App> Effects<A> {
@@ -109,15 +111,21 @@ impl<A: App> Effects<A> {
             next_job,
             invocation,
             now,
+            frames: 0,
         }
     }
 
     /// For `App::start`, which reads the model and changes nothing: no redraw unless it says.
-    pub(crate) fn starting(next_job: u64, now: Instant) -> Effects<A> {
+    pub(crate) fn starting(self) -> Effects<A> {
         Effects {
             changed: Changed::none(),
-            ..Effects::new(next_job, None, now)
+            ..self
         }
+    }
+
+    /// The frames the app's windows had drawn when this command ran.
+    pub(crate) fn drawn(self, frames: u64) -> Effects<A> {
+        Effects { frames, ..self }
     }
 
     /// For a test of `update`: nothing is run, and [`Effects::requests`] says what was asked.
@@ -141,6 +149,15 @@ impl<A: App> Effects<A> {
     /// as on the desktop.
     pub fn now(&self) -> Instant {
         self.now
+    }
+
+    /// How many frames the app's windows had drawn when this command ran, every window's, since
+    /// the app started: one each time the compositor let a window draw (winit's
+    /// `RedrawRequested`), or a test drew one (`TestApp::draw`). 0 before the first frame, and
+    /// under [`Effects::recording`]. Two commands that see the same count saw nothing drawn
+    /// between them: what `crate::shown` reads to tell a window on screen from one that is not.
+    pub fn frames(&self) -> u64 {
+        self.frames
     }
 
     /// Where this command came from: a button or a timer here, or the surface.
