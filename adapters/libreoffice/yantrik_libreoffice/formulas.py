@@ -23,6 +23,9 @@ SUM SUMIF SUMIFS SUMPRODUCT SUMSQ SWITCH T TAN TANH TEXT TEXTJOIN TIME TODAY TRI
 VALUE VAR VARP VLOOKUP WEEKDAY WEEKNUM XOR YEAR
 """.split())
 
+# The allowlist and Calc agree on what a function is: a full-width name is not one to either, so
+# it is text or #NAME? and never evaluates. `+`/`@` begin a formula in the UI, but `write_cells`
+# stores them as text, the safe direction.
 _STRING = re.compile(r'"(?:[^"]|"")*"')
 _CALL = re.compile(r"([A-Za-z_][A-Za-z0-9_.]*)\s*\(")
 # A sheet of another document is named in quotes and ended with `#`; `[` opens an Excel-style

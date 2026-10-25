@@ -56,8 +56,32 @@ def reachable(office):
         return False
 
 
+# The adapter's own LibreOffice never refreshes a link: Calc's "update links when opening" is
+# "never" (2), and the person is not asked. With the formula check in guard.py this means an
+# external reference is not fetched at all, not only refused after the fact (#942).
+NO_LINK_UPDATES = (
+    '<?xml version="1.0" encoding="UTF-8"?>\n'
+    '<oor:items xmlns:oor="http://openoffice.org/2001/registry" '
+    'xmlns:xs="http://www.w3.org/2001/XMLSchema" '
+    'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">\n'
+    '<item oor:path="/org.openoffice.Office.Calc/Content/Update">'
+    '<prop oor:name="Link" oor:op="fuse"><value>2</value></prop></item>\n'
+    '<item oor:path="/org.openoffice.Office.Writer/Content/Update">'
+    '<prop oor:name="Link" oor:op="fuse"><value>2</value></prop></item>\n'
+    '</oor:items>\n')
+
+
+def write_profile_settings(profile):
+    """Settings in the private profile, before LibreOffice reads it."""
+    os.makedirs(os.path.join(profile, "user"), exist_ok=True)
+    with open(os.path.join(profile, "user", "registrymodifications.xcu"), "w",
+              encoding="utf-8") as f:
+        f.write(NO_LINK_UPDATES)
+
+
 def start_headless(soffice, pipe, profile):
     """A LibreOffice with no window and a profile of its own, listening on `pipe`."""
+    write_profile_settings(profile)
     command = [soffice, "--headless", "--invisible", "--nologo", "--norestore", "--nodefault",
                "--nolockcheck", "-env:UserInstallation=file://%s" % profile,
                "--accept=pipe,name=%s;urp;" % pipe]

@@ -112,6 +112,9 @@ def agents_files(stat=None):
             said = formulas.refusal(path) if files.agent_is_calling() else None
             if said:
                 raise Refusal(said)
+        elif what == "outside":
+            if files.agent_is_calling():
+                raise Refusal(path)
         elif what == "links":
             if files.agent_is_calling():
                 raise Refusal("the document is linked to another file or source (%s), which an "

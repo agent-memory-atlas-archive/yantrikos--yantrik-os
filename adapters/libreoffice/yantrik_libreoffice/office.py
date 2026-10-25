@@ -16,7 +16,7 @@ import json
 import os
 import zlib
 
-from . import formulas
+from . import formulas, guard
 from .unoerrors import uno_error_name, uno_message  # noqa: F401
 from .cells import (FINGERPRINT_CELLS, MAX_CELLS, cell_position, column_name, number as _number,  # noqa: F401
                     parse_range, range_name)
@@ -108,11 +108,12 @@ class Office:
         except Exception as e:  # noqa: BLE001 - the rule's refusal is the caller's sentence
             raise OfficeError(str(e)) from None
 
-    def _unlinked(self, doc):
-        """Refuses, for a caller held to the rule, a document linked to another source."""
-        names = formulas.linked(doc)
-        if names:
-            self._admit("links", names)
+    def _unlinked(self, doc, scan=False):
+        """Refuses, for a caller held to the rule, a document linked to another source, and with
+        `scan` one whose formulas or names reach outside it (guard.py)."""
+        found = guard.problem(doc, scan)
+        if found:
+            self._admit(*found)
 
     # ── the connection ──────────────────────────────────────────────────────
 
@@ -346,7 +347,7 @@ class Office:
                 if doc.getURL() == url:
                     return {"document": self.name_of(doc), "kind": self.kind(doc), "path": path,
                             "already_open": True}
-            props = [self._prop("ReadOnly", bool(read_only))]
+            props = [self._prop("ReadOnly", bool(read_only)), self._prop("UpdateDocMode", 0)]
             if self.hidden:
                 props.append(self._prop("Hidden", True))
             doc = desktop.loadComponentFromURL(url, "_blank", 0, tuple(props))
@@ -371,6 +372,7 @@ class Office:
             doc = self._find(desktop, document)
             self._want(doc, WRITER, "`read_cells` reads a spreadsheet" if self.kind(doc) == CALC
                        else "")
+            self._unlinked(doc)
             text = doc.getText().getString().replace("\r\n", "\n")
             end = min(len(text), start + max_chars)
             return {"document": self.name_of(doc), "characters": len(text), "start": start,
@@ -394,9 +396,7 @@ class Office:
                     "characters": len(body.getString()), "modified": bool(doc.isModified())}
         return self.run(write)
 
-    def _sheets(self, doc):
-        sheets = doc.getSheets()
-        return [sheets.getByIndex(i) for i in range(sheets.getCount())]
+    _sheets = staticmethod(guard.sheets_of)
 
     def _sheet(self, doc, name):
         sheets = doc.getSheets()
@@ -412,13 +412,7 @@ class Office:
             active = None
         return active if active is not None else sheets.getByIndex(0)
 
-    @staticmethod
-    def _used(sheet):
-        cursor = sheet.createCursor()
-        cursor.gotoStartOfUsedArea(False)
-        cursor.gotoEndOfUsedArea(True)
-        a = cursor.getRangeAddress()
-        return a.StartColumn, a.StartRow, a.EndColumn, a.EndRow
+    _used = staticmethod(guard.used_area)
 
     def read_cells(self, range=None, sheet=None, document=None):  # noqa: A002 - the caller's word
         if range is not None and parse_range(range) is None:
@@ -429,7 +423,7 @@ class Office:
             doc = self._find(desktop, document)
             self._want(doc, CALC, "`read_text` reads a text document" if self.kind(doc) == WRITER
                        else "")
-            self._unlinked(doc)
+            self._unlinked(doc, scan=True)
             target = self._sheet(doc, sheet)
             left, top, right, bottom = parse_range(range) if range is not None else self._used(target)
             count = (right - left + 1) * (bottom - top + 1)
@@ -437,7 +431,11 @@ class Office:
                 raise OfficeError("%s is %d cells; read at most %d at a time"
                                   % (range_name(left, top, right, bottom), count, MAX_CELLS))
             cells = target.getCellRangeByPosition(left, top, right, bottom)
-            values, formulas = cells.getDataArray(), cells.getFormulaArray()
+            # Formulas first (nothing is computed), then values; links are asked again once
+            # the values exist, before any row leaves.
+            formulas = cells.getFormulaArray()
+            values = cells.getDataArray()
+            self._unlinked(doc)
             rows, behind = [], {}
             for i, row in enumerate(values):
                 out = []
@@ -482,6 +480,7 @@ class Office:
             self._want(doc, CALC, "`write_text` writes a text document"
                        if self.kind(doc) == WRITER else "")
             self._writable(doc)
+            self._unlinked(doc, scan=True)
             target = self._sheet(doc, sheet)
             # Every cell found before any is written: one outside the sheet refuses them all.
             found = []
