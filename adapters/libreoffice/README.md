@@ -69,6 +69,10 @@ could overwrite would have to be `sensitive` for every call, since a grade is pe
 per argument; refusing the one argument that would make it dangerous keeps the common case
 unasked.
 
+## LibreOffice is closed to agents for now (#953)
+
+Every action an agent or the Mind can call is refused with one sentence, and soffice is never contacted (`surface.AGENTS_OPEN` is off, `shut_to_agents`). Review found the Landlock fence below leaves UNIX sockets open, aborts Debian's soffice, and lets protected names nested inside open folders through, so what follows describes code that no agent path reaches yet, and its claims are stronger than it can keep. #953 builds the namespace sandbox that replaces it. The person's own LibreOffice is unaffected.
+
 ## Agents work in a LibreOffice of their own, fenced by the kernel
 
 A document can read files: an external reference, `INDIRECT`, a linked section, a macro, an
