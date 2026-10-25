@@ -11,6 +11,8 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use tungstenite::{Message, WebSocket, stream::MaybeTlsStream};
 
+use yantrik_ipc_contracts::mind_view::FOR_MIND_VAR;
+
 use super::{Tool, ToolContext, ToolRegistry, PermissionLevel};
 
 const CDP_HOST: &str = "127.0.0.1";
@@ -39,7 +41,11 @@ pub struct MindDisplay {
 
 impl MindDisplay {
     /// Mind View's display: everything of the person's cleared, then the seat's own set.
-    pub fn mind_view(set: Vec<(&'static str, String)>) -> Self {
+    ///
+    /// Every app started on it is also marked `YANTRIK_FOR_MIND=1`, so it masks what an agent
+    /// must not read off the screen (`yantrik_app::for_mind`).
+    pub fn mind_view(mut set: Vec<(&'static str, String)>) -> Self {
+        set.push((FOR_MIND_VAR, "1".to_string()));
         Self { clear: PERSON_SESSION_VARS.to_vec(), set }
     }
 
@@ -2824,6 +2830,18 @@ mod mind_display_tests {
         assert_eq!(env_of(&command, "WAYLAND_SOCKET"), Some(None));
         assert_eq!(env_of(&command, "XAUTHORITY"), Some(None));
         assert_eq!(env_of(&command, "WAYLAND_DISPLAY"), Some(Some("wayland-1".to_string())));
+    }
+
+    /// An app started on Mind View is marked, so it masks what an agent must not read off the
+    /// screen; the person's own display is not.
+    #[test]
+    fn a_mind_view_window_is_marked_for_a_mind_and_the_persons_is_not() {
+        let mut marked = std::process::Command::new("snippets");
+        MindDisplay::mind_view(vec![("WAYLAND_DISPLAY", "wayland-1".to_string())]).apply(&mut marked);
+        assert_eq!(env_of(&marked, FOR_MIND_VAR), Some(Some("1".to_string())));
+        let mut own = std::process::Command::new("snippets");
+        MindDisplay::person("wayland-0".to_string()).apply(&mut own);
+        assert_eq!(env_of(&own, FOR_MIND_VAR), None);
     }
 
     /// Without a shell to say where Mind View is, a headed window is refused rather than drawn on

@@ -76,6 +76,13 @@ pub(crate) fn handle(args: &serde_json::Value) -> Result<serde_json::Value, Stri
     WINDOW.with(|cell| answer_with(cell.borrow().as_deref(), args))
 }
 
+/// Whether the display `here` is another than `other`: the one rule for telling Mind View's
+/// display from the person's, for a launch's hand-over and for `for_mind`. Unknown on either
+/// side is not elsewhere.
+pub(crate) fn elsewhere(here: Option<&str>, other: Option<&str>) -> bool {
+    matches!((here, other), (Some(h), Some(a)) if h != a)
+}
+
 /// What a copy answers the call `args`, showing its window with `show` (`None`: it has none):
 /// `present`'s answer, with the presenter installed, and `launch`'s, through its own core.
 pub(crate) fn answer_with(
@@ -99,7 +106,7 @@ fn answer(
     show()?;
     // Said, not decided here: this process cannot move its window to another display, and the
     // launch that asked is the one that knows which display the person is looking at.
-    let elsewhere = matches!((here, asked_from), (Some(h), Some(a)) if h != a);
+    let elsewhere = elsewhere(here, asked_from);
     Ok(
         serde_json::json!({ "window": true, "presented": true, "display": here, "elsewhere": elsewhere }),
     )

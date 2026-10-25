@@ -78,6 +78,8 @@ export component SnippetManagerScreen inherits Rectangle {
     in-out property <string> detail-title: "";
     in-out property <string> detail-language: "";
     in-out property <string> detail-code: "";
+    // Drawn for a Mind: the code is masked, so the editor takes no typing.
+    in property <bool> detail-read-only: false;
     in-out property <string> detail-tags: "";
     in property <bool> detail-is-favorite: false;
     in property <string> detail-created-date: "";
@@ -879,6 +881,7 @@ export component SnippetManagerScreen inherits Rectangle {
                         code-editor := TextEdit {
                             vertical-stretch: 1;
                             text <=> root.detail-code;
+                            read-only: root.detail-read-only;
                             edited => { root.detail-edited(); }
                             font-size: Theme.fs-body;
                             font-family: Theme.font-mono;

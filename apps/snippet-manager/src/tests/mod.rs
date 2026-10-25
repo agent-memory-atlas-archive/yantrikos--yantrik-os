@@ -12,8 +12,12 @@
 //!   in the draft lane and offered back on the recovery bar, after a refused save or a restart.
 //!   `refused.rs`: a refused or unfinished write never loses the typing or offers it wrongly.
 //!   `kept.rs`: a draft goes only on a landed write or a Discard, under random failures too.
+//! - `agent_exposure.rs`: no snippet code in `describe` or an agent's search, and an agent's
+//!   import only of a file in the person's home.
 //! - `secrets.rs`: a snippet's code is never in a log, an answer, `describe` or a debug print.
+//! - `mind_view.rs`: drawn for a Mind (Mind View), the code is masked and cannot be edited or copied.
 //! - `rail.rs`: the agent rail and the AI button. `private_mode.rs`: `describe` in Private mode.
+//! - `folders.rs`: the library's and the drafts' folders are the person's alone (0700).
 
 use std::sync::Arc;
 
@@ -27,11 +31,14 @@ use crate::disk::testing::{self as faulty, Faulty};
 use crate::store::{file, Library};
 use crate::SnippetManager;
 
+mod agent_exposure;
 mod copying;
 mod editing;
 mod ending;
 mod files;
+mod folders;
 mod kept;
+mod mind_view;
 mod parity;
 mod private_mode;
 mod rail;
@@ -61,6 +68,17 @@ pub(crate) fn start_at(paths: Paths, mind: FakeMind, args: Vec<std::ffi::OsStrin
     let clipboard = clip::of(&paths);
     let mind = Arc::new(mind);
     let app = TestApp::<SnippetManager>::start_at_with(paths.clone(), args, mind.clone(), Services::fakes());
+    let f = Fixture { app, paths, disk, clipboard, mind };
+    f.quiet();
+    f
+}
+
+/// Started at `paths` as an app drawn for a Mind (`Boot::for_mind`), over what is kept there.
+pub(crate) fn start_for_mind(paths: Paths) -> Fixture {
+    let disk = faulty::install(&paths);
+    let clipboard = clip::of(&paths);
+    let mind = Arc::new(FakeMind::new());
+    let app = TestApp::<SnippetManager>::start_for_mind(paths.clone(), Vec::new(), mind.clone());
     let f = Fixture { app, paths, disk, clipboard, mind };
     f.quiet();
     f
