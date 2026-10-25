@@ -1724,6 +1724,50 @@ def render_consequence(c):
     return "\n".join(out)
 
 
+NL = chr(10)
+
+
+def _place_note(hit, how):
+    """Where a match is against the visible part of the page, in words; "" when it is in view,
+    so an in-view match reads as it always has."""
+    place = hit.get("place")
+    if hit.get("in_view", True) or not isinstance(place, dict):
+        return ""
+    n = max(1, int(place.get("screens") or 1))
+    unit = "screen" if n == 1 else "screens"
+    where = {"below": "below the visible part (about %d %s down)" % (n, unit),
+             "above": "above the visible part (about %d %s up)" % (n, unit)}.get(
+                 place.get("dir"), "off to the side of the visible part")
+    return "  — %s; %s" % (where, how)
+
+
+def render_found(result):
+    """The answer to find: every match on the whole page, each placed against what is in view, so
+    a match out of view is never reported as no match."""
+    found, text = result.get("found") or [], result.get("text") or []
+    url, query = result.get("url"), json.dumps(result.get("query", ""))
+    if found:
+        out = [PAGE_BEGINS]
+        out.extend(render_element(e, url) + _place_note(e, "scroll or click it") for e in found)
+        out.append(PAGE_ENDS)
+        total = result.get("total") or len(found)
+        if total > len(found):
+            out.append("(%d matches; the first %d are listed: find with more words narrows it)"
+                       % (total, len(found)))
+        return NL.join(out)
+    if text:
+        out = ["no control on this page holds %s, but its text does (%d place%s):"
+               % (query, len(text), "" if len(text) == 1 else "s"), PAGE_BEGINS]
+        for t in text:
+            out.append("text %s%s" % (json.dumps(_flat(t.get("text", ""), 100), ensure_ascii=False),
+                                     _place_note(t, "scroll to it") or "  — in view"))
+        out.append(PAGE_ENDS)
+        return NL.join(out)
+    return ("nothing on this page matches %s, anywhere in the page. %s"
+            % (query, "The page is still loading: find again in a moment." if result.get("loading")
+               else "It may be behind a click."))
+
+
 def render_browser(result):
     """Any answer of the browser surface, as text; None for a shape this does not know."""
     if not isinstance(result, dict):
@@ -1733,11 +1777,7 @@ def render_browser(result):
     if "did" in result:
         return render_consequence(result)
     if "found" in result:
-        found = result.get("found") or []
-        if not found:
-            return ("nothing on this page matches %s. It may be behind a click, or the page may not "
-                    "have finished loading." % json.dumps(result.get("query", "")))
-        return "\n".join([PAGE_BEGINS] + [render_element(e, result.get("url")) for e in found] + [PAGE_ENDS])
+        return render_found(result)
     if "text" in result and "size" in result:
         tail = ("\n[... %d more characters: text with a larger limit]" % (result["size"] - len(result["text"]))
                 if result.get("clipped") else "")
