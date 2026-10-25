@@ -14,8 +14,12 @@ drive all of this against a fake.
 
 import json
 import os
-import re
 import zlib
+
+from . import formulas
+from .unoerrors import uno_error_name, uno_message  # noqa: F401
+from .cells import (FINGERPRINT_CELLS, MAX_CELLS, cell_position, column_name, number as _number,  # noqa: F401
+                    parse_range, range_name)
 
 # The pipe LibreOffice listens on when the desktop opens it (bin/yantrik-libreoffice) and this
 # adapter connects to. `YANTRIK_LIBREOFFICE_PIPE` changes both.
@@ -52,15 +56,6 @@ SAVE_FILTERS = {
     ".odg": (DRAW, "draw8"),
 }
 
-# The most cells one read or one write carries: enough for any table a mind should be reading
-# whole, small enough that an answer stays an answer.
-MAX_CELLS = 10000
-# Past this many cells a sheet's content is not fingerprinted on every describe.
-FINGERPRINT_CELLS = 50000
-
-_CELL = re.compile(r"\$?([A-Za-z]{1,3})\$?([1-9][0-9]{0,6})")
-
-
 class OfficeError(Exception):
     """A sentence for the caller: what went wrong and what to do instead."""
 
@@ -73,64 +68,6 @@ class NotReachable(OfficeError):
         self.short = short
 
 
-def uno_error_name(error):
-    """The UNO type of an exception, unqualified (`NoConnectException`), however pyuno named the
-    Python class it made for it."""
-    for owner in (type(error), error):
-        name = getattr(owner, "__pyunostruct__", None) or getattr(owner, "typeName", None)
-        if isinstance(name, str) and name:
-            return name.rsplit(".", 1)[-1]
-    return type(error).__name__.rsplit(".", 1)[-1]
-
-
-def uno_message(error):
-    """What a UNO exception said, or its type when it said nothing."""
-    message = getattr(error, "Message", None)
-    if isinstance(message, str) and message.strip():
-        return message.strip()
-    text = str(error).strip()
-    return text or uno_error_name(error)
-
-
-def column_name(index):
-    """0 → A, 25 → Z, 26 → AA."""
-    name = ""
-    index += 1
-    while index:
-        index, rest = divmod(index - 1, 26)
-        name = chr(ord("A") + rest) + name
-    return name
-
-
-def cell_position(ref):
-    """`B3` → (1, 2): column and row from 0. None for anything that is not one cell."""
-    match = _CELL.fullmatch(ref.strip()) if isinstance(ref, str) else None
-    if not match:
-        return None
-    column = 0
-    for letter in match.group(1).upper():
-        column = column * 26 + (ord(letter) - ord("A") + 1)
-    return column - 1, int(match.group(2)) - 1
-
-
-def range_name(left, top, right, bottom):
-    first = "%s%d" % (column_name(left), top + 1)
-    last = "%s%d" % (column_name(right), bottom + 1)
-    return first if first == last else "%s:%s" % (first, last)
-
-
-def parse_range(text):
-    """`A1:C10` or `B3` → (left, top, right, bottom), or None."""
-    parts = text.split(":") if isinstance(text, str) else []
-    if len(parts) not in (1, 2):
-        return None
-    ends = [cell_position(p) for p in parts]
-    if any(e is None for e in ends):
-        return None
-    (c0, r0), (c1, r1) = ends[0], ends[-1]
-    return min(c0, c1), min(r0, r1), max(c0, c1), max(r0, r1)
-
-
 def absolute(path, what="`path`"):
     """A path a caller gave, `~` expanded; refused unless it is absolute, because this adapter's
     working directory is nobody's business and a relative path would land wherever it is."""
@@ -141,13 +78,6 @@ def absolute(path, what="`path`"):
         raise OfficeError("%s must be an absolute path (or start with ~), and `%s` is not"
                           % (what, path.strip()))
     return os.path.normpath(expanded)
-
-
-def _number(value):
-    """A cell's number as JSON would like it: 3 for 3.0."""
-    if isinstance(value, float) and value.is_integer() and abs(value) < 2 ** 53:
-        return int(value)
-    return value
 
 
 class Office:
@@ -177,6 +107,12 @@ class Office:
             raise
         except Exception as e:  # noqa: BLE001 - the rule's refusal is the caller's sentence
             raise OfficeError(str(e)) from None
+
+    def _unlinked(self, doc):
+        """Refuses, for a caller held to the rule, a document linked to another source."""
+        names = formulas.linked(doc)
+        if names:
+            self._admit("links", names)
 
     # ── the connection ──────────────────────────────────────────────────────
 
@@ -493,6 +429,7 @@ class Office:
             doc = self._find(desktop, document)
             self._want(doc, CALC, "`read_text` reads a text document" if self.kind(doc) == WRITER
                        else "")
+            self._unlinked(doc)
             target = self._sheet(doc, sheet)
             left, top, right, bottom = parse_range(range) if range is not None else self._used(target)
             count = (right - left + 1) * (bottom - top + 1)
@@ -535,6 +472,8 @@ class Office:
             if isinstance(value, bool) or not (value is None or isinstance(value, (int, float, str))):
                 raise OfficeError("%s: a cell takes a number, text, a formula starting with `=`, "
                                   "or null to empty it" % ref.upper())
+            if isinstance(value, str) and value.startswith("="):
+                self._admit("formula", value)
             plan.append((ref.strip().upper().replace("$", ""), position, value))
         plan.sort(key=lambda step: step[0])
 
@@ -554,6 +493,7 @@ class Office:
                         raise OfficeError("%s is outside the sheet `%s`"
                                           % (ref, target.getName())) from None
                     raise
+            before = [cell.getFormula() for cell, _ in found]
             for cell, value in found:
                 if value is None:
                     cell.setFormula("")
@@ -563,6 +503,12 @@ class Office:
                     cell.setString(value[1:] if value.startswith("'") else value)
                 else:
                     cell.setValue(float(value))
+            try:
+                self._unlinked(doc)
+            except OfficeError:
+                for (cell, _), old in zip(found, before):
+                    cell.setFormula(old)
+                raise
             return {"document": self.name_of(doc), "sheet": target.getName(),
                     "written": [ref for ref, _, _ in plan], "modified": bool(doc.isModified())}
         return self.run(write)

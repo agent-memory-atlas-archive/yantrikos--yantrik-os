@@ -26,6 +26,7 @@ from typing import Annotated, Literal, Optional
 
 from yantrik_surface import Later, Refusal, Surface, files
 
+from . import formulas
 from .office import NotReachable, Office, OfficeError
 
 APP_ID = "libreoffice"
@@ -107,6 +108,14 @@ def agents_files(stat=None):
             files.may_read_file(path, stat)
         elif what == "write":
             files.may_write_file(path, stat)
+        elif what == "formula":
+            said = formulas.refusal(path) if files.agent_is_calling() else None
+            if said:
+                raise Refusal(said)
+        elif what == "links":
+            if files.agent_is_calling():
+                raise Refusal("the document is linked to another file or source (%s), which an "
+                              "agent does not read through; ask the person" % ", ".join(path[:3]))
         elif path and files.agent_is_calling():
             try:
                 files.may_read_file(path, stat)

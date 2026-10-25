@@ -104,6 +104,48 @@ class TestAgentFiles(support.Case):
         self.assertEqual(self.agent("save_as", path=made)["result"]["path"], made)
         self.assertTrue(os.path.exists(made))
 
+    def sheet(self):
+        path = os.path.join(self.home, "Documents", "book.ods")
+        support.fake_uno.write_doc(path, "calc", sheets=[{"name": "Sheet1"}])
+        self.agent("open", path=path)
+        return path
+
+    def test_an_agent_writes_no_formula_that_reads_a_file(self):
+        """A formula reads any file the person can read, and `read_cells` hands it back."""
+        store = os.path.join(self.home, ".local", "share", "yantrik", "snippets", "snippets.json")
+        with open(store, "w", encoding="utf-8") as f:
+            f.write(SENTINEL)
+        self.sheet()
+        for formula in ("='file://%s'#$Sheet1.A1" % store, "=INDIRECT(\"'file://%s'#$S.A1\")" % store,
+                        "=DDE(\"soffice\";\"file://%s\";\"A1\")" % store,
+                        "=WEBSERVICE(\"file://%s\")" % store, "=hyperlink(\"file://x\")",
+                        "=FILTERXML(A2;\"//a\")", "=SUM(1;INDIRECT(\"A2\"))",
+                        "=SUM('x'#$S.A1)", "=[1]Sheet1!A1", "=com.sun.star.sheet.addin.X.F(1)"):
+            self.agent_refused("write_cells", cells={"A1": formula})
+        self.assertNotIn(SENTINEL, str(self.agent("read_cells", range="A1:A3")))
+        self.assertEqual(self.agent("read_cells", range="A1")["result"]["rows"], [[None]])
+
+    def test_an_agent_writes_formulas_of_its_own_cells(self):
+        self.sheet()
+        self.agent("write_cells", cells={"A1": 2, "A2": 3, "B1": "=SUM(A1:A2)*2",
+                                         "B2": '=IF(A1>1;"a(b";"c")', "B3": "=$Sheet1.A1+1"})
+        self.assertIn("B1", self.agent("read_cells", range="A1:B3")["result"]["formulas"])
+
+    def test_a_person_may_write_any_formula(self):
+        self.sheet()
+        self.act("write_cells", cells={"A1": "=WEBSERVICE(\"https://example.org\")"})
+
+    def test_a_linked_document_is_not_read_or_written_by_an_agent(self):
+        self.sheet()
+        self.agent("write_cells", cells={"A1": "old"})
+        self.soffice.documents[-1].external_links.append("file:///x")
+        self.assertIn("linked", self.agent_refused("read_cells", range="A1"))
+        said = self.agent_refused("write_cells", cells={"A1": "new"})
+        self.assertIn("linked", said)
+        self.assertEqual(self.soffice.documents[-1].sheets[0].cells["A1"], {"text": "old"},
+                         "the refused write was put back")
+        self.assertEqual(self.result("read_cells", range="A1")["rows"], [["old"]])
+
 
 if __name__ == "__main__":
     unittest.main()
