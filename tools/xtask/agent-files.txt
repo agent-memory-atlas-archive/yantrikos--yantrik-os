@@ -26,7 +26,7 @@ apps/document-editor/src/main.rs export_markdown path apps/document-editor/src/a
 apps/download-manager/src/main.rs add save_dir apps/download-manager/src/agent_rule.rs
 apps/email/src/intents.rs select_folder folder - an IMAP folder's name on the mail server, not a path on disk
 apps/image-viewer/src/intents.rs open path apps/image-viewer/src/agent_rule.rs
-apps/music-player/src/main.rs play_file path apps/music-player/src/main.rs
+apps/music-player/src/intents.rs play_file path apps/music-player/src/seen.rs
 apps/notes/src/intents/files.rs import path apps/notes/src/update/library.rs
 apps/notes/src/intents/files.rs export path apps/notes/src/update/library.rs
 apps/notes/src/intents/library.rs set_folder folder - a section of the Notes library list, not a path on disk

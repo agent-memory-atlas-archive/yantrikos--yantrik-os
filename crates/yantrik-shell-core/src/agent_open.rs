@@ -20,7 +20,7 @@ const YANTRIK_APPS: &[(&str, &str)] = &[
     ("yantrik-container-manager", "containers"),
     ("yantrik-email", "email"),
     ("yantrik-image-viewer", "image-viewer"),
-    ("yantrik-music-player", "music-player"),
+    ("yantrik-music-player", "music"),
     ("yantrik-network-manager", "network"),
     ("yantrik-notes", "notes"),
     ("yantrik-snippet-manager", "snippets"),
