@@ -12,7 +12,6 @@ from unittest import mock
 
 import support
 from yantrik_libreoffice import build
-from yantrik_libreoffice.surface import HIDDEN
 
 SENTINEL = "SENTINEL-libreoffice-agent-91d2"
 
@@ -23,7 +22,9 @@ def no_reach(token, what):
                                                   "result": {"reach": None, "known": True}}}
 
 
-class TestAgentFiles(support.Case):
+class AgentCase(support.Case):
+    """A home with protected places, a stand-in for the shell's rule, and calls made as an agent."""
+
     def setUp(self):
         super().setUp()
         home = self.machine.home
@@ -37,7 +38,8 @@ class TestAgentFiles(support.Case):
         os.makedirs(os.path.join(home, ".ssh"))
         self.asked = []
         self.surface = build(self.office, settings_path=self.machine.settings,
-                             mode_path=self.machine.mode_file, ask_shell=no_reach, stat=self.stat)
+                             mode_path=self.machine.mode_file, ask_shell=no_reach, stat=self.stat,
+                             agents=self.agents)
 
     def stat(self, asked):
         """`home_paths::stat` for these cases: outside, protected, or what is there."""
@@ -67,13 +69,16 @@ class TestAgentFiles(support.Case):
         support.fake_uno.write_doc(path, "writer", text=text)
         return path
 
+
+class TestAgentFiles(AgentCase):
     def test_an_agent_opens_only_files_in_the_home(self):
         for path in (self.doc(self.home, ".ssh", "id_ed25519"),
                      self.doc(self.home, ".local", "share", "yantrik", "snippets", "snippets.odt"),
                      self.doc(self.files, "outside.odt")):
             said = self.agent_refused("open", path=path)
             self.assertTrue(said.endswith(" is protected") or said.endswith(" is outside"), said)
-        self.assertEqual(self.soffice.documents, [], "nothing was opened")
+        self.assertEqual(self.soffice.documents + self.agent_soffice.documents, [],
+                         "nothing was opened")
         mine = self.doc(self.home, "Documents", "plan.odt", text="the agent's own")
         self.assertEqual(self.agent("open", path=mine)["result"]["path"], mine)
         self.assertEqual(self.agent("read_text")["result"]["text"], "the agent's own")
@@ -81,14 +86,21 @@ class TestAgentFiles(support.Case):
         self.assertEqual(self.result("open", path=self.doc(self.files, "theirs.odt"))["document"],
                          "theirs.odt")
 
-    def test_a_document_the_person_opened_from_elsewhere_is_left_alone(self):
-        theirs = self.doc(self.files, "theirs.odt")
-        self.act("open", path=theirs)
-        for action, args in (("read_text", {}), ("write_text", {"text": "x"}), ("save", {}),
-                             ("save_as", {"path": os.path.join(self.home, "Documents", "copy.odt")}),
-                             ("export_pdf", {"path": os.path.join(self.home, "Documents", "c.pdf")}),
-                             ("close", {})):
-            self.assertEqual(self.agent_refused(action, document="theirs.odt", **args), HIDDEN, action)
+    def test_no_agent_call_reaches_a_document_the_person_has_open(self):
+        """An agent's calls are served by the agents' own LibreOffice: the person's documents,
+        from anywhere, are not in it to be read, changed, saved or exported."""
+        for theirs in (self.doc(self.files, "theirs.odt"),
+                       self.doc(self.home, "Documents", "theirs-at-home.odt")):
+            self.act("open", path=theirs)
+        for name in ("theirs.odt", "theirs-at-home.odt"):
+            for action, args in (("read_text", {}), ("write_text", {"text": "x"}), ("save", {}),
+                                 ("save_as", {"path": os.path.join(self.home, "Documents", "c.odt")}),
+                                 ("export_pdf", {"path": os.path.join(self.home, "Documents", "c.pdf")}),
+                                 ("close", {})):
+                said = self.agent_refused(action, document=name, **args)
+                self.assertIn("no document is open", said, action)
+                self.assertNotIn(SENTINEL, said)
+        self.assertEqual(self.soffice.stores, [], "nothing of the person's was written")
         self.assertFalse(os.path.exists(os.path.join(self.home, "Documents", "copy.odt")))
         self.assertIn(SENTINEL, self.result("read_text", document="theirs.odt")["text"],
                       "the person reads their own document")
@@ -105,10 +117,11 @@ class TestAgentFiles(support.Case):
         self.assertEqual(self.agent("save_as", path=made)["result"]["path"], made)
         self.assertTrue(os.path.exists(made))
 
-    def sheet(self):
+    def sheet(self, by=None):
+        """A sheet in the home, opened by an agent (in the agents' LibreOffice) or by `by`."""
         path = os.path.join(self.home, "Documents", "book.ods")
         support.fake_uno.write_doc(path, "calc", sheets=[{"name": "Sheet1"}])
-        self.agent("open", path=path)
+        (by or self.agent)("open", path=path)
         return path
 
     def test_an_agent_writes_no_formula_that_reads_a_file(self):
@@ -133,24 +146,24 @@ class TestAgentFiles(support.Case):
         self.assertIn("B1", self.agent("read_cells", range="A1:B3")["result"]["formulas"])
 
     def test_a_person_may_write_any_formula(self):
-        self.sheet()
+        self.sheet(by=self.act)
         self.act("write_cells", cells={"A1": "=WEBSERVICE(\"https://example.org\")"})
 
     def test_a_linked_document_is_not_read_or_written_by_an_agent(self):
         self.sheet()
         self.agent("write_cells", cells={"A1": "old"})
-        self.soffice.documents[-1].external_links.append("file:///x")
+        self.agent_soffice.documents[-1].external_links.append("file:///x")
         self.assertIn("linked", self.agent_refused("read_cells", range="A1"))
         said = self.agent_refused("write_cells", cells={"A1": "new"})
         self.assertIn("linked", said)
-        self.assertEqual(self.soffice.documents[-1].sheets[0].cells["A1"], {"text": "old"},
+        self.assertEqual(self.agent_soffice.documents[-1].sheets[0].cells["A1"], {"text": "old"},
                          "the refused write was put back")
-        self.assertEqual(self.result("read_cells", range="A1")["rows"], [["old"]])
+        self.assertEqual(self.agent_soffice.documents[-1].sheets[0].cells["A1"], {"text": "old"})
 
     def seed(self, cells):
         """A sheet the person left with `cells` already in it, as a crafted file would."""
         self.sheet()
-        sheet = self.soffice.documents[-1].sheets[0]
+        sheet = self.agent_soffice.documents[-1].sheets[0]
         sheet.cells.update(cells)
         return sheet
 

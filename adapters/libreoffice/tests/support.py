@@ -4,7 +4,9 @@ LibreOffice.
 Every test gets a machine of its own — `HOME` and `XDG_RUNTIME_DIR` in a temporary directory,
 with a ceiling and a mode the test chooses — and a `FakeLibreOffice` (tests/fake_uno.py) already
 running on the adapter's pipe, reached through the adapter's real `Office` and the real surface.
-Nothing but `uno` is faked.
+Agents' calls go to a second one, the agents' own (agent_office.py), which `FakeAgentOffice`
+starts in place of the fenced soffice; the fence itself is tests/test_fence.py's. Nothing but
+`uno` and that start is faked.
 """
 
 import json
@@ -13,6 +15,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock  # noqa: F401 - the tests' one import of it
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ADAPTER = os.path.abspath(os.path.join(HERE, ".."))
@@ -26,7 +29,8 @@ for path in (HERE, ADAPTER, SDK):
         sys.path.insert(0, path)
 
 import fake_uno  # noqa: E402
-from yantrik_libreoffice import Office, build  # noqa: E402
+from yantrik_libreoffice import Office, OfficeError, build  # noqa: E402,F401
+from yantrik_libreoffice.agent_office import AgentOffice  # noqa: E402
 from yantrik_surface import RpcError  # noqa: E402
 
 
@@ -66,6 +70,40 @@ class Machine:
         shutil.rmtree(self.tmp, ignore_errors=True)
 
 
+class _Running:
+    """A fenced soffice's process, as `AgentOffice` sees one: running until waited for."""
+
+    def __init__(self):
+        self.alive = True
+
+    def poll(self):
+        return None if self.alive else 0
+
+    def wait(self, timeout=None):
+        self.alive = False
+        return 0
+
+
+class FakeAgentOffice(AgentOffice):
+    """The agents' own LibreOffice, with the fenced start replaced by a fake LibreOffice of its
+    own: everything else (which office a call reaches, the folders it covers, a file the person
+    has open) is the real `AgentOffice`."""
+
+    def __init__(self, soffice, home, person):
+        super().__init__(person=person, home=home, uno_module=fake_uno.FakeUno(soffice))
+        self.fake = soffice
+        self.starts = 0
+
+    def _start(self, env):
+        self.starts += 1
+        self.fake.start()
+        self._office = Office(self.fake.pipe, uno_module=self.uno_module, hidden=True,
+                              admit=self.admit, agents_only=True)
+        self._process = _Running()
+        self._folders = self._open_folders(env)
+        self.fenced_with = 0
+
+
 class Case(unittest.TestCase):
     """A surface over a running fake LibreOffice, on a machine of the test's own."""
 
@@ -79,8 +117,10 @@ class Case(unittest.TestCase):
         os.makedirs(self.files)
         self.soffice = fake_uno.FakeLibreOffice().start()
         self.office = Office(uno_module=fake_uno.FakeUno(self.soffice))
+        self.agent_soffice = fake_uno.FakeLibreOffice(pipe="yantrik-libreoffice-agent-test")
+        self.agents = FakeAgentOffice(self.agent_soffice, self.machine.home, self.office)
         self.surface = build(self.office, settings_path=self.machine.settings,
-                             mode_path=self.machine.mode_file)
+                             mode_path=self.machine.mode_file, agents=self.agents)
 
     # ── documents on disk ────────────────────────────────────────────────
 

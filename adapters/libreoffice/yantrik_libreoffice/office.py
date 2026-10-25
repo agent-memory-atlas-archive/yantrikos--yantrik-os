@@ -16,7 +16,10 @@ import json
 import os
 import zlib
 
-from . import formulas, guard
+from . import guard
+from .basics import (CALC, DRAW, IMPRESS, KIND_NAMES, WRITER, NotReachable, OfficeError,  # noqa: F401
+                     absolute, apply_rule)
+from .store import PDF_FILTERS, SAVE_FILTERS, Storing  # noqa: F401
 from .unoerrors import uno_error_name, uno_message  # noqa: F401
 from .cells import (FINGERPRINT_CELLS, MAX_CELLS, cell_position, column_name, number as _number,  # noqa: F401
                     parse_range, range_name)
@@ -25,7 +28,6 @@ from .cells import (FINGERPRINT_CELLS, MAX_CELLS, cell_position, column_name, nu
 # adapter connects to. `YANTRIK_LIBREOFFICE_PIPE` changes both.
 PIPE = "yantrik-libreoffice"
 
-WRITER, CALC, IMPRESS, DRAW = "writer", "calc", "impress", "draw"
 # Impress before Draw: a presentation is a drawing document too.
 _SERVICES = (
     ("com.sun.star.text.TextDocument", WRITER),
@@ -33,64 +35,20 @@ _SERVICES = (
     ("com.sun.star.presentation.PresentationDocument", IMPRESS),
     ("com.sun.star.drawing.DrawingDocument", DRAW),
 )
-KIND_NAMES = {WRITER: "a Writer document", CALC: "a Calc spreadsheet",
-              IMPRESS: "an Impress presentation", DRAW: "a Draw drawing"}
-
-PDF_FILTERS = {WRITER: "writer_pdf_Export", CALC: "calc_pdf_Export",
-               IMPRESS: "impress_pdf_Export", DRAW: "draw_pdf_Export"}
-
-# What `save_as` writes, by the extension of the path it is given: the kind of document that
-# can be saved that way, and LibreOffice's filter for it.
-SAVE_FILTERS = {
-    ".odt": (WRITER, "writer8"),
-    ".docx": (WRITER, "MS Word 2007 XML"),
-    ".doc": (WRITER, "MS Word 97"),
-    ".rtf": (WRITER, "Rich Text Format"),
-    ".txt": (WRITER, "Text"),
-    ".ods": (CALC, "calc8"),
-    ".xlsx": (CALC, "Calc MS Excel 2007 XML"),
-    ".xls": (CALC, "MS Excel 97"),
-    ".csv": (CALC, "Text - txt - csv (StarCalc)"),
-    ".odp": (IMPRESS, "impress8"),
-    ".pptx": (IMPRESS, "Impress MS PowerPoint 2007 XML"),
-    ".odg": (DRAW, "draw8"),
-}
-
-class OfficeError(Exception):
-    """A sentence for the caller: what went wrong and what to do instead."""
-
-
-class NotReachable(OfficeError):
-    """LibreOffice cannot be reached at all. `short` is the half-line describe's summary uses."""
-
-    def __init__(self, message, short):
-        super().__init__(message)
-        self.short = short
-
-
-def absolute(path, what="`path`"):
-    """A path a caller gave, `~` expanded; refused unless it is absolute, because this adapter's
-    working directory is nobody's business and a relative path would land wherever it is."""
-    if not isinstance(path, str) or not path.strip():
-        raise OfficeError("%s is empty; give an absolute path" % what)
-    expanded = os.path.expanduser(path.strip())
-    if not os.path.isabs(expanded):
-        raise OfficeError("%s must be an absolute path (or start with ~), and `%s` is not"
-                          % (what, path.strip()))
-    return os.path.normpath(expanded)
-
-
-class Office:
+class Office(Storing):
     """One LibreOffice, reached over the pipe `pipe`.
 
     Connected lazily and again after LibreOffice goes away and comes back: every public method
     connects if it has to, and raises `OfficeError` saying LibreOffice is not there when it is
     not. `hidden` opens documents without a window (for the adapter's own headless LibreOffice).
+    `agents_only` is the fenced LibreOffice that does agents' work (agent_office.py), every one
+    of whose calls is an agent's.
     """
 
-    def __init__(self, pipe=PIPE, uno_module=None, hidden=False, admit=None):
+    def __init__(self, pipe=PIPE, uno_module=None, hidden=False, admit=None, agents_only=False):
         self.pipe = pipe
         self.hidden = hidden
+        self.agents_only = agents_only
         self._uno = uno_module
         self._desktop = None
         # `admit(what, path)`: the rule for the files a caller names ("read", "write") and for
@@ -99,14 +57,7 @@ class Office:
         self.admit = admit
 
     def _admit(self, what, path):
-        if self.admit is None:
-            return
-        try:
-            self.admit(what, path)
-        except OfficeError:
-            raise
-        except Exception as e:  # noqa: BLE001 - the rule's refusal is the caller's sentence
-            raise OfficeError(str(e)) from None
+        apply_rule(self.admit, what, path)
 
     def _unlinked(self, doc, scan=False):
         """Refuses, for a caller held to the rule, a document linked to another source, and with
@@ -296,6 +247,10 @@ class Office:
             raise OfficeError("`%s` is open read-only; nothing can change it. Close it and open "
                               "it again without `read_only`" % self.name_of(doc))
 
+    def open_paths(self):
+        """The files of the documents open here (one never saved has none)."""
+        return self.run(lambda desktop: [p for p in map(self.path_of, self._documents(desktop)) if p])
+
     # ── what describe shows ─────────────────────────────────────────────────
 
     def overview(self):
@@ -446,7 +401,7 @@ class Office:
                     out.append(_number(value))
                     # A formula, not text that happens to start with `=`: a text cell's value is
                     # its text, and a formula's value is what it computes.
-                    if isinstance(formula, str) and formula.startswith("=") and value != formula:
+                    if guard.formula_of(formula) and value != formula:
                         behind["%s%d" % (column_name(left + j), top + i + 1)] = formula
                 rows.append(out)
             return {"document": self.name_of(doc), "sheet": target.getName(),
@@ -511,71 +466,6 @@ class Office:
             return {"document": self.name_of(doc), "sheet": target.getName(),
                     "written": [ref for ref, _, _ in plan], "modified": bool(doc.isModified())}
         return self.run(write)
-
-    def save(self, document=None):
-        def store(desktop):
-            doc = self._find(desktop, document)
-            path = self.path_of(doc)
-            if not path:
-                raise OfficeError("`%s` has never been saved, so it has no file to save over; "
-                                  "`save_as` it to a path" % self.name_of(doc))
-            self._admit("write", path)
-            self._writable(doc)
-            doc.store()
-            return {"document": self.name_of(doc), "path": path, "modified": bool(doc.isModified())}
-        return self.run(store)
-
-    def _new_file(self, path, suffixes):
-        """A path to a file that does not exist yet, in a directory that does."""
-        path = absolute(path)
-        self._admit("write", path)
-        if os.path.lexists(path):
-            raise OfficeError("a file is already at %s, and this action never replaces one; "
-                              "choose another path" % path)
-        if not os.path.isdir(os.path.dirname(path)):
-            raise OfficeError("there is no directory %s to write into" % os.path.dirname(path))
-        if suffixes is not None and os.path.splitext(path)[1].lower() not in suffixes:
-            raise OfficeError("%s must end in %s" % (path, " or ".join(sorted(suffixes))))
-        return path
-
-    def save_as(self, path, document=None):
-        path = self._new_file(path, SAVE_FILTERS)
-
-        def store(desktop):
-            doc = self._find(desktop, document)
-            kind, filter_name = SAVE_FILTERS[os.path.splitext(path)[1].lower()]
-            if self.kind(doc) != kind:
-                fits = sorted(ext for ext, (k, _) in SAVE_FILTERS.items() if k == self.kind(doc))
-                raise OfficeError("`%s` is %s, which cannot be saved as %s; it can be saved as %s"
-                                  % (self.name_of(doc), KIND_NAMES[self.kind(doc)],
-                                     os.path.splitext(path)[1], ", ".join(fits)))
-            was = self.path_of(doc)
-            doc.storeAsURL(self.uno().systemPathToFileUrl(path),
-                           (self._prop("FilterName", filter_name), self._prop("Overwrite", False)))
-            return {"document": self.name_of(doc), "path": path, "was": was}
-        return self.run(store)
-
-    def export_pdf_plan(self, path, document=None):
-        """Everything `export_pdf` checks before it writes: `(doc name, work)`, where `work()`
-        writes the PDF and returns the answer. Split so the surface can check in its turn and
-        write outside it."""
-        path = self._new_file(path, {".pdf"})
-
-        def find(desktop):
-            doc = self._find(desktop, document)
-            return doc, self.name_of(doc), self.kind(doc)
-        doc, name, kind = self.run(find)
-
-        def work():
-            def store(_desktop):
-                doc.storeToURL(self.uno().systemPathToFileUrl(path),
-                               (self._prop("FilterName", PDF_FILTERS[kind]),
-                                self._prop("Overwrite", False)))
-            self.run(store)
-            if not os.path.isfile(path):
-                raise OfficeError("LibreOffice answered, and nothing is at %s" % path)
-            return {"document": name, "path": path, "bytes": os.path.getsize(path)}
-        return name, work
 
     def close(self, document=None):
         def shut(desktop):

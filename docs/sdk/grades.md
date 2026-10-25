@@ -113,7 +113,7 @@ and `sensitive`. Its `close` refuses a document with unsaved changes rather than
 `sensitive` action that sometimes throws edits away. A handler's refusal is a sentence, so say
 what to do instead:
 
-<!-- from: adapters/libreoffice/yantrik_libreoffice/office.py -->
+<!-- from: adapters/libreoffice/yantrik_libreoffice/store.py -->
 ```python
         if os.path.lexists(path):
             raise OfficeError("a file is already at %s, and this action never replaces one; "

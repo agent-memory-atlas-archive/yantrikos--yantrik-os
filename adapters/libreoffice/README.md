@@ -15,10 +15,13 @@ which is the point of it: it is the second worked example in
 | `yantrik_libreoffice/office.py` | LibreOffice over UNO — the only file that touches `uno` |
 | `yantrik_libreoffice/surface.py` | the actions, their grades and descriptions, and what describe shows |
 | `yantrik_libreoffice/adapter.py` | the program: how it starts, what it serves, when it stops |
+| `yantrik_libreoffice/agent_office.py` | the agents' own LibreOffice, which serves every agent call |
+| `yantrik_libreoffice/fence.py`, `places.py` | the Landlock fence that LibreOffice runs in, and what it allows |
+| `yantrik_libreoffice/store.py`, `guard.py` | `save`, `save_as`, `export_pdf`, and the scan they and the reads share |
 | `bin/yantrik-libreoffice-adapter` | the command `X-Yantrik-Adapter` names |
 | `bin/yantrik-libreoffice` | the command `Exec` names: LibreOffice, listening on its UNO pipe |
 | `yantrik-libreoffice.desktop` | how the shell finds it while it is closed |
-| `tests/` | the adapter against a fake UNO (`fake_uno.py`), the program and the launcher, `yos check`, and `test_live.py` against a real LibreOffice |
+| `tests/` | the adapter against a fake UNO (`fake_uno.py`), the program and the launcher, `yos check`, the fence against the kernel (`test_fence.py`), and `test_live.py` and `test_live_fence.py` against a real LibreOffice |
 
 ## What a mind sees
 
@@ -65,6 +68,39 @@ does the asking. `tests/test_surface.py` holds both decisions.
 could overwrite would have to be `sensitive` for every call, since a grade is per action and not
 per argument; refusing the one argument that would make it dangerous keeps the common case
 unasked.
+
+## Agents work in a LibreOffice of their own, fenced by the kernel
+
+A document can read files: an external reference, `INDIRECT`, a linked section, a macro, an
+import filter. Whatever LibreOffice reads, it reads with the rights of its process, and the
+person's LibreOffice runs with all of theirs. So **no agent call reaches the person's
+LibreOffice** (#942). An agent's calls go to a second LibreOffice that the adapter starts on the
+first one: headless, with its own profile and pipe, launched through `fence.py`. Before soffice
+runs, the launcher asks Linux's **Landlock** to allow the process only these places:
+
+- the system folders, read-only;
+- its own profile;
+- making its pipe in `/tmp`;
+- the folders in the person's home that are open to agents (`places.py`).
+
+The home's open folders are its folders that are not hidden and hold no protected place
+(`home_paths::PROTECTED`); a folder that holds one, such as `~/Pictures` around `Screenshots`, is
+gone round. TCP is shut too. Every other path is refused by the kernel, to soffice and to
+everything it starts, whatever the document asks for.
+
+The launcher then tries to open the home and each protected place. It runs soffice only if all
+of them are refused. Where Landlock is missing, or the fence will not go up or does not hold,
+**the agent's call is refused**. It never runs unfenced.
+
+The trade-off is that an agent works on files, not on the person's open windows. A document the
+person has open is not in the agents' LibreOffice to read or change. `open` refuses a file the
+person has open (in their LibreOffice, or with a LibreOffice lock file beside it), so two
+LibreOffices never edit one file. Describe lists the agents' documents under `agent_documents`.
+
+The scan in `guard.py` stays as a second wall. Before an agent's read, save, `save_as` or export,
+the document may be linked to nothing, and a spreadsheet's formulas (array formulas included)
+and named expressions must pass the agent formula allowlist. The links are asked again after the
+read or write, and a file written while a link appeared is taken back.
 
 ## How it is started, and why that differs from Blender
 

@@ -20,6 +20,10 @@ The grades, and why (README.md has the long form):
 None of the descriptions says the action cannot be undone, and that is a decision too: the
 words would make `auto` mode ask about `save` as well, and a person who chose `auto` has said
 that `sensitive` work may run unasked.
+
+Whose LibreOffice a call reaches: the person's calls reach the person's LibreOffice, on the pipe;
+an agent's reach only the fenced LibreOffice of agent_office.py, which the kernel keeps out of the
+protected places, and are refused when that fence cannot be put up (#942).
 """
 
 from typing import Annotated, Literal, Optional
@@ -27,6 +31,7 @@ from typing import Annotated, Literal, Optional
 from yantrik_surface import Later, Refusal, Surface, files
 
 from . import formulas
+from .agent_office import AgentOffice
 from .office import NotReachable, Office, OfficeError
 
 APP_ID = "libreoffice"
@@ -46,9 +51,10 @@ class LibreOfficeSurface(Surface):
     from any thread, and LibreOffice serializes them itself.
     """
 
-    def __init__(self, office, app_id=APP_ID, **kwargs):
+    def __init__(self, office, app_id=APP_ID, agents=None, **kwargs):
         super().__init__(app_id, **kwargs)
         self.office = office
+        self.agents = agents
 
     def snapshot(self):
         try:
@@ -56,13 +62,18 @@ class LibreOfficeSurface(Surface):
         except NotReachable as e:
             return ("LibreOffice — %s" % e.short,
                     {"connected": False, "pipe": self.office.pipe, "problem": str(e),
-                     "documents": []})
+                     "documents": [], "agent_documents": self._agent_documents()})
         except OfficeError as e:
             return ("LibreOffice — did not answer",
                     {"connected": False, "pipe": self.office.pipe, "problem": str(e),
-                     "documents": []})
+                     "documents": [], "agent_documents": self._agent_documents()})
         return summary_of(documents, front), {
-            "connected": True, "pipe": self.office.pipe, "front": front, "documents": documents}
+            "connected": True, "pipe": self.office.pipe, "front": front, "documents": documents,
+            "agent_documents": self._agent_documents()}
+
+    def _agent_documents(self):
+        """The documents open in the agents' own LibreOffice (agent_office.py), when it runs."""
+        return self.agents.documents() if self.agents is not None else []
 
 
 def summary_of(documents, front):
@@ -98,28 +109,33 @@ HIDDEN = ("the document is a file an agent is not shown, and it is left alone; `
           "person's home")
 
 
-def agents_files(stat=None):
+def agents_files(stat=None, always=False):
     """The rule `Office.admit` is held to (#443): an agent names only files in the person's
     home, outside its protected places, and acts on no document the person opened from
     anywhere else — `read_text` was any file the person can read, graded `safe` (#942's audit).
-    `stat` stands in for the shell's `files_stat` in a test."""
+    `stat` stands in for the shell's `files_stat` in a test. With `always`, the rule's checks of
+    a document bind every call, as they do in the agents' own LibreOffice, whose every call is an
+    agent's, even work done after the dispatch has answered (`export_pdf`)."""
+    def agent():
+        return always or files.agent_is_calling()
+
     def admit(what, path):
         if what == "read":
             files.may_read_file(path, stat)
         elif what == "write":
             files.may_write_file(path, stat)
         elif what == "formula":
-            said = formulas.refusal(path) if files.agent_is_calling() else None
+            said = formulas.refusal(path) if agent() else None
             if said:
                 raise Refusal(said)
         elif what == "outside":
-            if files.agent_is_calling():
+            if agent():
                 raise Refusal(path)
         elif what == "links":
-            if files.agent_is_calling():
+            if agent():
                 raise Refusal("the document is linked to another file or source (%s), which an "
                               "agent does not read through; ask the person" % ", ".join(path[:3]))
-        elif path and files.agent_is_calling():
+        elif path and agent():
             try:
                 files.may_read_file(path, stat)
             except Refusal:
@@ -127,13 +143,20 @@ def agents_files(stat=None):
     return admit
 
 
-def build(office=None, app_id=APP_ID, stat=None, **kwargs):
-    """LibreOffice's surface over `office` (a fresh `Office` on the default pipe when None).
-    `kwargs` go to the SDK's `Surface` — tests pin the ceiling and mode files with them, and
-    `stat` stands in for the shell's `files_stat`."""
+def build(office=None, app_id=APP_ID, stat=None, agents=None, **kwargs):
+    """LibreOffice's surface over `office` (a fresh `Office` on the default pipe when None), with
+    agents' calls served by `agents` (a fresh fenced `AgentOffice` when None). `kwargs` go to the
+    SDK's `Surface` — tests pin the ceiling and mode files with them, and `stat` stands in for
+    the shell's `files_stat`."""
     office = office if office is not None else Office()
     office.admit = agents_files(stat)
-    surface = LibreOfficeSurface(office, app_id, **kwargs)
+    agents = agents if agents is not None else AgentOffice(person=office)
+    agents.admit = agents_files(stat, always=True)
+    surface = LibreOfficeSurface(office, app_id, agents=agents, **kwargs)
+
+    def serving():
+        """The LibreOffice this call is served by: the agents' own for an agent's call."""
+        return agents.office() if files.agent_is_calling() else office
 
     @surface.action("open", expected_seconds=15, timeout=120)
     def open_document(
@@ -145,6 +168,8 @@ def build(office=None, app_id=APP_ID, stat=None, **kwargs):
         """Open a file in LibreOffice, in a window of its own; documents already open stay as
         they are, and a file already open is not opened twice. Answers with the name the other
         actions take as `document`."""
+        if files.agent_is_calling():
+            return _answer(agents.open, path, read_only)
         return _answer(office.open, path, read_only)
 
     @surface.action("read_text", grade="safe", timeout=60)
@@ -156,7 +181,7 @@ def build(office=None, app_id=APP_ID, stat=None, **kwargs):
     ) -> dict:
         """Read the text of a Writer document: its body as plain text, one paragraph per line.
         A long document comes in parts: `start` and `max_chars` page through it."""
-        return _answer(office.read_text, document, start, max_chars)
+        return _answer(lambda: serving().read_text(document, start, max_chars))
 
     @surface.action("read_cells", grade="safe", timeout=60)
     def read_cells(
@@ -169,7 +194,7 @@ def build(office=None, app_id=APP_ID, stat=None, **kwargs):
         """Read cells of a Calc spreadsheet: their values row by row (numbers as numbers, text as
         text, empty cells as null), and in `formulas` the formula behind every computed cell. At
         most 10000 cells at a time."""
-        return _answer(office.read_cells, range, sheet, document)
+        return _answer(lambda: serving().read_cells(range, sheet, document))
 
     @surface.action("write_text", timeout=60)
     def write_text(
@@ -181,7 +206,7 @@ def build(office=None, app_id=APP_ID, stat=None, **kwargs):
     ) -> dict:
         """Write text into a Writer document. Nothing on disk changes until `save`, and
         LibreOffice's Undo takes it back."""
-        return _answer(office.write_text, text, at, document)
+        return _answer(lambda: serving().write_text(text, at, document))
 
     @surface.action("write_cells", timeout=60)
     def write_cells(
@@ -196,14 +221,14 @@ def build(office=None, app_id=APP_ID, stat=None, **kwargs):
         """Write cells of a Calc spreadsheet, every one or none: a cell that cannot be written
         leaves the sheet as it was. Nothing on disk changes until `save`, and LibreOffice's Undo
         takes it back."""
-        return _answer(office.write_cells, cells, sheet, document)
+        return _answer(lambda: serving().write_cells(cells, sheet, document))
 
     @surface.action("save", grade="sensitive", expected_seconds=10, timeout=120)
     def save(document: Annotated[Optional[str], DOCUMENT] = None) -> dict:
         """Save a document over the file it was opened from, in that file's format: what the
         file held before is replaced by what the document holds now, and LibreOffice keeps no
         copy of the old one."""
-        return _answer(office.save, document)
+        return _answer(lambda: serving().save(document))
 
     @surface.action("save_as", expected_seconds=10, timeout=120)
     def save_as(
@@ -213,7 +238,7 @@ def build(office=None, app_id=APP_ID, stat=None, **kwargs):
     ) -> dict:
         """Save a document to a new file, and from then on the document is that file. Never
         replaces a file: a path where something already is is refused."""
-        return _answer(office.save_as, path, document)
+        return _answer(lambda: serving().save_as(path, document))
 
     @surface.action("export_pdf", expected_seconds=20, timeout=300)
     def export_pdf(
@@ -224,13 +249,13 @@ def build(office=None, app_id=APP_ID, stat=None, **kwargs):
         a file: a path where something already is is refused."""
         # Checked in this turn — the document, the path — and written after it, so a long export
         # holds up nobody reading the surface in the meantime. The answer waits for the file.
-        _, work = _answer(office.export_pdf_plan, path, document)
+        _, work = _answer(lambda: serving().export_pdf_plan(path, document))
         return Later(lambda: _answer(work))
 
     @surface.action("close", timeout=60)
     def close(document: Annotated[Optional[str], DOCUMENT] = None) -> dict:
         """Close a document's window. Refused while it has unsaved changes: `save` or `save_as`
         it first, because this adapter never throws edits away."""
-        return _answer(office.close, document)
+        return _answer(lambda: serving().close(document))
 
     return surface

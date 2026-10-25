@@ -45,6 +45,22 @@ def links(doc):
     return names + _text_section_links(doc)
 
 
+def formula_of(written):
+    """The formula in what Calc reports a cell holds, or None for a value. A plain formula is
+    `=…`; one cell of an array formula is `{=…}`, braces around it, in every cell the array
+    covers (`getFormulaArray` and `getFormula` alike), and was read as a value until review H1
+    of #942. Anything else that starts with `{` is held to the allowlist too: a stricter reading
+    only refuses more."""
+    if not isinstance(written, str):
+        return None
+    if written.startswith("="):
+        return written
+    if written.startswith("{"):
+        inner = written[1:-1] if written.endswith("}") else written[1:]
+        return inner if inner.startswith("=") else "=" + inner
+    return None
+
+
 def outside_sentence(doc, sheets, used):
     """A sentence when any formula or named expression of a Calc document names anything outside
     it, else None. `sheets` are the document's sheets; `used(sheet)` is a sheet's used area."""
@@ -62,8 +78,9 @@ def outside_sentence(doc, sheets, used):
             return "this document is too large to check for formulas that read outside it"
         rows = sheet.getCellRangeByPosition(left, top, right, bottom).getFormulaArray()
         for row in rows:
-            for formula in row:
-                if isinstance(formula, str) and formula.startswith("="):
+            for written in row:
+                formula = formula_of(written)
+                if formula:
                     said = formulas.refusal(formula)
                     if said:
                         return ("a formula in this document names something outside it, so an "

@@ -182,7 +182,7 @@ the work is done. LibreOffice's `export_pdf`:
 ```python
         # Checked in this turn — the document, the path — and written after it, so a long export
         # holds up nobody reading the surface in the meantime. The answer waits for the file.
-        _, work = _answer(office.export_pdf_plan, path, document)
+        _, work = _answer(lambda: serving().export_pdf_plan(path, document))
         return Later(lambda: _answer(work))
 ```
 
