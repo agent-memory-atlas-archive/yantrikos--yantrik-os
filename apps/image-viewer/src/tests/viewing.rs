@@ -93,6 +93,11 @@ fn fit_and_the_info_panel_answer_and_describe_reads_what_the_window_shows() {
     assert!(app.ui(|ui| ui.get_fit_contain()));
 
     // A zoom of the person's own, as the window tells it: `fit` goes back to the whole picture.
+    // The two `fit`s above changed the window's fit flag, and its change handler tells the app
+    // what the window shows on the next turn of the event loop. Every test shares one UI thread,
+    // so any other test's turn can be that next turn, and it would land after the zoom told here
+    // and put the window's own (unzoomed) state over it. Take that turn first, so none is owed.
+    app.ui(|_| slint::platform::update_timers_and_animations());
     let zoomed = ViewState { zoomed: true, fit_contain: false, ..ViewState::default() };
     app.run(Command::ViewSeen(zoomed));
     assert_eq!(app.describe()["state"]["zoomed"], json!(true));
