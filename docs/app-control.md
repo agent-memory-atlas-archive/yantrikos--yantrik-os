@@ -342,6 +342,7 @@ content, and a content action a paired action takes back stays `standard` (`add_
 | email | `open_message`, `select_folder`, `search`, `mark_read`, `flag`, `compose` | standard | reads and a draft; `send` is deliberately not published — mail that has gone cannot be taken back |
 | email | `begin_google_sign_in` | sensitive | puts a full-access consent screen in front of the person, unasked |
 | image-viewer | `open`, `show`, `next`, `previous`, `rotate`, `flip`, `fit`, `toggle_info` | standard | showing pictures; `rotate` and `flip` turn and mirror what is on screen (the toolbar's own path), the file is unchanged and the next picture is shown as stored; `fit` is the fit button, back to the whole picture from a zoom |
+| music | `play`, `pause`, `next`, `previous`, `seek`, `set_volume`, `play_file`, `rescan` | standard | playback through mpv, answered with mpv's own report once it has done it; `play_file` takes an agent's path only in the person's home outside its protected places, and an agent is told no path it could not read |
 | network | `refresh`, `wifi_scan` | standard | reads that trigger a radio scan |
 | network | `wifi_connect`, `wifi_forget` | sensitive | changes what the machine joins; forgetting deletes a stored credential |
 | network | `wifi_disconnect`, `wifi_radio` | dangerous | on a machine reached over Wi-Fi, takes away the channel the undo would travel on |
