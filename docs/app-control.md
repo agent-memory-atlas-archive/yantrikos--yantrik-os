@@ -709,6 +709,14 @@ every window a mind opens is drawn in Mind View and never on the person's deskto
   shell brings Mind View forward, because that is where the window is. Every surface on the app
   runtime publishes `present` (`safe`; refused to an agent, since it is the desktop's own handover).
   A copy with no window answers that it has none, and the launch says so.
+- `read_mind_view` reads every line of Mind View as text, so an app with content an agent must not
+  read masks it when `Boot::for_mind` is set (`yantrik_app::for_mind`). It is set when the launch
+  carries `YANTRIK_FOR_MIND` (set on every app started on a mind's display,
+  `MindDisplay::mind_view`) or when the window's `WAYLAND_DISPLAY` is not the person's
+  (`present::elsewhere`, the comparison `present` already makes), so a launch that lost the marker is
+  still masked. The marker only turns masking on. `TestApp::start_for_mind` starts a test that way.
+  Snippets shows "Code is hidden while a Mind is looking." for its code and refuses editing,
+  Copy and AI Explain.
 - Not changed by design: `open_app files|settings|launchpad` switches the person's own screen;
   `focus_window`/`close_window` act on the person's windows; a mind typing into the Terminal app
   drives whichever Terminal window is open, including the person's if that is the one open.

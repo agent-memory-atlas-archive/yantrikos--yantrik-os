@@ -18,6 +18,7 @@ pub mod documents;
 pub mod drafts;
 pub mod effects;
 pub mod event_loop;
+pub mod for_mind;
 pub mod instance;
 pub mod intents;
 pub mod jobs;

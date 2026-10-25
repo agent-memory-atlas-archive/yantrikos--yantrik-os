@@ -227,9 +227,30 @@ impl<A: App> TestApp<A> {
         mind: Arc<dyn yantrik_mind::Mind>,
         services: yantrik_app::services::Services,
     ) -> TestApp<A> {
+        TestApp::start_as(paths, args, mind, services, false)
+    }
+
+    /// [`TestApp::start_at`] as an app drawn for a Mind (Mind View): `Boot::for_mind` is set, so
+    /// the app masks what an agent must not read. The other starts are never for a mind, whatever
+    /// this process's environment says.
+    pub fn start_for_mind(
+        paths: Paths,
+        args: Vec<std::ffi::OsString>,
+        mind: Arc<dyn yantrik_mind::Mind>,
+    ) -> TestApp<A> {
+        TestApp::start_as(paths, args, mind, yantrik_app::services::Services::fakes(), true)
+    }
+
+    fn start_as(
+        paths: Paths,
+        args: Vec<std::ffi::OsString>,
+        mind: Arc<dyn yantrik_mind::Mind>,
+        services: yantrik_app::services::Services,
+        for_mind: bool,
+    ) -> TestApp<A> {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         on_ui(move || {
-            let (boot, store) = Boot::<A::Settings>::open(paths.clone(), args, mind, services)
+            let (boot, store) = Boot::<A::Settings>::open_as(paths.clone(), args, mind, services, for_mind)
                 .unwrap_or_else(|e| panic!("{}: the launch was refused: {e}", A::ID));
             let model = A::model(&boot)
                 .unwrap_or_else(|e| panic!("{}: the model did not start: {e}", A::ID));

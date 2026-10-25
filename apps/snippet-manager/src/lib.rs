@@ -34,6 +34,7 @@ mod describe;
 mod disk;
 mod intents;
 mod lane;
+mod mind_view;
 mod model;
 mod rail;
 pub mod store;
@@ -108,6 +109,7 @@ impl App for SnippetManager {
             drafts: Default::default(),
             typed: 0,
             offers: Vec::new(),
+            for_mind: boot.for_mind,
         };
         recover(&mut m, &boot.drafts);
         Ok(m)

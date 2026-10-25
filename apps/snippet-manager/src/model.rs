@@ -172,6 +172,9 @@ pub struct Model {
     pub typed: u64,
     /// The drafts offered back, the bar's first.
     pub offers: Vec<Offer>,
+    /// Drawn for a Mind (`Boot::for_mind`): the window masks every snippet's code
+    /// (`crate::mind_view`).
+    pub for_mind: bool,
 }
 
 impl Model {
