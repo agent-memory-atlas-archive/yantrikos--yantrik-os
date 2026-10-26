@@ -18,6 +18,7 @@ use crate::office::{is_libreoffice, CLOSED_TO_AGENTS};
 const YANTRIK_APPS: &[(&str, &str)] = &[
     ("yantrik-calendar", "calendar"),
     ("yantrik-container-manager", "containers"),
+    ("yantrik-download-manager", "download-manager"),
     ("yantrik-email", "email"),
     ("yantrik-image-viewer", "image-viewer"),
     ("yantrik-music-player", "music"),
