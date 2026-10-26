@@ -267,16 +267,14 @@ pub fn removed(
     fx: &mut Effects<Email>,
 ) {
     let subject = &target.subject;
-    // Where a Mind looks a notice does not quote the subject (`mind_view::named`).
-    let named = crate::mind_view::named(m.for_mind, subject);
     let what = match &how {
         Removal::Delete => "delete",
         Removal::Move(_) => "move",
     };
     if let Err(e) = call {
         let text = match &how {
-            Removal::Delete => format!("Could not delete {named}: {e}"),
-            Removal::Move(to) => format!("Could not move {named} to {to}: {e}"),
+            Removal::Delete => format!("Could not delete \u{201c}{subject}\u{201d}: {e}"),
+            Removal::Move(to) => format!("Could not move \u{201c}{subject}\u{201d} to {to}: {e}"),
         };
         say(m, fx, text.clone());
         return log_failure(&how, &text);
@@ -294,7 +292,7 @@ pub fn removed(
     // Gone from its own folder: the listing is that folder's, so a message of the same UID in
     // another mailbox is not mistaken for it.
     if messages.iter().any(|s| s.id == target.id) {
-        let text = format!("The mail server reported the {what} of {named} and it is still in {read}.");
+        let text = format!("The mail server reported the {what} of \u{201c}{subject}\u{201d} and it is still in {read}.");
         say(m, fx, text.clone());
         return log_failure(&how, &text);
     }

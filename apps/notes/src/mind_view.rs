@@ -17,11 +17,14 @@ use crate::command::{Command, WindowAction};
 /// - typing, undo, redo and the conflict and recovery choices would change the note or put the
 ///   masked sentence over it;
 /// - save, import and export (and the dialog's confirm) would read or write a file as the person;
-/// - Copy saves the note as a new note, which carries its real text into a second note.
+/// - Copy saves the note as a new note, which carries its real text into a second note;
+/// - Trash, Restore, the notebook and tags fields and the recovery bar's Discard change the
+///   library, and no one may do that through a window as the person. The intents offer the same
+///   changes and reach them as `Command::Surface`, which this does not match.
 pub fn refuses(command: &Command) -> bool {
     match command {
         Command::From { command, .. } => refuses(command),
-        Command::Edit(_) => true,
+        Command::Edit(_) | Command::Metadata { .. } => true,
         Command::Window(action) => matches!(
             action,
             WindowAction::Copy
@@ -34,6 +37,10 @@ pub fn refuses(command: &Command) -> bool {
                 | WindowAction::KeepMine
                 | WindowAction::TakeTheirs
                 | WindowAction::RestoreDraft
+                | WindowAction::DiscardDraft
+                | WindowAction::Trash
+                | WindowAction::Restore
+                | WindowAction::Pin
         ),
         _ => false,
     }

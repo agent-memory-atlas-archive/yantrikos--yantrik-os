@@ -127,6 +127,7 @@ fn every_edit_path_in_a_mind_view_window_is_refused_before_the_document_changes(
         W::SaveAs,
         W::SaveClose,
         W::Goto,
+        W::Discard,
         W::Confirm { path: path.display().to_string() },
         W::Confirm { path: "/etc/hostname".into() },
     ];

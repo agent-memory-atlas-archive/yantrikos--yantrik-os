@@ -171,3 +171,17 @@ fn export_all_in_a_mind_view_window_writes_no_file() {
     f.quiet();
     assert_eq!(f.app.last_refusal().unwrap().sentence, yantrik_app::for_mind::READ_ONLY);
 }
+
+#[test]
+fn collections_in_a_mind_view_window_are_not_changed() {
+    let (paths, _) = kept();
+    let f = start_for_mind(paths);
+    for command in [
+        Command::CollectionCreate("new".into()),
+        Command::CollectionRename(0, "renamed".into()),
+        Command::CollectionDelete(0),
+    ] {
+        f.app.run(command);
+        assert_eq!(f.app.last_refusal().unwrap().sentence, yantrik_app::for_mind::READ_ONLY);
+    }
+}

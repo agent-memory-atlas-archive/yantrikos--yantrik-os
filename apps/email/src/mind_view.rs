@@ -10,15 +10,23 @@
 //!
 //! Where it would carry mail out, the command is refused ([`refuses`]): send, reply and forward.
 //! A search matches nothing, since nothing it could match is shown. The person's saved draft is
-//! never opened, saved over or cleared from here, and notices do not quote a subject.
+//! never opened, saved over or cleared from here, and nothing the model says is drawn.
 
-use crate::command::{Ask, Command};
+use crate::command::Command;
 
-/// A command a Mind's window cannot run, by the framework's read-only rule. The companion's
-/// summary and suggested reply read the message and put what they make of it on the window; Open
-/// original writes the sender's HTML to a file and opens it; Send, Reply and Forward carry mail
-/// out or quote it; Save draft and the composer's own edits would write over the person's draft
-/// with text the window cannot show.
+/// A command a Mind's window cannot run, by the framework's read-only rule:
+/// - every ask of the companion (summary, suggested reply, draft, enhance, classify) sends the
+///   message or the composer to the model, and what comes back is drawn in the window, in a notice
+///   that can quote the mail, or over the composer's body;
+/// - Open original writes the sender's HTML to a file and opens it;
+/// - Send, Reply and Forward carry mail out or quote it;
+/// - Save draft and the composer's own edits would write over the person's draft with text the
+///   window cannot show;
+/// - Delete, Archive and the account setup change the mailbox or the person's accounts, and the
+///   intents offer none of them.
+///
+/// What the intents offer (open, search, mark read, flag, select folder, compose, sign in) is not
+/// listed, so it runs as it does anywhere.
 pub fn refuses(command: &Command) -> bool {
     matches!(
         command,
@@ -28,12 +36,11 @@ pub fn refuses(command: &Command) -> bool {
             | Command::Forward
             | Command::SaveDraft(_)
             | Command::Edited { .. }
-            | Command::Ask(Ask::Summarize | Ask::SuggestReply)
+            | Command::Ask(_)
+            | Command::Delete(_)
+            | Command::Archive(_)
+            | Command::AddAccount
+            | Command::TestConnection(_)
+            | Command::SaveAccount(_)
     )
-}
-
-/// How a notice names a message: by its subject for the person, and for a Mind by a phrase that
-/// carries no mail.
-pub fn named(for_mind: bool, subject: &str) -> String {
-    if for_mind { "this message".to_string() } else { format!("\u{201c}{subject}\u{201d}") }
 }

@@ -15,7 +15,8 @@ use crate::command::{Command, WindowAction};
 /// - typing, replace, replace all, undo and redo would change the document;
 /// - open, save, save as, the save on the close prompt, and the dialog's confirm would read or
 ///   write a file as the person;
-/// - Go to line would tell the length of the document from where it lands.
+/// - Go to line would tell the length of the document from where it lands;
+/// - Discard on the close prompt drops unsaved text, a change as the person.
 pub fn refuses(command: &Command) -> bool {
     match command {
         Command::Edit(_) => true,
@@ -31,6 +32,7 @@ pub fn refuses(command: &Command) -> bool {
                 | WindowAction::ReplaceAll { .. }
                 | WindowAction::Undo
                 | WindowAction::Redo
+                | WindowAction::Discard
         ),
         _ => false,
     }

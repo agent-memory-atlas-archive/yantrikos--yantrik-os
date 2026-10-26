@@ -128,6 +128,12 @@ fn a_reply_a_forward_a_send_and_the_companion_carry_nothing_from_a_message_in_a_
         Command::OpenOriginal,
         Command::Ask(Ask::Summarize),
         Command::Ask(Ask::SuggestReply),
+        Command::Ask(Ask::Classify),
+        Command::Ask(Ask::Draft("write to them".into())),
+        Command::Ask(Ask::Enhance("formal".into())),
+        Command::Delete(0),
+        Command::Archive(0),
+        Command::AddAccount,
     ] {
         app.run(command);
         quiet(&app);
@@ -138,8 +144,8 @@ fn a_reply_a_forward_a_send_and_the_companion_carry_nothing_from_a_message_in_a_
     assert!(!window_text(&app).contains(SENTINEL));
 }
 
-/// A Mind's window started over a saved draft whose every field holds the sentinel.
-fn with_kept_draft(mail: &FakeMail) -> (TestApp<Email>, std::path::PathBuf, Draft) {
+/// A window started over a saved draft whose every field holds the sentinel, for a Mind or not.
+fn with_draft_kept(mail: &FakeMail, for_mind: bool) -> (TestApp<Email>, std::path::PathBuf, Draft) {
     let s = SENTINEL;
     let draft = Draft {
         to: format!("{s}@x"),
@@ -152,9 +158,19 @@ fn with_kept_draft(mail: &FakeMail) -> (TestApp<Email>, std::path::PathBuf, Draf
     fake::install(&paths, mail);
     let file = paths.data_dir().join(crate::files::DRAFT);
     crate::state::save_draft(&file, &draft).unwrap();
-    let app = TestApp::<Email>::start_for_mind(paths, Vec::new(), std::sync::Arc::new(FakeMind::new()));
+    let mind = std::sync::Arc::new(FakeMind::new());
+    let app = if for_mind {
+        TestApp::<Email>::start_for_mind(paths, Vec::new(), mind)
+    } else {
+        TestApp::<Email>::start_at(paths, Vec::new())
+    };
     quiet(&app);
     (app, file, draft)
+}
+
+/// A Mind's window started over a saved draft whose every field holds the sentinel.
+fn with_kept_draft(mail: &FakeMail) -> (TestApp<Email>, std::path::PathBuf, Draft) {
+    with_draft_kept(mail, true)
 }
 
 #[test]
@@ -169,7 +185,7 @@ fn the_composer_in_a_mind_view_window_does_not_show_the_saved_draft() {
     quiet(&app);
     let text = window_text(&app);
     assert!(!text.contains(SENTINEL), "{text}");
-    assert_eq!(app.ui(|ui| ui.get_compose_cc().to_string()), "");
+    assert_eq!(app.ui(|ui| ui.get_compose_cc().to_string()), HIDDEN, "the kept Cc is there, masked");
     assert_eq!(app.ui(|ui| ui.get_compose_to().to_string()), HIDDEN, "the Mind's own text is masked too");
     // Closing the composer neither saves over the person's draft nor clears it.
     app.run(Command::CancelCompose(Draft::default()));
@@ -182,14 +198,42 @@ fn the_composer_in_a_mind_view_window_does_not_show_the_saved_draft() {
 
 #[test]
 fn a_mind_view_window_does_not_write_the_person_s_draft_when_it_ends() {
-    let (app, file, _) = with_kept_draft(&mailbox());
-    let before = std::fs::read(&file).unwrap();
-    app.run(Command::Compose { to: "m@x".into(), subject: "hi".into(), body: "there".into() });
-    quiet(&app);
-    app.run(Command::OfferUnsent);
-    quiet(&app);
-    let _ = app.shutdown();
-    assert_eq!(std::fs::read(&file).unwrap(), before);
+    // The session ends with the composer open; then the person starts the app again.
+    let mut at_restart = Vec::new();
+    for for_mind in [false, true] {
+        let (app, file, draft) = with_draft_kept(&mailbox(), for_mind);
+        let before = std::fs::read(&file).unwrap();
+        app.run(Command::Compose { to: "m@x".into(), subject: "hi".into(), body: "there".into() });
+        quiet(&app);
+        let paths = app.paths();
+        app.event(yantrik_app::app::Event::ExitRequested(yantrik_app::app::ExitReason::Logout));
+        let _ = app.shutdown();
+        drop(app);
+        if for_mind {
+            assert_eq!(std::fs::read(&file).unwrap(), before, "the draft file is as it was");
+        }
+        let again = TestApp::<Email>::start_at(paths, Vec::new());
+        quiet(&again);
+        again.ui(|ui| ui.invoke_compose_new());
+        at_restart.push((again.ui(|ui| ui.get_compose_body().to_string()), draft.body));
+    }
+    assert_eq!(at_restart[0].0, "there", "the check can see the lane: the person's composer is kept");
+    assert_eq!(at_restart[1].0, at_restart[1].1, "a Mind's composer left nothing in the lane");
+}
+
+/// `compose` is an intent: in a Mind's instance it leaves the composer as it does anywhere, the
+/// kept draft's Cc and Bcc included. Only the window's rendering of it is masked.
+#[test]
+fn compose_leaves_the_same_composer_in_a_mind_view_window_as_anywhere() {
+    let mut got = Vec::new();
+    for for_mind in [false, true] {
+        let (app, _, _) = with_draft_kept(&mailbox(), for_mind);
+        let answer = super::act(&app, "compose", json!({ "to": "m@x", "subject": "hi", "body": "there" })).unwrap();
+        quiet(&app);
+        got.push((answer, app.model(|m| m.composer.text.clone()), app.describe()));
+    }
+    assert_eq!(got[0], got[1]);
+    assert!(got[0].1.cc.contains(SENTINEL), "the kept Cc is still on the draft");
 }
 
 #[test]
@@ -201,18 +245,21 @@ fn the_composer_s_own_edits_in_a_mind_view_window_are_refused() {
     assert_eq!(app.last_refusal().unwrap().sentence, READ_ONLY);
 }
 
+/// The companion answers with the mail quoted, as the review's probe had it do.
 #[test]
-fn a_failed_delete_in_a_mind_view_window_does_not_quote_the_subject() {
-    for outcome in [Err("NO permission".to_string()), Ok(json!({}))] {
-        let mail = mailbox().answering("email.delete_message", json!({}));
-        let app = with_message(&mail, true);
-        mail.set("email.delete_message", outcome);
-        app.run(Command::Delete(0));
-        quiet(&app);
-        let notice = app.ui(|ui| ui.get_notice().to_string());
-        assert!(!notice.is_empty() && !notice.contains(SENTINEL), "{notice}");
-        assert!(notice.contains("this message"), "{notice}");
-    }
+fn the_classify_button_in_a_mind_view_window_never_puts_the_companion_s_answer_on_the_window() {
+    let paths = Paths::temporary(Email::ID);
+    fake::install(&paths, &mailbox());
+    let mind = std::sync::Arc::new(FakeMind::new().answering(&format!("It is about {SENTINEL} body, so action-needed")).reaching(yantrik_app::mind::Reach::Ready));
+    let app = TestApp::<Email>::start_for_mind(paths, Vec::new(), mind.clone());
+    quiet(&app);
+    app.run(Command::Open(Pick::Key(0)));
+    quiet(&app);
+    app.ui(|ui| ui.invoke_ai_classify());
+    quiet(&app);
+    assert_eq!(app.last_refusal().unwrap().sentence, READ_ONLY);
+    assert!(mind.prompts().is_empty(), "the message was not sent to the companion");
+    assert!(!window_text(&app).contains(SENTINEL), "{}", window_text(&app));
 }
 
 #[test]

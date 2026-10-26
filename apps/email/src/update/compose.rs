@@ -25,13 +25,8 @@ fn opened_on_new_text(m: &mut Model) {
 pub fn compose_new(m: &mut Model, fx: &mut Effects<Email>) {
     opened_on_new_text(m);
     fx.changed(part::STATUS);
-    // Where a Mind looks the person's saved draft stays where it is: not shown, not replaced.
-    if m.for_mind {
-        m.composer.text = Draft::default();
-        m.composer.status.clear();
-        fx.changed(part::COMPOSE_TEXT);
-        return;
-    }
+    // Where a Mind looks the model is as anywhere, since `compose` is an intent and builds on the
+    // kept draft; the window masks the fields (`view::render`) and never writes the draft back.
     match m.composer.kept.clone() {
         Ok(Some(draft)) => {
             m.composer.text = draft;

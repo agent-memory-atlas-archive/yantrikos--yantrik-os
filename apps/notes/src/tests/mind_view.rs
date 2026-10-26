@@ -150,12 +150,18 @@ fn every_edit_and_file_path_in_a_mind_view_window_is_refused_before_anything_cha
         WindowAction::KeepMine,
         WindowAction::TakeTheirs,
         WindowAction::RestoreDraft,
+        WindowAction::DiscardDraft,
+        WindowAction::Trash,
+        WindowAction::Restore,
+        WindowAction::Pin,
         WindowAction::Copy,
     ];
     for action in actions {
         app.run(Command::Window(action.clone()));
         assert_eq!(app.last_refusal().unwrap().sentence, READ_ONLY, "{action:?}");
     }
+    app.run(Command::Metadata { notebook: "elsewhere".into(), tags: "x".into() });
+    assert_eq!(app.last_refusal().unwrap().sentence, READ_ONLY);
     settle(&app);
     assert_eq!(super::snapshot(paths.data_dir()), before, "no note was written, made or exported");
     assert!(!app.model(|m| m.unsaved()));
@@ -165,8 +171,26 @@ fn every_edit_and_file_path_in_a_mind_view_window_is_refused_before_anything_cha
 
 #[test]
 fn the_recovery_bar_in_a_mind_view_window_gives_no_length_of_the_text() {
-    let normal = crate::update::said::offer_gone("T", Some(1234));
-    assert!(normal.contains("1234 characters"));
-    let masked = crate::update::said::offer_gone("T", None);
-    assert!(!masked.chars().any(|c| c.is_ascii_digit()), "{masked}");
+    // A note typed in, killed, and its file gone: the bar describes the unsaved text.
+    let (app, path) = super::with_note("Lost");
+    app.run(Command::Edit("# Lost
+
+words typed before the crash".into()));
+    app.run_writes();
+    let paths = app.paths();
+    drop(app);
+    std::fs::remove_file(&path).unwrap();
+    let mut bars = Vec::new();
+    for for_mind in [false, true] {
+        let app = if for_mind {
+            let mind = std::sync::Arc::new(yantrik_app::mind::fake::FakeMind::new());
+            TestApp::<Notes>::start_for_mind(paths.clone(), Vec::new(), mind)
+        } else {
+            TestApp::<Notes>::start_at(paths.clone(), Vec::new())
+        };
+        settle(&app);
+        bars.push(app.ui(|ui| ui.get_recovery_said().to_string()));
+    }
+    assert!(bars[0].contains("characters"), "{}", bars[0]);
+    assert!(!bars[1].is_empty() && !bars[1].contains("characters"), "{}", bars[1]);
 }
