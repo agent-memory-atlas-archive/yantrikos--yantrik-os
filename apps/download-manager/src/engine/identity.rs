@@ -5,11 +5,14 @@
 //! and an open; a descriptor cannot.
 //!
 //! What is recorded when the app creates a file, and again each time it has written to it, is a
-//! stamp: device, inode, birth time, modification time and size. All of them must match. Device
-//! and inode alone are not enough, because a filesystem hands a freed inode to the next file made,
-//! so a person who deletes the partial file and saves their own under that name could match. A
-//! new file has another birth time, and any rewrite (in place or by replacement) changes the
-//! modification time or the size, which the app compares with what it last wrote itself.
+//! stamp. The file's identity is the first three parts: device, inode and birth time, and only
+//! those must match. Device and inode alone are not enough, because a filesystem hands a freed
+//! inode to the next file made; a new file has another birth time. Size and modification time
+//! are in the stamp but are not identity, since a recreated file can be given the same values.
+//! After a crash the file is longer than the last stamp says, because the app wrote more than it
+//! had recorded; those bytes are its own, so a resume continues from the file's actual size,
+//! read on the verified descriptor, provided that is not less than the recorded one (less means
+//! the file was truncated, and the download restarts under a new name).
 //!
 //! Where the filesystem gives no birth time the stamp carries `-` in its place and is not a proof
 //! at all: the app refuses to resume, to delete on cancel and to delete on retry, and leaves the
@@ -53,6 +56,20 @@ pub(super) fn has_stamp(text: &str) -> bool {
     text.strip_prefix(TAG).is_some_and(|rest| rest.split(':').nth(2).is_some_and(|birth| birth != "-"))
 }
 
+/// The identity inside a stamp: device, inode and birth time. Birth time is new for every file
+/// created, so a recreated file never has the same one. Size and modification time are not part
+/// of it, because a recreated file can be given the same values.
+fn identity(stamp: &str) -> Option<&str> {
+    let rest = stamp.strip_prefix(TAG)?;
+    let end = rest.match_indices(':').nth(2).map(|(i, _)| i)?;
+    Some(&rest[..end])
+}
+
+/// Is the file with stamp `now` the file that `recorded` was taken of? Needs a birth time.
+pub(super) fn same_file(recorded: &str, now: &str) -> bool {
+    has_stamp(recorded) && identity(recorded).is_some() && identity(recorded) == identity(now)
+}
+
 /// The size recorded in a stamp: how many bytes the app had written when it took it.
 pub(super) fn recorded_size(stamp: &str) -> Option<u64> {
     stamp.strip_prefix(TAG)?.rsplit(':').next()?.parse().ok()
@@ -76,7 +93,7 @@ pub(super) fn open_owned(download: &Download) -> Result<Option<File>, String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(format!("{}: {e}", path.display())),
     };
-    if has_stamp(&download.file_id) && stamp_fd(&file).as_deref() == Some(download.file_id.as_str()) {
+    if stamp_fd(&file).is_some_and(|now| same_file(&download.file_id, &now)) {
         Ok(Some(file))
     } else {
         Err(format!("the file at {} is not provably this download's own", path.display()))
@@ -234,8 +251,8 @@ mod sys {
         let ours = opened >= 0 && {
             // SAFETY: a non-negative result is a descriptor this call owns.
             let file = unsafe { File::from_raw_fd(opened) };
-            stamp_fd(&file).as_deref() == Some(expected)
-                && stamp(qfd_raw, &held, libc::AT_SYMLINK_NOFOLLOW).as_deref() == Some(expected)
+            stamp_fd(&file).is_some_and(|now| same_file(expected, &now))
+                && stamp(qfd_raw, &held, libc::AT_SYMLINK_NOFOLLOW).is_some_and(|now| same_file(expected, &now))
         };
         if ours {
             // Step three: nothing else renames in this folder, so the held name is that file.

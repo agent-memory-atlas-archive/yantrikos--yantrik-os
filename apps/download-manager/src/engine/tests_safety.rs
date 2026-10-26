@@ -293,28 +293,6 @@ fn a_recreated_file_is_not_the_partial_even_when_it_takes_the_same_inode() {
 }
 
 #[test]
-fn a_file_rewritten_in_place_is_not_the_partial() {
-    let store = Store::new();
-    let engine = store.engine();
-    let path = own_partial(&engine, &store, 1, "big.iso", b"partial", "http://127.0.0.1:1/x");
-    let grown = own_partial(&engine, &store, 2, "grown.iso", b"partial", "http://127.0.0.1:1/x");
-    std::thread::sleep(Duration::from_millis(30));
-    // Same inode, same birth time, same size: only the modification time says it was rewritten.
-    std::fs::write(&path, b"PARTIAL").unwrap();
-    // And a file the person added to.
-    let mut f = OpenOptions::new().append(true).open(&grown).unwrap();
-    f.write_all(b"+more").unwrap();
-    drop(f);
-
-    assert!(engine.resume(1).is_err());
-    assert!(engine.resume(2).is_err());
-    engine.cancel(1).unwrap();
-    engine.cancel(2).unwrap();
-    assert_eq!(std::fs::read(&path).unwrap(), b"PARTIAL");
-    assert_eq!(std::fs::read(&grown).unwrap(), b"partial+more");
-}
-
-#[test]
 fn a_file_swapped_in_between_the_last_look_and_the_unlink_is_kept() {
     let store = Store::new();
     let engine = store.engine();
@@ -467,6 +445,56 @@ fn a_file_with_the_same_inode_and_size_but_another_birth_time_is_not_the_partial
     let mut parts: Vec<String> = real.split(':').map(String::from).collect();
     parts[3] = "1.0".into();
     parts[4] = "1.0".into();
+    engine.edit(1, |d| d.file_id = parts.join(":"));
+    assert!(engine.resume(1).is_err());
+    engine.cancel(1).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"partial");
+}
+
+#[test]
+fn a_crash_mid_write_resumes_from_the_files_actual_size() {
+    use crate::tests::server::{File as Served, Server};
+    let server = Server::start(vec![("/big.iso", Served::plain(BODY.to_vec()))]);
+    let store = Store::new();
+    let engine = store.engine();
+    // The stamp was taken at 7 bytes; then the app wrote 6 more and was killed before recording.
+    let path = own_partial(&engine, &store, 1, "big.iso", &BODY[..7], &server.url("/big.iso"));
+    let recorded = recorded_size(&engine.get(1).unwrap().file_id).unwrap();
+    std::fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(&BODY[7..13]).unwrap();
+    assert_ne!(stamp_of(&path), engine.get(1).unwrap().file_id, "size and mtime moved");
+    assert!(std::fs::metadata(&path).unwrap().len() > recorded);
+    engine.resume(1).unwrap();
+    let done = wait_for(&engine, 1, finished);
+    assert_eq!(done.status, Status::Completed, "{}", done.error);
+    assert_eq!(done.filename, "big.iso", "the same file continued");
+    assert_eq!(std::fs::read(&path).unwrap(), BODY, "no byte lost or repeated");
+}
+
+#[test]
+fn a_file_cut_shorter_than_recorded_restarts_under_a_new_name() {
+    use crate::tests::server::{File as Served, Server};
+    let server = Server::start(vec![("/big.iso", Served::plain(BODY.to_vec()))]);
+    let store = Store::new();
+    let engine = store.engine();
+    let path = own_partial(&engine, &store, 1, "big.iso", &BODY[..7], &server.url("/big.iso"));
+    std::fs::OpenOptions::new().write(true).open(&path).unwrap().set_len(3).unwrap();
+    engine.resume(1).unwrap();
+    let done = wait_for(&engine, 1, finished);
+    assert_eq!(done.status, Status::Completed, "{}", done.error);
+    assert_ne!(done.filename, "big.iso");
+    assert_eq!(std::fs::read(store.0.join(&done.filename)).unwrap(), BODY);
+    assert_eq!(std::fs::read(&path).unwrap(), &BODY[..3], "the cut file is left alone");
+}
+
+#[test]
+fn a_recreated_file_with_the_same_size_is_refused_by_birth_time() {
+    let store = Store::new();
+    let engine = store.engine();
+    let path = own_partial(&engine, &store, 1, "big.iso", b"partial", "http://127.0.0.1:1/x");
+    let real = stamp_of(&path);
+    // Same device, inode, size and mtime; only the birth time is another file's.
+    let mut parts: Vec<String> = real.split(':').map(String::from).collect();
+    parts[3] = "1.0".into();
     engine.edit(1, |d| d.file_id = parts.join(":"));
     assert!(engine.resume(1).is_err());
     engine.cancel(1).unwrap();

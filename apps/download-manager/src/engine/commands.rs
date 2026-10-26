@@ -94,8 +94,23 @@ impl Engine {
         // the person's: refuse and leave it untouched.
         let (have, owned) = match open_owned(&download) {
             Ok(Some(file)) => {
-                let size = stamp_fd(&file).as_deref().and_then(recorded_size).unwrap_or(0);
-                (size, Some(file))
+                // After a crash the file holds more than the last stamp recorded; those bytes are
+                // the app's own. The size is read on the verified descriptor, never from the path.
+                let actual = stamp_fd(&file).as_deref().and_then(recorded_size).unwrap_or(0);
+                let recorded = recorded_size(&download.file_id).unwrap_or(0);
+                if actual >= recorded {
+                    (actual, Some(file))
+                } else {
+                    // Truncated since the app last wrote: start again under a new name, leaving
+                    // the file where it is.
+                    drop(file);
+                    let name = unique_in(&download.save_dir, &download.filename);
+                    self.edit(id, |d| {
+                        d.filename = name;
+                        d.file_id.clear();
+                    });
+                    (0, None)
+                }
             }
             Ok(None) => (0, None),
             Err(why) => {
