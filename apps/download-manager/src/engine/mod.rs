@@ -195,9 +195,10 @@ pub struct Download {
     /// An agent asked for it. Its fetch is held to the public internet (`fetch.rs`), also after a
     /// restart and a resume, so this is stored.
     pub agent: bool,
-    /// Device and inode of the file this download created, empty until it has created one.
+    /// The stamp (device, inode, birth time, modification time, size) of the file this download
+    /// created, as the app last wrote it; empty until it has created one (`identity.rs`).
     ///
-    /// Cancel and retry delete a file only if what sits at the path is still that same plain file;
+    /// Cancel, retry and resume touch a file only if it still has exactly this stamp;
     /// anything else there is the person's, and is left alone.
     pub file_id: String,
 }
@@ -458,6 +459,7 @@ pub struct Totals {
 
 mod commands;
 mod fetch;
+mod identity;
 mod plain;
 mod store;
 mod transfer;
@@ -471,5 +473,7 @@ pub use store::state_dir;
 pub(crate) use fetch::literal_refusal;
 #[cfg(test)]
 pub(crate) use fetch::listed;
+#[allow(unused_imports)]
+use identity::*;
 #[allow(unused_imports)]
 use store::*;

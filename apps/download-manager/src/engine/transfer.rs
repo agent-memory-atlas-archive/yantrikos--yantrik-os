@@ -1,11 +1,12 @@
 use super::*;
 
 impl Engine {
-    pub(super) fn spawn(&self, id: i32, resume_from: u64) {
+    /// `owned` is the partial file a resume has already proved to be its own, still open.
+    pub(super) fn spawn(&self, id: i32, resume_from: u64, owned: Option<File>) {
         let engine = self.clone();
         let started = std::thread::Builder::new()
             .name(format!("download-{id}"))
-            .spawn(move || engine.transfer(id, resume_from));
+            .spawn(move || engine.transfer(id, resume_from, owned));
         if let Err(e) = started {
             self.fail(id, format!("cannot start download thread: {e}"));
         }
@@ -32,11 +33,20 @@ impl Engine {
         }
     }
 
+    /// Record what the app has now written to `file`: the stamp a later resume or cancel must match.
+    fn record_stamp(&self, id: i32, file: &File) {
+        if let Some(stamp) = stamp_fd(file) {
+            self.edit(id, |d| d.file_id = stamp);
+        }
+    }
+
     /// One transfer, start to finish, on its own thread.
-    pub(super) fn transfer(&self, id: i32, resume_from: u64) {
+    pub(super) fn transfer(&self, id: i32, resume_from: u64, owned: Option<File>) {
         let Some(download) = self.get(id) else { return };
         let Some(ctl) = self.control_for(id) else { return };
-        let path = download.path();
+        let mut path = download.path();
+        #[cfg(test)]
+        seam::run("after_open", &path);
 
         let response = match fetch::open(&download.url, resume_from, download.agent) {
             Ok(response) => response,
@@ -47,7 +57,7 @@ impl Engine {
         };
 
         // A ranged request answered 200 means the body is the whole file, not the remainder.
-        let appending = resume_from > 0 && response.status() == 206;
+        let appending = owned.is_some() && (resume_from == 0 || response.status() == 206);
         let resume_supported = response
             .header("accept-ranges")
             .map(|v| v.to_ascii_lowercase().contains("bytes"))
@@ -65,27 +75,39 @@ impl Engine {
         // expression covers both.
         let total = body_len.map(|len| start_at + len);
 
-        // Never through a link: a link put where the download lands would send the bytes to
-        // wherever it points, past the rule that chose this place (agent_rule.rs).
-        let file = if appending {
-            no_follow(OpenOptions::new().append(true)).open(&path)
-        } else {
-            no_follow(OpenOptions::new().write(true).create_new(true)).open(&path)
-        };
-        let mut file = match file {
-            Ok(file) => file,
-            Err(e) => {
-                self.fail(id, format!("cannot write {}: {e}", path.display()));
-                return;
+        let mut file = match (owned, appending) {
+            // The descriptor the resume proved: the only way bytes reach the partial file.
+            (Some(file), true) => file,
+            (old, _) => {
+                // A new file, never through a link: one put where the download lands would send
+                // the bytes to wherever it points, past the rule that chose this place.
+                if let Some(old) = old {
+                    // The server ignored the range. The old partial is the app's own and now
+                    // useless; take it away if it is still provably that, and start into a new
+                    // file whose name collides with nothing.
+                    if let Some(stamp) = stamp_fd(&old) {
+                        drop(old);
+                        remove_if_ours(&path, &stamp);
+                    }
+                    let name = unique_in(&download.save_dir, &download.filename);
+                    path = download.save_dir.join(&name);
+                    self.edit(id, |d| d.filename = name.clone());
+                }
+                match no_follow(OpenOptions::new().write(true).create_new(true)).open(&path) {
+                    Ok(file) => file,
+                    Err(e) => {
+                        self.fail(id, format!("cannot write {}: {e}", path.display()));
+                        return;
+                    }
+                }
             }
         };
 
-        // Remember which file this is, so a later cancel can tell it from one the person put there.
-        let created = if appending { None } else { file.metadata().ok().map(|m| identity(&m)) };
+        // Remember which file this is, so a later cancel or resume can tell it from one the
+        // person put there.
+        let stamp = stamp_fd(&file);
         self.edit(id, |d| {
-            if let Some(file_id) = created {
-                d.file_id = file_id;
-            }
+            d.file_id = stamp.clone().unwrap_or_default();
             d.status = Status::Downloading;
             d.downloaded = start_at;
             d.total = total;
@@ -108,7 +130,11 @@ impl Engine {
             match ctl.load(Ordering::Relaxed) {
                 control::PAUSE => {
                     let _ = file.flush();
+                    let stamp = stamp_fd(&file);
                     self.edit(id, |d| {
+                        if let Some(stamp) = stamp {
+                            d.file_id = stamp;
+                        }
                         d.status = Status::Paused;
                         d.downloaded = written;
                         d.speed_bps = 0.0;
@@ -120,9 +146,12 @@ impl Engine {
                     return;
                 }
                 control::CANCEL => {
+                    // Proved on the descriptor it wrote through, so the file taken away is that one
+                    // and not whatever sits at the name now.
+                    let stamp = stamp_fd(&file);
                     drop(file);
-                    if let Some(download) = self.get(id) {
-                        remove_own_file(&download);
+                    if let Some(stamp) = stamp {
+                        remove_if_ours(&path, &stamp);
                     }
                     self.edit(id, |d| {
                         d.status = Status::Failed;
@@ -142,11 +171,13 @@ impl Engine {
                 Ok(n) => n,
                 Err(e) => {
                     let _ = file.flush();
+                    self.record_stamp(id, &file);
                     self.fail(id, format!("transfer broke: {e}"));
                     return;
                 }
             };
             if let Err(e) = file.write_all(&buffer[..read]) {
+                self.record_stamp(id, &file);
                 self.fail(id, format!("cannot write {}: {e}", path.display()));
                 return;
             }
@@ -163,7 +194,11 @@ impl Engine {
                         None
                     }
                 });
+                let stamp = stamp_fd(&file);
                 self.edit(id, |d| {
+                    if let Some(stamp) = stamp {
+                        d.file_id = stamp;
+                    }
                     d.downloaded = written;
                     d.speed_bps = speed;
                     d.eta_secs = eta;
@@ -174,6 +209,7 @@ impl Engine {
             }
         }
 
+        self.record_stamp(id, &file);
         if let Err(e) = file.flush() {
             self.fail(id, format!("cannot finish writing {}: {e}", path.display()));
             return;

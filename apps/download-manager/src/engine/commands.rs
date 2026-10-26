@@ -65,7 +65,7 @@ impl Engine {
         // Written before the thread starts. A crash one second into a 4 GB transfer must still
         // leave a record naming the URL, or the partial file beside it means nothing.
         self.save();
-        self.spawn(id, 0);
+        self.spawn(id, 0, None);
         Ok(id)
     }
 
@@ -88,14 +88,24 @@ impl Engine {
             Status::Paused | Status::Failed => {}
             other => return Err(format!("download {id} is {}, nothing to resume", other.as_str())),
         }
-        // Append only to the file this download created and wrote. Anything else at the path is
-        // the person's, and bytes added to it would corrupt it: refuse and leave it untouched.
-        let have = match std::fs::symlink_metadata(download.path()) {
-            Err(_) => 0,
-            Ok(meta) if owns_file(&download) && meta.len() >= download.downloaded => meta.len(),
-            Ok(_) => {
+        // Append only to the file this download created and last wrote. The proof is made on the
+        // descriptor the transfer then writes through, here and before any request goes out, so
+        // nothing done to the path afterwards can redirect the bytes. Anything else at the path is
+        // the person's: refuse and leave it untouched.
+        let (have, owned) = match open_owned(&download) {
+            Ok(Some(file)) => {
+                let size = stamp_fd(&file).as_deref().and_then(recorded_size).unwrap_or(0);
+                (size, Some(file))
+            }
+            Ok(None) => (0, None),
+            Err(why) => {
+                let legacy = if !has_stamp(&download.file_id) {
+                    "; a download saved before files were tracked has no record to check against"
+                } else {
+                    ""
+                };
                 return Err(format!(
-                    "download {id}: the file at its path is not the partial file this download wrote;                      retry starts it again under a new name and leaves that file alone"
+                    "download {id}: {why}{legacy}; retry starts it again under a new name and leaves that file alone"
                 ));
             }
         };
@@ -109,7 +119,7 @@ impl Engine {
             d.interrupted = false;
         });
         self.save();
-        self.spawn(id, have);
+        self.spawn(id, have, owned);
         Ok(())
     }
 
@@ -140,7 +150,15 @@ impl Engine {
         // this download created. A failed row may never have written anything, and what sits at
         // its path now is then the person's.
         if !download.status.is_active() {
-            remove_own_file(&download);
+            let gone = remove_if_ours(&download.path(), &download.file_id);
+            // A row saved before files were tracked has nothing to check a file against, so its
+            // file stays. Said out loud, because the person asked for it to go.
+            if !gone && !has_stamp(&download.file_id) && download.downloaded > 0 && download.path().symlink_metadata().is_ok() {
+                self.set_notice(format!(
+                    "{} was left on disk: this download was saved before files were tracked, so it cannot be shown to be its own",
+                    download.path().display()
+                ));
+            }
             self.edit(id, |d| {
                 d.status = Status::Failed;
                 d.error = "cancelled".into();
@@ -162,8 +180,7 @@ impl Engine {
         }
         // A file this download did not create (a `missing` one, or one that appeared since) is
         // left alone and the new fetch takes a name that is free.
-        let renamed = if download.status != Status::Missing && owns_file(&download) {
-            remove_own_file(&download);
+        let renamed = if download.status != Status::Missing && remove_if_ours(&download.path(), &download.file_id) {
             None
         } else if std::fs::symlink_metadata(download.path()).is_ok() {
             Some(unique_in(&download.save_dir, &download.filename))
@@ -188,7 +205,7 @@ impl Engine {
             d.interrupted = false;
         });
         self.save();
-        self.spawn(id, 0);
+        self.spawn(id, 0, None);
         Ok(())
     }
 
