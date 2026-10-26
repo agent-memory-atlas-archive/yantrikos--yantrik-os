@@ -59,10 +59,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-// Telling the person a transfer ended is fire-and-forget on a thread of its own, so it is safe
-// from a worker and costs this one nothing — see `yantrik_app_runtime::notify`.
-use yantrik_app_runtime::notify;
-use yantrik_app_runtime::serde_json;
+use yantrik_app::Notification;
 
 /// Read size per loop turn. Also the granularity at which a pause is noticed, which is why it is
 /// not larger: 64 KiB on a slow link is a fraction of a second of latency on the stop button.
@@ -263,6 +260,10 @@ pub struct Engine {
     notice_is_info: Arc<std::sync::atomic::AtomicBool>,
     /// When the list was last written. Read only by the progress throttle.
     last_save: Arc<Mutex<Option<Instant>>>,
+    /// What a worker would tell the person (a transfer ended or failed), waiting for the app to
+    /// send it. A worker has no `Effects` to ask with, so it leaves the notification here and the
+    /// app takes it on its next look (`Engine::announcements`).
+    announced: Arc<Mutex<Vec<Notification>>>,
 }
 
 impl Engine {
@@ -276,19 +277,47 @@ impl Engine {
     /// The seam [`Engine::new`] goes through, and the one the tests use: persistence that can only
     /// be exercised against the person's own `~/.local/share` is persistence nobody checks.
     pub fn open(state_dir: PathBuf) -> Self {
+        Self::open_in(state_dir, default_download_dir())
+    }
+
+    /// [`Engine::open`], with the folder downloads land in when the caller names none.
+    pub fn open_in(state_dir: PathBuf, default_dir: PathBuf) -> Self {
         let engine = Self {
             state: Arc::new(Mutex::new(State::default())),
             next_id: Arc::new(AtomicI32::new(1)),
             revision: Arc::new(AtomicU64::new(0)),
-            default_dir: default_download_dir(),
+            default_dir,
             store_path: state_dir.join("state.json"),
             notice: Arc::new(Mutex::new(String::new())),
             notice_seen: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             notice_is_info: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             last_save: Arc::new(Mutex::new(None)),
+            announced: Arc::new(Mutex::new(Vec::new())),
         };
         engine.load();
         engine
+    }
+
+    /// What the workers have to tell the person since the last call, oldest first.
+    pub fn announcements(&self) -> Vec<Notification> {
+        self.announced.lock().map(|mut a| std::mem::take(&mut *a)).unwrap_or_default()
+    }
+
+    pub(super) fn announce(&self, notification: Notification) {
+        if let Ok(mut announced) = self.announced.lock() {
+            announced.push(notification);
+        }
+    }
+
+    /// Whether any download is moving bytes or being hashed: what keeps the window's clock running
+    /// and what a close has to wait for.
+    pub fn working(&self) -> bool {
+        self.state.lock().map(|s| s.items.iter().any(|d| d.status.is_active() || d.checksum_status == "verifying")).unwrap_or(false)
+    }
+
+    /// Whether any download is still moving bytes into a file: queued, or downloading.
+    pub fn writing(&self) -> bool {
+        self.state.lock().map(|s| s.items.iter().any(|d| d.status.is_active())).unwrap_or(false)
     }
 
     /// Where downloads land when the caller does not choose.

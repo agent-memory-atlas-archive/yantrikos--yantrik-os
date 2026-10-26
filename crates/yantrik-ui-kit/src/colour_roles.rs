@@ -258,7 +258,7 @@ fn a_download_that_is_gone_is_not_red() {
     assert!(src.contains("YStatusPill {"), "a settled row wears the neutral outline pill");
     let bar = src.find("if root.error-text != \"\" : YNoticeBar").expect("the banner is the kit's notice");
     assert!(src[bar..bar + 200].contains("tone: 0;"), "and the neutral kind of it");
-    let engine = read("apps/download-manager/src/engine.rs");
+    let engine = read("apps/download-manager/src/engine/store.rs");
     assert!(!engine.contains("file(s) no longer"), "a count is said in words");
 }
 

@@ -23,7 +23,7 @@ apps/blender/addon/yantrik_blender/surface.py screenshot output apps/blender/add
 apps/document-editor/src/main.rs open path apps/document-editor/src/agent_rule.rs
 apps/document-editor/src/main.rs save_as path apps/document-editor/src/agent_rule.rs
 apps/document-editor/src/main.rs export_markdown path apps/document-editor/src/agent_rule.rs
-apps/download-manager/src/main.rs add save_dir apps/download-manager/src/agent_rule.rs
+apps/download-manager/src/intents.rs add save_dir apps/download-manager/src/agent_rule.rs
 apps/email/src/intents.rs select_folder folder - an IMAP folder's name on the mail server, not a path on disk
 apps/image-viewer/src/intents.rs open path apps/image-viewer/src/agent_rule.rs
 apps/music-player/src/intents.rs play_file path apps/music-player/src/seen.rs

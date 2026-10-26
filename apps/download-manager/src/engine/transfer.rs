@@ -28,7 +28,7 @@ impl Engine {
         // one deliberate exception: cancelling sets `Failed` inline a few hundred lines below,
         // because a person who pressed Cancel does not need to be told it stopped.
         if let Some(name) = self.get(id).map(|d| d.filename) {
-            notify::send(notify::Notification::new("Downloads", format!("{name} failed")).body(reason));
+            self.announce(Notification::new("Downloads", format!("{name} failed")).body(reason));
         }
     }
 
@@ -224,10 +224,9 @@ impl Engine {
             };
             // "Open folder" is a real action on this app's own control surface, taking this id
             // — the same call the button in the window makes. The shell presses it on our
-            // behalf, starting this app again if the transfer outlived the window, which is the
-            // usual case for a long download.
-            notify::send(
-                notify::Notification::new("Downloads", title)
+            // behalf, starting this app again if it is not running.
+            self.announce(
+                Notification::new("Downloads", title)
                     .body(body)
                     .action_with("open_folder", "Open folder", serde_json::json!({ "id": id })),
             );

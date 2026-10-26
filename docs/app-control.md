@@ -348,8 +348,8 @@ content, and a content action a paired action takes back stays `standard` (`add_
 | containers | `remove` | dangerous | the writable layer goes with it |
 | documents | `find`, `show` | safe | reads |
 | documents | `open`, `new`, `save`, `save_as`, `set_content`, `append`, `replace_all`, `export_markdown` | standard | content in the app's own library in ~/Documents, every step editable again |
-| download-manager | `add`, `pause`, `resume`, `retry`, `verify`, `pause_all`, `resume_all`, `clear_completed`, `open_folder` | standard | steering the queue |
-| download-manager | `cancel` | sensitive | ends a transfer in flight |
+| download-manager | `pause`, `resume`, `retry`, `verify`, `pause_all`, `resume_all`, `clear_completed`, `open_folder` | standard | steering the queue |
+| download-manager | `add`, `cancel` | sensitive | `add` fetches a URL the caller chose and writes the result as the person, and an agent saves only where it may write a file at all; `cancel` ends a transfer in flight and deletes the partial file |
 | email | `open_message`, `select_folder`, `search`, `mark_read`, `flag`, `compose` | standard | reads and a draft; `send` is deliberately not published — mail that has gone cannot be taken back |
 | email | `begin_google_sign_in` | sensitive | puts a full-access consent screen in front of the person, unasked |
 | image-viewer | `open`, `show`, `next`, `previous`, `rotate`, `flip`, `fit`, `toggle_info` | standard | showing pictures; `rotate` and `flip` turn and mirror what is on screen (the toolbar's own path), the file is unchanged and the next picture is shown as stored; `fit` is the fit button, back to the whole picture from a zoom |

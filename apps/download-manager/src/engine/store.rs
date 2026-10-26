@@ -122,9 +122,33 @@ impl Engine {
         self.save();
     }
 
+    /// The app is ending: stop every writer, give each up to `backstop` to reach its next chunk
+    /// boundary (where it flushes the file and records itself as paused), then write the list.
+    /// Whether every writer had stopped.
+    ///
+    /// [`Engine::shutdown`] is this without the wait. A writer still blocked on a socket when the
+    /// backstop passes leaves a file that ends at a whole chunk and a record the next start
+    /// reconciles against it, so nothing is lost either way; the wait only lets the record say
+    /// `paused` where it would have said `downloading`.
+    pub fn settle_for_exit(&self, backstop: Duration) -> bool {
+        self.pause_all();
+        let until = Instant::now() + backstop;
+        while self.writing() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        self.save();
+        !self.writing()
+    }
+
     /// Counts and combined speed, for the header line.
     pub fn totals(&self) -> Totals {
-        let items = self.snapshot();
+        Totals::of(&self.snapshot())
+    }
+}
+
+impl Totals {
+    /// The numbers for a list as it stands.
+    pub fn of(items: &[Download]) -> Totals {
         Totals {
             active: items.iter().filter(|d| d.status.is_active()).count(),
             paused: items.iter().filter(|d| d.status == Status::Paused).count(),
