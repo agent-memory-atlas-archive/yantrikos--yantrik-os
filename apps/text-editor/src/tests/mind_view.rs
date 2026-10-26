@@ -7,7 +7,7 @@ use yantrik_app::mind::fake::FakeMind;
 use yantrik_app::{App as _, Paths};
 use yantrik_testing::TestApp;
 
-use super::{opened, scratch, settle, typed};
+use super::{scratch, settle, typed};
 use crate::command::Command;
 use crate::TextEditor;
 
@@ -15,15 +15,20 @@ const SENTINEL: &str = "SENTINEL-editor-mind-view-3d9c";
 
 /// A Text Editor drawn for a Mind (or not) with a file holding the sentinel open.
 fn with_document(for_mind: bool) -> (TestApp<TextEditor>, std::path::PathBuf) {
+    // The file reaches the window as a launch argument: a masked window refuses the Open dialog.
+    let path = scratch("mind-view").join("plan.rs");
+    std::fs::write(&path, format!("fn main() {{
+    // {SENTINEL}
+    let s = \"{SENTINEL}\";
+}}
+")).unwrap();
     let paths = Paths::temporary(TextEditor::ID);
     let app = if for_mind {
-        TestApp::<TextEditor>::start_for_mind(paths, Vec::new(), std::sync::Arc::new(FakeMind::new()))
+        TestApp::<TextEditor>::start_for_mind(paths, vec![path.clone().into_os_string()], std::sync::Arc::new(FakeMind::new()))
     } else {
-        TestApp::<TextEditor>::start_at(paths, Vec::new())
+        TestApp::<TextEditor>::start_at(paths, vec![path.clone().into_os_string()])
     };
     settle(&app);
-    let path = scratch("mind-view").join("plan.rs");
-    opened(&app, &path, &format!("fn main() {{\n    // {SENTINEL}\n    let s = \"{SENTINEL}\";\n}}\n"));
     (app, path)
 }
 
@@ -103,4 +108,49 @@ fn masking_is_visual_only_describe_and_calls_are_as_for_a_normal_instance() {
     }
     assert!(got[0].contains(SENTINEL), "a Mind still reads the document through the calls");
     assert_eq!(got[0], got[1]);
+}
+
+#[test]
+fn every_edit_path_in_a_mind_view_window_is_refused_before_the_document_changes() {
+    use crate::command::WindowAction as W;
+    let (app, path) = with_document(true);
+    let disk = super::file(&path);
+    let before = super::text(&app);
+    app.run(Command::Find { query: SENTINEL.into(), match_case: false });
+    let actions = [
+        W::Replace { with: "PROBE-REPLACED".into() },
+        W::ReplaceAll { with: "PROBE-REPLACED".into() },
+        W::Undo,
+        W::Redo,
+        W::Open,
+        W::Save,
+        W::SaveAs,
+        W::SaveClose,
+        W::Goto,
+        W::Confirm { path: path.display().to_string() },
+        W::Confirm { path: "/etc/hostname".into() },
+    ];
+    for action in actions {
+        app.run(Command::Window(action.clone()));
+        assert_eq!(app.last_refusal().unwrap().sentence, READ_ONLY, "{action:?}");
+    }
+    settle(&app);
+    assert_eq!(super::text(&app), before, "the document is as it was");
+    assert!(!super::modified(&app));
+    assert_eq!(super::file(&path), disk, "nothing was written");
+    assert_eq!(super::tabs(&app), 1, "and nothing was opened");
+    assert!(!window_text(&app).contains("PROBE-REPLACED"));
+}
+
+#[test]
+fn a_mind_view_window_gives_no_measure_of_the_text_in_the_caret() {
+    let (app, _) = with_document(true);
+    // An offset into the mask, past its first line break in the real text.
+    app.run(Command::Cursor(20));
+    settle(&app);
+    assert_eq!((app.ui(|ui| ui.get_cursor_line()), app.ui(|ui| ui.get_cursor_column())), (1, 1));
+    let (normal, _) = with_document(false);
+    normal.run(Command::Cursor(20));
+    settle(&normal);
+    assert!(normal.ui(|ui| ui.get_cursor_line()) > 1, "a normal window still follows the caret");
 }

@@ -13,6 +13,7 @@ use yantrik_testing::TestApp;
 use super::{quiet, started};
 use crate::backend::fake::{self, FakeMail};
 use crate::command::{Ask, Command, Pick};
+use crate::state::Draft;
 use crate::Email;
 
 const SENTINEL: &str = "SENTINEL-email-mind-view-61fa";
@@ -86,6 +87,7 @@ fn window_text(app: &TestApp<Email>) -> String {
             ui.get_email_draft_status(),
             ui.get_compose_to(),
             ui.get_compose_cc(),
+            ui.get_compose_bcc(),
             ui.get_compose_subject(),
             ui.get_compose_body(),
             ui.get_email_search_query(),
@@ -114,18 +116,103 @@ fn a_normal_window_still_shows_the_mail() {
 }
 
 #[test]
-fn a_reply_a_forward_and_the_companion_carry_nothing_from_a_message_in_a_mind_view_window() {
-    let app = with_message(&mailbox(), true);
-    for command in [Command::Reply { all: true }, Command::Forward] {
+fn a_reply_a_forward_a_send_and_the_companion_carry_nothing_from_a_message_in_a_mind_view_window() {
+    let mail = mailbox().answering("email.send_message", json!({}));
+    let app = with_message(&mail, true);
+    let draft = Draft { to: "a@example.com".into(), subject: "s".into(), body: "b".into(), ..Draft::default() };
+    for command in [
+        Command::Reply { all: true },
+        Command::Forward,
+        Command::Send(draft.clone()),
+        Command::SaveDraft(draft),
+        Command::OpenOriginal,
+        Command::Ask(Ask::Summarize),
+        Command::Ask(Ask::SuggestReply),
+    ] {
         app.run(command);
         quiet(&app);
-        assert!(!window_text(&app).contains(SENTINEL), "the composer starts empty");
-    }
-    for command in [Command::OpenOriginal, Command::Ask(Ask::Summarize), Command::Ask(Ask::SuggestReply)] {
-        app.run(command);
         assert_eq!(app.last_refusal().unwrap().sentence, READ_ONLY);
     }
+    assert!(!app.ui(|ui| ui.get_is_composing()), "no composer was opened");
+    assert!(mail.asked_for("email.send_message").is_empty(), "nothing went out");
     assert!(!window_text(&app).contains(SENTINEL));
+}
+
+/// A Mind's window started over a saved draft whose every field holds the sentinel.
+fn with_kept_draft(mail: &FakeMail) -> (TestApp<Email>, std::path::PathBuf, Draft) {
+    let s = SENTINEL;
+    let draft = Draft {
+        to: format!("{s}@x"),
+        cc: format!("{s}-cc@x"),
+        bcc: format!("{s}-bcc@x"),
+        subject: format!("{s} subj"),
+        body: format!("{s} body"),
+    };
+    let paths = Paths::temporary(Email::ID);
+    fake::install(&paths, mail);
+    let file = paths.data_dir().join(crate::files::DRAFT);
+    crate::state::save_draft(&file, &draft).unwrap();
+    let app = TestApp::<Email>::start_for_mind(paths, Vec::new(), std::sync::Arc::new(FakeMind::new()));
+    quiet(&app);
+    (app, file, draft)
+}
+
+#[test]
+fn the_composer_in_a_mind_view_window_does_not_show_the_saved_draft() {
+    let (app, file, draft) = with_kept_draft(&mailbox());
+    let before = std::fs::read(&file).unwrap();
+    app.ui(|ui| ui.invoke_compose_new());
+    quiet(&app);
+    assert!(!window_text(&app).contains(SENTINEL), "{}", window_text(&app));
+    // The compose call fills the composer and the kept Cc and Bcc must not stay on screen.
+    app.run(Command::Compose { to: "m@x".into(), subject: "hi".into(), body: "there".into() });
+    quiet(&app);
+    let text = window_text(&app);
+    assert!(!text.contains(SENTINEL), "{text}");
+    assert_eq!(app.ui(|ui| ui.get_compose_cc().to_string()), "");
+    assert_eq!(app.ui(|ui| ui.get_compose_to().to_string()), HIDDEN, "the Mind's own text is masked too");
+    // Closing the composer neither saves over the person's draft nor clears it.
+    app.run(Command::CancelCompose(Draft::default()));
+    quiet(&app);
+    app.run(Command::CancelCompose(Draft { body: "mind text".into(), ..Draft::default() }));
+    quiet(&app);
+    assert_eq!(std::fs::read(&file).unwrap(), before, "the draft file is as it was");
+    assert_eq!(crate::state::load_draft(&file).unwrap(), Some(draft));
+}
+
+#[test]
+fn a_mind_view_window_does_not_write_the_person_s_draft_when_it_ends() {
+    let (app, file, _) = with_kept_draft(&mailbox());
+    let before = std::fs::read(&file).unwrap();
+    app.run(Command::Compose { to: "m@x".into(), subject: "hi".into(), body: "there".into() });
+    quiet(&app);
+    app.run(Command::OfferUnsent);
+    quiet(&app);
+    let _ = app.shutdown();
+    assert_eq!(std::fs::read(&file).unwrap(), before);
+}
+
+#[test]
+fn the_composer_s_own_edits_in_a_mind_view_window_are_refused() {
+    let (app, _, _) = with_kept_draft(&mailbox());
+    app.ui(|ui| ui.invoke_compose_new());
+    quiet(&app);
+    app.run(Command::Edited { text: Draft { body: HIDDEN.into(), ..Draft::default() }, query: String::new() });
+    assert_eq!(app.last_refusal().unwrap().sentence, READ_ONLY);
+}
+
+#[test]
+fn a_failed_delete_in_a_mind_view_window_does_not_quote_the_subject() {
+    for outcome in [Err("NO permission".to_string()), Ok(json!({}))] {
+        let mail = mailbox().answering("email.delete_message", json!({}));
+        let app = with_message(&mail, true);
+        mail.set("email.delete_message", outcome);
+        app.run(Command::Delete(0));
+        quiet(&app);
+        let notice = app.ui(|ui| ui.get_notice().to_string());
+        assert!(!notice.is_empty() && !notice.contains(SENTINEL), "{notice}");
+        assert!(notice.contains("this message"), "{notice}");
+    }
 }
 
 #[test]

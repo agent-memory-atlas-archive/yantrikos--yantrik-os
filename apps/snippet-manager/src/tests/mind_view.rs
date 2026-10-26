@@ -162,3 +162,12 @@ fn a_call_the_masked_copy_refuses_answers_with_the_refusal() {
     f.quiet();
     assert!(f.clipboard.texts().is_empty());
 }
+
+#[test]
+fn export_all_in_a_mind_view_window_writes_no_file() {
+    let (paths, _) = kept();
+    let f = start_for_mind(paths);
+    f.app.ui(|ui| ui.invoke_snip_export_all());
+    f.quiet();
+    assert_eq!(f.app.last_refusal().unwrap().sentence, yantrik_app::for_mind::READ_ONLY);
+}

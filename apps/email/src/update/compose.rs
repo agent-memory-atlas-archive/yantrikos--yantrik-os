@@ -25,6 +25,13 @@ fn opened_on_new_text(m: &mut Model) {
 pub fn compose_new(m: &mut Model, fx: &mut Effects<Email>) {
     opened_on_new_text(m);
     fx.changed(part::STATUS);
+    // Where a Mind looks the person's saved draft stays where it is: not shown, not replaced.
+    if m.for_mind {
+        m.composer.text = Draft::default();
+        m.composer.status.clear();
+        fx.changed(part::COMPOSE_TEXT);
+        return;
+    }
     match m.composer.kept.clone() {
         Ok(Some(draft)) => {
             m.composer.text = draft;
@@ -182,6 +189,11 @@ pub fn cancel(m: &mut Model, draft: Draft, fx: &mut Effects<Email>) {
     m.composer.open = false;
     m.composer.closed_during_send = m.composer.sending.is_some();
     fx.changed(part::STATUS);
+    // The draft file is the person's: closing a Mind's composer neither saves nor clears it.
+    if m.for_mind {
+        m.composer.status.clear();
+        return;
+    }
     if draft.is_empty() {
         m.composer.status.clear();
         file_op(m, FileOp::Clear { after_send: false, release_lane: false }, fx);

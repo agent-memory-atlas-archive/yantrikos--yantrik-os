@@ -133,3 +133,40 @@ fn masking_is_visual_only_describe_and_calls_are_as_for_a_normal_instance() {
     assert!(expected.to_string().contains(SENTINEL), "a Mind still reads notes through the calls");
     assert_eq!(got, expected);
 }
+
+#[test]
+fn every_edit_and_file_path_in_a_mind_view_window_is_refused_before_anything_changes() {
+    let paths = kept();
+    let app = start_for_mind(paths.clone());
+    let before = super::snapshot(paths.data_dir());
+    let title = app.ui(|ui| ui.get_note_title().to_string());
+    let actions = [
+        WindowAction::Undo,
+        WindowAction::Redo,
+        WindowAction::Save,
+        WindowAction::Import,
+        WindowAction::Export,
+        WindowAction::Confirm { path: "/tmp/out.md".into() },
+        WindowAction::KeepMine,
+        WindowAction::TakeTheirs,
+        WindowAction::RestoreDraft,
+        WindowAction::Copy,
+    ];
+    for action in actions {
+        app.run(Command::Window(action.clone()));
+        assert_eq!(app.last_refusal().unwrap().sentence, READ_ONLY, "{action:?}");
+    }
+    settle(&app);
+    assert_eq!(super::snapshot(paths.data_dir()), before, "no note was written, made or exported");
+    assert!(!app.model(|m| m.unsaved()));
+    assert_eq!(app.ui(|ui| ui.get_note_title().to_string()), title);
+    assert!(!std::path::Path::new("/tmp/out.md").exists());
+}
+
+#[test]
+fn the_recovery_bar_in_a_mind_view_window_gives_no_length_of_the_text() {
+    let normal = crate::update::said::offer_gone("T", Some(1234));
+    assert!(normal.contains("1234 characters"));
+    let masked = crate::update::said::offer_gone("T", None);
+    assert!(!masked.chars().any(|c| c.is_ascii_digit()), "{masked}");
+}

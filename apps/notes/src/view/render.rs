@@ -193,7 +193,7 @@ fn outside(ui: &NotesApp, m: &Model, pane: &Pane) {
             .map(|(state, o)| match state {
                 Showing::Open => said::offer_open(&o.content.title()),
                 Showing::Listed => said::offer_listed(&o.content.title()),
-                Showing::Gone => said::offer_gone(&o.content.title(), o.content.text.chars().count()),
+                Showing::Gone => said::offer_gone(&o.content.title(), (!m.for_mind).then(|| o.content.text.chars().count())),
             })
             .unwrap_or_default()
             .into(),

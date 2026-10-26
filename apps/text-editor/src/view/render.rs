@@ -51,8 +51,9 @@ pub fn render(ui: &TextEditorApp, m: &Model, changed: &Changed) {
         chrome(ui, m);
     }
     if changed.has(CARET) {
-        ui.set_cursor_line(m.cursor.0);
-        ui.set_cursor_column(m.cursor.1);
+        let (line, column) = caret(m);
+        ui.set_cursor_line(line);
+        ui.set_cursor_column(column);
     }
     for cue in &m.cues {
         match *cue {
@@ -69,6 +70,12 @@ pub fn render(ui: &TextEditorApp, m: &Model, changed: &Changed) {
             Cue::ResetContent => {}
         }
     }
+}
+
+/// The caret as the footer shows it. Its offset is into the mask, so against the real text it
+/// would say where the lines break; a Mind sees the start.
+fn caret(m: &Model) -> (i32, i32) {
+    if m.for_mind { (1, 1) } else { m.cursor }
 }
 
 fn chrome(ui: &TextEditorApp, m: &Model) {
@@ -102,8 +109,9 @@ fn chrome(ui: &TextEditorApp, m: &Model) {
     ui.set_busy(m.busy.is_some());
     ui.set_notice(m.notice.window().into());
     ui.set_recovery_status(m.recovery.clone().into());
-    ui.set_cursor_line(m.cursor.0);
-    ui.set_cursor_column(m.cursor.1);
+    let (line, column) = caret(m);
+    ui.set_cursor_line(line);
+    ui.set_cursor_column(column);
     ui.set_match_case(m.find.match_case);
     // A Mind sees a mask in place of the text, so the window finds nothing in it; a search by a
     // call still counts as it always did, in the model.

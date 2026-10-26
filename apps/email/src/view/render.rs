@@ -30,11 +30,12 @@ pub fn render(ui: &EmailApp, m: &Model, changed: &Changed) {
     }
     if changed.has(part::COMPOSE_TEXT) {
         let text = &m.composer.text;
-        ui.set_compose_to(text.to.clone().into());
-        ui.set_compose_cc(text.cc.clone().into());
-        ui.set_compose_bcc(text.bcc.clone().into());
-        ui.set_compose_subject(text.subject.clone().into());
-        ui.set_compose_body(text.body.clone().into());
+        let hide = |field: &str| SharedString::from(shown_if_any(m.for_mind, field).as_ref());
+        ui.set_compose_to(hide(&text.to));
+        ui.set_compose_cc(hide(&text.cc));
+        ui.set_compose_bcc(hide(&text.bcc));
+        ui.set_compose_subject(hide(&text.subject));
+        ui.set_compose_body(hide(&text.body));
     }
     if changed.has(part::SEARCH_TEXT) {
         ui.set_email_search_query(m.search.query.clone().into());

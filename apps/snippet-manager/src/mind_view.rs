@@ -16,7 +16,8 @@ pub fn shown(for_mind: bool, code: &str) -> String {
 }
 
 /// A command a Mind's window cannot run (the framework's read-only rule refuses it). Typing and
-/// saving would write the masked text over the real code; copying and explaining would carry the
+/// saving would write the masked text over the real code; export writes every snippet to a file as the
+/// person; copying and explaining would carry the
 /// real code out of the window. The rail's chip sends the code to the Mind in its prompt; the rail
 /// offers nothing here, and this is the second lock on the same door.
 pub fn refuses(command: &Command) -> bool {
@@ -26,6 +27,7 @@ pub fn refuses(command: &Command) -> bool {
             | Command::Save(_)
             | Command::Copy(_)
             | Command::CopyNamed(_)
+            | Command::ExportAll
             | Command::AiExplain
             | Command::Rail(RailCommand::Activate(_))
     )
