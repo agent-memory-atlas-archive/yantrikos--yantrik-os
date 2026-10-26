@@ -22,8 +22,6 @@ checked before it is saved, exported or handed back.
 """
 
 import os
-import shutil
-import stat
 
 from . import copies
 from .basics import OfficeError, absolute, apply_rule
@@ -43,7 +41,8 @@ def lock_file(path):
 
 class AgentWorkspace:
     """The agents' side of the surface, over `office`: the sandboxed `Office`, whose paths are the
-    copies in `work`. `admit` is the surface's rule for the person's files; `person` is the
+    copies in `work`, the sandbox's work folder (a workdir.WorkFolder, the only way this side
+    reaches into it). `admit` is the surface's rule for the person's files; `person` is the
     person's own `Office`, asked which files are open there."""
 
     def __init__(self, office, work, admit=None, person=None):
@@ -52,15 +51,8 @@ class AgentWorkspace:
         self.admit = admit
         self.person = person
         self._copies = {}       # copy's path -> copies.Copy
-        self._made = 0
 
     # ── the person's paths and the copies' ──────────────────────────────────
-
-    def _folder(self):
-        self._made += 1
-        folder = os.path.join(self.work, str(self._made))
-        os.mkdir(folder, 0o700)
-        return folder
 
     def _rule(self, what, path):
         """The rule for `path` as named, and where it resolves when that is somewhere else."""
@@ -120,7 +112,7 @@ class AgentWorkspace:
             return
         for path in [p for p in self._copies if p not in open_now]:
             del self._copies[path]
-            shutil.rmtree(os.path.dirname(path), ignore_errors=True)
+            self.work.discard(os.path.dirname(path))
 
     # ── the actions ─────────────────────────────────────────────────────────
 
@@ -133,12 +125,12 @@ class AgentWorkspace:
                 return self._outward(dict(answer, already_open=True))
         if self._held_by_person(path, real):
             raise OfficeError(HELD % path)
-        folder = self._folder()
+        slot = self.work.slot()
         try:
-            copy = copies.take(path, real, os.path.join(folder, os.path.basename(path)))
+            copy = copies.take(path, real, os.path.join(slot, os.path.basename(path)), self.work)
             answer = self.office.open(copy.work, read_only)
         except Exception:
-            shutil.rmtree(folder, ignore_errors=True)
+            self.work.discard(slot)
             raise
         self._copies[copy.work] = copy
         return self._outward(answer)
@@ -168,7 +160,7 @@ class AgentWorkspace:
         if not copies.unchanged(copy):
             raise OfficeError(copies.CHANGED % copy.given)
         answer = self.office.save(copy.work)
-        copies.put_back(copy)
+        copies.put_back(copy, self.work.read(copy.work))
         return self._outward(answer)
 
     def _target(self, path, suffixes):
@@ -184,28 +176,34 @@ class AgentWorkspace:
         shown, folder, name = self._target(path, SAVE_FILTERS)
         was = self._inward(document)
         before = self.office.path_for(was)
-        out = os.path.join(self._folder(), name)
+        out = os.path.join(self.work.slot(), name)
         answer = self.office.save_as(out, was)
-        copies.create(out, folder, name, shown)
-        real = os.path.join(folder, name)
-        self._copies[out] = copies.Copy(shown, real, out, copies.digest_of(_bytes(out)),
-                                        stat.S_IMODE(os.stat(real).st_mode))
+        data = self.work.read(out)
+        mode = copies.create(data, folder, name, shown)
+        self._copies[out] = copies.Copy(shown, os.path.join(folder, name), out,
+                                        copies.digest_of(data), mode)
         was = self._person_path(before) if before else None
         self._forget_closed()
         return dict(answer, path=shown, was=was)
 
     def export_pdf_plan(self, path, document=None):
         shown, folder, name = self._target(path, {".pdf"})
-        out = os.path.join(self._folder(), name)
-        doc_name, work = self.office.export_pdf_plan(out, self._inward(document))
+        slot = self.work.slot()
+        out = os.path.join(slot, name)
+        try:
+            doc_name, work = self.office.export_pdf_plan(out, self._inward(document))
+        except Exception:
+            self.work.discard(slot)
+            raise
 
         def export():
             try:
                 work()
-                size = copies.create(out, folder, name, shown)
+                data = self.work.read(out)
+                copies.create(data, folder, name, shown)
             finally:
-                shutil.rmtree(os.path.dirname(out), ignore_errors=True)
-            return {"document": doc_name, "path": shown, "bytes": size}
+                self.work.discard(slot)
+            return {"document": doc_name, "path": shown, "bytes": len(data)}
         return doc_name, export
 
     # ── what describe shows ─────────────────────────────────────────────────
@@ -223,8 +221,3 @@ def _same(a, b):
         return os.path.samefile(a, b)
     except OSError:
         return os.path.normpath(a) == os.path.normpath(b)
-
-
-def _bytes(path):
-    with open(path, "rb") as f:
-        return f.read()

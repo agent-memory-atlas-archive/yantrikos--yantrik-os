@@ -12,9 +12,13 @@ person's own files) or does not prove, every agent call is refused with `CLOSED_
 reason, and nothing is started: there is no unsandboxed way round.
 
 The UNO pipe: LibreOffice always makes its pipe in /tmp, and inside the sandbox /tmp is the
-adapter's private `pipes` folder. Outside, the adapter connects through a link in the real /tmp, at
-the name a UNO client looks for, pointing into that folder. Nothing inside can follow it back out:
-the real /tmp is not in the sandbox.
+adapter's private `pipes` folder. Outside, the adapter pins the socket made there into a folder
+the sandbox is not shown, checks who listens on it, and connects through a link in the real /tmp,
+at the name a UNO client looks for, to that pinned socket (unopipe.py). Nothing inside can follow
+it back out, or point it anywhere else.
+
+The work folder is the sandbox's to change, so the adapter reaches into it only through
+workdir.py, by handles, never following what it finds there.
 """
 
 import os
@@ -27,9 +31,11 @@ import time
 
 from . import fence, places, sandbox
 from .basics import OfficeError, PathMap, absolute, apply_rule
+from .unopipe import Pipe, PipeRefused
 from .canaries import Canaries
 from .instance import soffice_command, stop_headless, write_profile_settings
 from .office import Office
+from .workdir import WorkFolder
 from .workspace import HELD, AgentWorkspace, lock_file  # noqa: F401 - the tests' names for them
 
 # How long the sandboxed LibreOffice gets to start answering on its pipe.
@@ -67,7 +73,8 @@ class AgentOffice:
         self.landlock = None    # what the launcher put up inside, as it said it
         self._lock = threading.Lock()
         self._checked = (None, 0.0)
-        self._process = self._office = self._workspace = self._private = self._link = None
+        self._process = self._office = self._workspace = self._private = None
+        self._pipe = self._work = None
 
     # ── what an agent's call is served by ───────────────────────────────────
 
@@ -161,6 +168,7 @@ class AgentOffice:
         private = sandbox.Private(tempfile.mkdtemp(prefix="yantrik-libreoffice-agent-",
                                                    dir="/tmp")).make()
         self._private = private
+        self._work = WorkFolder(private.work)
         pipe = "yantrik-libreoffice-agent-%d-%s" % (os.getpid(), secrets.token_hex(6))
         canaries = Canaries(private.root)
         deadline = time.monotonic() + self.patience
@@ -173,7 +181,9 @@ class AgentOffice:
                 self._process = subprocess.Popen(
                     argv, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
                     env=sandbox.environment(env), start_new_session=True, close_fds=True)
-            served = self._await_pipe(private, pipe, deadline)
+            self._pipe = Pipe(pipe, private.pipes, private.uno, self._process.pid)
+            self._await_pipe(private, deadline)
+            self._pipe.pin()
         except sandbox.SandboxError as e:
             self._stop_locked()
             raise OfficeError(UNSANDBOXED % e) from None
@@ -182,28 +192,20 @@ class AgentOffice:
             raise
         finally:
             canaries.close()
-        self._link = "/tmp/OSL_PIPE_%d_%s" % (os.getuid(), pipe)
-        try:
-            os.symlink(served, self._link)
-        except OSError as e:
-            self._link = None
-            self._stop_locked()
-            raise OfficeError("the agents' LibreOffice could not be reached (%s); nothing was done"
-                              % e.strerror) from None
         office = Office(pipe, uno_module=self.uno_module, hidden=True,
                         admit=self._inner_rule(private.work), agents_only=True,
-                        paths=PathMap(private.work, sandbox.WORK))
+                        paths=PathMap(private.work, sandbox.WORK), files=self._work,
+                        reach=self._pipe.check)
         self._office = office
         self._await_answer(office, deadline)
         self.landlock = _said(private.log, "proved, with ")
-        self._workspace = AgentWorkspace(office, private.work, admit=self.admit,
+        self._workspace = AgentWorkspace(office, self._work, admit=self.admit,
                                          person=self.person)
 
-    def _await_pipe(self, private, pipe, deadline):
-        """The socket the sandboxed LibreOffice listens on, once the launcher proved the sandbox
-        and soffice made it."""
-        served = os.path.join(private.pipes, "OSL_PIPE_%d_%s" % (os.getuid(), pipe))
-        while not os.path.exists(served):
+    def _await_pipe(self, private, deadline):
+        """Until the sandboxed LibreOffice has made its pipe, once the launcher proved the
+        sandbox."""
+        while not self._pipe.made():
             if self._process.poll() is not None:
                 refused = _said(private.log, "refused: ")
                 if refused:
@@ -214,13 +216,15 @@ class AgentOffice:
                 raise OfficeError("the agents' LibreOffice did not answer within %ds; nothing "
                                   "was done" % int(self.patience))
             time.sleep(0.1)
-        return served
 
     def _await_answer(self, office, deadline):
         while True:
             try:
                 office.desktop()
                 return
+            except PipeRefused:
+                self._stop_locked()
+                raise
             except OfficeError:
                 if self._process.poll() is not None or time.monotonic() >= deadline:
                     said = _last_line(self._private.log)
@@ -238,14 +242,14 @@ class AgentOffice:
         self._clean_up()
 
     def _clean_up(self):
-        if self._link:
-            try:
-                os.remove(self._link)
-            except OSError:
-                pass
+        if self._pipe:
+            self._pipe.remove()
+        if self._work:
+            self._work.close()
         if self._private:
             shutil.rmtree(self._private.root, ignore_errors=True)
-        self._process = self._office = self._workspace = self._private = self._link = None
+        self._process = self._office = self._workspace = self._private = None
+        self._pipe = self._work = None
         self.landlock = None
 
 

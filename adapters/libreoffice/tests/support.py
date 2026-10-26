@@ -32,6 +32,7 @@ import fake_uno  # noqa: E402
 from yantrik_libreoffice import Office, OfficeError, build  # noqa: E402,F401
 from yantrik_libreoffice import agent_office, sandbox  # noqa: E402
 from yantrik_libreoffice.agent_office import AgentOffice  # noqa: E402
+from yantrik_libreoffice.workdir import WorkFolder  # noqa: E402
 from yantrik_libreoffice.workspace import AgentWorkspace  # noqa: E402
 from yantrik_surface import RpcError  # noqa: E402
 
@@ -109,10 +110,12 @@ class FakeAgentOffice(AgentOffice):
         self.fake.start()
         root = tempfile.mkdtemp(prefix="yantrik-lo-agent-")
         self._private = sandbox.Private(root).make()
+        self._work = WorkFolder(self._private.work)
         self._office = Office(self.fake.pipe, uno_module=self.uno_module, hidden=True,
-                              admit=self._inner_rule(self._private.work), agents_only=True)
+                              admit=self._inner_rule(self._private.work), agents_only=True,
+                              files=self._work)
         self._process = _Running()
-        self._workspace = AgentWorkspace(self._office, self._private.work, admit=self.admit,
+        self._workspace = AgentWorkspace(self._office, self._work, admit=self.admit,
                                          person=self.person)
         self.landlock = "none (a fake)"
 

@@ -79,9 +79,9 @@ class TestCopies(AgentCase):
         target = os.path.join(self.home, "Documents", "copy.odt")
         real = copies.create
 
-        def racing(source, folder, name, shown):
+        def racing(data, folder, name, shown):
             support.fake_uno.write_doc(os.path.join(folder, name), "writer", text=SENTINEL)
-            return real(source, folder, name, shown)
+            return real(data, folder, name, shown)
         with mock.patch.object(copies, "create", racing):
             said = self.agent_refused("save_as", path=target)
         self.assertIn("already at", said)

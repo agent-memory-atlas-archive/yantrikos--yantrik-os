@@ -40,6 +40,20 @@ def _remove(path):
         pass
 
 
+class HostFiles:
+    """The files the person's LibreOffice writes, reached where they lie: the person's own. The
+    agents' LibreOffice is given a workdir.WorkFolder instead, which never follows what the
+    sandbox left in its work folder (review H1)."""
+
+    @staticmethod
+    def remove(path):
+        _remove(path)
+
+    @staticmethod
+    def size(path):
+        return os.path.getsize(path) if os.path.isfile(path) else None
+
+
 def new_file(path, suffixes, admit):
     """A path to a file that does not exist yet, in a directory that does, that the caller may
     write (`admit("write", path)`: home_paths' write rule, for an agent)."""
@@ -80,15 +94,11 @@ class Storing:
             self._writable(doc)
             self._before_store(doc)
             # An agent's save keeps what the file held, to put it back if the write is refused.
-            old = None
-            if self.agents_only and os.path.isfile(path):
-                with open(path, "rb") as f:
-                    old = f.read()
+            old = self.files.read(path) if self.agents_only else None
 
             def undo():
                 if old is not None:
-                    with open(path, "wb") as f:
-                        f.write(old)
+                    self.files.replace(path, old)
             doc.store()
             self._after_store(doc, undo)
             return {"document": self.name_of(doc), "path": path, "modified": bool(doc.isModified())}
@@ -112,7 +122,7 @@ class Storing:
             was = self.path_of(doc)
             doc.storeAsURL(self.url_of(path),
                            (self._prop("FilterName", filter_name), self._prop("Overwrite", False)))
-            self._after_store(doc, lambda: _remove(path))
+            self._after_store(doc, lambda: self.files.remove(path))
             return {"document": self.name_of(doc), "path": path, "was": was}
         return self.run(store)
 
@@ -134,9 +144,10 @@ class Storing:
                 doc.storeToURL(self.url_of(path),
                                (self._prop("FilterName", PDF_FILTERS[kind]),
                                 self._prop("Overwrite", False)))
-                self._after_store(doc, lambda: _remove(path))
+                self._after_store(doc, lambda: self.files.remove(path))
             self.run(store)
-            if not os.path.isfile(path):
+            size = self.files.size(path)
+            if size is None:
                 raise OfficeError("LibreOffice answered, and nothing is at %s" % path)
-            return {"document": name, "path": path, "bytes": os.path.getsize(path)}
+            return {"document": name, "path": path, "bytes": size}
         return name, work

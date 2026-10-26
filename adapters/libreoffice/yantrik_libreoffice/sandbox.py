@@ -34,7 +34,7 @@ import re
 import stat
 import subprocess
 
-from .places import within
+from .places import parts, within
 
 # Where things are inside the sandbox.
 ROOT = "/yantrik"
@@ -51,8 +51,11 @@ PYTHON = "/usr/bin/python3"
 # Where bwrap is looked for: the system's own copy, never one on a PATH a caller could set.
 BWRAP = ("/usr/bin/bwrap", "/bin/bwrap")
 
+# `--disable-userns` (bwrap 0.8) keeps the sandbox from making user namespaces of its own, which
+# are kernel attack surface and could rearrange what it sees (review L2). An older bwrap fails the
+# check, and agents are refused.
 NAMESPACES = ("--unshare-user", "--unshare-ipc", "--unshare-pid", "--unshare-net",
-              "--unshare-uts", "--unshare-cgroup-try")
+              "--unshare-uts", "--unshare-cgroup-try", "--disable-userns")
 
 # What of /etc LibreOffice needs: the dynamic loader, the user and group names (sal names its pipe
 # by the uid it reads back), fonts, its own settings, the time zone and the locale. Nothing else
@@ -62,8 +65,10 @@ ETC = ("alternatives", "fonts", "group", "ld.so.cache", "ld.so.conf", "ld.so.con
        "passwd", "timezone")
 VAR = ("/var/cache/fontconfig",)
 TOP = ("/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32")
-# Where a link in LibreOffice's install may point and still be shown, read-only.
-LINK_TARGETS = ("/etc", "/var", "/opt")
+# Where a link in LibreOffice's install may point and still be shown, read-only, and how many
+# folders deep it must be: never a whole /var or /opt, nor one folder straight below them (review
+# L3), so a link to /var/lib shows nothing.
+LINK_TARGETS = {"/etc": 2, "/var": 3, "/opt": 3}
 # Entries looked at in LibreOffice's install for links that point out of it.
 MAX_WALKED = 50000
 CHECK_SECONDS = 15
@@ -77,7 +82,7 @@ class SandboxError(Exception):
 class Private:
     """The adapter's own folder behind one sandbox: made 0700, removed when the sandbox stops.
     Only `pipes`, `profile`, `work` and `tmp` are shown inside; the rest (the launch log, the
-    canary) is the adapter's alone."""
+    canary, `uno` where the UNO pipe is pinned: unopipe.py) is the adapter's alone."""
 
     def __init__(self, root):
         self.root = root
@@ -85,10 +90,11 @@ class Private:
         self.profile = os.path.join(root, "profile")
         self.work = os.path.join(root, "work")
         self.tmp = os.path.join(root, "tmp")
+        self.uno = os.path.join(root, "uno")
         self.log = os.path.join(root, "launch.log")
 
     def make(self):
-        for path in (self.pipes, self.profile, self.work, self.tmp):
+        for path in (self.pipes, self.profile, self.work, self.tmp, self.uno):
             os.mkdir(path, 0o700)
         return self
 
@@ -135,6 +141,9 @@ def check(bwrap, run=subprocess.run):
         raise SandboxError("bwrap would not run (%s)" % e) from None
     if done.returncode != 0:
         said = (done.stderr or b"").decode("utf-8", "replace").strip().splitlines()
+        if said and "disable-userns" in said[-1]:
+            raise SandboxError("bwrap is older than 0.8, which the sandbox needs to keep user "
+                               "namespaces from being made inside it (%s)" % said[-1])
         raise SandboxError("bwrap cannot make the sandbox's namespaces here (%s); unprivileged "
                            "user namespaces may be turned off"
                            % (said[-1] if said else "exit status %d" % done.returncode))
@@ -154,7 +163,7 @@ def linked_targets(root, hidden, walked=MAX_WALKED):
     """Where the links in LibreOffice's install `root` point outside /usr, outermost first, so the
     places they lead to can be shown read-only (Debian's share/uno_packages/cache is a link to
     /var/spool/libreoffice, and soffice aborts without it: #942 M2). A target in the person's
-    places, or outside /etc, /var and /opt, is never shown. Raises `SandboxError` past `walked`
+    places, outside /etc, /var and /opt, or too near the top of them, is never shown. Raises `SandboxError` past `walked`
     entries."""
     found, budget = set(), [walked]
     for folder, dirs, files in os.walk(root, followlinks=False):
@@ -169,7 +178,8 @@ def linked_targets(root, hidden, walked=MAX_WALKED):
             target = os.path.realpath(path)
             if within(target, "/usr") or within(target, root) or not os.path.exists(target):
                 continue
-            if not any(within(target, base) for base in LINK_TARGETS):
+            if not any(within(target, base) and len(parts(target)) >= depth
+                       for base, depth in LINK_TARGETS.items()):
                 continue
             if any(within(target, place) or within(place, target) for place in hidden):
                 continue
