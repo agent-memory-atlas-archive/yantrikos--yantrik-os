@@ -15,6 +15,12 @@ network namespace with nothing but loopback, and the rest. This file runs first 
     but loopback and no route out. A refusal counts only as the kernel's own words for "not
     there" or "not allowed"; anything else (too many files open, a timeout) fails the proof.
 
+    What each part proves differs (review L1). The paths (the probes, the person's sockets, the
+    path canary) are not in the sandbox's mount namespace at all, so with today's binds they pass
+    by not existing: they are the net that catches a later bind that shows one, not a test of
+    the namespaces. What tests the namespaces is the rest: the abstract and TCP canaries, which
+    only a network namespace of its own refuses, and the interface and route checks.
+
 Only then does it exec the command. If any step fails it exits with `REFUSED` and a sentence on
 stderr, and the command never runs: there is no unsandboxed fallback. Only the standard library is
 used, because `-I` runs it with nothing else on the path.
@@ -52,13 +58,15 @@ _NET_BIND_TCP, _NET_CONNECT_TCP = 1 << 0, 1 << 1
 _SCOPE_ABSTRACT_UNIX, _SCOPE_SIGNAL = 1 << 0, 1 << 1
 
 _READ = READ_FILE | READ_DIR
-# What each kind of allowed place may do. `work` has no MAKE_SYM: the fenced process makes no
-# link in the person's folders that another program might later follow into a protected place.
+# What each kind of allowed place may do. No kind has MAKE_SYM: the adapter outside reads the
+# folders the fenced process writes, and a link made there could lead it to one of the person's
+# files (#953 review H1, H2). workdir.py and unopipe.py never follow one either, for a kernel
+# without Landlock; this is the second wall.
 KINDS = {
     "system": _READ | EXECUTE,
     "work": _READ | WRITE_FILE | REMOVE_DIR | REMOVE_FILE | MAKE_DIR | MAKE_REG | REFER | TRUNCATE,
     "private": _READ | EXECUTE | WRITE_FILE | REMOVE_DIR | REMOVE_FILE | MAKE_DIR | MAKE_REG
-               | MAKE_SOCK | MAKE_FIFO | MAKE_SYM | REFER | TRUNCATE,
+               | MAKE_SOCK | MAKE_FIFO | REFER | TRUNCATE,
     "devices": _READ | WRITE_FILE | MAKE_REG | REMOVE_FILE | TRUNCATE | IOCTL_DEV,
     # The UNO pipe is a socket LibreOffice makes in /tmp; it may make one there and remove it,
     # and read nothing in /tmp.

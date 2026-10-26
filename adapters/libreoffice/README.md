@@ -17,7 +17,8 @@ which is the point of it: it is the second worked example in
 | `yantrik_libreoffice/adapter.py` | the program: how it starts, what it serves, when it stops |
 | `yantrik_libreoffice/agent_office.py` | the agents' own LibreOffice, started in its sandbox, which serves every agent call |
 | `yantrik_libreoffice/sandbox.py`, `fence.py`, `canaries.py`, `places.py` | the sandbox (bwrap), the launcher inside it (Landlock and the proof), the canaries it must not reach, and the person's places |
-| `yantrik_libreoffice/workspace.py`, `copies.py` | an agent's actions on copies of the person's files, and the only way bytes get back |
+| `yantrik_libreoffice/workspace.py`, `copies.py`, `workdir.py` | an agent's actions on copies of the person's files, the only way bytes get back, and the only way into the sandbox's work folder |
+| `yantrik_libreoffice/unopipe.py` | the agents' UNO pipe, pinned where the sandbox cannot reach and checked before every connection |
 | `yantrik_libreoffice/store.py`, `guard.py` | `save`, `save_as`, `export_pdf`, and the scan they and the reads share |
 | `bin/yantrik-libreoffice-adapter` | the command `X-Yantrik-Adapter` names |
 | `bin/yantrik-libreoffice` | the command `Exec` names: LibreOffice, listening on its UNO pipe |
@@ -89,15 +90,32 @@ sandbox `bwrap` builds (`sandbox.py`):
   again with an empty one.
 - **its own network namespace**: nothing but loopback, so no TCP, no UDP, and none of the
   session's abstract sockets.
-- its own IPC, PID and UTS namespaces, a new session, no capabilities, an environment with no
-  bus, display or runtime folder, and it dies with the adapter.
+- its own IPC, PID and UTS namespaces, a new session, no capabilities, no user namespaces of its
+  own (`--disable-userns`, so bwrap 0.8 or later), an environment with no bus, display or
+  runtime folder, and it dies with the adapter.
 
 Inside, `fence.py` runs first. It puts **Landlock** up as a second wall where the kernel offers it,
 then **proves the sandbox holds** before any document exists: the home and every protected place
 must fail to open, the person's sockets and three canaries the adapter leaves listening outside (a
 socket path, an abstract socket, a TCP port on the host) must fail to connect, and no interface but
 loopback and no route out may exist. Only the kernel's words for "not there" or "not allowed"
-count as failing. Then soffice runs.
+count as failing. Then soffice runs. The paths it probes are not in the sandbox at all, so they
+are a net for a later bind that shows one; the abstract and TCP canaries and the network checks
+are what test the namespaces. Landlock lets the sandbox make no links anywhere.
+
+**Everything the sandbox can write is hostile** (#962 review H1, H2). A document that takes over
+the sandboxed LibreOffice can change its work folder and its `/tmp`, so the adapter, which works
+outside with the person's rights, never follows anything there, with or without Landlock:
+
+- the work folder is reached only through `workdir.py`. Each document gets a slot, a folder with
+  a random name the adapter made and holds open; a file in it is opened through that handle, never
+  followed, and read only when it is a regular file of the adapter's own uid with one name, of a
+  size it takes. Renaming the slot or putting a link where a file was leads nowhere outside;
+- the UNO pipe is pinned (`unopipe.py`): the socket the sandbox made is hard-linked, as itself and
+  never as what a link points to, into a folder the sandbox is not shown, its listener must
+  descend from the sandbox's bwrap (SO_PEERCRED), and the name in the real `/tmp` that a UNO
+  client connects to is a link to that pinned socket, checked again before every connection. The
+  pipe's name is random per sandbox.
 
 **Where the sandbox cannot be built** (no `bwrap`, user namespaces off, LibreOffice installed in
 the person's own files) or does not prove, every agent call is refused with "LibreOffice isn't
@@ -126,7 +144,10 @@ and named expressions must pass the agent formula allowlist. The links are asked
 read or write, and a file written while a link appeared is taken back.
 
 Not covered: the sandbox sets no limit on the CPU, memory or disk an agent's LibreOffice uses, and
-filters no system calls beyond what the namespaces and Landlock refuse.
+has no seccomp filter: with no capabilities, no new privileges and no user namespaces of its own,
+what is left of the kernel is ordinary system calls, and a filter is its own reviewed change
+(#962 review L2). Where the kernel has no Landlock, the namespaces and the two guards above
+stand alone, and the launcher says so in its log.
 
 ## How it is started, and why that differs from Blender
 

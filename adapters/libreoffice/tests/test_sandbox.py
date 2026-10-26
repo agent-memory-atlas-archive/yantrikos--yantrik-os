@@ -107,6 +107,34 @@ class Spec(Machine):
         found = sandbox.linked_targets(root, places.hidden(self.home, self.env))
         self.assertEqual(found, ["/etc/passwd"])
 
+    def test_a_link_to_a_whole_top_folder_or_one_just_below_it_is_not_shown(self):
+        """#962 L3: never all of /var or /opt, nor /var/lib, for one link in the install."""
+        root = os.path.join(self.tmp, "opt", "libreoffice")
+        os.makedirs(root)
+        for name, target in (("var", "/var"), ("lib", "/var/lib"), ("opt", "/opt"),
+                             ("etc", "/etc"), ("fonts", "/var/cache/fontconfig")):
+            os.symlink(target, os.path.join(root, name))
+        found = sandbox.linked_targets(root, [])
+        self.assertNotIn("/var", found)
+        self.assertNotIn("/var/lib", found)
+        self.assertNotIn("/opt", found)
+        self.assertNotIn("/etc", found)
+        if os.path.isdir("/var/cache/fontconfig"):
+            self.assertEqual(found, ["/var/cache/fontconfig"])
+
+    def test_the_sandbox_makes_no_user_namespaces_and_no_kind_of_place_makes_links(self):
+        """#962 L2, and the second wall of H1 and H2."""
+        self.assertIn("--disable-userns", self.command())
+        for kind, rights in agent_office.fence.KINDS.items():
+            self.assertFalse(rights & agent_office.fence.MAKE_SYM, kind)
+
+    def test_an_old_bwrap_is_refused_with_its_reason(self):
+        done = subprocess.CompletedProcess([], 1, b"",
+                                           b"bwrap: Unknown option --disable-userns\n")
+        with self.assertRaises(sandbox.SandboxError) as caught:
+            sandbox.check("/usr/bin/bwrap", run=lambda *a, **k: done)
+        self.assertIn("older than 0.8", str(caught.exception))
+
     def test_too_large_an_install_is_refused_not_skimmed(self):
         root = os.path.join(self.tmp, "big")
         os.makedirs(root)
@@ -147,6 +175,7 @@ class Spec(Machine):
         self.assertEqual(dict((p, k) for k, p in sandbox.inner_rules("/opt/lo"))["/opt/lo"],
                          "system")
 
+    @unittest.skipIf(os.getuid() == 0, "as root, the stand-in bwrap is root's own")
     def test_only_roots_bwrap_is_used(self):
         mine = put(os.path.join(self.tmp, "bwrap"), "#!/bin/sh\n")
         os.chmod(mine, 0o755)
