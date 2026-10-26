@@ -4,6 +4,7 @@
 use slint::{ModelRc, VecModel};
 use yantrik_app::app::{Changed, WindowId};
 use yantrik_app::documents::OutsideState;
+use yantrik_app::for_mind::shown_if_any;
 
 use crate::model::Model;
 use crate::note::NoteText;
@@ -45,7 +46,7 @@ pub fn render(ui: &NotesApp, window: WindowId, m: &Model, changed: &Changed) {
         // The footer's amber goes with its words: a file found gone is unsaved with nothing typed.
         ui.set_modified(unsaved_in(m, pane));
         // Said with the notice, which every load that finds the library read-only sets.
-        ui.set_read_only(m.vault.read_only().is_some());
+        ui.set_read_only(m.vault.read_only().is_some() || m.for_mind);
     }
     // The notice gives way to the outside bar, so it is drawn again whenever the bar may be.
     if changed.has(STATUS) || changed.has(OUTSIDE) || changed.has(NOTE) {
@@ -63,13 +64,15 @@ pub fn render(ui: &NotesApp, window: WindowId, m: &Model, changed: &Changed) {
         ui.set_modified(unsaved_in(m, pane));
         // An edit turns the deleted bar's Let it go into Discard.
         ui.set_outside_edited(current.as_ref().is_some_and(|c| c.edited_since_gone()));
-        ui.set_words(shown.map_or(0, |c| c.words()) as i32);
+        // No count of words: a count is a measure of what the mask hides.
+        ui.set_words(if m.for_mind { 0 } else { shown.map_or(0, |c| c.words()) as i32 });
     }
     // Set only where it differs: the window it was typed in already shows it, and its caret stays.
     if changed.has(NOTE) || changed.has(CONTENT) || changed.has(EDIT) {
         let text = m.shown_in(pane).map(|c| c.text.as_str()).unwrap_or_default();
+        let text = shown_if_any(m.for_mind, text);
         if ui.get_content().as_str() != text {
-            ui.set_content(text.into());
+            ui.set_content(text.as_ref().into());
         }
     }
     if changed.has(NOTE) || changed.has(FIELDS) {
@@ -107,11 +110,11 @@ pub fn render(ui: &NotesApp, window: WindowId, m: &Model, changed: &Changed) {
         outside(ui, m, pane);
     }
     if changed.has(LIBRARY) {
-        library(ui, pane);
+        library(ui, pane, m.for_mind);
     }
     if changed.has(PREVIEW) {
         let blocks: Vec<PreviewBlock> =
-            pane.blocks.iter().map(|b| PreviewBlock { text: b.text.clone().into(), kind: b.kind }).collect();
+            pane.blocks.iter().map(|b| PreviewBlock { text: shown_if_any(m.for_mind, &b.text).as_ref().into(), kind: b.kind }).collect();
         ui.set_blocks(ModelRc::new(VecModel::from(blocks)));
     }
     // Last: a focus or a caret lands on what was just drawn. The keys are moved only in the
@@ -178,7 +181,8 @@ fn outside(ui: &NotesApp, m: &Model, pane: &Pane) {
     });
     ui.set_outside_said(offered.map(|(_, sentence)| sentence).unwrap_or_default().into());
     ui.set_outside_edited(current.as_ref().is_some_and(|c| c.edited_since_gone()));
-    ui.set_theirs(pane.theirs.as_ref().map(|t| t.text.clone()).unwrap_or_default().into());
+    let theirs = pane.theirs.as_ref().map(|t| t.text.as_str()).unwrap_or_default();
+    ui.set_theirs(shown_if_any(m.for_mind, theirs).as_ref().into());
     ui.set_theirs_gone(pane.theirs.is_none());
     ui.set_mine_fields(current.as_ref().map(|c| fields_line(c.content())).unwrap_or_default().into());
     ui.set_theirs_fields(pane.theirs.as_ref().map(fields_line).unwrap_or_default().into());
@@ -219,7 +223,7 @@ fn fields_line(note: &NoteText) -> String {
     }
 }
 
-fn library(ui: &NotesApp, pane: &Pane) {
+fn library(ui: &NotesApp, pane: &Pane, for_mind: bool) {
     let listing = &pane.listing;
     ui.set_all_count(listing.all_count);
     ui.set_pin_count(listing.pin_count);
@@ -236,7 +240,7 @@ fn library(ui: &NotesApp, pane: &Pane) {
         .map(|r| NoteRow {
             id: r.id.clone().into(),
             title: r.title.clone().into(),
-            preview: r.preview.clone().into(),
+            preview: shown_if_any(for_mind, &r.preview).as_ref().into(),
             date: r.date.clone().into(),
             marker: r.marker.into(),
             pinned: r.pinned,

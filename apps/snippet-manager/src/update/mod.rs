@@ -39,9 +39,7 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refuse
         // (`Event::Presented`), so the close is over and the file it hands over is taken.
         m.closing = false;
     }
-    if let Some(sentence) = m.for_mind.then(|| crate::mind_view::refuses(&command)).flatten() {
-        return Err(Refused::new("for_mind", sentence));
-    }
+    yantrik_app::for_mind::refuse_if(m.for_mind, crate::mind_view::refuses(&command))?;
     if (m.ending || m.closing) && starts_work(m, &command) {
         return Err(Refused::new("closing", CLOSING));
     }

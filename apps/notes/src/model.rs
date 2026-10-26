@@ -23,6 +23,8 @@ use crate::recovery::Recovery;
 use crate::store::Vault;
 
 pub struct Model {
+    /// Drawn for a Mind (`Boot::for_mind`): the window masks every note's text (`crate::mind_view`).
+    pub for_mind: bool,
     pub vault: Vault,
     pub library: Vec<Note>,
     pub documents: Documents<NoteText>,
@@ -226,6 +228,7 @@ impl Current<'_> {
 impl Model {
     pub fn new(vault: Vault, claim: Claim, recovery: Recovery) -> Model {
         Model {
+            for_mind: false,
             vault,
             library: Vec::new(),
             documents: Documents::new(),

@@ -72,7 +72,9 @@ pub fn compose(m: &mut Model, to: String, subject: String, body: String, fx: &mu
 /// network call; the message is already on screen.
 pub fn reply(m: &mut Model, all: bool, fx: &mut Effects<Email>) {
     let Some(open) = m.open.as_ref() else { return };
-    m.composer.text = rows::reply(&open.detail, all);
+    // A reply quotes the message and names its sender and subject; where a Mind looks it starts
+    // empty (`mind_view`).
+    m.composer.text = if m.for_mind { Draft::default() } else { rows::reply(&open.detail, all) };
     opened_on_new_text(m);
     fx.changed(part::COMPOSE_TEXT);
     fx.changed(part::STATUS);
@@ -80,7 +82,7 @@ pub fn reply(m: &mut Model, all: bool, fx: &mut Effects<Email>) {
 
 pub fn forward(m: &mut Model, fx: &mut Effects<Email>) {
     let detail = m.open.as_ref().map(|o| o.detail.clone()).unwrap_or_default();
-    m.composer.text = rows::forward(&detail);
+    m.composer.text = if m.for_mind { Draft::default() } else { rows::forward(&detail) };
     opened_on_new_text(m);
     fx.changed(part::COMPOSE_TEXT);
     fx.changed(part::STATUS);

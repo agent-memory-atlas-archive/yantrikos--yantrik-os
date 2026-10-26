@@ -5,7 +5,7 @@
 use serde_json::json;
 
 use super::{open, start_for_mind, Fixture};
-use crate::mind_view::HIDDEN;
+use yantrik_app::for_mind::HIDDEN;
 use crate::Command;
 
 const SENTINEL: &str = "SENTINEL-mind-view-5c1d";
@@ -91,7 +91,7 @@ fn copy_in_a_mind_view_window_puts_nothing_on_the_clipboard() {
     assert!(f.clipboard.texts().is_empty(), "{:?}", f.clipboard.texts());
     let by_name = f.act("copy", json!({ "id": id.to_string() }));
     f.quiet();
-    assert_eq!(by_name.unwrap_err(), "The code cannot be copied while a Mind is looking.");
+    assert_eq!(by_name.unwrap_err(), yantrik_app::for_mind::READ_ONLY);
     assert!(f.clipboard.texts().is_empty());
     assert_eq!(f.on_disk().get(id).unwrap().use_count, 0, "and nothing was counted");
 }
@@ -153,7 +153,7 @@ fn a_call_the_masked_copy_refuses_answers_with_the_refusal() {
     let (paths, id) = kept();
     let f = start_for_mind(paths);
     let args = || json!({ "id": id.to_string() });
-    let sentence = "The code cannot be copied while a Mind is looking.";
+    let sentence = yantrik_app::for_mind::READ_ONLY;
     // Answered at once, or by the settled call, never by a timeout.
     let answer = f.app.act("copy", args()).and_then(|p| p.settle());
     assert_eq!(answer.unwrap_err(), sentence);

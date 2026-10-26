@@ -8,6 +8,7 @@
 
 use slint::{ModelRc, VecModel};
 use yantrik_app::app::Changed;
+use yantrik_app::for_mind::HIDDEN;
 
 use crate::model::{Cue, Model};
 use crate::prompt;
@@ -30,14 +31,17 @@ pub fn render(ui: &TextEditorApp, m: &Model, changed: &Changed) {
     let view = m.viewport();
     let reset = m.cues.contains(&Cue::ResetContent);
     if changed.has(TEXT) || reset {
-        let shown = &text[..view.end];
+        // Where a Mind looks the field holds the mask, with no gutter and no colours: a gutter
+        // is a count of the lines, and the colours are the text again.
+        let shown = if m.for_mind { HIDDEN } else { &text[..view.end] };
         if reset || ui.get_content().as_str() != shown {
             ui.set_content(shown.into());
         }
         // The gutter and the colour layers cover the view, not the document: a gutter taller than
         // the clamped viewport would be laid out past the renderer's i16 coordinates again.
-        ui.set_numbers((1..=view.lines).map(|n| n.to_string()).collect::<Vec<_>>().join("\n").into());
-        let layers = highlight(shown, language(m.path(tab)));
+        let lines = if m.for_mind { 1 } else { view.lines };
+        ui.set_numbers((1..=lines).map(|n| n.to_string()).collect::<Vec<_>>().join("\n").into());
+        let layers = if m.for_mind { Default::default() } else { highlight(shown, language(m.path(tab))) };
         ui.set_has_highlights(!layers.is_empty());
         ui.set_keywords(layers.keywords.into());
         ui.set_strings(layers.strings.into());
@@ -54,6 +58,7 @@ pub fn render(ui: &TextEditorApp, m: &Model, changed: &Changed) {
         match *cue {
             Cue::FocusEditor => ui.invoke_focus_editor(),
             Cue::ResetPosition => ui.invoke_reset_position(),
+            Cue::Select(..) if m.for_mind => {}
             Cue::Select(a, z) => ui.invoke_select_range(a as i32, z as i32),
             Cue::ShowFind => {
                 ui.set_show_find(true);
@@ -87,18 +92,23 @@ fn chrome(ui: &TextEditorApp, m: &Model) {
             .into(),
     );
     ui.set_language(language(m.path(tab)).into());
-    ui.set_line_count(crate::text::lines(text) as i32);
-    ui.set_ending(if text.contains("\r\n") { "CRLF" } else { "LF" }.into());
-    ui.set_view_limited(view.limited);
-    ui.set_view_status(viewport::status(view, text).into());
+    // No measure of the text a Mind does not see: its lines, its line ending, or what was cut.
+    let seen = !m.for_mind;
+    ui.set_masked(m.for_mind);
+    ui.set_line_count(if seen { crate::text::lines(text) as i32 } else { 0 });
+    ui.set_ending(if seen && text.contains("\r\n") { "CRLF" } else { "LF" }.into());
+    ui.set_view_limited(seen && view.limited);
+    ui.set_view_status(if seen { viewport::status(view, text) } else { String::new() }.into());
     ui.set_busy(m.busy.is_some());
     ui.set_notice(m.notice.window().into());
     ui.set_recovery_status(m.recovery.clone().into());
     ui.set_cursor_line(m.cursor.0);
     ui.set_cursor_column(m.cursor.1);
     ui.set_match_case(m.find.match_case);
-    ui.set_match_count(m.find.matches.len() as i32);
-    ui.set_match_index(find::at_match(m) as i32);
+    // A Mind sees a mask in place of the text, so the window finds nothing in it; a search by a
+    // call still counts as it always did, in the model.
+    ui.set_match_count(if seen { m.find.matches.len() as i32 } else { 0 });
+    ui.set_match_index(if seen { find::at_match(m) as i32 } else { 0 });
     ui.set_dialog(prompt::dialog(m));
     ui.set_dialog_error(m.dialog_error.clone().into());
     ui.set_close_label(prompt::label(m, false).into());

@@ -6,9 +6,11 @@
 //! and the drafts are brought up to date: a tab with anything unsaved has its text in the lane.
 
 use yantrik_app::effects::Effects;
+use yantrik_app::for_mind;
 use yantrik_app::Refused;
 
 use crate::command::Command;
+use crate::mind_view;
 use crate::view::render::{CARET, CHROME, TEXT};
 use crate::model::{Finish, Model};
 use crate::TextEditor;
@@ -25,6 +27,8 @@ pub mod tabs;
 pub mod window;
 
 pub fn update(m: &mut Model, command: Command, fx: &mut Effects<TextEditor>) -> Result<(), Refused> {
+    // Typing would write the mask over the document (`mind_view::refuses`).
+    for_mind::refuse_if(m.for_mind, mind_view::refuses(&command))?;
     // A cue is for the render of the command that set it, and for no later one.
     m.cues.clear();
     let active = m.active_tab().id;

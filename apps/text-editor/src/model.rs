@@ -105,6 +105,8 @@ pub enum Legacy {
 }
 
 pub struct Model {
+    /// Drawn for a Mind (`Boot::for_mind`): the window masks the document (`crate::mind_view`).
+    pub for_mind: bool,
     pub documents: Documents<String>,
     pub tabs: Vec<Tab>,
     pub active: usize,
@@ -160,6 +162,7 @@ pub struct Model {
 impl Model {
     pub fn new(claim: Claim, state_dir: PathBuf) -> Model {
         Model {
+            for_mind: false,
             documents: Documents::new(),
             tabs: Vec::new(),
             active: 0,

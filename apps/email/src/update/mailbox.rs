@@ -263,6 +263,18 @@ pub fn search(m: &mut Model, query: &str, fx: &mut Effects<Email>) {
     });
 }
 
+/// The search box submitted in a window drawn for a Mind: a Mind sees a mask in place of every
+/// sender, subject and body, so nothing it could match is shown and the mail service, which would
+/// match the text the window hides, is not asked. A call's `search` is `search_for` and unchanged.
+pub fn search_masked(m: &mut Model, query: &str, fx: &mut Effects<Email>) {
+    if query.trim().is_empty() {
+        return search(m, query, fx);
+    }
+    m.search.active = true;
+    fx.changed(part::STATUS);
+    searched(m, query, Ok(Vec::new()), fx);
+}
+
 /// `search`: the box shows the query, and the folder on screen is searched for it.
 pub fn search_for(m: &mut Model, query: String, fx: &mut Effects<Email>) {
     m.search.query = query.clone();

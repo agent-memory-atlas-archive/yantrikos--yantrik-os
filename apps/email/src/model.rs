@@ -283,6 +283,8 @@ pub struct Search {
 }
 
 pub struct Model {
+    /// Drawn for a Mind (`Boot::for_mind`): the window masks mail (`crate::mind_view`).
+    pub for_mind: bool,
     pub mail: Arc<dyn MailService>,
     pub mind: Arc<dyn Mind>,
     pub files: Files,
@@ -322,6 +324,7 @@ pub struct Model {
 impl Model {
     pub fn new(mail: Arc<dyn MailService>, mind: Arc<dyn Mind>, files: Files, kept: Result<Option<Draft>, String>) -> Model {
         Model {
+            for_mind: false,
             mail,
             mind,
             files,

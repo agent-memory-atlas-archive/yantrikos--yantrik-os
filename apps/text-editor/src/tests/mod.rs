@@ -18,6 +18,7 @@ mod closing;
 mod findings;
 mod launch;
 mod lingering;
+mod mind_view;
 mod outside;
 mod parity;
 mod reading;
