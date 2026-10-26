@@ -53,6 +53,7 @@ pub fn start(
         inode: m.doc.inode,
         overwrite,
         agent,
+        others: Vec::new(),
         elsewhere: m.state_dir.join("kept"),
     };
     let d = m.d_mut();
@@ -212,6 +213,7 @@ pub fn export(
         inode: None,
         overwrite: false,
         agent,
+        others: Vec::new(),
         elsewhere: m.state_dir.join("kept"),
     };
     m.busy = Some(Work::Export);

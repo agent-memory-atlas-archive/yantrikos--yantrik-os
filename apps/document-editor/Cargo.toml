@@ -32,9 +32,6 @@ regex = { workspace = true }
 # Markdown -> HTML for the export, reusing the renderer Notes already depends on rather than
 # writing a second Markdown implementation to keep in step with the first.
 pulldown-cmark = { version = "0.13.1", default-features = false, features = ["html"] }
-# Where a file moved while it was open went (#86), shared with the Text Editor: the same name and
-# the same bytes, looked for near where it was. The watch itself is the framework's (`fx.watch`).
-yantrik-file-follow = { workspace = true }
 
 [dev-dependencies]
 # TestApp, with the window manager's word on activation.
