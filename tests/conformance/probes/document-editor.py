@@ -38,9 +38,11 @@ PROBE = "document-editor"
 # The control surface's id, which is also what `open_app` is asked for.
 SURFACE = "documents"
 APP_BIN = "/opt/yantrik/bin/yantrik-document-editor"
-# Where the unsaved draft lives between sessions. The app writes here on its own schedule, so it
-# is snapshotted and put back even though nothing in this probe writes it deliberately.
-DRAFTS = pathlib.Path.home() / ".local/state/yantrik/document-editor"
+# Where the unsaved draft lives between sessions (the framework's draft lane, under the app's
+# state folder; the build before the framework kept it in `.../document-editor/draft.json`). The
+# app writes here on its own schedule, so it is snapshotted and put back even though nothing in
+# this probe writes it deliberately.
+DRAFTS = pathlib.Path.home() / ".local/state/yantrik/documents"
 
 FIRST = "# Conformance\n\nThe first paragraph, with a — dash and नमस्ते.\n"
 SECOND = "## Appended\n\nA second section, added by the append action.\n"
