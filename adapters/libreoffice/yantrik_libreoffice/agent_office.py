@@ -35,6 +35,7 @@ from .unopipe import Pipe, PipeRefused
 from .canaries import Canaries
 from .instance import soffice_command, stop_headless, write_profile_settings
 from .office import Office
+from .spawner import Spawner
 from .workdir import WorkFolder
 from .workspace import HELD, AgentWorkspace, lock_file  # noqa: F401 - the tests' names for them
 
@@ -72,6 +73,7 @@ class AgentOffice:
         self.admit = None
         self.landlock = None    # what the launcher put up inside, as it said it
         self._lock = threading.Lock()
+        self._spawner = Spawner()
         self._checked = (None, 0.0)
         self._process = self._office = self._workspace = self._private = None
         self._pipe = self._work = None
@@ -116,6 +118,7 @@ class AgentOffice:
     def stop(self):
         with self._lock:
             self._stop_locked()
+        self._spawner.stop()    # the thread's end kills any sandbox still under it
 
     # ── the sandbox ─────────────────────────────────────────────────────────
 
@@ -178,9 +181,11 @@ class AgentOffice:
             argv = sandboxed(bwrap, private, root, home, env, canaries,
                              soffice_command(program, pipe, sandbox.PROFILE))
             with open(private.log, "wb") as log:
-                self._process = subprocess.Popen(
+                # On the spawner's thread, which outlives the request's: --die-with-parent
+                # follows the thread that started bwrap (spawner.py).
+                self._process = self._spawner.run(lambda: subprocess.Popen(
                     argv, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
-                    env=sandbox.environment(env), start_new_session=True, close_fds=True)
+                    env=sandbox.environment(env), start_new_session=True, close_fds=True))
             self._pipe = Pipe(pipe, private.pipes, private.uno, self._process.pid)
             self._await_pipe(private, deadline)
             self._pipe.pin()

@@ -208,9 +208,9 @@ rather than asking for a virtual environment.
 
 ## Shipping it
 
-Not in `build-release.sh` or the image yet. Shipping it would take:
+Nothing installs the adapter or LibreOffice today (`packages.list` names neither; it names only `bubblewrap`, the sandbox), so a machine has the adapter only when it is placed by hand, as on 520. Not in `build-release.sh` or the image yet. Shipping it would take:
 
-1. **LibreOffice in the image**: `libreoffice-writer`, `libreoffice-calc` and `python3-uno` in the
+1. **LibreOffice in the image**: `libreoffice-writer`, `libreoffice-calc` and `python3-uno` (the `-nogui` packages do not pull it in; the 520 test needed it beside them) in the
    package list of `deploy/yantrik-os/build-debian-iso.sh` (a few hundred MB), or leaving it to the
    person to install, in which case the entry must not be listed until `soffice` exists.
 2. **The adapter in the release**: `yantrik_libreoffice/`, `bin/` and a copy of

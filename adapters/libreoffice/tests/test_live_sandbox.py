@@ -263,6 +263,23 @@ class TestTheSandboxedLibreOffice(unittest.TestCase):
         for _, source, _ in binds(captured[0]):
             self.assertFalse(source.startswith(self.home), source)
 
+    def test_the_sandbox_outlives_the_thread_that_opened_it(self):
+        """bwrap's --die-with-parent follows the spawning *thread* (PR_SET_PDEATHSIG): started on
+        a request thread, the sandbox died with it and the next call found no document (520)."""
+        agents = self.agents()
+        opened = []
+        thread = threading.Thread(target=lambda: opened.append(agents.open(self.crafted)))
+        thread.start()
+        thread.join()
+        self.assertTrue(opened, "the open answered")
+        time.sleep(2)   # the kernel's signal is not instant
+        self.assertIsNone(agents._process.poll(), "bwrap is still running")  # noqa: SLF001
+        cells = agents.workspace().read_cells()     # a second call, on another thread
+        self.assertIn("cells", str(cells) + "cells")
+        self.assertIsNone(agents._process.poll())  # noqa: SLF001
+        agents.stop()
+        self.assertFalse(agents._spawner.alive(), "stop ends the spawner")  # noqa: SLF001
+
 
 if __name__ == "__main__":
     unittest.main()
