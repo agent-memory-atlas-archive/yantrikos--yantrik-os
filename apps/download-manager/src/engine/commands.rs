@@ -88,7 +88,17 @@ impl Engine {
             Status::Paused | Status::Failed => {}
             other => return Err(format!("download {id} is {}, nothing to resume", other.as_str())),
         }
-        let have = std::fs::symlink_metadata(download.path()).map(|m| m.len()).unwrap_or(0);
+        // Append only to the file this download created and wrote. Anything else at the path is
+        // the person's, and bytes added to it would corrupt it: refuse and leave it untouched.
+        let have = match std::fs::symlink_metadata(download.path()) {
+            Err(_) => 0,
+            Ok(meta) if owns_file(&download) && meta.len() >= download.downloaded => meta.len(),
+            Ok(_) => {
+                return Err(format!(
+                    "download {id}: the file at its path is not the partial file this download wrote;                      retry starts it again under a new name and leaves that file alone"
+                ));
+            }
+        };
         if let Some(ctl) = self.control_for(id) {
             ctl.store(control::RUN, Ordering::Relaxed);
         }

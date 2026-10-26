@@ -174,3 +174,25 @@ fn cancel_removes_the_partial_file_it_created_and_nothing_swapped_in_after() {
     assert!(!store.0.join("own.bin").exists(), "its own partial file goes");
     assert_eq!(std::fs::read_to_string(store.0.join("swap.bin")).unwrap(), "theirs");
 }
+
+#[test]
+fn resume_never_appends_to_a_file_that_is_not_the_downloads_own() {
+    let store = Store::new();
+    let engine = store.engine();
+    // Its own partial file, then the person replaced it with theirs (made first, so the inode differs).
+    std::fs::write(store.0.join("big.iso"), "partial").unwrap();
+    let mut row = saved(1, "big.iso", Status::Paused, &store.0, 7, 100);
+    row.file_id = identity(&std::fs::metadata(store.0.join("big.iso")).unwrap());
+    put(&engine, row);
+    std::fs::write(store.0.join("theirs.tmp"), "the person's own file").unwrap();
+    std::fs::rename(store.0.join("theirs.tmp"), store.0.join("big.iso")).unwrap();
+    // A failed row that never wrote anything, with the person's file at its path.
+    put(&engine, saved(2, "doc.pdf", Status::Failed, &store.0, 0, 100));
+    std::fs::write(store.0.join("doc.pdf"), "also theirs").unwrap();
+
+    assert!(engine.resume(1).is_err());
+    assert!(engine.resume(2).is_err());
+    assert_eq!(std::fs::read_to_string(store.0.join("big.iso")).unwrap(), "the person's own file");
+    assert_eq!(std::fs::read_to_string(store.0.join("doc.pdf")).unwrap(), "also theirs");
+    assert_eq!(engine.get(1).unwrap().status, Status::Paused, "the row is left as it was");
+}
