@@ -20,9 +20,9 @@ apps/blender/addon/yantrik_blender/surface.py open path apps/blender/addon/yantr
 apps/blender/addon/yantrik_blender/surface.py save path apps/blender/addon/yantrik_blender/surface.py
 apps/blender/addon/yantrik_blender/surface.py render output apps/blender/addon/yantrik_blender/surface.py
 apps/blender/addon/yantrik_blender/surface.py screenshot output apps/blender/addon/yantrik_blender/surface.py
-apps/document-editor/src/main.rs open path apps/document-editor/src/agent_rule.rs
-apps/document-editor/src/main.rs save_as path apps/document-editor/src/agent_rule.rs
-apps/document-editor/src/main.rs export_markdown path apps/document-editor/src/agent_rule.rs
+apps/document-editor/src/intents.rs open path apps/document-editor/src/agent_rule.rs
+apps/document-editor/src/intents.rs save_as path apps/document-editor/src/agent_rule.rs
+apps/document-editor/src/intents.rs export_markdown path apps/document-editor/src/agent_rule.rs
 apps/download-manager/src/main.rs add save_dir apps/download-manager/src/agent_rule.rs
 apps/email/src/intents.rs select_folder folder - an IMAP folder's name on the mail server, not a path on disk
 apps/image-viewer/src/intents.rs open path apps/image-viewer/src/agent_rule.rs

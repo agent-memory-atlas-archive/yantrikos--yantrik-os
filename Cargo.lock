@@ -11376,18 +11376,20 @@ name = "yantrik-document-editor"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "png",
  "pulldown-cmark",
  "regex",
  "serde",
  "serde_json",
  "slint",
  "tracing",
+ "yantrik-app",
  "yantrik-app-build",
- "yantrik-app-runtime",
  "yantrik-design-tokens",
  "yantrik-file-follow",
  "yantrik-ipc-contracts",
  "yantrik-ipc-transport",
+ "yantrik-testing",
  "yantrik-ui-kit",
 ]
 
