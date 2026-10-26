@@ -15,8 +15,8 @@ How it is started, and when it stops:
   * **headless** — `--headless` starts a LibreOffice of its own with no window and a private
     profile, and stops it on the way out: for scripts, tests and a machine with no display.
 
-In every one of these, an agent's calls are served by a fenced LibreOffice of their own
-(agent_office.py), started on the first and stopped with the adapter.
+In every one of these, an agent's calls are served by a LibreOffice of their own in a sandbox
+(agent_office.py), started on the first `open` and stopped with the adapter.
 """
 
 import argparse
@@ -113,7 +113,7 @@ def main(argv=None, office=None):
     stop = StopOnSignal()
 
     office = office if office is not None else Office(pipe, hidden=args.headless)
-    # An agent's calls are served by a fenced LibreOffice of their own, started on the first.
+    # An agent's calls are served by a sandboxed LibreOffice of their own, started on the first.
     agents = AgentOffice(args.soffice, person=office)
     surface = build(office, app_id, agents=agents)
     try:

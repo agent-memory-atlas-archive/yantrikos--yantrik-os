@@ -43,3 +43,41 @@ def apply_rule(rule, what, path):
         raise
     except Exception as e:  # noqa: BLE001 - the rule's refusal is the caller's sentence
         raise OfficeError(str(e)) from None
+
+
+class PathMap:
+    """Where a path this adapter names is for the LibreOffice it talks to. The person's LibreOffice
+    sees the same files at the same paths (no map). An agent's sees only its sandbox, where the
+    adapter's work folder `outside` is the folder `inside` (sandbox.py)."""
+
+    def __init__(self, outside=None, inside=None):
+        self.outside_root = os.path.normpath(outside) if outside else None
+        self.inside_root = os.path.normpath(inside) if inside else None
+
+    def inside(self, path):
+        """`path` as LibreOffice sees it. Raises `OfficeError` for one it is not shown."""
+        if self.outside_root is None:
+            return path
+        rel = _below(path, self.outside_root)
+        if rel is None:
+            raise OfficeError("%s is not among the files this LibreOffice is shown" % path)
+        return os.path.join(self.inside_root, rel) if rel else self.inside_root
+
+    def outside(self, path):
+        """A path LibreOffice reports, as this adapter names it; None for one outside its share."""
+        if self.outside_root is None or path is None:
+            return path
+        rel = _below(path, self.inside_root)
+        if rel is None:
+            return None
+        return os.path.join(self.outside_root, rel) if rel else self.outside_root
+
+
+def _below(path, root):
+    """`path` relative to `root` ("" for `root` itself), or None when it is not below it."""
+    path = os.path.normpath(path)
+    if path == root:
+        return ""
+    if path.startswith(root.rstrip(os.sep) + os.sep):
+        return path[len(root.rstrip(os.sep)) + 1:]
+    return None

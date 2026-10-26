@@ -27,10 +27,6 @@ class AgentCase(support.Case):
 
     def setUp(self):
         super().setUp()
-        # These tests exercise the fence-era logic; the switch is off in production (#953).
-        patch = mock.patch("yantrik_libreoffice.surface.AGENTS_OPEN", True)
-        patch.start()
-        self.addCleanup(patch.stop)
         home = self.machine.home
         saved = os.environ.get("HOME")
         os.environ["HOME"] = home

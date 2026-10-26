@@ -40,6 +40,35 @@ def _remove(path):
         pass
 
 
+class HostFiles:
+    """The files the person's LibreOffice writes, reached where they lie: the person's own. The
+    agents' LibreOffice is given a workdir.WorkFolder instead, which never follows what the
+    sandbox left in its work folder (review H1)."""
+
+    @staticmethod
+    def remove(path):
+        _remove(path)
+
+    @staticmethod
+    def size(path):
+        return os.path.getsize(path) if os.path.isfile(path) else None
+
+
+def new_file(path, suffixes, admit):
+    """A path to a file that does not exist yet, in a directory that does, that the caller may
+    write (`admit("write", path)`: home_paths' write rule, for an agent)."""
+    path = absolute(path)
+    admit("write", path)
+    if os.path.lexists(path):
+        raise OfficeError("a file is already at %s, and this action never replaces one; "
+                          "choose another path" % path)
+    if not os.path.isdir(os.path.dirname(path)):
+        raise OfficeError("there is no directory %s to write into" % os.path.dirname(path))
+    if suffixes is not None and os.path.splitext(path)[1].lower() not in suffixes:
+        raise OfficeError("%s must end in %s" % (path, " or ".join(sorted(suffixes))))
+    return path
+
+
 class Storing:
     """The writing half of `Office` (office.py), which it is mixed into."""
 
@@ -65,33 +94,18 @@ class Storing:
             self._writable(doc)
             self._before_store(doc)
             # An agent's save keeps what the file held, to put it back if the write is refused.
-            old = None
-            if self.agents_only and os.path.isfile(path):
-                with open(path, "rb") as f:
-                    old = f.read()
+            old = self.files.read(path) if self.agents_only else None
 
             def undo():
                 if old is not None:
-                    with open(path, "wb") as f:
-                        f.write(old)
+                    self.files.replace(path, old)
             doc.store()
             self._after_store(doc, undo)
             return {"document": self.name_of(doc), "path": path, "modified": bool(doc.isModified())}
         return self.run(store)
 
     def _new_file(self, path, suffixes):
-        """A path to a file that does not exist yet, in a directory that does, that the caller
-        may write (home_paths' write rule, for an agent)."""
-        path = absolute(path)
-        self._admit("write", path)
-        if os.path.lexists(path):
-            raise OfficeError("a file is already at %s, and this action never replaces one; "
-                              "choose another path" % path)
-        if not os.path.isdir(os.path.dirname(path)):
-            raise OfficeError("there is no directory %s to write into" % os.path.dirname(path))
-        if suffixes is not None and os.path.splitext(path)[1].lower() not in suffixes:
-            raise OfficeError("%s must end in %s" % (path, " or ".join(sorted(suffixes))))
-        return path
+        return new_file(path, suffixes, self._admit)
 
     def save_as(self, path, document=None):
         path = self._new_file(path, SAVE_FILTERS)
@@ -106,9 +120,9 @@ class Storing:
                                      os.path.splitext(path)[1], ", ".join(fits)))
             self._before_store(doc)
             was = self.path_of(doc)
-            doc.storeAsURL(self.uno().systemPathToFileUrl(path),
+            doc.storeAsURL(self.url_of(path),
                            (self._prop("FilterName", filter_name), self._prop("Overwrite", False)))
-            self._after_store(doc, lambda: _remove(path))
+            self._after_store(doc, lambda: self.files.remove(path))
             return {"document": self.name_of(doc), "path": path, "was": was}
         return self.run(store)
 
@@ -127,12 +141,13 @@ class Storing:
         def work():
             def store(_desktop):
                 self._before_store(doc)
-                doc.storeToURL(self.uno().systemPathToFileUrl(path),
+                doc.storeToURL(self.url_of(path),
                                (self._prop("FilterName", PDF_FILTERS[kind]),
                                 self._prop("Overwrite", False)))
-                self._after_store(doc, lambda: _remove(path))
+                self._after_store(doc, lambda: self.files.remove(path))
             self.run(store)
-            if not os.path.isfile(path):
+            size = self.files.size(path)
+            if size is None:
                 raise OfficeError("LibreOffice answered, and nothing is at %s" % path)
-            return {"document": name, "path": path, "bytes": os.path.getsize(path)}
+            return {"document": name, "path": path, "bytes": size}
         return name, work
