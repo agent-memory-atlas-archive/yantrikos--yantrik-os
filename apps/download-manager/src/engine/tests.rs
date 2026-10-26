@@ -77,6 +77,7 @@ pub(super) fn saved(id: i32, filename: &str, status: Status, dir: &Path, downloa
         restored: false,
         interrupted: false,
         agent: false,
+        file_id: String::new(),
     }
 }
 
@@ -191,6 +192,7 @@ fn reports_no_percentage_when_the_server_gave_no_length() {
         restored: false,
         interrupted: false,
         agent: false,
+        file_id: String::new(),
     };
     assert_eq!(download.progress(), 0.0);
     assert_eq!(download.size_text(), "4.0 KB");
@@ -224,6 +226,7 @@ fn row(id: i32, filename: &str, status: Status, total: Option<u64>) -> Download 
         restored: false,
         interrupted: false,
         agent: false,
+        file_id: String::new(),
     }
 }
 

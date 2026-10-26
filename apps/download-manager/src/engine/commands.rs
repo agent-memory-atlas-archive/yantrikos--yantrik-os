@@ -53,6 +53,7 @@ impl Engine {
             restored: false,
             interrupted: false,
             agent,
+            file_id: String::new(),
         };
 
         {
@@ -125,10 +126,11 @@ impl Engine {
             ctl.store(control::CANCEL, Ordering::Relaxed);
         }
         // A running worker removes the file itself when it sees the flag; a paused or failed one
-        // has no worker left to do it, so do it here. The file is the one this download was
-        // writing: its name was unused when it was queued.
+        // has no worker left to do it, so do it here, but only if the file is provably the one
+        // this download created. A failed row may never have written anything, and what sits at
+        // its path now is then the person's.
         if !download.status.is_active() {
-            let _ = std::fs::remove_file(download.path());
+            remove_own_file(&download);
             self.edit(id, |d| {
                 d.status = Status::Failed;
                 d.error = "cancelled".into();
@@ -148,12 +150,14 @@ impl Engine {
         if download.status.is_active() {
             return Err(format!("download {id} is already running"));
         }
-        // A `missing` file is not there; whatever is at its path now is not this download's, so it
-        // is left alone and the new fetch takes a name that is free.
-        let renamed = if download.status == Status::Missing {
+        // A file this download did not create (a `missing` one, or one that appeared since) is
+        // left alone and the new fetch takes a name that is free.
+        let renamed = if download.status != Status::Missing && owns_file(&download) {
+            remove_own_file(&download);
+            None
+        } else if std::fs::symlink_metadata(download.path()).is_ok() {
             Some(unique_in(&download.save_dir, &download.filename))
         } else {
-            let _ = std::fs::remove_file(download.path());
             None
         };
         if let Some(ctl) = self.control_for(id) {
@@ -167,6 +171,7 @@ impl Engine {
             d.downloaded = 0;
             d.error.clear();
             d.file_hash.clear();
+            d.file_id.clear();
             d.checksum_status = "none".into();
             d.ended_at.clear();
             d.started_at = now_stamp();

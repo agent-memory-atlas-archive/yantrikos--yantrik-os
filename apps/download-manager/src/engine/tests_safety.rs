@@ -17,14 +17,37 @@ fn many_concurrent_saves_and_a_close_leave_the_list_valid_and_whole() {
     for id in 1..=8 {
         put(&engine, saved(id, &format!("f{id}.bin"), Status::Paused, &store.0, 10, 100));
     }
+    // A reader parses the list and watches the notice for the whole run: a later good save
+    // overwrites a torn file and clears "cannot save", so looking only at the end misses both.
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reader = {
+        let (engine, done, file) = (engine.clone(), done.clone(), store.state_file());
+        std::thread::spawn(move || {
+            let mut bad = Vec::new();
+            while !done.load(Ordering::Relaxed) {
+                if let Ok(raw) = std::fs::read_to_string(&file) {
+                    if decode(&raw).is_err() {
+                        bad.push("unparseable state.json".to_string());
+                    }
+                }
+                if !engine.notice().is_empty() {
+                    bad.push(engine.notice());
+                }
+            }
+            bad
+        })
+    };
     let writers: Vec<_> = (0..8)
         .map(|_| {
             let engine = engine.clone();
-            std::thread::spawn(move || (0..60).for_each(|_| engine.save()))
+            std::thread::spawn(move || (0..150).for_each(|_| engine.save()))
         })
         .collect();
     engine.settle_for_exit(Duration::from_millis(50));
     writers.into_iter().for_each(|w| w.join().unwrap());
+    done.store(true, Ordering::Relaxed);
+    let bad = reader.join().unwrap();
+    assert!(bad.is_empty(), "a reader saw a torn list or a failed save: {bad:?}");
     let raw = std::fs::read_to_string(store.state_file()).unwrap();
     let (items, _) = decode(&raw).expect("state.json parses");
     assert_eq!(items.len(), 8, "every row is in it");
@@ -103,4 +126,51 @@ fn the_agent_mark_survives_a_restart() {
     d.agent = true;
     let (back, _) = decode(&encode(&[d], 2)).unwrap();
     assert!(back[0].agent);
+}
+
+#[test]
+fn cancel_and_retry_of_a_failed_row_that_wrote_nothing_keep_the_persons_files() {
+    // The row failed before its file was created. Since then the person saved their own files at
+    // the download's path (and at a `.part` name beside it).
+    let store = Store::new();
+    let engine = store.engine();
+    let mut row = saved(1, "report.pdf", Status::Failed, &store.0, 0, 100);
+    row.error = "HTTP 404".into();
+    put(&engine, row.clone());
+    put(&engine, { let mut r = row.clone(); r.id = 2; r });
+    std::fs::write(store.0.join("report.pdf"), "the person's own report").unwrap();
+    std::fs::write(store.0.join("report.pdf.part"), "the person's own part").unwrap();
+
+    engine.cancel(1).unwrap();
+    assert_eq!(std::fs::read_to_string(store.0.join("report.pdf")).unwrap(), "the person's own report");
+    assert_eq!(std::fs::read_to_string(store.0.join("report.pdf.part")).unwrap(), "the person's own part");
+
+    let _ = engine.retry(2);
+    assert_eq!(std::fs::read_to_string(store.0.join("report.pdf")).unwrap(), "the person's own report");
+    assert_eq!(std::fs::read_to_string(store.0.join("report.pdf.part")).unwrap(), "the person's own part");
+    assert_ne!(engine.get(2).unwrap().filename, "report.pdf", "the retry takes a free name");
+}
+
+#[test]
+fn cancel_removes_the_partial_file_it_created_and_nothing_swapped_in_after() {
+    let store = Store::new();
+    let engine = store.engine();
+    // Its own partial file: recorded when it was created, still the same plain file.
+    std::fs::write(store.0.join("own.bin"), "partial").unwrap();
+    let mut own = saved(1, "own.bin", Status::Paused, &store.0, 7, 100);
+    own.file_id = identity(&std::fs::metadata(store.0.join("own.bin")).unwrap());
+    put(&engine, own);
+    // The same, but the person replaced the file with another one of the same name.
+    std::fs::write(store.0.join("swap.bin"), "partial").unwrap();
+    let mut swapped = saved(2, "swap.bin", Status::Paused, &store.0, 7, 100);
+    swapped.file_id = identity(&std::fs::metadata(store.0.join("swap.bin")).unwrap());
+    put(&engine, swapped);
+    // Made before the old one goes, so the two cannot share an inode number.
+    std::fs::write(store.0.join("theirs.tmp"), "theirs").unwrap();
+    std::fs::rename(store.0.join("theirs.tmp"), store.0.join("swap.bin")).unwrap();
+
+    engine.cancel(1).unwrap();
+    engine.cancel(2).unwrap();
+    assert!(!store.0.join("own.bin").exists(), "its own partial file goes");
+    assert_eq!(std::fs::read_to_string(store.0.join("swap.bin")).unwrap(), "theirs");
 }

@@ -226,6 +226,8 @@ struct StoredDownload {
     resume_supported: bool,
     #[serde(default)]
     agent: bool,
+    #[serde(default)]
+    file_id: String,
 }
 
 /// Where the list lives between runs.
@@ -270,6 +272,7 @@ pub(super) fn encode(items: &[Download], next_id: i32) -> String {
                 error: d.error.clone(),
                 resume_supported: d.resume_supported,
                 agent: d.agent,
+                file_id: d.file_id.clone(),
             })
             .collect(),
     };
@@ -338,6 +341,7 @@ pub(super) fn decode(raw: &str) -> Result<(Vec<Download>, i32), String> {
             error: record.error,
             resume_supported: record.resume_supported,
             agent: record.agent,
+            file_id: record.file_id,
             selected: false,
             restored: true,
             interrupted: false,

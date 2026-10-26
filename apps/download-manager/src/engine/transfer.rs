@@ -70,7 +70,7 @@ impl Engine {
         let file = if appending {
             no_follow(OpenOptions::new().append(true)).open(&path)
         } else {
-            no_follow(OpenOptions::new().write(true).create(true).truncate(true)).open(&path)
+            no_follow(OpenOptions::new().write(true).create_new(true)).open(&path)
         };
         let mut file = match file {
             Ok(file) => file,
@@ -80,7 +80,12 @@ impl Engine {
             }
         };
 
+        // Remember which file this is, so a later cancel can tell it from one the person put there.
+        let created = if appending { None } else { file.metadata().ok().map(|m| identity(&m)) };
         self.edit(id, |d| {
+            if let Some(file_id) = created {
+                d.file_id = file_id;
+            }
             d.status = Status::Downloading;
             d.downloaded = start_at;
             d.total = total;
@@ -116,7 +121,9 @@ impl Engine {
                 }
                 control::CANCEL => {
                     drop(file);
-                    let _ = std::fs::remove_file(&path);
+                    if let Some(download) = self.get(id) {
+                        remove_own_file(&download);
+                    }
                     self.edit(id, |d| {
                         d.status = Status::Failed;
                         d.error = "cancelled".into();

@@ -179,3 +179,38 @@ pub(super) fn now_stamp() -> String {
 pub fn plural<'a>(n: usize, one: &'a str, many: &'a str) -> &'a str {
     if n == 1 { one } else { many }
 }
+
+/// Device and inode of a file, as text; empty where the platform has no such thing.
+pub(super) fn identity(meta: &std::fs::Metadata) -> String {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        format!("{}:{}", meta.dev(), meta.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        String::new()
+    }
+}
+
+/// Is what sits at the download's path still the plain file this download created?
+///
+/// False for a link, a directory, a file with another identity, and when no file was ever
+/// recorded. The app deletes a file only when this is true.
+pub(super) fn owns_file(download: &Download) -> bool {
+    if download.file_id.is_empty() {
+        return false;
+    }
+    match std::fs::symlink_metadata(download.path()) {
+        Ok(meta) => meta.file_type().is_file() && identity(&meta) == download.file_id,
+        Err(_) => false,
+    }
+}
+
+/// Delete the download's file if it is provably its own; otherwise leave it.
+pub(super) fn remove_own_file(download: &Download) {
+    if owns_file(download) {
+        let _ = std::fs::remove_file(download.path());
+    }
+}

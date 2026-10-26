@@ -195,6 +195,11 @@ pub struct Download {
     /// An agent asked for it. Its fetch is held to the public internet (`fetch.rs`), also after a
     /// restart and a resume, so this is stored.
     pub agent: bool,
+    /// Device and inode of the file this download created, empty until it has created one.
+    ///
+    /// Cancel and retry delete a file only if what sits at the path is still that same plain file;
+    /// anything else there is the person's, and is left alone.
+    pub file_id: String,
 }
 
 impl Download {
