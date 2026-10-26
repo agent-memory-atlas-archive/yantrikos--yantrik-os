@@ -11132,6 +11132,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "yantrik-file-follow",
  "yantrik-foundation",
  "yantrik-ipc-contracts",
  "yantrik-ipc-transport",
