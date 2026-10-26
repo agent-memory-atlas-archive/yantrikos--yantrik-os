@@ -56,6 +56,16 @@ impl Engine {
             }
         };
 
+        // A 206 for another part than asked for would put the wrong bytes in the app's own file.
+        if resume_from > 0 && response.status() == 206 {
+            let right = response
+                .header("content-range")
+                .is_none_or(|r| r.trim().starts_with(format!("bytes {resume_from}-").as_str()));
+            if !right {
+                self.fail(id, "the server sent a different part of the file than was asked for");
+                return;
+            }
+        }
         // A ranged request answered 200 means the body is the whole file, not the remainder.
         let appending = owned.is_some() && (resume_from == 0 || response.status() == 206);
         let resume_supported = response
@@ -85,10 +95,8 @@ impl Engine {
                     // The server ignored the range. The old partial is the app's own and now
                     // useless; take it away if it is still provably that, and start into a new
                     // file whose name collides with nothing.
-                    if let Some(stamp) = stamp_fd(&old) {
-                        drop(old);
-                        remove_if_ours(&path, &stamp);
-                    }
+                    drop(old);
+                    self.remove_owned(&path, &download.file_id);
                     let name = unique_in(&download.save_dir, &download.filename);
                     path = download.save_dir.join(&name);
                     self.edit(id, |d| d.filename = name.clone());
@@ -151,7 +159,7 @@ impl Engine {
                     let stamp = stamp_fd(&file);
                     drop(file);
                     if let Some(stamp) = stamp {
-                        remove_if_ours(&path, &stamp);
+                        self.remove_owned(&path, &stamp);
                     }
                     self.edit(id, |d| {
                         d.status = Status::Failed;
@@ -181,6 +189,8 @@ impl Engine {
                 self.fail(id, format!("cannot write {}: {e}", path.display()));
                 return;
             }
+            // The stamp follows every write, so whatever is saved at a quit matches the file.
+            self.record_stamp(id, &file);
             written += read as u64;
             window_bytes += read as u64;
 

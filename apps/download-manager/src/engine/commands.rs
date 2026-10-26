@@ -100,7 +100,7 @@ impl Engine {
             Ok(None) => (0, None),
             Err(why) => {
                 let legacy = if !has_stamp(&download.file_id) {
-                    "; a download saved before files were tracked has no record to check against"
+                    "; a download saved before files were tracked, or on a filesystem with no creation time, has no record to check against"
                 } else {
                     ""
                 };
@@ -150,12 +150,12 @@ impl Engine {
         // this download created. A failed row may never have written anything, and what sits at
         // its path now is then the person's.
         if !download.status.is_active() {
-            let gone = remove_if_ours(&download.path(), &download.file_id);
+            let gone = self.remove_owned(&download.path(), &download.file_id);
             // A row saved before files were tracked has nothing to check a file against, so its
             // file stays. Said out loud, because the person asked for it to go.
             if !gone && !has_stamp(&download.file_id) && download.downloaded > 0 && download.path().symlink_metadata().is_ok() {
                 self.set_notice(format!(
-                    "{} was left on disk: this download was saved before files were tracked, so it cannot be shown to be its own",
+                    "{} was left on disk: it cannot be shown to be this download's own (it was saved before files were tracked, or the filesystem records no creation time)",
                     download.path().display()
                 ));
             }
@@ -180,9 +180,12 @@ impl Engine {
         }
         // A file this download did not create (a `missing` one, or one that appeared since) is
         // left alone and the new fetch takes a name that is free.
-        let renamed = if download.status != Status::Missing && remove_if_ours(&download.path(), &download.file_id) {
+        let renamed = if download.status != Status::Missing && self.remove_owned(&download.path(), &download.file_id) {
             None
         } else if std::fs::symlink_metadata(download.path()).is_ok() {
+            if download.status != Status::Missing && download.downloaded > 0 && self.notice().is_empty() {
+                self.set_notice(format!("{} was left where it is; the new download takes another name", download.path().display()));
+            }
             Some(unique_in(&download.save_dir, &download.filename))
         } else {
             None

@@ -393,3 +393,82 @@ fn a_row_saved_before_files_were_tracked_keeps_its_file_and_says_so() {
     engine.cancel(2).unwrap();
     assert!(store.0.join("older.iso").exists());
 }
+
+/// The review's Probe A: while the app removes its file, the person's atomic save lands on the
+/// name again and again. Whatever happens, their file must still exist somewhere afterwards.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_atomic_save_racing_the_removal_never_costs_the_person_their_file() {
+    use std::os::unix::ffi::OsStrExt;
+    const ROUNDS: usize = 300;
+    let store = Store::new();
+    let mut lost = 0;
+    for round in 0..ROUNDS {
+        let app = store.0.join(format!("app{round}.bin"));
+        let theirs = store.0.join(format!("theirs{round}.bin"));
+        std::fs::write(&app, b"partial").unwrap();
+        std::fs::write(&theirs, format!("the person's file {round}")).unwrap();
+        let stamp = stamp_of(&app);
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let swapper = {
+            let (stop, a, b) = (stop.clone(), app.clone(), theirs.clone());
+            std::thread::spawn(move || {
+                let (a, b) = (std::ffi::CString::new(a.as_os_str().as_bytes()).unwrap(), std::ffi::CString::new(b.as_os_str().as_bytes()).unwrap());
+                while !stop.load(Ordering::Relaxed) {
+                    // RENAME_EXCHANGE: the two names trade files in one atomic step.
+                    unsafe { libc::syscall(libc::SYS_renameat2, libc::AT_FDCWD, a.as_ptr(), libc::AT_FDCWD, b.as_ptr(), 2u32) };
+                }
+            })
+        };
+        remove_if_ours(&app, &stamp);
+        stop.store(true, Ordering::Relaxed);
+        swapper.join().unwrap();
+        let wanted = format!("the person's file {round}");
+        let mut found = false;
+        let mut folders = vec![store.0.clone()];
+        while let Some(folder) = folders.pop() {
+            for entry in std::fs::read_dir(&folder).unwrap().flatten() {
+                match entry.file_type() {
+                    Ok(t) if t.is_dir() => folders.push(entry.path()),
+                    _ => found |= std::fs::read_to_string(entry.path()).is_ok_and(|text| text == wanted),
+                }
+            }
+        }
+        lost += usize::from(!found);
+    }
+    assert_eq!(lost, 0, "the person's file was deleted in {lost} of {ROUNDS} rounds");
+}
+
+#[test]
+fn a_stamp_without_a_birth_time_proves_nothing() {
+    let store = Store::new();
+    let engine = store.engine();
+    let path = own_partial(&engine, &store, 1, "big.iso", b"partial", "http://127.0.0.1:1/x");
+    // The same stamp as the file's own, with the birth time taken out, as a filesystem without
+    // one would write it.
+    let real = stamp_of(&path);
+    let parts: Vec<&str> = real.split(':').collect();
+    let bare = format!("{}:{}:{}:-:{}:{}", parts[0], parts[1], parts[2], parts[4], parts[5]);
+    assert!(!has_stamp(&bare));
+    engine.edit(1, |d| d.file_id = bare.clone());
+    assert!(engine.resume(1).is_err(), "no resume without a birth time");
+    engine.cancel(1).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"partial", "no delete without a birth time");
+    assert_eq!(remove_if_ours(&path, &bare), Removal::Kept);
+}
+
+#[test]
+fn a_file_with_the_same_inode_and_size_but_another_birth_time_is_not_the_partial() {
+    let store = Store::new();
+    let engine = store.engine();
+    let path = own_partial(&engine, &store, 1, "big.iso", b"partial", "http://127.0.0.1:1/x");
+    // The recorded stamp, with a birth time and modification time from another life of the inode.
+    let real = stamp_of(&path);
+    let mut parts: Vec<String> = real.split(':').map(String::from).collect();
+    parts[3] = "1.0".into();
+    parts[4] = "1.0".into();
+    engine.edit(1, |d| d.file_id = parts.join(":"));
+    assert!(engine.resume(1).is_err());
+    engine.cancel(1).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"partial");
+}

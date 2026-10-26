@@ -11,9 +11,17 @@
 //! new file has another birth time, and any rewrite (in place or by replacement) changes the
 //! modification time or the size, which the app compares with what it last wrote itself.
 //!
-//! Where the filesystem gives no birth time the stamp carries `-` in its place and compares equal
-//! only to a stamp that also has none; the other four fields then do the work, and a rewrite that
-//! restores both the size and the time is the one thing they cannot see. The PR body says so.
+//! Where the filesystem gives no birth time the stamp carries `-` in its place and is not a proof
+//! at all: the app refuses to resume, to delete on cancel and to delete on retry, and leaves the
+//! file. Mtime and size alone are never accepted, because a recreated file can match them.
+//!
+//! Taking a file away is done by quarantine, never by unlinking a name. `unlinkat` acts on a name
+//! and nothing ties the name to the inode that was checked, so a file the person saves there
+//! between the check and the unlink would go. Instead the file is first renamed, without replacing
+//! anything, into a private folder on the same filesystem; the stamp is checked on what was moved;
+//! only then is that held name unlinked. A mismatch moves the file back, and if its name has been
+//! taken meanwhile it is kept under a recovery name and the person is told where. The worst case
+//! is "the person's file moved for a moment and came back", never "deleted".
 //!
 //! This is Linux only. Elsewhere no stamp can be taken, so the app never deletes a partial file
 //! and never resumes one: it refuses rather than guess.
@@ -39,9 +47,10 @@ pub(super) fn stamp_fd(file: &File) -> Option<String> {
     }
 }
 
-/// Is this text a stamp this build can check?
+/// Is this text a stamp this build can prove ownership with? It needs the birth time: without
+/// one the stamp is kept as a record but never acted on.
 pub(super) fn has_stamp(text: &str) -> bool {
-    text.starts_with(TAG)
+    text.strip_prefix(TAG).is_some_and(|rest| rest.split(':').nth(2).is_some_and(|birth| birth != "-"))
 }
 
 /// The size recorded in a stamp: how many bytes the app had written when it took it.
@@ -74,24 +83,51 @@ pub(super) fn open_owned(download: &Download) -> Result<Option<File>, String> {
     }
 }
 
-/// Delete the file at `path` if, and only if, it still has the stamp `expected`.
-///
-/// Linux cannot unlink by descriptor, so: open the folder, open the file by name through it
-/// without following a link, take its stamp from that descriptor, look at the name again with
-/// `statx` just before, and `unlinkat` that name. What remains is the few microseconds between
-/// that last look and the unlink, in which a file with the same stamp would have to be put there
-/// by someone who can already write to this folder.
-pub(super) fn remove_if_ours(path: &Path, expected: &str) -> bool {
+/// What taking a file away came to.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Removal {
+    /// The file was the app's own, and is gone.
+    Removed,
+    /// Nothing was deleted, and whatever was at the name is where it was (or was never there).
+    Kept,
+    /// Something that is not the app's was moved aside and could not go back; it is here.
+    Recovered(PathBuf),
+}
+
+/// Delete the file at `path` if, and only if, it still has the stamp `expected`, by quarantine
+/// (see the top of this file). Never deletes when it cannot prove the file or has no same-folder
+/// place to hold it.
+pub(super) fn remove_if_ours(path: &Path, expected: &str) -> Removal {
     if !has_stamp(expected) {
-        return false;
+        return Removal::Kept;
     }
     #[cfg(target_os = "linux")]
     {
-        sys::unlink_if(path, expected)
+        sys::quarantine_remove(path, expected)
     }
     #[cfg(not(target_os = "linux"))]
     {
-        false
+        Removal::Kept
+    }
+}
+
+impl Engine {
+    /// Carry out `remove_if_ours` and say aloud when a file of the person's had to be set aside.
+    /// True if the app's own file was deleted.
+    pub(super) fn remove_owned(&self, path: &Path, expected: &str) -> bool {
+        match remove_if_ours(path, expected) {
+            Removal::Removed => true,
+            Removal::Kept => false,
+            Removal::Recovered(at) => {
+                tracing::warn!(from = %path.display(), kept = %at.display(), "a file that is not the download's was set aside and kept");
+                self.set_notice(format!(
+                    "{} is not the file this download made, so it was not deleted. It is kept at {}",
+                    path.display(),
+                    at.display()
+                ));
+                false
+            }
+        }
     }
 }
 
@@ -100,6 +136,7 @@ mod sys {
     use super::*;
     use std::ffi::{CStr, CString};
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::sync::atomic::AtomicU64;
     use std::os::unix::ffi::OsStrExt;
 
     /// `statx` on `dirfd`/`name`: the stamp of a plain file, `None` for anything else.
@@ -123,36 +160,110 @@ mod sys {
         ))
     }
 
-    pub(super) fn unlink_if(path: &Path, expected: &str) -> bool {
-        let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else { return false };
-        let Ok(name) = CString::new(name.as_bytes()) else { return false };
-        let Ok(dir_c) = CString::new(dir.as_os_str().as_bytes()) else { return false };
-        // SAFETY: both strings are NUL-terminated; a failed call returns -1, which is checked.
-        let dirfd = unsafe { libc::open(dir_c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC) };
-        if dirfd < 0 {
-            return false;
+    /// The private folder, made inside the download's own folder so a rename into it never
+    /// crosses a filesystem. Hidden, owner-only, and removed again when it is empty.
+    const QUARANTINE: &CStr = c".yantrik-downloads-held";
+    /// The flag of `renameat2` that refuses to replace anything.
+    const NOREPLACE: u32 = 1;
+
+    fn rename_noreplace(from_dir: i32, from: &CStr, to_dir: i32, to: &CStr) -> bool {
+        // SAFETY: both names are NUL-terminated and both descriptors are open folders.
+        unsafe { libc::syscall(libc::SYS_renameat2, from_dir, from.as_ptr(), to_dir, to.as_ptr(), NOREPLACE) == 0 }
+    }
+
+    fn open_dir_at(parent: i32, name: &CStr) -> Option<OwnedFd> {
+        let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+        // SAFETY: `name` is NUL-terminated; a failed call returns -1, which is checked.
+        let fd = unsafe { libc::openat(parent, name.as_ptr(), flags) };
+        // SAFETY: a non-negative result is a descriptor this call owns.
+        (fd >= 0).then(|| unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+
+    /// The quarantine folder, made if needed, and checked to be ours and closed to others.
+    fn open_quarantine(dirfd: i32) -> Option<OwnedFd> {
+        for _ in 0..3 {
+            // SAFETY: NUL-terminated name; EEXIST is fine, any other failure shows at the open.
+            unsafe { libc::mkdirat(dirfd, QUARANTINE.as_ptr(), 0o700) };
+            let Some(fd) = open_dir_at(dirfd, QUARANTINE) else { continue };
+            // SAFETY: `st` is a plain-data out parameter.
+            let mut st: libc::stat = unsafe { std::mem::zeroed() };
+            if unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } != 0 || st.st_uid != unsafe { libc::geteuid() } {
+                return None;
+            }
+            if st.st_mode & 0o077 != 0 && unsafe { libc::fchmod(fd.as_raw_fd(), 0o700) } != 0 {
+                return None;
+            }
+            return Some(fd);
         }
-        let dirfd = unsafe { OwnedFd::from_raw_fd(dirfd) };
-        let fd = unsafe {
-            libc::openat(
-                dirfd.as_raw_fd(),
-                name.as_ptr(),
-                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
-            )
+        None
+    }
+
+    /// Take the quarantine folder away if nothing is in it. Failure means something is, which is
+    /// the right answer.
+    fn tidy(dirfd: i32) {
+        // SAFETY: NUL-terminated name.
+        unsafe { libc::unlinkat(dirfd, QUARANTINE.as_ptr(), libc::AT_REMOVEDIR) };
+    }
+
+    pub(super) fn quarantine_remove(path: &Path, expected: &str) -> Removal {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else { return Removal::Kept };
+        let (Ok(name), Ok(dir_c)) = (CString::new(name.as_bytes()), CString::new(dir.as_os_str().as_bytes())) else {
+            return Removal::Kept;
         };
-        if fd < 0 {
-            return false;
+        let Some(dirfd) = open_dir_at(libc::AT_FDCWD, &dir_c) else { return Removal::Kept };
+        let dirfd = dirfd.as_raw_fd();
+        let Some(qfd) = open_quarantine(dirfd) else { return Removal::Kept };
+        let qfd_raw = qfd.as_raw_fd();
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let held_text = format!("held-{}-{n}", std::process::id());
+        let Ok(held) = CString::new(held_text.as_str()) else { return Removal::Kept };
+        let held_at = || dir.join(".yantrik-downloads-held").join(&held_text);
+
+        // Step one: the name goes first, and nothing is replaced. EXDEV, a missing file or any
+        // other failure ends it here with nothing touched.
+        if !rename_noreplace(dirfd, &name, qfd_raw, &held) {
+            tidy(dirfd);
+            return Removal::Kept;
         }
-        let file = unsafe { File::from_raw_fd(fd) };
-        if stamp_fd(&file).as_deref() != Some(expected) {
-            return false;
+        // Step two: look at what was moved, through the private folder, never following a link.
+        // SAFETY: NUL-terminated name; a failed call returns -1, which is checked.
+        let opened = unsafe {
+            libc::openat(qfd_raw, held.as_ptr(), libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+        };
+        let ours = opened >= 0 && {
+            // SAFETY: a non-negative result is a descriptor this call owns.
+            let file = unsafe { File::from_raw_fd(opened) };
+            stamp_fd(&file).as_deref() == Some(expected)
+                && stamp(qfd_raw, &held, libc::AT_SYMLINK_NOFOLLOW).as_deref() == Some(expected)
+        };
+        if ours {
+            // Step three: nothing else renames in this folder, so the held name is that file.
+            #[cfg(test)]
+            super::seam::run("before_unlink", path);
+            // SAFETY: NUL-terminated name.
+            if unsafe { libc::unlinkat(qfd_raw, held.as_ptr(), 0) } == 0 {
+                tidy(dirfd);
+                return Removal::Removed;
+            }
+            return Removal::Recovered(held_at());
         }
-        #[cfg(test)]
-        super::seam::run("before_unlink", path);
-        if stamp(dirfd.as_raw_fd(), &name, libc::AT_SYMLINK_NOFOLLOW).as_deref() != Some(expected) {
-            return false;
+        // Not the app's: put it back. Its name may have been taken meanwhile; then it is kept
+        // under a recovery name beside it, and if even that fails, where it is.
+        if rename_noreplace(qfd_raw, &held, dirfd, &name) {
+            tidy(dirfd);
+            return Removal::Kept;
         }
-        unsafe { libc::unlinkat(dirfd.as_raw_fd(), name.as_ptr(), 0) == 0 }
+        let base = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        for k in 1..=50 {
+            let recovered = if k == 1 { format!("{base}.recovered") } else { format!("{base}.recovered-{k}") };
+            let Ok(recovered_c) = CString::new(recovered.as_str()) else { break };
+            if rename_noreplace(qfd_raw, &held, dirfd, &recovered_c) {
+                tidy(dirfd);
+                return Removal::Recovered(dir.join(recovered));
+            }
+        }
+        Removal::Recovered(held_at())
     }
 }
 
