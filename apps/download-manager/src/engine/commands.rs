@@ -6,12 +6,12 @@ impl Engine {
     /// Rejects anything that is not `http`/`https` rather than handing it to the transport and
     /// reporting whatever that says: a caller that mistyped a path deserves to be told it was a
     /// path, and a `file://` "download" would be a copy with none of this machinery's meaning.
-    pub fn add(
-        &self,
-        url: &str,
-        checksum: &str,
-        save_dir: Option<&str>,
-    ) -> Result<i32, String> {
+    pub fn add(&self, url: &str, checksum: &str, save_dir: Option<&str>) -> Result<i32, String> {
+        self.add_as(url, checksum, save_dir, false)
+    }
+
+    /// [`Engine::add`], for `agent` when an agent asked: its fetch is held to the public internet.
+    pub fn add_as(&self, url: &str, checksum: &str, save_dir: Option<&str>, agent: bool) -> Result<i32, String> {
         let url = url.trim();
         if url.is_empty() {
             return Err("no URL given".into());
@@ -52,6 +52,7 @@ impl Engine {
             selected: false,
             restored: false,
             interrupted: false,
+            agent,
         };
 
         {
@@ -105,13 +106,27 @@ impl Engine {
     ///
     /// The record stays in the list as `failed` with the reason, because a download that vanished
     /// from the window tells the person nothing about why their file is not there.
+    ///
+    /// A finished download (`completed`, or `missing`) has no partial file: what is at its path is
+    /// the person's file, or something else that now sits there. Cancelling it only takes the row
+    /// out of the list and never touches the file.
     pub fn cancel(&self, id: i32) -> Result<(), String> {
         let download = self.get(id).ok_or_else(|| format!("no download {id}"))?;
+        if download.status.is_finished() {
+            if let Ok(mut state) = self.state.lock() {
+                state.items.retain(|d| d.id != id);
+                state.controls.remove(&id);
+            }
+            self.touch();
+            self.save();
+            return Ok(());
+        }
         if let Some(ctl) = self.control_for(id) {
             ctl.store(control::CANCEL, Ordering::Relaxed);
         }
-        // A running worker removes the file itself when it sees the flag; a paused or finished one
-        // has no worker left to do it, so do it here.
+        // A running worker removes the file itself when it sees the flag; a paused or failed one
+        // has no worker left to do it, so do it here. The file is the one this download was
+        // writing: its name was unused when it was queued.
         if !download.status.is_active() {
             let _ = std::fs::remove_file(download.path());
             self.edit(id, |d| {
@@ -133,11 +148,21 @@ impl Engine {
         if download.status.is_active() {
             return Err(format!("download {id} is already running"));
         }
-        let _ = std::fs::remove_file(download.path());
+        // A `missing` file is not there; whatever is at its path now is not this download's, so it
+        // is left alone and the new fetch takes a name that is free.
+        let renamed = if download.status == Status::Missing {
+            Some(unique_in(&download.save_dir, &download.filename))
+        } else {
+            let _ = std::fs::remove_file(download.path());
+            None
+        };
         if let Some(ctl) = self.control_for(id) {
             ctl.store(control::RUN, Ordering::Relaxed);
         }
         self.edit(id, |d| {
+            if let Some(name) = renamed {
+                d.filename = name;
+            }
             d.status = Status::Queued;
             d.downloaded = 0;
             d.error.clear();

@@ -15,15 +15,21 @@ pub struct File {
     pub body: Vec<u8>,
     /// Send this many bytes, then wait for [`Server::release`] before the rest.
     pub hold_at: Option<usize>,
+    /// Answer `302` to this `Location` instead of serving a body.
+    pub redirect: Option<String>,
 }
 
 impl File {
     pub fn plain(body: Vec<u8>) -> File {
-        File { body, hold_at: None }
+        File { body, hold_at: None, redirect: None }
+    }
+
+    pub fn redirect(to: &str) -> File {
+        File { body: Vec::new(), hold_at: None, redirect: Some(to.to_string()) }
     }
 
     pub fn held_at(body: Vec<u8>, at: usize) -> File {
-        File { body, hold_at: Some(at) }
+        File { body, hold_at: Some(at), redirect: None }
     }
 }
 
@@ -38,7 +44,16 @@ pub struct Server {
 }
 
 impl Server {
+    /// A server an agent's fetch may reach: its port is listed with the engine's test seam
+    /// (`engine/fetch.rs`), which lets nothing else on the loopback through.
     pub fn start(files: Vec<(&str, File)>) -> Server {
+        let server = Server::start_unlisted(files);
+        crate::engine::listed::allow(server.port);
+        server
+    }
+
+    /// A server on the loopback that an agent's fetch may not reach: the machine's own services.
+    pub fn start_unlisted(files: Vec<(&str, File)>) -> Server {
         let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback port");
         listener.set_nonblocking(true).unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -112,6 +127,10 @@ fn serve(mut stream: TcpStream, files: &HashMap<String, File>, gate: &Gate, rang
         let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
         return;
     };
+    if let Some(to) = &file.redirect {
+        let _ = stream.write_all(format!("HTTP/1.1 302 Found\r\nLocation: {to}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes());
+        return;
+    }
     let start = range.as_deref().and_then(|r| r.parse::<usize>().ok()).unwrap_or(0).min(file.body.len());
     let (status, extra) = if range.is_some() {
         ("206 Partial Content", format!("Content-Range: bytes {start}-{}/{}\r\n", file.body.len() - 1, file.body.len()))

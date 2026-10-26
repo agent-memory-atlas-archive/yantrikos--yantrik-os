@@ -8,10 +8,10 @@ static NEXT_STORE: AtomicUsize = AtomicUsize::new(0);
 /// Every test that builds an [`Engine`] goes through one: an engine made with `new()` would
 /// read and then write the person's real download list, and a test that can damage the
 /// machine it runs on is not a test anybody will keep running.
-struct Store(PathBuf);
+pub(super) struct Store(pub(super) PathBuf);
 
 impl Store {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let path = std::env::temp_dir().join(format!(
             "yantrik-dl-state-{}-{}",
             std::process::id(),
@@ -22,21 +22,21 @@ impl Store {
         Self(path)
     }
 
-    fn state_file(&self) -> PathBuf {
+    pub(super) fn state_file(&self) -> PathBuf {
         self.0.join("state.json")
     }
 
-    fn engine(&self) -> Engine {
+    pub(super) fn engine(&self) -> Engine {
         Engine::open(self.0.clone())
     }
 
     /// Put a file of `bytes` zeroes where a download of that name would have written it.
-    fn part(&self, name: &str, bytes: usize) {
+    pub(super) fn part(&self, name: &str, bytes: usize) {
         std::fs::write(self.0.join(name), vec![0u8; bytes]).unwrap();
     }
 
     /// Names in the directory, sorted, so an assertion can be about the whole directory.
-    fn entries(&self) -> Vec<String> {
+    pub(super) fn entries(&self) -> Vec<String> {
         let mut names: Vec<String> = std::fs::read_dir(&self.0)
             .unwrap()
             .filter_map(|e| e.ok())
@@ -54,7 +54,7 @@ impl Drop for Store {
 }
 
 /// One record as it would be after a real transfer, saving into `dir`.
-fn saved(id: i32, filename: &str, status: Status, dir: &Path, downloaded: u64, total: u64) -> Download {
+pub(super) fn saved(id: i32, filename: &str, status: Status, dir: &Path, downloaded: u64, total: u64) -> Download {
     Download {
         id,
         url: format!("https://example.com/{filename}"),
@@ -76,6 +76,7 @@ fn saved(id: i32, filename: &str, status: Status, dir: &Path, downloaded: u64, t
         selected: false,
         restored: false,
         interrupted: false,
+        agent: false,
     }
 }
 
@@ -189,6 +190,7 @@ fn reports_no_percentage_when_the_server_gave_no_length() {
         selected: false,
         restored: false,
         interrupted: false,
+        agent: false,
     };
     assert_eq!(download.progress(), 0.0);
     assert_eq!(download.size_text(), "4.0 KB");
@@ -221,6 +223,7 @@ fn row(id: i32, filename: &str, status: Status, total: Option<u64>) -> Download 
         selected: false,
         restored: false,
         interrupted: false,
+        agent: false,
     }
 }
 

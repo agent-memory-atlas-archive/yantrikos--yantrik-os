@@ -91,7 +91,14 @@ pub fn add(engine: &Engine, agent: bool, url: &str, sha256: &str, save_dir: &str
         std::fs::create_dir_all(&dir).map_err(|e| format!("cannot use {}: {e}", dir.display()))?;
     }
     agent_rule::may_save(agent, &dir, &engine::filename_from_url(url))?;
-    let id = engine.add(url, sha256, Some(save_dir))?;
+    // An address written out in the URL needs no lookup to refuse. A name that resolves to a
+    // private one is refused when the fetch connects (`engine/fetch.rs`).
+    if agent {
+        if let Some(refusal) = engine::literal_refusal(url) {
+            return Err(refusal);
+        }
+    }
+    let id = engine.add_as(url, sha256, Some(save_dir), agent)?;
     tracing::info!(id, "Download queued");
     let download = engine.get(id).ok_or("the download vanished as it was queued")?;
     Ok(json!({
@@ -110,6 +117,26 @@ pub fn on_row(
 ) -> Result<Value, String> {
     command(engine, id)?;
     row(engine, id)
+}
+
+/// Cancel a download and answer with its row as it was, or with `removed` where the row went.
+///
+/// A finished download has no partial file to discard: the person's cancel takes its row out of
+/// the list and keeps the file, and an agent's is refused (`Engine::cancel`).
+pub fn cancel(engine: &Engine, agent: bool, id: i32) -> Result<Value, String> {
+    let before = engine.get(id).ok_or_else(|| format!("no download {id}"))?;
+    if agent && before.status.is_finished() {
+        return Err(format!("download {id} finished; an agent may not remove it, and its file is never deleted"));
+    }
+    engine.cancel(id)?;
+    match engine.get(id) {
+        Some(after) => Ok(row_json(&after)),
+        None => {
+            let mut gone = row_json(&before);
+            gone["status"] = "removed".into();
+            Ok(gone)
+        }
+    }
 }
 
 /// An agent retries only what did not finish: `retry` deletes the file first, and on a finished

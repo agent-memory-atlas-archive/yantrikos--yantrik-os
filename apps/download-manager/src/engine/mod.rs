@@ -105,6 +105,12 @@ pub enum Status {
 }
 
 impl Status {
+    /// Finished once: `completed`, or `missing` because the file went away afterwards. Its path
+    /// holds the person's file, not a partial one.
+    pub fn is_finished(self) -> bool {
+        matches!(self, Status::Completed | Status::Missing)
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Status::Queued => "queued",
@@ -186,6 +192,9 @@ pub struct Download {
     /// Cleared the moment someone resumes or retries it, because from then on it is an ordinary
     /// transfer again.
     pub interrupted: bool,
+    /// An agent asked for it. Its fetch is held to the public internet (`fetch.rs`), also after a
+    /// restart and a resume, so this is stored.
+    pub agent: bool,
 }
 
 impl Download {
@@ -244,6 +253,9 @@ pub struct Engine {
     default_dir: PathBuf,
     /// Where the list is kept between runs.
     store_path: PathBuf,
+    /// Held from taking the snapshot to the end of the write, so the last list taken is the last
+    /// list written, however many workers save at once.
+    save_lock: Arc<Mutex<()>>,
     /// What went wrong reading or writing that file, or what changed about the list while nobody
     /// was looking — said on screen and in `describe`. An app that cannot keep its list has to
     /// admit it; silently forgetting is the fault this whole section exists to fix.
@@ -288,12 +300,18 @@ impl Engine {
             revision: Arc::new(AtomicU64::new(0)),
             default_dir,
             store_path: state_dir.join("state.json"),
+            save_lock: Arc::new(Mutex::new(())),
             notice: Arc::new(Mutex::new(String::new())),
             notice_seen: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             notice_is_info: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             last_save: Arc::new(Mutex::new(None)),
             announced: Arc::new(Mutex::new(Vec::new())),
         };
+        // Owner-only before anything is read or written: the list holds URLs, which can carry a
+        // token, and the folders they went to.
+        if let Err(e) = private_folder(&state_dir) {
+            engine.set_notice(format!("cannot keep {} private: {e}", state_dir.display()));
+        }
         engine.load();
         engine
     }
@@ -434,13 +452,19 @@ pub struct Totals {
 }
 
 mod commands;
+mod fetch;
 mod plain;
 mod store;
 mod transfer;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_safety;
 
 pub use plain::*;
 pub use store::state_dir;
+pub(crate) use fetch::literal_refusal;
+#[cfg(test)]
+pub(crate) use fetch::listed;
 #[allow(unused_imports)]
 use store::*;

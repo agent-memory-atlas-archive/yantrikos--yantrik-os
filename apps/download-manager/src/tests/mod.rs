@@ -26,6 +26,7 @@ use crate::Downloads;
 mod agents;
 mod closing;
 mod flow;
+mod hardening;
 mod order;
 mod parity;
 mod private_mode;

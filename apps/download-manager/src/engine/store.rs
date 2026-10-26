@@ -86,9 +86,20 @@ impl Engine {
         if let Ok(mut last) = self.last_save.lock() {
             *last = Some(Instant::now());
         }
+        // One writer at a time, with the snapshot taken inside the lock: workers all save together
+        // when a close pauses them, and a list taken early but written late would put an old one
+        // over a newer.
+        let _one_writer = self.save_lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let items = self.snapshot();
         let next_id = self.next_id.load(Ordering::Relaxed);
-        if let Err(e) = write_atomically(&self.store_path, &encode(&items, next_id)) {
+        let written = self
+            .store_path
+            .parent()
+            .map_or(Ok(()), private_folder)
+            .and_then(|()| {
+                yantrik_foundation::json_store::write_atomically(&self.store_path, encode(&items, next_id).as_bytes())
+            });
+        if let Err(e) = written {
             self.set_notice(format!("cannot save the download list to {}: {e}", self.store_path.display()));
         } else if self.notice().starts_with("cannot save") {
             // The disk came back. Leaving the old complaint up would have the window reporting a
@@ -111,12 +122,13 @@ impl Engine {
         }
     }
 
-    /// The window is closing: stop every writer and put the list down.
+    /// Stop every writer and put the list down, without waiting for the workers: the tests' way of
+    /// ending an engine. The app itself ends through [`Engine::settle_for_exit`].
     ///
-    /// The workers are not waited for. One blocked on a socket read can take the whole connect
-    /// timeout to reach its next chunk boundary, and holding the window open for that is worse
-    /// than what happens instead: the record goes to disk still saying `downloading`, and the next
-    /// start reconciles it against the partial file, which is exact.
+    /// A worker blocked on a socket read can take the whole connect timeout to reach its next
+    /// chunk boundary. The record then goes to disk still saying `downloading`, and the next start
+    /// reconciles it against the partial file, which is exact.
+    #[cfg(test)]
     pub fn shutdown(&self) {
         self.pause_all();
         self.save();
@@ -212,6 +224,8 @@ struct StoredDownload {
     error: String,
     #[serde(default)]
     resume_supported: bool,
+    #[serde(default)]
+    agent: bool,
 }
 
 /// Where the list lives between runs.
@@ -255,6 +269,7 @@ pub(super) fn encode(items: &[Download], next_id: i32) -> String {
                 ended_at: d.ended_at.clone(),
                 error: d.error.clone(),
                 resume_supported: d.resume_supported,
+                agent: d.agent,
             })
             .collect(),
     };
@@ -322,6 +337,7 @@ pub(super) fn decode(raw: &str) -> Result<(Vec<Download>, i32), String> {
             ended_at: record.ended_at,
             error: record.error,
             resume_supported: record.resume_supported,
+            agent: record.agent,
             selected: false,
             restored: true,
             interrupted: false,
@@ -367,38 +383,29 @@ pub(super) fn decode(raw: &str) -> Result<(Vec<Download>, i32), String> {
     Ok((items, next_id))
 }
 
-/// Replace a file in one step, or leave the old one exactly as it was.
-///
-/// Writing over the live file would mean a power cut mid-write leaves a half-written list, which
-/// is precisely the unreadable file the corrupt path then has to rescue. The temp name carries the
-/// pid so two processes cannot scribble over each other's half-written copy, and it sits in the
-/// same directory so the rename stays on one filesystem — a rename across devices is a copy, and a
-/// copy is not atomic.
-pub(super) fn write_atomically(path: &Path, body: &str) -> std::io::Result<()> {
-    let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(dir)?;
-    let temp = dir.join(format!(
-        "{}.tmp-{}",
-        path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "state.json".into()),
-        std::process::id()
-    ));
-    let write = (|| -> std::io::Result<()> {
-        let mut file = File::create(&temp)?;
-        file.write_all(body.as_bytes())?;
-        // The rename is only atomic with respect to a file whose bytes have landed.
-        file.sync_all()
-    })();
-    if let Err(e) = write {
-        let _ = std::fs::remove_file(&temp);
-        return Err(e);
+/// Make `dir` if it is missing and keep it the person's alone: 0700, as the list in it is 0600
+/// (the atomic writer makes it so). A folder already there with looser rights is tightened, unless
+/// it is a link: one the person pointed elsewhere is theirs to set.
+pub(super) fn private_folder(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+        if let Some(parent) = dir.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        match std::fs::DirBuilder::new().mode(0o700).create(dir) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+        let meta = std::fs::symlink_metadata(dir)?;
+        if meta.is_dir() && meta.permissions().mode() & 0o077 != 0 {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        }
+        Ok(())
     }
-    if let Err(e) = std::fs::rename(&temp, path) {
-        // Leaving the temp file behind would have the next start find a directory full of
-        // half-written lists and no way to tell which is which.
-        let _ = std::fs::remove_file(&temp);
-        return Err(e);
-    }
-    Ok(())
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(dir)
 }
 
 /// What a restored list says about the rows that came back different from how they were left.

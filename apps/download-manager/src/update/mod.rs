@@ -48,7 +48,7 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refuse
         }
         Command::Pause(id) => calls::start(m, fx, Call::Pause, move |e, _| calls::on_row(e, id, |e, id| e.pause(id))),
         Command::Resume(id) => calls::start(m, fx, Call::Resume, move |e, _| calls::on_row(e, id, |e, id| e.resume(id))),
-        Command::Cancel(id) => calls::start(m, fx, Call::Cancel, move |e, _| calls::on_row(e, id, |e, id| e.cancel(id))),
+        Command::Cancel(id) => calls::start(m, fx, Call::Cancel, move |e, agent| calls::cancel(e, agent, id)),
         Command::Retry(id) => calls::start(m, fx, Call::Retry, move |e, agent| calls::retry(e, agent, id)),
         Command::Verify { id, sha256 } => {
             calls::start(m, fx, Call::Verify, move |e, _| calls::verify(e, id, sha256.as_deref()));
@@ -173,7 +173,7 @@ fn landed_call(m: &mut Model, landed: Landed, fx: &mut Fx) {
 /// is told by the framework; the window is told here.
 fn work_failed(m: &mut Model, call: Call, fx: &mut Fx) {
     m.work = m.work.saturating_sub(1);
-    m.banner = format!("The download manager did not answer ({call:?}); try again.");
+    m.banner = format!("The download manager did not answer ({call:?}). It may still have run; look at the list before trying again.");
     m.banner_info = false;
     sync(m, fx);
     fx.changed(PART_BANNER);

@@ -28,6 +28,12 @@ ureq = { workspace = true }
 sha2 = { workspace = true }
 chrono = { workspace = true }
 libc = { workspace = true }
+# The one classifier of "internet, local network, or never a destination" (an agent's fetches).
+yantrik-address-place = { path = "../../crates/yantrik-address-place" }
+# The one atomic writer: unique temporary, owner-only.
+yantrik-foundation = { workspace = true }
+# Joining a redirect's `Location` and reading a host out of a URL.
+url = { workspace = true }
 
 [dev-dependencies]
 # `activate`, `display_gone` and `lingering`: the window manager and the compositor, as the runner

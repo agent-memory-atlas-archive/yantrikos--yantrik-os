@@ -38,18 +38,10 @@ impl Engine {
         let Some(ctl) = self.control_for(id) else { return };
         let path = download.path();
 
-        let mut request = ureq::get(&download.url);
-        if resume_from > 0 {
-            request = request.set("Range", &format!("bytes={resume_from}-"));
-        }
-        let response = match request.call() {
+        let response = match fetch::open(&download.url, resume_from, download.agent) {
             Ok(response) => response,
-            Err(ureq::Error::Status(code, _)) => {
-                self.fail(id, format!("server said HTTP {code}"));
-                return;
-            }
-            Err(e) => {
-                self.fail(id, format!("{e}"));
+            Err(reason) => {
+                self.fail(id, reason);
                 return;
             }
         };
