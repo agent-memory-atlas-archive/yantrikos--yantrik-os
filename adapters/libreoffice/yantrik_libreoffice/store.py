@@ -40,6 +40,21 @@ def _remove(path):
         pass
 
 
+def new_file(path, suffixes, admit):
+    """A path to a file that does not exist yet, in a directory that does, that the caller may
+    write (`admit("write", path)`: home_paths' write rule, for an agent)."""
+    path = absolute(path)
+    admit("write", path)
+    if os.path.lexists(path):
+        raise OfficeError("a file is already at %s, and this action never replaces one; "
+                          "choose another path" % path)
+    if not os.path.isdir(os.path.dirname(path)):
+        raise OfficeError("there is no directory %s to write into" % os.path.dirname(path))
+    if suffixes is not None and os.path.splitext(path)[1].lower() not in suffixes:
+        raise OfficeError("%s must end in %s" % (path, " or ".join(sorted(suffixes))))
+    return path
+
+
 class Storing:
     """The writing half of `Office` (office.py), which it is mixed into."""
 
@@ -80,18 +95,7 @@ class Storing:
         return self.run(store)
 
     def _new_file(self, path, suffixes):
-        """A path to a file that does not exist yet, in a directory that does, that the caller
-        may write (home_paths' write rule, for an agent)."""
-        path = absolute(path)
-        self._admit("write", path)
-        if os.path.lexists(path):
-            raise OfficeError("a file is already at %s, and this action never replaces one; "
-                              "choose another path" % path)
-        if not os.path.isdir(os.path.dirname(path)):
-            raise OfficeError("there is no directory %s to write into" % os.path.dirname(path))
-        if suffixes is not None and os.path.splitext(path)[1].lower() not in suffixes:
-            raise OfficeError("%s must end in %s" % (path, " or ".join(sorted(suffixes))))
-        return path
+        return new_file(path, suffixes, self._admit)
 
     def save_as(self, path, document=None):
         path = self._new_file(path, SAVE_FILTERS)
@@ -106,7 +110,7 @@ class Storing:
                                      os.path.splitext(path)[1], ", ".join(fits)))
             self._before_store(doc)
             was = self.path_of(doc)
-            doc.storeAsURL(self.uno().systemPathToFileUrl(path),
+            doc.storeAsURL(self.url_of(path),
                            (self._prop("FilterName", filter_name), self._prop("Overwrite", False)))
             self._after_store(doc, lambda: _remove(path))
             return {"document": self.name_of(doc), "path": path, "was": was}
@@ -127,7 +131,7 @@ class Storing:
         def work():
             def store(_desktop):
                 self._before_store(doc)
-                doc.storeToURL(self.uno().systemPathToFileUrl(path),
+                doc.storeToURL(self.url_of(path),
                                (self._prop("FilterName", PDF_FILTERS[kind]),
                                 self._prop("Overwrite", False)))
                 self._after_store(doc, lambda: _remove(path))

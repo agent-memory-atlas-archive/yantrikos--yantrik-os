@@ -15,13 +15,14 @@ which is the point of it: it is the second worked example in
 | `yantrik_libreoffice/office.py` | LibreOffice over UNO — the only file that touches `uno` |
 | `yantrik_libreoffice/surface.py` | the actions, their grades and descriptions, and what describe shows |
 | `yantrik_libreoffice/adapter.py` | the program: how it starts, what it serves, when it stops |
-| `yantrik_libreoffice/agent_office.py` | the agents' own LibreOffice, which serves every agent call |
-| `yantrik_libreoffice/fence.py`, `places.py` | the Landlock fence that LibreOffice runs in, and what it allows |
+| `yantrik_libreoffice/agent_office.py` | the agents' own LibreOffice, started in its sandbox, which serves every agent call |
+| `yantrik_libreoffice/sandbox.py`, `fence.py`, `canaries.py`, `places.py` | the sandbox (bwrap), the launcher inside it (Landlock and the proof), the canaries it must not reach, and the person's places |
+| `yantrik_libreoffice/workspace.py`, `copies.py` | an agent's actions on copies of the person's files, and the only way bytes get back |
 | `yantrik_libreoffice/store.py`, `guard.py` | `save`, `save_as`, `export_pdf`, and the scan they and the reads share |
 | `bin/yantrik-libreoffice-adapter` | the command `X-Yantrik-Adapter` names |
 | `bin/yantrik-libreoffice` | the command `Exec` names: LibreOffice, listening on its UNO pipe |
 | `yantrik-libreoffice.desktop` | how the shell finds it while it is closed |
-| `tests/` | the adapter against a fake UNO (`fake_uno.py`), the program and the launcher, `yos check`, the fence against the kernel (`test_fence.py`), and `test_live.py` and `test_live_fence.py` against a real LibreOffice |
+| `tests/` | the adapter against a fake UNO (`fake_uno.py`), the program and the launcher, `yos check`, the launcher and the sandbox against the kernel (`test_fence.py`, `test_sandbox.py`), the copies (`test_workspace.py`, `test_agents_sandboxed.py`), and `test_live.py` and `test_live_sandbox.py` against a real LibreOffice |
 
 ## What a mind sees
 
@@ -69,42 +70,63 @@ could overwrite would have to be `sensitive` for every call, since a grade is pe
 per argument; refusing the one argument that would make it dangerous keeps the common case
 unasked.
 
-## LibreOffice is closed to agents for now (#953)
+## Agents work on copies, in a sandboxed LibreOffice of their own (#953)
 
-Every action an agent or the Mind can call is refused with one sentence, and soffice is never contacted (`surface.AGENTS_OPEN` is off, `shut_to_agents`). Review found the Landlock fence below leaves UNIX sockets open, aborts Debian's soffice, and lets protected names nested inside open folders through, so what follows describes code that no agent path reaches yet, and its claims are stronger than it can keep. #953 builds the namespace sandbox that replaces it. The person's own LibreOffice is unaffected.
+A document can read files and reach sockets: an external reference, `INDIRECT`, `WEBSERVICE`, a
+linked section, a macro, an import filter. Whatever LibreOffice reads or reaches, it does with the
+rights of its process, and the person's LibreOffice runs with all of theirs. So **no agent call
+reaches the person's LibreOffice** (#942). An agent's calls (and the Mind's) go to a second,
+headless LibreOffice that the adapter starts on the first agent `open` (`agent_office.py`), in a
+sandbox `bwrap` builds (`sandbox.py`):
 
-## Agents work in a LibreOffice of their own, fenced by the kernel
+- **its own mount namespace, on an empty root.** Only `/usr` and a short list of `/etc` are shown,
+  read-only, with the few places LibreOffice's own install links to (Debian's
+  `/var/spool/libreoffice`), a fresh `/proc` and a minimal `/dev`. Its profile, its temporary
+  files and the copies it works on are private folders of the adapter's, and its `/tmp` holds
+  nothing but its own UNO pipe. The person's home, `/run` (the session bus, the display, every
+  Yantrik socket) and the real `/tmp` (the person's LibreOffice pipe) are not there at all, and
+  the root is read-only once built. A protected place inside a folder that is shown is covered
+  again with an empty one.
+- **its own network namespace**: nothing but loopback, so no TCP, no UDP, and none of the
+  session's abstract sockets.
+- its own IPC, PID and UTS namespaces, a new session, no capabilities, an environment with no
+  bus, display or runtime folder, and it dies with the adapter.
 
-A document can read files: an external reference, `INDIRECT`, a linked section, a macro, an
-import filter. Whatever LibreOffice reads, it reads with the rights of its process, and the
-person's LibreOffice runs with all of theirs. So **no agent call reaches the person's
-LibreOffice** (#942). An agent's calls go to a second LibreOffice that the adapter starts on the
-first one: headless, with its own profile and pipe, launched through `fence.py`. Before soffice
-runs, the launcher asks Linux's **Landlock** to allow the process only these places:
+Inside, `fence.py` runs first. It puts **Landlock** up as a second wall where the kernel offers it,
+then **proves the sandbox holds** before any document exists: the home and every protected place
+must fail to open, the person's sockets and three canaries the adapter leaves listening outside (a
+socket path, an abstract socket, a TCP port on the host) must fail to connect, and no interface but
+loopback and no route out may exist. Only the kernel's words for "not there" or "not allowed"
+count as failing. Then soffice runs.
 
-- the system folders, read-only;
-- its own profile;
-- making its pipe in `/tmp`;
-- the folders in the person's home that are open to agents (`places.py`).
+**Where the sandbox cannot be built** (no `bwrap`, user namespaces off, LibreOffice installed in
+the person's own files) or does not prove, every agent call is refused with "LibreOffice isn't
+open to agents yet: its sandbox is still being built (#953). Nothing was run." and the reason.
+Nothing is started; there is no unsandboxed way round. `bubblewrap` is in the image's package
+list for this.
 
-The home's open folders are its folders that are not hidden and hold no protected place
-(`home_paths::PROTECTED`); a folder that holds one, such as `~/Pictures` around `Screenshots`, is
-gone round. TCP is shut too. Every other path is refused by the kernel, to soffice and to
-everything it starts, whatever the document asks for.
+**Copies, in and out** (`workspace.py`, `copies.py`). The sandboxed LibreOffice never sees a
+person's file where it lies. `open` holds the path to the shell's rule (as named and where links
+resolve), refuses a file the person has open in their own LibreOffice or with a LibreOffice lock
+beside it, and copies it into the sandbox: a regular file with one name, checked to still be at
+the path the rule judged. `save` holds the file to the write rule again, refuses when the person
+has opened it since or it changed on disk, lets the sandboxed LibreOffice save the copy, and only
+then replaces the person's file with it, at once (a temporary file in the same folder, renamed
+over it). `save_as` and `export_pdf` write into the sandbox, then create the person's new file,
+never replacing one. Answers and describe (`agent_documents`) name the person's paths, never the
+sandbox's.
 
-The launcher then tries to open the home and each protected place. It runs soffice only if all
-of them are refused. Where Landlock is missing, or the fence will not go up or does not hold,
-**the agent's call is refused**. It never runs unfenced.
-
-The trade-off is that an agent works on files, not on the person's open windows. A document the
-person has open is not in the agents' LibreOffice to read or change. `open` refuses a file the
-person has open (in their LibreOffice, or with a LibreOffice lock file beside it), so two
-LibreOffices never edit one file. Describe lists the agents' documents under `agent_documents`.
+The trade-off: an agent works on files, not on the person's open windows, so it never sees the
+person's unsaved changes. A file a document links to beside it (a linked image, say) is not in the
+sandbox either.
 
 The scan in `guard.py` stays as a second wall. Before an agent's read, save, `save_as` or export,
 the document may be linked to nothing, and a spreadsheet's formulas (array formulas included)
 and named expressions must pass the agent formula allowlist. The links are asked again after the
 read or write, and a file written while a link appeared is taken back.
+
+Not covered: the sandbox sets no limit on the CPU, memory or disk an agent's LibreOffice uses, and
+filters no system calls beyond what the namespaces and Landlock refuse.
 
 ## How it is started, and why that differs from Blender
 
@@ -146,6 +168,9 @@ python3 -m unittest discover -s adapters/libreoffice/tests -v
 
 # against a real LibreOffice (needs soffice and python3-uno; skipped without them)
 python3 -m unittest discover -s adapters/libreoffice/tests -p test_live.py -v
+
+# the agents' sandbox with a real LibreOffice (needs bwrap and user namespaces as well)
+python3 -m unittest discover -s adapters/libreoffice/tests -p test_live_sandbox.py -v
 
 # by hand, headless, then drive it
 adapters/libreoffice/bin/yantrik-libreoffice-adapter --headless &

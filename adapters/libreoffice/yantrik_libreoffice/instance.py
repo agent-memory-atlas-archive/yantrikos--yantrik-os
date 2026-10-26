@@ -1,7 +1,7 @@
 """A LibreOffice of the adapter's own: no window, a private profile, a pipe of its own.
 
-Two are started from here: the one `--headless` asks for (adapter.py), and the fenced one that
-does an agent's work (agent_office.py), which is the same command run through fence.py.
+`--headless` starts one from here (adapter.py). The one that does an agent's work
+(agent_office.py) runs the same `soffice_command`, with this profile's settings, in its sandbox.
 """
 
 import os
@@ -40,13 +40,11 @@ def soffice_command(soffice, pipe, profile):
             "--accept=pipe,name=%s;urp;" % pipe]
 
 
-def start_headless(soffice, pipe, profile, wrap=None, env=None, stderr=None):
-    """Start it. `wrap(argv)` is the argv that runs it (the fence, for an agent's)."""
+def start_headless(soffice, pipe, profile, env=None, stderr=None):
+    """Start it."""
     write_profile_settings(profile)
-    command = soffice_command(soffice, pipe, profile)
-    if wrap is not None:
-        command = wrap(command)
-    return subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+    return subprocess.Popen(soffice_command(soffice, pipe, profile), stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL,
                             stderr=stderr if stderr is not None else subprocess.DEVNULL,
                             env=env, start_new_session=True, close_fds=True)
 

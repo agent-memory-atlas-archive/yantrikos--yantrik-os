@@ -5,8 +5,8 @@ Every test gets a machine of its own — `HOME` and `XDG_RUNTIME_DIR` in a tempo
 with a ceiling and a mode the test chooses — and a `FakeLibreOffice` (tests/fake_uno.py) already
 running on the adapter's pipe, reached through the adapter's real `Office` and the real surface.
 Agents' calls go to a second one, the agents' own (agent_office.py), which `FakeAgentOffice`
-starts in place of the fenced soffice; the fence itself is tests/test_fence.py's. Nothing but
-`uno` and that start is faked.
+starts in place of the sandboxed soffice; the sandbox itself is tests/test_sandbox.py's and the
+live tests'. Nothing but `uno` and that start is faked.
 """
 
 import json
@@ -30,7 +30,9 @@ for path in (HERE, ADAPTER, SDK):
 
 import fake_uno  # noqa: E402
 from yantrik_libreoffice import Office, OfficeError, build  # noqa: E402,F401
+from yantrik_libreoffice import agent_office, sandbox  # noqa: E402
 from yantrik_libreoffice.agent_office import AgentOffice  # noqa: E402
+from yantrik_libreoffice.workspace import AgentWorkspace  # noqa: E402
 from yantrik_surface import RpcError  # noqa: E402
 
 
@@ -71,10 +73,11 @@ class Machine:
 
 
 class _Running:
-    """A fenced soffice's process, as `AgentOffice` sees one: running until waited for."""
+    """A sandboxed soffice's process, as `AgentOffice` sees one: running until waited for."""
 
     def __init__(self):
         self.alive = True
+        self.pid = -1
 
     def poll(self):
         return None if self.alive else 0
@@ -85,23 +88,33 @@ class _Running:
 
 
 class FakeAgentOffice(AgentOffice):
-    """The agents' own LibreOffice, with the fenced start replaced by a fake LibreOffice of its
-    own: everything else (which office a call reaches, the folders it covers, a file the person
-    has open) is the real `AgentOffice`."""
+    """The agents' own LibreOffice, with the sandboxed start replaced by a fake LibreOffice of its
+    own that sees the work folder at the adapter's own paths: everything else (which office a call
+    reaches, the copies in and out, a file the person has open) is the real `AgentOffice` and
+    `AgentWorkspace`. `no_sandbox` set to a reason makes the real check refuse with it."""
 
     def __init__(self, soffice, home, person):
         super().__init__(person=person, home=home, uno_module=fake_uno.FakeUno(soffice))
         self.fake = soffice
         self.starts = 0
+        self.no_sandbox = None
 
-    def _start(self, env):
+    def _sandbox(self):
+        if self.no_sandbox:
+            raise OfficeError(agent_office.UNSANDBOXED % self.no_sandbox)
+        return "bwrap"
+
+    def _start(self, env, bwrap):
         self.starts += 1
         self.fake.start()
+        root = tempfile.mkdtemp(prefix="yantrik-lo-agent-")
+        self._private = sandbox.Private(root).make()
         self._office = Office(self.fake.pipe, uno_module=self.uno_module, hidden=True,
-                              admit=self.admit, agents_only=True)
+                              admit=self._inner_rule(self._private.work), agents_only=True)
         self._process = _Running()
-        self._folders = self._open_folders(env)
-        self.fenced_with = 0
+        self._workspace = AgentWorkspace(self._office, self._private.work, admit=self.admit,
+                                         person=self.person)
+        self.landlock = "none (a fake)"
 
 
 class Case(unittest.TestCase):

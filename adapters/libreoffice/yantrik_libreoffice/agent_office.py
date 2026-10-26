@@ -1,111 +1,108 @@
-"""Where an agent's LibreOffice work is done: a LibreOffice of its own, inside the fence (#942).
+"""Where an agent's LibreOffice work is done: a LibreOffice of its own, in a sandbox (#942, #953).
 
-The person's LibreOffice runs with all of the person's rights, and the desktop's is the one the
-adapter reaches on its pipe. Whatever a document in it asks for (a formula, a link, a macro, an
-import filter, an export) it reads as the person, so nothing done there for an agent could be
-kept out of the protected places except by understanding every way a document can read a file.
-Four rounds of review showed that list does not end. So an agent's calls never reach the person's
-LibreOffice. They go to this one: headless, with a private profile and pipe, started on an
-agent's first call through fence.py, which has the kernel refuse it every place places.py does
-not allow. If the fence cannot be put up, or does not hold, the call is refused; there is no
-unfenced way round.
+The person's LibreOffice runs with all of the person's rights. Whatever a document in it asks for
+(a formula, a link, a macro, an import filter, an export) it reads and reaches as the person, so an
+agent's calls never go there. They go to this one: headless, with a private profile and pipe,
+started on an agent's first `open` inside the sandbox sandbox.py builds, through the launcher in
+fence.py, which puts Landlock up inside where the kernel offers it and proves the sandbox holds
+before soffice runs. It works on copies of the person's files (workspace.py, copies.py).
 
-What that costs, and why it is the choice: an agent works on files, not on the person's open
-windows. It cannot read or change a document the person has open (their unsaved changes are
-theirs), and it is refused a file the person has open, so two LibreOffices never edit one file
-and neither overwrites the other's work. Working on a copy of the person's document instead
-would let the two drift apart and one save destroy the other, which this adapter never does.
+Where the sandbox cannot be built (no bwrap, user namespaces off, LibreOffice installed in the
+person's own files) or does not prove, every agent call is refused with `CLOSED_TO_AGENTS` and the
+reason, and nothing is started: there is no unsandboxed way round.
+
+The UNO pipe: LibreOffice always makes its pipe in /tmp, and inside the sandbox /tmp is the
+adapter's private `pipes` folder. Outside, the adapter connects through a link in the real /tmp, at
+the name a UNO client looks for, pointing into that folder. Nothing inside can follow it back out:
+the real /tmp is not in the sandbox.
 """
 
 import os
 import secrets
 import shutil
+import subprocess
 import tempfile
 import threading
 import time
 
-from . import fence, places
-from .basics import OfficeError, absolute, apply_rule
-from .instance import start_headless, stop_headless
+from . import fence, places, sandbox
+from .basics import OfficeError, PathMap, absolute, apply_rule
+from .canaries import Canaries
+from .instance import soffice_command, stop_headless, write_profile_settings
 from .office import Office
+from .workspace import HELD, AgentWorkspace, lock_file  # noqa: F401 - the tests' names for them
 
-# How long the fenced LibreOffice gets to start answering on its pipe.
+# How long the sandboxed LibreOffice gets to start answering on its pipe.
 START_PATIENCE = 60.0
+# How long a successful check that bwrap can make the sandbox stands before it is made again.
+CHECKED_FOR = 60.0
 
-FENCED = ("an agent's LibreOffice work runs only in a LibreOffice the kernel keeps out of the "
-          "person's protected places, and %s; nothing was opened, read or written")
-OUTSIDE = ("an agent's LibreOffice reaches only the folders in the person's home open to agents "
-           "(not hidden ones, and not files lying loose in the home), and %s is in none of them")
-STALE = ("the agent's LibreOffice was started before %s's folder was there to allow, and it has "
-         "documents open; `close` them, and the next call starts it again with that folder")
-HELD = ("the person has %s open in their own LibreOffice, and an agent works only in a "
-        "LibreOffice of its own; ask the person to close it first, so neither overwrites the "
-        "other's work")
-
-
-def lock_file(path):
-    """The file LibreOffice keeps beside a document it has open for editing."""
-    return os.path.join(os.path.dirname(path), ".~lock.%s#" % os.path.basename(path))
+CLOSED_TO_AGENTS = ("LibreOffice isn't open to agents yet: its sandbox is still being built "
+                    "(#953). Nothing was run.")
+UNSANDBOXED = CLOSED_TO_AGENTS + " This machine cannot build it: %s."
+NO_DOCUMENT = "no document is open in LibreOffice; `open` one first"
+NOT_SHOWN = ("the agents' LibreOffice works only on its copies of the person's files, and %s is "
+             "not one of them")
+LAUNCHER = fence.__file__
 
 
 class AgentOffice:
-    """The fenced LibreOffice for agents' calls, started on the first and stopped by `stop`.
+    """The sandboxed LibreOffice for agents' calls, started on the first `open` and stopped by
+    `stop`.
 
     `person` is the person's own `Office`, asked which files are open there. `admit` is the file
-    rule, set by the surface. `home` and `env` stand in for the session's in a test."""
+    rule, set by the surface. `home` and `env` stand in for the session's in a test, and `bwrap`
+    for the places bwrap is looked for."""
 
     def __init__(self, soffice="soffice", person=None, uno_module=None, home=None, env=None,
-                 patience=START_PATIENCE):
+                 patience=START_PATIENCE, bwrap=None):
         self.soffice = soffice
         self.person = person
         self.uno_module = uno_module
         self.home = home
         self.env = env
         self.patience = patience
+        self.bwrap = tuple(bwrap) if bwrap else sandbox.BWRAP
         self.admit = None
-        self.fenced_with = None     # the Landlock ABI the running one was fenced with
+        self.landlock = None    # what the launcher put up inside, as it said it
         self._lock = threading.Lock()
-        self._office = self._process = self._private = None
-        self._folders = []
+        self._checked = (None, 0.0)
+        self._process = self._office = self._workspace = self._private = self._link = None
 
-    # ── the office an agent's call is served by ─────────────────────────────
+    # ── what an agent's call is served by ───────────────────────────────────
 
-    def office(self, path=None):
-        """The fenced LibreOffice, started if need be; with `path`, one whose fence reaches that
-        file. Raises `OfficeError`; never answers with an unfenced one."""
+    def workspace(self, start=False):
+        """The sandboxed LibreOffice's workspace; started with `start`, otherwise only when it is
+        running. Raises `OfficeError`; never answers with an unsandboxed one."""
         with self._lock:
             if self._process is not None and self._process.poll() is not None:
                 self._clean_up()
-            if self._office is not None and (path is None or places.covers(path, self._folders)):
-                return self._office
-            env = self._env()
-            if path is not None:
-                if not places.covers(path, self._open_folders(env)):
-                    raise OfficeError(OUTSIDE % path)
-                if self._office is not None:
-                    if self._has_documents():
-                        raise OfficeError(STALE % path)
-                    self._stop_locked()
-            self._start(env)
-            return self._office
+            if self._workspace is not None:
+                return self._workspace
+            bwrap = self._sandbox()
+            if not start:
+                raise OfficeError(NO_DOCUMENT)
+            self._start(self._env(), bwrap)
+            return self._workspace
 
     def open(self, path, read_only=False):
-        """An agent's `open`: the rule first, then a file the person has open is refused, then
-        the fenced LibreOffice opens it."""
+        """An agent's `open`: refused first where no sandbox can be built, then the file rule,
+        and only then is anything started."""
         path = absolute(path)
+        if self._workspace is None:
+            with self._lock:
+                self._sandbox()
         apply_rule(self.admit, "read", path)
-        if not self._open_here(path) and self._held_by_person(path):
-            raise OfficeError(HELD % path)
-        return self.office(path).open(path, read_only)
+        return self.workspace(start=True).open(path, read_only)
 
     def documents(self):
-        """What describe lists for the agent's LibreOffice: its documents, if it is running.
-        Read without the lock, so describe never waits on a start in progress."""
-        office = self._office
-        if office is None:
+        """What describe lists for the agents' LibreOffice: its documents, if it is running, by
+        the person's paths. Read without the lock, so describe never waits on a start."""
+        workspace = self._workspace
+        if workspace is None:
             return []
         try:
-            return office.overview()[0]
+            return workspace.overview()[0]
         except OfficeError:
             return []
 
@@ -113,7 +110,20 @@ class AgentOffice:
         with self._lock:
             self._stop_locked()
 
-    # ── starting and stopping ───────────────────────────────────────────────
+    # ── the sandbox ─────────────────────────────────────────────────────────
+
+    def _sandbox(self):
+        """The bwrap to build the sandbox with, once it has been seen to make one here."""
+        bwrap, when = self._checked
+        if bwrap and time.monotonic() - when < CHECKED_FOR:
+            return bwrap
+        try:
+            bwrap = sandbox.find_bwrap(self.bwrap)
+            sandbox.check(bwrap)
+        except sandbox.SandboxError as e:
+            raise OfficeError(UNSANDBOXED % e) from None
+        self._checked = (bwrap, time.monotonic())
+        return bwrap
 
     def _env(self):
         return dict(os.environ if self.env is None else self.env)
@@ -121,100 +131,160 @@ class AgentOffice:
     def _home(self, env):
         home = self.home or env.get("HOME") or os.path.expanduser("~")
         if not os.path.isabs(home):
-            raise OfficeError(FENCED % "the session has no home folder to fence around")
+            raise OfficeError(UNSANDBOXED % "the session has no home folder to keep out")
         return os.path.normpath(home)
 
-    def _open_folders(self, env):
-        try:
-            return places.open_folders(self._home(env), env)
-        except places.TooLarge:
-            raise OfficeError(FENCED % ("the home has more than %d folders to look through around "
-                                        "its protected places" % places.MAX_LOOKED_AT)) from None
+    def _inner_rule(self, work):
+        """The sandboxed `Office`'s rule: its files are its copies, and the scan's verdicts
+        (formulas, links, references outside the document) are the surface's rule's."""
+        def admit(what, path):
+            if what in ("read", "write", "document"):
+                if path is not None and not places.within(path, work):
+                    raise OfficeError(NOT_SHOWN % path)
+                return
+            apply_rule(self.admit, what, path)
+        return admit
 
-    def _start(self, env):
-        try:
-            version = fence.abi()
-        except fence.FenceError as e:
-            raise OfficeError(FENCED % ("this machine cannot put that fence up: %s" % e)) from None
+    def _start(self, env, bwrap):
         program = shutil.which(self.soffice)
         if program is None:
             raise OfficeError("there is no LibreOffice (`%s`) on this machine for an agent's work"
                               % self.soffice)
         home = self._home(env)
-        folders = self._open_folders(env)
-        private = tempfile.mkdtemp(prefix="yantrik-libreoffice-agent-")
-        tmp = os.path.join(private, "tmp")
-        os.makedirs(tmp)
-        rules = places.rules(home, private, program, env, folders)
-        probes = places.probes(home, env)
+        try:
+            root = places.install_root(program, home)
+        except places.Unsuitable as e:
+            raise OfficeError(UNSANDBOXED % e) from None
+        if not os.access(sandbox.PYTHON, os.X_OK):
+            raise OfficeError(UNSANDBOXED % ("there is no %s to prove the sandbox with"
+                                             % sandbox.PYTHON))
+        private = sandbox.Private(tempfile.mkdtemp(prefix="yantrik-libreoffice-agent-",
+                                                   dir="/tmp")).make()
+        self._private = private
         pipe = "yantrik-libreoffice-agent-%d-%s" % (os.getpid(), secrets.token_hex(6))
-        log_path = os.path.join(private, "fence.log")
-        with open(log_path, "wb") as log:
-            process = start_headless(
-                program, pipe, os.path.join(private, "profile"),
-                wrap=lambda argv: fence.command(rules, probes, argv),
-                env=dict(env, TMPDIR=tmp, HOME=home), stderr=log)
-        office = Office(pipe, uno_module=self.uno_module, hidden=True, admit=self.admit,
-                        agents_only=True)
-        self._process, self._office, self._private = process, office, private
+        canaries = Canaries(private.root)
         deadline = time.monotonic() + self.patience
+        try:
+            canaries.open()
+            write_profile_settings(private.profile)
+            argv = sandboxed(bwrap, private, root, home, env, canaries,
+                             soffice_command(program, pipe, sandbox.PROFILE))
+            with open(private.log, "wb") as log:
+                self._process = subprocess.Popen(
+                    argv, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                    env=sandbox.environment(env), start_new_session=True, close_fds=True)
+            served = self._await_pipe(private, pipe, deadline)
+        except sandbox.SandboxError as e:
+            self._stop_locked()
+            raise OfficeError(UNSANDBOXED % e) from None
+        except OfficeError:
+            self._stop_locked()
+            raise
+        finally:
+            canaries.close()
+        self._link = "/tmp/OSL_PIPE_%d_%s" % (os.getuid(), pipe)
+        try:
+            os.symlink(served, self._link)
+        except OSError as e:
+            self._link = None
+            self._stop_locked()
+            raise OfficeError("the agents' LibreOffice could not be reached (%s); nothing was done"
+                              % e.strerror) from None
+        office = Office(pipe, uno_module=self.uno_module, hidden=True,
+                        admit=self._inner_rule(private.work), agents_only=True,
+                        paths=PathMap(private.work, sandbox.WORK))
+        self._office = office
+        self._await_answer(office, deadline)
+        self.landlock = _said(private.log, "proved, with ")
+        self._workspace = AgentWorkspace(office, private.work, admit=self.admit,
+                                         person=self.person)
+
+    def _await_pipe(self, private, pipe, deadline):
+        """The socket the sandboxed LibreOffice listens on, once the launcher proved the sandbox
+        and soffice made it."""
+        served = os.path.join(private.pipes, "OSL_PIPE_%d_%s" % (os.getuid(), pipe))
+        while not os.path.exists(served):
+            if self._process.poll() is not None:
+                refused = _said(private.log, "refused: ")
+                if refused:
+                    raise sandbox.SandboxError(refused)
+                raise OfficeError("the agents' LibreOffice would not start inside its sandbox: %s"
+                                  % _last_line(private.log))
+            if time.monotonic() >= deadline:
+                raise OfficeError("the agents' LibreOffice did not answer within %ds; nothing "
+                                  "was done" % int(self.patience))
+            time.sleep(0.1)
+        return served
+
+    def _await_answer(self, office, deadline):
         while True:
-            if process.poll() is not None:
-                said = _last_line(log_path)
-                self._clean_up()
-                raise OfficeError(FENCED % ("it would not start inside the fence: %s" % said))
             try:
                 office.desktop()
-                break
+                return
             except OfficeError:
-                if time.monotonic() >= deadline:
+                if self._process.poll() is not None or time.monotonic() >= deadline:
+                    said = _last_line(self._private.log)
                     self._stop_locked()
-                    raise OfficeError("the agent's LibreOffice did not answer within %ds; "
-                                      "nothing was done" % int(self.patience)) from None
+                    raise OfficeError("the agents' LibreOffice did not answer within %ds (%s); "
+                                      "nothing was done" % (int(self.patience), said)) from None
                 time.sleep(0.2)
-        self._folders, self.fenced_with = folders, version
 
     def _stop_locked(self):
         if self._process is not None and self._process.poll() is None:
-            stop_headless(self._process, self._office)
+            if self._office is not None:
+                stop_headless(self._process, self._office)
+            else:
+                _kill(self._process)
         self._clean_up()
 
     def _clean_up(self):
+        if self._link:
+            try:
+                os.remove(self._link)
+            except OSError:
+                pass
         if self._private:
-            shutil.rmtree(self._private, ignore_errors=True)
-        self._office = self._process = self._private = None
-        self._folders, self.fenced_with = [], None
+            shutil.rmtree(self._private.root, ignore_errors=True)
+        self._process = self._office = self._workspace = self._private = self._link = None
+        self.landlock = None
 
-    def _has_documents(self):
-        try:
-            return bool(self._office.open_paths()) or bool(self._office.overview()[0])
-        except OfficeError:
-            return False
 
-    def _open_here(self, path):
-        """Whether the agent's LibreOffice has `path` open already (its own lock is beside it)."""
-        office = self._office
-        try:
-            return office is not None and path in office.open_paths()
-        except OfficeError:
-            return False
+def sandboxed(bwrap, private, root, home, env, canaries, argv):
+    """The command that runs `argv` (in the sandbox's paths) in an agent's sandbox, through the
+    launcher's Landlock and proof: what `AgentOffice` starts soffice with, and what the tests
+    start their stand-ins with."""
+    inner = fence.command(sandbox.PYTHON, sandbox.LAUNCHER, sandbox.inner_rules(root),
+                          places.probes(home, env), argv,
+                          sockets=places.persons_sockets(env) + canaries.sockets(),
+                          abstract=canaries.abstract_names(), ports=canaries.ports())
+    return sandbox.command(bwrap, private, root, LAUNCHER, places.hidden(home, env), inner)
 
-    def _held_by_person(self, path):
-        if os.path.lexists(lock_file(path)):
-            return True
-        if self.person is None:
-            return False
-        try:
-            return path in self.person.open_paths()
-        except OfficeError:  # the person's LibreOffice is not running: nothing of theirs is open
-            return False
+
+def _kill(process):
+    try:
+        os.killpg(process.pid, 9)
+    except OSError:
+        process.kill()
+    process.wait()
+
+
+def _lines(path):
+    try:
+        with open(path, "rb") as f:
+            return [ln.strip() for ln in f.read().decode("utf-8", "replace").splitlines()
+                    if ln.strip()]
+    except OSError:
+        return []
+
+
+def _said(path, marker):
+    """What the launcher said after `marker` on its line in the log, or None."""
+    for line in reversed(_lines(path)):
+        if line.startswith("yantrik-libreoffice-sandbox: ") and marker in line:
+            return line.split(marker, 1)[1]
+    return None
 
 
 def _last_line(path):
-    try:
-        with open(path, "rb") as f:
-            lines = [ln.strip() for ln in f.read().decode("utf-8", "replace").splitlines()]
-    except OSError:
-        lines = []
-    lines = [ln for ln in lines if ln]
+    lines = _lines(path)
     return lines[-1] if lines else "it exited without saying why"

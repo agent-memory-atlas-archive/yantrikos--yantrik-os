@@ -22,9 +22,9 @@ words would make `auto` mode ask about `save` as well, and a person who chose `a
 that `sensitive` work may run unasked.
 
 Whose LibreOffice a call reaches: the person's calls reach the person's LibreOffice, on the pipe.
-An agent's calls (and the Mind's) reach none: every one is refused, and soffice is never contacted
-(#942, #953). The fenced LibreOffice of agent_office.py stays in the tree for #953, which builds
-the OS-level sandbox that lets agents back in; `AGENTS_OPEN` is the one switch, and it is off.
+An agent's calls (and the Mind's) never do. They reach the agents' own LibreOffice, in the sandbox
+of agent_office.py, working on copies of the person's files (workspace.py); where that sandbox
+cannot be built, every one is refused with `CLOSED_TO_AGENTS` and the reason (#942, #953).
 """
 
 from typing import Annotated, Literal, Optional
@@ -32,16 +32,10 @@ from typing import Annotated, Literal, Optional
 from yantrik_surface import Later, Refusal, Surface, files
 
 from . import formulas
-from .agent_office import AgentOffice
+from .agent_office import CLOSED_TO_AGENTS, AgentOffice  # noqa: F401
 from .office import NotReachable, Office, OfficeError
 
 APP_ID = "libreoffice"
-
-# Whether an agent's calls may reach LibreOffice at all. Off: five review rounds found ways round
-# the Landlock fence, so agents wait for the sandbox of #953. Nothing but a test turns it on.
-AGENTS_OPEN = False
-CLOSED_TO_AGENTS = ("LibreOffice isn't open to agents yet: its sandbox is still being built "
-                    "(#953). Nothing was run.")
 
 _KIND = {"writer": "Writer", "calc": "Calc", "impress": "Impress", "draw": "Draw"}
 
@@ -102,12 +96,6 @@ def summary_of(documents, front):
     return "LibreOffice — %s%s" % ("; ".join(parts), in_front)
 
 
-def shut_to_agents():
-    """Refuse an agent's call (or the Mind's) before anything is looked at, opened or started."""
-    if not AGENTS_OPEN and files.agent_is_calling():
-        raise Refusal(CLOSED_TO_AGENTS)
-
-
 def _answer(work, *args, **kwargs):
     """Run an `Office` call; its sentence, if it refuses, is the caller's refusal."""
     try:
@@ -158,9 +146,9 @@ def agents_files(stat=None, always=False):
 
 def build(office=None, app_id=APP_ID, stat=None, agents=None, **kwargs):
     """LibreOffice's surface over `office` (a fresh `Office` on the default pipe when None), with
-    agents' calls served by `agents` (a fresh fenced `AgentOffice` when None). `kwargs` go to the
-    SDK's `Surface` — tests pin the ceiling and mode files with them, and `stat` stands in for
-    the shell's `files_stat`."""
+    agents' calls served by `agents` (a fresh sandboxed `AgentOffice` when None). `kwargs` go to
+    the SDK's `Surface` — tests pin the ceiling and mode files with them, and `stat` stands in
+    for the shell's `files_stat`."""
     office = office if office is not None else Office()
     office.admit = agents_files(stat)
     agents = agents if agents is not None else AgentOffice(person=office)
@@ -168,9 +156,9 @@ def build(office=None, app_id=APP_ID, stat=None, agents=None, **kwargs):
     surface = LibreOfficeSurface(office, app_id, agents=agents, **kwargs)
 
     def serving():
-        """The LibreOffice this call is served by: the agents' own for an agent's call."""
-        shut_to_agents()
-        return agents.office() if files.agent_is_calling() else office
+        """What this call is served by: for an agent's, the agents' sandboxed LibreOffice, which
+        refuses when no sandbox can be built and is never the person's."""
+        return agents.workspace() if files.agent_is_calling() else office
 
     @surface.action("open", expected_seconds=15, timeout=120)
     def open_document(
@@ -182,7 +170,6 @@ def build(office=None, app_id=APP_ID, stat=None, agents=None, **kwargs):
         """Open a file in LibreOffice, in a window of its own; documents already open stay as
         they are, and a file already open is not opened twice. Answers with the name the other
         actions take as `document`."""
-        shut_to_agents()
         if files.agent_is_calling():
             return _answer(agents.open, path, read_only)
         return _answer(office.open, path, read_only)

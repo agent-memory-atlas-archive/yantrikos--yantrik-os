@@ -12,9 +12,9 @@
 # The companion's own file tools (crates/yantrik-companion-tools) are the Mind's, not an app's:
 # each takes its path through `validate_path` or `validate_write_path`.
 
-adapters/libreoffice/yantrik_libreoffice/surface.py open path - refused to every agent and the Mind: LibreOffice is closed to agents until its sandbox (#953); `shut_to_agents` runs before anything is read
-adapters/libreoffice/yantrik_libreoffice/surface.py save_as path - refused to every agent and the Mind: LibreOffice is closed to agents until its sandbox (#953); `shut_to_agents` runs before anything is read
-adapters/libreoffice/yantrik_libreoffice/surface.py export_pdf path - refused to every agent and the Mind: LibreOffice is closed to agents until its sandbox (#953); `shut_to_agents` runs before anything is read
+adapters/libreoffice/yantrik_libreoffice/surface.py open path adapters/libreoffice/yantrik_libreoffice/surface.py
+adapters/libreoffice/yantrik_libreoffice/surface.py save_as path adapters/libreoffice/yantrik_libreoffice/surface.py
+adapters/libreoffice/yantrik_libreoffice/surface.py export_pdf path adapters/libreoffice/yantrik_libreoffice/surface.py
 apps/blender/addon/yantrik_blender/surface.py import_model path apps/blender/addon/yantrik_blender/surface.py
 apps/blender/addon/yantrik_blender/surface.py open path apps/blender/addon/yantrik_blender/surface.py
 apps/blender/addon/yantrik_blender/surface.py save path apps/blender/addon/yantrik_blender/surface.py
