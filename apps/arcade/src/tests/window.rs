@@ -3,7 +3,8 @@
 
 use std::path::PathBuf;
 
-use slint::ComponentHandle as _;
+use slint::platform::{Key, PointerEventButton, WindowEvent};
+use slint::{ComponentHandle as _, LogicalPosition};
 
 use super::{open, seeded, Fixture};
 use crate::ThemeMode;
@@ -45,4 +46,37 @@ fn the_workbench_is_legible_in_both_themes_with_nothing_focused() {
     }
     let text = f.app.ui(|ui| ui.get_spec_text().to_string());
     assert!(text.contains("Meadow Run"));
+}
+
+/// A spec longer than the pane: with the caret taken down its lines (Down, 46 times), the editor scrolls so
+/// the caret is on screen, as the stock TextEdit did.
+#[test]
+fn the_caret_stays_in_view_in_a_long_spec() {
+    let f = open();
+    f.app.resize(1020, 680);
+    f.app.draw();
+    let long: String = (1..=45).map(|n| format!("  \"line_{n}\": {n},
+")).collect();
+    f.type_spec(&format!("{{
+{long}  \"last\": true
+}}"));
+    f.app.ui(|ui| {
+        let window = ui.window();
+        let at = LogicalPosition::new(600.0, 300.0);
+        window.dispatch_event(WindowEvent::PointerPressed { position: at, button: PointerEventButton::Left });
+        window.dispatch_event(WindowEvent::PointerReleased { position: at, button: PointerEventButton::Left });
+        for _ in 0..46 {
+            window.dispatch_event(WindowEvent::KeyPressed { text: Key::DownArrow.into() });
+            window.dispatch_event(WindowEvent::KeyReleased { text: Key::DownArrow.into() });
+        }
+    });
+    f.quiet();
+    f.app.draw();
+    assert!(f.app.ui(|ui| ui.get_spec_focused()), "the click focused the editor");
+    assert!(f.app.ui(|ui| ui.get_spec_scroll_y()) < -100.0, "the editor scrolled to the caret: {}", f.app.ui(|ui| ui.get_spec_scroll_y()));
+    for (dark, name) in [(true, "arcade-long-dark.png"), (false, "arcade-long-light.png")] {
+        f.app.ui(move |ui| ui.global::<ThemeMode>().set_dark(dark));
+        f.quiet();
+        screenshot(&f, name);
+    }
 }

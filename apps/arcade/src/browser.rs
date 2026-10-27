@@ -13,8 +13,15 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-/// The browsers started and not yet stopped: process id and profile folder.
-static LIVE: Mutex<Vec<(u32, PathBuf)>> = Mutex::new(Vec::new());
+/// A browser started and not yet stopped, and the two folders that go with it.
+struct Live {
+    pid: u32,
+    profile: PathBuf,
+    tmp: PathBuf,
+}
+
+/// The browsers started and not yet stopped.
+static LIVE: Mutex<Vec<Live>> = Mutex::new(Vec::new());
 
 /// Has the child receive SIGKILL when the thread that started it ends, which is the app's own end
 /// whatever way it comes (a logout, a crash, a kill). The thread is a long-lived pool worker, so
@@ -50,14 +57,14 @@ pub fn die_with_parent(command: &mut Command) {
 }
 
 /// Note a started browser, so the app ending on purpose can stop it and clear its profile.
-pub fn register(pid: u32, profile: &Path) {
-    LIVE.lock().unwrap_or_else(|e| e.into_inner()).push((pid, profile.to_path_buf()));
+pub fn register(pid: u32, profile: &Path, tmp: &Path) {
+    LIVE.lock().unwrap_or_else(|e| e.into_inner()).push(Live { pid, profile: profile.to_path_buf(), tmp: tmp.to_path_buf() });
 }
 
 /// Note that a browser is being stopped and reaped. Before the reap, never after: a reaped pid can
 /// be reused, and `kill_live` must not signal it.
 pub fn forget(pid: u32) {
-    LIVE.lock().unwrap_or_else(|e| e.into_inner()).retain(|(p, _)| *p != pid);
+    LIVE.lock().unwrap_or_else(|e| e.into_inner()).retain(|l| l.pid != pid);
 }
 
 /// Stops the browser started as `pid` and everything it started (its group), at once.
@@ -71,15 +78,23 @@ fn kill_group(pid: u32) {
     }
 }
 
-/// Stops every browser still running and clears the profile of each: the app is ending. Returns
+/// Stops every browser still running and clears the folders of each: the app is ending. Returns
 /// how many were signalled. A profile left for the next start's sweep is only for a kill -9.
+///
+/// The signals go out while the list is locked: a job's `Drop` calls `forget` before it reaps, so
+/// it waits here until they are sent, and a reaped pid (which can be reused) is never signalled.
+/// The folders are removed after the lock is let go.
 pub fn kill_live() -> usize {
-    let live: Vec<(u32, PathBuf)> = std::mem::take(&mut *LIVE.lock().unwrap_or_else(|e| e.into_inner()));
-    for (pid, _) in &live {
-        kill_group(*pid);
-    }
-    for (_, profile) in &live {
-        remove_profile(profile);
+    let live: Vec<Live> = {
+        let mut list = LIVE.lock().unwrap_or_else(|e| e.into_inner());
+        for l in list.iter() {
+            kill_group(l.pid);
+        }
+        std::mem::take(&mut *list)
+    };
+    for l in &live {
+        remove_profile(&l.profile);
+        remove_profile(&l.tmp);
     }
     live.len()
 }
@@ -104,14 +119,21 @@ pub struct Headless {
     pub ws_url: String,
     pub browser: String,
     profile: PathBuf,
+    tmp: PathBuf,
 }
 
 impl Headless {
     /// Starts `binary` on `url` with `profile` as its profile, in a group of its own, to die with
-    /// the app, with its temporary files inside the profile: Chromium makes
-    /// `/tmp/org.chromium.Chromium.*` per run, and there it goes with the profile.
+    /// the app, with its temporary files in a short private folder of its own: Chromium makes
+    /// `$TMPDIR/org.chromium.Chromium.*` per run, with a socket in it whose path must fit 107
+    /// bytes, so that folder cannot be inside a profile that sits under a long state directory.
     pub fn start(binary: &Path, url: &str, profile: &Path) -> Result<Headless, String> {
-        let tmp = profile.join("tmp");
+        let tmp = new_tmp(std::path::Path::new("/tmp"))?;
+        if let Err(sentence) = check_socket_len(&tmp) {
+            remove_profile(&tmp);
+            remove_profile(profile);
+            return Err(sentence);
+        }
         let mut command = Command::new(binary);
         command
             // Software rendering: WSL here has no GPU path for headless Chromium.
@@ -122,6 +144,7 @@ impl Headless {
                 "--enable-unsafe-swiftshader",
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
+                "--disable-crash-reporter",
                 "--mute-audio",
                 "--hide-scrollbars",
                 "--window-size=1280,720",
@@ -138,16 +161,59 @@ impl Headless {
     /// The part of [`Headless::start`] that does not know Chromium's flags, so a test can start a
     /// stand-in.
     fn spawn(mut command: Command, binary: &Path, profile: &Path, tmp: &Path) -> Result<Headless, String> {
-        let fail = |what: String| {
-            remove_profile(profile);
-            what
-        };
-        crate::library::private_folder(tmp).map_err(|e| fail(format!("cannot make the browser's temporary folder: {e}")))?;
         die_with_parent(&mut command);
-        let child = command.spawn().map_err(|e| fail(format!("cannot start {}: {e}", binary.display())))?;
-        register(child.id(), profile);
-        Ok(Headless { child, ws_url: String::new(), browser: binary.display().to_string(), profile: profile.to_path_buf() })
+        let child = command.spawn().map_err(|e| {
+            remove_profile(profile);
+            remove_profile(tmp);
+            format!("cannot start {}: {e}", binary.display())
+        })?;
+        register(child.id(), profile, tmp);
+        Ok(Headless {
+            child,
+            ws_url: String::new(),
+            browser: binary.display().to_string(),
+            profile: profile.to_path_buf(),
+            tmp: tmp.to_path_buf(),
+        })
     }
+}
+
+/// The longest a unix socket's path may be (`sun_path` is 108 bytes with its NUL).
+const SOCKET_PATH_MAX: usize = 107;
+
+/// The path of the socket Chromium's process singleton makes in `tmp`.
+pub fn singleton_socket_len(tmp: &Path) -> usize {
+    tmp.as_os_str().len() + "/org.chromium.Chromium.XXXXXX/SingletonSocket".len()
+}
+
+/// Refuses, in a sentence, a temporary folder whose singleton socket path would not fit: Chromium
+/// aborts on it with a fatal check and no message anyone would find.
+pub fn check_socket_len(tmp: &Path) -> Result<(), String> {
+    let len = singleton_socket_len(tmp);
+    if len > SOCKET_PATH_MAX {
+        return Err(format!(
+            "the browser's socket path under {} would be {len} bytes, more than the {SOCKET_PATH_MAX} a unix socket allows; set TMPDIR to a shorter folder",
+            tmp.display()
+        ));
+    }
+    Ok(())
+}
+
+/// A short private temporary folder for one browser: `<base>/yarc-XXXXXX`, made by `mkdtemp`
+/// (0700, unpredictable, never a fixed name), with the owning app's pid in it for the sweep.
+pub fn new_tmp(base: &Path) -> Result<PathBuf, String> {
+    use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
+    let mut template = base.join("yarc-XXXXXX").into_os_string().into_vec();
+    template.push(0);
+    // SAFETY: `template` is a writable NUL-terminated buffer; mkdtemp fills in the X's.
+    let made = unsafe { libc::mkdtemp(template.as_mut_ptr().cast()) };
+    if made.is_null() {
+        return Err(format!("cannot make a temporary folder in {}: {}", base.display(), std::io::Error::last_os_error()));
+    }
+    template.pop();
+    let tmp = PathBuf::from(std::ffi::OsStr::from_bytes(&template));
+    let _ = std::fs::write(tmp.join("owner-pid"), std::process::id().to_string());
+    Ok(tmp)
 }
 
 impl Drop for Headless {
@@ -161,6 +227,7 @@ impl Drop for Headless {
         let _ = self.child.kill();
         let _ = self.child.wait();
         remove_profile(&self.profile);
+        remove_profile(&self.tmp);
     }
 }
 
@@ -192,6 +259,7 @@ pub fn profile_in(base: &Path) -> Result<PathBuf, String> {
     static SERIAL: AtomicU64 = AtomicU64::new(0);
     crate::library::private_folder(base).map_err(|e| format!("cannot make {} private: {e}", base.display()))?;
     sweep_dead(base);
+    sweep_dead_tmp(Path::new("/tmp"));
     for _ in 0..8 {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -211,6 +279,34 @@ pub fn profile_in(base: &Path) -> Result<PathBuf, String> {
         }
     }
     Err("cannot find a free profile directory".into())
+}
+
+/// Removes the temporary folders (`yarc-*` directly in `base`) of apps that are gone: real
+/// directories owned by this user, never a link, and only when the pid in `owner-pid` is dead (or,
+/// with no pid written, the folder is over a minute old).
+fn sweep_dead_tmp(base: &Path) {
+    use std::os::unix::fs::MetadataExt as _;
+    let Ok(entries) = std::fs::read_dir(base) else { return };
+    // SAFETY: geteuid has no preconditions.
+    let me = unsafe { libc::geteuid() };
+    for entry in entries.flatten() {
+        if !entry.file_name().to_str().is_some_and(|n| n.starts_with("yarc-")) {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else { continue };
+        if !meta.file_type().is_dir() || meta.uid() != me {
+            continue;
+        }
+        let owner = std::fs::read_to_string(path.join("owner-pid")).ok().and_then(|t| t.trim().parse::<u32>().ok());
+        let dead = match owner {
+            Some(pid) => pid != std::process::id() && !process_exists(pid),
+            None => meta.modified().ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age.as_secs() > 60),
+        };
+        if dead {
+            let _ = std::fs::remove_dir_all(&path);
+        }
+    }
 }
 
 /// Removes the profiles of jobs whose app is gone (it crashed or was killed, so `Drop` never ran):
@@ -282,7 +378,7 @@ mod tests {
     #[test]
     fn ending_on_purpose_stops_every_live_browser() {
         let mut child = Command::new("sleep").arg("60").spawn().unwrap();
-        register(child.id(), &std::env::temp_dir().join("arcade-nonexistent-profile"));
+        register(child.id(), &std::env::temp_dir().join("arcade-nonexistent-profile"), &std::env::temp_dir().join("arcade-nonexistent-tmp"));
         // The list is shared with every test that ends an app, so nothing here counts it: this
         // child must be dead, whoever's `kill_live` it was that stopped it.
         kill_live();
@@ -347,7 +443,7 @@ mod tests {
     /// A stand-in browser: a main process and a helper in its group that keeps writing into the
     /// profile and into its temporary folder, as Chromium's zygote and renderers do.
     fn stand_in(profile: &Path) -> Result<Headless, String> {
-        let tmp = profile.join("tmp");
+        let tmp = new_tmp(Path::new("/tmp"))?;
         let mut command = Command::new("sh");
         command
             .arg("-c")
@@ -359,37 +455,90 @@ mod tests {
     }
 
     /// 20 jobs' worth of a browser whose helpers are still writing when the job ends: none leaves
-    /// its profile, or the temporary folder Chromium makes, behind.
+    /// its profile or its temporary folder behind.
     #[test]
     fn twenty_jobs_leave_no_profile_and_no_browser_temporary_folder() {
         let base = std::env::temp_dir().join(format!("arcade-leak-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
+        let mut tmps = Vec::new();
         for _ in 0..20 {
             let profile = profile_in(&base).unwrap();
             let job = stand_in(&profile).unwrap();
+            tmps.push(job.tmp.clone());
             std::thread::sleep(std::time::Duration::from_millis(40));
             // Other tests end apps, and an app ending stops every live browser, this one's too: so
             // only what is left after the job is asserted.
             drop(job);
             assert!(!profile.exists(), "{} was left behind", profile.display());
         }
+        for tmp in tmps {
+            assert!(!tmp.exists(), "{} was left behind", tmp.display());
+        }
         let left: Vec<_> = std::fs::read_dir(&base).unwrap().flatten().map(|e| e.path()).collect();
         assert!(left.is_empty(), "left in the profile folder: {left:?}");
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// The app ending on purpose (a window close or SIGTERM) clears the profiles of live jobs, and
-    /// does not leave them for the next start's sweep.
+    /// The app ending on purpose (a window close or SIGTERM) clears the profile and the temporary
+    /// folder of a live job, and does not leave them for the next start's sweep.
     #[test]
-    fn ending_on_purpose_clears_the_profile_of_a_live_job() {
+    fn ending_on_purpose_clears_the_folders_of_a_live_job() {
         let base = std::env::temp_dir().join(format!("arcade-live-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let profile = profile_in(&base).unwrap();
         let job = stand_in(&profile).unwrap();
+        let tmp = job.tmp.clone();
         std::thread::sleep(std::time::Duration::from_millis(40));
         kill_live();
-        assert!(!profile.exists(), "the live job's profile went with it");
+        assert!(!profile.exists() && !tmp.exists(), "the live job's folders went with it");
         drop(job);
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Review M1: Chromium aborts when its singleton socket path is over 107 bytes. The temporary
+    /// folder is short and not under the profile, so no profile base can push it over, the state
+    /// directory fallback included.
+    #[test]
+    fn the_socket_path_fits_whatever_the_profile_base_is() {
+        let tmp = new_tmp(Path::new("/tmp")).unwrap();
+        assert!(singleton_socket_len(&tmp) <= 107, "{}", singleton_socket_len(&tmp));
+        assert!(check_socket_len(&tmp).is_ok());
+        // What the profile-inside design put under the state-directory fallback of a long home.
+        let base = profile_base(None, None, Some("/home/pranab".into()));
+        let old = base.join("job-2096961-1-123456789/tmp");
+        assert!(singleton_socket_len(&old) > 107, "that is the path that aborted: {}", singleton_socket_len(&old));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn a_temporary_folder_that_would_not_fit_is_refused_in_a_sentence() {
+        let long = Path::new("/home/someone-with-a-long-name/.local/state/yantrik/arcade/profiles/job-1234567-12-123456789/tmp");
+        let err = check_socket_len(long).unwrap_err();
+        assert!(err.contains("107") && err.contains("TMPDIR"), "{err}");
+    }
+
+    #[test]
+    fn a_temporary_folder_is_private_unpredictable_and_swept_only_when_its_owner_is_gone() {
+        let a = new_tmp(Path::new("/tmp")).unwrap();
+        let b = new_tmp(Path::new("/tmp")).unwrap();
+        assert_ne!(a, b);
+        assert_eq!(std::fs::metadata(&a).unwrap().permissions().mode() & 0o777, 0o700);
+        // Owned by a pid that is gone: the sweep takes it. Ours stays.
+        let mut gone = Command::new("true").spawn().unwrap();
+        let dead = gone.id();
+        gone.wait().unwrap();
+        std::fs::write(a.join("owner-pid"), dead.to_string()).unwrap();
+        let elsewhere = std::env::temp_dir().join(format!("arcade-sweep-target-{}", std::process::id()));
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let link = Path::new("/tmp").join(format!("yarc-link-{}", std::process::id()));
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+        sweep_dead_tmp(Path::new("/tmp"));
+        assert!(!a.exists(), "a dead owner's folder is swept");
+        assert!(b.exists(), "this app's is not");
+        assert!(std::fs::symlink_metadata(&link).is_ok() && elsewhere.exists(), "a link is never followed");
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_dir_all(&elsewhere);
+        let _ = std::fs::remove_dir_all(&b);
     }
 }
