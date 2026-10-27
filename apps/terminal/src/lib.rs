@@ -25,8 +25,9 @@
 //!   session's scrollback, `HISTORY_LINES` (1000) lines plus the screen, whatever it prints.
 //!   Nothing runs while every shell is quiet.
 //! - ENDING LEAVES NOTHING. Closing a tab, closing the window, a quit and a logout each end the
-//!   shells they cover: SIGHUP to the foreground job and the shell's group, SIGKILL for what
-//!   ignores it, the shell reaped. A tab, a window or a quit with a job running asks first, one
+//!   shells they cover: SIGHUP to every process of the shell's session (foreground and
+//!   background jobs), the shell reaped, SIGKILL for what ignored the hangup. A process that
+//!   left the session with `setsid` is the person's explicit choice and is not touched. A tab, a window or a quit with a job running asks first, one
 //!   question at a time; a logout asks nothing.
 //! - ANSWERS ARE THE SHELL'S OWN. An action is told what its own shell did (`wait.rs`), read by
 //!   the worker that waited for it, never the tab the person happens to have in front of them.

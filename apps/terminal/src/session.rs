@@ -16,6 +16,8 @@ use std::{
 };
 
 pub const HISTORY_LINES: usize = 1000;
+/// Held from opening a PTY to spawning its shell.
+static SPAWN: Mutex<()> = Mutex::new(());
 const INPUT_LIMIT: usize = 64 * 1024;
 type Notify = Arc<dyn Fn() + Send + Sync>;
 enum Input {
@@ -86,6 +88,10 @@ impl Session {
         notify: Notify,
     ) -> anyhow::Result<Self> {
         let (rows, cols) = dimensions(rows, cols);
+        // The master is made close-on-exec only after it is opened, so two shells started at once
+        // could each inherit the other's master. One start at a time closes that window: nothing
+        // else forks between the open and the spawn.
+        let starting = SPAWN.lock().unwrap_or_else(|p| p.into_inner());
         let (pty, pts) = pty_process::blocking::open()?;
         pty.resize(pty_process::Size::new(rows, cols))?;
         let (wake, mut wake_reader) = UnixStream::pair()?;
@@ -108,6 +114,7 @@ impl Session {
             .env_remove("COLUMNS")
             .env_remove("LINES")
             .spawn(pts)?;
+        drop(starting);
         let pid = child.id();
         let state = Arc::new(State {
             parser: Mutex::new(vt100::Parser::new(rows, cols, HISTORY_LINES)),
@@ -212,7 +219,8 @@ impl Session {
                     }
                 }
             }
-            // Closing a tab also closes its foreground job and reaps its shell.
+            // Closing a tab hangs up everything the session started, foreground and background,
+            // and reaps its shell.
             let foreground = unsafe { libc::tcgetpgrp(raw) };
             if shared.closing.load(Ordering::Acquire) {
                 unsafe {
@@ -220,6 +228,9 @@ impl Session {
                         libc::kill(-foreground, libc::SIGHUP);
                     }
                     libc::kill(-(pid as i32), libc::SIGHUP);
+                }
+                for member in members(pid as i32) {
+                    unsafe { libc::kill(member, libc::SIGHUP) };
                 }
             }
             drop(master);
@@ -242,15 +253,14 @@ impl Session {
                 status = child.wait().ok();
             }
             // A close or a logout leaves nothing of the session running. What ignored the hangup
-            // (a job that traps SIGHUP) is killed now that the shell is reaped, in the two
-            // groups the session had: the job that was in front and the shell's own.
+            // (a job that traps SIGHUP, `nohup`, in front or behind) is killed now that the shell
+            // is reaped. It is found by session id, which every job the shell started shares
+            // whatever its process group: a process that called `setsid` left the session on
+            // purpose and is the person's choice. Nothing is signalled by group number after the
+            // reap, so a number that was reused is never hit.
             if shared.closing.load(Ordering::Acquire) {
-                for group in [foreground, pid as i32] {
-                    // `kill(-group, 0)` is true only while the group still has a member, so a
-                    // group that is gone is never signalled.
-                    if group > 0 && group != unsafe { libc::getpgrp() } && unsafe { libc::kill(-group, 0) } == 0 {
-                        unsafe { libc::kill(-group, libc::SIGKILL) };
-                    }
+                for member in members(pid as i32) {
+                    unsafe { libc::kill(member, libc::SIGKILL) };
                 }
             }
             *shared.exit.lock().unwrap() = status.and_then(|s| s.code());
@@ -462,6 +472,30 @@ impl Drop for Session {
         self.hang_up();
     }
 }
+/// The live processes whose session id is `sid`: the shell and every job it started that did not
+/// leave the session.
+pub fn members(sid: i32) -> Vec<i32> {
+    let Ok(dir) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    dir.flatten()
+        .filter_map(|e| e.file_name().to_str()?.parse::<i32>().ok())
+        .filter(|&p| {
+            let Ok(stat) = std::fs::read_to_string(format!("/proc/{p}/stat")) else {
+                return false;
+            };
+            // After the command's closing bracket: state, parent, group, session.
+            let mut fields = stat.rsplit(')').next().unwrap_or("").split_whitespace();
+            fields.nth(3).and_then(|s| s.parse::<i32>().ok()) == Some(sid) && fields_alive(&stat)
+        })
+        .collect()
+}
+
+/// A zombie only waits to be reaped; it is not signalled.
+fn fields_alive(stat: &str) -> bool {
+    stat.rsplit(')').next().unwrap_or("").split_whitespace().next() != Some("Z")
+}
+
 fn dimensions(rows: u16, cols: u16) -> (u16, u16) {
     (rows.clamp(2, 160), cols.clamp(8, 400))
 }

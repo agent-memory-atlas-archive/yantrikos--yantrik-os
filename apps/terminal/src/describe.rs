@@ -38,7 +38,7 @@ pub fn view(m: &Model) -> View {
                 .map(|n| format!("shell exited (status {n}); `new_tab` starts another"))
                 .unwrap_or_else(|| "the shell has ended".to_string())
         } else {
-            match &busy {
+            match busy.as_deref().map(|j| hide(j.to_string())) {
                 Some(job) => format!("running: {job}"),
                 None => "shell idle at a prompt".to_string(),
             }

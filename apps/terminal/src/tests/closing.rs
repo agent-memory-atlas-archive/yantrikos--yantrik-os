@@ -165,8 +165,8 @@ fn closing_with_no_tab_ends_at_once() {
     f.app.run(Command::CloseTab(0));
     f.until("no tab", |f| f.tabs() == 0);
     f.app.close_requested(WindowId::PRIMARY);
-    f.quiet();
-    assert!(f.app.exit_reason().is_some());
+    // The closed tab's shell is still being reaped by its worker, so the end is waited for.
+    f.until("the app to end", |f| f.app.exit_reason().is_some());
 }
 
 #[test]
@@ -322,4 +322,47 @@ fn bringing_the_window_forward_reads_what_runs_again_and_draws_nothing_new() {
     f.app.advance(Duration::from_millis(200));
     f.quiet();
     assert_eq!(f.app.draw(), 0);
+}
+
+/// Background jobs are part of the session: one that ignores the hangup, one under `nohup`, and
+/// one stopped, are all gone after a logout. (A `setsid` job left the session on purpose.)
+#[test]
+fn a_logout_ends_background_jobs_too() {
+    let f = open();
+    f.type_until("(trap '' HUP; exec sleep 3031) &\r", "sleep 3031");
+    f.type_until("nohup sleep 3032 &\r", "sleep 3032");
+    f.type_until("sleep 3033 &\r", "sleep 3033");
+    let shell = f.active_pid() as i32;
+    f.until("three background jobs", |_| crate::session::members(shell).len() >= 4);
+    let jobs: Vec<u32> = crate::session::members(shell).into_iter().map(|p| p as u32).collect();
+    f.app.display_gone();
+    f.until("the app to end", |f| f.app.exit_reason().is_some());
+    wait_gone(&f, &jobs);
+}
+
+/// Two shells started at once never hold each other's PTY master: nothing in a shell's session
+/// has a `/dev/ptmx` open, whichever way the starts overlapped.
+#[test]
+fn shells_started_at_once_hold_no_pty_master() {
+    use std::sync::Arc;
+    for _ in 0..6 {
+        let started: Vec<_> = (0..16)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    crate::Session::spawn_shell("/bin/sh", &["-i"], std::path::Path::new("/tmp"), 24, 80, Arc::new(|| {})).unwrap()
+                })
+            })
+            .collect();
+        let shells: Vec<_> = started.into_iter().map(|t| t.join().unwrap()).collect();
+        for shell in &shells {
+            let fds = std::fs::read_dir(format!("/proc/{}/fd", shell.pid())).unwrap();
+            for fd in fds.flatten() {
+                let target = std::fs::read_link(fd.path()).unwrap_or_default();
+                assert!(!target.to_string_lossy().contains("ptmx"), "shell {} holds {target:?}", shell.pid());
+            }
+        }
+        for shell in shells {
+            shell.shutdown();
+        }
+    }
 }

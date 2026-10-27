@@ -80,6 +80,27 @@ fn the_screen_the_folders_and_the_tab_titles_are_hidden_and_nothing_can_be_typed
         app.run(command);
         assert_eq!(app.last_refusal().map(|r| r.sentence), Some(READ_ONLY.to_string()));
     }
+    // A job named like the sentinel is not named in the summary or anywhere else.
+    session.write(format!("cp /bin/sleep /tmp/{SENTINEL} 2>/dev/null; /tmp/{SENTINEL} 30\r").as_bytes()).unwrap();
+    for _ in 0..300 {
+        app.tick();
+        app.run_jobs();
+        app.advance(std::time::Duration::from_millis(20));
+        if session.has_children() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    for _ in 0..30 {
+        app.tick();
+        app.run_jobs();
+        app.advance(std::time::Duration::from_millis(100));
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let d = app.describe();
+    assert!(d["summary"].as_str().unwrap().contains(&format!("running: {HIDDEN}")), "the job was seen, and hidden: {d}");
+    assert!(!leaks(&d), "the summary names no job: {d}");
+    let _ = std::fs::remove_file(format!("/tmp/{SENTINEL}"));
     assert!(mind.prompts().is_empty(), "the screen was never sent to the model");
     assert_eq!(app.model(|m| m.tabs.len()), 1, "and no shell was started");
 }
