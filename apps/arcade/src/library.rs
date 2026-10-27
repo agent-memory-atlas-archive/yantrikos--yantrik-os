@@ -32,6 +32,24 @@ fn default_root() -> PathBuf {
     PathBuf::from(home).join(".local/share/yantrik/arcade")
 }
 
+/// Writes `bytes` to `path`, whole or not at all, readable by the person alone. A spec, a
+/// build and a verdict are each either the old file or the new one, never half of either.
+fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    yantrik_foundation::json_store::write_atomically(path, bytes)
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))
+}
+
+/// Makes `folder` (and what is missing above it) the person's alone: 0700 on Unix.
+pub fn private_folder(folder: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(folder)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(folder, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
 /// A character as the list shows it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CharacterEntry {
@@ -51,6 +69,7 @@ pub struct GameEntry {
     pub verification: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct Library {
     root: PathBuf,
     /// Tests point this at a pretend Trash; in the app it is None and the real
@@ -69,6 +88,20 @@ impl Library {
             _ => default_root(),
         };
         Library { root, trash_override: None }
+    }
+
+    /// The library an app started at `paths` keeps: `YANTRIK_ARCADE_DIR` when it is set (the CLI
+    /// honours the same variable, so the two always meet), otherwise the app's data folder, which
+    /// is where the library has always lived (`~/.local/share/yantrik/arcade`). Under a test the
+    /// variable is ignored and the Trash is a folder of the test's own.
+    pub fn for_app(paths: &yantrik_app::Paths) -> Library {
+        #[cfg(test)]
+        return Library { root: paths.data_dir().to_path_buf(), trash_override: Some(paths.state_dir().join("trash")) };
+        #[cfg(not(test))]
+        match std::env::var("YANTRIK_ARCADE_DIR") {
+            Ok(dir) if !dir.is_empty() => Library { root: PathBuf::from(dir), trash_override: None },
+            _ => Library { root: paths.data_dir().to_path_buf(), trash_override: None },
+        }
     }
 
     /// A library rooted at an explicit directory — what every test here uses.
@@ -135,7 +168,7 @@ impl Library {
             ));
         }
         let json = serde_json::to_string_pretty(&spec).expect("a parsed spec re-serializes");
-        fs::write(&path, json).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        write_private(&path, json.as_bytes())?;
         Ok(CharacterEntry {
             slug,
             name: spec.name.clone(),
@@ -167,7 +200,7 @@ impl Library {
         fs::copy(&path, previous_dir.join(format!("{slug}.json")))
             .map_err(|e| format!("cannot keep the previous spec: {e}"))?;
         let json = serde_json::to_string_pretty(&spec).expect("a parsed spec re-serializes");
-        fs::write(&path, json).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        write_private(&path, json.as_bytes())?;
 
         let mut stale = Vec::new();
         for game in self.list_games() {
@@ -261,7 +294,7 @@ impl Library {
         }
         fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
         let json = serde_json::to_string_pretty(&spec).expect("a parsed spec re-serializes");
-        fs::write(self.game_spec_path(&slug), json)
+        write_private(&self.game_spec_path(&slug), json.as_bytes())
             .map_err(|e| format!("cannot write the spec: {e}"))?;
         Ok(self.describe_game(&slug, &spec))
     }
@@ -304,7 +337,7 @@ impl Library {
         fs::rename(self.game_spec_path(&new_slug), dir.join("spec.previous.json"))
             .map_err(|e| format!("cannot keep the previous spec: {e}"))?;
         let json = serde_json::to_string_pretty(&spec).expect("a parsed spec re-serializes");
-        fs::write(self.game_spec_path(&new_slug), json)
+        write_private(&self.game_spec_path(&new_slug), json.as_bytes())
             .map_err(|e| format!("cannot write the spec: {e}"))?;
         self.drop_build(&new_slug);
         Ok(self.describe_game(&new_slug, &spec))
@@ -355,7 +388,7 @@ impl Library {
         let resolved = ResolvedGame::resolve(spec, &|name| lib.load_character(name))?;
         let html = compile::compile(&resolved);
         let out = self.game_html(&slug);
-        fs::write(&out, html).map_err(|e| format!("cannot write {}: {e}", out.display()))?;
+        write_private(&out, html.as_bytes())?;
         // A fresh build invalidates the old verdict: it was about the previous file.
         let _ = fs::remove_file(self.verify_path(&slug));
         Ok((slug, out))
@@ -410,7 +443,7 @@ impl Library {
     pub fn write_verify(&self, slug: &str, report: &Value) -> Result<(), String> {
         let path = self.verify_path(slug);
         let json = serde_json::to_string_pretty(report).map_err(|e| e.to_string())?;
-        fs::write(&path, json).map_err(|e| format!("cannot write {}: {e}", path.display()))
+        write_private(&path, json.as_bytes())
     }
 
     /// Move a game to the freedesktop Trash. Recoverable from Files, which is

@@ -86,7 +86,7 @@ pub fn open_tab(base: &str, url: &str) -> Result<Tab, String> {
 /// Ask the shell to launch (or focus) the Browser app through its own route.
 fn ask_shell_for_browser() -> Result<(), String> {
     let client = yantrik_ipc_transport::SyncRpcClient::for_service(
-        &yantrik_app_runtime::control::service_id_for("shell"),
+        &yantrik_app::control::service_id_for("shell"),
     )
     .with_timeout(Duration::from_secs(3));
     let result = client

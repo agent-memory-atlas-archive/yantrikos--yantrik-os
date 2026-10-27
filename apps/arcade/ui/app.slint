@@ -36,6 +36,9 @@ export component ArcadeApp inherits AppWindow {
     callback action(string);
     callback pick-game(string);
     callback pick-character(string);
+    // The two fields the person types in: the app keeps what they hold (and drafts the spec).
+    callback spec-edited(string);
+    callback game-edited(string);
 
     VerticalLayout {
         spacing: 0px;
@@ -133,6 +136,7 @@ export component ArcadeApp inherits AppWindow {
                     }
                     TextEdit {
                         text <=> root.spec-text;
+                        edited(text) => { root.spec-edited(text); }
                         vertical-stretch: 1;
                         wrap: no-wrap;
                         font-family: Theme.font-mono;
@@ -152,6 +156,7 @@ export component ArcadeApp inherits AppWindow {
                         }
                         LineEdit {
                             text <=> root.game-name;
+                            edited(text) => { root.game-edited(text); }
                             placeholder-text: "The game's title";
                             width: 220px;
                         }
