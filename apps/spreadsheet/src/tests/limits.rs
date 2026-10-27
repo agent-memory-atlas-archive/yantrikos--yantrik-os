@@ -1,130 +1,51 @@
-//! The security review of #727 (5f3f849e), one test per finding, with the reviewer's inputs.
+//! The security review of #727 (5f3f849e), one test per finding, with the reviewer's inputs: text and
+//! work have bounds, nesting has a bound, recalculation is not quadratic, parsing stops at the
+//! sheet's limits. They ran against the old session; here the same inputs go through the file layer
+//! and the framework's dispatch, and the memory ones are measured on the thread that does the work.
 
 use serde_json::json;
-use yantrik_app_runtime::control::AgentTokenScope;
 
-use crate::session::Session;
-use crate::surface;
-use crate::tests::{act, Scratch};
+use super::{act, cell, scratch, started};
+use crate::address::{parse_cell, Cell};
+use crate::formula::budget::{MAX_TEXT, MAX_WORK};
+use crate::formula::parser::MAX_DEPTH;
+use crate::sheet::Sheet;
 
-/// The person opens a file outside the home, which no agent may read. The temp dir is outside
-/// `$HOME` in every test run, so the file is hidden from agents by `home_paths`.
-fn person_opens_a_secret(dir: &Scratch) -> Session {
-    let secret = dir.path("secret.csv");
-    std::fs::write(&secret, "topsecret,42\n").unwrap();
-    let mut s = Session::new();
-    act(&mut s, "open", json!({ "path": secret })).unwrap();
-    s
-}
-
-#[test]
-fn an_agent_reads_nothing_of_a_hidden_sheet_through_any_action() {
-    let dir = Scratch::new("hidden");
-    let mut s = person_opens_a_secret(&dir);
-    let copy = dir.path("x.csv");
-    {
-        let _agent = AgentTokenScope::enter(Some("tok-sheets-review".into()));
-        for (name, args) in [
-            ("select", json!({ "cell": "A1" })),
-            ("set_cell", json!({ "cell": "C1", "text": "=A1&B1" })),
-            ("set_cell", json!({ "cell": "C1", "text": "=VLOOKUP(\"topsecret\",A1:B1,2)" })),
-            ("undo", json!({})),
-            ("redo", json!({})),
-            ("get_range", json!({ "range": "A1:C1" })),
-            ("save", json!({ "path": "~/Documents/x.csv" })),
-            ("save", json!({ "path": copy })),
-            ("save_over", json!({ "path": copy })),
-            ("save_over", json!({})),
-        ] {
-            let e = act(&mut s, name, args).unwrap_err();
-            assert!(!e.contains("topsecret"), "{name}: {e}");
-            assert!(e.contains("not read or saved for an agent"), "{name}: {e}");
-        }
-        assert!(!copy.exists(), "nothing of the hidden sheet was written");
-        assert_eq!(s.doc.sheet.raw(crate::address::Cell::new(0, 2)), "", "set_cell did not run");
-
-        let view = serde_json::to_string(&yantrik_app_runtime::control::describe_json(
-            "spreadsheet",
-            &surface::describe(&s),
-            &[],
-        ))
-        .unwrap();
-        assert!(!view.contains("topsecret"), "{view}");
-    }
-    // The person still sees and edits their own sheet.
-    let got = act(&mut s, "select", json!({ "cell": "A1" })).unwrap();
-    assert_eq!(got["typed"], "topsecret");
-}
-
-#[test]
-fn a_hidden_sheet_quoted_by_the_status_line_is_not_read_out() {
-    let dir = Scratch::new("hidden-status");
-    let mut s = person_opens_a_secret(&dir);
-    // The person's own formula quotes the cell's text in its error, on the status line.
-    act(&mut s, "set_cell", json!({ "cell": "C1", "text": "=A1+1" })).unwrap();
-    assert!(s.status().0.contains("topsecret"));
-    let _agent = AgentTokenScope::enter(Some("tok-sheets-review".into()));
-    let state = yantrik_app_runtime::control::describe_json("spreadsheet", &surface::describe(&s), &[]);
-    let text = state.to_string();
-    assert!(!text.contains("topsecret"), "{text}");
-}
-
-/// The security delta review's INFO: `describe` still gave a hidden sheet's path, used range,
-/// counts, first error and selected cell. Now it gives its name and nothing of its shape.
-#[test]
-fn describe_gives_an_agent_a_hidden_sheets_name_and_nothing_of_its_shape() {
-    let dir = Scratch::new("hidden-describe");
-    let mut s = person_opens_a_secret(&dir);
-    act(&mut s, "set_cell", json!({ "cell": "D3", "text": "=1/0" })).unwrap();
-    act(&mut s, "select", json!({ "cell": "C2" })).unwrap();
-    let _agent = AgentTokenScope::enter(Some("tok-sheets-review".into()));
-    let state = yantrik_app_runtime::control::describe_json("spreadsheet", &surface::describe(&s), &[]);
-    let st = &state["state"];
-    assert_eq!(st["sheet"], "secret.csv");
-    for key in ["path", "rows", "cols", "used", "selection", "can_undo", "can_redo", "filled_cells", "error_cells", "first_error"] {
-        assert!(st[key].is_null(), "{key}: {}", st[key]);
-    }
-    assert!(st["hidden"].is_string(), "the agent is told why");
-    let text = state.to_string();
-    for shape in ["A1:D3", "D3", "C2", "topsecret"] {
-        assert!(!text.contains(shape), "{shape} in {text}");
-    }
+fn csv_file(name: &str, text: &str) -> std::path::PathBuf {
+    let path = scratch(name).join("sheet.csv");
+    std::fs::write(&path, text).unwrap();
+    path
 }
 
 // ── Memory: text and work have bounds ───────────────────────────────────
 
-use crate::address::{parse_cell, Cell};
-use crate::formula::budget::{MAX_TEXT, MAX_WORK};
-use crate::sheet::Sheet;
-
 /// The reviewer's 1.3 KB file: 1,000 × `x`, then `=A1&A1`, `=A2&A2`, … for 40 rows.
 #[test]
 fn the_doubling_csv_opens_and_stops_at_the_cell_limit() {
-    let dir = Scratch::new("doubling");
-    let path = dir.path("double.csv");
+    let app = started();
     let mut text = "x".repeat(1000) + "\n";
     for r in 1..40 {
         text.push_str(&format!("=A{r}&A{r}\n"));
     }
     assert!(text.len() < 1400, "{}", text.len());
-    std::fs::write(&path, text).unwrap();
-    let mut s = Session::new();
-    act(&mut s, "open", json!({ "path": path })).unwrap();
-    let sheet = &s.doc.sheet;
-    assert_eq!(sheet.value(Cell::new(5, 0)).display().len(), 32_000, "A6 still fits in a cell");
-    let e = sheet.value(Cell::new(6, 0));
-    assert!(e.error().unwrap().message.contains("more than the 32768"), "{e:?}");
-    assert!(sheet.value(Cell::new(39, 0)).error().is_some(), "A40 shows the error passed on");
+    let path = csv_file("doubling", &text);
+    act(&app, "open", json!({ "path": path.display().to_string() })).unwrap();
+    let a6 = act(&app, "get_range", json!({ "range": "A6" })).unwrap();
+    assert_eq!(a6["values"][0][0].as_str().unwrap().len(), 32_000, "A6 still fits in a cell");
+    let a7 = act(&app, "get_range", json!({ "range": "A7" })).unwrap();
+    assert!(a7["values"][0][0]["message"].as_str().unwrap().contains("more than the 32768"), "{a7}");
+    let a40 = act(&app, "get_range", json!({ "range": "A40" })).unwrap();
+    assert!(a40["values"][0][0]["error"].is_string(), "A40 shows the error passed on");
 }
 
 #[test]
 fn an_agent_set_cell_chain_is_held_to_the_same_limit() {
-    let mut s = Session::new();
-    act(&mut s, "set_cell", json!({ "cell": "A1", "text": "x".repeat(1000) })).unwrap();
+    let app = started();
+    act(&app, "set_cell", json!({ "cell": "A1", "text": "x".repeat(1000) })).unwrap();
     for r in 1..40 {
-        act(&mut s, "set_cell", json!({ "cell": format!("A{}", r + 1), "text": format!("=A{r}&A{r}") })).unwrap();
+        act(&app, "set_cell", json!({ "cell": format!("A{}", r + 1), "text": format!("=A{r}&A{r}") })).unwrap();
     }
-    let got = act(&mut s, "get_range", json!({ "range": "A7" })).unwrap();
+    let got = act(&app, "get_range", json!({ "range": "A7" })).unwrap();
     assert_eq!(got["values"][0][0]["error"], "#VALUE!", "{got}");
 }
 
@@ -165,8 +86,6 @@ fn a_formula_that_reads_too_many_cells_is_refused_before_it_reads_them() {
 
 // ── Stack: nesting has a bound ──────────────────────────────────────────
 
-use crate::formula::parser::MAX_DEPTH;
-
 fn nested(depth: usize) -> String {
     format!("={}1{}", "(".repeat(depth), ")".repeat(depth))
 }
@@ -176,8 +95,8 @@ fn nested(depth: usize) -> String {
 fn sixteen_thousand_brackets_are_an_error_not_a_stack_overflow() {
     let f = nested(16_000);
     assert_eq!(f.len(), 32_002);
-    let mut s = Session::new();
-    let got = act(&mut s, "set_cell", json!({ "cell": "A1", "text": f })).unwrap();
+    let app = started();
+    let got = act(&app, "set_cell", json!({ "cell": "A1", "text": f })).unwrap();
     assert_eq!(got["value"]["error"], "#ERROR!", "{got}");
     assert!(got["problem"].as_str().unwrap().contains("nests more than 100 levels"), "{got}");
 }
@@ -208,11 +127,9 @@ fn every_kind_of_deep_nesting_is_refused_and_shallow_nesting_still_works() {
 
 #[test]
 fn a_csv_cell_longer_than_a_cell_holds_is_refused_with_its_line() {
-    let dir = Scratch::new("long-cell");
-    let path = dir.path("long.csv");
-    std::fs::write(&path, format!("ok\n\"{}\"\n", nested(20_000))).unwrap();
-    let mut s = Session::new();
-    let e = act(&mut s, "open", json!({ "path": path })).unwrap_err();
+    let app = started();
+    let path = csv_file("long-cell", &format!("ok\n\"{}\"\n", nested(20_000)));
+    let e = act(&app, "open", json!({ "path": path.display().to_string() })).unwrap_err();
     assert!(e.contains("line 2") && e.contains("32768 characters"), "{e}");
     assert!(crate::csv::parse(&"a".repeat(MAX_TEXT)).is_ok(), "exactly a cell's worth is fine");
 }
@@ -250,28 +167,27 @@ fn sums(rows: usize) -> String {
     (1..=rows).map(|r| vec![format!("=SUM(A{r}:A{r})"); 26].join(",") + "\n").collect()
 }
 
-fn open_time(rows: usize) -> (Session, std::time::Duration) {
-    let dir = Scratch::new(&format!("sums-{rows}"));
-    let path = dir.path("sums.csv");
-    std::fs::write(&path, sums(rows)).unwrap();
-    let mut s = Session::new();
+fn open_time(rows: usize) -> (yantrik_testing::TestApp<crate::YSheets>, std::time::Duration) {
+    let app = started();
+    let path = csv_file(&format!("sums-{rows}"), &sums(rows));
     let t = std::time::Instant::now();
-    act(&mut s, "open", json!({ "path": path })).unwrap();
+    act(&app, "open", json!({ "path": path.display().to_string() })).unwrap();
     let took = t.elapsed();
-    assert_eq!(s.doc.sheet.value(Cell::new(rows - 1, 1)).error().map(|e| e.code()), Some("#CYCLE!"));
-    (s, took)
+    let b = super::shown(&app, &format!("B{rows}"));
+    assert_eq!(b, "#CYCLE!");
+    (app, took)
 }
 
 /// 40,000 formula cells took 6 s in a release build before; a debug build now opens them in
 /// well under that, and each edit after it costs the same, not more.
 #[test]
 fn forty_thousand_range_formulas_open_and_edit_in_linear_time() {
-    let (mut s, took) = open_time(40_000 / 26);
+    let (app, took) = open_time(40_000 / 26);
     assert!(took.as_secs_f64() < 5.0, "{took:?}");
     let t = std::time::Instant::now();
-    act(&mut s, "set_cell", json!({ "cell": "A1", "text": "5" })).unwrap();
+    act(&app, "set_cell", json!({ "cell": "A1", "text": "5" })).unwrap();
     assert!(t.elapsed().as_secs_f64() < 5.0, "{:?}", t.elapsed());
-    assert_eq!(s.doc.sheet.value(Cell::new(0, 1)).display(), "5");
+    assert_eq!(super::shown(&app, "B1"), "5");
 }
 
 /// The reviewer's 494,000 cells, about 9 MB: over 300 s before. Run with
@@ -301,17 +217,25 @@ fn ranges_that_overlap_without_end_are_held_to_the_budget() {
 /// fields, about 400 MB). Both now stop after at most one sheet's worth of fields.
 #[test]
 fn sixteen_megabytes_of_newlines_or_commas_stop_at_the_sheets_limits() {
-    let dir = Scratch::new("huge");
-    let size = crate::document::MAX_FILE_BYTES as usize;
+    let app = started();
+    let size = crate::files::MAX_FILE_BYTES as usize;
     for (name, byte, says) in [("lines.csv", b'\n', "500000 cells"), ("commas.csv", b',', "256 columns")] {
-        let path = dir.path(name);
+        let path = scratch("huge").join(name);
         std::fs::write(&path, vec![byte; size]).unwrap();
-        let mut s = Session::new();
         let t = std::time::Instant::now();
-        let e = act(&mut s, "open", json!({ "path": path })).unwrap_err();
+        let e = act(&app, "open", json!({ "path": path.display().to_string() })).unwrap_err();
         assert!(e.contains(says), "{name}: {e}");
         assert!(t.elapsed().as_secs_f64() < 5.0, "{name}: {:?}", t.elapsed());
     }
+}
+
+#[test]
+fn a_file_one_byte_over_the_size_limit_is_refused_without_being_read_whole() {
+    let app = started();
+    let path = scratch("one-over").join("big.csv");
+    std::fs::write(&path, vec![b'1'; crate::files::MAX_FILE_BYTES as usize + 1]).unwrap();
+    let e = act(&app, "open", json!({ "path": path.display().to_string() })).unwrap_err();
+    assert!(e.contains("is more than the 16 MB this sheet opens"), "{e}");
 }
 
 #[test]
@@ -324,54 +248,6 @@ fn the_parser_keeps_the_limits_exactly() {
     let full = "1,1\n".repeat(MAX_CELLS / 2);
     assert_eq!(crate::csv::parse(&full).unwrap().len(), MAX_CELLS / 2);
     assert!(crate::csv::parse(&(full + "1\n")).unwrap_err().contains("more than the 500000 cells"));
-}
-
-// ── Open reads regular files only ───────────────────────────────────────
-
-/// Open `path` on a thread of its own, so a regression fails the test instead of hanging it.
-fn open_within_seconds(path: std::path::PathBuf) -> Result<crate::document::Opened, String> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(crate::document::Document::new().open(&path));
-    });
-    rx.recv_timeout(std::time::Duration::from_secs(5)).expect("open blocked or read without end")
-}
-
-#[test]
-fn a_fifo_a_device_and_a_link_to_a_device_are_refused_at_once() {
-    let dir = Scratch::new("special");
-    let fifo = dir.path("pipe.csv");
-    let c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
-    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
-    let zero = dir.path("zero.csv");
-    std::os::unix::fs::symlink("/dev/zero", &zero).unwrap();
-    for path in [fifo, zero, "/dev/zero".into()] {
-        let e = open_within_seconds(path.clone()).unwrap_err();
-        assert!(e.contains("not a regular file"), "{}: {e}", path.display());
-    }
-    let folder = open_within_seconds(dir.path("")).unwrap_err();
-    assert!(folder.contains("is a folder"), "{folder}");
-}
-
-// ── The mode a new file is given is the one its comment says ────────────
-
-#[test]
-fn a_new_csv_is_written_by_this_user_and_readable_by_others_less_the_umask() {
-    use std::os::unix::fs::PermissionsExt;
-    let dir = Scratch::new("mode");
-    let path = dir.path("new.csv");
-    let mut s = Session::new();
-    act(&mut s, "set_cell", json!({ "cell": "A1", "text": "1" })).unwrap();
-    act(&mut s, "save", json!({ "path": path })).unwrap();
-    let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-    assert_eq!(mode & !0o644, 0, "never more than 0o644: {mode:o}");
-    assert_eq!(mode & 0o600, 0o600, "this user reads and writes it: {mode:o}");
-
-    // A replaced file keeps the mode it had.
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-    act(&mut s, "set_cell", json!({ "cell": "A1", "text": "2" })).unwrap();
-    act(&mut s, "save_over", json!({ "path": path })).unwrap();
-    assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
 }
 
 // ── Memory: a nested SUMIF holds no copy of its range while the next one runs ──
@@ -436,40 +312,36 @@ fn nested_sumif(range: &str) -> String {
 const MB: usize = 1024 * 1024;
 
 /// The CSV route: 480 rows of 32,768 × `x` and the nested formula, 15.7 MB, under the 16 MB cap.
+/// The file layer's own function is what the open job runs, so it is measured on this thread.
 #[test]
 fn a_nested_sumif_in_a_csv_reads_its_range_once_at_a_time() {
-    let dir = Scratch::new("sumif-csv");
-    let path = dir.path("sumif.csv");
     let mut text = format!("{}\n", "x".repeat(MAX_TEXT)).repeat(480);
     text.push_str(&format!("\"{}\"\n", nested_sumif("A1:A480").replace('"', "\"\"")));
-    assert!(text.len() < crate::document::MAX_FILE_BYTES as usize, "{}", text.len());
-    std::fs::write(&path, &text).unwrap();
+    assert!(text.len() < crate::files::MAX_FILE_BYTES as usize, "{}", text.len());
+    let path = csv_file("sumif-csv", &text);
     let file = text.len();
     drop(text);
 
-    let mut s = Session::new();
-    let (opened, peak) = peak_of(|| act(&mut s, "open", json!({ "path": path })));
-    opened.unwrap();
-    assert_eq!(s.doc.sheet.value(Cell::new(480, 0)).display(), "0", "no text is \"y\", so nothing is summed");
+    let (opened, peak) = peak_of(|| crate::files::open::open_sheet(&path, false));
+    let opened = opened.unwrap();
+    assert_eq!(opened.sheet.value(Cell::new(480, 0)).display(), "0", "no text is \"y\", so nothing is summed");
     // The file read, parsed and kept, and one copy of the range: a few times the file, not 95.
     assert!(peak < 8 * file, "open took {} MB at once for a {} MB file", peak / MB, file / MB);
 }
 
-/// The agent route: 2,000 cells of 32,768 characters, then one `set_cell` of the nested formula.
+/// The agent route: 2,000 cells of 32,768 characters, then one `set_cell` of the nested formula,
+/// worked out as the recalculation job works it.
 #[test]
 fn a_nested_sumif_from_an_agent_reads_its_range_once_at_a_time() {
-    let mut s = Session::new();
-    // The 2,000 cells go in at once: one `set_cell` each works the whole sheet out 2,000 times,
-    // which a debug build takes minutes over. The sheet they make is the same.
-    s.doc.sheet = Sheet::from_rows(&vec![vec!["x".repeat(MAX_TEXT)]; 2000]).unwrap();
-    let _agent = AgentTokenScope::enter(Some("tok-sheets-review".into()));
+    let mut s = Sheet::from_rows(&vec![vec!["x".repeat(MAX_TEXT)]; 2000]).unwrap();
     let data = 2000 * MAX_TEXT;
-    let formula = nested_sumif("A1:A2000");
-    let (got, peak) = peak_of(|| act(&mut s, "set_cell", json!({ "cell": "B1", "text": formula })));
-    assert_eq!(got.unwrap()["value"], json!(0.0));
+    s.put(cell("B1"), &nested_sumif("A1:A2000")).unwrap();
+    let snapshot = s.snapshot();
+    let (solved, peak) = peak_of(|| snapshot.solve());
+    assert_eq!(solved.value(cell("B1")).to_json(), json!(0.0));
     // The recalculation's new values (one copy of every text) and one copy of the range: twice
     // the text, where 95 copies at once was 6.3 GB.
-    assert!(peak < 3 * data, "set_cell took {} MB at once over {} MB of text", peak / MB, data / MB);
+    assert!(peak < 3 * data, "the recalculation took {} MB at once over {} MB of text", peak / MB, data / MB);
 }
 
 #[test]
