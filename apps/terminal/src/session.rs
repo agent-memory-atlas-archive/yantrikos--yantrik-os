@@ -108,11 +108,14 @@ impl Session {
             .stdin(pts.try_clone()?)
             .stdout(pts.try_clone()?)
             .stderr(pts);
-        // SAFETY: only async-signal-safe calls run between the fork and the exec (setsid and an
-        // ioctl). By then the slave is the child's standard input, so it becomes the controlling
-        // terminal of the new session.
+        // SAFETY: only async-signal-safe calls run between the fork and the exec (`child::tidy`,
+        // setsid and an ioctl). By then the slave is the child's standard input, so it becomes the
+        // controlling terminal of the new session. The descriptor limit is read here, before the
+        // fork, for the fallback in `tidy`.
+        let limit = crate::child::descriptor_limit();
         unsafe {
-            command.pre_exec(|| {
+            command.pre_exec(move || {
+                crate::child::tidy(limit);
                 if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) < 0 {
                     return Err(std::io::Error::last_os_error());
                 }

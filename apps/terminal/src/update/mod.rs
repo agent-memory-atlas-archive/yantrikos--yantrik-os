@@ -53,7 +53,11 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refuse
     m.answer = serde_json::Value::Null;
     fx.unchanged();
     // In a Mind's copy nothing is typed, started, searched or explained: the screen is hidden.
-    yantrik_app::for_mind::refuse_if(m.for_mind, reads_or_feeds_a_shell(&command))?;
+    // The window says why, as well as the caller: a refused key or action is no silent log line.
+    if let Err(refused) = yantrik_app::for_mind::refuse_if(m.for_mind, reads_or_feeds_a_shell(&command)) {
+        refuse(m, fx, refused.sentence);
+        return Ok(());
+    }
     if m.leaving() && starts_work(&command) {
         return Err(Refused::new("closing", CLOSING));
     }

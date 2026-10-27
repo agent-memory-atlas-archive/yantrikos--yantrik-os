@@ -43,6 +43,7 @@ use yantrik_app::intents::Intents;
 use yantrik_app::Refused;
 
 mod answers;
+mod child;
 mod command;
 mod describe;
 mod hub;

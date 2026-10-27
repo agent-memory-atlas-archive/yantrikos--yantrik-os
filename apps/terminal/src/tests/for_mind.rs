@@ -77,8 +77,11 @@ fn the_screen_the_folders_and_the_tab_titles_are_hidden_and_nothing_can_be_typed
         Command::Do(Do::Explain),
         Command::Do(Do::New),
     ] {
+        app.run(Command::Do(Do::Dismiss));
         app.run(command);
-        assert_eq!(app.last_refusal().map(|r| r.sentence), Some(READ_ONLY.to_string()));
+        let notice = app.ui(|ui| ui.get_notice().to_string());
+        assert_eq!(notice, READ_ONLY, "the window says it, not only the log");
+        assert_eq!(app.model(|m| m.notice.clone()), READ_ONLY);
     }
     // A job named like the sentinel is not named in the summary or anywhere else.
     session.write(format!("cp /bin/sleep /tmp/{SENTINEL} 2>/dev/null; /tmp/{SENTINEL} 30\r").as_bytes()).unwrap();
