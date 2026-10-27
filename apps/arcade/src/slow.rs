@@ -4,7 +4,7 @@
 use std::path::Path;
 
 use crate::command::Verb;
-use crate::library::Library;
+use crate::library::{stamp_of, Library};
 use crate::{play, verify};
 
 pub trait Slow: Send + Sync {
@@ -20,11 +20,21 @@ pub struct Real;
 impl Slow for Real {
     fn run(&self, verb: Verb, library: &Library, slug: &str, html: &Path) -> Result<String, String> {
         let shot = library.screenshot_path(slug);
+        // The build this run judges. If the game is built again or removed while the browser is
+        // at work, what it found is about a file that is gone, and is dropped.
+        let judged = stamp_of(html);
+        let changed = || {
+            let _ = std::fs::remove_file(&shot);
+            format!("{slug} was built again or removed while it was being checked, so that result was dropped; run it again")
+        };
         match verb {
             Verb::Verify => {
                 let report = verify::verify_game(html, Some(&shot))?;
                 let value = serde_json::to_value(&report).map_err(|e| e.to_string())?;
-                library.write_verify(slug, &value)?;
+                if stamp_of(html) != judged {
+                    return Err(changed());
+                }
+                library.write_verdict(slug, &value, &judged)?;
                 // The verifier's own sentence, so the job, the games list and the banner agree,
                 // and so an inconclusive run says it was the machine rather than reading as a
                 // verdict on the game. It is still not a pass: the job lands as failed until a
@@ -35,7 +45,13 @@ impl Slow for Real {
                     Err(format!("{slug}: verification {}", report.summary_line()))
                 }
             }
-            Verb::Screenshot => verify::screenshot_game(html, &shot).map(|()| format!("{} \u{2192} {}", slug, shot.display())),
+            Verb::Screenshot => {
+                verify::screenshot_game(html, &shot)?;
+                if stamp_of(html) != judged {
+                    return Err(changed());
+                }
+                Ok(format!("{} \u{2192} {}", slug, shot.display()))
+            }
             // The same file `screenshot` writes: if the Browser cannot draw the game, play renders
             // it headless there and says so.
             Verb::Play => play::play(html, &shot),

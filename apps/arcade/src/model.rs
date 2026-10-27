@@ -119,6 +119,9 @@ pub struct Model {
     /// Whether a draft of the editor's text is in the draft lane.
     pub drafted: bool,
 
+    /// Drawn for a Mind (Mind View): the window is read-only and the person's draft stays hidden.
+    pub for_mind: bool,
+
     // ── The app's life ──
     pub closing: bool,
     pub ending: bool,

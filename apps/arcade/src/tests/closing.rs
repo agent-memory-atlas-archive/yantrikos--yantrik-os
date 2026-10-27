@@ -112,3 +112,45 @@ fn nothing_more_is_started_while_the_app_is_closing() {
     let refused = f.act("new_game", json!({ "spec": "{}" })).unwrap_err();
     assert_eq!(refused, crate::update::CLOSING);
 }
+
+/// Review M1 (probe): a browser action asked, the window closed before the lane lands. The job
+/// must not start after the close (nothing is left to wait for it, and its browser would be
+/// orphaned), and the caller is told why instead of "started".
+#[test]
+fn a_browser_job_is_not_started_once_the_app_is_closing() {
+    let f = open();
+    super::seeded(&f);
+    f.act("build", json!({ "game": "meadow-run" })).unwrap();
+    let pending = f.app.act("verify", json!({ "game": "meadow-run" })).unwrap();
+    f.app.close_requested(WindowId::PRIMARY);
+    f.quiet();
+    assert!(f.browser.calls().is_empty(), "no worker started after the close: {:?}", f.browser.calls());
+    assert_eq!(pending.settle().unwrap_err(), crate::update::CLOSING);
+    assert!(f.app.exit_reason().is_some());
+}
+
+#[test]
+fn a_browser_job_is_not_started_once_the_app_is_ending() {
+    let f = open();
+    super::seeded(&f);
+    f.act("build", json!({ "game": "meadow-run" })).unwrap();
+    let pending = f.app.act("screenshot", json!({ "game": "meadow-run" })).unwrap();
+    f.app.display_gone();
+    f.quiet();
+    assert!(f.browser.calls().is_empty());
+    assert_eq!(pending.settle().unwrap_err(), crate::update::CLOSING);
+}
+
+/// Review M1: a logout stops the headless browsers still running, because each has a debugging
+/// port open that any local process could drive.
+#[cfg(unix)]
+#[test]
+fn a_logout_stops_a_browser_that_is_still_running() {
+    let f = open();
+    let mut browser = std::process::Command::new("sleep").arg("60").spawn().unwrap();
+    crate::browser::register(browser.id());
+    f.app.display_gone();
+    f.quiet();
+    let status = browser.wait().unwrap();
+    assert!(!status.success(), "it was killed, not left to finish");
+}

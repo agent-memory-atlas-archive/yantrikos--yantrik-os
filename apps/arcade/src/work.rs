@@ -7,11 +7,18 @@ use serde_json::{json, Value};
 
 use crate::command::{Browse, Landing, Listing, Reply, Request, Verb};
 use crate::library::Library;
+use crate::spec::parse_game;
 
 /// The whole of what the lane does for one command: run it, then read the library again, so the
 /// listing that lands is the library as this command left it.
-pub fn run(library: &Library, seq: u64, request: Request, from_editor: bool) -> Landing {
-    let result = command(library, &request);
+///
+/// `running` is the browser jobs under way, as (action, game): a game with one is not rebuilt,
+/// replaced or deleted under it.
+pub fn run(library: &Library, seq: u64, request: Request, from_editor: bool, running: &[(String, String)]) -> Landing {
+    let result = match busy_on(library, &request, running) {
+        Some(sentence) => Err(sentence),
+        None => command(library, &request),
+    };
     Landing { seq, request: Some(request), from_editor, result, listing: list(library) }
 }
 
@@ -28,6 +35,23 @@ pub fn character_spec(library: &Library, seq: u64, slug: &str) -> Landing {
 
 pub fn list(library: &Library) -> Listing {
     Listing { games: library.list_games(), characters: library.list_characters() }
+}
+
+/// Why `request` cannot run now: it would build, replace or delete a game a browser job is at
+/// work on. The job would judge a file that is gone and write its verdict beside the new one.
+fn busy_on(library: &Library, request: &Request, running: &[(String, String)]) -> Option<String> {
+    if running.is_empty() {
+        return None;
+    }
+    let key = match request.verb {
+        Verb::Build | Verb::Delete => request.game.clone(),
+        Verb::UpdateGame if !request.game.is_empty() => request.game.clone(),
+        Verb::UpdateGame => parse_game(&request.spec).ok()?.title,
+        _ => return None,
+    };
+    let (slug, _) = library.load_game_spec(&key).ok()?;
+    let (action, _) = running.iter().find(|(_, subject)| *subject == slug)?;
+    Some(format!("{action} of {slug} is running; wait for it to land (`describe` lists it under jobs), then try again"))
 }
 
 fn command(library: &Library, request: &Request) -> Result<Reply, String> {

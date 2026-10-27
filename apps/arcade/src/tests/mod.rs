@@ -31,6 +31,7 @@ mod closing;
 mod drafts;
 mod flow;
 mod folders;
+mod mind_view;
 mod order;
 mod parity;
 mod private_mode;

@@ -40,6 +40,7 @@ use yantrik_app::intents::Intents;
 use yantrik_app::Refused;
 
 mod answers;
+mod browser;
 pub mod cli;
 mod command;
 pub mod compile;
@@ -102,12 +103,14 @@ impl App for Arcade {
             game_name: String::new(),
             notice: String::new(),
             drafted: false,
+            for_mind: boot.for_mind,
             closing: false,
             ending: false,
             answer: serde_json::Value::Null,
         };
         // Text the last run did not keep is back in the editor, and says so.
-        if let Some(text) = update::drafts::recovered(&boot.drafts) {
+        // Not in a Mind's copy: the draft is the person's own, unsaved, and not for it to read.
+        if let Some(text) = update::drafts::recovered(&boot.drafts).filter(|_| !boot.for_mind) {
             m.spec_text = text;
             m.drafted = true;
             m.notice = "The spec you were typing is back in the editor; save it as a game or a character to keep it.".into();

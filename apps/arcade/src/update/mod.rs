@@ -12,6 +12,7 @@
 //! - this file: the window's own state, the requests and the landings.
 
 use yantrik_app::effects::Effects;
+use yantrik_app::for_mind;
 use yantrik_app::Refused;
 
 use crate::answers;
@@ -34,6 +35,9 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refuse
     if (m.closing || m.ending) && starts_work(&command) {
         return Err(Refused::new("closing", CLOSING));
     }
+    // In a copy drawn for a Mind the window is read-only: its buttons run as the person, with no
+    // consent card, so the Mind goes through the intents, which are graded.
+    for_mind::refuse_if(m.for_mind, matches!(command, Command::Button(_) | Command::SpecEdited(_) | Command::PickCharacter(_)))?;
     match command {
         Command::Button(id) => button(m, fx, &id),
         Command::Run(request) => return begin(m, fx, request, false),
@@ -142,7 +146,8 @@ fn begin(m: &mut Model, fx: &mut Fx, request: Request, from_editor: bool) -> Res
     m.asked += 1;
     let seq = m.asked;
     m.work += 1;
-    let reply = m.lane.ask(move |library| work::run(library, seq, request, from_editor));
+    let running: Vec<(String, String)> = m.jobs.running().iter().map(|j| (j.action.clone(), j.subject.clone())).collect();
+    let reply = m.lane.ask(move |library| work::run(library, seq, request, from_editor, &running));
     fx.spawn_or(Command::LaneFailed { slow }, move |_| lands(reply.wait()));
     // Nothing on screen moves until the command lands.
     fx.unchanged();
@@ -191,6 +196,15 @@ fn landed(m: &mut Model, landing: Landing, fx: &mut Fx) {
             }
             if let Some(request) = request.as_ref().filter(|r| from_editor && r.verb.takes_spec()) {
                 kept(m, fx, &request.spec);
+            }
+            // A browser job asked before the window closed is not started after it: nothing is left
+            // to wait for it, and its browser would outlive the app.
+            if slow.is_some() && (m.closing || m.ending) {
+                m.notice = CLOSING.into();
+                fx.changed(PART_NOTICE);
+                answers::fail(fx, CLOSING.into());
+                life::drained(m, fx);
+                return;
             }
             let value = match (slow, request) {
                 (Some(browse), Some(request)) => {

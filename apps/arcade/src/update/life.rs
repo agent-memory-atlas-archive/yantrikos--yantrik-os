@@ -46,6 +46,9 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Fx) {
             // holds that is unsaved, the editor's text, is written as a draft.
             m.ending = true;
             drafts::at_the_end(m, fx);
+            // A browser job is not waited for: its browser has a debugging port open, so it is
+            // stopped with the app and not left running.
+            crate::browser::kill_live();
             if !m.busy() {
                 fx.exit();
             }
@@ -59,6 +62,7 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Fx) {
 pub fn drained(m: &mut Model, fx: &mut Fx) {
     if (m.closing || m.ending) && !m.busy() {
         drafts::at_the_end(m, fx);
+        crate::browser::kill_live();
         fx.exit();
     }
 }

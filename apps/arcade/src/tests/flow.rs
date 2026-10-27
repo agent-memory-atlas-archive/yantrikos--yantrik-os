@@ -211,3 +211,30 @@ fn an_agent_is_answered_as_the_person_is() {
     let gone = f.settled(pending).unwrap();
     assert_eq!(gone["deleted"], json!("\"Agent Run\" moved to the Trash"));
 }
+
+/// Review M2: a game with a browser job under way is not built again, replaced or deleted under
+/// it, with a sentence that says why. Done, the same call works.
+#[test]
+fn a_game_with_a_job_running_is_not_deleted_replaced_or_built_under_it() {
+    let f = open();
+    seeded(&f);
+    f.act("build", json!({ "game": "meadow-run" })).unwrap();
+    let job = f.start_slow(vec![("verify", json!({ "game": "meadow-run" }))]).remove(0);
+    // All three asked while the job is under way, so each is judged against it.
+    let asked: Vec<_> = [
+        ("delete", json!({ "game": "meadow-run" })),
+        ("build", json!({ "game": "Meadow Run" })),
+        ("update_game", json!({ "spec": meadow_run("Meadow Run") })),
+    ]
+    .into_iter()
+    .map(|(name, args)| (name, f.app.act(name, args).unwrap()))
+    .collect();
+    f.quiet();
+    for (name, pending) in asked {
+        let refused = pending.settle().unwrap_err();
+        assert_eq!(refused, "verify of meadow-run is running; wait for it to land (`describe` lists it under jobs), then try again", "{name}");
+    }
+    assert!(f.library().game_html("meadow-run").exists(), "the build is as it was");
+    job.settle().unwrap();
+    f.act("delete", json!({ "game": "meadow-run" })).unwrap();
+}

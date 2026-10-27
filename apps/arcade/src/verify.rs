@@ -309,6 +309,7 @@ impl Drop for Headless {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        crate::browser::forget(self.child.id());
         let _ = std::fs::remove_dir_all(&self.profile);
     }
 }
@@ -322,11 +323,10 @@ pub fn launch_headless(html: &Path) -> Result<Headless, String> {
         .map_err(|e| format!("cannot read {}: {e}", html.display()))?;
     let url = format!("file://{}", abs.display());
 
-    let profile = std::env::temp_dir().join(format!("arcade-verify-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&profile);
-    std::fs::create_dir_all(&profile).map_err(|e| format!("cannot create a profile directory: {e}"))?;
+    let profile = crate::browser::new_profile()?;
 
-    let child = Command::new(&binary)
+    let mut command = Command::new(&binary);
+    command
         // Software rendering: WSL here has no GPU path for headless Chromium.
         .args([
             "--headless=new",
@@ -343,9 +343,13 @@ pub fn launch_headless(html: &Path) -> Result<Headless, String> {
         .arg(format!("--user-data-dir={}", profile.display()))
         .arg(&url)
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("cannot start {}: {e}", binary.display()))?;
+        .stderr(Stdio::null());
+    crate::browser::die_with_parent(&mut command);
+    let child = command.spawn().map_err(|e| {
+        let _ = std::fs::remove_dir_all(&profile);
+        format!("cannot start {}: {e}", binary.display())
+    })?;
+    crate::browser::register(child.id());
 
     let mut headless = Headless { child, ws_url: String::new(), browser: binary.display().to_string(), profile: profile.clone() };
 
@@ -608,10 +612,7 @@ pub fn verify_session(ws_url: &str, browser: &str, screenshot_out: Option<&Path>
         Err(e) => (false, format!("no screenshot from the browser: {e}"), None),
     };
     if let (Some(bytes), Some(out)) = (&png_bytes, screenshot_out) {
-        if let Some(parent) = out.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        std::fs::write(out, bytes).map_err(|e| format!("cannot write {}: {e}", out.display()))?;
+        crate::library::write_in_place(out, bytes)?;
         report.screenshot = out.file_name().and_then(|n| n.to_str()).map(String::from);
     }
 
@@ -1019,10 +1020,7 @@ pub fn screenshot_game(html: &Path, png_out: &Path) -> Result<(), String> {
         s.get("frames").and_then(|v| v.as_f64()).unwrap_or(0.0) > 5.0
     });
     let bytes = capture_screenshot(&mut session)?;
-    if let Some(parent) = png_out.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
-    }
-    std::fs::write(png_out, &bytes).map_err(|e| format!("cannot write {}: {e}", png_out.display()))
+    crate::library::write_in_place(png_out, &bytes)
 }
 
 #[cfg(test)]
@@ -1403,6 +1401,7 @@ mod tests {
     fn a_clean_session_passes_every_gate() {
         let fake = Fake::start(Script::Clean);
         let shot_dir = std::env::temp_dir().join(format!("arcade-fake-shot-clean-{}", std::process::id()));
+        std::fs::create_dir_all(&shot_dir).unwrap();
         let shot = shot_dir.join("screenshot.png");
         let report = verify_session(&fake.ws_url(), "fake-chrome", Some(&shot), &quick_limits()).unwrap();
 
