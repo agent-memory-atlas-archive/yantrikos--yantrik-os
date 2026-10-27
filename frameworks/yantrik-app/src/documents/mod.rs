@@ -17,6 +17,7 @@ pub mod disk;
 pub mod draft;
 pub mod files;
 pub(crate) mod exchange;
+pub mod notice;
 pub mod outside;
 pub mod save;
 #[cfg(test)]
