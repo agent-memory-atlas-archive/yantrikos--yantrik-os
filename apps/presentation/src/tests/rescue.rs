@@ -153,7 +153,7 @@ fn a_deck_whose_file_was_changed_by_another_program_is_rescued_beside_it_not_ove
     assert_eq!(read_deck(std::path::Path::new(&kept)).slides[0].title, "Mine");
     assert_eq!(read_deck(&path).slides[0].title, "Theirs", "their version is where they left it");
     assert_eq!(path_of(&app), Some(other));
-    assert_eq!(file(&path).contains("Mine"), false);
+    assert!(!file(&path).contains("Mine"));
 }
 
 #[test]

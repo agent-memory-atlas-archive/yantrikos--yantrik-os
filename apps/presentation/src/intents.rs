@@ -72,8 +72,12 @@ pub fn table(table: &mut Intents<YPresent>) {
     add(
         table,
         Action::new("save_as", "Write the deck to a path of your choosing")
-            .arg(Param::text("path").describe("Where to write the .ydeck file")),
-        |a| Act::SaveAs { path: text(a, "path").unwrap_or_default() },
+            .arg(Param::text("path").describe("Where to write the .ydeck file"))
+            .arg(Param::flag("overwrite").optional().describe("Replace a file that is already at that path")),
+        |a| Act::SaveAs {
+            path: text(a, "path").unwrap_or_default(),
+            overwrite: a.raw().get("overwrite").and_then(Value::as_bool).unwrap_or(false),
+        },
     );
 
     add(

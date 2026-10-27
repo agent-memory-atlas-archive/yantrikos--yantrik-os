@@ -88,7 +88,7 @@ fn every_way_of_moving_commits_what_is_on_the_canvas_first() {
         let app = three();
         click(&app, |ui| ui.invoke_select_slide(1));
         type_title(&app, "B, as typed");
-        click(&app, move |ui| path(ui));
+        click(&app, path);
         assert!(outline(&app).contains(&"B, as typed".to_string()), "{name}: {:?}", outline(&app));
         assert_eq!(outline(&app).iter().filter(|t| t.as_str() == "A").count(), 1, "{name}: A is untouched");
     }

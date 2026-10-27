@@ -185,9 +185,7 @@ fn masking_is_visual_only_describe_and_calls_are_as_for_a_normal_instance() {
     assert!(expected.to_string().contains(SENTINEL), "a Mind still reads the deck through describe");
     // The state differs only in where the deck's draft lives (each start made its own) and the
     // folder; the content and the answers are the same.
-    for key in ["summary"] {
-        assert_eq!(got[key], expected[key]);
-    }
+    assert_eq!(got["summary"], expected["summary"]);
     assert_eq!(got["state"]["current"], expected["state"]["current"]);
     assert_eq!(got["state"]["outline"], expected["state"]["outline"]);
     assert_eq!(got["moved"], expected["moved"]);

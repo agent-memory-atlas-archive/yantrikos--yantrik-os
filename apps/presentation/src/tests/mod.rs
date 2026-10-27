@@ -105,7 +105,7 @@ pub fn path_of(app: &TestApp<YPresent>) -> Option<PathBuf> {
 
 /// What the canvas holds now.
 pub fn canvas(app: &TestApp<YPresent>) -> crate::deck::Edits {
-    app.ui(|ui| crate::view::canvas(ui))
+    app.ui(crate::view::canvas)
 }
 
 /// The person pressed a window action, with the canvas as it was.

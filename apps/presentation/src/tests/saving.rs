@@ -116,9 +116,7 @@ fn a_read_only_file_and_a_link_are_refused_and_nothing_is_written() {
     std::fs::set_permissions(&path, mode).unwrap();
     let err = act(&app, "save", none()).unwrap_err();
     assert!(err.contains("is read-only, so nothing was written"), "{err}");
-    let mut mode = std::fs::metadata(&path).unwrap().permissions();
-    mode.set_readonly(false);
-    std::fs::set_permissions(&path, mode).unwrap();
+    std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o644)).unwrap();
     assert_eq!(read_deck(&path).slides[0].title, "One");
     let dir = scratch("link-target");
     write_deck(&dir.join("real.ydeck"), "Real", &["real"]);

@@ -196,6 +196,18 @@ fn save_as_refuses_a_file_that_is_somebody_elses_and_a_relative_path() {
     assert!(err.contains("already exists") && err.contains("nothing was overwritten"), "{err}");
     assert_eq!(file(&theirs), "THEIRS");
     assert_eq!(path_of(&app), None);
+    // With `overwrite` the same call replaces it, and the bytes on disk are the deck.
+    let made = act(&app, "save_as", json!({ "path": theirs.display().to_string(), "overwrite": true })).unwrap();
+    assert_eq!(made["slides"], 1);
+    assert_eq!(read_deck(&theirs).slides[0].title, "Title Slide");
+    assert_eq!(path_of(&app), Some(theirs.clone()));
+    assert_eq!(listing(theirs.parent().unwrap()), vec!["theirs.ydeck"], "and no temporary is left");
+    let again = started();
+    std::fs::write(&theirs, "THEIRS AGAIN").unwrap();
+    let off = act(&again, "save_as", json!({ "path": theirs.display().to_string(), "overwrite": false })).unwrap_err();
+    assert!(off.contains("overwrite=true"), "{off}");
+    assert_eq!(file(&theirs), "THEIRS AGAIN");
+    let app = started();
     let relative = act(&app, "save_as", json!({ "path": "relative/x.ydeck" })).unwrap_err();
     assert!(relative.contains("absolute file path"), "{relative}");
     let empty = act(&app, "save_as", json!({ "path": "  " }));

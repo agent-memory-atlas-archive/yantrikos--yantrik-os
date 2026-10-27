@@ -23,6 +23,10 @@ struct Golden {
     params: &'static [(&'static str, &'static str, bool, &'static str)],
 }
 
+/// The one parameter added since: `save_as`'s optional `overwrite`, worded as Document Editor's.
+/// The framework's save refuses a file already there, so without it an agent could not replace one.
+const ADDED: &str = "overwrite";
+
 /// The old names the framework does not allow an app to keep, and what they are now.
 const RENAMED: &[(&str, &str)] = &[("present", "presenter_view")];
 
@@ -158,13 +162,29 @@ fn the_action_table_is_the_one_ypresent_always_published() {
         assert_eq!(spec.permission, old.risk, "`{}` is graded as it was", old.name);
         assert!(!spec.deferred, "`{}` answers when its work is done, as it did", old.name);
         assert!(!spec.stateless && spec.expected_seconds.is_none() && spec.explainer.is_none());
-        let params: Vec<(&str, &str, bool, &str)> =
-            spec.params.iter().map(|p| (p.name.as_str(), p.kind, p.required, p.description.as_str())).collect();
+        let params: Vec<(&str, &str, bool, &str)> = spec
+            .params
+            .iter()
+            .filter(|p| !(old.name == "save_as" && p.name == ADDED))
+            .map(|p| (p.name.as_str(), p.kind, p.required, p.description.as_str()))
+            .collect();
         assert_eq!(params, old.params.to_vec(), "`{}`'s arguments", old.name);
         for p in &spec.params {
             assert!(p.default.is_none() && p.values.is_empty() && p.items.is_none());
         }
     }
+}
+
+#[test]
+fn save_as_has_the_one_added_parameter_worded_as_document_editors() {
+    let mut table = Intents::<YPresent>::new();
+    YPresent::intents(&mut table);
+    let spec = table.specs().into_iter().find(|s| s.name == "save_as").unwrap();
+    let added: Vec<_> = spec.params.iter().filter(|p| p.name == ADDED).collect();
+    assert_eq!(added.len(), 1);
+    let p = added[0];
+    assert_eq!((p.kind, p.required, p.description.as_str()), ("boolean", false, "Replace a file that is already at that path"));
+    assert_eq!(spec.permission, "standard", "and the grade is as it was");
 }
 
 #[test]

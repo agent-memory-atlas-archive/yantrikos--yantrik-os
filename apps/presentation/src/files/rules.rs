@@ -64,7 +64,7 @@ impl FileRules for DeckRules {
     }
 
     fn already_there(&self, path: &Path) -> String {
-        format!("{} already exists. Choose another name; nothing was overwritten.", path.display())
+        format!("{} already exists. Choose another name; nothing was overwritten. Save As with overwrite=true replaces it.", path.display())
     }
 
     fn changed_on_disk(&self, path: &Path) -> String {

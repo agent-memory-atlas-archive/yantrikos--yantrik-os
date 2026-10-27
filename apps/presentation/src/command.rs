@@ -100,7 +100,7 @@ pub enum Act {
     Open { path: String },
     Show,
     Save,
-    SaveAs { path: String },
+    SaveAs { path: String, overwrite: bool },
     NewDeck { title: Option<String> },
     AddSlide { title: Option<String>, body: Option<String>, notes: Option<String>, after: Option<Index> },
     SetSlide { index: Index, title: Option<String>, body: Option<String>, notes: Option<String> },

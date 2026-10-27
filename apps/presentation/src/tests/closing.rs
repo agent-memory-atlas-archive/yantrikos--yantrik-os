@@ -99,7 +99,7 @@ fn nothing_the_close_does_leaves_a_dialog_or_a_question_up() {
     app.close_requested(WindowId::PRIMARY);
     app.run_writes();
     assert!(state(&app).get("prompt_open").is_none(), "there is no prompt to be open");
-    assert_eq!(file(&draft_file(&app)).contains("\"a\""), true);
+    assert!(file(&draft_file(&app)).contains("\"a\""));
     act(&app, "show", super::none()).ok();
 }
 

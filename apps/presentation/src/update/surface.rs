@@ -29,7 +29,7 @@ pub fn act(m: &mut Model, fx: &mut Effects<YPresent>, act: Act, caller: Caller) 
         Act::Open { path } => open(m, fx, &path, caller),
         Act::Show => show(m, caller),
         Act::Save => save(m, fx, caller),
-        Act::SaveAs { path } => save_as(m, fx, &path, caller),
+        Act::SaveAs { path, overwrite } => save_as(m, fx, &path, overwrite, caller),
         Act::NewDeck { title } => new_deck(m, fx, title, caller),
         Act::AddSlide { title, body, notes, after } => add_slide(m, caller, title, body, notes, after),
         Act::SetSlide { index, title, body, notes } => set_slide(m, caller, index, title, body, notes),
@@ -145,12 +145,12 @@ fn save(m: &mut Model, fx: &mut Effects<YPresent>, caller: Caller) -> Done {
 }
 
 /// `save_as`: the deck written to this path, and kept there from then on.
-fn save_as(m: &mut Model, fx: &mut Effects<YPresent>, path: &str, caller: Caller) -> Done {
+fn save_as(m: &mut Model, fx: &mut Effects<YPresent>, path: &str, overwrite: bool, caller: Caller) -> Done {
     // The content written is the deck's: saving one the person opened from outside the home into
     // the home would put it where `describe` reads it back.
     not_hidden(m, caller)?;
     let target = path_arg(path)?;
-    saving::start(m, fx, Target::Path(target), false, AfterSave::SaveAs(caller), caller.agent);
+    saving::start(m, fx, Target::Path(target), overwrite, AfterSave::SaveAs(caller), caller.agent);
     Ok(None)
 }
 
