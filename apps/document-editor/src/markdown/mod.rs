@@ -5,6 +5,8 @@
 mod export;
 mod find;
 mod format;
+#[cfg(test)]
+mod tests;
 
 pub use export::to_html;
 pub use find::{matches, replace, replace_all};

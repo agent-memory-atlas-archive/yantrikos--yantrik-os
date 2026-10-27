@@ -11370,18 +11370,6 @@ name = "yantrik-design-tokens"
 version = "0.1.0"
 
 [[package]]
-name = "yantrik-document-core-tests"
-version = "0.1.0"
-dependencies = [
- "libc",
- "pulldown-cmark",
- "regex",
- "serde",
- "serde_json",
- "yantrik-file-follow",
-]
-
-[[package]]
 name = "yantrik-document-editor"
 version = "0.1.0"
 dependencies = [

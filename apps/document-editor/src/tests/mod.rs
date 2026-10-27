@@ -15,6 +15,7 @@ use crate::YDoc;
 mod agents;
 mod answers;
 mod closing;
+mod files;
 mod launch;
 mod lingering;
 mod outside;
