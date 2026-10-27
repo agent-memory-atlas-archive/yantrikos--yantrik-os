@@ -14,9 +14,12 @@ pub struct Caller {
 }
 
 impl Caller {
-    /// The call being dispatched on this thread. Outside a dispatch it is the person.
+    /// The call being dispatched on this thread. Outside a dispatch it is the person, and so is
+    /// the rail's Replace: it rides the agent path for the gate's sake (private mode, the ceiling)
+    /// but it is the person's press on the person's own document. Agents over the socket are not
+    /// helped by it: only the core sets the mark.
     pub fn now() -> Caller {
-        Caller { agent: control::agent_is_calling() }
+        Caller { agent: control::agent_is_calling() && !yantrik_app::rail::is_person_applying() }
     }
 
     /// The person at the window: buttons, keys, a launch.

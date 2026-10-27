@@ -152,3 +152,34 @@ fn what_the_mind_remembers_about_the_title_is_added_to_the_rail_once_the_title_s
     });
     assert!(rows.contains(&("memory:r1".into(), "Friday launch".into(), "90% match".into())), "{rows:?}");
 }
+
+#[test]
+fn the_persons_replace_works_on_a_document_agents_are_not_shown_and_an_agent_still_is_refused() {
+    let (app, _) = start(FakeMind::new().answering("# Plan
+
+Ship Friday.
+"));
+    ready(&app);
+    let path = super::scratch("rail-hidden").join("outside.md");
+    super::opened(&app, &path, DOC);
+    if !app.model(|m| m.doc.hidden) {
+        return; // A temp folder inside the home is shown to agents and proves nothing here.
+    }
+    app.run(Command::Rail(RailCommand::Activate("tighten".into())));
+    settle(&app);
+    assert_eq!(card(&app).1, "Replace");
+    app.run(Command::Rail(RailCommand::Apply));
+    settle(&app);
+    assert_eq!(text(&app), "# Plan
+
+Ship Friday.
+", "the person's press replaced it: {}", super::notice(&app));
+    assert!(modified(&app));
+    // Presenting the rail's own token over the socket is an agent's call, and is refused.
+    let err = super::act_as_agent(&app, "rail", "set_content", json!({ "text": "x" })).unwrap_err();
+    assert!(err.ends_with(crate::agent_rule::HIDDEN_REFUSAL), "{err}");
+    assert_eq!(text(&app), "# Plan
+
+Ship Friday.
+");
+}
