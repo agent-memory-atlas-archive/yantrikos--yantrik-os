@@ -130,3 +130,19 @@ fn a_save_pressed_while_a_reread_is_pending_does_not_strand_a_clean_document_in_
     assert!(!notice(&app).contains("unsaved changes"), "{}", notice(&app));
     act(&app, "save", none()).expect("a clean document that followed the file saves");
 }
+
+/// A re-read of the previous file that lands after another document opened is that file's, not
+/// this one's: dropped, so the window never shows A's text as B's, clean, with a false notice.
+#[test]
+fn a_late_reread_of_the_previous_file_does_not_land_on_the_one_opened_since() {
+    let (app, a) = with_file("late-reread", "A content\n");
+    let b = a.with_file_name("b.md");
+    super::opened(&app, &b, "B content\n");
+    let late = crate::files::open::described(a.clone(), "A written outside\n".into());
+    app.run(crate::command::Command::Reread { from: a, result: Ok(late) });
+    settle(&app);
+    assert_eq!((path_of(&app), text(&app)), (Some(b.clone()), "B content\n".into()));
+    assert!(!notice(&app).contains("changed outside"), "{}", notice(&app));
+    act(&app, "save", none()).expect("B saves: nothing was taken for it");
+    assert_eq!(file(&b), "B content\n");
+}

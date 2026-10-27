@@ -57,7 +57,8 @@ pub enum Command {
     SaveLanded { seq: u64, then: AfterSave, result: Result<Box<Wrote>, Box<SaveFailed>> },
     Exported { then: AfterExport, html: bool, result: Result<Box<Wrote>, Box<SaveFailed>> },
     /// The document, with nothing unsaved, read again after another program changed its file.
-    Reread { seq: u64, result: Result<Opened, String> },
+    /// `from` is the file that was read; a result for a file no longer open is dropped.
+    Reread { from: PathBuf, result: Result<Opened, String> },
     /// Where the document's file went after it was found gone; `None` when nothing was found.
     Located { from: PathBuf, found: Option<Opened> },
     /// The old build's recovery file was set aside once its draft was the lane's.

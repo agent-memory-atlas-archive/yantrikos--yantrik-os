@@ -14,7 +14,10 @@
 //!
 //! TODO(#951): when the window is drawn for a Mind (`Model::for_mind`), the headings and the card
 //! carry document text. Mask them with the shared helper once #951 lands; until then the memory
-//! rows are not asked for in Mind View (update/memory.rs) and nothing else is hidden.
+//! rows are not asked for in Mind View (update/memory.rs) and nothing else is hidden. The same
+//! follow-up must stop the rail's apply passing as the person's press in a Mind's window: the core
+//! marks it `is_person_applying` without looking at `Boot::for_mind` (cx/rail_hooks.rs), so either
+//! the core skips the mark there or yDoc refuses `RailCommand::Apply` and `Activate` in Mind View.
 
 use serde_json::json;
 use yantrik_app::effects::Effects;

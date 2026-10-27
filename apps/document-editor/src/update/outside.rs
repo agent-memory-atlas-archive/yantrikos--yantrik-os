@@ -37,12 +37,11 @@ pub fn seen(m: &mut Model, fx: &mut Effects<YDoc>, key: &str, seen: Observed) {
     if let Some((key, path, seen)) = d.rewatch() {
         fx.watch(&key, path, seen);
     }
-    let (seq, path) = (d.seq, d.source.path().map(PathBuf::from));
-    let Some(path) = path else { return };
+    let Some(path) = d.source.path().map(PathBuf::from) else { return };
     match after {
         OutsideState::Changed { .. } => {
-            let lost = Command::Reread { seq, result: Err("the file could not be read".into()) };
-            fx.spawn_or(lost, move |_| Command::Reread { seq, result: read_text(&path).map(|text| described(path, text)) });
+            let lost = Command::Reread { from: path.clone(), result: Err("the file could not be read".into()) };
+            fx.spawn_or(lost, move |_| Command::Reread { from: path.clone(), result: read_text(&path).map(|text| described(path, text)) });
         }
         OutsideState::Conflict { .. } if !matches!(before, OutsideState::Conflict { .. }) => {
             m.notice.set_about(hidden, conflict(&title), || conflict(HIDDEN));
@@ -68,7 +67,12 @@ pub fn conflict(title: &str) -> String {
 }
 
 /// The document, with nothing unsaved, read again after another program changed its file.
-pub fn reread(m: &mut Model, fx: &mut Effects<YDoc>, seq: u64, result: Result<Opened, String>) {
+pub fn reread(m: &mut Model, fx: &mut Effects<YDoc>, from: PathBuf, result: Result<Opened, String>) {
+    // Read for a file that is no longer the one open (another document opened before it landed):
+    // its text is not this document's, and labelling it so would show a clean document that is not.
+    if m.path() != Some(from.as_path()) {
+        return;
+    }
     // A save went out meanwhile: its own check against the file decides, and its landing is the
     // one the document expects. The re-read is set aside, and the save's landing takes the change
     // up again (`after_save`), so it is never left unsaid.
@@ -80,7 +84,6 @@ pub fn reread(m: &mut Model, fx: &mut Effects<YDoc>, seq: u64, result: Result<Op
     // Unsaved text is what a re-read must not replace. How many edits the document has had since
     // is not: an earlier re-read that landed first, or text typed and typed back, leaves nothing
     // here to lose, and counting those made a clean document a false conflict.
-    let _ = seq;
     let edited = m.text_unsaved();
     // Typed in meanwhile, or the file is no longer a document: the person's text stays, and no
     // save writes over the other version.
@@ -141,7 +144,7 @@ pub fn after_save(m: &mut Model, fx: &mut Effects<YDoc>, saved: bool) {
     if let Some((key, path, seen)) = d.watch_entry() {
         fx.watch(&key, path, seen);
     }
-    let (seq, path) = (d.seq, d.source.path().map(PathBuf::from));
+    let path = d.source.path().map(PathBuf::from);
     if modified {
         d.outside = OutsideState::Conflict { now: None };
         let failed = (m.notice.window().to_string(), m.notice.read(true).to_string());
@@ -151,8 +154,8 @@ pub fn after_save(m: &mut Model, fx: &mut Effects<YDoc>, saved: bool) {
         return;
     }
     let Some(path) = path else { return };
-    let lost = Command::Reread { seq, result: Err("the file could not be read".into()) };
-    fx.spawn_or(lost, move |_| Command::Reread { seq, result: read_text(&path).map(|text| described(path, text)) });
+    let lost = Command::Reread { from: path.clone(), result: Err("the file could not be read".into()) };
+    fx.spawn_or(lost, move |_| Command::Reread { from: path.clone(), result: read_text(&path).map(|text| described(path, text)) });
 }
 
 /// Where the document's file went, after the watch found it gone.

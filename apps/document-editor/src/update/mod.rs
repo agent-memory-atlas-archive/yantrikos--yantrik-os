@@ -84,7 +84,7 @@ fn dispatch(m: &mut Model, fx: &mut Effects<YDoc>, command: Command) {
         Command::Opened { then, result } => opening::landed(m, fx, then, result),
         Command::SaveLanded { seq, then, result } => saving::landed(m, fx, seq, then, result),
         Command::Exported { then, html, result } => saving::exported(m, fx, then, html, result),
-        Command::Reread { seq, result } => outside::reread(m, fx, seq, result),
+        Command::Reread { from, result } => outside::reread(m, fx, from, result),
         Command::Located { from, found } => outside::located(m, fx, from, found),
         Command::LegacyArchived(result) => drafts::legacy_archived(m, result),
         #[cfg(test)]
