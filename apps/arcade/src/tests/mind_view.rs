@@ -23,14 +23,26 @@ fn the_windows_buttons_and_editor_are_read_only_to_a_mind() {
     seeded(&f);
     let app = start_for_mind(f.paths.clone());
     app.ui(|ui| ui.set_game_name("meadow-run".into()));
+    let notice = |app: &TestApp<Arcade>| app.ui(|ui| ui.get_notice().to_string());
     for id in ["delete", "build", "new-game", "play"] {
-        app.run(crate::Command::Button(id.into()));
-        assert_eq!(app.last_refusal().map(|r| r.sentence), Some(READ_ONLY.to_string()), "{id}");
+        app.ui(|ui| ui.set_notice("".into()));
+        app.ui(move |ui| ui.invoke_action(id.into()));
+        app.tick();
+        assert_eq!(notice(&app), READ_ONLY, "{id}: the window says so");
     }
-    app.run(crate::Command::SpecEdited("{}".into()));
-    assert_eq!(app.last_refusal().map(|r| r.sentence), Some(READ_ONLY.to_string()));
-    app.run(crate::Command::PickCharacter("pip".into()));
-    assert_eq!(app.last_refusal().map(|r| r.sentence), Some(READ_ONLY.to_string()));
+    // A typed edit is refused and does not stay in the field: it is drawn again from the model.
+    app.ui(|ui| {
+        ui.set_spec_text("typed by a mind".into());
+        ui.invoke_spec_edited("typed by a mind".into());
+    });
+    app.tick();
+    assert_eq!(app.ui(|ui| ui.get_spec_text().to_string()), "", "the refused text is gone from the field");
+    assert_eq!(notice(&app), READ_ONLY);
+    app.ui(|ui| ui.set_notice("".into()));
+    app.ui(|ui| ui.invoke_pick_character("pip".into()));
+    app.tick();
+    assert_eq!(notice(&app), READ_ONLY);
+    assert_eq!(app.ui(|ui| ui.get_spec_text().to_string()), "");
     assert!(f.library().game_dir("meadow-run").exists(), "the game is where it was");
 }
 

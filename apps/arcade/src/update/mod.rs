@@ -37,7 +37,14 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refuse
     }
     // In a copy drawn for a Mind the window is read-only: its buttons run as the person, with no
     // consent card, so the Mind goes through the intents, which are graded.
-    for_mind::refuse_if(m.for_mind, matches!(command, Command::Button(_) | Command::SpecEdited(_) | Command::PickCharacter(_)))?;
+    if let Err(refused) = for_mind::refuse_if(m.for_mind, matches!(command, Command::Button(_) | Command::SpecEdited(_) | Command::PickCharacter(_))) {
+        // Said in the window, and the fields drawn again from the model, so a refused edit does
+        // not stay in the field as if it had been taken.
+        m.notice = refused.sentence;
+        fx.changed(PART_NOTICE);
+        fx.changed(PART_EDITOR);
+        return Ok(());
+    }
     match command {
         Command::Button(id) => button(m, fx, &id),
         Command::Run(request) => return begin(m, fx, request, false),

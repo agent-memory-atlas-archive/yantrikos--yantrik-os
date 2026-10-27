@@ -5,7 +5,7 @@ import { AppIdentity } from "app_color.slint";
 import { AppHeader } from "app_header.slint";
 import { YButton } from "y_button.slint";
 import { Icons } from "icon.slint";
-import { ScrollView, TextEdit, LineEdit } from "std-widgets.slint";
+import { ScrollView } from "std-widgets.slint";
 export { ThemeMode, AccentPreset }
 
 export struct GameRow { slug:string, title:string, detail:string, selected:bool }
@@ -134,13 +134,31 @@ export component ArcadeApp inherits AppWindow {
                         text: "SPEC — a character or a game, as JSON";
                         color: Theme.text-dim; font-size: Theme.fs-caption; font-weight: 600; letter-spacing: 1.6px; height: 16px;
                     }
-                    TextEdit {
-                        text <=> root.spec-text;
-                        edited(text) => { root.spec-edited(text); }
+                    // The editor is a TextInput in the theme's own colours: the stock TextEdit takes its
+                    // text colour from the style's palette, which does not follow the theme, and was
+                    // near-invisible in the light theme once it lost focus.
+                    Rectangle {
                         vertical-stretch: 1;
-                        wrap: no-wrap;
-                        font-family: Theme.font-mono;
-                        font-size: 12px;
+                        background: Theme.bg-input;
+                        border-radius: 6px;
+                        border-width: 1px;
+                        border-color: spec-input.has-focus ? Theme.focus-ring : Theme.border-default;
+                        clip: true;
+                        spec-scroll := ScrollView {
+                            spec-input := TextInput {
+                                min-width: spec-scroll.visible-width;
+                                min-height: spec-scroll.visible-height;
+                                text <=> root.spec-text;
+                                edited => { root.spec-edited(self.text); }
+                                color: Theme.text-primary;
+                                wrap: no-wrap;
+                                single-line: false;
+                                font-family: Theme.font-mono;
+                                font-size: 12px;
+                                accessible-role: text-input;
+                                accessible-label: "Spec, a character or a game as JSON";
+                            }
+                        }
                     }
                     HorizontalLayout {
                         spacing: 8px;
@@ -154,11 +172,34 @@ export component ArcadeApp inherits AppWindow {
                         Text {
                             text: "Selected game:"; color: Theme.text-dim; font-size: 12px; vertical-alignment: center;
                         }
-                        LineEdit {
-                            text <=> root.game-name;
-                            edited(text) => { root.game-edited(text); }
-                            placeholder-text: "The game's title";
+                        Rectangle {
                             width: 220px;
+                            height: 32px;
+                            background: Theme.bg-input;
+                            border-radius: 6px;
+                            border-width: 1px;
+                            border-color: game-input.has-focus ? Theme.focus-ring : Theme.border-default;
+                            game-input := TextInput {
+                                x: 10px;
+                                width: parent.width - 20px;
+                                height: parent.height;
+                                vertical-alignment: center;
+                                text <=> root.game-name;
+                                edited => { root.game-edited(self.text); }
+                                color: Theme.text-primary;
+                                font-size: 13px;
+                                single-line: true;
+                                accessible-role: text-input;
+                                accessible-label: "The selected game's title";
+                            }
+                            if game-input.text == "" : Text {
+                                x: 10px;
+                                text: "The game's title";
+                                color: Theme.text-dim;
+                                font-size: 13px;
+                                vertical-alignment: center;
+                                height: parent.height;
+                            }
                         }
                         Rectangle { horizontal-stretch: 1; }
                     }

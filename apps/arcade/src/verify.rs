@@ -38,7 +38,7 @@
 //! gate sequence against a fake CDP server — no browser, no display, no luck.
 
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -47,6 +47,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tungstenite::protocol::Message;
 use tungstenite::WebSocket;
+
+use crate::browser::Headless;
 
 /// Average frame-time ceiling in milliseconds, measured by the engine over its
 /// last 90 frames. Clearing this under software rendering is a real pass — any
@@ -298,23 +300,6 @@ pub fn chrome_binary() -> Option<PathBuf> {
 
 // ── Headless launch ────────────────────────────────────────────────
 
-pub struct Headless {
-    child: Child,
-    pub ws_url: String,
-    pub browser: String,
-    profile: PathBuf,
-}
-
-impl Drop for Headless {
-    fn drop(&mut self) {
-        // Off the list before the reap: a reaped pid can be reused, and kill_live must not hit it.
-        crate::browser::forget(self.child.id());
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        let _ = std::fs::remove_dir_all(&self.profile);
-    }
-}
-
 /// Launch a headless Chromium showing the given file, and find its page target.
 pub fn launch_headless(html: &Path) -> Result<Headless, String> {
     let binary = chrome_binary().ok_or_else(|| {
@@ -326,33 +311,7 @@ pub fn launch_headless(html: &Path) -> Result<Headless, String> {
 
     let profile = crate::browser::new_profile()?;
 
-    let mut command = Command::new(&binary);
-    command
-        // Software rendering: WSL here has no GPU path for headless Chromium.
-        .args([
-            "--headless=new",
-            "--use-gl=angle",
-            "--use-angle=swiftshader",
-            "--enable-unsafe-swiftshader",
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--mute-audio",
-            "--hide-scrollbars",
-            "--window-size=1280,720",
-            "--remote-debugging-port=0",
-        ])
-        .arg(format!("--user-data-dir={}", profile.display()))
-        .arg(&url)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    crate::browser::die_with_parent(&mut command);
-    let child = command.spawn().map_err(|e| {
-        let _ = std::fs::remove_dir_all(&profile);
-        format!("cannot start {}: {e}", binary.display())
-    })?;
-    crate::browser::register(child.id());
-
-    let mut headless = Headless { child, ws_url: String::new(), browser: binary.display().to_string(), profile: profile.clone() };
+    let mut headless = Headless::start(&binary, &url, &profile)?;
 
     // The port lands in DevToolsActivePort once the debugger is up.
     let port_file = profile.join("DevToolsActivePort");

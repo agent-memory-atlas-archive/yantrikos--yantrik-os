@@ -148,7 +148,7 @@ fn a_browser_job_is_not_started_once_the_app_is_ending() {
 fn a_logout_stops_a_browser_that_is_still_running() {
     let f = open();
     let mut browser = std::process::Command::new("sleep").arg("60").spawn().unwrap();
-    crate::browser::register(browser.id());
+    crate::browser::register(browser.id(), &std::env::temp_dir().join("arcade-nonexistent-profile"));
     // Only this child is checked: the list of live browsers is shared by every test that ends an app.
     f.app.display_gone();
     f.quiet();

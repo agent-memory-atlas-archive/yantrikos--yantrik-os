@@ -36,6 +36,7 @@ mod order;
 mod parity;
 mod private_mode;
 mod rest;
+mod window;
 
 /// The token an agent's calls carry here.
 pub(crate) const AGENT: &str = "tok-test-agent";
