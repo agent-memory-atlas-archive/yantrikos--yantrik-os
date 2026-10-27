@@ -26,8 +26,11 @@ fn mask(pid: u32, field: &str) -> u64 {
     u64::from_str_radix(line.trim(), 16).unwrap()
 }
 
-/// The open descriptors of a process: number, where it points, and the file's identity.
-fn open_files(pid: u32) -> Vec<(u32, PathBuf, Option<(u64, u64)>)> {
+/// One open descriptor: its number, where it points, and the file's identity (device, inode).
+type Open = (u32, PathBuf, Option<(u64, u64)>);
+
+/// The open descriptors of a process.
+fn open_files(pid: u32) -> Vec<Open> {
     let mut files: Vec<_> = std::fs::read_dir(format!("/proc/{pid}/fd"))
         .unwrap()
         .flatten()
