@@ -260,7 +260,9 @@ fn save_then(m: &mut Model, fx: &mut Effects<Notes>, step: Step) {
 fn open_text(m: &mut Model, fx: &mut Effects<Notes>) -> Option<String> {
     let refusal = match m.current() {
         None => "No note is open. Open one with `open_note`, or make one with `new_note`.",
-        Some(c) if c.trash() => "The open note is in the Trash and cannot be edited; `restore` puts it back first.",
+        // Not "restore it first": a model told that restores and edits in one turn, taking a note
+        // out of the Trash the person put it in without asking them.
+        Some(c) if c.trash() => "The open note is in the Trash and cannot be edited. Ask the person before restoring it.",
         Some(c) => return Some(c.text().to_string()),
     };
     refuse(m, fx, refusal.into());

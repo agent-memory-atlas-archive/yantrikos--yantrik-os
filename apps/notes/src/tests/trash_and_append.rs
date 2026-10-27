@@ -83,3 +83,15 @@ fn the_trash_is_opt_in_by_its_own_id() {
     assert_eq!(state(&app)["trashed_note_open"], true);
     assert!(open_text(&app).contains("old"));
 }
+
+/// An edit of a trashed note leaves restoring to the person: a model told "restore it first"
+/// restores and edits in one turn.
+#[test]
+fn editing_a_trashed_note_says_to_ask_the_person_before_restoring_it() {
+    let app = socks(None);
+    let id = app.model(|m| m.library.iter().find(|n| n.trash).unwrap().id.clone());
+    act(&app, "open_note", json!({ "title": format!("trash:{id}") })).unwrap();
+    let refused = act(&app, "append", json!({ "text": "- more" })).unwrap_err();
+    assert_eq!(refused, "The open note is in the Trash and cannot be edited. Ask the person before restoring it.");
+    assert!(open_text(&app).contains("old") && !open_text(&app).contains("more"));
+}
