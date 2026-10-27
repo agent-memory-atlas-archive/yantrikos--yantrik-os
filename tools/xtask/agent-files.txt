@@ -42,7 +42,7 @@ apps/studio/src/main.rs open path apps/studio/src/agent_rule.rs
 apps/studio/src/main.rs variations of apps/studio/src/agent_rule.rs
 apps/studio/src/main.rs set_backend workflow apps/studio/src/agent_rule.rs
 apps/studio/src/main.rs delete path - moves only Studio's own pictures, inside its gallery (`Engine::resolve(_, true)`), whoever asks
-apps/terminal/src/main.rs open_directory directory - a shell's working directory, graded sensitive: the shell it starts reaches any file the person can, as `run` does
+apps/terminal/src/intents.rs open_directory directory - a shell's working directory, graded sensitive: the shell it starts reaches any file the person can, as `run` does
 apps/text-editor/src/intents/documents.rs open path apps/text-editor/src/agent_rule.rs
 apps/text-editor/src/intents/documents.rs save_as path apps/text-editor/src/agent_rule.rs
 crates/yantrik-ui/src/control.rs report_problem record - names one of the shell's own problem records (`wire/problem_report.rs`), never a path

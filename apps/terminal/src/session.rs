@@ -241,6 +241,18 @@ impl Session {
                 let _ = child.kill();
                 status = child.wait().ok();
             }
+            // A close or a logout leaves nothing of the session running. What ignored the hangup
+            // (a job that traps SIGHUP) is killed now that the shell is reaped, in the two
+            // groups the session had: the job that was in front and the shell's own.
+            if shared.closing.load(Ordering::Acquire) {
+                for group in [foreground, pid as i32] {
+                    // `kill(-group, 0)` is true only while the group still has a member, so a
+                    // group that is gone is never signalled.
+                    if group > 0 && group != unsafe { libc::getpgrp() } && unsafe { libc::kill(-group, 0) } == 0 {
+                        unsafe { libc::kill(-group, libc::SIGKILL) };
+                    }
+                }
+            }
             *shared.exit.lock().unwrap() = status.and_then(|s| s.code());
             shared.alive.store(false, Ordering::Release);
             shared.revision.fetch_add(1, Ordering::Release);
@@ -303,9 +315,20 @@ impl Session {
     pub fn clear_error(&self) {
         *self.state.error.lock().unwrap() = None;
     }
-    pub fn shutdown(mut self) {
+    /// Ask the session to end: its worker sends SIGHUP to the foreground job and the shell's
+    /// group, waits a moment, then SIGKILL, and reaps the shell. Returns at once; `alive()` is
+    /// false when the worker is done, and the notify closure is called then.
+    pub fn hang_up(&self) {
         self.state.closing.store(true, Ordering::Release);
         let _ = (&self.wake).write(&[1]);
+    }
+    /// The last thing the session had to say about its input, until it is cleared.
+    pub fn error(&self) -> Option<String> {
+        self.state.error.lock().unwrap().clone()
+    }
+    /// [`Session::hang_up`], then wait for the worker. For a test and for code that may block.
+    pub fn shutdown(mut self) {
+        self.hang_up();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -326,6 +349,11 @@ impl Session {
             .unwrap()
             .screen()
             .application_cursor()
+    }
+    /// How far back the view is scrolled, and the screen's size as (rows, columns).
+    pub fn geometry(&self) -> (usize, (u16, u16)) {
+        let parser = self.state.parser.lock().unwrap();
+        (parser.screen().scrollback(), parser.screen().size())
     }
     pub fn set_scrollback(&self, offset: usize) {
         self.state
@@ -431,8 +459,7 @@ impl Session {
 }
 impl Drop for Session {
     fn drop(&mut self) {
-        self.state.closing.store(true, Ordering::Release);
-        let _ = (&self.wake).write(&[1]);
+        self.hang_up();
     }
 }
 fn dimensions(rows: u16, cols: u16) -> (u16, u16) {
@@ -474,89 +501,5 @@ fn color(value: vt100::Color, default: (u8, u8, u8)) -> (u8, u8, u8) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::{Duration, Instant};
-    fn wait(mut condition: impl FnMut() -> bool) {
-        let until = Instant::now() + Duration::from_secs(5);
-        while !condition() {
-            assert!(Instant::now() < until, "PTY condition timed out");
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
-    fn session() -> Session {
-        Session::spawn_shell(
-            "/bin/sh",
-            &["-i"],
-            Path::new("/tmp"),
-            24,
-            80,
-            Arc::new(|| {}),
-        )
-        .unwrap()
-    }
-    #[test]
-    fn persistent_shell_and_interactive_input() {
-        let s = session();
-        s.write(b"export YANTRIK_TEST=retained; cd /; printf 'READY:%s\\n' \"$YANTRIK_TEST\"\n")
-            .unwrap();
-        wait(|| s.snapshot().text.contains("READY:retained"));
-        s.write(b"printf 'STATE:%s:%s\\n' \"$PWD\" \"$YANTRIK_TEST\"\n")
-            .unwrap();
-        wait(|| s.snapshot().text.contains("STATE:/:retained"));
-        s.write(b"read answer; printf 'ANSWER:%s\\n' \"$answer\"\n")
-            .unwrap();
-        s.write(b"interactive\n").unwrap();
-        wait(|| s.snapshot().text.contains("ANSWER:interactive"));
-        assert_eq!(s.cwd(), Path::new("/"));
-    }
-    #[test]
-    fn interrupt_resize_ansi_and_exit() {
-        let s = session();
-        s.resize(30, 100).unwrap();
-        wait(|| s.snapshot().size == (30, 100));
-        s.write(b"stty size; printf '\\033[31mRED_OK\\033[0m\\n'; sleep 30\n")
-            .unwrap();
-        wait(|| {
-            s.snapshot().text.contains("30 100")
-                && s.snapshot().runs.iter().any(|r| {
-                    r.text.contains("RED_OK") && r.fg == color(vt100::Color::Idx(1), (0, 0, 0))
-                })
-        });
-        wait(|| s.has_children());
-        s.write(b"\x03").unwrap();
-        wait(|| !s.has_children());
-        s.write(b"printf 'INTERRUPTED_OK\\n'\n").unwrap();
-        wait(|| {
-            s.snapshot()
-                .text
-                .lines()
-                .any(|l| l.trim() == "INTERRUPTED_OK")
-        });
-        s.write(b"exit 7\n").unwrap();
-        wait(|| !s.alive());
-        assert_eq!(s.snapshot().exit, Some(7));
-        assert!(s.write(b"x").is_err());
-    }
-    #[test]
-    fn bounded_history_independent_tabs_and_cleanup() {
-        let s = session();
-        let other = session();
-        s.write(
-            b"i=0; while [ $i -lt 1200 ]; do echo line-$i; i=$((i+1)); done; echo HISTORY_DONE\n",
-        )
-        .unwrap();
-        wait(|| s.snapshot().text.lines().any(|line| line == "HISTORY_DONE"));
-        let history = s.history();
-        assert!(history.len() <= HISTORY_LINES + 24);
-        assert!(history.iter().any(|l| l == "line-1199"));
-        assert!(!other.snapshot().text.contains("line-1199"));
-        s.set_scrollback(100);
-        assert_eq!(s.snapshot().scrollback, 100);
-        assert!(!s.snapshot().cursor_visible);
-        let pid = s.pid();
-        drop(s);
-        wait(|| !Path::new(&format!("/proc/{pid}")).exists());
-        assert!(other.alive());
-    }
-}
+#[path = "session_tests.rs"]
+mod tests;
