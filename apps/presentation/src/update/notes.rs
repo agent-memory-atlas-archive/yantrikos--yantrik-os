@@ -45,7 +45,7 @@ pub fn ask(m: &mut Model, fx: &mut Effects<YPresent>, canvas: &Edits) {
     }
     // What the person sees is what is asked about, and is in the deck before it goes.
     slides::typed(m, canvas);
-    let asked = NotesAsk { index: m.deck().current(), title: canvas.title.clone(), body: canvas.body.clone() };
+    let asked = NotesAsk { doc: m.doc.id, index: m.deck().current(), title: canvas.title.clone(), body: canvas.body.clone() };
     say(m, ASKING);
     m.asking = Some(asked.clone());
     let (mind, ask_text) = (m.mind.clone(), prompt(&asked.title, &asked.body));
@@ -62,6 +62,9 @@ pub fn written(m: &mut Model, ask: NotesAsk, result: Result<String, String>) {
         return;
     }
     m.asking = None;
+    if ask.doc != m.doc.id {
+        return;
+    }
     let text = match result {
         Ok(text) => text,
         Err(why) => return say(m, why),

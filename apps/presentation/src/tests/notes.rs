@@ -114,3 +114,20 @@ fn a_mind_that_cannot_answer_is_said_and_the_slide_is_left_alone() {
     press(&app, WindowAction::GenerateNotes);
     assert_eq!(mind.prompts().len(), 2);
 }
+
+#[test]
+fn an_answer_for_a_deck_that_was_replaced_is_not_written_into_the_next_one() {
+    let mind = Arc::new(FakeMind::new().answering("For the old deck."));
+    let app = asked(&mind);
+    // A saved deck, so replacing it needs no write of its own first.
+    let path = super::scratch("notes-replaced").join("talk.ydeck");
+    act(&app, "save_as", json!({ "path": path.display().to_string() })).unwrap();
+    let canvas_now = canvas(&app);
+    app.run(crate::command::Command::Window { action: WindowAction::GenerateNotes, canvas: canvas_now });
+    // Before the answer, the deck is replaced by a blank one whose first slide reads the same.
+    act(&app, "new_deck", json!({ "title": "Second" })).unwrap();
+    act(&app, "set_slide", json!({ "index": 0, "title": "Why now", "body": "Costs fell by half" })).unwrap();
+    settle(&app);
+    assert_eq!(notes_of(&app, 0), "");
+    assert!(app.model(|m| m.asking.is_none()));
+}

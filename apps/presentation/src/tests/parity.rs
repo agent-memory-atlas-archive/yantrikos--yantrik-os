@@ -1,8 +1,8 @@
 //! The parity pin: the action table and `describe` exactly as yPresent published them before the
 //! framework. The table below was extracted mechanically from the old
-//! `apps/presentation/src/main.rs` at origin/main (`publish_control`'s `Action::new` chains, by
-//! scratchpad/presentation/extract_golden.py), not copied by hand from the new one, so a word
-//! changed in `intents.rs` fails here.
+//! `apps/presentation/src/main.rs` at 4e24dff7 (`publish_control`'s `Action::new` chains: name,
+//! description, `.risk`, and each `.arg(Param::…)` with its `.describe` and `.optional`), not copied
+//! by hand from the new one, so a word changed in `intents.rs` fails here.
 //!
 //! One name is not the old one: `present`, which the framework reserves for the desktop's own
 //! hand-over (`yantrik_app::intents::RESERVED`). It is `presenter_view` now, with the same

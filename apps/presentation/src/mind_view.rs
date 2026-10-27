@@ -4,7 +4,9 @@
 //! The window shows the framework's one sentence (`yantrik_app::for_mind::HIDDEN`) where a deck's
 //! text would be: every slide's title, body and notes, on the canvas, in the rail's thumbnails and
 //! on the presenter view's next-slide card. The deck's name, its file, its slide count and the
-//! position stay, since the Mind reads them through `describe` anyway. The canvas takes no typing,
+//! position stay for a deck an agent may be shown, since the Mind reads them through `describe`
+//! anyway; for a deck it is not shown, the name and file are `(hidden)` here too and the notice is
+//! the form an agent reads. The canvas takes no typing,
 //! a search finds nothing, and what would change the deck or read or write a file through the
 //! window is refused ([`refuses`]).
 //!

@@ -92,8 +92,9 @@ fn held_aside(m: &mut Model, lane: &[Back], old: &OldFile, unreadable: usize) ->
     if !lane.is_empty() || unreadable > 0 {
         places.push(m.state_dir.join(yantrik_app::drafts::DIR));
     }
+    let mut unreadable_old = None;
     match old {
-        OldFile::Unreadable(why) => return why.clone(),
+        OldFile::Unreadable(why) => unreadable_old = Some(why.clone()),
         OldFile::Found(deck) => {
             if !in_lane(lane, &from_legacy(deck.clone())) {
                 places.push(m.state_dir.join(legacy::NAME));
@@ -101,15 +102,21 @@ fn held_aside(m: &mut Model, lane: &[Back], old: &OldFile, unreadable: usize) ->
         }
         OldFile::Absent => {}
     }
-    if places.is_empty() {
+    if places.is_empty() && unreadable_old.is_none() {
         return String::new();
     }
     let places: Vec<String> = places.iter().map(|p| p.display().to_string()).collect();
-    let said = format!(
-        "An unsaved draft from a previous session is waiting in {}. It was left alone; open yPresent with no file to \
-         pick it up.",
-        places.join(" and in ")
-    );
+    let mut said = match places.is_empty() {
+        true => String::new(),
+        false => format!(
+            "An unsaved draft from a previous session is waiting in {}. It was left alone; open yPresent with no \
+             file to pick it up.",
+            places.join(" and in ")
+        ),
+    };
+    if let Some(why) = unreadable_old {
+        said = format!("{said} {why}").trim().to_string();
+    }
     m.held_aside = Some(said.clone());
     said
 }

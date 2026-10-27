@@ -198,3 +198,27 @@ fn masking_is_visual_only_describe_and_calls_are_as_for_a_normal_instance() {
 fn app_text(app: &TestApp<YPresent>) -> String {
     app.ui(|ui| ui.get_slides().row_data(0).unwrap().title.to_string())
 }
+
+#[test]
+fn a_hidden_deck_has_no_name_path_or_notice_in_a_mind_view_window() {
+    // A deck outside the home is one an agent is not shown. Its draft is kept, and a Mind's window
+    // starts on the same state.
+    let (app, path) = super::with_file("mind-hidden", &["Plain"]);
+    if path.starts_with(std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default())) {
+        return;
+    }
+    super::type_title(&app, &format!("edited {SENTINEL}"));
+    app.run_writes();
+    let paths = app.paths();
+    let _ = app.shutdown();
+    let mind = start_for_mind(paths);
+    let text = window_text(&mind);
+    let dir = path.parent().unwrap().display().to_string();
+    assert!(!text.contains(&dir) && !text.contains("talk.ydeck"), "{text}");
+    assert!(!text.contains("Talk"), "the deck's name is hidden too: {text}");
+    assert!(!text.contains(SENTINEL), "{text}");
+    assert!(text.contains(HIDDEN), "{text}");
+    assert_eq!(mind.ui(|ui| ui.get_presentation_title().to_string()), HIDDEN);
+    assert_eq!(mind.ui(|ui| ui.get_file_path().to_string()), HIDDEN);
+    assert!(!mind.ui(|ui| ui.get_notice().to_string()).contains(&dir));
+}

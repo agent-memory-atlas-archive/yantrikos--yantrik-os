@@ -12,7 +12,7 @@ use yantrik_app::documents::{Durability, Fingerprint, OutsideState, SaveError, S
 use yantrik_app::effects::Effects;
 
 use super::{closing, keep_in_step, opening, say, slides, surface};
-use crate::agent_rule::HIDDEN;
+use crate::agent_rule::{HIDDEN, HIDDEN_REFUSAL};
 use crate::command::{AfterSave, Away, Cause, Command, Next};
 use crate::deck::{encode, Content, Edits};
 use crate::files::kept;
@@ -112,10 +112,18 @@ pub fn window_save(m: &mut Model, fx: &mut Effects<YPresent>, canvas: &Edits) {
 
 /// The deck about to be replaced, written to a file of its own first.
 pub fn rescue(m: &mut Model, fx: &mut Effects<YPresent>, next: Next, then: Cause, agent: bool) {
+    // A deck with no baseline (it came back from the old build's recovery file) is not written
+    // onto its file: nothing says the file is what it was typed against.
     let target = match (m.path(), &m.d().outside) {
-        (Some(_), OutsideState::Clean | OutsideState::Changed { .. }) => Target::Own,
+        (Some(_), OutsideState::Clean | OutsideState::Changed { .. }) if m.doc.on_disk.is_some() => Target::Own,
         _ => Target::Unnamed,
     };
+    // A deck an agent is not shown is never copied somewhere it can read: the file the rule
+    // judges is the new one, not where the content came from. The deck stays in front, and its
+    // draft is kept.
+    if agent && m.doc.hidden && !matches!(target, Target::Own) {
+        return opening::refuse(m, fx, &then, HIDDEN_REFUSAL.into());
+    }
     start(m, fx, target, false, AfterSave::Rescue { next, cause: then }, agent);
 }
 
@@ -291,6 +299,12 @@ pub fn export(
     then: Cause,
     agent: bool,
 ) {
+    // A copy never replaces the document it is a copy of: a deck saved as `talk.md` has the
+    // default export's very name.
+    if m.path() == Some(target.as_path()) {
+        let sentence = "An export never replaces the deck it comes from; give it another path.";
+        return opening::refuse(m, fx, &then, sentence.into());
+    }
     let text = if extension == "md" { m.deck().to_markdown() } else { m.deck().to_outline() };
     // A copy has no home: nothing it is compared with.
     let job = SaveJob {
@@ -339,7 +353,10 @@ pub fn exported(
                     let answer = json!({ "path": path, "bytes": wrote.bytes, "slides": slides });
                     surface::answer(m, fx, answer);
                 }
-                Cause::Window | Cause::Launch => say(m, format!("Exported to {path}.")),
+                Cause::Window | Cause::Launch => {
+                    let hidden = m.doc.hidden;
+                    m.notice.set_about(hidden, format!("Exported to {path}."), || format!("Exported to {HIDDEN}."));
+                }
             }
         }
         Err(failed) => {

@@ -122,3 +122,15 @@ fn a_logout_hands_the_draft_over_in_the_command_that_answers_not_after_its_debou
     let at_once = fx.requests().iter().any(|r| matches!(r, Request::SaveDraft { delay, .. } if *delay == Duration::ZERO));
     assert!(at_once, "the process may be killed within the signal deadline, before a debounce: {names:?}");
 }
+
+#[test]
+fn a_failed_open_with_a_close_pending_leaves_the_window_open_and_says_why() {
+    let (app, _) = with_file("close-open-fails", &["One"]);
+    let missing = scratch("close-open-fails-2").join("nothing.ydeck");
+    let pending = app.act("open", json!({ "path": missing.display().to_string() })).unwrap();
+    app.close_requested(WindowId::PRIMARY);
+    settle(&app);
+    pending.settle().unwrap_err();
+    assert!(app.exit_reason().is_none(), "the window was not closed");
+    assert!(notice(&app).ends_with(crate::update::closing::NOT_CLOSED), "{}", notice(&app));
+}

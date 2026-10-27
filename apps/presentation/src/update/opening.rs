@@ -71,7 +71,11 @@ pub fn landed(m: &mut Model, fx: &mut Effects<YPresent>, then: Cause, result: Re
     m.notice.clear();
     match result {
         Ok(opened) => replace(m, fx, Next::File(opened), then),
-        Err(e) => refuse(m, fx, &then, e),
+        Err(e) => {
+            refuse(m, fx, &then, e);
+            // A close that waited on this read stays undone: the failure is what the person reads.
+            super::closing::not_closed(m);
+        }
     }
     next(m, fx);
 }
@@ -108,6 +112,8 @@ pub fn replace(m: &mut Model, fx: &mut Effects<YPresent>, next: Next, then: Caus
 /// The deck in front closed: unwatched, its draft gone, its view and the table's entry too.
 fn close_current(m: &mut Model, fx: &mut Effects<YPresent>) {
     let name = m.doc.draft.clone();
+    // Speaker notes asked of this deck are not for the next one.
+    m.asking = None;
     if let Some(d) = m.documents.close_document(m.doc.id) {
         fx.unwatch(&d.source.key());
     }
@@ -125,6 +131,9 @@ fn arrived(m: &mut Model) {
 /// `next` in front, and the call that asked for it answered from what it did.
 pub fn put_in_front(m: &mut Model, fx: &mut Effects<YPresent>, next: Next, then: Cause, rescued: Option<PathBuf>) {
     let saved_to = rescued.map(|p| p.display().to_string());
+    // Whether the deck being replaced was one an agent is not shown: the notice about where it
+    // went is read by an agent through `describe`.
+    let was_hidden = m.doc.hidden;
     match next {
         Next::Blank(title) => {
             close_current(m, fx);
@@ -178,6 +187,7 @@ pub fn put_in_front(m: &mut Model, fx: &mut Effects<YPresent>, next: Next, then:
     if let (Some(saved), Cause::Window | Cause::Launch) = (&saved_to, &then) {
         let kept = format!("The deck you were editing was saved to {saved}.");
         let held = m.notice.window().to_string();
-        m.notice.set(if held.is_empty() { kept } else { format!("{kept} {held}") });
+        let for_agents = format!("The deck you were editing was saved to {HIDDEN}.");
+        m.notice.set_about(was_hidden, if held.is_empty() { kept } else { format!("{kept} {held}") }, || for_agents);
     }
 }

@@ -139,7 +139,12 @@ fn show(m: &Model, caller: Caller) -> Done {
 /// `save`: the deck written to its file, or, for a deck with no file, to a fresh one in the
 /// default folder.
 fn save(m: &mut Model, fx: &mut Effects<YPresent>, caller: Caller) -> Done {
-    let target = if m.path().is_some() { Target::Own } else { Target::Unnamed };
+    // A deck whose file's text was never read (it came back from the old recovery file) is kept in
+    // a file of its own rather than written onto one that may have changed.
+    let target = if m.path().is_some() && m.doc.on_disk.is_some() { Target::Own } else { Target::Unnamed };
+    if caller.agent && m.doc.hidden && !matches!(target, Target::Own) {
+        return Err(HIDDEN_REFUSAL.into());
+    }
     saving::start(m, fx, target, false, AfterSave::Save(caller), caller.agent);
     Ok(None)
 }

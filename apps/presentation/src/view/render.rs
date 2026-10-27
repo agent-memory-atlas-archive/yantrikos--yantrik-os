@@ -14,7 +14,7 @@
 
 use slint::{Model as _, ModelRc, VecModel};
 use yantrik_app::app::Changed;
-use yantrik_app::for_mind::shown_if_any;
+use yantrik_app::for_mind::{shown_if_any, HIDDEN};
 use yantrik_app::rows;
 
 use crate::deck::{theme_spec, Slide, THEMES};
@@ -117,8 +117,12 @@ fn chrome(ui: &PresentationApp, m: &Model) {
     ui.set_slide_count(count as i32);
     ui.set_current_slide_index(at as i32);
     ui.set_slide_progress(format!("Slide {} of {}", at + 1, count).into());
-    ui.set_presentation_title(deck.title().into());
-    ui.set_file_path(m.path().map(|p| p.display().to_string()).unwrap_or_default().into());
+    // A deck an agent is not shown has no name or path in a Mind's window either: the Mind reads
+    // `(hidden)` for them through `describe`.
+    let concealed = m.for_mind && m.doc.hidden;
+    ui.set_presentation_title(if concealed { HIDDEN.into() } else { deck.title().into() });
+    let file = m.path().map(|p| p.display().to_string()).unwrap_or_default();
+    ui.set_file_path(if concealed && !file.is_empty() { HIDDEN.into() } else { file.into() });
     let modified = m.modified();
     ui.set_is_modified(modified);
     ui.set_save_status(
@@ -152,5 +156,6 @@ fn chrome(ui: &PresentationApp, m: &Model) {
     rows::set(ui.get_theme_swatches(), swatches, |l| ui.set_theme_swatches(l));
 
     ui.set_search_count(m.hits.len() as i32);
-    ui.set_notice(m.notice.window().into());
+    // A Mind's window draws what an agent would read of the notice, not the person's sentence.
+    ui.set_notice(if m.for_mind { m.notice.read(true) } else { m.notice.window() }.into());
 }

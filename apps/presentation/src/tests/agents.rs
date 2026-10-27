@@ -194,3 +194,81 @@ fn a_path_with_spaces_round_the_name_opens_and_writes_what_was_checked() {
     act(&app, "export_markdown", json!({ "path": format!("{} ", copy.display()) })).unwrap();
     assert!(copy.exists() && !dir.join("copy.md ").exists(), "written where it was checked");
 }
+
+/// A folder of this test's own inside the real home, for the deck folder: the agent rule judges
+/// where a file goes, so the copy must be able to land somewhere it allows.
+fn folder_in_home(name: &str) -> Option<PathBuf> {
+    let home = PathBuf::from(std::env::var_os("HOME")?);
+    let dir = home.join(format!("ypresent-test-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
+}
+
+/// A hidden deck with an unsaved edit carrying the sentinel, and the deck folder inside the home.
+fn hidden_and_unsaved(name: &str) -> Option<(TestApp<YPresent>, PathBuf, PathBuf)> {
+    let (app, path, dir) = secret_deck(name);
+    if !outside_home(&dir) {
+        return None;
+    }
+    let folder = folder_in_home(name)?;
+    app.run(crate::command::Command::UseDeckDir(folder.clone()));
+    type_title(&app, &format!("unsaved {SENTINEL}"));
+    Some((app, path, folder))
+}
+
+/// An agent may not move a deck it is not shown into the home by replacing it: `new_deck` and
+/// `open` write the deck being replaced to a file of its own first, and that copy is somewhere the
+/// agent may read.
+#[test]
+fn an_agent_cannot_have_a_hidden_deck_copied_into_the_home_by_replacing_it() {
+    for gone in ["deleted", "conflict"] {
+        let Some((app, path, folder)) = hidden_and_unsaved(&format!("rescue-{gone}")) else { return };
+        if gone == "deleted" {
+            std::fs::remove_file(&path).unwrap();
+            app.look_at_files();
+        } else {
+            super::outside_writes(&app, &path, &super::deck_text("Theirs", &["theirs"]));
+        }
+        super::settle(&app);
+        assert!(super::modified(&app), "{gone}");
+        // A deck an agent may read, so only the replacement is in question.
+        let other = folder.join("o.ydeck");
+        super::write_deck(&other, "O", &["o"]);
+        for (name, args) in [("new_deck", json!({})), ("open", json!({ "path": other.display().to_string() }))] {
+            let err = act_as_agent(&app, "tok-ypresent", name, args).unwrap_err();
+            assert_eq!(err, HIDDEN_REFUSAL, "{gone} {name}");
+        }
+        assert_eq!(super::listing(&folder), vec!["o.ydeck"], "{gone}: nothing was copied into the home");
+        assert_eq!(super::outline(&app).len(), 1, "{gone}: the deck stays in front");
+        app.run_writes();
+        assert!(super::draft_file(&app).exists(), "{gone}: and its draft is kept");
+        // The person's own replacement is unchanged: the deck is kept in a file of its own.
+        let answer = act(&app, "new_deck", super::none()).unwrap();
+        let kept = answer["previous_deck_saved_to"].as_str().unwrap().to_string();
+        assert!(kept.starts_with(&folder.display().to_string()), "{gone}: {kept}");
+        assert!(super::file(std::path::Path::new(&kept)).contains(SENTINEL), "{gone}: the person's copy holds the deck");
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+}
+
+#[test]
+fn what_an_agent_reads_in_the_notice_names_no_file_after_an_export_or_a_replacement() {
+    let (app, _, dir) = secret_deck("agent-notice-2");
+    if !outside_home(&dir) {
+        return;
+    }
+    super::press(&app, crate::command::WindowAction::ExportMarkdown);
+    assert!(notice(&app).starts_with("Exported to "), "{}", notice(&app));
+    let seen = described_as(&app, "tok-ypresent");
+    let for_agent = seen.state["notice"].as_str().unwrap().to_string();
+    assert!(!for_agent.contains("talk.md") && !for_agent.contains(&dir.display().to_string()), "{for_agent}");
+    // A deck replaced by the person's own Open says where it went; an agent reads no path.
+    type_title(&app, "edited");
+    let recent = scratch("agent-notice-recent");
+    super::write_deck(&recent.join("only.ydeck"), "Only", &["only"]);
+    app.run(crate::command::Command::UseDeckDir(recent));
+    super::press(&app, crate::command::WindowAction::OpenRecent);
+    assert!(notice(&app).starts_with("The deck you were editing was saved to "), "{}", notice(&app));
+    let for_agent = described_as(&app, "tok-ypresent").state["notice"].as_str().unwrap().to_string();
+    assert!(!for_agent.contains("talk.ydeck") && !for_agent.contains(&dir.display().to_string()), "{for_agent}");
+}

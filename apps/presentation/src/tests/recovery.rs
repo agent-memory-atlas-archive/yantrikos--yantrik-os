@@ -58,6 +58,7 @@ fn a_kill_after_the_draft_landed_loses_nothing() {
     assert_eq!(outline(&again), vec!["Typed", "Two"]);
     assert_eq!(app_body(&again), "and not kept");
     assert_eq!(state(&again)["recovered"], true);
+    assert_eq!(super::path_of(&again), None, "a deck that never had a file still has none");
     assert!(modified(&again), "a recovered deck is by construction not what is on disk");
     assert_eq!(notice(&again), "Recovered unsaved changes. Save keeps them.");
 }
@@ -234,4 +235,35 @@ fn an_old_deck_saved_before_its_draft_landed_still_has_its_file_set_aside() {
     assert_eq!(read_deck(std::path::Path::new(saved["path"].as_str().unwrap())).slides[0].title, "from the old build");
     app.shutdown();
     assert_eq!(notice(&killed_and_started_again(app)), "", "and nothing is offered at the next start");
+}
+
+#[test]
+fn a_deck_from_the_old_file_that_names_a_file_is_replaced_into_a_file_of_its_own_first_time() {
+    let paths = Paths::temporary("presentation");
+    let dir = scratch("legacy-replace");
+    let deck_path = dir.join("talk.ydeck");
+    write_deck(&deck_path, "Talk", &["On disk"]);
+    old_file(&paths, Some(&deck_path), &["Typed in the old build"]);
+    let app = start_at(paths, Vec::new());
+    let folder = super::deck_folder(&app);
+    let answer = act(&app, "new_deck", super::none()).expect("not a false conflict on the first try");
+    let kept = std::path::PathBuf::from(answer["previous_deck_saved_to"].as_str().unwrap());
+    assert_eq!(kept.parent(), Some(folder.as_path()));
+    assert_eq!(read_deck(&kept).slides[0].title, "Typed in the old build");
+    assert_eq!(read_deck(&deck_path).slides[0].title, "On disk", "the file is not written over");
+}
+
+#[test]
+fn an_unreadable_old_file_and_a_waiting_draft_are_both_said_when_a_file_is_named() {
+    let paths = Paths::temporary("presentation");
+    lane_draft(&paths, "deck-3-3", None, &["waiting"], 300);
+    std::fs::create_dir_all(paths.state_dir()).unwrap();
+    std::fs::write(paths.state_dir().join("recovery.json"), "{ not json").unwrap();
+    let given = scratch("argv-both").join("given.ydeck");
+    write_deck(&given, "Given", &["given"]);
+    let app = start_at(paths.clone(), vec![given.into()]);
+    let said = notice(&app);
+    assert!(said.contains(&paths.state_dir().join("drafts").display().to_string()), "{said}");
+    assert!(said.contains("recovery file") && said.contains("left alone"), "{said}");
+    assert!(app.model(|m| m.held_aside.is_some()), "and it is said again after the open");
 }

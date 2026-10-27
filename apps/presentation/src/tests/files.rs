@@ -295,3 +295,20 @@ fn a_decks_content_survives_the_text_a_slide_may_hold() {
     let back = parse(&file(&path)).unwrap();
     assert_eq!((back.slides[0].title.as_str(), back.slides[0].notes.as_str()), (odd, odd));
 }
+
+#[test]
+fn an_export_never_writes_over_the_deck_it_came_from() {
+    let app = started();
+    let dir = scratch("export-self");
+    let deck = dir.join("talk.md");
+    act(&app, "set_slide", json!({ "index": 0, "title": "My deck, saved with an md name" })).unwrap();
+    act(&app, "save_as", ask(&deck)).unwrap();
+    let before = file(&deck);
+    let err = act(&app, "export_markdown", none()).unwrap_err();
+    assert!(err.contains("never replaces the deck it comes from"), "{err}");
+    assert_eq!(file(&deck), before, "the deck's file is as it was");
+    assert!(!modified(&app));
+    press(&app, WindowAction::ExportMarkdown);
+    assert!(notice(&app).contains("never replaces the deck"), "{}", notice(&app));
+    assert_eq!(file(&deck), before);
+}

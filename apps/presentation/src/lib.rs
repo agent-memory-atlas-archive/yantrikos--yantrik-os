@@ -57,7 +57,12 @@ impl App for YPresent {
         let mut m = Model::new(state.clone(), boot.mind.clone(), boot.for_mind);
         let old = files::legacy::read(&state);
         let notice = recovery::restore(&mut m, &boot.drafts, old, !boot.launch.files.is_empty());
-        m.notice.set(notice);
+        // The sentence names the deck's file; for a deck an agent is not shown, an agent reads it
+        // without that name.
+        let hidden = m.doc.hidden;
+        m.notice.set_about(hidden, notice, || {
+            format!("Recovered unsaved changes to {}. Save keeps them.", agent_rule::HIDDEN)
+        });
         Ok(m)
     }
 

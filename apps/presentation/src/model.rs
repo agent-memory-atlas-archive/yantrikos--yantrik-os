@@ -90,6 +90,8 @@ pub struct Doc {
 /// answer goes to the slide it was asked about and to no other.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NotesAsk {
+    /// The deck it was asked about: an answer for another deck is not written.
+    pub doc: DocumentId,
     pub index: usize,
     pub title: String,
     pub body: String,
