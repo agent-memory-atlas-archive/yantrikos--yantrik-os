@@ -328,7 +328,7 @@ fn bringing_the_window_forward_reads_what_runs_again_and_draws_nothing_new() {
 fn a_logout_hangs_up_background_jobs_and_lets_a_handler_finish() {
     let f = open();
     let marker = super::folder(&f.paths, "handler").join("cleaned");
-    let handler = format!("(trap 'sleep 0.2; echo cleaned > {}; exit' HUP; while :; do sleep 0.05; done) &\r", marker.display());
+    let handler = format!("(trap 'sleep 0.1; echo cleaned > {}; exit' HUP; while :; do sleep 0.05; done) &\r", marker.display());
     f.type_until(&handler, "cleaned");
     f.type_until("sleep 3033 &\r", "sleep 3033");
     let shell = f.active_pid() as i32;
