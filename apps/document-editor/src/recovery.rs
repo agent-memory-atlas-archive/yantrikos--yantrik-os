@@ -46,14 +46,19 @@ pub fn restore(m: &mut Model, found: &Drafts, old: OldFile, file_named: bool) ->
             problems.push(why);
         }
         OldFile::Found(doc) => {
-            // Already the lane's: a start that ended before the old file was set aside.
             let draft = from_legacy(doc);
-            if back.is_empty() {
+            if in_lane(&back, &draft) {
+                // A start that ended before the old file was set aside: its text is the lane's
+                // already, so the file is set aside at the first command.
+                m.legacy = Legacy::Owed;
+            } else {
                 back.push(Back { name: None, draft });
             }
         }
     }
-    back.sort_by_key(|b| std::cmp::Reverse(b.draft.at));
+    // The old file's document first, always: it is the one that is not in the lane, so it is the
+    // one that cannot be left for later without being offered again at every start.
+    back.sort_by_key(|b| (b.name.is_some(), std::cmp::Reverse(b.draft.at)));
     let mut rest = back.into_iter();
     let restored = rest.next().map(|b| open_one(m, b)).is_some();
     let left = rest.count() + unreadable;
@@ -71,20 +76,35 @@ pub fn restore(m: &mut Model, found: &Drafts, old: OldFile, file_named: bool) ->
     }
 }
 
-/// A file was named on the command line: the drafts are left alone, and the notice says so.
+/// Whether the old file's document is already a draft in the lane: the same file and the same
+/// text. A lane draft that differs is another document, so the old text is never taken for it.
+fn in_lane(lane: &[Back], old: &DocDraft) -> bool {
+    lane.iter().any(|b| b.draft.path == old.path && b.draft.text == old.text)
+}
+
+/// A file was named on the command line: the drafts are left alone, and the notice says where
+/// each one is.
 fn held_aside(m: &mut Model, lane: &[Back], old: &OldFile, unreadable: usize) -> String {
-    let waiting = match old {
+    let mut places = Vec::new();
+    if !lane.is_empty() || unreadable > 0 {
+        places.push(m.state_dir.join(yantrik_app::drafts::DIR));
+    }
+    match old {
         OldFile::Unreadable(why) => return why.clone(),
-        OldFile::Found(_) => true,
-        OldFile::Absent => !lane.is_empty() || unreadable > 0,
-    };
-    if !waiting {
+        OldFile::Found(doc) => {
+            if !in_lane(lane, &from_legacy(doc.clone())) {
+                places.push(crate::files::legacy::old_dir(&m.state_dir).join(crate::files::legacy::NAME));
+            }
+        }
+        OldFile::Absent => {}
+    }
+    if places.is_empty() {
         return String::new();
     }
+    let places: Vec<String> = places.iter().map(|p| p.display().to_string()).collect();
     let said = format!(
-        "An unsaved draft from a previous session is waiting in {}. It was left alone; open yDoc with no file to \
-         pick it up.",
-        m.state_dir.join(yantrik_app::drafts::DIR).display()
+        "An unsaved draft from a previous session is waiting in {}. It was left alone; open yDoc with no file to pick it up.",
+        places.join(" and in ")
     );
     m.held_aside = Some(said.clone());
     said

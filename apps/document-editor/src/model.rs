@@ -74,6 +74,8 @@ pub enum Cue {
 pub enum Legacy {
     /// Nothing to do: none, already set aside, or left as it was (unreadable).
     Done,
+    /// Its document is in the lane already; the file is set aside at the first command.
+    Owed,
     /// Its document's draft not yet on disk, by draft name; set aside once it is.
     Waiting(String),
     /// Being set aside.
@@ -238,10 +240,14 @@ impl Model {
     /// program changed the file under it: in the last two its text is on no disk at all, whatever
     /// it is, until it is saved somewhere.
     pub fn modified(&self) -> bool {
-        let d = self.d();
-        self.doc.recovered
-            || matches!(d.outside, OutsideState::Deleted | OutsideState::Conflict { .. })
-            || d.content != self.doc.on_disk.as_deref().unwrap_or_default()
+        self.text_unsaved() || matches!(self.d().outside, OutsideState::Deleted | OutsideState::Conflict { .. })
+    }
+
+    /// Whether the text in front differs from the file's (or was recovered): what a re-read of the
+    /// file would replace. A conflict alone does not count; it says the file moved on, not that
+    /// there is anything here to lose.
+    pub fn text_unsaved(&self) -> bool {
+        self.doc.recovered || self.d().content != self.doc.on_disk.as_deref().unwrap_or_default()
     }
 
     /// Where a Save As is offered when the document has no file yet: a name out of its title, in

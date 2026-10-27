@@ -154,3 +154,83 @@ fn a_file_named_on_the_command_line_wins_the_window_and_the_draft_is_left_where_
     settle(&next);
     assert_eq!(text(&next), "my unsaved draft\n");
 }
+
+/// How many drafts the lane holds.
+fn lane_count(paths: &Paths) -> usize {
+    std::fs::read_dir(paths.state_dir().join(yantrik_app::drafts::DIR))
+        .map(|d| d.filter_map(Result::ok).filter(|e| e.path().extension().is_some_and(|x| x == "json")).count())
+        .unwrap_or(0)
+}
+
+const UNTITLED_X: &str = r#"{ "path": null, "text": "LEGACY X only copy", "baseline": "" }"#;
+
+#[test]
+fn the_old_file_is_imported_once_even_when_the_lane_already_holds_another_draft() {
+    let (app, _) = with_file("legacy-lane", "disk\n");
+    typed(&app, "Y edited\n");
+    app.run_writes();
+    let paths = app.paths();
+    drop(app);
+    let dir = old_file(&paths, UNTITLED_X);
+    let first = TestApp::<YDoc>::start_at(paths.clone(), Vec::new());
+    settle(&first);
+    assert_eq!(text(&first), "LEGACY X only copy", "the old text is in front, not left out");
+    assert!(notice(&first).contains("1 more draft"), "and the lane's draft is counted: {}", notice(&first));
+    first.run_writes();
+    settle(&first);
+    assert!(!dir.join(legacy::NAME).exists() && dir.join(legacy::ARCHIVED).exists(), "set aside");
+    assert_eq!(lane_count(&paths), 2, "both are the lane's now");
+    drop(first);
+    // Later starts offer each draft once: X is never offered again from the old folder.
+    let second = TestApp::<YDoc>::start_at(paths.clone(), Vec::new());
+    settle(&second);
+    assert!(notice(&second).contains("1 more draft"), "{}", notice(&second));
+    assert_eq!(lane_count(&paths), 2);
+    assert!(!dir.join(legacy::NAME).exists());
+}
+
+#[test]
+fn an_old_file_whose_draft_is_already_the_lanes_is_set_aside_at_once_and_not_offered_twice() {
+    let paths = Paths::temporary("documents");
+    let dir = old_file(&paths, UNTITLED_X);
+    let first = TestApp::<YDoc>::start_at(paths.clone(), Vec::new());
+    settle(&first);
+    first.run_writes();
+    settle(&first);
+    drop(first);
+    // A start killed after the draft landed and before the old file was set aside.
+    std::fs::rename(dir.join(legacy::ARCHIVED), dir.join(legacy::NAME)).unwrap();
+    let again = TestApp::<YDoc>::start_at(paths.clone(), Vec::new());
+    settle(&again);
+    assert_eq!(text(&again), "LEGACY X only copy");
+    assert_eq!(notice(&again), RECOVERED, "once, with nothing more to say");
+    assert!(!dir.join(legacy::NAME).exists(), "set aside without waiting for another save");
+    assert!(dir.join(legacy::ARCHIVED).exists());
+    assert_eq!(lane_count(&paths), 1);
+}
+
+#[test]
+fn a_file_named_at_launch_says_where_the_old_file_is_not_the_lanes_folder() {
+    let paths = Paths::temporary("documents");
+    let dir = old_file(&paths, UNTITLED_X);
+    let given = scratch("legacy-named").join("given.md");
+    std::fs::write(&given, "# Given\n").unwrap();
+    let app = TestApp::<YDoc>::start_at(paths, vec![given.into()]);
+    settle(&app);
+    assert!(notice(&app).contains(&dir.join(legacy::NAME).display().to_string()), "{}", notice(&app));
+    assert!(dir.join(legacy::NAME).exists(), "left alone");
+}
+
+#[test]
+fn the_old_file_is_set_aside_when_its_document_is_saved_before_the_draft_landed() {
+    let paths = Paths::temporary("documents");
+    let dir = old_file(&paths, UNTITLED_X);
+    let app = TestApp::<YDoc>::start_at(paths, Vec::new());
+    settle(&app);
+    let target = scratch("legacy-saved").join("x.md");
+    act(&app, "save_as", json!({ "path": target.display().to_string() })).unwrap();
+    app.run_writes();
+    settle(&app);
+    assert_eq!(file(&target), "LEGACY X only copy");
+    assert!(dir.join(legacy::ARCHIVED).exists() && !dir.join(legacy::NAME).exists(), "its text is in a file now");
+}

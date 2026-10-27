@@ -44,6 +44,8 @@ pub fn sync(m: &mut Model, fx: &mut Effects<YDoc>) {
     } else if state != DraftState::None {
         fx.discard_draft(&name);
         m.d_mut().draft_discarded();
+        // Saved before its draft landed: the old file's text is in the document's own file now.
+        settle_legacy(m, fx, &name);
     }
 }
 
@@ -87,11 +89,14 @@ pub fn started(m: &mut Model, fx: &mut Effects<YDoc>) {
     if let Some((key, path, seen)) = m.d().watch_entry() {
         fx.watch(&key, path, seen);
     }
-    let Legacy::Waiting(waiting) = m.legacy.clone() else { return };
-    if waiting == m.doc.draft {
-        let name = m.doc.draft.clone();
-        fx.checkpoint_draft(&name, draft_of(m).bytes());
-        m.d_mut().draft_asked();
+    match m.legacy.clone() {
+        Legacy::Waiting(waiting) if waiting == m.doc.draft => {
+            let name = m.doc.draft.clone();
+            fx.checkpoint_draft(&name, draft_of(m).bytes());
+            m.d_mut().draft_asked();
+        }
+        Legacy::Owed => set_aside(m, fx),
+        _ => {}
     }
 }
 
@@ -100,6 +105,11 @@ fn settle_legacy(m: &mut Model, fx: &mut Effects<YDoc>, name: &str) {
     if !matches!(&m.legacy, Legacy::Waiting(w) if w == name) {
         return;
     }
+    set_aside(m, fx);
+}
+
+/// The old file renamed, in a job.
+fn set_aside(m: &mut Model, fx: &mut Effects<YDoc>) {
     m.legacy = Legacy::Archiving;
     let dir = legacy::old_dir(&m.state_dir);
     let lost = Command::LegacyArchived(Err("the job did not finish".into()));
