@@ -10,12 +10,14 @@
 //!
 //! # The end
 //!
-//! A close the person confirmed hangs every shell up (SIGHUP to the foreground job and the
-//! shell's group, SIGKILL for what ignores it, the shell reaped: `session.rs`), closes the window
+//! A close the person confirmed hangs every shell up (SIGHUP to every process of its
+//! session, a short wait for handlers, SIGKILL for what still runs and did not ignore the hangup,
+//! the shell reaped: `session.rs`), closes the window
 //! and lingers until the last shell is gone. A logout (SIGTERM, SIGHUP, or the display going)
 //! asks nothing, because nobody is there to answer: it hangs the shells up and ends the app when
 //! they are gone, or when a backstop passes. A person's quit that was confirmed ends the same
-//! way. Either way no shell is left running with nobody to read it.
+//! way. Either way no shell is left running with nobody to read it; a job that ignores SIGHUP chose to
+//! outlive its terminal and stays.
 
 use std::sync::Arc;
 use std::time::Duration;

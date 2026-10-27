@@ -45,6 +45,10 @@ fn environment() {
         // Every shell a test starts is a plain sh with a prompt the tests can wait for.
         std::env::set_var("SHELL", "/bin/sh");
         std::env::set_var("PS1", format!("{PROMPT} "));
+        // And they start in a folder of their own, so nothing a job writes lands in the tree.
+        let home = std::env::temp_dir().join(format!("yantrik-terminal-tests-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_current_dir(home).unwrap();
     });
 }
 

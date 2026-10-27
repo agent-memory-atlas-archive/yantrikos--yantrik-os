@@ -24,11 +24,12 @@
 //!   without pause (`yes`) costs one command and one redraw a frame, and its memory is the
 //!   session's scrollback, `HISTORY_LINES` (1000) lines plus the screen, whatever it prints.
 //!   Nothing runs while every shell is quiet.
-//! - ENDING LEAVES NOTHING. Closing a tab, closing the window, a quit and a logout each end the
-//!   shells they cover: SIGHUP to every process of the shell's session (foreground and
-//!   background jobs), the shell reaped, SIGKILL for what ignored the hangup. A process that
-//!   left the session with `setsid` is the person's explicit choice and is not touched. A tab, a window or a quit with a job running asks first, one
-//!   question at a time; a logout asks nothing.
+//! - ENDING IS A HANGUP. Closing a tab, closing the window, a quit and a logout each hang up the
+//!   shells they cover as a terminal does: SIGHUP to every process of the shell's session,
+//!   foreground and background, then up to 500 ms for SIGHUP handlers to finish, then SIGKILL for
+//!   what is still running. A job that ignores SIGHUP (`nohup`, `trap '' HUP`) chose to outlive its
+//!   terminal and is left running, and so is one that called `setsid`. A tab, a window or a quit
+//!   with a job running asks first, one question at a time; a logout asks nothing.
 //! - ANSWERS ARE THE SHELL'S OWN. An action is told what its own shell did (`wait.rs`), read by
 //!   the worker that waited for it, never the tab the person happens to have in front of them.
 

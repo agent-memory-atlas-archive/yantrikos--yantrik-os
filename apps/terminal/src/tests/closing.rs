@@ -12,8 +12,6 @@ use crate::command::{Command, Do};
 use crate::update::life::{ANSWER_FIRST, WAIT_FOR_CHECK};
 use crate::update::{CLOSING, END_AFTER};
 
-const IGNORES_HANGUP: &str = "(trap '' HUP; exec sleep 302)";
-
 fn dialog(f: &Fixture) -> bool {
     f.app.ui(|ui| ui.get_confirm_close())
 }
@@ -133,7 +131,7 @@ fn confirming_a_window_close_ends_every_shell_and_every_job_and_the_app() {
     f.open_tabs(2);
     f.start_job("sleep 300");
     f.app.run(Command::SelectTab(1));
-    f.start_job(IGNORES_HANGUP);
+    f.start_job("sleep 301");
     let all = everything_running(&f);
     assert!(all.len() >= 5, "three shells and two jobs: {all:?}");
 
@@ -204,7 +202,7 @@ fn logout_leaves_nothing(end: impl FnOnce(&Fixture)) {
     f.open_tabs(2);
     f.start_job("sleep 300");
     f.app.run(Command::SelectTab(1));
-    f.start_job(IGNORES_HANGUP);
+    f.start_job("sleep 301");
     // A question is open when the logout comes: it is dropped, not waited for.
     f.app.run(Command::SelectTab(2));
     f.app.ui(|ui| ui.invoke_close_tab(2));
@@ -324,20 +322,43 @@ fn bringing_the_window_forward_reads_what_runs_again_and_draws_nothing_new() {
     assert_eq!(f.app.draw(), 0);
 }
 
-/// Background jobs are part of the session: one that ignores the hangup, one under `nohup`, and
-/// one stopped, are all gone after a logout. (A `setsid` job left the session on purpose.)
+/// A shell's background jobs are part of its session: a plain `sleep &` is hung up with it, and a
+/// job with a SIGHUP handler gets its moment to clean up before anything is killed.
 #[test]
-fn a_logout_ends_background_jobs_too() {
+fn a_logout_hangs_up_background_jobs_and_lets_a_handler_finish() {
     let f = open();
-    f.type_until("(trap '' HUP; exec sleep 3031) &\r", "sleep 3031");
-    f.type_until("nohup sleep 3032 &\r", "sleep 3032");
+    let marker = super::folder(&f.paths, "handler").join("cleaned");
+    let handler = format!("(trap 'sleep 0.2; echo cleaned > {}; exit' HUP; while :; do sleep 0.05; done) &\r", marker.display());
+    f.type_until(&handler, "cleaned");
     f.type_until("sleep 3033 &\r", "sleep 3033");
     let shell = f.active_pid() as i32;
-    f.until("three background jobs", |_| crate::session::members(shell).len() >= 4);
+    f.until("the background jobs", |_| crate::session::members(shell).len() >= 3);
     let jobs: Vec<u32> = crate::session::members(shell).into_iter().map(|p| p as u32).collect();
     f.app.display_gone();
     f.until("the app to end", |f| f.app.exit_reason().is_some());
     wait_gone(&f, &jobs);
+    assert_eq!(std::fs::read_to_string(&marker).unwrap().trim(), "cleaned", "the handler ran to its end");
+}
+
+/// A job that ignores SIGHUP chose to outlive its terminal, as in other terminals, and is left
+/// running: `nohup` and `trap '' HUP`, backgrounded or in front.
+#[test]
+fn a_job_that_ignores_the_hangup_outlives_a_logout() {
+    let f = open();
+    f.type_until("nohup sleep 3032 >/dev/null 2>&1 &\r", "sleep 3032");
+    f.type_until("(trap '' HUP; exec sleep 3034) &\r", "sleep 3034");
+    let shell = f.active_pid() as i32;
+    f.until("the jobs", |_| crate::session::members(shell).len() >= 3);
+    let jobs: Vec<u32> = crate::session::members(shell).into_iter().filter(|&p| p != shell).map(|p| p as u32).collect();
+    f.app.display_gone();
+    f.until("the app to end", |f| f.app.exit_reason().is_some());
+    wait_gone(&f, &[shell as u32]);
+    std::thread::sleep(Duration::from_millis(800));
+    let alive: Vec<u32> = jobs.iter().copied().filter(|p| exists(*p)).collect();
+    for pid in &jobs {
+        unsafe { libc::kill(*pid as i32, libc::SIGKILL) };
+    }
+    assert_eq!(alive.len(), jobs.len(), "they chose to stay: {alive:?} of {jobs:?}");
 }
 
 /// Two shells started at once never hold each other's PTY master: nothing in a shell's session

@@ -20,7 +20,6 @@ yantrik-ui-kit = { workspace = true }
 slint = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
-pty-process = "0.5"
 vt100 = "0.16"
 libc = "0.2"
 anyhow = "1"

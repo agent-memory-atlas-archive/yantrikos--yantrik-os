@@ -4,8 +4,8 @@ use std::{
     collections::VecDeque,
     io::{Read, Write},
     os::{
-        fd::{AsRawFd, OwnedFd},
-        unix::net::UnixStream,
+        fd::{AsRawFd, FromRawFd, OwnedFd},
+        unix::{ffi::OsStrExt, net::UnixStream, process::CommandExt},
     },
     path::{Path, PathBuf},
     sync::{
@@ -16,8 +16,6 @@ use std::{
 };
 
 pub const HISTORY_LINES: usize = 1000;
-/// Held from opening a PTY to spawning its shell.
-static SPAWN: Mutex<()> = Mutex::new(());
 const INPUT_LIMIT: usize = 64 * 1024;
 type Notify = Arc<dyn Fn() + Send + Sync>;
 enum Input {
@@ -88,17 +86,10 @@ impl Session {
         notify: Notify,
     ) -> anyhow::Result<Self> {
         let (rows, cols) = dimensions(rows, cols);
-        // The master is made close-on-exec only after it is opened, so two shells started at once
-        // could each inherit the other's master. One start at a time closes that window: nothing
-        // else forks between the open and the spawn.
-        let starting = SPAWN.lock().unwrap_or_else(|p| p.into_inner());
-        let (pty, pts) = pty_process::blocking::open()?;
-        pty.resize(pty_process::Size::new(rows, cols))?;
+        let (mut master, pts) = open_pty(rows, cols)?;
         let (wake, mut wake_reader) = UnixStream::pair()?;
         wake.set_nonblocking(true)?;
         wake_reader.set_nonblocking(true)?;
-        let fd: OwnedFd = pty.into();
-        let mut master = std::fs::File::from(fd);
         let raw = master.as_raw_fd();
         unsafe {
             let flags = libc::fcntl(raw, libc::F_GETFL);
@@ -106,15 +97,29 @@ impl Session {
                 return Err(std::io::Error::last_os_error().into());
             }
         }
-        let mut child = pty_process::blocking::Command::new(shell)
+        let mut command = std::process::Command::new(shell);
+        command
             .args(args)
             .current_dir(dir)
             .env("TERM", "xterm-256color")
             .env("COLORTERM", "truecolor")
             .env_remove("COLUMNS")
             .env_remove("LINES")
-            .spawn(pts)?;
-        drop(starting);
+            .stdin(pts.try_clone()?)
+            .stdout(pts.try_clone()?)
+            .stderr(pts);
+        // SAFETY: only async-signal-safe calls run between the fork and the exec (setsid and an
+        // ioctl). By then the slave is the child's standard input, so it becomes the controlling
+        // terminal of the new session.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = command.spawn()?;
         let pid = child.id();
         let state = Arc::new(State {
             parser: Mutex::new(vt100::Parser::new(rows, cols, HISTORY_LINES)),
@@ -230,7 +235,7 @@ impl Session {
                     libc::kill(-(pid as i32), libc::SIGHUP);
                 }
                 for member in members(pid as i32) {
-                    unsafe { libc::kill(member, libc::SIGHUP) };
+                    signal(member, pid as i32, libc::SIGHUP);
                 }
             }
             drop(master);
@@ -252,15 +257,22 @@ impl Session {
                 let _ = child.kill();
                 status = child.wait().ok();
             }
-            // A close or a logout leaves nothing of the session running. What ignored the hangup
-            // (a job that traps SIGHUP, `nohup`, in front or behind) is killed now that the shell
-            // is reaped. It is found by session id, which every job the shell started shares
-            // whatever its process group: a process that called `setsid` left the session on
-            // purpose and is the person's choice. Nothing is signalled by group number after the
-            // reap, so a number that was reused is never hit.
+            // A close or a logout hangs the session's jobs up and gives them a moment (500 ms)
+            // to finish what a SIGHUP handler does. Whatever then still runs and did not choose to
+            // outlive its terminal is killed. A job that ignores SIGHUP (`nohup`, `trap '' HUP`)
+            // chose to, and is left running, as in other terminals; so is one that called
+            // `setsid`. Jobs are found by session id, which each shares whatever its process
+            // group, and signalled through a pidfd, so a pid reused meanwhile is never hit.
             if shared.closing.load(Ordering::Acquire) {
-                for member in members(pid as i32) {
-                    unsafe { libc::kill(member, libc::SIGKILL) };
+                let sid = pid as i32;
+                for _ in 0..25 {
+                    if members(sid).iter().all(|&m| ignores_hangup(m)) {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                for member in members(sid).into_iter().filter(|&m| !ignores_hangup(m)) {
+                    signal(member, sid, libc::SIGKILL);
                 }
             }
             *shared.exit.lock().unwrap() = status.and_then(|s| s.code());
@@ -494,6 +506,86 @@ pub fn members(sid: i32) -> Vec<i32> {
 /// A zombie only waits to be reaped; it is not signalled.
 fn fields_alive(stat: &str) -> bool {
     stat.rsplit(')').next().unwrap_or("").split_whitespace().next() != Some("Z")
+}
+
+/// Whether the process ignores SIGHUP (bit 1 of `SigIgn` in its status): it chose to outlive its
+/// terminal.
+fn ignores_hangup(pid: i32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/status"))
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find_map(|l| l.strip_prefix("SigIgn:"))
+                .and_then(|mask| u64::from_str_radix(mask.trim(), 16).ok())
+        })
+        .is_some_and(|mask| mask & 1 != 0)
+}
+
+/// Send `signal` to `pid` if it is still a live member of session `sid`. The process is held
+/// through a pidfd, which pins its identity: the session is read again after the pidfd exists and
+/// the signal goes through it, so a pid that was reused is never hit. Only a kernel without
+/// pidfds (ENOSYS) falls back to the plain pid.
+fn signal(pid: i32, sid: i32, signal: i32) {
+    // SAFETY: plain system calls on a pid, and a descriptor closed here.
+    unsafe {
+        let fd = libc::syscall(libc::SYS_pidfd_open, pid, 0) as i32;
+        if fd < 0 {
+            if std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOSYS) {
+                libc::kill(pid, signal);
+            }
+            return;
+        }
+        if is_member(pid, sid) {
+            libc::syscall(libc::SYS_pidfd_send_signal, fd, signal, std::ptr::null::<libc::siginfo_t>(), 0);
+        }
+        libc::close(fd);
+    }
+}
+
+/// Whether `pid` is a live process of session `sid`.
+fn is_member(pid: i32, sid: i32) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    // After the command's closing bracket: state, parent, group, session.
+    let mut fields = stat.rsplit(')').next().unwrap_or("").split_whitespace();
+    fields.next().is_some_and(|state| state != "Z") && fields.nth(2).and_then(|s| s.parse::<i32>().ok()) == Some(sid)
+}
+
+/// Opens a PTY, close-on-exec from the instant it exists: the master is made with `O_CLOEXEC`
+/// itself and the slave is opened by std, which always adds it. There is no window in which a fork
+/// anywhere in the process, a shell or any other child, could copy the master. Returns the
+/// master and the slave.
+fn open_pty(rows: u16, cols: u16) -> std::io::Result<(std::fs::File, std::fs::File)> {
+    use std::os::unix::fs::OpenOptionsExt;
+    // SAFETY: plain system calls; the descriptor is owned by the File made from it at once.
+    let master = unsafe {
+        let fd = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC);
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        std::fs::File::from(OwnedFd::from_raw_fd(fd))
+    };
+    let raw = master.as_raw_fd();
+    let mut name = [0 as libc::c_char; 128];
+    // SAFETY: `name` is as long as the length given; the ioctl reads a `winsize` that lives on.
+    let slave = unsafe {
+        if libc::grantpt(raw) != 0 || libc::unlockpt(raw) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let size = libc::winsize { ws_row: rows, ws_col: cols, ws_xpixel: 0, ws_ypixel: 0 };
+        if libc::ioctl(raw, libc::TIOCSWINSZ, &size) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let err = libc::ptsname_r(raw, name.as_mut_ptr(), name.len());
+        if err != 0 {
+            return Err(std::io::Error::from_raw_os_error(err));
+        }
+        std::ffi::CStr::from_ptr(name.as_ptr())
+    };
+    let path = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(slave.to_bytes()));
+    let pts = std::fs::OpenOptions::new().read(true).write(true).custom_flags(libc::O_NOCTTY).open(path)?;
+    Ok((master, pts))
 }
 
 fn dimensions(rows: u16, cols: u16) -> (u16, u16) {
