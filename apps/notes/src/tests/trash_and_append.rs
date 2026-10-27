@@ -30,6 +30,17 @@ fn append_to_a_note_ending_in_a_newline_adds_no_blank_line() {
     assert_eq!(text_after_append("# List\n\n- umbrella\n", "- socks"), "# List\n\n- umbrella\n- socks");
 }
 
+/// A model often sends the line break itself (a real call: "\n- Hotel confirmation AX-4471").
+#[test]
+fn an_addition_that_starts_with_a_newline_adds_no_blank_line() {
+    assert_eq!(text_after_append("# List\n\n- umbrella", "\n- socks"), "# List\n\n- umbrella\n- socks");
+}
+
+#[test]
+fn a_note_with_crlf_line_breaks_keeps_them() {
+    assert_eq!(text_after_append("# List\r\n\r\n- umbrella", "- socks"), "# List\r\n\r\n- umbrella\r\n- socks");
+}
+
 /// A trashed "Socks" ("old") and, unless `live` is None, a live "Socks" ("new"); nothing open.
 fn socks(live: Option<&str>) -> TestApp<Notes> {
     let app = started();

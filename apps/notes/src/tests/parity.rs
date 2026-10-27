@@ -57,7 +57,7 @@ const BEFORE: &[Golden] = &[
         risk: "standard",
         description: r#"Add text to the end of the note that is open and save it. Nothing already in the note is removed; use `set_content` to replace it instead."#,
         params: &[
-            ("text", true, r#"Exactly what to add. It starts on a new line: a newline goes before it unless the note is empty or already ends with one."#),
+            ("text", true, r#"Exactly what to add. It starts on a new line: a newline goes before it unless the note is empty, already ends with one, or the text starts with one."#),
         ],
     },
     Golden {

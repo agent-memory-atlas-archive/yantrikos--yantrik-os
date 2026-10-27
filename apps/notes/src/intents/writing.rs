@@ -82,7 +82,7 @@ pub(super) fn table(table: &mut Intents<Notes>) {
         .arg(arg(
             "text",
             "Exactly what to add. It starts on a new line: a newline goes before it unless the \
-             note is empty or already ends with one.",
+             note is empty, already ends with one, or the text starts with one.",
         )),
         |a| {
             Ok(Act::Append(needed(

@@ -309,14 +309,16 @@ fn retitled(text: &str, title: &str) -> String {
     }
 }
 
-/// `text` with `addition` on a line of its own: a newline goes between them unless the note is
-/// empty or already ends with one.
+/// `text` with `addition` on a line of its own: a line break goes between them unless the note is
+/// empty, already ends with one, or the addition starts with one (models often send it
+/// themselves). The break is the note's own: `\r\n` in a note that uses it, `\n` otherwise.
 fn appended(text: String, addition: &str) -> String {
-    if text.is_empty() || text.ends_with('\n') {
-        text + addition
-    } else {
-        format!("{text}\n{addition}")
+    let starts_on_its_own = addition.starts_with('\n') || addition.starts_with("\r\n");
+    if text.is_empty() || text.ends_with('\n') || starts_on_its_own {
+        return text + addition;
     }
+    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    format!("{text}{newline}{addition}")
 }
 
 /// The note a call names, by its exact title or its file name; or the refusal that lists what the
