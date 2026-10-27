@@ -25,6 +25,8 @@ fn opened_on_new_text(m: &mut Model) {
 pub fn compose_new(m: &mut Model, fx: &mut Effects<Email>) {
     opened_on_new_text(m);
     fx.changed(part::STATUS);
+    // Where a Mind looks the model is as anywhere, since `compose` is an intent and builds on the
+    // kept draft; the window masks the fields (`view::render`) and never writes the draft back.
     match m.composer.kept.clone() {
         Ok(Some(draft)) => {
             m.composer.text = draft;
@@ -72,7 +74,9 @@ pub fn compose(m: &mut Model, to: String, subject: String, body: String, fx: &mu
 /// network call; the message is already on screen.
 pub fn reply(m: &mut Model, all: bool, fx: &mut Effects<Email>) {
     let Some(open) = m.open.as_ref() else { return };
-    m.composer.text = rows::reply(&open.detail, all);
+    // A reply quotes the message and names its sender and subject; where a Mind looks it starts
+    // empty (`mind_view`).
+    m.composer.text = if m.for_mind { Draft::default() } else { rows::reply(&open.detail, all) };
     opened_on_new_text(m);
     fx.changed(part::COMPOSE_TEXT);
     fx.changed(part::STATUS);
@@ -80,7 +84,7 @@ pub fn reply(m: &mut Model, all: bool, fx: &mut Effects<Email>) {
 
 pub fn forward(m: &mut Model, fx: &mut Effects<Email>) {
     let detail = m.open.as_ref().map(|o| o.detail.clone()).unwrap_or_default();
-    m.composer.text = rows::forward(&detail);
+    m.composer.text = if m.for_mind { Draft::default() } else { rows::forward(&detail) };
     opened_on_new_text(m);
     fx.changed(part::COMPOSE_TEXT);
     fx.changed(part::STATUS);
@@ -180,6 +184,11 @@ pub fn cancel(m: &mut Model, draft: Draft, fx: &mut Effects<Email>) {
     m.composer.open = false;
     m.composer.closed_during_send = m.composer.sending.is_some();
     fx.changed(part::STATUS);
+    // The draft file is the person's: closing a Mind's composer neither saves nor clears it.
+    if m.for_mind {
+        m.composer.status.clear();
+        return;
+    }
     if draft.is_empty() {
         m.composer.status.clear();
         file_op(m, FileOp::Clear { after_send: false, release_lane: false }, fx);

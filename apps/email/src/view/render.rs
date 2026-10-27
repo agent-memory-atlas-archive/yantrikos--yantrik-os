@@ -2,6 +2,7 @@
 
 use slint::{Color, ModelRc, SharedString, VecModel};
 use yantrik_app::app::Changed;
+use yantrik_app::for_mind::shown_if_any;
 
 use crate::model::{part, Clear, Model, Rgb, OPEN_MESSAGE};
 use crate::state::{self, Counted};
@@ -29,11 +30,12 @@ pub fn render(ui: &EmailApp, m: &Model, changed: &Changed) {
     }
     if changed.has(part::COMPOSE_TEXT) {
         let text = &m.composer.text;
-        ui.set_compose_to(text.to.clone().into());
-        ui.set_compose_cc(text.cc.clone().into());
-        ui.set_compose_bcc(text.bcc.clone().into());
-        ui.set_compose_subject(text.subject.clone().into());
-        ui.set_compose_body(text.body.clone().into());
+        let hide = |field: &str| SharedString::from(shown_if_any(m.for_mind, field).as_ref());
+        ui.set_compose_to(hide(&text.to));
+        ui.set_compose_cc(hide(&text.cc));
+        ui.set_compose_bcc(hide(&text.bcc));
+        ui.set_compose_subject(hide(&text.subject));
+        ui.set_compose_body(hide(&text.body));
     }
     if changed.has(part::SEARCH_TEXT) {
         ui.set_email_search_query(m.search.query.clone().into());
@@ -90,6 +92,7 @@ fn folders(ui: &EmailApp, m: &Model) {
 /// the folder, not of the tab: "3 unread of 128" is about the mailbox, and it would be a strange
 /// thing for pressing Unread to change.
 fn list(ui: &EmailApp, m: &Model) {
+    let hide = |text: &str| SharedString::from(shown_if_any(m.for_mind, text).as_ref());
     let items: Vec<EmailListItem> = m
         .shown()
         .into_iter()
@@ -97,10 +100,10 @@ fn list(ui: &EmailApp, m: &Model) {
             let it = &r.item;
             EmailListItem {
                 id: key,
-                from_name: it.from_name.clone().into(),
-                from_addr: it.from_addr.clone().into(),
-                subject: it.subject.clone().into(),
-                preview: it.preview.clone().into(),
+                from_name: hide(&it.from_name),
+                from_addr: hide(&it.from_addr),
+                subject: hide(&it.subject),
+                preview: hide(&it.preview),
                 date_text: it.date_text.clone().into(),
                 is_read: it.is_read,
                 is_flagged: it.is_flagged,
@@ -108,7 +111,7 @@ fn list(ui: &EmailApp, m: &Model) {
                 has_attachment: it.has_attachment,
                 thread_count: it.thread_count,
                 thread_id: it.thread_id.clone().into(),
-                avatar_initial: it.avatar_initial.clone().into(),
+                avatar_initial: hide(&it.avatar_initial),
                 avatar_color: color(it.avatar),
             }
         })
@@ -143,22 +146,23 @@ fn open(ui: &EmailApp, m: &Model) {
         return;
     };
     let d = &open.detail;
+    let hide = |text: &str| SharedString::from(shown_if_any(m.for_mind, text).as_ref());
     ui.set_email_detail(EmailDetailData {
         id: OPEN_MESSAGE,
-        from_name: d.from_name.clone().into(),
-        from_addr: d.from_addr.clone().into(),
-        from_initial: d.from_initial.clone().into(),
+        from_name: hide(&d.from_name),
+        from_addr: hide(&d.from_addr),
+        from_initial: hide(&d.from_initial),
         from_avatar_color: color(d.avatar),
-        to_addr: d.to_addr.clone().into(),
-        cc_addr: d.cc_addr.clone().into(),
-        subject: d.subject.clone().into(),
+        to_addr: hide(&d.to_addr),
+        cc_addr: hide(&d.cc_addr),
+        subject: hide(&d.subject),
         date_text: d.date_text.clone().into(),
-        body: d.body.clone().into(),
-        ai_summary: d.ai_summary.clone().into(),
+        body: hide(&d.body),
+        ai_summary: hide(&d.ai_summary),
         is_flagged: d.is_flagged,
         is_read: d.is_read,
         has_attachment: d.has_attachment,
-        attachment_names: d.attachment_names.clone().into(),
+        attachment_names: hide(&d.attachment_names),
         thread_count: d.thread_count,
         has_html: d.has_html,
     });
@@ -166,7 +170,7 @@ fn open(ui: &EmailApp, m: &Model) {
         .attachments
         .iter()
         .map(|a| EmailAttachmentData {
-            name: a.name.clone().into(),
+            name: hide(&a.name),
             size_text: a.size_text.clone().into(),
             mime_type: a.mime_type.clone().into(),
             is_downloaded: a.is_downloaded,
@@ -180,10 +184,10 @@ fn open(ui: &EmailApp, m: &Model) {
         .enumerate()
         .map(|(i, t)| EmailThreadMessage {
             id: i as i32,
-            from_name: t.from_name.clone().into(),
-            from_addr: t.from_addr.clone().into(),
+            from_name: hide(&t.from_name),
+            from_addr: hide(&t.from_addr),
             date_text: t.date_text.clone().into(),
-            body: t.body.clone().into(),
+            body: hide(&t.body),
             is_collapsed: t.is_collapsed,
         })
         .collect();

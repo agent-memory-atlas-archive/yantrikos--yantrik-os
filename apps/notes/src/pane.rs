@@ -33,6 +33,9 @@ pub struct Pane {
     pub status: String,
     pub folder: String,
     pub query: String,
+    /// Whether the query is matched against the notes' text as well as their titles. The window
+    /// of a Mind's display matches titles only; a search by a call matches as it always did.
+    pub text_search: bool,
     pub preview: bool,
     pub focus_mode: bool,
     /// 0 none, 1 import, 2 export, 3 compare, 4 the close prompt.
@@ -75,6 +78,7 @@ impl Pane {
             status: String::new(),
             folder: "all".into(),
             query: String::new(),
+            text_search: true,
             preview: false,
             focus_mode: false,
             dialog: 0,

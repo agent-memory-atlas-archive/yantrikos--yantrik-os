@@ -3,9 +3,11 @@
 //! the companion are asked from jobs, and their answers come back as commands.
 
 use yantrik_app::effects::Effects;
+use yantrik_app::for_mind;
 use yantrik_app::Refused;
 
 use crate::command::{Command, Work};
+use crate::mind_view;
 use crate::model::{part, Model};
 use crate::Email;
 
@@ -19,6 +21,8 @@ mod pick;
 mod setup;
 
 pub fn update(m: &mut Model, command: Command, fx: &mut Effects<Email>) -> Result<(), Refused> {
+    // What would show or carry mail where a Mind looks is refused (`mind_view::refuses`).
+    for_mind::refuse_if(m.for_mind, mind_view::refuses(&command))?;
     // Every command says what it drew. The composer's text and the setup fields are the window's
     // while the person types, so nothing redraws them unless a command put something there.
     fx.changed(part::MODEL);
@@ -28,6 +32,7 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Effects<Email>) -> Resul
         Command::FolderClicked(idx) => mailbox::folder_clicked(m, idx, fx),
         Command::SelectFolder(want) => return mailbox::select_folder(m, &want, fx),
         Command::Listed { why, folder, outcome } => mailbox::listed(m, why, folder, outcome, fx),
+        Command::Search(query) if m.for_mind => mailbox::search_masked(m, &query, fx),
         Command::Search(query) => mailbox::search(m, &query, fx),
         Command::SearchFor(query) => mailbox::search_for(m, query, fx),
         Command::Searched { query, outcome } => mailbox::searched(m, &query, outcome, fx),

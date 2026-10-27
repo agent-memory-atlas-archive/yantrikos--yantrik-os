@@ -23,6 +23,7 @@ mod demo;
 mod describe;
 mod files;
 mod intents;
+mod mind_view;
 mod model;
 mod rows;
 /// The half of the app that has no window in it. `tests/email-core` compiles it on its own.
@@ -61,6 +62,7 @@ impl App for Email {
             kept = Ok(Some(text.clone()));
         }
         let mut model = Model::new(backend::for_app(&boot.paths), boot.mind.clone(), files, kept);
+        model.for_mind = boot.for_mind;
         model.composer.kept_unsure = sending.is_some() || files::is_unsure(&model.files.draft);
         // Said once the first look lands, unless the person has chosen about the draft first.
         model.composer.announce_unsent = from_lanes.as_ref().map(|_| match sending {

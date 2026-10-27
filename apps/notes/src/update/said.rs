@@ -186,10 +186,14 @@ pub fn offer_listed(title: &str) -> String {
 }
 
 /// The recovery bar, for a note whose file is gone, so there is nothing to open.
-pub fn offer_gone(title: &str, characters: usize) -> String {
+///
+/// `characters` is the length of the text, or `None` where the window may not give a measure of
+/// it (`mind_view`).
+pub fn offer_gone(title: &str, characters: Option<usize>) -> String {
+    let length = characters.map(|n| format!(" ({n} characters)")).unwrap_or_default();
     format!(
-        "Notes closed before \"{title}\" was saved, and its file is gone. Restore keeps the unsaved text \
-         ({characters} characters) as a note; Discard drops it."
+        "Notes closed before \"{title}\" was saved, and its file is gone. Restore keeps the unsaved text{length} \
+         as a note; Discard drops it."
     )
 }
 

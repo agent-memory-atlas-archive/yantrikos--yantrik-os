@@ -37,6 +37,51 @@ pub fn from_env() -> bool {
     drawn_for_mind(marker.as_deref(), display.as_deref())
 }
 
+/// What a window shows where a Mind may be looking and the person's content would be: the one
+/// sentence every app uses, so the mask reads the same in Snippets, Notes, Email and Text Editor.
+/// It is the owner's wording and it is shown whenever the rule above masks, including a window
+/// masked by its display alone, so it says that a Mind may be looking and does not assert one is.
+pub const HIDDEN: &str = "Hidden while a Mind is looking.";
+
+/// Why a command is refused in a masked window, and the one sentence for all of them. The rule is
+/// that a window on a Mind's display is a window the Mind drives, so nothing may run through it
+/// as the person:
+/// - an edit (typing, paste, drag-in, IME, undo, redo, replace) would change content the window
+///   cannot show;
+/// - a file read or write (open, import, export, save, save as, print) would use the person's
+///   rights over the person's files;
+/// - sending or quoting (send, reply, forward) would carry content out.
+///
+/// Copy is here only where it duplicates content (Notes); the clipboard itself holds the mask.
+pub const READ_ONLY: &str = "This is read-only while a Mind is looking.";
+
+/// The content as the window shows it: the content itself for the person, [`HIDDEN`] for a Mind.
+pub fn shown(for_mind: bool, content: &str) -> std::borrow::Cow<'_, str> {
+    if for_mind {
+        std::borrow::Cow::Borrowed(HIDDEN)
+    } else {
+        std::borrow::Cow::Borrowed(content)
+    }
+}
+
+/// [`shown`] for content that may be empty: an empty field stays empty, since a mask over nothing
+/// would say there is something to hide.
+pub fn shown_if_any(for_mind: bool, content: &str) -> std::borrow::Cow<'_, str> {
+    if content.is_empty() { std::borrow::Cow::Borrowed("") } else { shown(for_mind, content) }
+}
+
+/// The read-only rule: a command that edits, duplicates, reads or writes a file, or sends out masked
+/// content, refused with [`READ_ONLY`] where a Mind is looking. An app calls this before anything
+/// else for each command of its own that would change or carry out the content, so the rule and
+/// its sentence are not copied per app.
+pub fn refuse_if(for_mind: bool, would_run_as_person: bool) -> Result<(), crate::Refused> {
+    if for_mind && would_run_as_person {
+        Err(crate::Refused::new("for_mind", READ_ONLY))
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -59,5 +104,17 @@ mod tests {
         assert!(!drawn_for_mind(None, Some(PERSON_DISPLAY)));
         assert!(!drawn_for_mind(None, None));
         assert!(!drawn_for_mind(Some(""), None));
+    }
+
+    #[test]
+    fn a_window_on_another_display_shows_the_one_sentence_and_refuses_edits() {
+        // The display rule alone decided: no marker, a display that is not the person's.
+        let for_mind = drawn_for_mind(None, Some("wayland-mind"));
+        assert_eq!(shown(for_mind, "secret"), HIDDEN);
+        assert_eq!(shown_if_any(for_mind, ""), "", "nothing to hide, nothing said");
+        assert_eq!(refuse_if(for_mind, true).unwrap_err().sentence, READ_ONLY);
+        assert!(refuse_if(for_mind, false).is_ok());
+        assert_eq!(shown(false, "secret"), "secret");
+        assert!(refuse_if(false, true).is_ok());
     }
 }

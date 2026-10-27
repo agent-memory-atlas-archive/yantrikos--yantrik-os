@@ -121,6 +121,7 @@ mod logout;
 mod mailbox;
 mod markup;
 mod message;
+mod mind_view;
 mod parity;
 mod private_mode;
 mod rest;
