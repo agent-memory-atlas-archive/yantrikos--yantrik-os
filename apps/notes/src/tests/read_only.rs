@@ -111,7 +111,8 @@ fn every_change_is_refused_with_the_reason_and_nothing_is_written() {
         assert_eq!(act(&app, name, args), Err(READ_ONLY.to_string()), "{name}");
     }
     act(&app, "set_folder", json!({ "folder": "trash" })).unwrap();
-    act(&app, "open_note", json!({ "title": "Binned" })).unwrap();
+    let binned = app.model(|m| m.library.iter().find(|n| n.trash).unwrap().id.clone());
+    act(&app, "open_note", json!({ "title": format!("trash:{binned}") })).unwrap();
     assert_eq!(act(&app, "restore", json!({})), Err(READ_ONLY.to_string()), "restore");
     assert_eq!(snapshot(&vault(&app)), before, "a refused change wrote to the vault");
 }

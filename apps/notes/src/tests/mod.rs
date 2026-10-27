@@ -40,6 +40,7 @@ mod saving;
 mod startup;
 mod store;
 mod surface;
+mod trash_and_append;
 mod version;
 mod window;
 mod windows;

@@ -39,7 +39,7 @@ pub fn act(m: &mut Model, fx: &mut Effects<Notes>, act: Act) {
         }
         Act::Append(addition) => {
             let Some(text) = open_text(m, fx) else { return };
-            commit(m, fx, text + &addition);
+            commit(m, fx, appended(text, &addition));
         }
         Act::SetContent(text) => {
             if open_text(m, fx).is_some() {
@@ -260,7 +260,9 @@ fn save_then(m: &mut Model, fx: &mut Effects<Notes>, step: Step) {
 fn open_text(m: &mut Model, fx: &mut Effects<Notes>) -> Option<String> {
     let refusal = match m.current() {
         None => "No note is open. Open one with `open_note`, or make one with `new_note`.",
-        Some(c) if c.trash() => "The open note is in the Trash and cannot be edited; `restore` puts it back first.",
+        // Not "restore it first": a model told that restores and edits in one turn, taking a note
+        // out of the Trash the person put it in without asking them.
+        Some(c) if c.trash() => "The open note is in the Trash and cannot be edited. Ask the person before restoring it.",
         Some(c) => return Some(c.text().to_string()),
     };
     refuse(m, fx, refusal.into());
@@ -309,16 +311,41 @@ fn retitled(text: &str, title: &str) -> String {
     }
 }
 
+/// `text` with `addition` on a line of its own: a line break goes between them unless the note is
+/// empty, already ends with one, or the addition starts with one (models often send it
+/// themselves). The break is the note's own: `\r\n` in a note that uses it, `\n` otherwise.
+fn appended(text: String, addition: &str) -> String {
+    let starts_on_its_own = addition.starts_with('\n') || addition.starts_with("\r\n");
+    if text.is_empty() || text.ends_with('\n') || starts_on_its_own {
+        return text + addition;
+    }
+    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    format!("{text}{newline}{addition}")
+}
+
 /// The note a call names, by its exact title or its file name; or the refusal that lists what the
-/// library holds.
+/// library holds. Only live notes are considered. When several live notes share a title the first
+/// in library order wins (the rule since the port), and a live note always beats a trashed one.
+/// The Trash is opt-in: `trash:<file>`, the id the library gives a trashed note's row.
 fn named(m: &Model, wanted: &str) -> Result<Note, String> {
-    if let Some(note) = m.library.iter().find(|n| n.id == wanted || n.title() == wanted) {
+    if let Some(file) = wanted.strip_prefix("trash:") {
+        if let Some(note) = m.library.iter().find(|n| n.trash && n.id == file) {
+            return Ok(note.clone());
+        }
+    }
+    if let Some(note) = m.library.iter().find(|n| !n.trash && (n.id == wanted || n.title() == wanted)) {
         return Ok(note.clone());
     }
     let titles: Vec<String> =
         m.library.iter().filter(|n| !n.trash).take(8).map(|n| format!("\"{}\"", n.title())).collect();
     let held = if titles.is_empty() { "nothing yet".to_string() } else { titles.join(", ") };
-    Err(format!("No note is called \"{wanted}\". The library holds: {held}"))
+    let trashed = m
+        .library
+        .iter()
+        .find(|n| n.trash && (n.id == wanted || n.title() == wanted))
+        .map(|n| format!(". A note of that name is in the Trash; open it with \"trash:{}\".", n.id))
+        .unwrap_or_default();
+    Err(format!("No note is called \"{wanted}\". The library holds: {held}{trashed}"))
 }
 
 fn open_note(m: &mut Model, fx: &mut Effects<Notes>, wanted: &str) {
