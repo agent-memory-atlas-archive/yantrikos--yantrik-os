@@ -324,12 +324,20 @@ pub fn export(
     let failed = SaveFailed { error: SaveError::new(JOB_LOST), kept: None };
     let slides = m.deck().len();
     let make = default_name.then(|| m.deck_dir.clone());
+    // What an earlier export of this deck starts with: the Markdown's header, or the outline's
+    // title and first number.
+    let replaces = default_name.then(|| match extension {
+        "md" => format!("<!-- yPresent deck: {} -->", m.title()),
+        _ => format!("# {}
+
+1. ", m.title()),
+    });
     let lost = Command::Exported { then: then.clone(), slides, result: Err(Box::new(failed)) };
     let disk = m.disk.clone();
     fx.spawn_or(lost, move |_| Command::Exported {
         then,
         slides,
-        result: export_copy(job, make.as_deref(), disk.as_ref()).map(Box::new),
+        result: export_copy(job, make.as_deref(), replaces.as_deref(), disk.as_ref()).map(Box::new),
     });
 }
 

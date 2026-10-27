@@ -31,6 +31,18 @@ fn choose(unnamed: &Unnamed) -> Result<PathBuf, Box<SaveFailed>> {
     unused_path(dir, &unnamed.title).map_err(refused)
 }
 
+/// Whether the regular file at `path` begins with `header`, read without following a link.
+fn starts_with(path: &Path, header: &str) -> bool {
+    use std::io::Read as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let Ok(file) = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path)
+    else {
+        return false;
+    };
+    let mut head = Vec::new();
+    file.take(header.len() as u64).read_to_end(&mut head).is_ok() && head == header.as_bytes()
+}
+
 /// Saves the deck. With `unnamed`, the name is chosen here, in the job, where the disk may be read.
 pub fn save_deck(
     mut job: SaveJob,
@@ -48,9 +60,27 @@ pub fn save_deck(
 /// did; a name the caller gave is never replaced.
 ///
 /// `make` is the folder to make first, when the name is one this app chose in its own.
-pub fn export_copy(job: SaveJob, make: Option<&Path>, disk: &dyn Disk) -> Result<Wrote, Box<SaveFailed>> {
+/// `replaces` is what an earlier export of this deck starts with: a name this app chose replaces
+/// a file already there only when that file starts with it, so a person's own `talk.md`, or
+/// another deck's export of the same name, is never written over.
+pub fn export_copy(
+    job: SaveJob,
+    make: Option<&Path>,
+    replaces: Option<&str>,
+    disk: &dyn Disk,
+) -> Result<Wrote, Box<SaveFailed>> {
     if let Some(dir) = make {
         std::fs::create_dir_all(dir).map_err(|e| refused(format!("could not make {}: {e}", dir.display())))?;
+    }
+    if let Some(header) = replaces {
+        if let Ok(meta) = std::fs::symlink_metadata(&job.target) {
+            if !meta.is_file() || !starts_with(&job.target, header) {
+                return Err(refused(format!(
+                    "{} is already there and is not an earlier export of this deck, so it was not replaced. Give                      `export_markdown` a path of your own.",
+                    job.target.display()
+                )));
+            }
+        }
     }
     framework::save(&ExportRules, &job, disk)
 }

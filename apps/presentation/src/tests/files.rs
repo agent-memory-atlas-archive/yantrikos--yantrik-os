@@ -312,3 +312,50 @@ fn an_export_never_writes_over_the_deck_it_came_from() {
     assert!(notice(&app).contains("never replaces the deck"), "{}", notice(&app));
     assert_eq!(file(&deck), before);
 }
+
+#[test]
+fn a_default_export_replaces_only_an_earlier_export_of_this_deck() {
+    let (app, path) = with_file("export-guard", &["One"]);
+    let md = path.with_file_name("talk.md");
+    // The person's own file of that name, beside the deck.
+    std::fs::write(&md, "MY OWN NOTES\n").unwrap();
+    let err = act(&app, "export_markdown", none()).unwrap_err();
+    assert!(err.contains(&md.display().to_string()) && err.contains("not an earlier export of this deck"), "{err}");
+    assert_eq!(file(&md), "MY OWN NOTES\n", "byte-identical afterwards");
+    press(&app, WindowAction::ExportMarkdown);
+    assert!(notice(&app).contains("not an earlier export"), "{}", notice(&app));
+    assert_eq!(file(&md), "MY OWN NOTES\n");
+    // The same for the outline, whose earlier export starts with the deck's title and a number.
+    let outline_file = path.with_file_name("talk.outline.md");
+    std::fs::write(&outline_file, "# Talk\n\nnot a numbered outline\n").unwrap();
+    press(&app, WindowAction::ExportOutline);
+    assert_eq!(file(&outline_file), "# Talk\n\nnot a numbered outline\n");
+    // Out of the way, an export is made; the next one replaces it.
+    std::fs::remove_file(&md).unwrap();
+    act(&app, "export_markdown", none()).unwrap();
+    act(&app, "set_slide", json!({ "index": 0, "title": "Renamed" })).unwrap();
+    act(&app, "export_markdown", none()).unwrap();
+    assert!(file(&md).contains("# Renamed"), "a previous export is replaced");
+}
+
+#[test]
+fn an_export_from_another_deck_with_the_same_stem_is_not_replaced() {
+    let dir = scratch("export-other-deck");
+    let first = dir.join("talk.ydeck");
+    write_deck(&first, "Quarterly", &["a"]);
+    let app = started();
+    act(&app, "open", ask(&first)).unwrap();
+    act(&app, "export_markdown", none()).unwrap();
+    let md = dir.join("talk.md");
+    let theirs = file(&md);
+    assert!(theirs.starts_with("<!-- yPresent deck: Quarterly -->"));
+    // Another deck, also called talk.ydeck elsewhere, exported into the same place.
+    let second = dir.join("talk2/talk.ydeck");
+    std::fs::create_dir_all(second.parent().unwrap()).unwrap();
+    write_deck(&second, "Annual", &["b"]);
+    std::fs::rename(&md, second.with_file_name("talk.md")).unwrap();
+    act(&app, "open", ask(&second)).unwrap();
+    let err = act(&app, "export_markdown", none()).unwrap_err();
+    assert!(err.contains("not an earlier export of this deck"), "{err}");
+    assert_eq!(file(&second.with_file_name("talk.md")), theirs, "the other deck's export is as it was");
+}
