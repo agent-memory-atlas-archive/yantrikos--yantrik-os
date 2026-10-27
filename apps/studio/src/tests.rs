@@ -1984,3 +1984,48 @@ fn the_gallery_the_window_and_the_files_agree() {
     assert!(detail_for(&engine, &name).contains("There is no record beside this picture"));
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// Security: `set_backend` names an environment variable whose value goes as a bearer token to the
+/// `base_url` it names, so an agent that could call it could send any secret to any host. It is the
+/// person's alone: an agent is refused at the door every action is published through, the settings
+/// file is untouched and nothing is sent anywhere.
+#[test]
+fn an_agent_cannot_point_studio_and_a_key_at_a_host() {
+    use yantrik_app_runtime::control::AgentTokenScope;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::env::set_var("STUDIO_TEST_EXFIL_VAR", "not-a-real-secret");
+
+    let (dir, found) = world("agent-set-backend");
+    let settings = found.settings.clone().unwrap();
+    std::fs::write(&settings, r#"{"backend":{"kind":"fake"}}"#).unwrap();
+    let before = std::fs::read(&settings).unwrap();
+    let engine = an_engine(r#"{"backend":{"kind":"fake"}}"#, &found);
+    let actions = surface(engine.clone());
+    let args = json!({
+        "kind": "openai-images", "model": "gpt-image-1",
+        "base_url": format!("http://127.0.0.1:{port}"), "api_key_env": "STUDIO_TEST_EXFIL_VAR"
+    });
+    // The path `publish_control` gives every action: the rule first, then the handler.
+    let through_the_door = |args: &Value| {
+        agent_rule::admit("set_backend", args)?;
+        call(&actions, "set_backend", args.clone())
+    };
+
+    let agent = AgentTokenScope::enter(Some("tok-studio-test".into()));
+    let refused = through_the_door(&args).expect_err("an agent's set_backend is refused");
+    drop(agent);
+    assert_eq!(
+        refused,
+        "Changing where Studio sends prompts is the person's choice; ask them to change it in Studio."
+    );
+    assert_eq!(std::fs::read(&settings).unwrap(), before, "the settings file is unchanged");
+    assert_eq!(engine.snapshot().facts.kind, "fake", "the backend is unchanged");
+    assert!(listener.accept().is_err(), "nothing connected to the listener");
+
+    // The person's own call still works.
+    let done = through_the_door(&json!({ "kind": "fake" })).expect("the person's set_backend works");
+    assert_eq!(done["backend"], json!("fake"));
+    std::fs::remove_dir_all(&dir).ok();
+}

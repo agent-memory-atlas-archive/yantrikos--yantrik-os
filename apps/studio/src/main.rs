@@ -699,7 +699,8 @@ fn surface(engine: Engine) -> Vec<(Action, Handler)> {
     add(
         act(
             "set_backend",
-            "Choose where pictures are made from now on, and write that choice down in the \
+            "The person's alone: an agent that calls this is refused and should ask the person to \
+             change it in Studio. Choose where pictures are made from now on, and write that choice down in the \
              configuration file. Graded `sensitive` because it decides where every later prompt \
              goes: naming a hosted service means the sentences typed into this app will leave this \
              machine and may cost money. `generate` and `variations` are regraded the moment this \

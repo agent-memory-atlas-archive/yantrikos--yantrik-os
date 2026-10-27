@@ -3,7 +3,7 @@
 //! Studio runs as the person. `upscale` copied any picture the person can read into the gallery,
 //! where every image tool reads it - the screenshots in `~/Pictures/Screenshots` included -
 //! `open` handed any picture to the machine's viewer, `variations` read the record beside any
-//! picture, and `set_backend` read any file as a workflow (security review of #942, finding 1).
+//! picture, (security review of #942, finding 1).
 //! An agent now names only files in the person's home outside its protected places, by the rule
 //! every side shares (`yantrik_ipc_contracts::home_paths`). A bare filename names a picture in the
 //! gallery, which is Studio's own, and is resolved there as before. The person is not asked.
@@ -22,15 +22,24 @@ fn named_file(action: &str) -> Option<&'static str> {
     match action {
         "upscale" | "open" => Some("path"),
         "variations" => Some("of"),
-        "set_backend" => Some("workflow"),
         _ => None,
     }
 }
+
+/// The refusal an agent's `set_backend` gets.
+pub const SET_BACKEND_IS_THE_PERSONS: &str =
+    "Changing where Studio sends prompts is the person's choice; ask them to change it in Studio.";
 
 /// Whether this caller may run `action` with `args`.
 pub fn admit(action: &str, args: &Value) -> Result<(), String> {
     if !agent_is_calling() {
         return Ok(());
+    }
+    // `set_backend` names an environment variable whose value is sent as a bearer token to the
+    // `base_url` it names, so an agent could send any secret in the environment to any host. It is
+    // the person's alone, whatever else it names.
+    if action == "set_backend" {
+        return Err(SET_BACKEND_IS_THE_PERSONS.to_string());
     }
     let Some(key) = named_file(action) else { return Ok(()) };
     let named = args.get(key).and_then(Value::as_str).unwrap_or_default().trim();
@@ -57,7 +66,7 @@ mod tests {
         assert_eq!(admit("upscale", &json!({ "path": outside })), Ok(()), "the person is not asked");
 
         let agent = AgentTokenScope::enter(Some("tok-studio-test".into()));
-        for (action, key) in [("upscale", "path"), ("open", "path"), ("variations", "of"), ("set_backend", "workflow")] {
+        for (action, key) in [("upscale", "path"), ("open", "path"), ("variations", "of")] {
             for asked in [
                 outside.as_str(),
                 "~/Pictures/Screenshots/shot.png",
@@ -71,7 +80,7 @@ mod tests {
             assert_eq!(admit(action, &json!({ key: "studio-1.png" })), Ok(()), "{action}");
         }
         assert_eq!(admit("delete", &json!({ "path": outside })), Ok(()), "delete keeps to the gallery itself");
-        assert_eq!(admit("set_backend", &json!({ "kind": "fake" })), Ok(()), "no workflow named");
+        assert_eq!(admit("set_backend", &json!({ "kind": "fake" })), Err(SET_BACKEND_IS_THE_PERSONS.to_string()));
         drop(agent);
         let _ = std::fs::remove_file(&outside);
     }
