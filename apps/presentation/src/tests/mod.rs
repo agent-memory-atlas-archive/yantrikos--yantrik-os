@@ -27,6 +27,7 @@ mod private_mode;
 mod recovery;
 mod rescue;
 mod saving;
+mod shots;
 mod untrusted;
 mod window;
 

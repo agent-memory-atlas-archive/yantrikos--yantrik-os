@@ -32,6 +32,8 @@ libc = { workspace = true }
 yantrik-testing = { workspace = true, features = ["testing"] }
 # FaultyDisk, to make any step of a save fail.
 yantrik-app = { workspace = true, features = ["testing"] }
+# The window drawn without a display, written as a screenshot.
+png = "0.18"
 
 [build-dependencies]
 yantrik-app-build = { workspace = true }

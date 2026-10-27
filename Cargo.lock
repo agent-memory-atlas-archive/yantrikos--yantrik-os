@@ -11772,6 +11772,7 @@ name = "yantrik-presentation"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "png",
  "serde",
  "serde_json",
  "slint",

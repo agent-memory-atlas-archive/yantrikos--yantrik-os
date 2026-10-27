@@ -61,6 +61,16 @@ fn next_then_select_does_not_write_one_slide_over_the_next() {
 }
 
 #[test]
+fn text_the_screen_has_not_announced_yet_is_still_committed_before_the_selection_moves() {
+    // Typed, and the model has not heard of it: the move itself carries what the canvas holds.
+    let app = three();
+    app.ui(|ui| ui.set_current_title("typed, not announced".into()));
+    click(&app, |ui| ui.invoke_next_slide());
+    assert_eq!(outline(&app), vec!["typed, not announced", "B", "C"]);
+    assert_eq!(canvas(&app).title, "B", "and the canvas is on the slide moved to");
+}
+
+#[test]
 fn every_way_of_moving_commits_what_is_on_the_canvas_first() {
     type Press = fn(&crate::PresentationApp);
     let paths: [(&str, Press); 9] = [
@@ -102,8 +112,6 @@ fn the_keys_move_and_stop_at_the_ends() {
 
 #[test]
 fn typing_reaches_the_deck_says_unsaved_and_arms_the_draft() {
-    let app = three();
-    assert!(!modified(&app) || modified(&app), "a deck built by calls is unsaved");
     let (app, _) = super::with_file("typing", &["One"]);
     assert!(!modified(&app));
     type_title(&app, "One, edited");

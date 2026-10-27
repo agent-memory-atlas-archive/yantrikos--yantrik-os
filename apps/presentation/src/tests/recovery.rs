@@ -219,3 +219,19 @@ fn a_file_named_on_the_command_line_wins_the_window_and_leaves_every_draft_where
     let next = start_at(paths, Vec::new());
     assert!(outline(&next) == vec!["older still"] || outline(&next) == vec!["unsaved from last time"], "offered at the next start with no file");
 }
+
+#[test]
+fn an_old_deck_saved_before_its_draft_landed_still_has_its_file_set_aside() {
+    let paths = Paths::temporary("presentation");
+    let old = old_file(&paths, None, &["from the old build"]);
+    let app = start_at(paths.clone(), Vec::new());
+    assert!(old.exists(), "its draft has not reached the disk, so the file waits");
+    // Saved before the draft landed: the draft is discarded, and the old file's deck is in a file.
+    let saved = act(&app, "save", super::none()).unwrap();
+    settle(&app);
+    assert!(!old.exists(), "set aside when the draft was discarded, not left to be offered again");
+    assert!(paths.state_dir().join("recovery.json.imported").exists());
+    assert_eq!(read_deck(std::path::Path::new(saved["path"].as_str().unwrap())).slides[0].title, "from the old build");
+    app.shutdown();
+    assert_eq!(notice(&killed_and_started_again(app)), "", "and nothing is offered at the next start");
+}

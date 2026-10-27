@@ -9,6 +9,7 @@ use super::{
     act, draft_file, file, killed_and_started_again, notice, outline, scratch, settle, started, state, type_title,
     with_file, write_deck,
 };
+use crate::YPresent;
 
 #[test]
 fn a_deck_with_nothing_unsaved_closes_at_once() {
@@ -100,4 +101,24 @@ fn nothing_the_close_does_leaves_a_dialog_or_a_question_up() {
     assert!(state(&app).get("prompt_open").is_none(), "there is no prompt to be open");
     assert_eq!(file(&draft_file(&app)).contains("\"a\""), true);
     act(&app, "show", super::none()).ok();
+}
+
+#[test]
+fn a_logout_hands_the_draft_over_in_the_command_that_answers_not_after_its_debounce() {
+    use std::sync::Arc;
+    use std::time::Duration;
+    use yantrik_app::effects::{Effects, Request};
+    use yantrik_app::mind::fake::FakeMind;
+
+    use crate::command::Command;
+    use crate::model::Model;
+
+    let mut m = Model::new(scratch("logout-effects"), Arc::new(FakeMind::new()), false);
+    m.deck_mut().set_slide(0, Some("typed just now"), None, None).unwrap();
+    let mut fx = Effects::<YPresent>::recording();
+    crate::update::update(&mut m, Command::LoggingOut, &mut fx).unwrap();
+    let names: Vec<&str> = fx.requests().iter().map(Request::name).collect();
+    assert!(names.contains(&"exit"), "{names:?}");
+    let at_once = fx.requests().iter().any(|r| matches!(r, Request::SaveDraft { delay, .. } if *delay == Duration::ZERO));
+    assert!(at_once, "the process may be killed within the signal deadline, before a debounce: {names:?}");
 }
