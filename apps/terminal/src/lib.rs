@@ -28,7 +28,9 @@
 //!   shells they cover as a terminal does: SIGHUP to every process of the shell's session,
 //!   foreground and background, then up to 500 ms for SIGHUP handlers to finish, then SIGKILL for
 //!   what is still running. A job that ignores SIGHUP (`nohup`, `trap '' HUP`) chose to outlive its
-//!   terminal and is left running, and so is one that called `setsid`. A tab, a window or a quit
+//!   terminal and is left running, and so is one that called `setsid`. The one exception: if the
+//!   shell itself has not exited 500 ms after the hangup (the person ran `trap '' HUP` in it), the
+//!   foreground group, a job that ignores SIGHUP included, is killed with it. A tab, a window or a quit
 //!   with a job running asks first, one question at a time; a logout asks nothing.
 //! - ANSWERS ARE THE SHELL'S OWN. An action is told what its own shell did (`wait.rs`), read by
 //!   the worker that waited for it, never the tab the person happens to have in front of them.

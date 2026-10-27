@@ -530,7 +530,7 @@ fn signal(pid: i32, sid: i32, signal: i32) {
     unsafe {
         let fd = libc::syscall(libc::SYS_pidfd_open, pid, 0) as i32;
         if fd < 0 {
-            if std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOSYS) {
+            if std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOSYS) && is_member(pid, sid) {
                 libc::kill(pid, signal);
             }
             return;
