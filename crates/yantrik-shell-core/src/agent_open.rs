@@ -27,6 +27,7 @@ const YANTRIK_APPS: &[(&str, &str)] = &[
     ("yantrik-notes", "notes"),
     ("yantrik-snippet-manager", "snippets"),
     ("yantrik-system-monitor", "system-monitor"),
+    ("yantrik-terminal", "terminal"),
     ("yantrik-text-editor", "editor"),
     ("yantrik-weather", "weather"),
 ];

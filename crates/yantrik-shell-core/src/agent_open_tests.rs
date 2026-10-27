@@ -45,7 +45,9 @@ fn an_unknown_or_missing_handler_is_refused() {
 #[test]
 fn an_external_app_is_refused_and_a_yantrik_app_is_not() {
     assert!(may_open_file(Handler::Desktop("gimp.desktop"), &installed()).is_err());
-    assert!(may_open_file(Handler::Desktop("yantrik-terminal.desktop"), &installed()).is_err());
+    assert!(may_open_file(Handler::Desktop("yantrik-blender.desktop"), &installed()).is_err());
+    // Terminal is a framework app now: a file named to it is never typed into a shell.
+    assert!(may_open_file(Handler::Desktop("yantrik-terminal.desktop"), &installed()).is_ok());
     assert!(may_open_file(Handler::Desktop("yantrik-notes.desktop"), &installed()).is_ok());
     assert!(may_open_file(Handler::Desktop("yantrik-text-editor"), &installed()).is_ok());
     assert!(may_open_file(Handler::TextEditor, &[]).is_ok());
