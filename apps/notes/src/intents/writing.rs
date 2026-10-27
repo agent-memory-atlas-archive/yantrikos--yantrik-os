@@ -46,12 +46,14 @@ pub(super) fn table(table: &mut Intents<Notes>) {
         act(
             "open_note",
             "Open an existing note by its exact title or its filename and show it in the editor. \
-             The note that was open is saved first; a note in the Trash opens read-only.",
+             The note that was open is saved first. Only live notes are matched, never the Trash; \
+             with several of one title the first listed wins. A trashed note opens read-only, \
+             and only by `trash:<filename>`.",
         )
         .arg(arg(
             "title",
             "The note's exact title, or the filename `describe` lists it under (`note-….md`). \
-             Trashed notes are matched too.",
+             For a note in the Trash give `trash:<filename>`; a title never matches the Trash.",
         )),
         |a| {
             let wanted = needed(a, "open_note", "title", "Use a title or filename from `describe.notes`.")?;
@@ -79,8 +81,8 @@ pub(super) fn table(table: &mut Intents<Notes>) {
         )
         .arg(arg(
             "text",
-            "Exactly what to add, appended to the last character already there — begin it with \
-             a newline to start it on its own line.",
+            "Exactly what to add. It starts on a new line: a newline goes before it unless the \
+             note is empty or already ends with one.",
         )),
         |a| {
             Ok(Act::Append(needed(

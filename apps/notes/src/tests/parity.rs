@@ -39,9 +39,9 @@ const BEFORE: &[Golden] = &[
     Golden {
         name: "open_note",
         risk: "standard",
-        description: r#"Open an existing note by its exact title or its filename and show it in the editor. The note that was open is saved first; a note in the Trash opens read-only."#,
+        description: r#"Open an existing note by its exact title or its filename and show it in the editor. The note that was open is saved first. Only live notes are matched, never the Trash; with several of one title the first listed wins. A trashed note opens read-only, and only by `trash:<filename>`."#,
         params: &[
-            ("title", true, r#"The note's exact title, or the filename `describe` lists it under (`note-….md`). Trashed notes are matched too."#),
+            ("title", true, r#"The note's exact title, or the filename `describe` lists it under (`note-….md`). For a note in the Trash give `trash:<filename>`; a title never matches the Trash."#),
         ],
     },
     Golden {
@@ -57,7 +57,7 @@ const BEFORE: &[Golden] = &[
         risk: "standard",
         description: r#"Add text to the end of the note that is open and save it. Nothing already in the note is removed; use `set_content` to replace it instead."#,
         params: &[
-            ("text", true, r#"Exactly what to add, appended to the last character already there — begin it with a newline to start it on its own line."#),
+            ("text", true, r#"Exactly what to add. It starts on a new line: a newline goes before it unless the note is empty or already ends with one."#),
         ],
     },
     Golden {
