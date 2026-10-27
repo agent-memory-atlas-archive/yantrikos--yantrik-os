@@ -26,33 +26,49 @@ fn home() -> PathBuf {
 
 /// Refuse an agent's `open` of anything but a file in the home, outside its protected places.
 pub fn may_read(agent: bool, path: &Path) -> Result<(), String> {
+    may_read_in(&home(), agent, path)
+}
+
+/// [`may_read`] for this home. The rule itself, with the home passed in so nothing has to set
+/// the process's environment to test it.
+pub fn may_read_in(home: &Path, agent: bool, path: &Path) -> Result<(), String> {
     if !agent {
         return Ok(());
     }
-    home_paths::may_read_file(&path.to_string_lossy(), &home())
+    home_paths::may_read_file(&path.to_string_lossy(), home)
 }
 
 /// Refuse an agent's `save_as` or `save` to anywhere but a file in the home, outside its
 /// protected places, in a folder already there, and not through a link.
 pub fn may_write(agent: bool, path: &Path) -> Result<(), String> {
+    may_write_in(&home(), agent, path)
+}
+
+/// [`may_write`] for this home.
+pub fn may_write_in(home: &Path, agent: bool, path: &Path) -> Result<(), String> {
     if !agent {
         return Ok(());
     }
-    home_paths::may_write_file(&path.to_string_lossy(), &home())
+    home_paths::may_write_file(&path.to_string_lossy(), home)
 }
 
 /// Whether a document's file is one no agent is shown: a place an agent may not read. Decided when the
 /// document takes the file (opened, saved as, followed after a move) and kept with the document. A document with
 /// no file holds only what was typed or given to it, and is shown.
 pub fn hidden_from_agents(path: &Path) -> bool {
-    home_paths::may_read_file(&path.to_string_lossy(), &home()).is_err()
+    hidden_from_agents_in(&home(), path)
+}
+
+/// [`hidden_from_agents`] for this home.
+pub fn hidden_from_agents_in(home: &Path, path: &Path) -> bool {
+    home_paths::may_read_file(&path.to_string_lossy(), home).is_err()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// One test, because it points `HOME` at a home of its own and nothing else here reads it.
+    /// The rule for a home of this test's own: passed in, never set in the process's environment.
     #[test]
     fn an_agent_names_only_files_in_the_home() {
         let root = std::env::temp_dir().join(format!("document-agent-rule-{}", std::process::id()));
@@ -72,12 +88,12 @@ mod tests {
         }
         let outside = root.join("outside.md");
         std::fs::write(&outside, "SENTINEL").unwrap();
-        std::env::set_var("HOME", &home_dir);
+        let home = home_dir.as_path();
 
         // The person is not asked.
-        assert_eq!(may_read(false, &home_dir.join(".ssh/id_ed25519")), Ok(()));
-        assert_eq!(may_write(false, &outside), Ok(()));
-        assert!(hidden_from_agents(&outside) && hidden_from_agents(&home_dir.join(".ssh/id_ed25519")));
+        assert_eq!(may_read_in(home, false, &home_dir.join(".ssh/id_ed25519")), Ok(()));
+        assert_eq!(may_write_in(home, false, &outside), Ok(()));
+        assert!(hidden_from_agents_in(home, &outside) && hidden_from_agents_in(home, &home_dir.join(".ssh/id_ed25519")));
 
         let ends = |got: Result<(), String>, why: &str| {
             let err = got.expect_err(why);
@@ -88,16 +104,16 @@ mod tests {
             home_dir.join(".local/state/yantrik/notes/drafts/note.json"),
             home_dir.join(".ssh/id_ed25519"),
         ] {
-            ends(may_read(true, &protected), " is protected");
-            ends(may_write(true, &protected), " is protected");
+            ends(may_read_in(home, true, &protected), " is protected");
+            ends(may_write_in(home, true, &protected), " is protected");
         }
-        ends(may_write(true, &own.join("new.md")), " is protected");
-        ends(may_write(true, &home_dir.join(".bashrc")), " is protected");
-        ends(may_read(true, &outside), " is outside");
-        ends(may_read(true, Path::new("/etc/hostname")), " is outside");
-        assert_eq!(may_read(true, &home_dir.join("Documents/plan.md")), Ok(()));
-        assert_eq!(may_write(true, &home_dir.join("Documents/new.md")), Ok(()));
-        assert!(!hidden_from_agents(&home_dir.join("Documents/plan.md")));
+        ends(may_write_in(home, true, &own.join("new.md")), " is protected");
+        ends(may_write_in(home, true, &home_dir.join(".bashrc")), " is protected");
+        ends(may_read_in(home, true, &outside), " is outside");
+        ends(may_read_in(home, true, Path::new("/etc/hostname")), " is outside");
+        assert_eq!(may_read_in(home, true, &home_dir.join("Documents/plan.md")), Ok(()));
+        assert_eq!(may_write_in(home, true, &home_dir.join("Documents/new.md")), Ok(()));
+        assert!(!hidden_from_agents_in(home, &home_dir.join("Documents/plan.md")));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

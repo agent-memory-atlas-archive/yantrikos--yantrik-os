@@ -96,7 +96,7 @@ pub fn would_throw_away(target: &Path, lost: &str) -> String {
 /// `open`: the file read in a job, and the answer built from what it found. Refused, with the
 /// size of what it would lose in it, while the document has unsaved changes, unless `discard`.
 fn open(m: &mut Model, fx: &mut Effects<YDoc>, path: String, discard: bool, caller: Caller) -> Done {
-    let target = expanded(&path);
+    let target = expanded(path.trim());
     if !discard {
         if let Some(lost) = m.unsaved(false) {
             let hidden = m.unsaved(true).unwrap_or_default();
@@ -140,7 +140,7 @@ fn save_as(m: &mut Model, fx: &mut Effects<YDoc>, path: String, overwrite: bool,
     // The text written is the document's: saving one the person opened from ~/.ssh into
     // ~/Documents would put it where `describe` reads it back.
     not_hidden(m, caller)?;
-    saving::start(m, fx, Some(expanded(&path)), overwrite, AfterSave::SaveAs(caller), caller.agent);
+    saving::start(m, fx, Some(expanded(path.trim())), overwrite, AfterSave::SaveAs(caller), caller.agent);
     Ok(None)
 }
 
@@ -192,7 +192,7 @@ fn replace_all(m: &mut Model, fx: &mut Effects<YDoc>, query: String, with: Strin
 /// `export_markdown`: a copy written to a path, in a job, the document left in its own file.
 fn export_markdown(m: &mut Model, fx: &mut Effects<YDoc>, path: String, caller: Caller) -> Done {
     not_hidden(m, caller)?;
-    saving::export(m, fx, expanded(&path), false, AfterExport::Surface(caller), caller.agent);
+    saving::export(m, fx, expanded(path.trim()), false, AfterExport::Surface(caller), caller.agent);
     Ok(None)
 }
 

@@ -90,8 +90,14 @@ pub fn landed(m: &mut Model, fx: &mut Effects<YDoc>, then: AfterOpen, result: Re
             if let (AfterOpen::Launch, Some(said)) = (&then, &m.held_aside) {
                 m.notice.set(said.clone());
             }
-            if let AfterOpen::Surface(_) = &then {
-                let answer = serde_json::json!({ "opened": path, "bytes": bytes, "words": words, "headings": headings });
+            if let AfterOpen::Surface(caller) = &then {
+                // A file an agent is not shown (a link out of the places it may name) is opened
+                // for the window, and the agent learns nothing of it.
+                let answer = if caller.agent && m.doc.hidden {
+                    serde_json::json!({ "opened": crate::agent_rule::HIDDEN })
+                } else {
+                    serde_json::json!({ "opened": path, "bytes": bytes, "words": words, "headings": headings })
+                };
                 surface::answer(m, fx, answer);
             }
         }

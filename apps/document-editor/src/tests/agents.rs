@@ -146,3 +146,16 @@ fn what_an_agent_reads_in_the_notice_about_a_hidden_document_names_no_file() {
     let person = app.model(|m| m.notice.window().to_string());
     assert!(!person.contains(SENTINEL), "{person}");
 }
+
+#[test]
+fn a_path_with_spaces_round_the_name_opens_and_writes_what_was_checked() {
+    let app = started();
+    let dir = scratch("trimmed");
+    let note = dir.join("note.md");
+    std::fs::write(&note, "# Note\n").unwrap();
+    act(&app, "open", json!({ "path": format!("  {}  ", note.display()) })).expect("the trimmed name is the one opened");
+    assert_eq!(super::path_of(&app), Some(note.clone()));
+    let copy = dir.join("copy.md");
+    act(&app, "export_markdown", json!({ "path": format!("{} ", copy.display()) })).unwrap();
+    assert!(copy.exists() && !dir.join("copy.md ").exists(), "written where it was checked");
+}
