@@ -48,8 +48,10 @@ pub enum Command {
     Presented,
     DraftSaved(String),
     DraftNotSaved { name: String, why: String },
-    /// The sheet has stood still for a beat: its draft is made now.
+    /// The sheet has stood still for a beat: its draft is encoded now.
     DraftDue,
+    /// A draft was encoded off the window's thread, for the document's `seq` it was of.
+    DraftEncoded { name: String, seq: u64, bytes: Option<Vec<u8>> },
     /// The watch saw the open sheet's file change.
     FileChanged { key: String, seen: Observed },
     // What the jobs found.

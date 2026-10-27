@@ -36,9 +36,12 @@ fn draft_of(m: &Model) -> SheetDraft {
     }
 }
 
-/// Whether the sheet's draft is behind its edits.
+/// Whether the sheet's draft is behind its edits, and no encode of this very state is on its way.
 fn owed(m: &Model) -> bool {
     let (seq, name) = (m.d().seq, &m.doc.draft);
+    if m.encoding == Some(seq) {
+        return false;
+    }
     match &m.d().draft {
         DraftState::Kept { seq: kept } => *kept < seq,
         DraftState::Failed { .. } => m.draft_failed_at.get(name).is_none_or(|at| *at < seq),
@@ -65,13 +68,36 @@ pub fn sync(m: &mut Model, fx: &mut Effects<YSheets>) {
     }
 }
 
-/// The sheet has stood still: its draft is made now, if it is still owed.
+/// The sheet has stood still: its draft is encoded now, in a job, if it is still owed. Encoding a
+/// large sheet is not for the window's thread; the job is given the sheet's rows as they are (shared,
+/// not copied) and the lane gets the bytes when they land, if the sheet is still the one they are of.
 pub fn due(m: &mut Model, fx: &mut Effects<YSheets>) {
     if m.given_up || !m.modified() || !owed(m) {
         return;
     }
-    let name = m.doc.draft.clone();
-    fx.save_draft(&name, draft_of(m).bytes());
+    let (name, seq) = (m.doc.draft.clone(), m.d().seq);
+    m.encoding = Some(seq);
+    let snapshot = m.sheet().snapshot();
+    let (path, on_disk, active) = (m.path().map(Into::into), m.doc.on_disk.clone(), m.active.name());
+    let lost = Command::DraftEncoded { name: name.clone(), seq, bytes: None };
+    fx.spawn_or(lost, move |_| {
+        let draft = SheetDraft { version: VERSION, path, rows: snapshot.used_rows(), on_disk, active, at: now_ms() };
+        Command::DraftEncoded { name, seq, bytes: Some(draft.bytes()) }
+    });
+}
+
+/// A draft was encoded. It is handed to the lane only if the sheet has not been typed into since
+/// (the newer state has its own pause and its own encode) and is still unsaved; otherwise it is
+/// dropped, as a stale recalculation is.
+pub fn encoded(m: &mut Model, fx: &mut Effects<YSheets>, name: String, seq: u64, bytes: Option<Vec<u8>>) {
+    if m.encoding == Some(seq) {
+        m.encoding = None;
+    }
+    let Some(bytes) = bytes else { return };
+    if m.given_up || m.doc.draft != name || m.d().seq != seq || !m.modified() {
+        return;
+    }
+    fx.save_draft(&name, bytes);
     m.draft_failed_at.remove(&name);
     m.draft_asked();
 }

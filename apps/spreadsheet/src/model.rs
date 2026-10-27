@@ -99,6 +99,14 @@ pub struct Watch {
     pub moves: u64,
 }
 
+/// The cells of a sheet just read, already made into what the window shows, for the one render
+/// that draws it whole.
+#[derive(Debug, Clone)]
+pub struct Prebuilt {
+    pub rev: u64,
+    pub rows: Vec<Vec<crate::SpreadsheetCell>>,
+}
+
 /// What ySheets knows of the sheet beside what the framework's document holds.
 #[derive(Debug, Clone)]
 pub struct Doc {
@@ -171,12 +179,16 @@ pub struct Model {
     pub answer: Value,
     /// The newest revision of the sheet a job was started to work out.
     pub solving: u64,
+    /// The document `seq` whose draft is being encoded in a job.
+    pub encoding: Option<u64>,
     /// A revision whose job ended without an answer, so none is started for it again.
     pub solve_lost: Option<u64>,
     pub watch: Option<Watch>,
     /// How many times the person moved the selection: a changed count means they moved on.
     pub moves: u64,
     pub redraw: Redraw,
+    /// Taken by the render that draws the sheet whole (it is moved into the window, not copied).
+    pub prebuilt: std::cell::RefCell<Option<Prebuilt>>,
     pub cues: Vec<Cue>,
     /// The disk saves write through.
     pub disk: Arc<dyn Disk>,
@@ -214,10 +226,12 @@ impl Model {
             reread_owed: false,
             answer: Value::Null,
             solving: 0,
+            encoding: None,
             solve_lost: None,
             watch: None,
             moves: 0,
             redraw: Redraw::All,
+            prebuilt: Default::default(),
             // Typing goes into A1 from the first key, without a click first.
             cues: vec![Cue::LoadField, Cue::EditCell],
             disk: Arc::new(RealDisk),

@@ -161,3 +161,52 @@ fn a_recovered_sheet_whose_file_is_somewhere_an_agent_is_not_shown_stays_hidden_
     assert!(app.model(|m| m.doc.hidden), "decided when the draft took its file");
     assert_eq!(state(&app)["selection"]["typed"], json!("topsecret"), "the person sees it");
 }
+
+#[test]
+fn the_draft_is_encoded_in_a_job_and_handed_to_the_lane_when_it_lands() {
+    let app = started();
+    enter(&app, "typed");
+    app.advance(crate::update::drafts::PAUSE);
+    assert_eq!(app.jobs_waiting(), 1, "the encode is a job, not part of the timer's command");
+    assert_eq!(app.writes_waiting(), 0, "and nothing is the lane's yet");
+    settle(&app);
+    assert_eq!(app.writes_waiting(), 1);
+    app.run_writes();
+    assert!(std::fs::read_to_string(draft_file(&app)).unwrap().contains("typed"));
+}
+
+#[test]
+fn a_draft_encoded_for_a_sheet_typed_into_since_is_dropped_and_the_newer_one_is_made() {
+    let app = started();
+    enter(&app, "first");
+    app.advance(crate::update::drafts::PAUSE);
+    assert_eq!(app.jobs_waiting(), 1);
+    // Typed into before the encode landed.
+    enter_no_settle(&app, "second");
+    app.run_jobs();
+    assert_eq!(app.writes_waiting(), 0, "the encode of the older state is not kept");
+    flush_drafts(&app);
+    let kept = std::fs::read_to_string(draft_file(&app)).unwrap();
+    assert!(kept.contains("second") && kept.contains("first"), "the newer state, with both: {kept}");
+}
+
+#[test]
+fn a_draft_that_lands_after_the_sheet_was_saved_is_not_kept() {
+    let (app, _) = with_file("draft-after-save", "1\r\n");
+    act(&app, "set_cell", json!({ "cell": "A1", "text": "2" })).unwrap();
+    app.advance(crate::update::drafts::PAUSE);
+    let saving = app.act("save_over", json!({})).unwrap();
+    app.run_jobs();
+    settle(&app);
+    saving.settle().unwrap();
+    app.run_writes();
+    assert!(!draft_file(&app).exists(), "nothing is unsaved, so no draft");
+}
+
+fn enter_no_settle(app: &yantrik_testing::TestApp<crate::YSheets>, text: &str) {
+    let text = text.to_string();
+    app.ui(move |ui| {
+        ui.set_cell_data(text.clone().into());
+        ui.invoke_formula_submitted(text.into(), "down".into());
+    });
+}

@@ -11,7 +11,7 @@
 
 use std::path::PathBuf;
 
-use yantrik_app::documents::{Fingerprint, Observed, OutsideState, Source};
+use yantrik_app::documents::{Observed, OutsideState, Source};
 use yantrik_app::effects::Effects;
 
 use super::cells;
@@ -64,7 +64,7 @@ fn spawn_reread(fx: &mut Effects<YSheets>, path: PathBuf) {
 pub fn conflict(title: &str) -> String {
     format!(
         "{title} was changed outside ySheets while this sheet has unsaved changes. Your changes are intact and \
-         nothing was written over the other version; Save As keeps yours in a file of its own."
+         nothing was written over the other version; `save` with a path (or Save As in the window) keeps yours in a file of its own."
     )
 }
 
@@ -106,11 +106,11 @@ pub fn reread(m: &mut Model, fx: &mut Effects<YSheets>, from: PathBuf, result: R
             return m.notice.set_about(hidden, unshown(&title), || unshown(HIDDEN));
         }
     };
-    let OpenedSheet { file, sheet, .. } = *opened;
+    let OpenedSheet { file, sheet, baseline, .. } = *opened;
     let mut book = m.book().clone();
     book.followed(sheet);
     let d = m.d_mut();
-    d.take_theirs(book, Fingerprint::of_bytes(file.text.as_bytes()));
+    d.take_theirs(book, baseline);
     if let Some((key, path, seen)) = d.watch_entry() {
         fx.watch(&key, path, seen);
     }
@@ -178,7 +178,7 @@ pub fn located(m: &mut Model, fx: &mut Effects<YSheets>, from: PathBuf, found: O
     let gone = |name: &str| {
         format!(
             "{name} is not there any more, and nothing with the same name and the same contents was found near it. \
-             Your changes are untouched \u{2014} Save As keeps your sheet in a new file."
+             Your changes are untouched \u{2014} `save` with a path (or Save As in the window) keeps your sheet in a new file."
         )
     };
     let Some(found) = found else {

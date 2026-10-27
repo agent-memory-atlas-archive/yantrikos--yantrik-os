@@ -192,3 +192,24 @@ fn a_path_with_spaces_round_the_name_opens_what_was_checked() {
     assert!(copy.exists() && !dir.join("copy.csv ").exists(), "written where it was checked");
     settle(&app);
 }
+
+#[test]
+fn a_path_the_rule_refuses_is_said_before_unsaved_changes_as_it_always_was() {
+    let app = started();
+    let dir = scratch("order");
+    if !outside_home(&dir) {
+        return;
+    }
+    let other = dir.join("other.csv");
+    std::fs::write(&other, "1\r\n").unwrap();
+    act(&app, "set_cell", json!({ "cell": "A1", "text": "mine" })).unwrap();
+    // An agent naming a file it may not read is told so, whether or not there is anything unsaved.
+    let e = act_as_agent(&app, "tok-sheets", "open", json!({ "path": "~/.ssh/id_ed25519" })).unwrap_err();
+    assert!(e.ends_with(" is protected"), "{e}");
+    let e = act_as_agent(&app, "tok-sheets", "open", json!({ "path": other.display().to_string() })).unwrap_err();
+    assert!(e.ends_with(" is outside"), "{e}");
+    // The person, for whom the path is fine, is told about the unsaved changes.
+    let e = act(&app, "open", json!({ "path": other.display().to_string() })).unwrap_err();
+    assert!(e.contains("has unsaved changes, so nothing was opened"), "{e}");
+    assert_eq!(super::raw(&app, "A1"), "mine");
+}

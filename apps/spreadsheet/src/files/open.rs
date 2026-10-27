@@ -19,6 +19,11 @@ pub struct OpenedSheet {
     /// How many rows and columns the file itself had, before the sheet padded them to a grid.
     pub file_rows: usize,
     pub file_cols: usize,
+    /// The fingerprint of the file's text, made in the job: hashing a large file is not for the
+    /// window's thread.
+    pub baseline: yantrik_app::documents::Fingerprint,
+    /// The cells as the window shows them, when a job made them (`update::opening`).
+    pub cells: Option<Vec<Vec<crate::SpreadsheetCell>>>,
 }
 
 /// The sheet a file's text makes. The text has been read as CSV already; this is the same read,
@@ -29,7 +34,8 @@ pub fn sheet_of(file: Opened) -> Result<OpenedSheet, String> {
     let file_rows = rows.len();
     let file_cols = rows.iter().map(Vec::len).max().unwrap_or(0);
     let sheet = Sheet::from_rows(&rows).map_err(|e| format!("{shown} is too large to open: {e}"))?;
-    Ok(OpenedSheet { file, sheet, file_rows, file_cols })
+    let baseline = yantrik_app::documents::Fingerprint::of_bytes(file.text.as_bytes());
+    Ok(OpenedSheet { file, sheet, file_rows, file_cols, baseline, cells: None })
 }
 
 /// Opens the sheet at `path`. An agent may name only a file in the person's home, outside its
@@ -37,6 +43,13 @@ pub fn sheet_of(file: Opened) -> Result<OpenedSheet, String> {
 /// open any CSV they can read. A refusal names the path first.
 pub fn open_sheet(path: &Path, agent: bool) -> Result<OpenedSheet, String> {
     open_sheet_in(&PathBuf::from(std::env::var_os("HOME").unwrap_or_default()), path, agent)
+}
+
+/// Whether `path` may be opened by this caller: the agent rule alone, which reads the disk (so it
+/// runs in a job). The surface asks it before anything else is said about the open.
+pub fn may_open(path: &Path, agent: bool) -> Result<(), String> {
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    agent::may_read_in(&home, agent, path).map_err(|e| said(path, e))
 }
 
 /// [`open_sheet`] for this home: the rule itself, with the home passed in so a test does not have

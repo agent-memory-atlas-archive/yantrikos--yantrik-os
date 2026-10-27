@@ -43,8 +43,8 @@ fn edits_made_while_the_file_is_written_stay_unsaved() {
     act(&app, "set_cell", json!({ "cell": "A1", "text": "first" })).unwrap();
     // Save is started and has not landed; the person types another cell.
     app.ui(|ui| ui.invoke_command("save".into()));
-    super::click(&app, "B2");
     app.ui(|ui| {
+        ui.invoke_cell_clicked(1, 1);
         ui.set_cell_data("second".into());
         ui.invoke_formula_submitted("second".into(), "down".into());
     });
@@ -116,4 +116,45 @@ fn save_as_a_second_file_moves_the_sheet_there_and_watches_it() {
     assert_eq!(watched.len(), 1);
     assert_eq!(watched[0].1, other);
     assert_eq!(shown(&app, "A1"), "2");
+}
+
+/// The words in backticks in `sentence`, each of which names an action.
+fn named_actions(sentence: &str) -> Vec<String> {
+    sentence.split('`').skip(1).step_by(2).map(|w| w.split_whitespace().next().unwrap_or_default().to_string()).collect()
+}
+
+#[test]
+fn no_sentence_names_an_action_the_app_does_not_have() {
+    use crate::files::rules::SheetRules;
+    use yantrik_app::documents::files::FileRules as _;
+    let app = started();
+    let table: Vec<String> =
+        app.describe()["actions"].as_array().unwrap().iter().map(|a| a["name"].as_str().unwrap().to_string()).collect();
+    let mut sentences: Vec<String> = Vec::new();
+    // The file was moved: found again beside where it was, and not found at all.
+    let (app, path) = with_file("sentences", "1\r\n");
+    let moved = path.with_file_name("renamed.csv");
+    std::fs::rename(&path, &moved).unwrap();
+    sentences.push(act(&app, "save", json!({})).unwrap_err());
+    std::fs::remove_file(&moved).unwrap();
+    sentences.push(act(&app, "save", json!({})).unwrap_err());
+    // The rest of the file layer's words, and the notices that say what to do next.
+    let p = std::path::Path::new("/x/y.csv");
+    sentences.extend([
+        SheetRules.already_there(p),
+        SheetRules.changed_on_disk(p),
+        SheetRules.linked(p),
+        SheetRules.read_only(p),
+        SheetRules.write_into_moved(p),
+        SheetRules.write_here_or_elsewhere(),
+        crate::update::conflict_sentence("x.csv"),
+    ]);
+    for sentence in &sentences {
+        assert!(!sentence.contains("overwrite") && !sentence.contains("save_as"), "{sentence}");
+        for word in named_actions(sentence) {
+            assert!(table.contains(&word), "`{word}` is not one of the actions {table:?}: {sentence}");
+        }
+    }
+    assert!(sentences[0].contains("`save_over` with the path"), "{}", sentences[0]);
+    assert!(sentences[1].contains("`save_over` writes it here again, or `save` with a path"), "{}", sentences[1]);
 }

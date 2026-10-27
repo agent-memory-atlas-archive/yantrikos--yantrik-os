@@ -200,6 +200,53 @@ fn the_reviewers_nine_megabyte_sheet_opens() {
     assert!(took.as_secs_f64() < 10.0, "{took:?}");
 }
 
+/// How much of opening the reviewer's 9 MB sheet (494,000 formula cells) is on the window's thread.
+/// The job parses the file and works the sheet out; the command that lands it is what the window
+/// waits for. Run with `cargo test --release -- --ignored --nocapture large_open`.
+#[test]
+#[ignore]
+fn large_open_ui_part() {
+    use crate::command::{Cause, Command};
+    let app = started();
+    let path = csv_file("large-open", &sums(19_000));
+    let job = std::time::Instant::now();
+    let mut opened = crate::files::open::open_sheet(&path, false).unwrap();
+    opened.cells = Some(crate::view::render::rows_of(false, &opened.sheet));
+    let job = job.elapsed();
+    let parts = std::time::Instant::now();
+    let (_filled, _errors) = opened.sheet.counts();
+    let _first = opened.sheet.first_error();
+    let counts = parts.elapsed();
+    let parts = std::time::Instant::now();
+    let model = crate::model::Model::new(std::env::temp_dir(), false);
+    let cells: Vec<_> = opened.sheet.values().iter().map(|v| crate::view::render::shown(&model, v)).collect();
+    let strings = parts.elapsed();
+    drop(cells);
+    let parts = std::time::Instant::now();
+    let texts: Vec<String> = opened.sheet.values().iter().map(|v| v.display()).collect();
+    let formatting = parts.elapsed();
+    let parts = std::time::Instant::now();
+    let shared: Vec<slint::SharedString> = texts.iter().map(|t| t.as_str().into()).collect();
+    let into_slint = parts.elapsed();
+    eprintln!("  formatting only {formatting:?}; into Slint strings {into_slint:?} ({} cells)", shared.len());
+    eprintln!("  of which: counts and first error {counts:?}; one display string per cell {strings:?}");
+    let rows_for_models = opened.cells.clone().unwrap();
+    let models = std::time::Instant::now();
+    let lines: Vec<crate::SheetRow> = rows_for_models
+        .into_iter()
+        .map(|cells| crate::SheetRow { cells: slint::ModelRc::new(slint::VecModel::from(cells)) })
+        .collect();
+    let list = slint::ModelRc::new(slint::VecModel::from(lines));
+    let models = models.elapsed();
+    eprintln!("  Slint models for 19,000 rows of 26 cells, nothing else: {models:?}");
+    drop(list);
+    let ui = std::time::Instant::now();
+    app.run(Command::Opened { then: Cause::Window, result: Ok(Box::new(opened)) });
+    let ui = ui.elapsed();
+    eprintln!("large open: job (read, parse, work out) {job:?}; window's thread (install, first render) {ui:?}");
+    assert_eq!(super::shown(&app, "B19000"), "#CYCLE!");
+}
+
 #[test]
 fn ranges_that_overlap_without_end_are_held_to_the_budget() {
     // Running totals over everything above: 7,000 formulas link to 24.5 million others.

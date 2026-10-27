@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 
 use serde_json::json;
-use yantrik_app::documents::{Fingerprint, Source};
+use yantrik_app::documents::Source;
 use yantrik_app::effects::Effects;
 
 use super::{cells, drafts, say, surface};
@@ -17,7 +17,7 @@ use crate::agent_rule::HIDDEN;
 use crate::book::Book;
 use crate::caller::Caller;
 use crate::command::{Cause, Command};
-use crate::files::open::{open_sheet, OpenedSheet};
+use crate::files::open::{may_open, open_sheet, OpenedSheet};
 use crate::model::{self, Cue, Model, Redraw, Work};
 use crate::YSheets;
 
@@ -35,8 +35,21 @@ pub fn start(m: &mut Model, fx: &mut Effects<YSheets>, path: PathBuf, then: Caus
     m.busy = Some(Work::Open);
     say(m, "Opening file…");
     let agent = caller.agent;
+    // A call is refused for unsaved changes only after the rule for its path has had its say, as it
+    // always was; the rule reads the disk, so both are decided in the job.
+    let unsaved = matches!(then, Cause::Surface(_)).then(|| m.modified().then(|| would_throw_away(&m.title()))).flatten();
+    let for_mind = m.for_mind;
     let lost = Command::Opened { then: then.clone(), result: Err(JOB_LOST.into()) };
-    fx.spawn_or(lost, move |_| Command::Opened { then, result: open_sheet(&path, agent).map(Box::new) });
+    fx.spawn_or(lost, move |_| {
+        let result = may_open(&path, agent)
+            .and_then(|()| unsaved.map_or(Ok(()), Err))
+            .and_then(|()| open_sheet(&path, agent))
+            .map(|mut opened| {
+                opened.cells = Some(crate::view::render::rows_of(for_mind, &opened.sheet));
+                Box::new(opened)
+            });
+        Command::Opened { then, result }
+    });
 }
 
 /// A file a launch asked to open, once ySheets is free.
@@ -109,14 +122,15 @@ fn close_current(m: &mut Model, fx: &mut Effects<YSheets>) {
 pub fn put_in_front(m: &mut Model, fx: &mut Effects<YSheets>, opened: OpenedSheet, then: Cause) {
     close_current(m, fx);
     let draft = m.next_draft();
-    let OpenedSheet { file, sheet, file_rows, file_cols } = opened;
-    let baseline = Fingerprint::of_bytes(file.text.as_bytes());
+    let OpenedSheet { file, sheet, file_rows, file_cols, baseline, cells } = opened;
     let id = m.documents.open(Source::File(file.path.clone()), Book::opened(sheet), Some(baseline));
+    let text = file.text;
     if let Some((key, path, seen)) = m.documents.get(id).and_then(|d| d.watch_entry()) {
         fx.watch(&key, path, seen);
     }
-    m.doc = model::place(&mut m.documents, id, Some(file.text.clone()), draft, file.hidden, file.inode);
+    m.doc = model::place(&mut m.documents, id, Some(text), draft, file.hidden, file.inode);
     arrived(m);
+    *m.prebuilt.get_mut() = cells.map(|rows| crate::model::Prebuilt { rev: m.sheet().rev(), rows });
     let (filled, errors) = m.sheet().counts();
     let mut line = format!("Opened {} — {file_rows} rows × {file_cols} columns.", m.title());
     if errors > 0 {

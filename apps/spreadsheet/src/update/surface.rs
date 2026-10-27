@@ -171,9 +171,6 @@ fn step(m: &mut Model, fx: &mut Effects<YSheets>, caller: Caller, undo: bool) ->
 /// has unsaved changes.
 fn open(m: &mut Model, fx: &mut Effects<YSheets>, path: &str, caller: Caller) -> Done {
     let target = path_arg(path)?;
-    if m.modified() {
-        return Err(opening::would_throw_away(&m.title()));
-    }
     opening::start(m, fx, target, Cause::Surface(caller), caller);
     Ok(None)
 }

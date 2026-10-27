@@ -26,10 +26,14 @@ mod solved;
 pub mod surface;
 mod window;
 
+#[cfg(test)]
+pub use outside::conflict as conflict_sentence;
+
 pub fn update(m: &mut Model, command: Command, fx: &mut Effects<YSheets>) -> Result<(), Refused> {
     // A cue is for the render of the command that set it, and for no later one.
     m.cues.clear();
     m.redraw = crate::model::Redraw::Nothing;
+    *m.prebuilt.get_mut() = None;
     // A window drawn for a Mind takes nothing that would change the sheet, or read or write a file
     // as the person (mind_view.rs).
     for_mind::refuse_if(m.for_mind, m.for_mind && mind_view::refuses(m, &command))?;
@@ -81,6 +85,7 @@ fn dispatch(m: &mut Model, fx: &mut Effects<YSheets>, command: Command) {
         Command::DraftSaved(name) => drafts::saved(m, &name),
         Command::DraftNotSaved { name, why } => drafts::not_saved(m, &name, &why),
         Command::DraftDue => drafts::due(m, fx),
+        Command::DraftEncoded { name, seq, bytes } => drafts::encoded(m, fx, name, seq, bytes),
         Command::FileChanged { key, seen } => outside::seen(m, fx, &key, seen),
         Command::Opened { then, result } => opening::landed(m, fx, then, result),
         Command::Picked { saving, choice, suggested } => picking::picked(m, fx, saving, choice, suggested),

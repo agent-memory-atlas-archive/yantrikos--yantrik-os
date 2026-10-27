@@ -44,8 +44,13 @@ pub fn render(ui: &SpreadsheetApp, m: &Model, changed: &Changed) {
 
 /// What a cell shows. A line break in a cell is drawn as a mark, since a row is one line high.
 pub fn shown(m: &Model, value: &Value) -> SpreadsheetCell {
-    let text = value.display().replace("\r\n", " ↵ ").replace(['\n', '\r'], " ↵ ");
-    if m.for_mind {
+    shown_for(m.for_mind, value)
+}
+
+/// [`shown`] without a model, for the job that builds a large sheet's cells off the window's thread.
+pub fn shown_for(for_mind: bool, value: &Value) -> SpreadsheetCell {
+    let text = marked(value.display());
+    if for_mind {
         return SpreadsheetCell { text: shown_if_any(true, &text).as_ref().into(), is_number: false, is_error: false };
     }
     SpreadsheetCell {
@@ -53,6 +58,22 @@ pub fn shown(m: &Model, value: &Value) -> SpreadsheetCell {
         is_number: matches!(value, Value::Number(_)),
         is_error: value.error().is_some(),
     }
+}
+
+/// A line break in a cell is drawn as a mark. Almost no cell has one, so almost none is copied.
+fn marked(text: String) -> String {
+    if text.contains(['\n', '\r']) {
+        text.replace("\r\n", " ↵ ").replace(['\n', '\r'], " ↵ ")
+    } else {
+        text
+    }
+}
+
+/// Every cell of `sheet` as the window shows it, row by row. A job does this for a sheet just read,
+/// so opening a large file leaves the window's thread only the models to hang them on.
+pub fn rows_of(for_mind: bool, sheet: &crate::sheet::Sheet) -> Vec<Vec<SpreadsheetCell>> {
+    let (cols, values) = (sheet.cols(), sheet.values());
+    (0..sheet.rows()).map(|r| (0..cols).map(|c| shown_for(for_mind, &values[r * cols + c])).collect()).collect()
 }
 
 fn row_cells(m: &Model, r: usize) -> Vec<SpreadsheetCell> {
@@ -85,8 +106,11 @@ fn grid(ui: &SpreadsheetApp, m: &Model) {
 /// Every row built again: a new sheet, a new size, or a result that changed too much to say where.
 fn whole(ui: &SpreadsheetApp, m: &Model) {
     let (rows, cols) = (m.sheet().rows(), m.sheet().cols());
-    let lines: Vec<SheetRow> =
-        (0..rows).map(|r| SheetRow { cells: ModelRc::new(VecModel::from(row_cells(m, r))) }).collect();
+    let built = m.prebuilt.borrow_mut().take().filter(|b| b.rev == m.sheet().rev());
+    let lines: Vec<SheetRow> = match built {
+        Some(b) => b.rows.into_iter().map(|cells| SheetRow { cells: ModelRc::new(VecModel::from(cells)) }).collect(),
+        None => (0..rows).map(|r| SheetRow { cells: ModelRc::new(VecModel::from(row_cells(m, r))) }).collect(),
+    };
     ui.set_rows(ModelRc::new(VecModel::from(lines)));
     let names: Vec<SharedString> = (0..cols).map(|c| col_name(c).into()).collect();
     ui.set_col_names(ModelRc::new(VecModel::from(names)));

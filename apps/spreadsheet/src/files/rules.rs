@@ -77,8 +77,8 @@ impl FileRules for SheetRules {
 
     fn changed_on_disk(&self, path: &Path) -> String {
         format!(
-            "{} changed on disk since it was opened. Nothing was written and your changes are still here. Save As \
-             another file to keep both versions.",
+            "{} changed on disk since it was opened. Nothing was written and your changes are still here. Keep both versions by saving to \
+             another path (`save` with a path, or Save As in the window).",
             path.display()
         )
     }
@@ -91,7 +91,15 @@ impl FileRules for SheetRules {
     }
 
     fn read_only(&self, path: &Path) -> String {
-        format!("{} is read-only, so nothing was written. Save As another file.", path.display())
+        format!("{} is read-only, so nothing was written. Save to another path (`save` with a path, or Save As in the window).", path.display())
+    }
+
+    fn write_into_moved(&self, now: &Path) -> String {
+        format!("`save_over` with the path {} writes your changes into it.", now.display())
+    }
+
+    fn write_here_or_elsewhere(&self) -> String {
+        "`save_over` writes it here again, or `save` with a path puts it wherever you choose.".into()
     }
 
     fn save_failed(&self, e: &dyn std::fmt::Display) -> String {
