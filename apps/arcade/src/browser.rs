@@ -23,11 +23,18 @@ pub fn die_with_parent(command: &mut Command) {
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::process::CommandExt as _;
-        // SAFETY: the closure runs between fork and exec and makes one async-signal-safe call.
+        // The parent as it is now. If it dies between the fork and the prctl below, the signal is
+        // never armed; the child sees that its parent is no longer this one and ends itself.
+        let parent = std::process::id() as libc::pid_t;
+        // SAFETY: the closure runs between fork and exec and makes only async-signal-safe calls
+        // (prctl, getppid, _exit) and reads errno.
         unsafe {
-            command.pre_exec(|| {
+            command.pre_exec(move || {
                 if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong, 0, 0, 0) != 0 {
                     return Err(std::io::Error::last_os_error());
+                }
+                if libc::getppid() != parent {
+                    libc::_exit(1);
                 }
                 Ok(())
             });
@@ -87,6 +94,7 @@ pub fn new_profile() -> Result<PathBuf, String> {
 pub fn profile_in(base: &Path) -> Result<PathBuf, String> {
     static SERIAL: AtomicU64 = AtomicU64::new(0);
     crate::library::private_folder(base).map_err(|e| format!("cannot make {} private: {e}", base.display()))?;
+    sweep_dead(base);
     for _ in 0..8 {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -106,6 +114,35 @@ pub fn profile_in(base: &Path) -> Result<PathBuf, String> {
         }
     }
     Err("cannot find a free profile directory".into())
+}
+
+/// Removes the profiles of jobs whose app is gone (it crashed or was killed, so `Drop` never ran):
+/// directories named `job-<pid>-...` directly in `base`, for a pid that no longer exists. Nothing
+/// else is touched: not a link, not a file, not another name, not our own pid's.
+fn sweep_dead(base: &Path) {
+    let Ok(entries) = std::fs::read_dir(base) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(|n| n.strip_prefix("job-")).and_then(|n| n.split('-').next()).and_then(|p| p.parse::<u32>().ok()) else {
+            continue;
+        };
+        let path = entry.path();
+        let plain_dir = std::fs::symlink_metadata(&path).map(|m| m.file_type().is_dir()).unwrap_or(false);
+        if plain_dir && pid != std::process::id() && !process_exists(pid) {
+            let _ = std::fs::remove_dir_all(&path);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn process_exists(pid: u32) -> bool {
+    // SAFETY: signal 0 only asks whether the process exists; EPERM means it does, and is not ours.
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) }
+}
+
+#[cfg(not(unix))]
+fn process_exists(_: u32) -> bool {
+    true
 }
 
 #[cfg(all(test, unix))]
@@ -149,10 +186,41 @@ mod tests {
     fn ending_on_purpose_stops_every_live_browser() {
         let mut child = Command::new("sleep").arg("60").spawn().unwrap();
         register(child.id());
-        assert!(kill_live() >= 1);
+        // The list is shared with every test that ends an app, so nothing here counts it: this
+        // child must be dead, whoever's `kill_live` it was that stopped it.
+        kill_live();
         let status = child.wait().unwrap();
         assert!(!status.success(), "killed, not finished");
-        assert_eq!(kill_live(), 0, "and none is left on the list");
+    }
+
+    #[test]
+    fn a_profile_left_by_a_dead_app_is_removed_and_nothing_else_is() {
+        let base = std::env::temp_dir().join(format!("arcade-sweep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let mut gone = Command::new("true").spawn().unwrap();
+        let dead = gone.id();
+        gone.wait().unwrap();
+        let own = base.join(format!("job-{}-0-0", std::process::id()));
+        let stale = base.join(format!("job-{dead}-3-5"));
+        let other_name = base.join(format!("keep-{dead}-3-5"));
+        let a_file = base.join(format!("job-{dead}-file"));
+        let elsewhere = base.join("elsewhere");
+        let link = base.join(format!("job-{dead}-link"));
+        for dir in [&own, &stale, &other_name, &elsewhere] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(elsewhere.join("precious"), "x").unwrap();
+        std::fs::write(&a_file, "x").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+        profile_in(&base).unwrap();
+        assert!(!stale.exists(), "the dead app's profile went");
+        for kept in [&own, &other_name, &a_file, &elsewhere] {
+            assert!(kept.exists(), "{} was not ours to remove", kept.display());
+        }
+        assert!(std::fs::symlink_metadata(&link).is_ok(), "a link is left alone");
+        assert!(elsewhere.join("precious").exists(), "and never followed");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

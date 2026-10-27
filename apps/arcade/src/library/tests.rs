@@ -415,21 +415,7 @@ fn the_library_is_where_it_always_was_whatever_xdg_data_home_says() {
     assert_eq!(resolve_root(None, home.clone()), expected);
     assert_eq!(resolve_root(Some("".into()), home.clone()), expected, "an empty override is none");
     assert_eq!(resolve_root(Some("/srv/games".into()), home), PathBuf::from("/srv/games"));
-    // The real thing, with the variable set: `open()` is `resolve_root` over the environment.
-    let _guard = ENV.lock().unwrap();
-    let (xdg, dir, home_was) = (std::env::var_os("XDG_DATA_HOME"), std::env::var_os("YANTRIK_ARCADE_DIR"), std::env::var_os("HOME"));
-    std::env::set_var("XDG_DATA_HOME", "/somewhere/else");
-    std::env::remove_var("YANTRIK_ARCADE_DIR");
-    std::env::set_var("HOME", "/home/pranab");
-    let opened = Library::open().root().to_path_buf();
-    for (key, value) in [("XDG_DATA_HOME", xdg), ("YANTRIK_ARCADE_DIR", dir), ("HOME", home_was)] {
-        match value {
-            Some(v) => std::env::set_var(key, v),
-            None => std::env::remove_var(key),
-        }
-    }
-    assert_eq!(opened, expected);
+    // `open()` is this rule over the environment and nothing else, so nothing here sets
+    // `HOME` or `XDG_DATA_HOME` in a process other tests are running in.
 }
-
-static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
 

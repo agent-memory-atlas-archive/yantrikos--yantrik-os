@@ -307,9 +307,10 @@ pub struct Headless {
 
 impl Drop for Headless {
     fn drop(&mut self) {
+        // Off the list before the reap: a reaped pid can be reused, and kill_live must not hit it.
+        crate::browser::forget(self.child.id());
         let _ = self.child.kill();
         let _ = self.child.wait();
-        crate::browser::forget(self.child.id());
         let _ = std::fs::remove_dir_all(&self.profile);
     }
 }
