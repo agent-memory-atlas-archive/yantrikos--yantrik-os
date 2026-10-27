@@ -56,7 +56,7 @@ pub fn window(m: &mut Model, fx: &mut Effects<YSheets>) {
     match m.busy {
         // The window goes now and the save lands with none; the sheet is in its draft meanwhile.
         Some(Work::Save) => {
-            drafts::checkpoint_now(m, fx);
+            drafts::checkpoint_now(m, fx, None);
             fx.close(WindowId::PRIMARY);
             fx.linger(LINGER);
             m.lingering = true;
@@ -133,7 +133,7 @@ pub fn not_closed(m: &mut Model) {
 /// failed) goes to its draft first and the person is told, since there is no window left to tell
 /// them in.
 fn end_after_linger(m: &mut Model, fx: &mut Effects<YSheets>, why: Option<&str>) {
-    if drafts::checkpoint_now(m, fx) {
+    if drafts::checkpoint_now(m, fx, None) {
         let body = match why {
             Some(why) => format!("{why} The sheet is kept and comes back the next time ySheets opens."),
             None => "The unsaved sheet is kept and comes back the next time ySheets opens.".to_string(),
@@ -162,6 +162,11 @@ pub fn presented(m: &mut Model) {
 /// The session or the system is ending ySheets, with no one to ask: the unsaved sheet is handed to
 /// its draft now, rather than after its debounce, and ySheets ends in this one command.
 pub fn logging_out(m: &mut Model, fx: &mut Effects<YSheets>) {
-    drafts::checkpoint_now(m, fx);
+    // The formula bar's text, if it was not entered, goes into the draft: it is unsaved text, and a
+    // logout asks nothing. It is read from the window here, in the one command that has no time to
+    // be told it first.
+    m.ending = true;
+    let bar = m.bar();
+    drafts::checkpoint_now(m, fx, bar.as_deref());
     fx.exit();
 }

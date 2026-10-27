@@ -30,6 +30,9 @@ fn raise(cx: &Cx<YSheets>, command: Command) {
 
 /// Binds the window's callbacks.
 pub fn wire(cx: &Cx<YSheets>, ui: &SpreadsheetApp) {
+    // The model keeps a handle on the window for the one thing it cannot be told in time: what the
+    // formula bar holds when the session ends (`Model::bar`).
+    cx.read(|m| *m.window.borrow_mut() = Some(ui.as_weak()));
     let (run, weak) = (cx.clone(), ui.as_weak());
     ui.on_cell_clicked(move |row, col| {
         if let Some(ui) = weak.upgrade() {

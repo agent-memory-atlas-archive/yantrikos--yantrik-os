@@ -22,6 +22,7 @@ fn lane_draft(paths: &Paths, name: &str, path: Option<&Path>, rows: &[&[&str]], 
         rows: rows.iter().map(|r| r.iter().map(|c| c.to_string()).collect()).collect(),
         on_disk: None,
         active: "A1".into(),
+        typing: None,
         at,
     };
     let file = yantrik_app::drafts::path_in(paths.state_dir(), name);
@@ -107,7 +108,7 @@ fn a_draft_that_is_not_one_of_ours_is_left_alone_and_said() {
 fn a_draft_past_the_sheets_limits_is_left_alone_and_said() {
     let paths = Paths::temporary("spreadsheet");
     let huge = vec![vec!["x".to_string(); 300]];
-    let draft = SheetDraft { version: VERSION, path: None, rows: huge, on_disk: None, active: "A1".into(), at: 1 };
+    let draft = SheetDraft { version: VERSION, path: None, rows: huge, on_disk: None, active: "A1".into(), typing: None, at: 1 };
     let file = yantrik_app::drafts::path_in(paths.state_dir(), "sheet-too-wide");
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
     std::fs::write(&file, draft.bytes()).unwrap();

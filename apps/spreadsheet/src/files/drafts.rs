@@ -30,6 +30,11 @@ pub struct SheetDraft {
     pub on_disk: Option<String>,
     /// The selected cell, as A1 names it.
     pub active: String,
+    /// The cell whose text was still in the formula bar, not entered, when the draft was made at a
+    /// logout. Its text is in `rows` (in the draft only, never in a file), and the notice at the
+    /// next start says so.
+    #[serde(default)]
+    pub typing: Option<String>,
     /// When the draft was made, in milliseconds.
     pub at: u64,
 }
@@ -77,6 +82,7 @@ mod tests {
             rows: vec![vec!["1".into(), "=A1+1".into()]],
             on_disk: Some("1,2\r\n".into()),
             active: "B1".into(),
+            typing: None,
             at: 2,
         }
     }

@@ -145,3 +145,51 @@ fn the_window_coming_forward_asks_nothing_of_the_app() {
     assert_eq!(app.pending_commands(), 0);
     assert!(app.last_refusal().is_none());
 }
+
+#[test]
+fn text_in_the_formula_bar_not_yet_entered_is_in_the_draft_a_logout_writes() {
+    for signal in [true, false] {
+        let (app, path) = with_file("logout-bar", "1\r\n");
+        // Typed, and not entered: the sheet itself is unchanged.
+        super::type_in_bar(&app, "typed in the bar, never entered");
+        assert!(!super::modified(&app));
+        if signal {
+            app.event(Event::ExitRequested(ExitReason::Logout));
+        } else {
+            app.display_gone();
+        }
+        assert!(app.exit_reason().is_some(), "ended in the command that answered");
+        app.shutdown();
+        let again = killed_and_started_again(app);
+        assert_eq!(raw(&again, "A1"), "typed in the bar, never entered", "signal={signal}");
+        assert!(super::modified(&again), "it is an edit nobody has saved");
+        assert_eq!(
+            notice(&again),
+            format!(
+                "Recovered unsaved changes to {}. The text you were typing in A1 is in that cell. Save keeps it.",
+                path.display()
+            ),
+            "signal={signal}"
+        );
+        assert_eq!(file(&path), "1\r\n", "and the saved file is never touched by it");
+    }
+}
+
+#[test]
+fn text_cleared_from_the_formula_bar_at_logout_comes_back_cleared() {
+    let (app, _) = with_file("logout-bar-cleared", "keep me\r\n");
+    super::type_in_bar(&app, "");
+    app.event(Event::ExitRequested(ExitReason::Logout));
+    app.shutdown();
+    let again = killed_and_started_again(app);
+    assert_eq!(raw(&again, "A1"), "");
+    assert!(notice(&again).contains("The text you were typing in A1 is in that cell"));
+}
+
+#[test]
+fn a_bar_that_shows_the_cell_as_it_is_adds_nothing_to_a_logout() {
+    let (app, _) = with_file("logout-bar-same", "same\r\n");
+    app.event(Event::ExitRequested(ExitReason::Logout));
+    app.shutdown();
+    assert_eq!(notice(&killed_and_started_again(app)), "", "nothing was unsaved, so nothing is offered back");
+}

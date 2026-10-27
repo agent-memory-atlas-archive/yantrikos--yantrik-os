@@ -24,14 +24,25 @@ pub const PAUSE: Duration = Duration::from_millis(250);
 
 const TIMER: TimerId = TimerId("ysheets.draft");
 
-/// What the draft holds now.
-fn draft_of(m: &Model) -> SheetDraft {
+/// What the draft holds now, with the text in the formula bar if it differs from its cell: the
+/// edit nobody entered goes into the cell in the draft, so a start gives it back.
+fn draft_of(m: &Model, bar: Option<&str>) -> SheetDraft {
+    let mut rows = m.sheet().used_rows();
+    let typing = bar.filter(|text| *text != m.sheet().raw(m.active)).map(|text| {
+        let (r, c) = (m.active.row, m.active.col);
+        let width = rows.first().map_or(0, Vec::len).max(c + 1);
+        rows.resize(rows.len().max(r + 1), Vec::new());
+        rows.iter_mut().for_each(|row| row.resize(width, String::new()));
+        rows[r][c] = text.to_string();
+        m.active.name()
+    });
     SheetDraft {
         version: VERSION,
         path: m.path().map(Into::into),
-        rows: m.sheet().used_rows(),
+        rows,
         on_disk: m.doc.on_disk.clone(),
         active: m.active.name(),
+        typing,
         at: now_ms(),
     }
 }
@@ -53,7 +64,7 @@ fn owed(m: &Model) -> bool {
 /// edits, and removed when nothing is unsaved. A draft that could not be written is tried again at
 /// the sheet's next edit, not at every command.
 pub fn sync(m: &mut Model, fx: &mut Effects<YSheets>) {
-    if m.given_up {
+    if m.given_up || m.ending {
         return;
     }
     if m.modified() {
@@ -81,7 +92,7 @@ pub fn due(m: &mut Model, fx: &mut Effects<YSheets>) {
     let (path, on_disk, active) = (m.path().map(Into::into), m.doc.on_disk.clone(), m.active.name());
     let lost = Command::DraftEncoded { name: name.clone(), seq, bytes: None };
     fx.spawn_or(lost, move |_| {
-        let draft = SheetDraft { version: VERSION, path, rows: snapshot.used_rows(), on_disk, active, at: now_ms() };
+        let draft = SheetDraft { version: VERSION, path, rows: snapshot.used_rows(), on_disk, active, typing: None, at: now_ms() };
         Command::DraftEncoded { name, seq, bytes: Some(draft.bytes()) }
     });
 }
@@ -104,12 +115,13 @@ pub fn encoded(m: &mut Model, fx: &mut Effects<YSheets>, name: String, seq: u64,
 
 /// The draft written now, not after its pause: ySheets is about to end. Whether there was anything
 /// unsaved to keep.
-pub fn checkpoint_now(m: &mut Model, fx: &mut Effects<YSheets>) -> bool {
-    if m.given_up || !m.modified() {
+pub fn checkpoint_now(m: &mut Model, fx: &mut Effects<YSheets>, bar: Option<&str>) -> bool {
+    let unentered = !m.for_mind && bar.is_some_and(|text| text != m.sheet().raw(m.active));
+    if m.given_up || !(m.modified() || unentered) {
         return false;
     }
     let name = m.doc.draft.clone();
-    fx.checkpoint_draft(&name, draft_of(m).bytes());
+    fx.checkpoint_draft(&name, draft_of(m, bar.filter(|_| !m.for_mind)).bytes());
     m.draft_asked();
     true
 }

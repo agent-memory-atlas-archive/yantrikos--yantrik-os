@@ -26,7 +26,10 @@ struct Back {
 /// Said when a draft came back.
 fn recovered(draft: &SheetDraft) -> String {
     let to = draft.path.as_ref().map(|p| format!(" to {}", p.display())).unwrap_or_default();
-    format!("Recovered unsaved changes{to}. Save keeps them.")
+    match &draft.typing {
+        Some(cell) => format!("Recovered unsaved changes{to}. The text you were typing in {cell} is in that cell. Save keeps it."),
+        None => format!("Recovered unsaved changes{to}. Save keeps them."),
+    }
 }
 
 /// Opens the newest draft in `found` into `m`. Returns the notice.

@@ -166,6 +166,9 @@ pub struct Model {
     pub discarding: bool,
     /// The sheet was given up on purpose (a close with *Discard*): its draft is not made again.
     pub given_up: bool,
+    /// The session is ending: whatever draft the logout wrote is the last word, and no later step of
+    /// the same command takes it away.
+    pub ending: bool,
     /// The window was asked to close and is waiting for the formula bar's text to be committed.
     pub closing_after_commit: bool,
     /// The window closed with a save in flight: ySheets ends when it lands (`fx.linger`).
@@ -189,6 +192,8 @@ pub struct Model {
     pub redraw: Redraw,
     /// Taken by the render that draws the sheet whole (it is moved into the window, not copied).
     pub prebuilt: std::cell::RefCell<Option<Prebuilt>>,
+    /// The window, for `bar`. Set when the callbacks are bound.
+    pub window: std::cell::RefCell<Option<slint::Weak<crate::SpreadsheetApp>>>,
     pub cues: Vec<Cue>,
     /// The disk saves write through.
     pub disk: Arc<dyn Disk>,
@@ -220,6 +225,7 @@ impl Model {
             queue: None,
             discarding: false,
             given_up: false,
+            ending: false,
             closing_after_commit: false,
             lingering: false,
             close_when_done: false,
@@ -232,6 +238,7 @@ impl Model {
             moves: 0,
             redraw: Redraw::All,
             prebuilt: Default::default(),
+            window: Default::default(),
             // Typing goes into A1 from the first key, without a click first.
             cues: vec![Cue::LoadField, Cue::EditCell],
             disk: Arc::new(RealDisk),
@@ -312,6 +319,12 @@ impl Model {
     /// Where the sheet's draft file is.
     pub fn draft_path(&self) -> PathBuf {
         yantrik_app::drafts::path_in(&self.state_dir, &self.doc.draft)
+    }
+
+    /// What the formula bar holds now, if the window is there. Only a logout asks (update/closing.rs):
+    /// every other command is told the bar's text with it.
+    pub fn bar(&self) -> Option<String> {
+        self.window.borrow().as_ref().and_then(slint::Weak::upgrade).map(|ui| ui.get_cell_data().to_string())
     }
 
     /// Whether the unsaved-changes question is up.
