@@ -20,6 +20,7 @@ pub mod effects;
 pub mod event_loop;
 pub mod for_mind;
 pub mod instance;
+pub mod lane;
 pub mod intents;
 pub mod jobs;
 pub mod launch;

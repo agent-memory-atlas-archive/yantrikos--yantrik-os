@@ -1,5 +1,5 @@
 //! What the app is: the library as last read, what the editor and the selection hold, and the
-//! record of the browser jobs. The library itself is on disk and the lane's (`lane.rs`); the model
+//! record of the browser jobs. The library itself is on disk and the lane's (`yantrik_app::lane`); the model
 //! holds the last listing the lane read, so `describe` and the window never touch the disk.
 
 use std::sync::Arc;
@@ -7,7 +7,7 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use crate::command::Listing;
-use crate::lane::Lane;
+use yantrik_app::lane::Lane;
 use crate::library::{GameEntry, Library};
 use crate::slow::Slow;
 
@@ -97,7 +97,7 @@ impl Jobs {
 
 pub struct Model {
     pub library: Library,
-    pub lane: Lane,
+    pub lane: Lane<Library>,
     pub slow: Arc<dyn Slow>,
     pub listing: Listing,
     /// The order of the last command asked, and of the last listing applied.

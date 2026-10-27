@@ -3,7 +3,7 @@
 //!
 //! The person's buttons and the Mind's intents are the same requests (`begin`), so a person and an
 //! agent cannot get different answers about whether something worked. The library's commands run
-//! on the lane (`lane.rs`); what they found comes back as `Landed`, and an intent is answered from
+//! on the lane (`yantrik_app::lane`); what they found comes back as `Landed`, and an intent is answered from
 //! its own landing. Nothing here runs on a clock: the window changes only when a command moves it,
 //! and at rest it draws nothing.
 //!

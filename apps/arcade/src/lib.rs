@@ -11,7 +11,7 @@
 //! - `library.rs`: the characters and games as plain files under one directory, each spec, build
 //!   and verdict written whole or not at all. `spec.rs`, `compile.rs` and `engine.js`: the two
 //!   grammars and the compiler. `verify.rs` and `play.rs`: the headless verifier and the Browser.
-//! - `lane.rs`: the line of commands to the library, in the order they were asked for.
+//! - the lane: the line of commands to the library, in the order they were asked for (`yantrik_app::lane`).
 //! - `model.rs` and `command.rs`: what the app is, and every change to it. `update/`: the only code
 //!   that changes the model. `view.rs`: the window. `describe.rs`: what the Mind reads.
 //! - `intents.rs`: the nine actions, as they were published. `answers.rs`: what each is told.
@@ -45,7 +45,6 @@ mod command;
 pub mod compile;
 mod describe;
 mod intents;
-mod lane;
 pub mod library;
 pub mod play;
 mod model;
@@ -88,7 +87,7 @@ impl App for Arcade {
         // see what is on disk.
         let listing = work::list(&library);
         let mut m = Model {
-            lane: lane::Lane::start(library.clone()),
+            lane: yantrik_app::lane::Lane::start("arcade-library", library.clone()),
             slow: slow::for_app(&boot.paths),
             library,
             listing,
