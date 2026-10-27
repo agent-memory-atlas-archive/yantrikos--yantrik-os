@@ -49,6 +49,7 @@ mod linger;
 mod persisted;
 mod quitting;
 mod rail_hooks;
+pub use rail_hooks::is_person_applying;
 mod settlement;
 mod windows;
 pub use handle::{Cx, UiRef};
