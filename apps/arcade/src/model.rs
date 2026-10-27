@@ -70,6 +70,17 @@ impl Jobs {
         self.list.iter().filter(|j| matches!(j.status, JobStatus::Running)).collect()
     }
 
+    /// Ends every running job as failed, with `why`: the app is closing, and no browser is left
+    /// to answer. Returns how many.
+    pub fn fail_running(&mut self, why: &str) -> usize {
+        let mut n = 0;
+        for job in self.list.iter_mut().filter(|j| matches!(j.status, JobStatus::Running)) {
+            job.status = JobStatus::Failed(why.to_string());
+            n += 1;
+        }
+        n
+    }
+
     pub fn len(&self) -> usize {
         self.list.len()
     }

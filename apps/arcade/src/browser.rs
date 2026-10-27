@@ -118,8 +118,8 @@ pub struct Headless {
     child: std::process::Child,
     pub ws_url: String,
     pub browser: String,
-    profile: PathBuf,
-    tmp: PathBuf,
+    pub(crate) profile: PathBuf,
+    pub(crate) tmp: PathBuf,
 }
 
 impl Headless {
@@ -339,7 +339,7 @@ fn process_exists(_: u32) -> bool {
 }
 
 #[cfg(all(test, unix))]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt as _;
 
@@ -442,7 +442,7 @@ mod tests {
 
     /// A stand-in browser: a main process and a helper in its group that keeps writing into the
     /// profile and into its temporary folder, as Chromium's zygote and renderers do.
-    fn stand_in(profile: &Path) -> Result<Headless, String> {
+    pub(crate) fn stand_in(profile: &Path) -> Result<Headless, String> {
         let tmp = new_tmp(Path::new("/tmp"))?;
         let mut command = Command::new("sh");
         command

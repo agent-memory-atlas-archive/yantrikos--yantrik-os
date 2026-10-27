@@ -143,9 +143,12 @@ impl App for Arcade {
             // A command on the lane, or typing unsaved: the typing goes to the draft lane and the
             // window closes, and the app runs on until the command lands. With neither, the
             // framework closes the window and ends, as before.
-            Event::CloseRequested(window) if m.busy() || m.unsaved() => Some(Command::Closing(window)),
+            Event::CloseRequested(window) if m.busy() || m.unsaved() || !m.jobs.running().is_empty() => Some(Command::Closing(window)),
             // A second launch opened the window again while that close waits: it is cancelled.
             Event::Presented(_) if m.closing => Some(Command::Reopened),
+            // Brought forward again (a second launch, or the shell's present): the library is read
+            // again, as when the window is activated.
+            Event::Presented(_) => Some(Command::Reload),
             // A logout (a signal, the display going) or a person's quit.
             Event::ExitRequested(_) => Some(Command::Ending),
             // Brought to the front: the library is read again, so the lists are the disk's word.

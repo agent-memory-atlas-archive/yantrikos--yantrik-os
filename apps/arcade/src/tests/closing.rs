@@ -156,3 +156,29 @@ fn a_logout_stops_a_browser_that_is_still_running() {
     let status = browser.wait().unwrap();
     assert!(!status.success(), "it was killed, not left to finish");
 }
+
+/// A window closed while a browser job is under way: the app ends at once, the browser is dead, and
+/// neither its profile nor its temporary folder is left behind. (The app used to close the window,
+/// wait out the framework's grace period for the job, and exit without cleaning up.)
+#[cfg(unix)]
+#[test]
+fn closing_the_window_mid_job_stops_the_browser_and_clears_its_folders() {
+    let f = open();
+    super::seeded(&f);
+    f.act("build", json!({ "game": "meadow-run" })).unwrap();
+    let base = std::env::temp_dir().join(format!("arcade-close-{}", std::process::id()));
+    let profile = crate::browser::profile_in(&base).unwrap();
+    let browser = crate::browser::tests::stand_in(&profile).unwrap();
+    let tmp = browser.tmp.clone();
+    let job = f.start_slow(vec![("verify", json!({ "game": "meadow-run" }))]).remove(0);
+    job.settle().unwrap();
+    assert_eq!(f.state()["jobs"][0]["status"], json!("running"));
+    f.app.close_requested(WindowId::PRIMARY);
+    f.app.tick();
+    assert!(f.app.exit_reason().is_some(), "the app ends at once");
+    assert!(!profile.exists() && !tmp.exists(), "both folders are gone: {} {}", profile.display(), tmp.display());
+    assert_eq!(f.state()["jobs"][0]["status"], json!("failed"));
+    assert_eq!(f.state()["jobs"][0]["detail"], json!(crate::update::CLOSING));
+    drop(browser);
+    let _ = std::fs::remove_dir_all(&base);
+}

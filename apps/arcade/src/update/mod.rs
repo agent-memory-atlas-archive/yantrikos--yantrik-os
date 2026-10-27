@@ -86,16 +86,20 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Fx) -> Result<(), Refuse
             // Brought to the front: the library is read again, so the lists are the disk's word
             // and not the last command's (the CLI, or another copy, may have written). Nothing is
             // drawn if it has not moved.
-            if !m.reload_asked && !m.closing && !m.ending {
-                m.reload_asked = true;
-                ask_reload(m, fx);
-            }
+            reload(m, fx);
             fx.unchanged();
         }
         Command::DraftNotKept { why } => {
             say(m, fx, format!("The spec you are typing could not be kept as a draft ({why}); save it as a game or a character so it is not lost."));
         }
-        command @ (Command::Closing(_) | Command::Reopened | Command::Ending) => life::update(m, command, fx),
+        command @ (Command::Closing(_) | Command::Reopened | Command::Ending) => {
+            let reopened = matches!(command, Command::Reopened);
+            life::update(m, command, fx);
+            // A second launch brought the window back: the library is read again too.
+            if reopened {
+                reload(m, fx);
+            }
+        }
     }
     Ok(())
 }
@@ -159,6 +163,14 @@ fn begin(m: &mut Model, fx: &mut Fx, request: Request, from_editor: bool) -> Res
     // Nothing on screen moves until the command lands.
     fx.unchanged();
     Ok(())
+}
+
+/// Reads the library again unless a read is already asked or the app is ending.
+fn reload(m: &mut Model, fx: &mut Fx) {
+    if !m.reload_asked && !m.closing && !m.ending {
+        m.reload_asked = true;
+        ask_reload(m, fx);
+    }
 }
 
 fn ask_reload(m: &mut Model, fx: &mut Fx) {

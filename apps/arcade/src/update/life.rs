@@ -31,6 +31,11 @@ pub fn update(m: &mut Model, command: Command, fx: &mut Fx) {
             // The window goes at once; the app runs on without it until the lane is empty. The
             // editor's text is written now, in case the backstop is what ends the app.
             m.closing = true;
+            // A closed app has no use for a browser job: its browser is stopped and its folders
+            // removed now, not left for a grace period the framework would only wait out, and the
+            // job is ended with the closing sentence.
+            crate::browser::kill_live();
+            m.jobs.fail_running(CLOSING);
             drafts::at_the_end(m, fx);
             fx.close(window);
             fx.linger(CLOSE_BACKSTOP);

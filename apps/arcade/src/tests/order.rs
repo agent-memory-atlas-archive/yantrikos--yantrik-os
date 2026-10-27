@@ -71,3 +71,19 @@ fn the_lists_are_read_again_when_the_window_comes_forward() {
     assert_eq!(f.state()["games"][0]["title"], json!("From The Side"));
     assert_eq!(f.app.ui(|ui| slint::Model::row_count(&ui.get_games())), 1);
 }
+
+/// A game built from a terminal shows when the window is presented again, not only when it is
+/// focused.
+#[test]
+fn presenting_the_window_reads_the_library_again() {
+    let f = open();
+    f.library().save_game(&meadow_run("From The Terminal")).unwrap();
+    assert_eq!(f.state()["games"], json!([]));
+    f.app.present().unwrap();
+    f.quiet();
+    assert_eq!(f.state()["games"][0]["title"], json!("From The Terminal"));
+    f.library().save_game(&meadow_run("And Another")).unwrap();
+    f.app.launch_again().unwrap();
+    f.quiet();
+    assert_eq!(f.state()["games"].as_array().unwrap().len(), 2);
+}
