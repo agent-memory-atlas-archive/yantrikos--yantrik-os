@@ -30,6 +30,11 @@ impl Slow for Real {
         match verb {
             Verb::Verify => {
                 let report = verify::verify_game(html, Some(&shot))?;
+                // Stopped because the app is closing: what the browser had found by then is not a
+                // verdict, and none is written.
+                if crate::browser::cancelled() {
+                    return Err(crate::browser::STOPPED.into());
+                }
                 let value = serde_json::to_value(&report).map_err(|e| e.to_string())?;
                 if stamp_of(html) != judged {
                     return Err(changed());
@@ -47,6 +52,9 @@ impl Slow for Real {
             }
             Verb::Screenshot => {
                 verify::screenshot_game(html, &shot)?;
+                if crate::browser::cancelled() {
+                    return Err(crate::browser::STOPPED.into());
+                }
                 if stamp_of(html) != judged {
                     return Err(changed());
                 }

@@ -10,11 +10,13 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::cell::RefCell;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// A browser started and not yet stopped, and the two folders that go with it.
 struct Live {
+    cancel: Arc<AtomicBool>,
     pid: u32,
     profile: PathBuf,
     tmp: PathBuf,
@@ -57,8 +59,40 @@ pub fn die_with_parent(command: &mut Command) {
 }
 
 /// Note a started browser, so the app ending on purpose can stop it and clear its profile.
-pub fn register(pid: u32, profile: &Path, tmp: &Path) {
-    LIVE.lock().unwrap_or_else(|e| e.into_inner()).push(Live { pid, profile: profile.to_path_buf(), tmp: tmp.to_path_buf() });
+pub fn register(pid: u32, profile: &Path, tmp: &Path, cancel: Arc<AtomicBool>) {
+    LIVE.lock().unwrap_or_else(|e| e.into_inner()).push(Live { cancel, pid, profile: profile.to_path_buf(), tmp: tmp.to_path_buf() });
+}
+
+thread_local! {
+    /// The cancellation flag of the browser job this thread is running, if it is running one.
+    static CURRENT: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
+}
+
+/// Makes `flag` the one this thread's waits look at.
+pub fn set_current(flag: Option<Arc<AtomicBool>>) {
+    CURRENT.with(|c| *c.borrow_mut() = flag);
+}
+
+/// Whether the browser job this thread runs has been stopped because the app is ending. Every
+/// wait in a job looks at this, so a job returns within a poll of its browser being killed
+/// instead of waiting out a timeout the framework would then wait out too.
+pub fn cancelled() -> bool {
+    CURRENT.with(|c| c.borrow().as_ref().is_some_and(|f| f.load(Ordering::SeqCst)))
+}
+
+/// The sentence a stopped job ends with.
+pub const STOPPED: &str = "the browser job was stopped because Arcade is closing";
+
+/// Sleeps for `total`, in short slices, and returns early when the job is cancelled.
+pub fn nap(total: std::time::Duration) {
+    let end = std::time::Instant::now() + total;
+    while !cancelled() {
+        let left = end.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return;
+        }
+        std::thread::sleep(left.min(std::time::Duration::from_millis(20)));
+    }
 }
 
 /// Note that a browser is being stopped and reaped. Before the reap, never after: a reaped pid can
@@ -88,6 +122,7 @@ pub fn kill_live() -> usize {
     let live: Vec<Live> = {
         let mut list = LIVE.lock().unwrap_or_else(|e| e.into_inner());
         for l in list.iter() {
+            l.cancel.store(true, Ordering::SeqCst);
             kill_group(l.pid);
         }
         std::mem::take(&mut *list)
@@ -167,7 +202,9 @@ impl Headless {
             remove_profile(tmp);
             format!("cannot start {}: {e}", binary.display())
         })?;
-        register(child.id(), profile, tmp);
+        let cancel = Arc::new(AtomicBool::new(false));
+        register(child.id(), profile, tmp, cancel.clone());
+        set_current(Some(cancel));
         Ok(Headless {
             child,
             ws_url: String::new(),
@@ -219,6 +256,7 @@ pub fn new_tmp(base: &Path) -> Result<PathBuf, String> {
 impl Drop for Headless {
     fn drop(&mut self) {
         let pid = self.child.id();
+        set_current(None);
         // Off the list before the reap: a reaped pid can be reused, and kill_live must not hit it.
         forget(pid);
         // The helpers (zygote, GPU, renderers) are in the group and keep writing into the profile
@@ -378,7 +416,7 @@ pub(crate) mod tests {
     #[test]
     fn ending_on_purpose_stops_every_live_browser() {
         let mut child = Command::new("sleep").arg("60").spawn().unwrap();
-        register(child.id(), &std::env::temp_dir().join("arcade-nonexistent-profile"), &std::env::temp_dir().join("arcade-nonexistent-tmp"));
+        register(child.id(), &std::env::temp_dir().join("arcade-nonexistent-profile"), &std::env::temp_dir().join("arcade-nonexistent-tmp"), Arc::new(AtomicBool::new(false)));
         // The list is shared with every test that ends an app, so nothing here counts it: this
         // child must be dead, whoever's `kill_live` it was that stopped it.
         kill_live();
@@ -540,5 +578,27 @@ pub(crate) mod tests {
         let _ = std::fs::remove_file(&link);
         let _ = std::fs::remove_dir_all(&elsewhere);
         let _ = std::fs::remove_dir_all(&b);
+    }
+
+    /// A job's wait ends within a poll of the app ending, not after its timeout: the job runs on a
+    /// thread of its own, as in the app, waiting as the verifier does.
+    #[test]
+    fn a_job_waiting_on_its_browser_returns_at_once_when_the_app_ends() {
+        let base = std::env::temp_dir().join(format!("arcade-cancel-{}", std::process::id()));
+        let (done, heard) = std::sync::mpsc::channel();
+        let job_base = base.clone();
+        std::thread::spawn(move || {
+            let profile = profile_in(&job_base).unwrap();
+            let browser = stand_in(&profile).unwrap();
+            nap(std::time::Duration::from_secs(30));
+            let _ = done.send(cancelled());
+            drop(browser);
+        });
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let closed = std::time::Instant::now();
+        kill_live();
+        let was_cancelled = heard.recv_timeout(std::time::Duration::from_millis(300));
+        assert_eq!(was_cancelled, Ok(true), "the job did not return within 300 ms of the close ({:?})", closed.elapsed());
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

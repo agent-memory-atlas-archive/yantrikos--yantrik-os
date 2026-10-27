@@ -149,7 +149,7 @@ fn a_logout_stops_a_browser_that_is_still_running() {
     let f = open();
     let mut browser = std::process::Command::new("sleep").arg("60").spawn().unwrap();
     let nowhere = std::env::temp_dir().join("arcade-nonexistent");
-    crate::browser::register(browser.id(), &nowhere, &nowhere);
+    crate::browser::register(browser.id(), &nowhere, &nowhere, Default::default());
     // Only this child is checked: the list of live browsers is shared by every test that ends an app.
     f.app.display_gone();
     f.quiet();

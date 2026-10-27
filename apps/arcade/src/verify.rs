@@ -317,8 +317,8 @@ pub fn launch_headless(html: &Path) -> Result<Headless, String> {
     let port_file = profile.join("DevToolsActivePort");
     let deadline = Instant::now() + Duration::from_secs(30);
     let port = loop {
-        if Instant::now() > deadline {
-            return Err("the browser did not open its debugging port within 30 s".into());
+        if Instant::now() > deadline || crate::browser::cancelled() {
+            return Err(if crate::browser::cancelled() { crate::browser::STOPPED.into() } else { "the browser did not open its debugging port within 30 s".into() });
         }
         if let Ok(text) = std::fs::read_to_string(&port_file) {
             if let Some(first) = text.lines().next() {
@@ -327,7 +327,7 @@ pub fn launch_headless(html: &Path) -> Result<Headless, String> {
                 }
             }
         }
-        std::thread::sleep(Duration::from_millis(200));
+        crate::browser::nap(Duration::from_millis(200));
     };
 
     let base = format!("http://127.0.0.1:{port}");
@@ -340,7 +340,7 @@ pub fn launch_headless(html: &Path) -> Result<Headless, String> {
 pub fn page_ws_url(http_base: &str) -> Result<String, String> {
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut last = "no targets yet".to_string();
-    while Instant::now() < deadline {
+    while Instant::now() < deadline && !crate::browser::cancelled() {
         match ureq::get(&format!("{http_base}/json/list")).call() {
             Ok(resp) => match resp.into_json::<Value>() {
                 Ok(list) => {
@@ -359,7 +359,7 @@ pub fn page_ws_url(http_base: &str) -> Result<String, String> {
             },
             Err(e) => last = format!("/json/list: {e}"),
         }
-        std::thread::sleep(Duration::from_millis(250));
+        crate::browser::nap(Duration::from_millis(250));
     }
     Err(format!("no page target from the browser ({last})"))
 }
@@ -394,8 +394,8 @@ impl Session {
             .map_err(|e| format!("the browser websocket refused a {method} command: {e}"))?;
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            if Instant::now() > deadline {
-                return Err(format!("{method} did not answer within 30 s"));
+            if Instant::now() > deadline || crate::browser::cancelled() {
+                return Err(if crate::browser::cancelled() { crate::browser::STOPPED.into() } else { format!("{method} did not answer within 30 s") });
             }
             match self.conn.read() {
                 Ok(Message::Text(text)) => {
@@ -417,10 +417,10 @@ impl Session {
                 Ok(Message::Close(_)) => return Err("the browser closed the websocket".into()),
                 Ok(_) => {}
                 Err(tungstenite::Error::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(20));
+                    crate::browser::nap(Duration::from_millis(20));
                 }
                 Err(tungstenite::Error::Io(e)) if e.kind() == std::io::ErrorKind::TimedOut => {
-                    std::thread::sleep(Duration::from_millis(20));
+                    crate::browser::nap(Duration::from_millis(20));
                 }
                 Err(e) => return Err(format!("the browser websocket failed: {e}")),
             }
@@ -589,7 +589,7 @@ pub fn verify_session(ws_url: &str, browser: &str, screenshot_out: Option<&Path>
     let before = poll_state(&mut session);
     let key_result = dispatch_key(&mut session, "KeyW", "w", 87);
     let hold_started = Instant::now();
-    std::thread::sleep(Duration::from_millis(1400));
+    crate::browser::nap(Duration::from_millis(1400));
     let after = key_result.ok().and_then(|()| poll_state(&mut session));
     let (input_verdict, input_detail) = judge_input(before.as_ref(), after.as_ref(), hold_started.elapsed());
 
@@ -615,7 +615,7 @@ pub fn verify_session(ws_url: &str, browser: &str, screenshot_out: Option<&Path>
     session
         .evaluate("window.__arcade.setBot(null); window.__arcade.setPaced && window.__arcade.setPaced(false); window.__arcade.reset(); 0")
         .ok();
-    std::thread::sleep(Duration::from_millis(2500));
+    crate::browser::nap(Duration::from_millis(2500));
     let final_state = session.evaluate("JSON.stringify(window.__arcade.state())").unwrap_or(Value::Null);
     let (budget_verdict, budget_detail) = judge_frame_budget(state_num(&final_state, "frameMs"));
 
@@ -696,14 +696,14 @@ fn run_bot(session: &mut Session, sim_secs: f64, limits: &Limits, pred: &dyn Fn(
             last = Some(state);
         }
         let wall = start.elapsed();
-        if wall >= ceiling {
+        if wall >= ceiling || crate::browser::cancelled() {
             return match last {
                 None => BotRun::Silent,
                 Some(last) if has_clock => BotRun::TooSlow { last, wall },
                 Some(last) => BotRun::NoClock { last },
             };
         }
-        std::thread::sleep(limits.poll);
+        crate::browser::nap(limits.poll);
     }
 }
 
@@ -862,7 +862,7 @@ fn engine_error_list(session: &mut Session) -> Vec<String> {
 /// asking for its JSON keeps the websocket traffic to plain strings.
 fn wait_for_state(session: &mut Session, budget: Duration, pred: &dyn Fn(&Value) -> bool) -> Option<Value> {
     let deadline = Instant::now() + budget;
-    while Instant::now() < deadline {
+    while Instant::now() < deadline && !crate::browser::cancelled() {
         if let Ok(v) = session.evaluate("window.__arcade ? JSON.stringify(window.__arcade.state()) : 'null'") {
             if let Some(text) = v.as_str() {
                 if let Ok(state) = serde_json::from_str::<Value>(text) {
@@ -872,7 +872,7 @@ fn wait_for_state(session: &mut Session, budget: Duration, pred: &dyn Fn(&Value)
                 }
             }
         }
-        std::thread::sleep(Duration::from_millis(300));
+        crate::browser::nap(Duration::from_millis(300));
     }
     None
 }
@@ -896,7 +896,7 @@ fn dispatch_key(session: &mut Session, code: &str, key: &str, vk: u32) -> Result
         "Input.dispatchKeyEvent",
         json!({ "type": "keyDown", "code": code, "key": key, "windowsVirtualKeyCode": vk, "nativeVirtualKeyCode": vk }),
     )?;
-    std::thread::sleep(Duration::from_millis(120));
+    crate::browser::nap(Duration::from_millis(120));
     session.call(
         "Input.dispatchKeyEvent",
         json!({ "type": "keyUp", "code": code, "key": key, "windowsVirtualKeyCode": vk, "nativeVirtualKeyCode": vk }),
@@ -904,7 +904,7 @@ fn dispatch_key(session: &mut Session, code: &str, key: &str, vk: u32) -> Result
     // The engine listens on window, and a held key repeats: hold it by re-sending
     // keyDown a few times so one dispatch is not one 16 ms nudge.
     for _ in 0..8 {
-        std::thread::sleep(Duration::from_millis(120));
+        crate::browser::nap(Duration::from_millis(120));
         session.call(
             "Input.dispatchKeyEvent",
             json!({ "type": "keyDown", "code": code, "key": key, "windowsVirtualKeyCode": vk, "nativeVirtualKeyCode": vk }),
@@ -1539,5 +1539,39 @@ mod tests {
         let line = report.summary_line();
         assert!(line.starts_with("inconclusive at frame_budget"), "{line}");
         assert!(line.contains(MACHINE_NOT_GAME), "{line}");
+    }
+
+    /// A browser that never answers: a job's call returns within a poll of the job being
+    /// cancelled, not after its 30 s timeout (the app waits that out when it ends).
+    #[test]
+    fn a_call_to_a_silent_browser_returns_when_the_job_is_cancelled() {
+        use std::sync::atomic::AtomicBool;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_millis(300))).ok();
+            let mut ws = tungstenite::accept(stream).unwrap();
+            // Reads and says nothing, until the client goes.
+            loop {
+                match ws.read() {
+                    Err(tungstenite::Error::Io(ref e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => continue,
+                    Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        });
+        let flag = Arc::new(AtomicBool::new(false));
+        let job_flag = flag.clone();
+        let (done, heard) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            crate::browser::set_current(Some(job_flag));
+            let mut session = Session::connect(&format!("ws://127.0.0.1:{port}/")).unwrap();
+            let _ = done.send(session.call("Runtime.enable", json!({})));
+        });
+        crate::browser::nap(Duration::from_millis(200));
+        flag.store(true, Ordering::SeqCst);
+        let answer = heard.recv_timeout(Duration::from_millis(300)).expect("the call did not return within 300 ms of the cancel");
+        assert!(answer.is_err());
     }
 }
