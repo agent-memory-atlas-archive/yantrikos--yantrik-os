@@ -122,10 +122,12 @@ pub fn legacy_archived(m: &mut Model, result: Result<(), String>) {
     m.legacy = Legacy::Done;
     if let Err(why) = result {
         // Left in place, it is offered again at the next start unless the lane still holds it as
-        // it was (same path, same text): edited or saved since, it comes back once more.
+        // it was (same path, same text), so a recovered draft that was edited or saved since comes
+        // back once more.
         tracing::warn!(
             error = %why,
-            "the old recovery file could not be set aside; it is left as it was, and the next start may offer its              text again as a draft from a previous session"
+            "the old recovery file could not be set aside; it is left as it was, and the next start may offer its \
+             text again as a draft from a previous session"
         );
     }
 }
