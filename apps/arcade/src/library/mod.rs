@@ -440,6 +440,24 @@ impl Library {
     /// Record the verdict on the build whose stamp is `judged`. A verdict is about one file: if
     /// the game was built again, or removed, while it was being judged, it is dropped, and the
     /// new build is not shown as verified on the strength of the old one.
+    /// What a finished run keeps: its screenshot and its verdict, each one atomic write, and only
+    /// if the build is still the one it judged. Anything else (the build changed, the game is
+    /// gone) keeps nothing, and the earlier files stand untouched.
+    pub fn commit(&self, slug: &str, judged: &Stamp, shot: Option<Vec<u8>>, verdict: Option<&Value>) -> Result<(), String> {
+        if &stamp_of(&self.game_html(slug)) != judged {
+            return Err(format!(
+                "{slug} was built again or removed while it was being checked, so that result was dropped; run it again"
+            ));
+        }
+        if let Some(bytes) = shot {
+            write_in_place(&self.screenshot_path(slug), &bytes)?;
+        }
+        match verdict {
+            Some(report) => self.write_verify(slug, report),
+            None => Ok(()),
+        }
+    }
+
     pub fn write_verdict(&self, slug: &str, report: &Value, judged: &Stamp) -> Result<(), String> {
         if &stamp_of(&self.game_html(slug)) != judged {
             return Err(format!(

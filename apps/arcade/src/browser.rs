@@ -68,6 +68,28 @@ thread_local! {
     static CURRENT: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
 }
 
+/// The flag of the job this thread is running, for the code that starts its browser.
+pub fn current() -> Option<Arc<AtomicBool>> {
+    CURRENT.with(|c| c.borrow().clone())
+}
+
+/// A job's cancellation flag as this thread's own, for as long as the scope lives. The job holds
+/// its own `Arc` of the flag as well, so nothing that clears the thread's can clear the job's.
+pub struct JobScope;
+
+impl JobScope {
+    pub fn enter(flag: Arc<AtomicBool>) -> JobScope {
+        set_current(Some(flag));
+        JobScope
+    }
+}
+
+impl Drop for JobScope {
+    fn drop(&mut self) {
+        set_current(None);
+    }
+}
+
 /// Makes `flag` the one this thread's waits look at.
 pub fn set_current(flag: Option<Arc<AtomicBool>>) {
     CURRENT.with(|c| *c.borrow_mut() = flag);
@@ -202,9 +224,9 @@ impl Headless {
             remove_profile(tmp);
             format!("cannot start {}: {e}", binary.display())
         })?;
-        let cancel = Arc::new(AtomicBool::new(false));
-        register(child.id(), profile, tmp, cancel.clone());
-        set_current(Some(cancel));
+        // The job's own flag when there is one, so `kill_live` stops the job as well as its browser.
+        let cancel = current().unwrap_or_default();
+        register(child.id(), profile, tmp, cancel);
         Ok(Headless {
             child,
             ws_url: String::new(),
@@ -256,7 +278,6 @@ pub fn new_tmp(base: &Path) -> Result<PathBuf, String> {
 impl Drop for Headless {
     fn drop(&mut self) {
         let pid = self.child.id();
-        set_current(None);
         // Off the list before the reap: a reaped pid can be reused, and kill_live must not hit it.
         forget(pid);
         // The helpers (zygote, GPU, renderers) are in the group and keep writing into the profile
@@ -588,6 +609,7 @@ pub(crate) mod tests {
         let (done, heard) = std::sync::mpsc::channel();
         let job_base = base.clone();
         std::thread::spawn(move || {
+            let _scope = JobScope::enter(Default::default());
             let profile = profile_in(&job_base).unwrap();
             let browser = stand_in(&profile).unwrap();
             nap(std::time::Duration::from_secs(30));

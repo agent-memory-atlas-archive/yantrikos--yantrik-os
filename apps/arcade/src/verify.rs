@@ -191,7 +191,7 @@ pub struct Report {
 }
 
 impl Report {
-    fn new(browser: String) -> Report {
+    pub(crate) fn new(browser: String) -> Report {
         Report {
             passed: false,
             correctness: Verdict::Inconclusive,
@@ -222,7 +222,7 @@ impl Report {
         }
     }
 
-    fn finish(mut self) -> Report {
+    pub(crate) fn finish(mut self) -> Report {
         self.correctness = Verdict::fold(self.gates.iter().filter(|g| g.kind == Kind::Correctness).map(|g| &g.verdict));
         self.performance = Verdict::fold(self.gates.iter().filter(|g| g.kind == Kind::Performance).map(|g| &g.verdict));
         self.passed = self.gates.iter().all(|g| g.verdict == Verdict::Passed);
