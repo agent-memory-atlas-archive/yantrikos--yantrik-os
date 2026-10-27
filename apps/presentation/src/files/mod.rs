@@ -2,6 +2,7 @@
 //! thread, and returns what it found as plain data for the command that carries it back.
 
 pub mod drafts;
+pub mod export;
 pub mod legacy;
 pub mod names;
 pub mod open;

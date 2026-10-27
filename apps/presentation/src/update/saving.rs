@@ -17,7 +17,8 @@ use crate::command::{AfterSave, Away, Cause, Command, Next};
 use crate::deck::{encode, Content, Edits};
 use crate::files::kept;
 use crate::files::names::export_path;
-use crate::files::save::{export_copy, save_deck, SaveFailed, SaveJob, Unnamed, Wrote};
+use crate::files::export::{export_copy, DefaultName};
+use crate::files::save::{save_deck, SaveFailed, SaveJob, Unnamed, Wrote};
 use crate::model::{Model, Work};
 use crate::YPresent;
 
@@ -288,8 +289,9 @@ pub fn export_window(m: &mut Model, fx: &mut Effects<YPresent>, extension: &str,
 }
 
 /// Writes a copy of the deck to `target` in a job, leaving the deck in its own file. A name this
-/// app made from the deck's own is replaced by the next export, as it always was; a name the
-/// caller gave is not.
+/// app made from the deck's own (`default_name`) is replaced only by an export of this deck that
+/// nothing has changed since; if it is taken by anything else the window counts up (`talk-2.md`)
+/// and an agent is refused. A name the caller gave is never replaced.
 pub fn export(
     m: &mut Model,
     fx: &mut Effects<YPresent>,
@@ -299,9 +301,10 @@ pub fn export(
     then: Cause,
     agent: bool,
 ) {
+    let count_up = default_name && matches!(then, Cause::Window | Cause::Launch);
     // A copy never replaces the document it is a copy of: a deck saved as `talk.md` has the
-    // default export's very name.
-    if m.path() == Some(target.as_path()) {
+    // default export's very name. (The window counts up past it.)
+    if !count_up && m.path() == Some(target.as_path()) {
         let sentence = "An export never replaces the deck it comes from; give it another path.";
         return opening::refuse(m, fx, &then, sentence.into());
     }
@@ -309,35 +312,47 @@ pub fn export(
     // A copy has no home: nothing it is compared with.
     let job = SaveJob {
         text,
-        target,
+        target: target.clone(),
         own: None,
         on_disk: None,
         unsure: None,
         inode: None,
-        overwrite: default_name,
+        overwrite: false,
         agent,
         others: Vec::new(),
         elsewhere: m.state_dir.join("kept"),
     };
     m.busy = Some(Work::Export);
-    say(m, "Exporting…");
+    say(m, "Exporting\u{2026}");
     let failed = SaveFailed { error: SaveError::new(JOB_LOST), kept: None };
     let slides = m.deck().len();
-    let make = default_name.then(|| m.deck_dir.clone());
-    // What an earlier export of this deck starts with: the Markdown's header, or the outline's
-    // title and first number.
-    let replaces = default_name.then(|| match extension {
-        "md" => format!("<!-- yPresent deck: {} -->", m.title()),
-        _ => format!("# {}
-
-1. ", m.title()),
+    // What an earlier export of this deck begins with: the Markdown's header line, or the
+    // outline's title and first number.
+    let header = match extension {
+        "md" => format!("<!-- yPresent deck: {} -->\n", m.title()),
+        _ => format!("# {}\n\n1. ", m.title()),
+    };
+    let stem = target
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .and_then(|n| n.strip_suffix(&format!(".{extension}")).map(str::to_string))
+        .unwrap_or_default();
+    let default = default_name.then(|| DefaultName {
+        dir: target.parent().map(PathBuf::from).unwrap_or_default(),
+        stem,
+        extension: extension.to_string(),
+        header,
+        remembered: m.doc.exports.clone(),
+        count_up,
     });
-    let lost = Command::Exported { then: then.clone(), slides, result: Err(Box::new(failed)) };
+    let remember = default_name;
+    let lost = Command::Exported { then: then.clone(), slides, remember, result: Err(Box::new(failed)) };
     let disk = m.disk.clone();
     fx.spawn_or(lost, move |_| Command::Exported {
         then,
         slides,
-        result: export_copy(job, make.as_deref(), replaces.as_deref(), disk.as_ref()).map(Box::new),
+        remember,
+        result: export_copy(job, default.as_ref(), disk.as_ref()).map(Box::new),
     });
 }
 
@@ -347,6 +362,7 @@ pub fn exported(
     fx: &mut Effects<YPresent>,
     then: Cause,
     slides: usize,
+    remember: bool,
     result: Result<Box<Wrote>, Box<SaveFailed>>,
 ) {
     if m.busy == Some(Work::Export) {
@@ -355,6 +371,12 @@ pub fn exported(
     match result {
         Ok(wrote) => {
             let path = wrote.file.path.display().to_string();
+            if remember {
+                // The next default export may replace this file, and only while it is still this.
+                let at = wrote.file.path.clone();
+                m.doc.exports.retain(|(p, _)| *p != at);
+                m.doc.exports.push((at, wrote.written.clone()));
+            }
             m.notice.clear();
             match then {
                 Cause::Surface(_) => {
@@ -369,7 +391,10 @@ pub fn exported(
         }
         Err(failed) => {
             let sentence = failed.error.sentence.clone();
-            say(m, sentence.clone());
+            // Said to the person with the file named; an agent reads it for a deck it is not shown
+            // without the name.
+            let hidden = m.doc.hidden;
+            m.notice.set_about(hidden, sentence.clone(), || "The export was not written.".to_string());
             // A close that waited on this export stays undone: the failure is what the person reads.
             closing::not_closed(m);
             if let Cause::Surface(_) = then {

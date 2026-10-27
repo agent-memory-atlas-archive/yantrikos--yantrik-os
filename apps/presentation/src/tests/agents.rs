@@ -262,6 +262,16 @@ fn what_an_agent_reads_in_the_notice_names_no_file_after_an_export_or_a_replacem
     let seen = described_as(&app, "tok-ypresent");
     let for_agent = seen.state["notice"].as_str().unwrap().to_string();
     assert!(!for_agent.contains("talk.md") && !for_agent.contains(&dir.display().to_string()), "{for_agent}");
+    // An export that fails says why to the person, with the file; an agent reads no name.
+    let md = dir.join("talk.md");
+    let mut mode = std::fs::metadata(&md).unwrap().permissions();
+    mode.set_readonly(true);
+    std::fs::set_permissions(&md, mode).unwrap();
+    super::press(&app, crate::command::WindowAction::ExportMarkdown);
+    assert!(notice(&app).contains("read-only"), "{}", notice(&app));
+    let for_agent = described_as(&app, "tok-ypresent").state["notice"].as_str().unwrap().to_string();
+    assert!(!for_agent.contains("talk.md") && !for_agent.contains(&dir.display().to_string()), "{for_agent}");
+    std::fs::set_permissions(&md, std::os::unix::fs::PermissionsExt::from_mode(0o644)).unwrap();
     // A deck replaced by the person's own Open says where it went; an agent reads no path.
     type_title(&app, "edited");
     let recent = scratch("agent-notice-recent");

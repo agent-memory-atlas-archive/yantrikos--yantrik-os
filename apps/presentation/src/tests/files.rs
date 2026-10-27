@@ -308,9 +308,12 @@ fn an_export_never_writes_over_the_deck_it_came_from() {
     assert!(err.contains("never replaces the deck it comes from"), "{err}");
     assert_eq!(file(&deck), before, "the deck's file is as it was");
     assert!(!modified(&app));
+    // The window counts up past the deck's own name, and says where it went.
     press(&app, WindowAction::ExportMarkdown);
-    assert!(notice(&app).contains("never replaces the deck"), "{}", notice(&app));
-    assert_eq!(file(&deck), before);
+    let counted = dir.join("talk-2.md");
+    assert_eq!(notice(&app), format!("Exported to {}.", counted.display()));
+    assert!(file(&counted).starts_with("<!-- yPresent deck:"));
+    assert_eq!(file(&deck), before, "the deck is as it was");
 }
 
 #[test]
@@ -321,15 +324,19 @@ fn a_default_export_replaces_only_an_earlier_export_of_this_deck() {
     std::fs::write(&md, "MY OWN NOTES\n").unwrap();
     let err = act(&app, "export_markdown", none()).unwrap_err();
     assert!(err.contains(&md.display().to_string()) && err.contains("not an earlier export of this deck"), "{err}");
+    assert!(!err.contains("   "), "no run of spaces in a sentence: {err}");
     assert_eq!(file(&md), "MY OWN NOTES\n", "byte-identical afterwards");
+    // The window does not send the person to a tool they cannot reach: it counts up.
     press(&app, WindowAction::ExportMarkdown);
-    assert!(notice(&app).contains("not an earlier export"), "{}", notice(&app));
+    let counted = path.with_file_name("talk-2.md");
+    assert_eq!(notice(&app), format!("Exported to {}.", counted.display()));
     assert_eq!(file(&md), "MY OWN NOTES\n");
     // The same for the outline, whose earlier export starts with the deck's title and a number.
     let outline_file = path.with_file_name("talk.outline.md");
     std::fs::write(&outline_file, "# Talk\n\nnot a numbered outline\n").unwrap();
     press(&app, WindowAction::ExportOutline);
     assert_eq!(file(&outline_file), "# Talk\n\nnot a numbered outline\n");
+    assert_eq!(file(&path.with_file_name("talk-2.outline.md")), "# Talk\n\n1. One\n");
     // Out of the way, an export is made; the next one replaces it.
     std::fs::remove_file(&md).unwrap();
     act(&app, "export_markdown", none()).unwrap();
@@ -358,4 +365,44 @@ fn an_export_from_another_deck_with_the_same_stem_is_not_replaced() {
     let err = act(&app, "export_markdown", none()).unwrap_err();
     assert!(err.contains("not an earlier export of this deck"), "{err}");
     assert_eq!(file(&second.with_file_name("talk.md")), theirs, "the other deck's export is as it was");
+}
+
+#[test]
+fn two_never_saved_decks_with_the_same_title_do_not_share_one_default_export() {
+    let app = started();
+    let dir = deck_folder(&app);
+    act(&app, "set_slide", json!({ "index": 0, "title": "A's slide" })).unwrap();
+    let first = act(&app, "export_markdown", none()).unwrap();
+    assert_eq!(first["path"], json!(dir.join("untitled.md").display().to_string()));
+    let a = file(&dir.join("untitled.md"));
+    // A is kept as untitled.ydeck, and B is another deck that is also called Untitled.
+    act(&app, "new_deck", none()).unwrap();
+    act(&app, "set_slide", json!({ "index": 0, "title": "B's slide" })).unwrap();
+    let refused = act(&app, "export_markdown", none()).unwrap_err();
+    assert!(refused.contains("not an earlier export of this deck"), "{refused}");
+    press(&app, WindowAction::ExportMarkdown);
+    assert_eq!(notice(&app), format!("Exported to {}.", dir.join("untitled-2.md").display()));
+    assert_eq!(file(&dir.join("untitled.md")), a, "A's export is as it was");
+    assert!(file(&dir.join("untitled-2.md")).contains("B's slide"));
+    // B's own earlier export is replaced by its next one.
+    act(&app, "set_slide", json!({ "index": 0, "title": "B again" })).unwrap();
+    press(&app, WindowAction::ExportMarkdown);
+    assert!(file(&dir.join("untitled-2.md")).contains("B again"));
+    assert_eq!(super::listing(&dir), vec!["untitled-2.md", "untitled.md", "untitled.ydeck"]);
+}
+
+#[test]
+fn an_export_changed_since_it_was_made_is_not_replaced() {
+    let (app, path) = with_file("export-edited", &["One"]);
+    let md = path.with_file_name("talk.md");
+    act(&app, "export_markdown", none()).unwrap();
+    // The person adds to it: it still begins with the header, but it is no longer what was written.
+    let mut mine = file(&md);
+    mine.push_str("\nMY ADDITIONS\n");
+    std::fs::write(&md, &mine).unwrap();
+    assert!(act(&app, "export_markdown", none()).unwrap_err().contains("not an earlier export of this deck"));
+    assert_eq!(file(&md), mine);
+    press(&app, WindowAction::ExportMarkdown);
+    assert_eq!(file(&md), mine);
+    assert!(path.with_file_name("talk-2.md").exists());
 }

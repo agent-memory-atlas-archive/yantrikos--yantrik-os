@@ -84,6 +84,9 @@ pub struct Doc {
     pub unsure: Option<Fingerprint>,
     /// The deck's revision the framework's document has been told about.
     pub seen_revision: u64,
+    /// The path and fingerprint of each default export this deck has made: a default export
+    /// replaces a file only when it is still exactly one of these.
+    pub exports: Vec<(PathBuf, Fingerprint)>,
 }
 
 /// A request to the Mind for one slide's speaker notes, kept until its answer lands so the
@@ -264,5 +267,5 @@ pub fn place(
 ) -> Doc {
     let view = documents.show(id, yantrik_app::app::WindowId::PRIMARY);
     let seen_revision = documents.get(id).map_or(0, |d| d.content.revision());
-    Doc { id, view, on_disk, recovered: false, hidden, draft, inode, unsure: None, seen_revision }
+    Doc { id, view, on_disk, recovered: false, hidden, draft, inode, unsure: None, seen_revision, exports: Vec::new() }
 }

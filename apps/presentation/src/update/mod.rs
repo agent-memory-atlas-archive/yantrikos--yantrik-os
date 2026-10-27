@@ -84,7 +84,7 @@ fn dispatch(m: &mut Model, fx: &mut Effects<YPresent>, command: Command) {
         Command::FileChanged { key, seen } => outside::seen(m, fx, &key, seen),
         Command::Opened { then, result } => opening::landed(m, fx, then, result),
         Command::SaveLanded { seq, then, written, result } => saving::landed(m, fx, seq, then, *written, result),
-        Command::Exported { then, slides, result } => saving::exported(m, fx, then, slides, result),
+        Command::Exported { then, slides, remember, result } => saving::exported(m, fx, then, slides, remember, result),
         Command::Reread { from, result } => outside::reread(m, fx, from, result),
         Command::Located { from, found } => outside::located(m, fx, from, found),
         Command::LegacyArchived(result) => drafts::legacy_archived(m, result),

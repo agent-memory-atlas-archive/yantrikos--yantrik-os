@@ -41,7 +41,7 @@ pub enum Command {
     // What the jobs found.
     Opened { then: Cause, result: Result<Box<Opened>, String> },
     SaveLanded { seq: u64, then: AfterSave, written: Box<Content>, result: Result<Box<Wrote>, Box<SaveFailed>> },
-    Exported { then: Cause, slides: usize, result: Result<Box<Wrote>, Box<SaveFailed>> },
+    Exported { then: Cause, slides: usize, remember: bool, result: Result<Box<Wrote>, Box<SaveFailed>> },
     /// The deck, with nothing unsaved, read again after another program changed its file. `from`
     /// is the file that was read; a result for a file no longer open is dropped.
     Reread { from: PathBuf, result: Result<Box<Opened>, String> },
