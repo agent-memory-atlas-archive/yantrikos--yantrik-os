@@ -77,7 +77,11 @@ pub fn reread(m: &mut Model, fx: &mut Effects<YDoc>, seq: u64, result: Result<Op
         return;
     }
     let (title, hidden) = (m.title(), m.doc.hidden);
-    let edited = m.d().seq != seq || m.modified();
+    // Unsaved text is what a re-read must not replace. How many edits the document has had since
+    // is not: an earlier re-read that landed first, or text typed and typed back, leaves nothing
+    // here to lose, and counting those made a clean document a false conflict.
+    let _ = seq;
+    let edited = m.text_unsaved();
     // Typed in meanwhile, or the file is no longer a document: the person's text stays, and no
     // save writes over the other version.
     let opened = match result {
@@ -122,9 +126,16 @@ pub fn after_save(m: &mut Model, fx: &mut Effects<YDoc>, saved: bool) {
     if !std::mem::take(&mut m.reread_owed) || saved {
         return;
     }
-    let (modified, title, hidden) = (m.modified(), m.title(), m.doc.hidden);
+    let (modified, title, hidden) = (m.text_unsaved(), m.title(), m.doc.hidden);
     let d = m.d_mut();
-    if !matches!(d.outside, OutsideState::Changed { .. }) {
+    // A save refused for the change the re-read was parked for left a conflict behind it. For a
+    // document with nothing unsaved that is the change itself, still owed a re-read.
+    let owed = match d.outside {
+        OutsideState::Changed { .. } => true,
+        OutsideState::Conflict { .. } => !modified,
+        _ => false,
+    };
+    if !owed {
         return;
     }
     if let Some((key, path, seen)) = d.watch_entry() {

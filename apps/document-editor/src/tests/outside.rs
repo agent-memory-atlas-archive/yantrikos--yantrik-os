@@ -105,3 +105,28 @@ fn a_document_whose_file_was_deleted_never_traps_the_person_in_the_prompt() {
     assert_eq!(file(&kept), "only copy\n");
     assert_eq!(app.exit_reason(), Some(yantrik_app::app::ExitReason::LastWindowClosed));
 }
+
+#[test]
+fn two_rereads_in_flight_leave_a_clean_document_clean() {
+    let (app, path) = with_file("two-rereads", "first\n");
+    std::fs::write(&path, "second\n").unwrap();
+    app.look_at_files();
+    std::fs::write(&path, "third, longer\n").unwrap();
+    app.look_at_files();
+    settle(&app);
+    assert_eq!(text(&app), "third, longer\n", "{}", notice(&app));
+    assert!(!notice(&app).contains("unsaved changes"), "a clean document is not a conflict: {}", notice(&app));
+    act(&app, "save", none()).expect("and it saves");
+}
+
+#[test]
+fn a_save_pressed_while_a_reread_is_pending_does_not_strand_a_clean_document_in_conflict() {
+    let (app, path) = with_file("save-during-reread", "first\n");
+    std::fs::write(&path, "theirs\n").unwrap();
+    app.look_at_files();
+    app.run(crate::Command::Window(WindowAction::Save));
+    settle(&app);
+    assert_eq!(text(&app), "theirs\n", "{}", notice(&app));
+    assert!(!notice(&app).contains("unsaved changes"), "{}", notice(&app));
+    act(&app, "save", none()).expect("a clean document that followed the file saves");
+}

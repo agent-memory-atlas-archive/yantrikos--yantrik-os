@@ -256,6 +256,8 @@ pub fn exported(
             let sentence = failed.error.sentence.clone();
             m.dialog_error = sentence.clone();
             say(m, sentence.clone());
+            // A close that waited on this export stays undone: the failure is what the person reads.
+            closing::not_closed(m);
             if let AfterExport::Surface(_) = then {
                 surface::settle_refused(fx, sentence);
             }

@@ -5,7 +5,8 @@ use serde_json::json;
 use yantrik_app::documents::disk::Step;
 
 use super::{act, failing, file, modified, none, notice, path_of, press, scratch, settle, started, state, typed, with_file};
-use crate::command::WindowAction;
+use crate::command::{Command, WindowAction};
+use crate::update::closing::NOT_CLOSED;
 
 #[test]
 fn save_as_writes_the_file_and_answers_with_what_landed() {
@@ -151,20 +152,31 @@ fn a_save_in_flight_refuses_other_calls_and_each_call_is_answered_by_its_own_wor
 
 #[test]
 fn typing_while_a_file_is_written_is_refused_and_the_page_put_back() {
-    let (app, path) = with_file("typing-busy", "v1
-");
-    typed(&app, "v2
-");
+    let (app, path) = with_file("typing-busy", "v1\n");
+    typed(&app, "v2\n");
     // Not landed yet: the save job waits for the test.
     app.run(crate::Command::Window(WindowAction::Save));
     assert_eq!(app.jobs_waiting(), 1);
-    typed(&app, "v3 typed during the save
-");
-    assert_eq!(super::text(&app), "v2
-", "the text the save agreed with is the document's");
+    typed(&app, "v3 typed during the save\n");
+    assert_eq!(super::text(&app), "v2\n", "the text the save agreed with is the document's");
     assert!(notice(&app).contains("reading or writing a file"), "{}", notice(&app));
     settle(&app);
-    assert_eq!(file(&path), "v2
-");
+    assert_eq!(file(&path), "v2\n");
     assert!(!modified(&app), "nothing typed during the save is lost or half-saved");
+}
+
+#[test]
+fn an_export_that_fails_under_a_pending_close_keeps_the_window_and_says_why() {
+    let (app, path) = with_file("export-close", "# Doc\n");
+    let disk = failing(&app);
+    disk.fail(Step::Write, "copy.md", Some(1));
+    let copy = path.with_file_name("copy.md");
+    press(&app, WindowAction::ExportMarkdown);
+    app.run(Command::Window(WindowAction::Confirm { path: copy.display().to_string() }));
+    app.close_requested(yantrik_app::app::WindowId::PRIMARY);
+    settle(&app);
+    assert!(notice(&app).contains("injected failure"), "the failure is not wiped: {}", notice(&app));
+    assert!(notice(&app).ends_with(NOT_CLOSED), "{}", notice(&app));
+    assert!(!app.model(|m| m.close_when_done), "no close is left waiting");
+    assert!(app.exit_reason().is_none() && !app.windows().is_empty(), "the window stayed");
 }

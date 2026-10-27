@@ -173,13 +173,19 @@ pub fn not_saved(m: &mut Model, fx: &mut Effects<YDoc>, why: &str) {
         // Blocked: the prompt stays up, asking again, with the reason under it.
         let _ = closing.flow.progress(&m.documents, Some(why.to_string()));
     }
+    not_closed(m);
+    if m.lingering {
+        end_after_linger(m, fx, Some(why));
+    }
+}
+
+/// A close that waited on a save or an export that failed is dropped, and the failure already
+/// said gains that the window stayed.
+pub fn not_closed(m: &mut Model) {
     if std::mem::take(&mut m.close_when_done) {
         // Added to the failure already said, in both its forms (notice.rs).
         let (window, agents) = (m.notice.window().to_string(), m.notice.read(true).to_string());
         m.notice.set_about(window != agents, format!("{window} {NOT_CLOSED}"), || format!("{agents} {NOT_CLOSED}"));
-    }
-    if m.lingering {
-        end_after_linger(m, fx, Some(why));
     }
 }
 
