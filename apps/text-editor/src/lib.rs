@@ -26,6 +26,7 @@ mod command;
 mod describe;
 mod files;
 mod intents;
+mod mind_view;
 mod model;
 mod notice;
 mod owner;
@@ -78,6 +79,7 @@ impl App for TextEditor {
         })?;
         let state = boot.paths.state_dir().to_path_buf();
         let mut m = Model::new(claim, state.clone());
+        m.for_mind = boot.for_mind;
         let notice = recovery::restore(&mut m, &boot.drafts, files::legacy::read(&state, None));
         if m.tabs.is_empty() {
             update::tabs::blank(&mut m, owner::Opener::Person);

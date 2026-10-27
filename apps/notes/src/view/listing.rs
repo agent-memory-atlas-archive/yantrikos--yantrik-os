@@ -40,7 +40,10 @@ const RECENT_SECS: u64 = 7 * 86400;
 
 /// The list for `folder` and `query`, with `open` (the note the window shows, as it is now) in
 /// place of its library entry. `now` is seconds since the epoch.
-pub fn list(library: &[Note], open: Option<&Note>, folder: &str, query: &str, now: u64) -> Listing {
+///
+/// `search_text` is whether the query is matched against the notes' text as well as their titles
+/// and fields; a window drawn for a Mind matches only what it shows.
+pub fn list(library: &[Note], open: Option<&Note>, folder: &str, query: &str, search_text: bool, now: u64) -> Listing {
     let q = query.trim().to_lowercase();
     let is_open = |n: &Note| open.is_some_and(|c| c.id == n.id && c.trash == n.trash);
     let all: Vec<&Note> = library
@@ -67,7 +70,8 @@ pub fn list(library: &[Note], open: Option<&Note>, folder: &str, query: &str, no
             };
             scope
                 && (q.is_empty()
-                    || n.content.text.to_lowercase().contains(&q)
+                    || (search_text && n.content.text.to_lowercase().contains(&q))
+                    || n.title().to_lowercase().contains(&q)
                     || n.content.meta.to_lowercase().contains(&q))
         })
         .collect();

@@ -13,10 +13,12 @@ use std::time::Duration;
 use yantrik_app::app::WindowId;
 use yantrik_app::documents::{DocumentId, OutsideState};
 use yantrik_app::effects::Effects;
+use yantrik_app::for_mind;
 use yantrik_app::timers::TimerId;
 use yantrik_app::Refused;
 
 use crate::command::{Command, Step};
+use crate::mind_view;
 use crate::model::{Model, Work};
 use crate::note::now;
 use crate::pane::Cue;
@@ -51,6 +53,9 @@ pub const AUTOSAVE_AFTER: Duration = Duration::from_millis(750);
 const WORKER_STOPPED: &str = "Storage worker stopped. Keep this window open to preserve your draft.";
 
 pub fn update(m: &mut Model, command: Command, fx: &mut Effects<Notes>) -> Result<(), Refused> {
+    // The editor shows a mask where a Mind looks, and typing or copying would carry the mask or
+    // the real text through it (`mind_view::refuses`).
+    for_mind::refuse_if(m.for_mind, mind_view::refuses(&command))?;
     // A cue is for the render of the command that set it, and for no later one.
     m.panes_mut().for_each(|p| p.cues.clear());
     let focused = m.pane.window;
@@ -98,6 +103,7 @@ fn dispatch(m: &mut Model, fx: &mut Effects<Notes>, command: Command) {
         Command::Filter { folder, query } => {
             m.pane.folder = folder;
             m.pane.query = query;
+            m.pane.text_search = !m.for_mind;
             relist(m, fx);
         }
         Command::ViewSynced { focus_mode, dialog } => {
@@ -203,7 +209,7 @@ fn relist(m: &mut Model, fx: &mut Effects<Notes>) {
     let at = now();
     let listings: Vec<(WindowId, listing::Listing)> = m
         .panes()
-        .map(|p| (p.window, listing::list(&m.library, m.shown_note_in(p).as_ref(), &p.folder, &p.query, at)))
+        .map(|p| (p.window, listing::list(&m.library, m.shown_note_in(p).as_ref(), &p.folder, &p.query, p.text_search, at)))
         .collect();
     for (pane, (_, listing)) in m.panes_mut().zip(listings) {
         pane.listing = listing;

@@ -26,6 +26,7 @@ mod claim;
 mod command;
 mod describe;
 mod intents;
+mod mind_view;
 mod model;
 mod note;
 mod notice;
@@ -94,7 +95,9 @@ impl App for Notes {
             Startup::handed_over(claim::ALREADY_RUNNING)
         })?;
         let recovery = recovery::Recovery::read(&boot.drafts, vault.dir(), boot.paths.state_dir());
-        Ok(Model::new(vault, claim, recovery))
+        let mut m = Model::new(vault, claim, recovery);
+        m.for_mind = boot.for_mind;
+        Ok(m)
     }
 
     fn wire(cx: &Cx<Self>) {

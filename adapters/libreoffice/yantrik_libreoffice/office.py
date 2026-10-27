@@ -18,8 +18,8 @@ import zlib
 
 from . import guard
 from .basics import (CALC, DRAW, IMPRESS, KIND_NAMES, WRITER, NotReachable, OfficeError,  # noqa: F401
-                     absolute, apply_rule)
-from .store import PDF_FILTERS, SAVE_FILTERS, Storing  # noqa: F401
+                     PathMap, absolute, apply_rule)
+from .store import PDF_FILTERS, SAVE_FILTERS, HostFiles, Storing  # noqa: F401
 from .unoerrors import uno_error_name, uno_message  # noqa: F401
 from .cells import (FINGERPRINT_CELLS, MAX_CELLS, cell_position, column_name, number as _number,  # noqa: F401
                     parse_range, range_name)
@@ -41,14 +41,22 @@ class Office(Storing):
     Connected lazily and again after LibreOffice goes away and comes back: every public method
     connects if it has to, and raises `OfficeError` saying LibreOffice is not there when it is
     not. `hidden` opens documents without a window (for the adapter's own headless LibreOffice).
-    `agents_only` is the fenced LibreOffice that does agents' work (agent_office.py), every one
-    of whose calls is an agent's.
+    `agents_only` is the sandboxed LibreOffice that does agents' work (agent_office.py), every
+    one of whose calls is an agent's, and `paths` how this adapter's paths are named inside its
+    sandbox: every path here is the adapter's, turned into LibreOffice's only at the UNO call.
+    `files` is how the files it writes are reached from here (store.py), and `reach()`, asked
+    before every new connection, refuses one to a pipe that is no longer the one it was given
+    (unopipe.py).
     """
 
-    def __init__(self, pipe=PIPE, uno_module=None, hidden=False, admit=None, agents_only=False):
+    def __init__(self, pipe=PIPE, uno_module=None, hidden=False, admit=None, agents_only=False,
+                 paths=None, files=None, reach=None):
         self.pipe = pipe
         self.hidden = hidden
         self.agents_only = agents_only
+        self.paths = paths or PathMap()
+        self.files = files or HostFiles()
+        self.reach = reach
         self._uno = uno_module
         self._desktop = None
         # `admit(what, path)`: the rule for the files a caller names ("read", "write") and for
@@ -104,6 +112,8 @@ class Office(Storing):
         except Exception as e:  # noqa: BLE001 - a UNO runtime that will not start is a sentence
             raise NotReachable("this adapter's UNO runtime would not start: %s" % uno_message(e),
                                "no UNO runtime to reach it with") from None
+        if self.reach is not None:
+            self.reach()
         try:
             context = resolver.resolve(self.connect_string())
         except Exception as e:  # noqa: BLE001 - every UNO failure becomes a sentence
@@ -164,7 +174,13 @@ class Office(Storing):
 
     def path_of(self, doc):
         url = doc.getURL() or ""
-        return self.uno().fileUrlToSystemPath(url) if url.startswith("file:") else None
+        if not url.startswith("file:"):
+            return None
+        return self.paths.outside(self.uno().fileUrlToSystemPath(url))
+
+    def url_of(self, path):
+        """The URL LibreOffice knows the file at this adapter's `path` by."""
+        return self.uno().systemPathToFileUrl(self.paths.inside(path))
 
     def name_of(self, doc):
         """What a caller calls a document: its file's name, or LibreOffice's title for one that
@@ -247,6 +263,10 @@ class Office(Storing):
             raise OfficeError("`%s` is open read-only; nothing can change it. Close it and open "
                               "it again without `read_only`" % self.name_of(doc))
 
+    def path_for(self, which):
+        """The file of the document `which` names (as `_pick` finds it), or None if never saved."""
+        return self.run(lambda desktop: self.path_of(self._pick(desktop, which)))
+
     def open_paths(self):
         """The files of the documents open here (one never saved has none)."""
         return self.run(lambda desktop: [p for p in map(self.path_of, self._documents(desktop)) if p])
@@ -297,7 +317,7 @@ class Office(Storing):
             raise OfficeError("no file at %s" % path)
 
         def load(desktop):
-            url = self.uno().systemPathToFileUrl(path)
+            url = self.url_of(path)
             for doc in self._documents(desktop):
                 if doc.getURL() == url:
                     return {"document": self.name_of(doc), "kind": self.kind(doc), "path": path,

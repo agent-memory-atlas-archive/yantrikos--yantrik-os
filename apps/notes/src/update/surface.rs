@@ -48,6 +48,7 @@ pub fn act(m: &mut Model, fx: &mut Effects<Notes>, act: Act) {
         }
         Act::Search(query) => {
             m.pane.query = query.clone();
+            m.pane.text_search = true;
             fx.changed(CHROME);
             relist(m, fx);
             let (matches, titles) = listed(m);

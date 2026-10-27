@@ -11105,6 +11105,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "yantrik-address-place"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "yantrik-agent-terminal"
 version = "0.1.0"
 dependencies = [
@@ -11405,11 +11414,14 @@ dependencies = [
  "slint",
  "tracing",
  "ureq 2.12.1",
+ "url",
+ "yantrik-address-place",
+ "yantrik-app",
  "yantrik-app-build",
- "yantrik-app-runtime",
  "yantrik-design-tokens",
+ "yantrik-foundation",
  "yantrik-ipc-contracts",
- "yantrik-ipc-transport",
+ "yantrik-testing",
  "yantrik-ui-kit",
 ]
 
@@ -11425,6 +11437,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "yantrik-address-place",
 ]
 
 [[package]]

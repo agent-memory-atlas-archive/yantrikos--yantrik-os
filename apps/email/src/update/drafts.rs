@@ -126,6 +126,9 @@ fn closing_sentence(m: &Model) -> Option<&'static str> {
 /// unknown outcome. Applied in `start`, before any press, so a draft the person keeps or discards
 /// afterwards is written after it. Its lane copy goes when the file has landed.
 pub fn write_unsent(m: &mut Model, fx: &mut Effects<Email>) {
+    if m.for_mind {
+        return;
+    }
     let Some(unsent) = m.composer.unsent_at_start.take() else { return };
     let unsure = m.composer.kept_unsure;
     file_op(m, FileOp::Save { draft: unsent, keep: Keep::Quietly, unsure, release_lane: true }, fx);
@@ -137,7 +140,9 @@ pub fn write_unsent(m: &mut Model, fx: &mut Effects<Email>) {
 /// a draft save still queued behind the write in flight, which the end would otherwise drop. A
 /// send in flight left its own copy there when Send was pressed. Nothing is sent.
 pub fn ending(m: &mut Model, how: Ending, fx: &mut Effects<Email>) {
-    let open = (m.composer.open && !m.composer.text.is_empty()).then(|| m.composer.text.clone());
+    // A Mind's composer text is not the person's, and a queued save is not written for a Mind:
+    // neither goes to the draft lane.
+    let open = (m.composer.open && !m.composer.text.is_empty() && !m.for_mind).then(|| m.composer.text.clone());
     let queued = match &m.composer.queued {
         Some(FileOp::Save { draft, .. }) => Some(draft.clone()),
         _ => None,

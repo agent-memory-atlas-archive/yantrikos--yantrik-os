@@ -1,16 +1,19 @@
-//! Which desktop entries are LibreOffice, for the rule that keeps it closed to agents (#942, #953).
+//! Which desktop entries are LibreOffice, for the rule that keeps the person's LibreOffice closed to
+//! agents (#942, #953).
 //!
-//! LibreOffice evaluates what it opens (links, macros, fields) with all of the person's rights, and
-//! its sandbox is not built yet. The adapter refuses every agent action; this is the same rule for
-//! the shell's own routes that open a file in its default app. It decides by the handler an entry
-//! resolves to, not by the file's extension, so a renamed file or a changed default cannot get round
-//! it.
+//! LibreOffice evaluates what it opens (links, macros, fields) with the rights of the process that
+//! opens it, and the person's has all of theirs. An agent's work goes through the adapter's own
+//! actions instead, which run a LibreOffice of their own in a sandbox on a copy of the file
+//! (adapters/libreoffice). This is the rule for the shell's own routes that would open a file, or
+//! the app, in the person's LibreOffice. It decides by the handler an entry resolves to, not by the
+//! file's extension, so a renamed file or a changed default cannot get round it.
 
 use crate::apps::{exec_argv, DesktopEntry};
 
-/// The refusal an agent or the Mind is given, the same sentence the adapter gives.
-pub const CLOSED_TO_AGENTS: &str =
-    "LibreOffice isn't open to agents yet: its sandbox is still being built (#953). Nothing was run.";
+/// The refusal an agent or the Mind is given, naming the route it can take instead.
+pub const CLOSED_TO_AGENTS: &str = "An agent does not open files in the person's LibreOffice, which runs \
+     with all of the person's rights. While LibreOffice is open, its own actions (`yos act \
+     libreoffice open`) work on a copy in a sandbox instead (#953). Nothing was opened.";
 
 /// Programs and ids that are LibreOffice, whichever way an entry spells them.
 const NAMES: &[&str] = &[

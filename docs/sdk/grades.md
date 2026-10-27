@@ -115,9 +115,9 @@ what to do instead:
 
 <!-- from: adapters/libreoffice/yantrik_libreoffice/store.py -->
 ```python
-        if os.path.lexists(path):
-            raise OfficeError("a file is already at %s, and this action never replaces one; "
-                              "choose another path" % path)
+    if os.path.lexists(path):
+        raise OfficeError("a file is already at %s, and this action never replaces one; "
+                          "choose another path" % path)
 ```
 
 **Say it when it cannot be undone.** A description that says so — any of *not recoverable*,

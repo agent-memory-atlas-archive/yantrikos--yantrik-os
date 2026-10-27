@@ -3,7 +3,7 @@
 //! One list with a twin: `private_ranges.json` beside this crate is a copy of yantrik-mind's
 //! `deploy/private_ranges.json`, which the Mind's own fetch guard reads. The proxy refuses every
 //! address in it, in every mode, unless a person's rule that says `lan` covers it
-//! (`crate::policy`), so the Mind can leave classifying destinations to the proxy when it is
+//! (yantrik-egress's `policy`), so the Mind can leave classifying destinations to the proxy when it is
 //! behind one. Change both files or neither.
 
 use std::net::IpAddr;
