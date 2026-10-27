@@ -207,13 +207,9 @@ impl ComfyUi {
         }
         match Self::agent().get(&self.url(&path)).call() {
             Ok(response) => {
-                let mut bytes = Vec::new();
-                std::io::Read::read_to_end(&mut response.into_reader(), &mut bytes)
-                    .map_err(|e| format!("the picture could not be read from the server ({e})"))?;
-                if bytes.is_empty() {
-                    return Err(format!("the server sent an empty file for {}", found.filename));
-                }
-                Ok(bytes)
+                let bytes = crate::fetch::read_capped(response.into_reader(), crate::fetch::MOST_BYTES)
+                    .map_err(|e| format!("the picture from the server: {e}"))?;
+                crate::fetch::picture(bytes, &format!("the server (for {})", found.filename))
             }
             Err(ureq::Error::Status(code, response)) => Err(format!(
                 "the server would not hand over {} (HTTP {code}): {}",
@@ -467,9 +463,13 @@ impl Backend for OpenAiImages {
             })?;
         drop(key);
 
-        let value: serde_json::Value = response
-            .into_json()
-            .map_err(|e| format!("the reply from {} was not readable JSON ({e})", crate::config::shown_address(&self.settings.base_url)))?;
+        // A reply that carries a picture inline is at most as long as the picture's base64, and
+        // is read through that cap (`fetch.rs`).
+        let said = crate::config::shown_address(&self.settings.base_url);
+        let reply = crate::fetch::read_capped(response.into_reader(), crate::fetch::MOST_BYTES / 3 * 4 + 4096)
+            .map_err(|e| format!("the reply from {said}: {e}"))?;
+        let value: serde_json::Value = serde_json::from_slice(&reply)
+            .map_err(|e| format!("the reply from {said} was not readable JSON ({e})"))?;
         let first = value
             .get("data")
             .and_then(|d| d.as_array())
@@ -478,20 +478,19 @@ impl Backend for OpenAiImages {
 
         let bytes = if let Some(encoded) = first.get("b64_json").and_then(|b| b.as_str()) {
             use base64::Engine;
-            base64::engine::general_purpose::STANDARD
+            let bytes = base64::engine::general_purpose::STANDARD
                 .decode(encoded.trim())
-                .map_err(|e| format!("the image came back base64-encoded but could not be decoded ({e})"))?
+                .map_err(|e| format!("the image came back base64-encoded but could not be decoded ({e})"))?;
+            if bytes.len() as u64 > crate::fetch::MOST_BYTES {
+                return Err(format!("the image from {said} is larger than Studio will take"));
+            }
+            crate::fetch::picture(bytes, &said)?
         } else if let Some(location) = first.get("url").and_then(|u| u.as_str()) {
             // The URL is the service's own, fetched immediately: it is usually signed and short
             // lived, and a sidecar pointing at an expired link is a picture that cannot be shown.
-            let response = agent
-                .get(location)
-                .call()
-                .map_err(|e| format!("the image was offered at a URL that could not be fetched ({e})"))?;
-            let mut bytes = Vec::new();
-            std::io::Read::read_to_end(&mut response.into_reader(), &mut bytes)
-                .map_err(|e| format!("the image could not be read from its URL ({e})"))?;
-            bytes
+            // It is a server's choice of where to send this machine, so it is fetched only when it
+            // is https and the internet (`fetch.rs`).
+            crate::fetch::fetch_offered(location)?
         } else {
             return Err(format!(
                 "the reply from {} held neither image bytes nor a URL: {}",

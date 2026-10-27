@@ -38,14 +38,16 @@ type Fx = Effects<Studio>;
 /// two directory timestamps rather than a listing, so this is free while nothing is happening.
 pub const POLL: TimerId = TimerId("studio.poll");
 pub const POLL_EVERY: Duration = Duration::from_secs(4);
-/// Brings `generate` and `variations` to the grade the backend on disk deserves, once the surface
-/// is served: the first thing this app does after publishing.
 /// The name of the draft the unsent prompt is kept under.
 pub const PROMPT_DRAFT: &str = "prompt";
-
+/// Brings `generate` and `variations` to the grade the backend on disk deserves, once the surface
+/// is served: the first thing this app does after publishing.
 pub const REGRADE: TimerId = TimerId("studio.regrade");
 
 /// The first effects: the poll, and the grade.
+#[cfg(test)]
+pub use backend::AGENT_REFUSED;
+
 pub fn first(fx: &mut Fx) {
     fx.every(POLL, POLL_EVERY, Command::Poll);
     fx.after(REGRADE, Duration::ZERO, Command::Regrade);

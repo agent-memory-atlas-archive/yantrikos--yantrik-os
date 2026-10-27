@@ -279,13 +279,11 @@ impl Config {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("{} could not be created ({e})", parent.display()))?;
         }
-        let temporary = path.with_extension("json.new");
         let body = serde_json::to_vec_pretty(&self.to_json())
             .map_err(|e| format!("the configuration could not be written ({e})"))?;
-        std::fs::write(&temporary, body)
-            .map_err(|e| format!("{} could not be written ({e})", temporary.display()))?;
-        std::fs::rename(&temporary, path)
-            .map_err(|e| format!("{} could not be put in place ({e})", path.display()))?;
+        // Mode 0600: an address in it may carry sign-in details. Never through a planted link, and
+        // flushed before the rename (`safe_write.rs`).
+        crate::safe_write::replace(path, &body, 0o600)?;
         Ok(path.to_path_buf())
     }
 }

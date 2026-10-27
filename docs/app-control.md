@@ -372,7 +372,7 @@ content, and a content action a paired action takes back stays `standard` (`add_
 | snippets | `delete` | sensitive | no trash |
 | studio | `refresh` | safe | reads |
 | studio | `generate`, `variations` | standard ⇄ sensitive | regraded at runtime: `standard` to a model on the machine, `sensitive` when the backend sends the prompt to a hosted service |
-| studio | `set_backend` | sensitive | stored configuration: written into the settings file, it decides where every later prompt goes |
+| studio | `set_backend` | sensitive | stored configuration: written into the settings file, it decides where every later prompt goes and which credential goes with it, so it is the person's choice: every call from an agent is refused ("Changing where Studio sends prompts is the person's choice; ask them to change it in Studio."); the person's own call and the file `studio.json` are unchanged |
 | studio | `upscale`, `open`, `delete`, `cancel`, `cancel_all` | standard | library content and job steering |
 | system-monitor | `sort_processes`, `filter_processes` | standard | view state |
 | system-monitor | `kill_process` | dangerous | ends what somebody else is running |

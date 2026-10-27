@@ -30,6 +30,7 @@ use crate::model::{Model, Places};
 use crate::Studio;
 
 mod backends;
+mod fetching;
 mod drafts;
 mod files;
 mod for_mind;

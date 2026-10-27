@@ -22,6 +22,9 @@ yantrik-ui-kit = { workspace = true }
 # file browser and the image viewer give, because a viewer that disagrees with the browser about
 # what it can open is worse than one that opens nothing.
 yantrik-image-core = { workspace = true }
+# Where an address leads, for the one URL a hosted service may offer a picture at: the same answer the
+# download manager gives an agent's fetch.
+yantrik-address-place = { path = "../../crates/yantrik-address-place" }
 slint = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -237,10 +237,12 @@ fn an_agent_names_only_files_in_the_home() {
             assert!(problem.starts_with("an agent names only a file in the person's home"), "{action} {asked}: {problem}");
         }
     }
+    // `set_backend` is the person's alone (tests/backends.rs): an agent naming a workflow is
+    // refused before the file is looked at.
     let problem = f
         .agent("set_backend", json!({ "kind": "comfyui", "workflow": "/etc/hostname" }))
         .unwrap_err();
-    assert!(problem.starts_with("an agent names only a file in the person's home"), "{problem}");
+    assert_eq!(problem, crate::update::AGENT_REFUSED);
     assert!(!f.world.places.settings.as_ref().unwrap().exists(), "a refused change was written");
 
     // A bare name is a picture in the gallery, resolved there; delete keeps to the gallery itself.

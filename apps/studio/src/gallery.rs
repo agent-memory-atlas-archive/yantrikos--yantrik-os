@@ -81,13 +81,9 @@ impl Sidecar {
     /// looks like it was not made here.
     pub fn write(&self, image: &Path) -> Result<PathBuf, String> {
         let path = Self::path_for(image);
-        let temporary = path.with_extension("json.new");
         let body = serde_json::to_vec_pretty(self)
             .map_err(|e| format!("the sidecar could not be written ({e})"))?;
-        std::fs::write(&temporary, body)
-            .map_err(|e| format!("{} could not be written ({e})", temporary.display()))?;
-        std::fs::rename(&temporary, &path)
-            .map_err(|e| format!("{} could not be put in place ({e})", path.display()))?;
+        crate::safe_write::replace(&path, &body, 0o644)?;
         Ok(path)
     }
 

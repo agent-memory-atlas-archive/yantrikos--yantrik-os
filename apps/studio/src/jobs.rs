@@ -192,7 +192,14 @@ fn save_as(
     // is removed again. A picture with no record beside it is indistinguishable in the gallery
     // from one somebody copied in, which loses the thing that makes this app worth having; a
     // record with no picture is worse, and cannot happen this way round.
-    std::fs::write(&path, &shot.bytes).map_err(|e| format!("{} could not be written ({e})", path.display()))?;
+    // A file nobody had (`O_EXCL`), never written through a link planted at the name.
+    if let Err(e) = crate::safe_write::write_new(&path, &shot.bytes, 0o644) {
+        // What was half-written is removed; a file that was already there is not ours to remove.
+        if e.kind() != std::io::ErrorKind::AlreadyExists {
+            let _ = std::fs::remove_file(&path);
+        }
+        return Err(format!("{} could not be written ({e})", path.display()));
+    }
     let sidecar = Sidecar {
         prompt: request.prompt.clone(),
         negative: request.negative.clone(),

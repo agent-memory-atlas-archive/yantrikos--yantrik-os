@@ -11889,6 +11889,7 @@ dependencies = [
  "tracing",
  "ureq 2.12.1",
  "url",
+ "yantrik-address-place",
  "yantrik-app",
  "yantrik-app-build",
  "yantrik-design-tokens",

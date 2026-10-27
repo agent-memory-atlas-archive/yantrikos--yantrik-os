@@ -157,7 +157,9 @@ pub fn actions() -> Vec<(Action, Parse)> {
                  lands, so a caller cannot point Studio at a service and generate in the same breath \
                  under the old, local grade. No key is taken here — only the NAME of an environment \
                  variable that holds one, which is read at call time and never stored, logged or \
-                 shown.",
+                 shown. An agent cannot call this: where Studio sends prompts is the person's \
+                 choice, so every call from an agent is refused, and the person makes it in \
+                 Studio's window or in studio.json.",
             )
             .risk("sensitive")
             .arg(arg(

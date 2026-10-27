@@ -27,6 +27,10 @@ use crate::Studio;
 
 type Fx = Effects<Studio>;
 
+/// What every agent caller of `set_backend` is told.
+pub const AGENT_REFUSED: &str =
+    "Changing where Studio sends prompts is the person's choice; ask them to change it in Studio.";
+
 /// The two actions whose grade follows the backend.
 const FOLLOWS_THE_BACKEND: [&str; 2] = ["generate", "variations"];
 
@@ -67,6 +71,13 @@ pub fn explain(m: &mut Model, fx: &mut Fx) {
 
 /// `set_backend`: checked and written down on a worker; answered when it has landed.
 pub fn set(m: &mut Model, fx: &mut Fx, ask: BackendAsk) {
+    // Where Studio sends prompts, and which credential goes with them, is the person's choice. An
+    // agent that could name the host and the variable could have the value of any environment
+    // variable sent to a host it picked as a Bearer token. Refused before anything else is read,
+    // and nothing is connected to.
+    if by_agent(fx) {
+        return refuse(m, fx, AGENT_REFUSED);
+    }
     let Some(kind) = needed(m, fx, "set_backend", "kind", &ask.kind) else { return };
     if m.changing_backend {
         return refuse(m, fx, "Studio is already changing where pictures are made; ask again in a moment.");

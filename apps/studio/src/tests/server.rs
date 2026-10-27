@@ -44,6 +44,10 @@ pub(crate) struct Manners {
     pub(crate) refuse: Option<(u16, String)>,
     /// Never report a render as finished, so the only way out is the cancel flag.
     pub(crate) never_finish: bool,
+    /// Answer an image request with this URL to fetch, as some hosted services do.
+    pub(crate) offer_url: Option<String>,
+    /// Answer an image request with these bytes inline, whatever they are.
+    pub(crate) inline_bytes: Option<Vec<u8>>,
 }
 
 /// A ComfyUI server, and an OpenAI-compatible images endpoint, in this process.
@@ -274,6 +278,10 @@ fn route(
                 }),
             )
         }
+        ("GET", "/offered") => {
+            shared.lock().unwrap().viewed.push(target.to_string());
+            (200, "image/png", backend::draw("offered", 1, 16, 16))
+        }
         ("GET", "/view") => {
             let mut filename = String::new();
             let mut subfolder = String::new();
@@ -323,6 +331,13 @@ fn route(
                 .and_then(|(w, h)| Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?)))
                 .unwrap_or((1024, 1024));
             use base64::Engine as _;
+            if let Some(offered) = &manners.offer_url {
+                return json(200, json!({ "data": [{ "url": offered }] }));
+            }
+            if let Some(bytes) = &manners.inline_bytes {
+                let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+                return json(200, json!({ "data": [{ "b64_json": encoded }] }));
+            }
             let encoded = base64::engine::general_purpose::STANDARD.encode(backend::draw(&prompt, 1, width, height));
             json(200, json!({ "created": 1_780_000_000u64, "data": [{ "b64_json": encoded }] }))
         }

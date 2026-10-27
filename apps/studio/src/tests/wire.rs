@@ -116,6 +116,7 @@ fn a_server_that_refuses_the_graph_passes_its_own_explanation_back() {
             r#"{"error":{"message":"Value not in list: ckpt_name: 'sdxl_test.safetensors'","type":"invalid_prompt"}}"#.to_string(),
         )),
         never_finish: false,
+        ..Manners::default()
     });
     let f = started("wire-2", &server.config("comfyui"));
 

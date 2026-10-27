@@ -251,3 +251,42 @@ fn while_a_change_is_being_written_nothing_is_sent_and_a_second_change_waits() {
     assert_eq!(m.config.backend.kind, Kind::Fake);
     assert_eq!(m.notice, "the disk is full");
 }
+
+/// Where Studio sends prompts, and which credential goes with them, is the person's choice: an
+/// agent that could name the host and the variable could have the value of any environment variable
+/// sent to a host it picked as a Bearer token. Every agent call is refused, and nothing is
+/// connected to.
+#[test]
+fn an_agent_cannot_change_where_prompts_go_and_no_request_ever_leaves() {
+    use std::net::TcpListener;
+    const SECRET_VARIABLE: &str = "STUDIO_TEST_AGENT_SECRET";
+    std::env::set_var(SECRET_VARIABLE, "sk-not-a-real-secret-4471");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+
+    let f = fake("agent-backend");
+    for call in [
+        json!({ "kind": "openai-images", "base_url": url, "api_key_env": SECRET_VARIABLE, "model": "x" }),
+        json!({ "kind": "comfyui", "base_url": url }),
+        json!({ "kind": "fake" }),
+        json!({ "kind": "openai-images", "model": "x", "api_key_env": "HOME" }),
+    ] {
+        assert_eq!(f.agent("set_backend", call.clone()), Err(crate::update::AGENT_REFUSED.to_string()), "{call}");
+    }
+    assert_eq!(crate::update::AGENT_REFUSED, "Changing where Studio sends prompts is the person's choice; ask them to change it in Studio.");
+    // Nothing changed, nothing was written, and the notice is the same sentence.
+    assert_eq!(f.app.model(|m| m.config.backend.kind), Kind::Fake);
+    assert!(!f.world.places.settings.as_ref().unwrap().exists());
+    assert_eq!(f.notice(), crate::update::AGENT_REFUSED);
+    // So a generation afterwards goes nowhere near the listener.
+    f.agent("generate", json!({ "prompt": "hello", "width": 64, "height": 64 })).unwrap();
+    assert_eq!(f.settled(), "");
+    assert!(listener.accept().is_err(), "a request reached the listener an agent named");
+
+    // The person's own call, with the same arguments, is unchanged.
+    let answer = f.act("set_backend", json!({ "kind": "comfyui", "base_url": url })).unwrap();
+    assert_eq!(answer["backend"], json!("comfyui"));
+    assert_eq!(f.app.model(|m| m.config.backend.kind), Kind::ComfyUi);
+    std::env::remove_var(SECRET_VARIABLE);
+}
