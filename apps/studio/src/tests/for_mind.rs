@@ -170,12 +170,13 @@ fn a_mind_calling_the_actions_is_refused_with_the_same_sentence() {
         ("upscale", json!({ "path": path.clone() })),
         ("open", json!({ "path": path.clone() })),
         ("delete", json!({ "path": path.clone() })),
-        ("set_backend", json!({ "kind": "fake" })),
         ("cancel", json!({ "job": 1 })),
         ("cancel_all", json!({})),
     ] {
         assert_eq!(f.agent(name, args), Err(READ_ONLY.to_string()), "{name}");
     }
+    // `set_backend` is the person's alone: an agent is refused it before Mind View is asked.
+    assert_eq!(f.agent("set_backend", json!({ "kind": "fake" })), Err(crate::update::AGENT_REFUSED.to_string()));
     // Reading is not refused.
     assert!(f.agent("refresh", json!({})).is_ok());
 }

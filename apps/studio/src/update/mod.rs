@@ -46,7 +46,7 @@ pub const REGRADE: TimerId = TimerId("studio.regrade");
 
 /// The first effects: the poll, and the grade.
 #[cfg(test)]
-pub use backend::AGENT_REFUSED;
+pub use crate::intents::AGENT_REFUSED;
 
 pub fn first(fx: &mut Fx) {
     fx.every(POLL, POLL_EVERY, Command::Poll);

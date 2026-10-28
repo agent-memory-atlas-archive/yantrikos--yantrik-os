@@ -109,7 +109,10 @@ fn nothing_the_window_says_names_an_action_the_person_cannot_call() {
     assert!(m.facts().note.contains("set_backend"));
 
     apply(&mut m, Command::ExplainBackend);
-    assert!(m.notice.contains(crate::config::FILE_NAME), "{}", m.notice);
+    assert_eq!(
+        m.notice,
+        "Pictures are made by this machine right now. Changing where Studio sends prompts is the person's choice; to change it, edit ~/.config/yantrik/studio.json."
+    );
     for agent_only in ["set_backend", "yos act", "describe", "generate prompt="] {
         assert!(!m.notice.contains(agent_only), "the button says `{agent_only}`: {}", m.notice);
     }

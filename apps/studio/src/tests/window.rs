@@ -164,7 +164,10 @@ fn the_window_shows_the_queue_the_gallery_and_the_record_of_the_chosen_picture()
     // ── the buttons that change nothing on disk ──
     press(&f, "backend");
     let notice = ui(&f).4;
-    assert!(notice.contains("studio.json"), "{notice}");
+    assert_eq!(
+        notice,
+        "Pictures are made by this machine right now. Changing where Studio sends prompts is the person's choice; to change it, edit ~/.config/yantrik/studio.json."
+    );
     assert!(!notice.contains("set_backend"), "the button sends the person to an action: {notice}");
     // `refresh` clears the notice rather than leaving the last thing that went wrong on screen.
     press(&f, "refresh");

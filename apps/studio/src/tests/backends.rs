@@ -274,11 +274,15 @@ fn an_agent_cannot_change_where_prompts_go_and_no_request_ever_leaves() {
     ] {
         assert_eq!(f.agent("set_backend", call.clone()), Err(crate::update::AGENT_REFUSED.to_string()), "{call}");
     }
-    assert_eq!(crate::update::AGENT_REFUSED, "Changing where Studio sends prompts is the person's choice; ask them to change it in Studio.");
+    assert_eq!(
+        crate::update::AGENT_REFUSED,
+        "Changing where Studio sends prompts is the person's choice; ask them to edit ~/.config/yantrik/studio.json."
+    );
     // Nothing changed, nothing was written, and the notice is the same sentence.
     assert_eq!(f.app.model(|m| m.config.backend.kind), Kind::Fake);
     assert!(!f.world.places.settings.as_ref().unwrap().exists());
-    assert_eq!(f.notice(), crate::update::AGENT_REFUSED);
+    // The framework refused it before the app was asked, so the app has nothing to say.
+    assert_eq!(f.notice(), "");
     // So a generation afterwards goes nowhere near the listener.
     f.agent("generate", json!({ "prompt": "hello", "width": 64, "height": 64 })).unwrap();
     assert_eq!(f.settled(), "");
@@ -289,4 +293,82 @@ fn an_agent_cannot_change_where_prompts_go_and_no_request_ever_leaves() {
     assert_eq!(answer["backend"], json!("comfyui"));
     assert_eq!(f.app.model(|m| m.config.backend.kind), Kind::ComfyUi);
     std::env::remove_var(SECRET_VARIABLE);
+}
+
+/// The same refusal through the framework's real dispatch (the registry the socket serves, with
+/// the authority a test pins), not a copy of the wrapper: an agent's call in every mode the
+/// framework has, granted or not, is refused with the one sentence before any grade, approval or
+/// handler is reached; the configuration file is byte-identical afterwards; and an in-process
+/// listener the call names gets no connection.
+#[test]
+fn the_real_dispatch_refuses_an_agents_set_backend_in_every_mode() {
+    use std::net::TcpListener;
+    use yantrik_testing::Call;
+    const SECRET_VARIABLE: &str = "STUDIO_TEST_DISPATCH_SECRET";
+    std::env::set_var(SECRET_VARIABLE, "sk-not-a-real-secret-9921");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+
+    let f = fake("dispatch-backend");
+    // The person's own choice, written down: the file the agent must not be able to change.
+    f.act("set_backend", json!({ "kind": "comfyui", "base_url": "http://127.0.0.1:8188" })).unwrap();
+    let settings = f.world.places.settings.clone().unwrap();
+    let before = std::fs::read(&settings).unwrap();
+
+    for mode in ["plan", "ask", "auto", "bypass", "bypass_all"] {
+        for granted in [false, true] {
+            let mut call = Call::new(
+                "set_backend",
+                json!({ "kind": "openai-images", "base_url": url, "api_key_env": SECRET_VARIABLE, "model": "x" }),
+            )
+            .as_agent(super::AGENT)
+            .in_mode(mode);
+            if granted {
+                call = call.granted();
+            }
+            let refused = f.app.act_as(call).unwrap_err();
+            assert_eq!(refused, crate::update::AGENT_REFUSED, "mode {mode}, granted {granted}");
+        }
+    }
+    assert_eq!(std::fs::read(&settings).unwrap(), before, "the configuration file changed");
+    assert_eq!(f.app.model(|m| m.config.backend.kind), Kind::ComfyUi);
+    assert!(f.app.model(|m| !m.changing_backend), "a worker was started for a refused call");
+    assert_eq!(f.app.jobs_waiting(), 0);
+    assert!(listener.accept().is_err(), "a request reached the listener an agent named");
+    std::env::remove_var(SECRET_VARIABLE);
+}
+
+/// The person's card says which credential goes with the prompt, by name and never by value.
+#[test]
+fn the_persons_card_names_the_credential_that_goes_with_the_prompt() {
+    const NAMED: &str = "STUDIO_TEST_CARD_SECRET";
+    std::env::set_var(NAMED, "sk-this-value-must-never-be-said-3303");
+    let (set_backend, _) =
+        crate::intents::actions().into_iter().find(|(a, _)| a.name == "set_backend").unwrap();
+    let explains = |args: serde_json::Value| set_backend.explainer.as_ref().unwrap().sentence(&args);
+    assert_eq!(
+        explains(json!({ "kind": "openai-images", "base_url": "https://img.example/v1", "api_key_env": NAMED })),
+        "After this, prompts and the value of $STUDIO_TEST_CARD_SECRET go to img.example."
+    );
+    // The variable's default name, when none is given.
+    assert_eq!(
+        explains(json!({ "kind": "openai" })),
+        "After this, prompts and the value of $OPENAI_API_KEY go to api.openai.com."
+    );
+    // Only a name that is a name is said; anything else gets no sentence rather than a guess.
+    for odd in ["A B", "X; rm -rf", "a\nb", "$(id)"] {
+        assert_eq!(explains(json!({ "kind": "openai-images", "api_key_env": odd })), "", "{odd:?}");
+    }
+    // A kind that sends no key says what it always said.
+    assert_eq!(explains(json!({ "kind": "fake" })), "After this, prompts stay on this machine.");
+    assert_eq!(
+        explains(json!({ "kind": "comfyui", "base_url": "http://gpu-box.lan:8188" })),
+        "After this, prompts go to the ComfyUI server at gpu-box.lan."
+    );
+    for kind in ["openai-images", "comfyui", "fake"] {
+        let said = explains(json!({ "kind": kind, "api_key_env": NAMED }));
+        assert!(!said.contains("sk-this-value"), "the card says a value: {said}");
+    }
+    std::env::remove_var(NAMED);
 }

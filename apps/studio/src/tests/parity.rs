@@ -14,8 +14,9 @@ use yantrik_app::intents::Intents;
 use super::{fake, started, unconfigured};
 use crate::Studio;
 
-/// What `set_backend` says since agents may not call it, after the description it always had.
-const AGENT_NOTE: &str = " An agent cannot call this: where Studio sends prompts is the person's choice, so every call from an agent is refused, and the person makes it in Studio's window or in studio.json.";
+/// What `set_backend` says first since agents may not call it (the hotfix #992 on main put the same
+/// words before the description it always had, naming the file the person edits).
+const PERSONS_ALONE: &str = "The person's alone: an agent that calls this is refused and should ask the person to edit ~/.config/yantrik/studio.json. ";
 
 struct Golden {
     name: &'static str,
@@ -150,7 +151,7 @@ fn the_nine_actions_are_published_as_they_were() {
         let name = golden.name;
         assert_eq!(spec.name, name);
         // The one word changed on purpose: `set_backend` says an agent cannot call it.
-        let description = if name == "set_backend" { format!("{}{AGENT_NOTE}", golden.description) } else { golden.description.to_string() };
+        let description = if name == "set_backend" { format!("{PERSONS_ALONE}{}", golden.description) } else { golden.description.to_string() };
         assert_eq!(spec.description, description, "{name}: description");
         assert_eq!(spec.permission, golden.risk, "{name}: grade");
         assert_eq!(spec.expected_seconds, None, "{name}: expected seconds");

@@ -20,7 +20,7 @@
 use std::time::Duration;
 
 use yantrik_app::control::{Action, Param};
-use yantrik_app::intents::{Args, Intent, Intents, Settle};
+use yantrik_app::intents::{Agents, Args, Intent, Intents, Settle};
 
 use crate::answers;
 use crate::args;
@@ -32,13 +32,25 @@ use crate::Studio;
 /// file read, a file move or a queue entry; none waits for a picture.
 pub const WITHIN: Duration = Duration::from_secs(10);
 
+/// What every agent caller of `set_backend` is told. Where Studio sends prompts, and which
+/// credential goes with them, is the person's choice: the variable `api_key_env` names is sent as
+/// a bearer token to the `base_url` named, so an agent that could set both could have any secret
+/// in the environment sent to a host it picked. The framework refuses an agent's call to an
+/// intent declared `Agents::Refused` before the grade, the mode or an approval is looked at, so no
+/// card is ever shown for it.
+pub const AGENT_REFUSED: &str =
+    "Changing where Studio sends prompts is the person's choice; ask them to edit ~/.config/yantrik/studio.json.";
+
 pub fn table(table: &mut Intents<Studio>) {
     for (action, parse) in actions() {
-        table.add(
-            Intent::new(action, move |a| Ok(parse(a)))
-                .settles(Settle::Explicit { within: WITHIN })
-                .reply(answers::reply),
-        );
+        let persons_alone = action.name == "set_backend";
+        let mut intent = Intent::new(action, move |a| Ok(parse(a)))
+            .settles(Settle::Explicit { within: WITHIN })
+            .reply(answers::reply);
+        if persons_alone {
+            intent = intent.agents(Agents::Refused(AGENT_REFUSED));
+        }
+        table.add(intent);
     }
 }
 
@@ -150,16 +162,15 @@ pub fn actions() -> Vec<(Action, Parse)> {
         (
             act(
                 "set_backend",
-                "Choose where pictures are made from now on, and write that choice down in the \
-                 configuration file. Graded `sensitive` because it decides where every later prompt \
+                "The person's alone: an agent that calls this is refused and should ask the person to \
+                 edit ~/.config/yantrik/studio.json. Choose where pictures are made from now on, and \
+                 write that choice down in the configuration file. Graded `sensitive` because it decides where every later prompt \
                  goes: naming a hosted service means the sentences typed into this app will leave this \
                  machine and may cost money. `generate` and `variations` are regraded the moment this \
                  lands, so a caller cannot point Studio at a service and generate in the same breath \
                  under the old, local grade. No key is taken here — only the NAME of an environment \
                  variable that holds one, which is read at call time and never stored, logged or \
-                 shown. An agent cannot call this: where Studio sends prompts is the person's \
-                 choice, so every call from an agent is refused, and the person makes it in \
-                 Studio's window or in studio.json.",
+                 shown.",
             )
             .risk("sensitive")
             .arg(arg(
@@ -215,9 +226,20 @@ pub fn actions() -> Vec<(Action, Parse)> {
                 };
                 match kind {
                     config::Kind::Fake => "After this, prompts stay on this machine.".to_string(),
-                    config::Kind::OpenAiImages => host()
-                        .map(|host| format!("After this, prompts go to {host} and may cost money."))
-                        .unwrap_or_default(),
+                    // A hosted service is sent a key with the prompt: the card says which variable's
+                    // value goes, by name and never by value.
+                    config::Kind::OpenAiImages => {
+                        let named = args::given(args, "api_key_env");
+                        let name = match named.trim() {
+                            "" => "OPENAI_API_KEY",
+                            name => name,
+                        };
+                        let usable = !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+                        match (host(), usable) {
+                            (Some(host), true) => format!("After this, prompts and the value of ${name} go to {host}."),
+                            _ => String::new(),
+                        }
+                    }
                     config::Kind::ComfyUi => match host().as_deref() {
                         Some("127.0.0.1" | "localhost" | "[::1]") => {
                             "After this, prompts go to the ComfyUI server on this machine.".to_string()

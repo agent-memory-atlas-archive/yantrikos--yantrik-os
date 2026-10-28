@@ -20,16 +20,13 @@ use super::{by_agent, needed, refuse, say};
 use crate::answers;
 use crate::backend;
 use crate::command::{BackendAsk, BackendSet, Command};
+use crate::intents::AGENT_REFUSED;
 use crate::config::Kind;
 use crate::jobs;
 use crate::model::{display, Model, PART_BACKEND, PART_STATUS};
 use crate::Studio;
 
 type Fx = Effects<Studio>;
-
-/// What every agent caller of `set_backend` is told.
-pub const AGENT_REFUSED: &str =
-    "Changing where Studio sends prompts is the person's choice; ask them to change it in Studio.";
 
 /// The two actions whose grade follows the backend.
 const FOLLOWS_THE_BACKEND: [&str; 2] = ["generate", "variations"];
@@ -57,13 +54,9 @@ pub fn regrade(m: &mut Model) {
 /// prompts go is a decision worth one file and one sentence, not a form with a field for a secret;
 /// so the button says where the decision lives.
 pub fn explain(m: &mut Model, fx: &mut Fx) {
-    let path = crate::config::config_path()
-        .map(|path| display(&path))
-        .unwrap_or_else(|| "~/.config/yantrik/studio.json".to_string());
     let sentence = format!(
-        "Pictures are made by {} right now. To change that, edit {path}: its \"backend\" section names \
-         the kind (comfyui, openai-images or fake) and where it is. Choosing a hosted service sends \
-         your prompts to that service, and it may charge for them.",
+        "Pictures are made by {} right now. Changing where Studio sends prompts is the person's choice; \
+         to change it, edit ~/.config/yantrik/studio.json.",
         m.facts().place
     );
     say(m, fx, sentence);
@@ -71,10 +64,9 @@ pub fn explain(m: &mut Model, fx: &mut Fx) {
 
 /// `set_backend`: checked and written down on a worker; answered when it has landed.
 pub fn set(m: &mut Model, fx: &mut Fx, ask: BackendAsk) {
-    // Where Studio sends prompts, and which credential goes with them, is the person's choice. An
-    // agent that could name the host and the variable could have the value of any environment
-    // variable sent to a host it picked as a Bearer token. Refused before anything else is read,
-    // and nothing is connected to.
+    // The framework refuses an agent's call to this intent before it gets here
+    // (`Agents::Refused`, intents.rs). This is the second lock, for any route that reaches the
+    // command without it: refused before anything else is read, and nothing is connected to.
     if by_agent(fx) {
         return refuse(m, fx, AGENT_REFUSED);
     }
