@@ -369,3 +369,107 @@ fn a_key_pasted_where_a_variable_name_goes_is_said_nowhere() {
     assert!(!kind_in_file.contains(SECRET), "{kind_in_file}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Many real keys (`hf_...`, `ghp_...`) are valid variable names, so a key pasted into `api_key_env`
+/// is accepted as a name. It is said nowhere: a name is said only for a variable that is set here.
+#[test]
+fn a_key_shaped_like_a_variable_name_is_said_nowhere_and_a_set_variable_is_named() {
+    use std::sync::{Arc, Mutex};
+    use yantrik_testing::Call;
+    const KEY: &str = "hf_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
+    std::env::remove_var(KEY);
+    let dir = std::env::temp_dir().join(format!("studio-hf-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("studio.json");
+    std::fs::write(
+        &file,
+        format!(r#"{{"backend":{{"kind":"openai-images","base_url":"https://router.example/v1","model":"m","api_key_env":"{KEY}"}}}}"#),
+    )
+    .unwrap();
+
+    #[derive(Clone, Default)]
+    struct Log(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Log {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let log = Log::default();
+    let writer = log.clone();
+    let subscriber = tracing_subscriber::fmt().with_writer(move || writer.clone()).with_max_level(tracing::Level::TRACE).finish();
+    // It is a valid name, so the file is accepted as it is written (the person's config still works
+    // once they set the variable), and what the app logs about it repeats nothing.
+    let config = tracing::subscriber::with_default(subscriber, || {
+        tracing::callsite::rebuild_interest_cache();
+        let config = crate::config::Config::read(&file);
+        tracing::warn!("{}", config.backend.api_key().unwrap_err());
+        config
+    });
+    assert!(config.refused.is_none());
+    assert_eq!(config.backend.api_key_env, KEY, "what the person gave is kept");
+    let logged = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+    assert!(logged.contains("is not set"), "nothing was logged to check: {logged:?}");
+    assert!(!logged.contains("hf_"), "the log repeats the key: {logged}");
+
+    let f = super::with_config("hf-key", config);
+    let clean = |where_: &str, text: String| {
+        assert!(!text.contains("hf_") && !text.contains("AbCdEf"), "{where_} repeats the key: {text}");
+    };
+    // A generate that fails for want of the variable.
+    f.act("generate", json!({ "prompt": "a lighthouse", "width": 64, "height": 64 })).unwrap();
+    let failed = f.settled();
+    assert!(failed.contains("could not make the picture"), "{failed}");
+    assert!(failed.contains("the environment variable named in studio.json's `api_key_env` is not set"), "{failed}");
+    let window = f.app.ui(|ui: &crate::StudioApp| format!("{} {} {}", ui.get_notice(), ui.get_facts(), ui.get_backend_line()));
+    let pending = f.app.act_as(Call::new("refresh", json!({})).as_agent(super::AGENT)).unwrap();
+    let as_agent = f.settle(pending).unwrap().to_string();
+    let (set_backend, _) = crate::intents::actions().into_iter().find(|(a, _)| a.name == "set_backend").unwrap();
+    let card = set_backend
+        .explainer
+        .as_ref()
+        .unwrap()
+        .sentence(&json!({ "kind": "openai-images", "base_url": "https://router.example/v1", "api_key_env": KEY }));
+    // The person's set_backend with the same value: accepted, and nothing it says repeats it.
+    let answer = f.act("set_backend", json!({ "kind": "openai-images", "model": "m", "api_key_env": KEY })).unwrap();
+    for (where_, text) in [
+        ("the notice after a failed generate", failed),
+        ("the window", window),
+        ("an agent's answer", as_agent),
+        ("describe", f.describe().to_string()),
+        ("the summary", f.summary()),
+        ("the card", card.clone()),
+        ("set_backend's answer", answer.to_string()),
+        ("the notice after set_backend", f.notice()),
+        (
+            "the window after set_backend",
+            f.app.ui(|ui: &crate::StudioApp| format!("{} {}", ui.get_notice(), ui.get_facts())),
+        ),
+    ] {
+        clean(where_, text);
+    }
+    assert_eq!(answer["api_key_env"], serde_json::Value::Null);
+    assert_eq!(f.state()["backend"]["api_key_env"], serde_json::Value::Null);
+    assert_eq!(f.state()["backend"]["api_key_is_set"], json!(false));
+    assert!(card.contains("the environment variable you named"), "{card}");
+
+    // A variable that IS set is named: in the card, in describe, in the answer and in the pane.
+    const SET: &str = "STUDIO_TEST_SET_VARIABLE_7731";
+    std::env::set_var(SET, "a-value-that-is-never-said-8812");
+    let answer = f.act("set_backend", json!({ "kind": "openai-images", "model": "m", "api_key_env": SET })).unwrap();
+    assert_eq!(answer["api_key_env"], json!(SET));
+    assert_eq!(f.state()["backend"]["api_key_env"], json!(SET));
+    assert_eq!(f.state()["backend"]["api_key_is_set"], json!(true));
+    let pane = f.app.ui(|ui: &crate::StudioApp| ui.get_facts().to_string());
+    assert!(pane.contains(&format!("the environment variable {SET}, which is set")), "{pane}");
+    let card = set_backend.explainer.as_ref().unwrap().sentence(&json!({ "kind": "openai-images", "api_key_env": SET }));
+    assert_eq!(card, format!("After this, prompts and the value of ${SET} go to api.openai.com."));
+    for text in [answer.to_string(), f.describe().to_string(), pane, card] {
+        assert!(!text.contains("a-value-that-is-never-said"), "the value is said: {text}");
+    }
+    std::env::remove_var(SET);
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -93,7 +93,8 @@ fn a_hosted_backend_with_no_key_exported_says_what_to_export() {
             &Stop::new(),
         )
         .unwrap_err();
-    assert!(problem.contains("STUDIO_TEST_MISSING_KEY"), "{problem}");
+    // A variable that is not set is not named (it may be a key pasted where a name goes).
+    assert!(problem.contains("named in studio.json's `api_key_env`") && !problem.contains("STUDIO_TEST_MISSING_KEY"), "{problem}");
 }
 
 #[test]

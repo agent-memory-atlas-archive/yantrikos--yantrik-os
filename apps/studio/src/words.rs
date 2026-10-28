@@ -58,8 +58,8 @@ pub fn facts_block(m: &Model) -> String {
         // to export; the value is the one thing this window must not show, so the only question
         // asked of it is whether it is there.
         lines.push(format!(
-            "API key: the environment variable {}, which is {}.",
-            m.config.backend.api_key_env,
+            "API key: {}, which is {}.",
+            crate::config::variable_phrase(&m.config.backend.api_key_env),
             if m.key_is_set() { "set, so prompts can be sent" } else { "not usable, so nothing can be sent yet" }
         ));
     }

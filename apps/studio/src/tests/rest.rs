@@ -34,3 +34,4 @@ fn a_window_that_is_not_asking_for_a_caret_draws_nothing_and_arms_only_the_poll(
     assert_eq!(rest.fired, 15);
     assert_eq!(rest.jobs, 15);
 }
+

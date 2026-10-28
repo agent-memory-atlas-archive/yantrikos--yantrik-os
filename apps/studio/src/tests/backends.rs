@@ -56,14 +56,16 @@ fn set_backend_moves_where_prompts_go_and_what_that_is_graded() {
         .unwrap();
     assert_eq!(answer["generate_is_now_graded"], json!("sensitive"));
     assert_eq!(answer["prompt_leaves_this_machine"], json!(true));
-    assert_eq!(answer["api_key_env"], json!("STUDIO_ABSENT_KEY"), "the variable's name is the person's to know");
+    // The name of a variable that is not set is not said (it may be a key pasted where a name goes).
+    assert_eq!(answer["api_key_env"], serde_json::Value::Null);
     assert!(answer["note"].as_str().unwrap().contains("is not set"), "{answer}");
     assert_eq!(grade(&f), ("sensitive", "sensitive"));
     // A generation that cannot be sent says so rather than failing quietly in a worker.
     f.act("generate", json!({ "prompt": "a lighthouse" })).unwrap();
     let notice = f.settled();
     assert!(notice.contains("openai-images could not make the picture"), "{notice}");
-    assert!(notice.contains("STUDIO_ABSENT_KEY is not set"), "{notice}");
+    assert!(notice.contains("the environment variable named in studio.json's `api_key_env` is not set"), "{notice}");
+    assert!(!notice.contains("STUDIO_ABSENT_KEY"), "{notice}");
     assert_eq!(f.state()["backend"]["api_key_is_set"], json!(false));
 
     // And back to the placeholder, which is local again.
@@ -104,7 +106,7 @@ fn a_hosted_backend_whose_key_is_not_exported_is_saved_and_says_what_is_missing(
         json!({ "kind": "openai-images", "model": "gpt-image-1", "api_key_env": "STUDIO_TEST_UNSET_KEY" }),
     )
     .unwrap();
-    assert!(f.notice().contains("STUDIO_TEST_UNSET_KEY"), "{:?}", f.notice());
+    assert!(f.notice().contains("named in studio.json's `api_key_env`") && !f.notice().contains("STUDIO_TEST_UNSET_KEY"), "{:?}", f.notice());
     assert!(
         f.summary().starts_with("Studio \u{2014} the environment variable"),
         "{}",
@@ -352,9 +354,19 @@ fn the_persons_card_names_the_credential_that_goes_with_the_prompt() {
         "After this, prompts and the value of $STUDIO_TEST_CARD_SECRET go to img.example."
     );
     // The variable's default name, when none is given.
+    let default_set = std::env::var_os("OPENAI_API_KEY").is_some();
     assert_eq!(
         explains(json!({ "kind": "openai" })),
-        "After this, prompts and the value of $OPENAI_API_KEY go to api.openai.com."
+        if default_set {
+            "After this, prompts and the value of $OPENAI_API_KEY go to api.openai.com."
+        } else {
+            "After this, prompts and the value of the environment variable you named go to api.openai.com."
+        }
+    );
+    // A name that is not set is not said: it may be a key pasted where a name goes.
+    assert_eq!(
+        explains(json!({ "kind": "openai-images", "api_key_env": "STUDIO_TEST_NEVER_SET_VARIABLE" })),
+        "After this, prompts and the value of the environment variable you named go to api.openai.com."
     );
     // Only a name that is a name is said; anything else gets no sentence rather than a guess.
     for odd in ["A B", "X; rm -rf", "a\nb", "$(id)"] {

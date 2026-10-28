@@ -120,7 +120,7 @@ pub fn landed(m: &mut Model, fx: &mut Fx, result: Result<BackendSet, String>) {
             "backend": facts.kind,
             "where": facts.place,
             "configured": facts.configured,
-            "api_key_env": m.config.backend.api_key_env,
+            "api_key_env": crate::config::shown_variable(&m.config.backend.api_key_env),
             "generate_is_now_graded": facts.grade,
             "prompt_leaves_this_machine": facts.prompt_leaves,
             "note": facts.note,

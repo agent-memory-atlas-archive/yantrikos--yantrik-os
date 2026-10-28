@@ -116,13 +116,10 @@ impl Backend {
         }
         match std::env::var(self.api_key_env.trim()) {
             Ok(value) if !value.trim().is_empty() => Ok(value),
-            Ok(_) => Err(format!(
-                "the environment variable {} is set but empty",
-                self.api_key_env
-            )),
+            Ok(_) => Err(format!("{} is set but empty", variable_phrase(&self.api_key_env))),
             Err(_) => Err(format!(
-                "the environment variable {} is not set, so nothing can be sent to {}",
-                self.api_key_env,
+                "{} is not set, so nothing can be sent to {}",
+                variable_phrase(&self.api_key_env),
                 shown_address(&self.base_url)
             )),
         }
@@ -323,9 +320,30 @@ pub fn is_variable_name(name: &str) -> bool {
     chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// A rejected word that is safe to quote back: a short run of letters, as a kind is written
-/// (`midjourney`). Anything with a digit in it or longer (a pasted key, a sentence) is not
-/// repeated.
+/// What a sentence says where it would name a key variable that is not set here.
+pub const UNNAMED_VARIABLE: &str = "the environment variable named in studio.json's `api_key_env`";
+
+/// The key variable's name, to be said, and only when it is a name and a variable that is actually
+/// set in Studio's environment. Many real keys (`hf_...`, `ghp_...`, `gsk_...`) are valid variable
+/// names, and a person's commonest mistake is pasting the key itself into `api_key_env`: a pasted
+/// key is never the name of a set variable, so it is never said. The one rule for every place that
+/// names the variable (the window, `describe`, the card, an error, the answer to `set_backend`).
+pub fn shown_variable(name: &str) -> Option<&str> {
+    let name = name.trim();
+    (is_variable_name(name) && std::env::var_os(name).is_some()).then_some(name)
+}
+
+/// "the environment variable NAME" when [`shown_variable`] allows the name, else the fixed phrase.
+pub fn variable_phrase(name: &str) -> String {
+    match shown_variable(name) {
+        Some(name) => format!("the environment variable {name}"),
+        None => UNNAMED_VARIABLE.to_string(),
+    }
+}
+
+/// A rejected word that is safe to quote back: a short run of ASCII letters, hyphens and
+/// underscores, at most sixteen bytes, as a kind is written (`midjourney`, `openai-images`).
+/// Anything with a digit in it or longer (a pasted key, a sentence) is not repeated.
 pub fn short_word(text: &str) -> Option<&str> {
     let text = text.trim();
     (!text.is_empty() && text.len() <= 16 && text.chars().all(|c| c.is_ascii_alphabetic() || matches!(c, '_' | '-')))
@@ -477,7 +495,8 @@ impl Config {
         // because a person has to be able to tell which variable to export, and a name is not a
         // secret. A test asserts the value cannot appear here.
         if facts.kind == "openai-images" {
-            state.insert("api_key_env".into(), json!(self.backend.api_key_env));
+            // The name only when it is a variable that is set here; never a pasted key.
+            state.insert("api_key_env".into(), json!(shown_variable(&self.backend.api_key_env)));
             state.insert("api_key_is_set".into(), json!(key_is_present));
         }
         if !facts.note.is_empty() {

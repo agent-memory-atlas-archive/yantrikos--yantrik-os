@@ -85,8 +85,25 @@ fn a_job_stopped_between_pictures_keeps_what_it_had_written() {
     // Whatever landed before the flag was seen stays: a cancellation is not a deletion, and the
     // notice says how many there were and that it cannot be resumed.
     assert!(m.queue.is_empty());
-    assert!(m.notice.contains("1 had already been written"), "{}", m.notice);
+    assert!(
+        m.notice.starts_with("Cancelled. 1 picture had already been written to the gallery and has been left there;"),
+        "{}",
+        m.notice
+    );
     assert!(m.notice.contains("cannot be resumed"), "{}", m.notice);
+
+    // And for several: plural, with the plural verb.
+    let (_world, mut m) = bare("between-three", r#"{"backend":{"kind":"fake"}}"#);
+    apply(&mut m, Command::Generate(Some(Box::new(Plan { count: 4, ..Plan::new("four harbours") }))));
+    let id = m.queue[0].job.id;
+    m.queue[0].job.made = 3;
+    m.queue[0].flying = false;
+    apply(&mut m, Command::Cancel(Which::One(id)));
+    assert!(
+        m.notice.starts_with("Cancelled. 3 pictures had already been written to the gallery and have been left there;"),
+        "{}",
+        m.notice
+    );
 }
 
 /// The cancel command stops the job the picture in flight belongs to, answers from its own id, and

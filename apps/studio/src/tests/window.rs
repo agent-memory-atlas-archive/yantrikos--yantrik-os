@@ -266,3 +266,35 @@ fn the_fields_are_the_models_and_a_refused_value_does_not_stay_in_the_box() {
     f.app.run(crate::Command::Edit(crate::model::Field::Prompt, "from a command".into()));
     assert_eq!(f.app.ui(|ui: &StudioApp| ui.get_prompt().to_string()), "from a command");
 }
+
+/// A notice of two or more lines is shown whole: the banner is never shorter than its sentence at
+/// the width the window has, at the default size, at a short window (where the layout squeezes its
+/// rows) and at the narrowest. The old Studio had the same banner, which grew with a sentence only
+/// while the window was tall enough; its notices were one line, so it never showed.
+#[test]
+fn a_notice_of_several_lines_is_not_clipped() {
+    let dir = std::env::temp_dir().join(format!("studio-banner-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("studio.json");
+    std::fs::write(&file, r#"{"backend":{"kind":"openai-images","model":"m","api_key_env":"sk-proj-x"}}"#).unwrap();
+    // The sentence a refused configuration puts there, and a longer one.
+    let f = super::with_config("banner", crate::config::Config::read(&file));
+    let measure = |f: &Fixture| f.app.ui(|ui: &StudioApp| (ui.get_notice_need(), ui.get_notice_room()));
+    let mut seen_two_lines = false;
+    for sentence in [None, Some("word ".repeat(120))] {
+        if let Some(long) = sentence {
+            f.app.run(crate::Command::Unknown(long));
+        }
+        for (width, height) in [(1180u32, 800u32), (1180, 560), (900, 540), (700, 540), (700, 800)] {
+            f.app.resize(width, height);
+            f.app.draw_until_still();
+            let (need, room) = measure(&f);
+            assert!(room >= need, "{width}x{height}: the banner is {room}px for a sentence that needs {need}px");
+            // One line needs 36px; more than that is a wrapped sentence, shown whole.
+            seen_two_lines |= need > 40.0;
+            looked_at(&screenshot(&f, &format!("studio-notice-{width}x{height}.png")));
+        }
+    }
+    assert!(seen_two_lines, "no size made the sentence wrap, so nothing was checked");
+    let _ = std::fs::remove_dir_all(&dir);
+}

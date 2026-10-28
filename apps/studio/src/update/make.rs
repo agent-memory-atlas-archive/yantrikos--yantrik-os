@@ -198,8 +198,9 @@ fn abandon(m: &mut Model, fx: &mut Fx, id: i32, made: u32) {
     // notice is not there yet, so a failure reads as a success.
     m.notice = match made {
         0 => "Cancelled before anything was made.".to_string(),
+        1 => "Cancelled. 1 picture had already been written to the gallery and has been left there; a generation cannot be resumed, so ask again if you want the rest.".to_string(),
         n => format!(
-            "Cancelled. {n} had already been written to the gallery and have been left there; a generation cannot be resumed, so ask again if you want the rest."
+            "Cancelled. {n} pictures had already been written to the gallery and have been left there; a generation cannot be resumed, so ask again if you want the rest."
         ),
     };
     fx.changed(PART_NOTICE);

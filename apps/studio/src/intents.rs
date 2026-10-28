@@ -235,8 +235,15 @@ pub fn actions() -> Vec<(Action, Parse)> {
                             name => name,
                         };
                         let usable = config::is_variable_name(name);
-                        match (host(), usable) {
-                            (Some(host), true) => format!("After this, prompts and the value of ${name} go to {host}."),
+                        // The name only when it is a variable that is set here (`shown_variable`):
+                        // a key pasted where a name goes is valid as a name and must not be said.
+                        match (host(), usable, config::shown_variable(name)) {
+                            (Some(host), true, Some(name)) => {
+                                format!("After this, prompts and the value of ${name} go to {host}.")
+                            }
+                            (Some(host), true, None) => format!(
+                                "After this, prompts and the value of the environment variable you named go to {host}."
+                            ),
                             _ => String::new(),
                         }
                     }

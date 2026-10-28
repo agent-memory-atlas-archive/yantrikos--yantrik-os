@@ -189,7 +189,7 @@ fn a_backend_address_is_never_said_with_its_sign_in_details() {
     let explains = |args: Value| set_backend.explainer.as_ref().unwrap().sentence(&args);
     assert_eq!(
         explains(json!({ "kind": "openai-images", "base_url": "https://user:pw@images.example/v1?api-key=x" })),
-        "After this, prompts and the value of $OPENAI_API_KEY go to images.example."
+        "After this, prompts and the value of the environment variable you named go to images.example."
     );
     for odd in ["https://user:1/w@evil.example/v1", "https://user:p/w@evil.example/v1"] {
         assert_eq!(explains(json!({ "kind": "openai-images", "base_url": odd })), "", "{odd}");

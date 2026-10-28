@@ -365,7 +365,8 @@ fn each_kind_of_backend_is_described_as_it_was() {
     let d = hosted.describe();
     assert_eq!(d["summary"], json!("Studio \u{2014} a hosted service at https://api.openai.com/v1; nothing in the gallery yet"));
     let backend = &d["state"]["backend"];
-    assert_eq!(backend["api_key_env"], json!("STUDIO_ABSENT_KEY"));
+    // The key is there, and holds the name only when that variable is set (it is not).
+    assert_eq!(backend["api_key_env"], json!(null));
     assert_eq!(backend["api_key_is_set"], json!(false));
     assert_eq!(backend["generate_is_graded"], json!("sensitive"));
     assert!(backend["note"].as_str().unwrap().starts_with("Prompts cannot be sent yet:"), "{backend}");

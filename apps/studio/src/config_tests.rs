@@ -195,7 +195,7 @@ fn a_hosted_backend_with_no_key_exported_says_which_variable_is_missing() {
     // and those two are reported differently on purpose.
     assert!(facts.configured);
     assert_eq!(facts.grade, "sensitive");
-    assert!(facts.note.contains("STUDIO_TEST_ABSENT_KEY"), "{facts:?}");
+    assert!(facts.note.contains("named in studio.json's `api_key_env`") && !facts.note.contains("STUDIO_TEST_ABSENT_KEY"), "{facts:?}");
     // The note names the variable, never a value; there is no value to leak here, and the
     // assertion below is the one that would catch a regression that printed one.
     assert!(!facts.note.contains("api_key="), "{facts:?}");
@@ -224,7 +224,7 @@ fn a_key_is_read_from_the_environment_and_only_from_there() {
     };
     std::env::remove_var("STUDIO_TEST_KEY_2");
     let problem = backend.api_key().unwrap_err();
-    assert!(problem.contains("STUDIO_TEST_KEY_2"), "{problem}");
+    assert!(problem.contains("named in studio.json's `api_key_env`") && !problem.contains("STUDIO_TEST_KEY_2"), "{problem}");
     assert!(!problem.contains('='), "the message must not look like a key: {problem}");
 
     std::env::set_var("STUDIO_TEST_KEY_2", "   ");

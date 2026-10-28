@@ -109,6 +109,11 @@ export component StudioApp inherits AppWindow {
     // The window's width in logical pixels.
     callback resized(int);
 
+    // How tall the notice needs to be to show all of its sentence, and how tall it is. Read by the
+    // tests: a banner shorter than its text clips the second line.
+    out property <length> notice-need: notice-text.preferred-height + 20px;
+    out property <length> notice-room: notice-box.height;
+
     public function focus-prompt() { prompt-field.focus(); }
 
     VerticalLayout {
@@ -129,8 +134,17 @@ export component StudioApp inherits AppWindow {
             action(id) => { root.action(id); }
         }
 
-        if root.notice != "" : Rectangle {
+        // Always there and collapsed when it has nothing to say, so the window can read how tall
+        // the sentence needs it to be and how tall it is (`notice-need`, `notice-room`).
+        notice-box := Rectangle {
             background: Theme.bg-elevated;
+            visible: root.notice != "";
+            max-height: root.notice == "" ? 0px : 100000px;
+            // Never shorter than its sentence at the width it is drawn in: when the window is short
+            // the layout shrinks its rows to their smallest, and a wrapped sentence's smallest is
+            // one line, which cut the second line off. `preferred-height` here is the Text's, at
+            // the width its layout cell has; nothing in it reads this height back.
+            min-height: root.notice == "" ? 0px : notice-text.preferred-height + 20px;
             // Sized by a layout rather than by `height: text.preferred-height + 20px` with
             // `width: parent.width - 40px` on the text. Those two read the size of the thing they
             // sit inside, and the window's own width is derived from this layout's preferred size,
@@ -140,7 +154,7 @@ export component StudioApp inherits AppWindow {
                 padding: 10px;
                 padding-left: 20px;
                 padding-right: 20px;
-                Text {
+                notice-text := Text {
                     text: root.notice;
                     color: Theme.amber;
                     font-size: 13px;
