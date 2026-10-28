@@ -151,6 +151,7 @@ fn no_sentence_names_an_action_the_app_does_not_have() {
     ]);
     for sentence in &sentences {
         assert!(!sentence.contains("overwrite") && !sentence.contains("save_as"), "{sentence}");
+        assert!(!sentence.contains("   "), "a run of spaces (a lost line continuation?): {sentence}");
         for word in named_actions(sentence) {
             assert!(table.contains(&word), "`{word}` is not one of the actions {table:?}: {sentence}");
         }

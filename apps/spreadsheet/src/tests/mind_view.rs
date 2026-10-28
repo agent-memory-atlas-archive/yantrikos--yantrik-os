@@ -211,3 +211,48 @@ fn escape_in_a_mind_view_window_puts_the_mask_back_not_what_was_typed() {
     assert_eq!(super::bar(&app), HIDDEN);
     assert!(app.last_refusal().is_none_or(|r| r.sentence != READ_ONLY), "escape is looking");
 }
+
+/// A sheet the person opened from a place an agent may not read, with filled cells and a selection,
+/// kept as a draft; and where it is kept. `None` where the temporary folder is inside the home.
+fn kept_hidden() -> Option<yantrik_app::Paths> {
+    let app = started();
+    let secret = scratch("mind-hidden").join("secret.csv");
+    if secret.starts_with(std::env::var_os("HOME").unwrap_or_default()) {
+        return None;
+    }
+    std::fs::write(&secret, format!("{SENTINEL},42\n")).unwrap();
+    act(&app, "open", json!({ "path": secret.display().to_string() })).unwrap();
+    act(&app, "set_cell", json!({ "cell": "D7", "text": "=1/0" })).unwrap();
+    super::flush_drafts(&app);
+    let paths = app.paths();
+    let _ = app.shutdown();
+    Some(paths)
+}
+
+#[test]
+fn a_mind_view_window_of_a_sheet_an_agent_is_not_shown_hides_its_shape_as_describe_does() {
+    let Some(paths) = kept_hidden() else { return };
+    let app = start_for_mind(paths);
+    assert!(app.model(|m| m.doc.hidden));
+    // Every cell is the mask, the empty ones too: which cells hold something is not drawn.
+    assert_eq!(shown(&app, "A1"), HIDDEN);
+    assert_eq!(shown(&app, "D7"), HIDDEN);
+    assert_eq!(shown(&app, "Z50"), HIDDEN);
+    assert_eq!(super::bar(&app), HIDDEN);
+    assert_eq!(status(&app), HIDDEN);
+    assert_eq!(app.ui(|ui| ui.get_active_ref().to_string()), "");
+    assert_eq!(app.ui(|ui| (ui.get_active_row(), ui.get_active_col())), (-1, -1));
+    assert!(window_text(&app).lines().all(|l| l.is_empty() || l == HIDDEN || l == "secret.csv"), "{}", window_text(&app));
+    assert!(!window_text(&app).contains(SENTINEL));
+    // Looking still works, and typing is still refused.
+    click(&app, "E5");
+    assert_eq!(super::bar(&app), HIDDEN);
+    app.ui(|ui| {
+        ui.set_cell_data("typed".into());
+        ui.invoke_formula_submitted("typed".into(), "down".into());
+    });
+    settle(&app);
+    assert_eq!(app.last_refusal().unwrap().sentence, READ_ONLY);
+    assert_eq!(super::bar(&app), HIDDEN);
+    assert_eq!(raw(&app, "E5"), "");
+}

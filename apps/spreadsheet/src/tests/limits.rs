@@ -211,7 +211,7 @@ fn large_open_ui_part() {
     let path = csv_file("large-open", &sums(19_000));
     let job = std::time::Instant::now();
     let mut opened = crate::files::open::open_sheet(&path, false).unwrap();
-    opened.cells = Some(crate::view::render::rows_of(false, &opened.sheet));
+    opened.cells = Some(crate::view::render::rows_of(crate::view::render::Mask::Off, &opened.sheet));
     let job = job.elapsed();
     let parts = std::time::Instant::now();
     let (_filled, _errors) = opened.sheet.counts();

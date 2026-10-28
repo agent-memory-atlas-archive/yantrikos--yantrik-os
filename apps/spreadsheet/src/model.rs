@@ -341,7 +341,15 @@ impl Model {
     /// framework's one sentence in place of it (an empty cell stays empty, since a mask over
     /// nothing would say there is something to hide).
     pub fn field_text(&self) -> String {
+        if self.mask() == crate::view::render::Mask::All {
+            return yantrik_app::for_mind::HIDDEN.into();
+        }
         yantrik_app::for_mind::shown_if_any(self.for_mind, self.sheet().raw(self.active)).into_owned()
+    }
+
+    /// What this window hides of the sheet in front.
+    pub fn mask(&self) -> crate::view::render::Mask {
+        crate::view::render::Mask::of(self.for_mind, self.doc.hidden)
     }
 
     /// What the status line says now, and whether it is a problem.

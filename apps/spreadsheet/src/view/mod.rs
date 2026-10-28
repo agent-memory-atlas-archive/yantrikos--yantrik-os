@@ -1,7 +1,11 @@
 //! The window: its callbacks bound to commands, and how it is drawn (render.rs).
 //!
 //! Every callback that carries the formula bar's text sends it with the command, and the model is
-//! told what the window shows and never reads the window itself. In a window drawn for a Mind
+//! told what the window shows and does not read the window. The one exception is a logout
+//! (`Model::bar`, used by `update::closing::logging_out`): the bar has no change callback, the
+//! logout must be answered in a single command, and text typed and not entered has to reach the
+//! draft in it. The model keeps a weak handle on the window for that read and nothing else; routing
+//! it through a hook in the framework would need a round trip a logout does not have time for. In a window drawn for a Mind
 //! (Mind View), typing into the bar is refused; the notice and the mask in the bar are put up
 //! first (`Command::Masked`), so what was typed does not stay in the field.
 

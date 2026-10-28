@@ -3,7 +3,10 @@
 //!
 //! The window shows the framework's one sentence (`yantrik_app::for_mind::HIDDEN`) where a cell's
 //! contents would be: in every cell of the grid, and in the formula bar. The sheet's name, its
-//! size, the selection and the counts stay, since the Mind reads them through `describe` anyway.
+//! size, the selection and the counts stay, since the Mind reads them through `describe` anyway;
+//! for a sheet an agent is not shown, `describe` withholds them, so the window does too: every cell
+//! is the mask (empty ones as well), the bar is the mask, the status line is the mask, and the
+//! selection and the undo buttons say nothing (`view::render::Mask`).
 //! The formula bar takes no typing, and what would change the sheet, or read or write a file
 //! through the window, is refused ([`refuses`]).
 //!

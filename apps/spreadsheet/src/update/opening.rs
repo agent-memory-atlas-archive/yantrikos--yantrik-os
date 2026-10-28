@@ -45,7 +45,8 @@ pub fn start(m: &mut Model, fx: &mut Effects<YSheets>, path: PathBuf, then: Caus
             .and_then(|()| unsaved.map_or(Ok(()), Err))
             .and_then(|()| open_sheet(&path, agent))
             .map(|mut opened| {
-                opened.cells = Some(crate::view::render::rows_of(for_mind, &opened.sheet));
+                let mask = crate::view::render::Mask::of(for_mind, opened.file.hidden);
+                opened.cells = Some(crate::view::render::rows_of(mask, &opened.sheet));
                 Box::new(opened)
             });
         Command::Opened { then, result }

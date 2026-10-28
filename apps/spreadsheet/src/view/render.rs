@@ -42,16 +42,43 @@ pub fn render(ui: &SpreadsheetApp, m: &Model, changed: &Changed) {
     }
 }
 
+/// What a window drawn for a Mind hides. An agent is told nothing of the shape of a sheet it may not
+/// read (`describe`'s hidden view), so a Mind View window of such a sheet hides the shape as well:
+/// every cell is the mask, empty ones too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mask {
+    /// A normal window.
+    Off,
+    /// A Mind View window: what holds something is the mask, an empty cell stays empty.
+    Filled,
+    /// A Mind View window of a sheet an agent is not shown: every cell is the mask.
+    All,
+}
+
+impl Mask {
+    pub fn of(for_mind: bool, hidden: bool) -> Mask {
+        match (for_mind, hidden) {
+            (false, _) => Mask::Off,
+            (true, false) => Mask::Filled,
+            (true, true) => Mask::All,
+        }
+    }
+}
+
 /// What a cell shows. A line break in a cell is drawn as a mark, since a row is one line high.
 pub fn shown(m: &Model, value: &Value) -> SpreadsheetCell {
-    shown_for(m.for_mind, value)
+    shown_for(m.mask(), value)
 }
 
 /// [`shown`] without a model, for the job that builds a large sheet's cells off the window's thread.
-pub fn shown_for(for_mind: bool, value: &Value) -> SpreadsheetCell {
+pub fn shown_for(mask: Mask, value: &Value) -> SpreadsheetCell {
     let text = marked(value.display());
-    if for_mind {
-        return SpreadsheetCell { text: shown_if_any(true, &text).as_ref().into(), is_number: false, is_error: false };
+    match mask {
+        Mask::Off => {}
+        Mask::Filled => {
+            return SpreadsheetCell { text: shown_if_any(true, &text).as_ref().into(), is_number: false, is_error: false }
+        }
+        Mask::All => return SpreadsheetCell { text: HIDDEN.into(), is_number: false, is_error: false },
     }
     SpreadsheetCell {
         text: SharedString::from(text),
@@ -71,9 +98,9 @@ fn marked(text: String) -> String {
 
 /// Every cell of `sheet` as the window shows it, row by row. A job does this for a sheet just read,
 /// so opening a large file leaves the window's thread only the models to hang them on.
-pub fn rows_of(for_mind: bool, sheet: &crate::sheet::Sheet) -> Vec<Vec<SpreadsheetCell>> {
+pub fn rows_of(mask: Mask, sheet: &crate::sheet::Sheet) -> Vec<Vec<SpreadsheetCell>> {
     let (cols, values) = (sheet.cols(), sheet.values());
-    (0..sheet.rows()).map(|r| (0..cols).map(|c| shown_for(for_mind, &values[r * cols + c])).collect()).collect()
+    (0..sheet.rows()).map(|r| (0..cols).map(|c| shown_for(mask, &values[r * cols + c])).collect()).collect()
 }
 
 fn row_cells(m: &Model, r: usize) -> Vec<SpreadsheetCell> {
@@ -128,14 +155,17 @@ fn dialog_kind(m: &Model) -> SheetDialog {
 fn chrome(ui: &SpreadsheetApp, m: &Model) {
     ui.set_file_name(m.title().into());
     ui.set_modified(m.modified());
-    ui.set_active_row(m.active.row as i32);
-    ui.set_active_col(m.active.col as i32);
-    ui.set_active_ref(m.active.name().into());
+    // A Mind's window of a sheet an agent is not shown says nothing of where the selection is or
+    // what can be undone, as `describe` says nothing of either.
+    let shape_hidden = m.mask() == Mask::All;
+    ui.set_active_row(if shape_hidden { -1 } else { m.active.row as i32 });
+    ui.set_active_col(if shape_hidden { -1 } else { m.active.col as i32 });
+    ui.set_active_ref(if shape_hidden { "".into() } else { m.active.name().into() });
     let history = &m.book().history;
-    ui.set_can_undo(history.can_undo());
-    ui.set_can_redo(history.can_redo());
+    ui.set_can_undo(!shape_hidden && history.can_undo());
+    ui.set_can_redo(!shape_hidden && history.can_redo());
     let status = m.status();
-    if m.for_mind && status.quotes_cells {
+    if shape_hidden || (m.for_mind && status.quotes_cells) {
         ui.set_status_text(HIDDEN.into());
         ui.set_status_is_problem(false);
     } else {
