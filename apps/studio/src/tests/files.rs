@@ -283,7 +283,8 @@ fn a_configuration_that_was_not_used_says_which_file_and_what_is_wrong() {
     ] {
         assert!(text.contains("studio.json was not used"), "{where_}: {text}");
         assert!(text.contains("has to be the name of an environment variable"), "{where_}: {text}");
-        assert!(text.contains(NAME), "{where_} does not name the variable: {text}");
+        // What the field held is never repeated, not even a name that is only hyphenated.
+        assert!(!text.contains(NAME), "{where_} repeats what the field held: {text}");
         assert!(!text.contains("sk-never-said"), "{where_} says the value: {text}");
     }
     assert_eq!(window.0, said, "the window and the model disagree");
@@ -291,5 +292,80 @@ fn a_configuration_that_was_not_used_says_which_file_and_what_is_wrong() {
     // The app still runs, on placeholders.
     assert_eq!(described["state"]["backend"]["kind"], serde_json::json!("fake"));
     std::env::remove_var(NAME);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A key pasted into `api_key_env` (the commonest mistake in this file) is never repeated: not in
+/// the window, not in `describe` as the person or as an agent, not in the summary, not in the log,
+/// and not in what `set_backend` refuses with.
+#[test]
+fn a_key_pasted_where_a_variable_name_goes_is_said_nowhere() {
+    use std::sync::{Arc, Mutex};
+    use yantrik_testing::Call;
+    const SECRET: &str = "SECRET123";
+    let dir = std::env::temp_dir().join(format!("studio-pasted-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("studio.json");
+    std::fs::write(
+        &file,
+        format!(r#"{{"backend":{{"kind":"openai-images","model":"m","api_key_env":"sk-proj-{SECRET}"}}}}"#),
+    )
+    .unwrap();
+
+    // What the app logs while it reads the file.
+    #[derive(Clone, Default)]
+    struct Log(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Log {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let log = Log::default();
+    let writer = log.clone();
+    let subscriber = tracing_subscriber::fmt().with_writer(move || writer.clone()).with_max_level(tracing::Level::TRACE).finish();
+    let config = tracing::subscriber::with_default(subscriber, || {
+        // Another test may have reached the same log line with nobody listening, and the callsite
+        // remembers that; ask it again now that someone is.
+        tracing::callsite::rebuild_interest_cache();
+        crate::config::Config::read(&file)
+    });
+    let logged = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+    assert!(logged.contains("is not usable"), "the read logged nothing, so the check below proves nothing: {logged:?}");
+    assert!(!logged.contains(SECRET), "the log repeats the key: {logged}");
+    let said = config.refused.clone().expect("the file was refused");
+    assert!(said.contains("not the key itself") && !said.contains(SECRET) && !said.contains("sk-"), "{said}");
+
+    let f = super::with_config("pasted-key", config);
+    let window = f.app.ui(|ui: &crate::StudioApp| format!("{} {} {}", ui.get_notice(), ui.get_facts(), ui.get_backend_line()));
+    let as_person = f.describe().to_string();
+    // A Mind's account reads describe too: the same text, asked for as an agent.
+    let pending = f.app.act_as(Call::new("refresh", json!({})).as_agent(super::AGENT)).unwrap();
+    let as_agent = f.settle(pending).unwrap().to_string();
+    let after_agent = f.describe().to_string();
+    for (where_, text) in [
+        ("the window", window),
+        ("describe", as_person),
+        ("an agent's answer", as_agent),
+        ("describe after an agent's call", after_agent),
+        ("the summary", f.summary()),
+        ("the notice", f.notice()),
+    ] {
+        assert!(!text.contains(SECRET) && !text.contains("sk-proj"), "{where_} repeats the key: {text}");
+    }
+
+    // And what `set_backend` refuses with, for the person and for the file's reader.
+    let refused = f
+        .act("set_backend", json!({ "kind": "openai-images", "model": "m", "api_key_env": format!("sk-proj-{SECRET}") }))
+        .unwrap_err();
+    assert!(refused.contains("not the key itself") && !refused.contains(SECRET), "{refused}");
+    assert!(!f.notice().contains(SECRET), "{}", f.notice());
+    let kind = f.act("set_backend", json!({ "kind": format!("sk-proj-{SECRET}") })).unwrap_err();
+    assert!(!kind.contains(SECRET), "{kind}");
+    let kind_in_file = crate::config::Config::parse(&format!(r#"{{"backend":{{"kind":"sk-proj-{SECRET}"}}}}"#)).unwrap_err();
+    assert!(!kind_in_file.contains(SECRET), "{kind_in_file}");
     let _ = std::fs::remove_dir_all(&dir);
 }

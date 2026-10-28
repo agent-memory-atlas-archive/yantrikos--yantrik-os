@@ -11882,6 +11882,7 @@ dependencies = [
  "sha2",
  "slint",
  "tracing",
+ "tracing-subscriber",
  "ureq 2.12.1",
  "url",
  "yantrik-address-place",

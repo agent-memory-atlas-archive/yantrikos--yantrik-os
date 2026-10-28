@@ -52,6 +52,8 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 # hears them.
 yantrik-mind = { workspace = true }
 yantrik-testing = { workspace = true, features = ["testing"] }
+# Capturing what the app logs, to prove a secret is not in it.
+tracing-subscriber = { workspace = true }
 # The headless test writes what it drew, so a person can look at it instead of trusting the
 # assertions about it.
 png = "0.18"

@@ -209,10 +209,10 @@ impl Config {
             Kind::Fake
         } else {
             Kind::parse(&kind_word).ok_or_else(|| {
-                format!(
-                    "`kind` is \"{kind_word}\", which is not one of {}",
-                    KINDS.join(", ")
-                )
+                match short_word(&kind_word) {
+                    Some(word) => format!("`kind` is \"{word}\", which is not one of {}", KINDS.join(", ")),
+                    None => format!("`kind` is not one of {}", KINDS.join(", ")),
+                }
             })?
         };
 
@@ -323,13 +323,24 @@ pub fn is_variable_name(name: &str) -> bool {
     chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// A rejected word that is safe to quote back: a short run of letters, as a kind is written
+/// (`midjourney`). Anything with a digit in it or longer (a pasted key, a sentence) is not
+/// repeated.
+pub fn short_word(text: &str) -> Option<&str> {
+    let text = text.trim();
+    (!text.is_empty() && text.len() <= 16 && text.chars().all(|c| c.is_ascii_alphabetic() || matches!(c, '_' | '-')))
+        .then_some(text)
+}
+
 /// The plain sentence for a key variable's name that is not one; `None` for a good name or no name.
 pub fn bad_variable_name(name: &str) -> Option<String> {
     let name = name.trim();
+    // The rejected text is never quoted, and nothing about its shape is said (no prefix, no
+    // length): the commonest mistake here is pasting the key itself, and this sentence reaches the
+    // window, `describe`, the summary and the log.
     (!name.is_empty() && !is_variable_name(name)).then(|| {
-        format!(
-            "`api_key_env` has to be the name of an environment variable (letters, digits and underscores, not starting with a digit), and {name:?} is not one"
-        )
+        "`api_key_env` has to be the name of an environment variable (letters, digits and underscores, not starting with a digit), not the key itself"
+            .to_string()
     })
 }
 

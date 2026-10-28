@@ -240,9 +240,9 @@ pub fn set_backend(
         return Err(problem);
     }
     let Some(parsed) = Kind::parse(&ask.kind) else {
+        let named = crate::config::short_word(&ask.kind).map(|word| format!("`{word}`")).unwrap_or_else(|| "That".to_string());
         return Err(format!(
-            "`{}` is not a backend Studio has. It can make pictures with {}, or with `fake`, which draws a placeholder here.",
-            ask.kind,
+            "{named} is not a backend Studio has. It can make pictures with {}, or with `fake`, which draws a placeholder here.",
             KINDS.join(", ")
         ));
     };
