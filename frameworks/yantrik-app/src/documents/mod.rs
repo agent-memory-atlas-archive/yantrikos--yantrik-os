@@ -23,6 +23,8 @@ pub mod save;
 #[cfg(test)]
 mod disk_tests;
 #[cfg(test)]
+mod sentences_tests;
+#[cfg(test)]
 mod tests;
 pub mod watched;
 

@@ -16,6 +16,7 @@ use crate::office::{is_libreoffice, CLOSED_TO_AGENTS};
 /// beside this module reads every framework `App` impl under `apps/`, so an app added there and
 /// missing here fails the build instead of staying shut to agents unnoticed.
 const YANTRIK_APPS: &[(&str, &str)] = &[
+    ("yantrik-arcade", "arcade"),
     ("yantrik-calendar", "calendar"),
     ("yantrik-container-manager", "containers"),
     ("yantrik-document-editor", "documents"),
@@ -27,6 +28,7 @@ const YANTRIK_APPS: &[(&str, &str)] = &[
     ("yantrik-notes", "notes"),
     ("yantrik-presentation", "presentation"),
     ("yantrik-snippet-manager", "snippets"),
+    ("yantrik-spreadsheet", "spreadsheet"),
     ("yantrik-studio", "studio"),
     ("yantrik-system-monitor", "system-monitor"),
     ("yantrik-terminal", "terminal"),

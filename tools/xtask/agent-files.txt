@@ -34,9 +34,9 @@ apps/presentation/src/intents.rs open path frameworks/yantrik-app/src/documents/
 apps/presentation/src/intents.rs save_as path frameworks/yantrik-app/src/documents/files/agent.rs
 apps/presentation/src/intents.rs export_markdown path frameworks/yantrik-app/src/documents/files/agent.rs
 apps/snippet-manager/src/intents.rs import path - held by #940's agent import (`update/files.rs`, `home_paths::may_read_file`); this line names that file once #940 lands
-apps/spreadsheet/src/surface.rs open path apps/spreadsheet/src/agent_rule.rs
-apps/spreadsheet/src/surface.rs save path apps/spreadsheet/src/agent_rule.rs
-apps/spreadsheet/src/surface.rs save_over path apps/spreadsheet/src/agent_rule.rs
+apps/spreadsheet/src/intents.rs open path frameworks/yantrik-app/src/documents/files/agent.rs
+apps/spreadsheet/src/intents.rs save path frameworks/yantrik-app/src/documents/files/agent.rs
+apps/spreadsheet/src/intents.rs save_over path frameworks/yantrik-app/src/documents/files/agent.rs
 apps/studio/src/intents.rs upscale path apps/studio/src/agent_rule.rs
 apps/studio/src/intents.rs open path apps/studio/src/agent_rule.rs
 apps/studio/src/intents.rs variations of apps/studio/src/agent_rule.rs
