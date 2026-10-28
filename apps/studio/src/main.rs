@@ -390,11 +390,13 @@ fn facts_block(snapshot: &Snapshot) -> String {
         // to export; the value is the one thing this window must not show, so the only question
         // asked of it is whether it is there.
         let usable = snapshot.config.backend.api_key().is_ok();
-        lines.push(format!(
-            "API key: the environment variable {}, which is {}.",
-            snapshot.config.backend.api_key_env,
-            if usable { "set, so prompts can be sent" } else { "not usable, so nothing can be sent yet" }
-        ));
+        lines.push(match config::shown_variable(&snapshot.config.backend.api_key_env) {
+            Some(name) => format!(
+                "API key: the environment variable {name}, which is {}.",
+                if usable { "set, so prompts can be sent" } else { "not usable, so nothing can be sent yet" }
+            ),
+            None => "API key: the environment variable named in studio.json's `api_key_env` is not set, so nothing can be sent yet.".to_string(),
+        });
     }
     lines.push(format!(
         "Making a picture is graded `{}` on this configuration.",
@@ -903,7 +905,7 @@ fn do_set_backend(engine: &Engine, args: &Value) -> Result<Value, String> {
         "backend": snapshot.facts.kind,
         "where": snapshot.facts.place,
         "configured": snapshot.facts.configured,
-        "api_key_env": snapshot.config.backend.api_key_env,
+        "api_key_env": config::shown_variable(&snapshot.config.backend.api_key_env),
         "generate_is_now_graded": snapshot.facts.grade,
         "prompt_leaves_this_machine": snapshot.facts.prompt_leaves,
         "note": snapshot.facts.note,

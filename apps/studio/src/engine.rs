@@ -1510,7 +1510,8 @@ mod tests {
         let snapshot = engine
             .set_backend("openai-images", "", "gpt-image-1", "STUDIO_TEST_UNSET_KEY", "")
             .unwrap();
-        assert!(snapshot.notice.contains("STUDIO_TEST_UNSET_KEY"), "{:?}", snapshot.notice);
+        assert!(snapshot.notice.contains("is not set"), "{:?}", snapshot.notice);
+        assert!(!snapshot.notice.contains("STUDIO_TEST_UNSET_KEY"), "{:?}", snapshot.notice);
         assert!(
             snapshot.summary().starts_with("Studio — the environment variable"),
             "{}",

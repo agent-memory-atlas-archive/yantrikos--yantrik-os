@@ -118,15 +118,44 @@ impl Backend {
             Ok(value) if !value.trim().is_empty() => Ok(value),
             Ok(_) => Err(format!(
                 "the environment variable {} is set but empty",
-                self.api_key_env
+                self.variable_phrase()
             )),
             Err(_) => Err(format!(
-                "the environment variable {} is not set, so nothing can be sent to {}",
-                self.api_key_env,
+                "{} is not set, so nothing can be sent to {}",
+                self.variable_phrase_subject(),
                 shown_address(&self.base_url)
             )),
         }
     }
+
+    /// The configured variable's name when it is safe to show, else a fixed phrase naming none.
+    fn variable_phrase(&self) -> String {
+        match shown_variable(&self.api_key_env) {
+            Some(name) => name.to_string(),
+            None => "named in studio.json's `api_key_env`".to_string(),
+        }
+    }
+
+    fn variable_phrase_subject(&self) -> String {
+        match shown_variable(&self.api_key_env) {
+            Some(name) => format!("the environment variable {name}"),
+            None => "the environment variable named in studio.json's `api_key_env`".to_string(),
+        }
+    }
+}
+
+/// The variable's name, only when it is safe to show: a valid variable name AND a variable that
+/// exists in the environment. A person who pastes the key itself into `api_key_env` often pastes
+/// a valid-looking name (`hf_…`, `ghp_…`), but no variable by that name exists, so it is never
+/// echoed. Only the variable's presence is asked of the environment, never its value.
+pub fn shown_variable(name: &str) -> Option<&str> {
+    let name = name.trim();
+    let mut chars = name.chars();
+    let first = chars.next()?;
+    if !(first.is_ascii_alphabetic() || first == '_') || !chars.all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return None;
+    }
+    std::env::var_os(name).is_some().then_some(name)
 }
 
 /// The whole configuration, and whether it came from a file at all. `configured` is kept rather
@@ -418,7 +447,7 @@ impl Config {
         // because a person has to be able to tell which variable to export, and a name is not a
         // secret. A test asserts the value cannot appear here.
         if facts.kind == "openai-images" {
-            state.insert("api_key_env".into(), json!(self.backend.api_key_env));
+            state.insert("api_key_env".into(), json!(shown_variable(&self.backend.api_key_env)));
             state.insert("api_key_is_set".into(), json!(key_is_present));
         }
         if !facts.note.is_empty() {
@@ -677,7 +706,8 @@ mod tests {
         // and those two are reported differently on purpose.
         assert!(facts.configured);
         assert_eq!(facts.grade, "sensitive");
-        assert!(facts.note.contains("STUDIO_TEST_ABSENT_KEY"), "{facts:?}");
+        assert!(facts.note.contains("is not set"), "{facts:?}");
+        assert!(!facts.note.contains("STUDIO_TEST_ABSENT_KEY"), "an unset name is not echoed: {facts:?}");
         // The note names the variable, never a value; there is no value to leak here, and the
         // assertion below is the one that would catch a regression that printed one.
         assert!(!facts.note.contains("api_key="), "{facts:?}");
@@ -698,6 +728,50 @@ mod tests {
         std::env::remove_var("STUDIO_TEST_KEY");
     }
 
+    const PASTED_KEY: &str = "hf_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
+
+    fn pasted_config() -> Config {
+        std::env::remove_var(PASTED_KEY);
+        Config::parse(&format!(
+            r#"{{"backend":{{"kind":"openai-images","model":"gpt-image-1","api_key_env":"{PASTED_KEY}"}}}}"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_key_pasted_where_a_variable_name_belongs_is_shown_nowhere() {
+        let config = pasted_config();
+        // Stored config is unchanged.
+        assert_eq!(config.backend.api_key_env, PASTED_KEY);
+        let problem = config.backend.api_key().unwrap_err();
+        assert!(!problem.contains(PASTED_KEY), "{problem}");
+        assert!(problem.contains("is not set"), "{problem}");
+        let state = config.state(false);
+        assert_eq!(state["api_key_env"], serde_json::Value::Null, "{state}");
+        assert!(!state.to_string().contains(PASTED_KEY), "{state}");
+        let facts = config.facts(false);
+        assert!(!facts.note.contains(PASTED_KEY), "{facts:?}");
+    }
+
+    #[test]
+    fn a_variable_that_is_set_is_named_and_one_that_is_not_a_name_never_is() {
+        const NAME: &str = "STUDIO_TEST_SHOWN_VARIABLE_UNIQUE";
+        std::env::set_var(NAME, "sk-never-shown");
+        assert_eq!(shown_variable(&format!("  {NAME} ")), Some(NAME));
+        let state = Config::parse(&format!(
+            r#"{{"backend":{{"kind":"openai-images","model":"m","api_key_env":"{NAME}"}}}}"#
+        ))
+        .unwrap()
+        .state(true);
+        assert_eq!(state["api_key_env"], serde_json::json!(NAME));
+        assert!(!state.to_string().contains("sk-never-shown"));
+        std::env::remove_var(NAME);
+        assert_eq!(shown_variable(NAME), None);
+        assert_eq!(shown_variable("1BAD"), None);
+        assert_eq!(shown_variable("has space"), None);
+        assert_eq!(shown_variable(""), None);
+    }
+
     #[test]
     fn a_key_is_read_from_the_environment_and_only_from_there() {
         let backend = Backend {
@@ -706,7 +780,8 @@ mod tests {
         };
         std::env::remove_var("STUDIO_TEST_KEY_2");
         let problem = backend.api_key().unwrap_err();
-        assert!(problem.contains("STUDIO_TEST_KEY_2"), "{problem}");
+        assert!(problem.contains("is not set"), "{problem}");
+        assert!(!problem.contains("STUDIO_TEST_KEY_2"), "an unset name is not echoed: {problem}");
         assert!(!problem.contains('='), "the message must not look like a key: {problem}");
 
         std::env::set_var("STUDIO_TEST_KEY_2", "   ");
