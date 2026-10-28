@@ -22,6 +22,18 @@ pub enum Choice {
     Unavailable(String),
 }
 
+/// Who is asked for a file: `saving`, and the sheet's current file to suggest.
+pub type Ask = std::sync::Arc<dyn Fn(bool, Option<PathBuf>) -> Choice + Send + Sync>;
+
+/// The desktop's picker. A test puts a stand-in in the model, so it never opens a real one.
+pub fn desktop() -> Ask {
+    std::sync::Arc::new(ask_the_desktop)
+}
+
+fn ask_the_desktop(saving: bool, current: Option<PathBuf>) -> Choice {
+    if saving { save_file(current.as_deref()) } else { open_file() }
+}
+
 /// Ask the person for a CSV file to open.
 pub fn open_file() -> Choice {
     ask("OpenFile", "Open a sheet", None).unwrap_or_else(Choice::Unavailable)
