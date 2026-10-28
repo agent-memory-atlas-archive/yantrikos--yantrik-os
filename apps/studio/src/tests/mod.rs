@@ -38,6 +38,7 @@ mod parity;
 mod private_mode;
 mod queue;
 mod refusals;
+mod rest;
 pub(crate) mod server;
 mod surface;
 mod units;
@@ -66,7 +67,7 @@ pub(crate) fn unconfigured(name: &str) -> Fixture {
     with_config(name, Config::unconfigured())
 }
 
-fn with_config(name: &str, config: Config) -> Fixture {
+pub(crate) fn with_config(name: &str, config: Config) -> Fixture {
     let f = just_started(name, config, |_| {});
     f.until("the grade to be published", |f| f.app.model(|m| m.graded));
     f

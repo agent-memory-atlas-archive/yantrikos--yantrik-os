@@ -138,6 +138,10 @@ pub struct Config {
     pub configured: bool,
     /// Where the pictures go. Empty means the default, `~/Pictures/Studio`.
     pub output_folder: String,
+    /// Set when the configuration file exists and was not used, with the sentence that says which
+    /// file and what is wrong. The window and `describe` carry it, so a person who wrote the file
+    /// is not left to find a log line.
+    pub refused: Option<String>,
 }
 
 impl Config {
@@ -149,6 +153,7 @@ impl Config {
             backend: Backend::defaults_for(Kind::Fake),
             configured: false,
             output_folder: String::new(),
+            refused: None,
         }
     }
 
@@ -172,7 +177,13 @@ impl Config {
                 // leave a person who wrote `"kind": "openai"` wondering why their prompts are
                 // going nowhere; a log line they can find is the least that is owed.
                 tracing::warn!("{} is not usable ({problem}); Studio drew placeholders instead", path.display());
-                Config::unconfigured()
+                Config {
+                    refused: Some(format!(
+                        "{} was not used: {problem}. Studio draws placeholders until it is fixed.",
+                        crate::model::display(path)
+                    )),
+                    ..Config::unconfigured()
+                }
             }
         }
     }
@@ -211,6 +222,7 @@ impl Config {
             output_folder: text_of(root, "output_folder")
                 .or(text_of(root, "output"))
                 .unwrap_or_default(),
+            refused: None,
         };
         if let Some(url) = text_of(backend, "base_url").or(text_of(backend, "url")) {
             config.backend.base_url = url.trim_end_matches('/').to_string();
@@ -409,7 +421,11 @@ impl Config {
             String::new()
         };
 
-        let window_note = if self.configured {
+        // A file that exists and was not used: its own sentence, in place of "nothing is configured".
+        let note = self.refused.clone().unwrap_or(note);
+        let window_note = if let Some(refused) = &self.refused {
+            refused.clone()
+        } else if self.configured {
             note.clone()
         } else {
             format!(

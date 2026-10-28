@@ -77,7 +77,11 @@ fn broken_json_is_reported_rather_than_swallowed() {
     assert!(problem.contains("JSON"), "{problem}");
     // `read` is the boundary that has to survive a bad file: the app must still open.
     let path = write("{ not json");
-    assert_eq!(Config::read(&path), Config::unconfigured());
+    let read = Config::read(&path);
+    assert_eq!(Config { refused: None, ..read.clone() }, Config::unconfigured());
+    // And says so, with the file and the reason, for the window and `describe` to carry.
+    let said = read.refused.expect("a file that was not used says so");
+    assert!(said.contains("was not used") && said.contains("not valid JSON"), "{said}");
 }
 
 #[test]

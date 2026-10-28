@@ -260,7 +260,7 @@ pub fn set_backend(
         backend.workflow = gallery::expand_home(ask.workflow.trim()).display().to_string();
     }
 
-    let candidate = Config { backend: backend.clone(), configured: true, output_folder: String::new() };
+    let candidate = Config { backend: backend.clone(), configured: true, output_folder: String::new(), refused: None };
     let text = serde_json::to_string(&candidate.to_json()).map_err(|e| e.to_string())?;
     let mut config = Config::parse(&text)?;
     if parsed == Kind::ComfyUi && !backend.workflow.is_empty() {

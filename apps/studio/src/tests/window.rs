@@ -229,11 +229,27 @@ fn the_record_pane_follows_the_width_of_the_window() {
     f.app.draw_until_still();
     f.quiet();
     assert!(f.app.model(|m| m.wide));
+    let wide = screenshot(&f, "studio-wide.png");
+    let at_the_right_edge = |f: &Fixture| {
+        f.app.ui(|ui: &StudioApp| {
+            let shot = ui.window().take_snapshot().expect("a snapshot");
+            let (x, y) = (shot.width() as usize - 20, 400usize);
+            let at = (y * shot.width() as usize + x) * 4;
+            shot.as_bytes()[at..at + 3].to_vec()
+        })
+    };
+    let pane = at_the_right_edge(&f);
     f.app.resize(700, 700);
     f.app.draw_until_still();
     f.quiet();
     assert!(!f.app.model(|m| m.wide), "a narrow window kept the record pane");
     assert!(!f.app.ui(|ui: &StudioApp| ui.get_wide()));
+    // The layout follows: the pane is 330 px, so the narrow window draws a different picture of
+    // its right-hand side than the wide one did. Both are written for a person to look at.
+    let narrow = screenshot(&f, "studio-narrow.png");
+    assert_ne!(at_the_right_edge(&f), pane, "the right edge of a narrow window is still the record pane's colour");
+    looked_at(&wide);
+    looked_at(&narrow);
     f.app.resize(1280, 860);
     f.app.draw_until_still();
     f.quiet();

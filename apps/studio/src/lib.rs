@@ -99,6 +99,11 @@ impl App for Studio {
                 m.notice = "Your unsent prompt from last time is back in the box.".to_string();
             }
         }
+        // A configuration file that exists and was not used says so in the window and in
+        // `describe`, not only in the log: which file, and what is wrong with it.
+        if let Some(refused) = m.config.refused.clone() {
+            m.notice = if m.notice.is_empty() { refused } else { format!("{refused} {}", m.notice) };
+        }
         Ok(m)
     }
 

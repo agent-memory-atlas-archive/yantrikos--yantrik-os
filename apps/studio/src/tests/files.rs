@@ -252,3 +252,44 @@ fn an_agent_names_only_files_in_the_home() {
     assert!(problem.contains("only deletes its own pictures"), "{problem}");
     assert!(PathBuf::from(&outside).exists());
 }
+
+/// A hand-edited `studio.json` that exists and cannot be used says so where the person and a Mind
+/// look, not only in the log: which file, and what is wrong. The variable's value is never said.
+#[test]
+fn a_configuration_that_was_not_used_says_which_file_and_what_is_wrong() {
+    const NAME: &str = "STUDIO-BAD-KEY";
+    std::env::set_var(NAME, "sk-never-said-5521");
+    let dir = std::env::temp_dir().join(format!("studio-refused-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("studio.json");
+    std::fs::write(
+        &file,
+        format!(r#"{{"backend":{{"kind":"openai-images","model":"m","api_key_env":"{NAME}"}}}}"#),
+    )
+    .unwrap();
+    let config = crate::config::Config::read(&file);
+    assert_eq!(config.refused.as_deref().map(|s| s.contains("was not used")), Some(true));
+
+    let f = super::with_config("refused-config", config);
+    let said = f.notice();
+    let window = f.app.ui(|ui: &crate::StudioApp| (ui.get_notice().to_string(), ui.get_facts().to_string()));
+    let described = f.describe();
+    for (where_, text) in [
+        ("the notice", said.clone()),
+        ("the window's notice", window.0.clone()),
+        ("the pane", window.1.clone()),
+        ("describe", described["state"].to_string()),
+        ("the summary", f.summary()),
+    ] {
+        assert!(text.contains("studio.json was not used"), "{where_}: {text}");
+        assert!(text.contains("has to be the name of an environment variable"), "{where_}: {text}");
+        assert!(text.contains(NAME), "{where_} does not name the variable: {text}");
+        assert!(!text.contains("sk-never-said"), "{where_} says the value: {text}");
+    }
+    assert_eq!(window.0, said, "the window and the model disagree");
+    assert_eq!(described["state"]["backend"]["note"].as_str().unwrap(), described["state"]["notice"].as_str().unwrap());
+    // The app still runs, on placeholders.
+    assert_eq!(described["state"]["backend"]["kind"], serde_json::json!("fake"));
+    std::env::remove_var(NAME);
+    let _ = std::fs::remove_dir_all(&dir);
+}
