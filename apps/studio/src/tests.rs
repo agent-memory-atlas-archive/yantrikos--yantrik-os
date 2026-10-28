@@ -770,14 +770,15 @@ fn set_backend_moves_where_prompts_go_and_what_that_is_graded() {
     .unwrap();
     assert_eq!(answer["generate_is_now_graded"], json!("sensitive"));
     assert_eq!(answer["prompt_leaves_this_machine"], json!(true));
-    assert_eq!(answer["api_key_env"], json!("STUDIO_ABSENT_KEY"), "the variable's name is the person's to know");
+    assert_eq!(answer["api_key_env"], Value::Null, "an unset variable's name is not echoed");
     assert!(answer["note"].as_str().unwrap().contains("is not set"), "{answer}");
     assert_eq!(engine.grade(), "sensitive");
     // A generation that cannot be sent says so rather than failing quietly in a worker.
     call(&actions, "generate", json!({ "prompt": "a lighthouse" })).unwrap();
     let notice = settled(&engine);
     assert!(notice.contains("openai-images could not make the picture"), "{notice}");
-    assert!(notice.contains("STUDIO_ABSENT_KEY is not set"), "{notice}");
+    assert!(notice.contains("is not set"), "{notice}");
+    assert!(!notice.contains("STUDIO_ABSENT_KEY"), "{notice}");
     assert!(engine.snapshot().state()["backend"]["api_key_is_set"] == json!(false));
 
     // And back to the placeholder, which is local again.
@@ -1594,6 +1595,43 @@ fn a_key_is_used_and_never_repeated_by_anything_the_app_says_or_writes() {
     assert!(!written.contains(KEY_VALUE), "the configuration file holds the key");
     assert!(written.contains(KEY_VARIABLE));
     assert!(written.contains("openai-images"));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_key_pasted_as_the_variable_name_reaches_no_output_of_the_app() {
+    const PASTED: &str = "hf_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
+    std::env::remove_var(PASTED);
+    let (dir, found) = world("pasted-key");
+    let engine = an_engine(
+        &format!(r#"{{"backend":{{"kind":"openai-images","model":"gpt-image-1","api_key_env":"{PASTED}"}}}}"#),
+        &found,
+    );
+    let actions = surface(engine.clone());
+    let answer = call(
+        &actions,
+        "set_backend",
+        json!({ "kind": "openai-images", "model": "gpt-image-1", "api_key_env": PASTED }),
+    )
+    .unwrap();
+    assert_eq!(answer["api_key_env"], Value::Null);
+    let snapshot = engine.snapshot();
+    let explained = spec_of(&actions, "set_backend")
+        .explainer
+        .as_ref()
+        .expect("explains")
+        .sentence(&json!({ "kind": "openai-images", "api_key_env": PASTED }));
+    for text in [
+        described(&engine, &actions).to_string(),
+        answer.to_string(),
+        facts_block(&snapshot),
+        snapshot.summary(),
+        snapshot.notice.clone(),
+        snapshot.state().to_string(),
+        explained,
+    ] {
+        assert!(!text.contains(PASTED), "the pasted key was echoed: {text}");
+    }
     std::fs::remove_dir_all(&dir).ok();
 }
 

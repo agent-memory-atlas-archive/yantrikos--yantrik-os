@@ -714,7 +714,8 @@ mod tests {
                 &new_cancel(),
             )
             .unwrap_err();
-        assert!(problem.contains("STUDIO_TEST_MISSING_KEY"), "{problem}");
+        assert!(problem.contains("is not set"), "{problem}");
+        assert!(!problem.contains("STUDIO_TEST_MISSING_KEY"), "an unset name is not echoed: {problem}");
     }
 
     #[test]
