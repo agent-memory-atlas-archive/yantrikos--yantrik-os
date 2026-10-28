@@ -130,7 +130,7 @@ fn an_agent_names_only_files_in_the_home() {
     std::fs::write(home.join("Pictures/ok.png"), "x").unwrap();
 
     assert_eq!(agent_rule::admit_in(false, "upscale", &outside, &home), Ok(()), "the person is not asked");
-    for action in ["upscale", "open", "variations", "set_backend"] {
+    for action in ["upscale", "open", "variations"] {
         for asked in [outside.as_str(), "/etc/hostname"] {
             let e = agent_rule::admit_in(true, action, asked, &home).expect_err(asked);
             assert!(e.starts_with("an agent names only a file in the person's home"), "{action} {asked}: {e}");
@@ -144,7 +144,8 @@ fn an_agent_names_only_files_in_the_home() {
         );
     }
     assert_eq!(agent_rule::admit_in(true, "delete", &outside, &home), Ok(()), "delete keeps to the gallery itself");
-    assert_eq!(agent_rule::admit_in(true, "set_backend", "", &home), Ok(()), "no workflow named");
+    // `set_backend` is refused outright by the framework, so this rule has nothing to say of it.
+    assert!(!agent_rule::names_a_file("set_backend"));
     assert!(!agent_rule::names_a_file("generate"));
     let _ = std::fs::remove_dir_all(&dir);
 }

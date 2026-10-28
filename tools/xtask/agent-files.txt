@@ -40,7 +40,7 @@ apps/spreadsheet/src/surface.rs save_over path apps/spreadsheet/src/agent_rule.r
 apps/studio/src/intents.rs upscale path apps/studio/src/agent_rule.rs
 apps/studio/src/intents.rs open path apps/studio/src/agent_rule.rs
 apps/studio/src/intents.rs variations of apps/studio/src/agent_rule.rs
-apps/studio/src/intents.rs set_backend workflow apps/studio/src/agent_rule.rs
+apps/studio/src/intents.rs set_backend workflow - refused outright to every agent, by `Agents::Refused` in this file
 apps/studio/src/intents.rs delete path - moves only Studio's own pictures, inside its gallery (`jobs::resolve` with `inside`), whoever asks
 apps/terminal/src/intents.rs open_directory directory - a shell's working directory, graded sensitive: the shell it starts reaches any file the person can, as `run` does
 apps/text-editor/src/intents/documents.rs open path frameworks/yantrik-app/src/documents/files/agent.rs

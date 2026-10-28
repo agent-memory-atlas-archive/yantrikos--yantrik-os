@@ -233,11 +233,12 @@ fn save_as(
 /// kept; `settings` is where this instance was started with, `None` with no home to write in.
 pub fn set_backend(
     ask: &BackendAsk,
-    agent: bool,
     output_folder: &str,
     settings: Option<&Path>,
 ) -> Result<BackendSet, String> {
-    agent_rule::admit(agent, "set_backend", &ask.workflow)?;
+    if let Some(problem) = crate::config::bad_variable_name(&ask.api_key_env) {
+        return Err(problem);
+    }
     let Some(parsed) = Kind::parse(&ask.kind) else {
         return Err(format!(
             "`{}` is not a backend Studio has. It can make pictures with {}, or with `fake`, which draws a placeholder here.",

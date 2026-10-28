@@ -372,3 +372,57 @@ fn the_persons_card_names_the_credential_that_goes_with_the_prompt() {
     }
     std::env::remove_var(NAMED);
 }
+
+/// The app's own second lock, driven as the framework would drive it if a call ever reached the
+/// command without the dispatch's refusal: an agent's `SetBackend` is refused with the sentence, no
+/// worker is started, and nothing is written.
+#[test]
+fn the_apps_own_lock_refuses_an_agents_set_backend() {
+    use yantrik_app::effects::Request;
+    let (world, mut m) = bare("second-lock", r#"{"backend":{"kind":"fake"}}"#);
+    let ask = BackendAsk {
+        kind: "openai-images".into(),
+        base_url: "http://203.0.113.7:1".into(),
+        model: "x".into(),
+        api_key_env: "HOME".into(),
+        workflow: String::new(),
+    };
+    let fx = apply_as_agent(&mut m, Command::SetBackend(Box::new(ask.clone())));
+    assert!(matches!(fx.requests().last(), Some(Request::Settle(Err(r))) if r.sentence == crate::update::AGENT_REFUSED));
+    assert_eq!(m.notice, crate::update::AGENT_REFUSED);
+    assert!(fx.requests().iter().all(|r| r.name() != "spawn"), "a worker was started for a refused call");
+    assert!(!m.changing_backend);
+    assert_eq!(m.config.backend.kind, Kind::Fake);
+    assert!(!world.places.settings.as_ref().unwrap().exists(), "something was written");
+    // The person's own call is not held up by it.
+    let fx = apply(&mut m, Command::SetBackend(Box::new(ask)));
+    assert!(m.changing_backend);
+    assert_eq!(fx.requests().iter().filter(|r| r.name() == "spawn").count(), 1);
+}
+
+/// A key variable's name has to be a name: refused with a plain sentence by `set_backend`, and by
+/// the reader of a hand-edited file, so the card and what happens agree.
+#[test]
+fn a_key_variable_has_to_be_named_like_one() {
+    let f = fake("variable-names");
+    for odd in ["A B", "1KEY", "KEY-NAME", "KEY;rm", "$(id)", "k\u{e9}y"] {
+        let problem = f
+            .act("set_backend", json!({ "kind": "openai-images", "model": "x", "api_key_env": odd }))
+            .unwrap_err();
+        assert!(problem.contains("has to be the name of an environment variable"), "{odd:?}: {problem}");
+        assert!(!f.world.places.settings.as_ref().unwrap().exists(), "{odd:?} was written down");
+        assert_eq!(f.app.model(|m| m.config.backend.kind), Kind::Fake);
+        let from_file = Config::parse(&format!(
+            r#"{{"backend":{{"kind":"openai-images","model":"x","api_key_env":{}}}}}"#,
+            serde_json::to_string(odd).unwrap()
+        ))
+        .unwrap_err();
+        assert!(from_file.contains("has to be the name of an environment variable"), "{odd:?}: {from_file}");
+    }
+    for good in ["OPENAI_API_KEY", "_x", "a1_B2"] {
+        assert!(Config::parse(&format!(r#"{{"backend":{{"kind":"openai-images","model":"x","api_key_env":"{good}"}}}}"#)).is_ok(), "{good}");
+    }
+    // None named is the default, and the card and the behaviour agree on it.
+    assert!(f.act("set_backend", json!({ "kind": "openai-images", "model": "x" })).is_ok());
+    assert_eq!(f.app.model(|m| m.config.backend.api_key_env.clone()), "OPENAI_API_KEY");
+}

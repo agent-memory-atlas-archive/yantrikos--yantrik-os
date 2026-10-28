@@ -219,6 +219,9 @@ impl Config {
             config.backend.model = model;
         }
         if let Some(env_name) = text_of(backend, "api_key_env").or(text_of(backend, "key_env")) {
+            if let Some(problem) = bad_variable_name(&env_name) {
+                return Err(problem);
+            }
             config.backend.api_key_env = env_name;
         }
         if let Some(workflow) = text_of(backend, "workflow").or(text_of(backend, "graph")) {
@@ -298,6 +301,24 @@ fn text_of(object: &serde_json::Map<String, serde_json::Value>, key: &str) -> Op
         Some(serde_json::Value::Null) | None => None,
         Some(other) => Some(other.to_string()),
     }
+}
+
+/// Whether `name` can be the name of an environment variable: `[A-Za-z_][A-Za-z0-9_]*`. The one
+/// rule for the config file, for `set_backend`, and for the card that says which variable's value
+/// goes with a prompt, so what the card says and what happens are the same.
+pub fn is_variable_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// The plain sentence for a key variable's name that is not one; `None` for a good name or no name.
+pub fn bad_variable_name(name: &str) -> Option<String> {
+    let name = name.trim();
+    (!name.is_empty() && !is_variable_name(name)).then(|| {
+        format!(
+            "`api_key_env` has to be the name of an environment variable (letters, digits and underscores, not starting with a digit), and {name:?} is not one"
+        )
+    })
 }
 
 /// `~/.config/yantrik/studio.json`, honouring `XDG_CONFIG_HOME` the way the rest of the OS does.

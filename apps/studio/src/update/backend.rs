@@ -76,11 +76,10 @@ pub fn set(m: &mut Model, fx: &mut Fx, ask: BackendAsk) {
     }
     m.changing_backend = true;
     let ask = BackendAsk { kind, ..ask };
-    let agent = by_agent(fx);
     let (folder, settings) = (m.config.output_folder.clone(), m.places.settings.clone());
     fx.spawn_or(
         Command::BackendSet(Err("Studio's worker stopped before it wrote the choice down. Nothing was changed.".into())),
-        move |_| Command::BackendSet(jobs::set_backend(&ask, agent, &folder, settings.as_deref())),
+        move |_| Command::BackendSet(jobs::set_backend(&ask, &folder, settings.as_deref())),
     );
 }
 

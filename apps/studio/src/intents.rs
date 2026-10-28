@@ -234,7 +234,7 @@ pub fn actions() -> Vec<(Action, Parse)> {
                             "" => "OPENAI_API_KEY",
                             name => name,
                         };
-                        let usable = !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+                        let usable = config::is_variable_name(name);
                         match (host(), usable) {
                             (Some(host), true) => format!("After this, prompts and the value of ${name} go to {host}."),
                             _ => String::new(),
